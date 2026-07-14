@@ -1,18 +1,22 @@
 # Repository Naming and Ownership Decisions
 
-> **Status:** Proposed for the Phase 0 exit review. No repository has been created.
+> **Status:** Accepted for the inference migration. `SceneWorks/inference` is the
+> canonical inference source; product consolidation and old-repository archival
+> remain separate, unapproved decisions.
 
-## Recommended canonical topology
+## Accepted canonical topology
 
 | Purpose | GitHub repository | Local checkout | Visibility | Organizational owner |
 |---|---|---|---|---|
-| Inference source of truth | `SceneWorks/inference` | `inference/` | Public, matching the current Apache inference repositories | SceneWorks organization |
-| Product source of truth, if approved at the license checkpoint | `SceneWorks/studio` | `studio/` | To be decided with mixed-license/access review | SceneWorks organization |
+| Inference source of truth | `SceneWorks/inference` | `inference/` | Private; retain actual visibility unless separately approved | SceneWorks organization |
+| Product sources of truth | Existing SceneWorks, ChatWorks, and SoundWorks repositories | Existing checkouts | Retain existing visibility pending mixed-license/access review | Existing repository owners |
 | MLX Rust fork | `SceneWorks/mlx-rs` | `mlx-rs/` | Retain current visibility | SceneWorks organization |
 
-The repository display names may be `sceneworks-inference` and
-`sceneworks-studio`; the recommended URLs stay concise. Package/crate names remain
-independent of repository names.
+The initial recommendation was public visibility because the imported inference
+repositories were public. The repository was actually created private. The
+migration does not broaden its own authority by changing that setting, and the
+consumer cutover records the private cross-repository authentication consequence
+explicitly. Package/crate names remain independent of repository names.
 
 ## Inference repository ownership
 
@@ -77,11 +81,14 @@ confirm:
 Failure of this checkpoint leaves the three product repositories separate and does
 not alter the inference migration.
 
-## Phase 0 exit approval requested
+## Phase 0 exit approval record
 
-- [ ] Approve `SceneWorks/inference` as the canonical inference repository URL.
-- [ ] Approve `inference/` as the local checkout directory.
-- [ ] Approve importing full history while baselining exact recorded SHAs.
-- [ ] Approve keeping current package names through the first consumer cutover.
-- [ ] Approve retaining `mlx-rs` as a separate repository.
+- [x] `SceneWorks/inference` is the canonical inference repository URL.
+- [x] `inference/` is the local checkout directory.
+- [x] Full history was imported while exact recorded SHAs remained compatibility baselines.
+- [x] Current package names remain through the first consumer cutover.
+- [x] `mlx-rs` remains a separate repository.
 
+Execution was approved in stages on 2026-07-12 and 2026-07-13. Those approvals did
+not authorize product monorepo creation, old-repository archival, or any
+repository visibility change.

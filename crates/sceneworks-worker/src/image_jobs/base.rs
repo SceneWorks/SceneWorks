@@ -970,7 +970,7 @@ fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 }
 
 /// The candle off-Mac Anima weights dir (sc-10676): the `split_files/` subdir of the HF snapshot `root`
-/// when it holds `diffusion_models/` (the dense DiT tree `candle_gen_anima::loader::resolve_split_files`
+/// when it holds `diffusion_models/` (the dense DiT tree `runtime_cuda::providers::anima::loader::resolve_split_files`
 /// reads — the exact dir the GPU-validated anima smoke used), else `root` itself. The candle loader also
 /// accepts the snapshot parent, so falling back to `root` keeps a partial download a loud load error, not
 /// a silently-wrong dir. Anima has NO convert-at-install tier off-Mac (the `anima_quant` converter is
@@ -2033,7 +2033,7 @@ fn load_spec(
 }
 
 /// Registry-only generator load (epic 3720, sc-3724): resolve `engine_id` through the
-/// backend-neutral `gen_core::load` seam and return a `Box<dyn gen_core::Generator>`. Optionally
+/// backend-neutral `crate::inference_runtime::load` seam and return a `Box<dyn gen_core::Generator>`. Optionally
 /// installs an IP-Adapter from `ip_adapter_dir` (`LoadSpec::with_ip_adapter`) — the FLUX.1 XLabs
 /// IP-Adapter reference path (epic 3621), after which the engine treats a `Conditioning::Reference`
 /// as the image prompt. `cfg(target_os)` decides which provider crate registered the engine, not
@@ -2051,13 +2051,13 @@ fn load_engine(
 }
 
 /// Shared real-weight smoke loader: resolve `engine_id` through the backend-neutral
-/// `gen_core::load` seam and wrap a failure as `WorkerError::Engine`. Every image
+/// `crate::inference_runtime::load` seam and wrap a failure as `WorkerError::Engine`. Every image
 /// control/base lane's `#[cfg(test)]` load wrapper funnels through here so the
-/// `gen_core::load` + `map_err` tail lives in one place (sc-8954). `cfg(target_os)`
+/// `crate::inference_runtime::load` + `map_err` tail lives in one place (sc-8954). `cfg(target_os)`
 /// still decides which provider crate registered the engine, not this call.
 #[cfg(all(target_os = "macos", test))]
 fn load_control_engine(engine_id: &str, spec: &LoadSpec) -> WorkerResult<Box<dyn Generator>> {
-    gen_core::load(engine_id, spec)
+    crate::inference_runtime::load(engine_id, spec)
         .map_err(|error| WorkerError::Engine(format!("{engine_id} load failed: {error}")))
 }
 
@@ -2136,7 +2136,7 @@ fn resolve_flux_ip_adapter_dir(settings: &Settings) -> WorkerResult<PathBuf> {
 
 /// Emit an `image_pipeline_load_{start,complete}` event from inside a blocking
 /// generation closure (sc-3450), parity with the Python worker's pipeline-load
-/// events. On the backend path `gen_core::load` is a single atomic call that also fuses
+/// events. On the backend path `crate::inference_runtime::load` is a single atomic call that also fuses
 /// any distill LoRA and applies user LoRAs (`spec.with_adapters`), so there is no
 /// separable fuse/apply step to bracket: the adapter total (`adapter_count` =
 /// distill + user) is reported here instead of via the torch worker's separate
@@ -4000,9 +4000,9 @@ async fn generate_candle_stream(
         | "realvisxl"
         | "realvisxl_lightning"
         | "illustrious_xl_v1"
-        | "illustrious_xl_v2" => candle_gen_sdxl::set_flash_attn(flash_attn),
+        | "illustrious_xl_v2" => runtime_cuda::providers::sdxl::set_flash_attn(flash_attn),
         // Base z_image (sc-8679) shares the candle z-image accel-attention toggle with Turbo.
-        "z_image_turbo" | "z_image" => candle_gen_z_image::set_accel_attn(flash_attn),
+        "z_image_turbo" | "z_image" => runtime_cuda::providers::z_image::set_accel_attn(flash_attn),
         _ => {}
     }
 
@@ -4645,6 +4645,26 @@ async fn consume_gen_events(
                         ProgressStage::Generating,
                         step_fraction(index, 1, 1, total_u32),
                         &format!("Image {}/{total} — decoding.", index + 1),
+                        Some(streaming_result(plan, asset_writes)),
+                        backend,
+                    ),
+                )
+                .await?;
+            }
+            GenEvent::Loading { index, phase } => {
+                mark_started(index);
+                let component = match phase {
+                    LoadPhase::TextEncoder => "text encoder",
+                    LoadPhase::Renderer => "render components",
+                };
+                update_job(
+                    api,
+                    &job.id,
+                    image_progress(
+                        JobStatus::LoadingModel,
+                        ProgressStage::LoadingModel,
+                        step_fraction(index, 0, 1, total_u32),
+                        &format!("Image {}/{total} — loading {component}.", index + 1),
                         Some(streaming_result(plan, asset_writes)),
                         backend,
                     ),
@@ -5597,7 +5617,7 @@ mod standard_tier_tests {
 
     /// sc-8746 on-device verify (MLX): drive the ACTUAL worker seam against a downloaded SceneWorks
     /// realvisxl-mlx turnkey — `standard_tier_subdir` resolves the `q4/` subdir from the tier root,
-    /// then `gen_core::load("sdxl", …)` with `Quant::Q4` loads the packed tier and renders. Asserts a
+    /// then `crate::inference_runtime::load("sdxl", …)` with `Quant::Q4` loads the packed tier and renders. Asserts a
     /// non-degenerate image (per-pixel std above the all-black/NaN floor). `#[ignore]`d — run by hand
     /// on a Mac with the tier downloaded:
     /// ```text
@@ -5635,7 +5655,7 @@ mod standard_tier_tests {
         // Load the packed q4 tier through the MLX `sdxl` engine (Quant::Q4 = harmless no-op on the
         // already-packed weights) and render a 768x768 image.
         let spec = LoadSpec::new(WeightsSource::Dir(tier.clone())).with_quant(Quant::Q4);
-        let generator = gen_core::load("sdxl", &spec).expect("load MLX sdxl provider on q4 tier");
+        let generator = crate::inference_runtime::load("sdxl", &spec).expect("load MLX sdxl provider on q4 tier");
         let gen_req = GenerationRequest {
             prompt: "a photorealistic portrait of a red fox in a snowy forest, golden hour"
                 .to_owned(),

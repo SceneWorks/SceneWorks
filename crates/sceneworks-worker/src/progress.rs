@@ -6,7 +6,7 @@ use super::*;
 /// wrap `tokio::task::spawn_blocking`, and `JoinHandle::abort()` is INERT on an already-running
 /// blocking task — so the teardown's real job is to AWAIT the task long enough for the engine's
 /// between-steps cancel-flag poll (a denoise step, a VAE decode, a checkpoint save, or the cold
-/// `gen_core::load()`/quantize) to actually stop the GPU work before the consumer returns and the
+/// `crate::inference_runtime::load()`/quantize) to actually stop the GPU work before the consumer returns and the
 /// worker claims the next job. 30s covers a between-steps cooperative stop for the slowest of those
 /// ops without being so long a genuinely wedged engine can hang the worker for minutes.
 pub(crate) const CANCEL_JOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(30);

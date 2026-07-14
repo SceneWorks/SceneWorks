@@ -1,6 +1,6 @@
 // Candle (Windows/CUDA) in-place ComfyUI Z-Image txt2img route (epic 10451 Phase 2, sc-10668). Renders
 // a user's existing ComfyUI Z-Image base weights — read in place, no copy, no re-download — via
-// `candle_gen_z_image::load_from_comfyui_components`, which remaps the ComfyUI-native DiT + VAE keys and
+// `runtime_cuda::providers::z_image::load_from_comfyui_components`, which remaps the ComfyUI-native DiT + VAE keys and
 // loads the Qwen3 text encoder verbatim (candle-gen #384). The model id is an `external_base_*` catalog
 // row (assembled by the API's `external_base_models`); its `modelManifestEntry` carries `family:"z-image"`
 // and a `components[]` list of {role, path} for the DiT / text-encoder / VAE.
@@ -164,7 +164,7 @@ async fn generate_candle_zimage_comfyui_stream(
                 vae,
                 tokenizer_dir,
             } = paths;
-            let model = candle_gen_z_image::load_from_comfyui_components(
+            let model = runtime_cuda::providers::z_image::load_from_comfyui_components(
                 transformer,
                 text_encoder,
                 vae,

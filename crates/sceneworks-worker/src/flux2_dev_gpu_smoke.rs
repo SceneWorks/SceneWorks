@@ -1,6 +1,6 @@
 //! Local real-weight GPU smoke for the candle FLUX.2-dev worker lane (epic 6564 sc-7458, the worker
 //! half of the sc-7457 provider). `#[ignore]`d — run by hand on the RTX PRO 6000. It drives the real
-//! candle FLUX.2-dev engine via `gen_core::load("flux2_dev")` with a **Q4** `LoadSpec` — the exact
+//! candle FLUX.2-dev engine via `crate::inference_runtime::load("flux2_dev")` with a **Q4** `LoadSpec` — the exact
 //! runtime seam `generate_candle_stream` uses (minus the API/job plumbing) once the router routes
 //! `flux2_dev` to candle off-Mac. The 32B doesn't fit the GPU dense, so the dev quant path stages the
 //! dense diffusers snapshot in system RAM and quantizes each projection onto the GPU at load
@@ -130,7 +130,8 @@ fn flux2_dev_candle_gpu_smoke() {
         weights_dir.display()
     );
     let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.clone())).with_quant(quant);
-    let generator = gen_core::load("flux2_dev", &spec).expect("load candle flux2_dev provider");
+    let generator =
+        crate::inference_runtime::load("flux2_dev", &spec).expect("load candle flux2_dev provider");
 
     let req = GenerationRequest {
         prompt: prompt.clone(),
@@ -179,7 +180,7 @@ fn flux2_dev_candle_gpu_smoke() {
 }
 
 /// Real-weight GPU smoke for the candle FLUX.2-dev **edit** worker lane (sc-7736) — drives the bespoke
-/// `candle_gen_flux2::Flux2Edit::load_dev` provider (Q4 CPU-stage → quantize-onto-GPU) the worker's
+/// `runtime_cuda::providers::flux2::Flux2Edit::load_dev` provider (Q4 CPU-stage → quantize-onto-GPU) the worker's
 /// `generate_candle_flux2_edit_stream` loads, with a reference (env `FLUX2_DEV_REF`, else a synthetic
 /// image). Embedded distilled guidance, single forward (no negative pass). Proves the worker links + runs
 /// the dev edit provider end-to-end; the quality A/B is the engine's `flux2-edit --variant dev` example.
@@ -191,7 +192,7 @@ fn flux2_dev_candle_gpu_smoke() {
 #[test]
 #[ignore = "real-weight GPU smoke; needs the dense FLUX.2-dev diffusers snapshot + a CUDA device (cap=120)"]
 fn flux2_dev_edit_candle_gpu_smoke() {
-    use candle_gen_flux2::{Flux2Edit, Flux2EditPaths, Flux2EditRequest};
+    use runtime_cuda::providers::flux2::{Flux2Edit, Flux2EditPaths, Flux2EditRequest};
 
     let weights_dir = env_path("FLUX2_DEV_DIR");
     assert!(
@@ -271,7 +272,7 @@ fn flux2_dev_edit_candle_gpu_smoke() {
 }
 
 /// Real-weight GPU smoke for the candle FLUX.2-dev **strict-pose control** worker lane (sc-7736) — drives
-/// the bespoke `candle_gen_flux2::Flux2Control::load` provider the worker's
+/// the bespoke `runtime_cuda::providers::flux2::Flux2Control::load` provider the worker's
 /// `generate_candle_flux2_control_stream` loads, with a synthetic control image and the Fun-Controlnet-
 /// Union checkpoint (env `FLUX2_CONTROL`). Proves the worker links + runs the dev control provider; the
 /// pose-conditioning A/B (scale 0 vs 0.75) is the engine's `flux2-control` example (sc-7460).
@@ -284,7 +285,7 @@ fn flux2_dev_edit_candle_gpu_smoke() {
 #[test]
 #[ignore = "real-weight GPU smoke; needs the dense FLUX.2-dev snapshot + the Fun-Controlnet-Union ckpt + a CUDA device (cap=120)"]
 fn flux2_dev_control_candle_gpu_smoke() {
-    use candle_gen_flux2::{Flux2Control, Flux2ControlPaths, Flux2ControlRequest};
+    use runtime_cuda::providers::flux2::{Flux2Control, Flux2ControlPaths, Flux2ControlRequest};
 
     let weights_dir = env_path("FLUX2_DEV_DIR");
     let control = env_path("FLUX2_CONTROL");

@@ -1,5 +1,5 @@
 // Candle (Windows/CUDA) Krea 2 image-edit route (epic 10871) — the Kontext-style dual-conditioned edit
-// surface off-Mac via `candle_gen_krea::pipeline::{load_components, load_edit_components, render_edit}`.
+// surface off-Mac via `runtime_cuda::providers::krea::pipeline::{load_components, load_edit_components, render_edit}`.
 // The candle sibling of the macOS `krea_edit.rs` (`generate_krea_edit_stream`): an `edit_image` job on
 // `krea_2_raw` carrying a source image (+ optional 2nd) is routed here rather than the plain Raw t2i path.
 // The source(s) ride as in-context VAE tokens at distinct RoPE frames AND ground the Qwen3-VL vision
@@ -250,18 +250,18 @@ async fn generate_candle_krea_edit_stream(
         "krea_edit",
         adapter_count,
         move || {
-            let device = candle_gen::default_device()
+            let device = runtime_cuda::media::default_device()
                 .map_err(|error| WorkerError::Engine(format!("Krea edit device init: {error}")))?;
             // Load the Krea Raw components with the edit LoRA merged into the DiT (R5), plus the edit-only
             // components (Qwen3-VL vision tower + VAE encoder) — both cached for the whole batch.
-            let comps = candle_gen_krea::pipeline::load_components(
+            let comps = runtime_cuda::providers::krea::pipeline::load_components(
                 &weights_dir,
                 &device,
                 &adapters,
                 None,
             )
             .map_err(|error| WorkerError::Engine(format!("Krea edit load failed: {error}")))?;
-            let edit = candle_gen_krea::pipeline::load_edit_components(&weights_dir, &device)
+            let edit = runtime_cuda::providers::krea::pipeline::load_edit_components(&weights_dir, &device)
                 .map_err(|error| {
                     WorkerError::Engine(format!("Krea edit components load failed: {error}"))
                 })?;
@@ -294,7 +294,7 @@ async fn generate_candle_krea_edit_stream(
                     cancel: cancel.clone(),
                     ..Default::default()
                 };
-                let result = candle_gen_krea::pipeline::render_edit(
+                let result = runtime_cuda::providers::krea::pipeline::render_edit(
                     &comps,
                     &edit,
                     &req,

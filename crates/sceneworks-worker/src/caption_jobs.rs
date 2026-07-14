@@ -2,7 +2,7 @@
 //!
 //! SceneWorks keeps the existing `training_caption` job contract and result shape,
 //! but the in-process Rust worker can serve `captioner=joy_caption` through the
-//! backend-neutral `gen_core::load_captioner` seam: the macOS `mlx` worker via mlx-gen's
+//! backend-neutral `crate::inference_runtime::load_captioner` seam: the macOS `mlx` worker via mlx-gen's
 //! JoyCaption provider, and the Windows/CUDA candle worker via candle-gen-joycaption
 //! (`--features backend-candle`). `cfg(target_os)` only decides which provider crate registers the
 //! captioner; the job flow below is identical. The Python torch captioner remains the explicit
@@ -34,8 +34,7 @@ const CANCEL_MESSAGE: &str = "Training captioning canceled by user.";
 const PROGRESS_POST_INTERVAL: Duration = Duration::from_millis(250);
 
 // epic 3720 (sc-3724): the backend-neutral captioner contract types come from `gen_core`; the
-// `as _;` provider link below stays mlx-gen-specific (it registers the JoyCaption captioner into
-// the registry).
+// selected runtime bundle explicitly includes its JoyCaption implementation.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -44,14 +43,6 @@ use gen_core::{
     CancelFlag, CaptionOptions, CaptionRequest, CaptionSampling, Image, LoadSpec, Progress,
     WeightsSource,
 };
-#[cfg(target_os = "macos")]
-use mlx_gen_joycaption as _;
-// Candle JoyCaption captioner force-link anchor (sc-5098): keeps its `inventory::submit!` captioner
-// registration (`fancyfeast/llama-joycaption-beta-one-hf-llava`, backend `candle`) from being dropped
-// by the MSVC release linker. Mirrors the mlx anchor above.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_joycaption as _;
-
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -183,7 +174,7 @@ pub(crate) async fn run_training_caption_job(
                 "engine": JOY_CAPTION_MODEL,
             }),
         );
-        let captioner = gen_core::load_captioner(
+        let captioner = crate::inference_runtime::load_captioner(
             JOY_CAPTION_MODEL,
             &LoadSpec::new(WeightsSource::Dir(weights_dir)),
         )

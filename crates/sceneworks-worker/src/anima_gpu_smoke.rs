@@ -1,6 +1,6 @@
 //! Local real-weight GPU smoke for the candle **Anima 2B** worker lane (epic 10512, sc-10625 — the
 //! hardware-gated acceptance extracted from sc-10525). `#[ignore]`d — run by hand on the RTX PRO 6000.
-//! It drives the real candle Anima engine via `gen_core::load("anima_{base,aesthetic,turbo}")` with a
+//! It drives the real candle Anima engine via `crate::inference_runtime::load("anima_{base,aesthetic,turbo}")` with a
 //! `LoadSpec` pointed at the ungated `circlestone-labs/Anima` `split_files/` snapshot — the exact
 //! runtime seam `generate_candle_stream` uses (minus the API/job plumbing) once the router routes Anima
 //! to candle off-Mac.
@@ -176,7 +176,8 @@ fn anima_candle_gpu_smoke() {
             .unwrap_or_default(),
         split.display()
     );
-    let generator = gen_core::load(id, &spec).unwrap_or_else(|e| panic!("load candle {id}: {e}"));
+    let generator = crate::inference_runtime::load(id, &spec)
+        .unwrap_or_else(|e| panic!("load candle {id}: {e}"));
 
     // Turbo is the merged CFG-free student — its descriptor advertises `supports_negative_prompt: false`
     // and `supports_guidance: false`, so passing either is (correctly) rejected by `validate`. Only the
@@ -296,7 +297,8 @@ fn anima_worker_lane_gpu_smoke() {
 
         // DENSE load (Quant None) — exactly what generate_candle_stream forces for Anima.
         let spec = LoadSpec::new(WeightsSource::Dir(dir));
-        let generator = gen_core::load(id, &spec).unwrap_or_else(|e| panic!("load {id}: {e}"));
+        let generator =
+            crate::inference_runtime::load(id, &spec).unwrap_or_else(|e| panic!("load {id}: {e}"));
         let req = GenerationRequest {
             prompt: prompt.to_string(),
             negative_prompt: uses_cfg.then(|| negative.to_string()),

@@ -1,6 +1,6 @@
 // Candle (Windows/CUDA) in-place ComfyUI FLUX.2-dev txt2img route (epic 10451 Phase 2e, sc-10680).
 // Renders a user's existing ComfyUI FLUX.2-dev fp8-mixed DiT — read in place, no copy, no re-download —
-// via `candle_gen_flux2::load_from_comfyui_dit`, which dequants the inline-scale fp8 MLPs
+// via `runtime_cuda::providers::flux2::load_from_comfyui_dit`, which dequants the inline-scale fp8 MLPs
 // (`w = w_fp8·weight_scale`, dropping the `.input_scale` activation scale) and remaps the BFL-native
 // keys onto the diffusers schema in memory (candle-gen sc-10680). The 32B DiT does not fit the GPU
 // dense after the fp8→f32 dequant, so each projection is folded onto the GPU (Q8), matching the resident
@@ -229,7 +229,7 @@ async fn generate_candle_flux2_comfyui_stream(
                 snapshot_dir,
             } = paths;
             let model =
-                candle_gen_flux2::load_from_comfyui_dit(transformer, snapshot_dir, Some(quant))
+                runtime_cuda::providers::flux2::load_from_comfyui_dit(transformer, snapshot_dir, Some(quant))
                     .map_err(|error| {
                         WorkerError::Engine(format!("ComfyUI FLUX.2-dev load failed: {error}"))
                     })?;

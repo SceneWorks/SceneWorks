@@ -25,8 +25,8 @@ use std::sync::{Mutex, OnceLock};
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use gen_core::CancelFlag;
 // CARVE-OUT(epic 3720): backend-specific; absorbed by Segmenter in Phase 6.
-use mlx_gen::weights::Weights;
-use mlx_gen_sam2::{Sam2ModelSize, Sam2VideoPredictor};
+use runtime_macos::media::weights::Weights;
+use runtime_macos::providers::sam2::{Sam2ModelSize, Sam2VideoPredictor};
 
 use crate::{Settings, WorkerError, WorkerResult};
 
@@ -262,7 +262,9 @@ pub(crate) fn propagate_track_blocking(
                     .map(|cb| cb as &mut dyn FnMut(usize, usize)),
             )
             .map_err(|e| match e {
-                mlx_gen::Error::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
+                runtime_macos::media::Error::Canceled => {
+                    WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
+                }
                 e => WorkerError::Engine(format!("sam2 propagate: {e}")),
             })?;
         // `propagate` yields the prompt frame onward in order; build a dense per-clip-frame vec.

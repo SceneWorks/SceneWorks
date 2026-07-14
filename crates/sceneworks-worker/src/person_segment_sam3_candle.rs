@@ -20,11 +20,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use candle_gen::candle_core::{Device, Tensor};
-use candle_gen::default_device;
-use candle_gen::gen_core::Quant;
-use candle_gen_sam3::{Sam3TextConfig, Sam3Tokenizer, Sam3VideoModel, VideoFrameOutput, Weights};
 use gen_core::CancelFlag;
+use runtime_cuda::media::candle_core::{Device, Tensor};
+use runtime_cuda::media::default_device;
+use runtime_cuda::media::gen_core::Quant;
+use runtime_cuda::providers::sam3::{
+    Sam3TextConfig, Sam3Tokenizer, Sam3VideoModel, VideoFrameOutput, Weights,
+};
 
 use crate::person_segment_sam3_common::{
     check_segment_canceled, frame_mask_for_object, normalize_chw, paint_order, per_frame_masks,
@@ -204,7 +206,9 @@ pub(crate) fn segment_track_blocking(
                 .map(|cb| cb as &mut dyn FnMut(usize, usize)),
         )
         .map_err(|e| match e {
-            candle_gen::CandleError::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
+            runtime_cuda::media::CandleError::Canceled => {
+                WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
+            }
             e => WorkerError::Engine(format!("sam3 propagate: {e}")),
         })?;
 
@@ -307,7 +311,9 @@ pub(crate) fn segment_all_persons_in_memory(
                 .map(|cb| cb as &mut dyn FnMut(usize, usize)),
         )
         .map_err(|e| match e {
-            candle_gen::CandleError::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
+            runtime_cuda::media::CandleError::Canceled => {
+                WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
+            }
             e => WorkerError::Engine(format!("sam3 propagate: {e}")),
         })?;
 

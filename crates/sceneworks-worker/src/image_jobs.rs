@@ -25,13 +25,9 @@ use super::*;
 use sceneworks_core::contracts::GenerationMetrics;
 use sceneworks_core::image_request::ImageRequest;
 
-// Force each provider crate to link so its `inventory::submit!` registration survives
-// linker GC. Each per-family story adds its provider dep + a matching `use … as _;`.
-// See mlx-gen-z-image/tests/registry.rs ("the SceneWorks worker").
-// epic 3720 (sc-3724): the backend-neutral contract types come from `gen_core` (the registry
-// contract layer mlx-gen re-exports). The `as _;` provider links below stay mlx-gen-specific —
-// `cfg(target_os)` decides which backend crates register into the registry, not which contract
-// types the worker names.
+// Backend-neutral contract types come from the canonical inference release. The selected runtime
+// bundle explicitly owns its provider catalog; this product module names only contract types and
+// the few bespoke utility APIs that do not implement the general registry traits.
 // Contract types for the generation harness — shared by the macOS MLX path AND the Windows candle
 // lane (sc-3675), so broadened from macOS-only. `gen_core` is a direct worker dep on every platform.
 #[cfg(any(
@@ -40,7 +36,7 @@ use sceneworks_core::image_request::ImageRequest;
 ))]
 use gen_core::{
     AdapterKind, AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest,
-    Generator, Image, LoadSpec, Progress, Quant, WeightsSource,
+    Generator, Image, LoadPhase, LoadSpec, Progress, Quant, WeightsSource,
 };
 // `IdentityWeights` (the PuLID-FLUX `LoadSpec::identity` seam, sc-8827) is used only by the macOS MLX
 // PuLID path (`image_jobs/pulid.rs`); gate it so the candle lane's `-D warnings` sees no unused import.
@@ -57,176 +53,22 @@ use gen_core::IdentityWeights;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use gen_core::ControlKind;
+
+// Provider-specific utilities below are explicit exports of the selected runtime bundle; ordinary
+// generators, trainers, captioners, and embedders are reached only through `inference_runtime`.
+// InstantID (sc-3345) is a bespoke provider, not a general `Generator`, so it is reached through
+// the runtime bundle's named utility export. The `runtime_macos::media::weights::Weights` loader and
+// concrete InstantID API stay MLX-typed until the face stack moves onto a neutral contract.
 #[cfg(target_os = "macos")]
-use mlx_gen_chroma as _;
+use runtime_macos::media::weights::Weights;
 #[cfg(target_os = "macos")]
-use mlx_gen_flux as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_flux2 as _;
-// Ideogram 4 (epic 4725) — force-link so `inventory::submit!` registers `ideogram_4`.
-#[cfg(target_os = "macos")]
-use mlx_gen_ideogram as _;
-// Boogu-Image-0.1 (epic 6387) — force-link so `inventory::submit!` registers `boogu_image`,
-// `boogu_image_turbo`, and `boogu_image_edit` (else linker GC drops their `ModelRegistration` and
-// `gen_core::load("boogu_image")` returns "no generator registered").
-#[cfg(target_os = "macos")]
-use mlx_gen_boogu as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_kolors as _;
-// Krea 2 Turbo (epic 7565) — force-link so `inventory::submit!` registers `krea_2_turbo` (else linker GC
-// drops its `ModelRegistration` and `gen_core::load("krea_2_turbo")` returns "no generator registered").
-#[cfg(target_os = "macos")]
-use mlx_gen_krea as _;
-// Stable Diffusion 3.5 (epic 7841 / sc-7871) — force-link so `inventory::submit!` registers
-// `sd3_5_large` (true-CFG) + `sd3_5_large_turbo` (ADD-distilled, CFG-off) + `sd3_5_medium` (MMDiT-X);
-// else linker GC drops their `ModelRegistration` and `gen_core::load("sd3_5_large")` returns "no
-// generator registered". All three reach the generic MODEL_TABLE / `generate_stream` path.
-#[cfg(target_os = "macos")]
-use mlx_gen_sd3 as _;
-// SANA 1600M (epic 8485 / sc-8489) — force-link so `register_generators!` registers `sana_1600m`
-// (Image/t2i, true-CFG, 32× DC-AE divisor, mac_only) into the gen-core inventory; else linker GC drops
-// its `ModelRegistration` and `gen_core::load("sana_1600m")` returns "no generator registered". Reaches
-// the generic MODEL_TABLE / `generate_stream` path like the other registry families.
-#[cfg(target_os = "macos")]
-use mlx_gen_sana as _;
-// Anima 2B (epic 10512 / sc-10523) — force-link so `register_generators!` registers `anima_base`,
-// `anima_aesthetic`, and `anima_turbo` into the gen-core inventory; else linker GC drops their
-// `ModelRegistration` and `gen_core::load("anima_base")` returns "no generator registered". All three
-// reach the generic MODEL_TABLE / `generate_stream` path (t2i, NC-gated, mac_only).
-#[cfg(target_os = "macos")]
-use mlx_gen_anima as _;
-// Lens / Lens-Turbo (epic 3164 engine / sc-5105) — an inventory-registered `Generator` under the ids
-// `lens` + `lens_turbo`, reached through the generic MODEL_TABLE / `generate_stream` path. Force-link
-// or the linker GCs its `ModelRegistration` and `gen_core::load("lens_turbo")` returns "no generator
-// registered" (the bug that bit Kolors).
-#[cfg(target_os = "macos")]
-use mlx_gen_lens as _;
-// PuLID-FLUX (sc-3344) IS an inventory-registered `Generator` (engine id `pulid_flux`), unlike the
-// bespoke InstantID provider below — so it is force-linked here like the other registry families
-// (its `ModelRegistration` is otherwise dropped by linker GC) and reached via `gen_core::load`. The
-// reference-face + idWeight/timestepToStartCfg mapping + weight provisioning live in the dedicated
-// `generate_pulid_flux_stream` (image_jobs/pulid.rs), not the generic MODEL_TABLE path.
-#[cfg(target_os = "macos")]
-use mlx_gen_pulid as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_qwen_image as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_sdxl as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_seedvr2 as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_sensenova as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_z_image as _;
-// Bernini still-image companion (epic 4699 / sc-5424): the full planner+renderer `Generator`
-// self-registers under `bernini` (`Modality::Both`); the image path reaches it via
-// `gen_core::load("bernini")` (no direct type contact). Force-link here too — the binary already
-// links it for the video path (video_jobs.rs), but anchoring the dependency the image surface
-// actually uses keeps the `ModelRegistration` if the video path is ever cfg'd out.
-#[cfg(target_os = "macos")]
-use mlx_gen_bernini as _;
-// candle (Windows/CUDA) backend — epic 3672, sc-3675. Mirror of the mlx `use … as _;` anchors above:
-// force the candle SDXL provider to link so its `inventory::submit!` (engine id `sdxl`, backend
-// `candle`) survives linker GC and resolves through the SAME gen_core registry — no candle-specific
-// dispatch, `cfg(target_os)` just decides which backend registers. Gated on the optional
-// `backend-candle` build feature too (the dep is pulled only by the CUDA build); whether candle is
-// actually USED at runtime is the separate `backend_candle_enabled` setting, not this link anchor.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_sdxl as _;
-// The four candle image families wired in sc-5096 (epic 5095). Same force-link anchor pattern as the
-// SDXL crate above + the mlx providers: each self-registers its engine id (`z_image_turbo` /
-// `flux1_schnell` + `flux1_dev` / `flux2_klein_9b` / `qwen_image`) into the shared gen_core inventory
-// registry, and the `as _;` keeps the MSVC release linker from GC-ing the `inventory::submit!`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_flux as _;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_flux2 as _;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_qwen_image as _;
-// Candle Anima 2B (sc-10525, epic 10512): `anima_base` / `anima_aesthetic` / `anima_turbo` self-register
-// into the shared gen_core inventory; the `as _;` keeps the MSVC release linker from GC-ing the
-// `register_generators!` registrations (else `gen_core::load("anima_base")` returns "no generator
-// registered"). The Windows/CUDA sibling of the `mlx_gen_anima` anchor above. MANDATORY even though the
-// catalog leaves `candle_routed = false` (unvalidated on GPU) — linkage must survive for the future
-// hardware-gated bring-up; routing is a separate catalog decision, not a link-time one.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_anima as _;
-// Candle Stable Diffusion 3.5 (sc-7880, epic 7982): `sd3_5_large` / `sd3_5_large_turbo` / `sd3_5_medium`
-// self-register into the shared gen_core inventory; the `as _;` keeps the MSVC release linker from GC-ing
-// the `inventory::submit!` registrations (else `gen_core::load("sd3_5_large")` returns "no generator
-// registered"). The Windows/CUDA sibling of the `mlx_gen_sd3` anchor above. Pure txt2img; Q4/Q8 quant.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_sd3 as _;
-// Candle Ideogram 4 (sc-6596, epic 6561): `ideogram_4` + `ideogram_4_turbo` self-register into the
-// shared gen_core inventory; `as _;` keeps the MSVC release linker from GC-ing the registrations.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_ideogram as _;
-// Candle Chroma (sc-5484, epic 3692): chroma1_hd / chroma1_base / chroma1_flash self-register into the
-// shared gen_core inventory; the `as _;` keeps the MSVC release linker from GC-ing the registrations.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_chroma as _;
-// Candle Boogu-Image-0.1 (sc-7524, epic 6831): `boogu_image` / `boogu_image_turbo` / `boogu_image_edit`
-// self-register into the shared gen_core inventory; the `as _;` keeps the MSVC release linker from GC-ing
-// the `ModelRegistration`s (else `gen_core::load("boogu_image")` returns "no generator registered"). The
-// Windows/CUDA sibling of the `mlx_gen_boogu` anchor above.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_boogu as _;
-// Candle Krea 2 (sc-7581, epic 7565 P4): `krea_2_turbo` self-registers into the shared gen_core
-// inventory; `as _;` keeps the MSVC release linker from GC-ing the `ModelRegistration`. The
-// Windows/CUDA sibling of the `mlx_gen_krea` anchor above.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_krea as _;
-// Candle Kolors (sc-5576, epic 3692): the `kolors` T2I id self-registers into the shared gen_core
-// inventory; `as _;` keeps the MSVC release linker from GC-ing the registration.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_kolors as _;
-// Candle SenseNova-U1 (sc-5576, epic 3692): `sensenova_u1_8b` + `sensenova_u1_8b_fast` self-register
-// into the shared gen_core inventory; force-linked so the registrations survive linker GC.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_sensenova as _;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_z_image as _;
-// Candle Bernini still-image companion (sc-10996, epic 6562): the full planner+renderer `Generator`
-// self-registers under `bernini` (`Modality::Video`, `frames:1` yields a single still); the image
-// path reaches it via `gen_core::load("bernini")` (no direct type contact). Force-link here — the
-// Windows/CUDA sibling of the `mlx_gen_bernini` anchor above — so the MSVC release linker keeps the
-// `register_generators!` registration (else `gen_core::load("bernini")` returns "no generator
-// registered"). The dedicated `generate_candle_bernini_image_stream` drives it (image_jobs/bernini.rs).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_bernini as _;
-// Lens / Lens-Turbo (epic 5107 engine / sc-5126 cutover) — the candle Windows/CUDA sibling of the
-// `mlx_gen_lens` anchor above, and the 8th candle image family (effectively). Self-registers `lens`
-// (20-step/CFG-5) + `lens_turbo` (4-step/g-1.0) into the shared gen_core inventory registry; the
-// FIRST candle family to advertise Q4/Q8 quant + LoRA/LoKr. Force-linked so the MSVC release linker
-// keeps the `inventory::submit!` (the dead-strip trap that bit Kolors on MLX).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_lens as _;
-// Candle SeedVR2 upscaler (sc-5928, epic 4811 / epic 5482) — the Windows/CUDA sibling of the Mac
-// `mlx_gen_seedvr2` anchor above. Self-registers the upscaler ids `seedvr2` / `seedvr2_3b` /
-// `seedvr2_7b` into the shared gen_core inventory; the image upscale path reaches it via
-// `gen_core::load("seedvr2")` from `upscale_jobs::run_seedvr2_upscale`. Force-linked so the MSVC
-// release linker keeps the `inventory::submit!` registrations.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_seedvr2 as _;
-// CARVE-OUT(epic 3720): backend-specific; absorbed by FaceEmbedder in Phase 3.
-// InstantID (sc-3345) is a bespoke provider, not an inventory-registered `Generator`, so it is
-// referenced by name (`InstantId::load`) rather than anchored with `as _;` — and the native face
-// stack it composes (`mlx-gen-face`, SCRFD + ArcFace) rides in transitively but is anchored here so
-// the direct dep the story adds is meaningful + survives any future unused-crate lint. The
-// `mlx_gen::weights::Weights` loader and the `mlx_gen_instantid` API stay mlx-gen-typed until the
-// bespoke face stack is lifted onto a neutral FaceEmbedder contract.
-#[cfg(target_os = "macos")]
-use mlx_gen::weights::Weights;
-#[cfg(target_os = "macos")]
-use mlx_gen_face as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_instantid::{
+use runtime_macos::providers::instantid::{
     BodyPoint, InstantId, InstantIdPaths, InstantIdRequest, FACE_RESTORE_PROMPT,
 };
 // The Windows/CUDA sibling: the candle InstantID provider (sc-5491, epic 5480), retiring the Python
-// `_vendor/instantid` off-Mac. Same bespoke by-name reference (`InstantId::load`), NOT inventory-
-// registered — so no `as _;` force-link anchor (unlike the registered candle families above). The
-// SCRFD + ArcFace FaceEmbedder the model composes (`candle-gen-face`, sc-5490) rides in transitively
+// `_vendor/instantid` off-Mac. The same bespoke by-name reference (`InstantId::load`) is owned by
+// `runtime-cuda` rather than the general media registry. The SCRFD + ArcFace FaceEmbedder the model
+// composes (`candle-gen-face`, sc-5490) rides in transitively
 // via `candle-gen-instantid` and is used directly (not through the registry), so it needs no direct
 // worker dep. The candle `with_face` loads the face pair from THEIR DIRECTORY, so there is no
 // `Weights::from_file` import on this lane (the MLX `Weights` loader above stays macOS-only).
@@ -235,30 +77,28 @@ use mlx_gen_instantid::{
 // `gen_core` contract — the single-rev skew gate (sc-4482) is what makes the worker's `gen_core::Image`
 // the exact type `InstantId::generate` consumes.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_instantid::{
+use runtime_cuda::providers::instantid::{
     BodyPoint, InstantId, InstantIdPaths, InstantIdRequest, FACE_RESTORE_PROMPT,
 };
 // SDXL IP-Adapter-Plus reference provider (sc-5488, epic 5480) — the candle (Windows/CUDA) reference-
 // conditioning sibling of the InstantID lane, living in `candle-gen-sdxl` (it composes that crate's
 // IP-Adapter Resampler + the new CLIP ViT-H image encoder + a pure-IP denoise). Candle-only: macOS keeps
 // the MLX SDXL IP path (the registry `SdxlSubMode::Ip`), so these named types resolve only off-Mac.
-// `candle_gen_sdxl` is already force-link anchored above (the registered txt2img `sdxl`); this is the
-// named-type import the bespoke reference route (`image_jobs/sdxl_ipadapter.rs`) drives.
+// The bespoke reference route (`image_jobs/sdxl_ipadapter.rs`) uses this named utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_sdxl::{
+use runtime_cuda::providers::sdxl::{
     IpAdapterSdxl, IpAdapterSdxlPaths, IpAdapterSdxlRequest, SdxlEdit, SdxlEditPaths,
     SdxlEditRequest,
 };
 // FLUX.2-klein reference / img2img edit provider (sc-5487, epic 5480) — the candle (Windows/CUDA) FLUX.2
 // edit lane (the sibling of the SDXL edit lane above), living in `candle-gen-flux2` (Kontext-style
 // reference token-concat over the txt2img FLUX.2 stack + the VAE encoder). Candle-only: macOS keeps the
-// MLX `flux2_klein_9b_edit` registry path. `candle_gen_flux2` is already force-link anchored above (the
-// registered txt2img `flux2_klein_9b`); this is the named-type import the bespoke edit route
-// (`image_jobs/flux2_edit_candle.rs`) drives. The same crate carries the bespoke `Flux2Control`
+// MLX `flux2_klein_9b_edit` registry path. The bespoke edit route
+// (`image_jobs/flux2_edit_candle.rs`) uses this named utility export. The same crate carries `Flux2Control`
 // (FLUX.2-dev Fun-Controlnet-Union strict-pose VACE branch, sc-7460) the candle pose route
 // (`image_jobs/flux2_control_candle.rs`, sc-7736) drives.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_flux2::{
+use runtime_cuda::providers::flux2::{
     Flux2Control, Flux2ControlPaths, Flux2ControlRequest, Flux2Edit, Flux2EditPaths,
     Flux2EditRequest,
 };
@@ -266,66 +106,64 @@ use candle_gen_flux2::{
 // sibling of the SDXL IP lane, living in `candle-gen-kolors` (it reuses candle-gen-sdxl's vendored IP
 // UNet + the CLIP ViT-L/14-336 image encoder, with the Kolors ChatGLM3 conditioning + leading-Euler
 // sampler). Candle-only: macOS keeps the MLX Kolors IP path (the registry `Reference` route), so these
-// named types resolve only off-Mac. `candle_gen_kolors` is already force-link anchored above (the
-// registered txt2img `kolors`); this is the named-type import the bespoke reference route
-// (`image_jobs/kolors_ipadapter.rs`) drives.
+// named types resolve only off-Mac. The bespoke reference route
+// (`image_jobs/kolors_ipadapter.rs`) uses this named utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_kolors::{IpAdapterKolors, IpAdapterKolorsPaths, IpAdapterKolorsRequest};
+use runtime_cuda::providers::kolors::{
+    IpAdapterKolors, IpAdapterKolorsPaths, IpAdapterKolorsRequest,
+};
 // FLUX XLabs IP-Adapter reference provider (sc-5872, epic 5480) — the candle (Windows/CUDA) FLUX sibling
 // of the SDXL/Kolors IP lanes, living in `candle-gen-flux` (the forked FLUX DiT with the per-double-block
 // XLabs seam + the pooled CLIP-ViT-L image encoder). Candle-only: macOS keeps the MLX FLUX XLabs IP path
-// (epic 3621, the registry `Reference` route). `candle_gen_flux` is already force-link anchored above (the
-// registered txt2img `flux1_*`); this is the named-type import the bespoke reference route
-// (`image_jobs/flux_ipadapter.rs`) drives.
+// (epic 3621, the registry `Reference` route). The bespoke route
+// (`image_jobs/flux_ipadapter.rs`) uses this named utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_flux::{IpAdapterFlux, IpAdapterFluxPaths, IpAdapterFluxRequest};
+use runtime_cuda::providers::flux::{IpAdapterFlux, IpAdapterFluxPaths, IpAdapterFluxRequest};
 // FLUX.1-dev strict-control Fun-Controlnet-Union provider (sc-8412, epic 8236) — the candle (Windows/CUDA)
 // FLUX.1-dev sibling of the FLUX.2 / Z-Image / Qwen strict-control lanes, living in `candle-gen-flux` (the
 // Shakker Union-Pro-2.0 residual-emitter control branch overlaid on the FLUX.1-dev base via the
 // compose-ready DiT seam). Candle-only: macOS keeps the MLX `flux1_dev_control` registry generator
-// (flux1_control.rs). `candle_gen_flux` is already force-link anchored above (the registered txt2img
-// `flux1_*`); this is the named-type import the bespoke control route
-// (`image_jobs/flux1_control_candle.rs`) drives.
+// (flux1_control.rs). The bespoke control route (`image_jobs/flux1_control_candle.rs`) uses this
+// named utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_flux::{Flux1ControlPaths, Flux1ControlRequest, Flux1DevControl};
+use runtime_cuda::providers::flux::{Flux1ControlPaths, Flux1ControlRequest, Flux1DevControl};
 // Qwen-Image 2512-Fun-Controlnet-Union (strict control) provider (sc-5489 origin / sc-8350 repoint, epic
 // 8236) — the candle (Windows/CUDA) strict-control lane. As of sc-8350 this rides the input-agnostic
 // `QwenFunControl` VACE engine on the Qwen-Image-2512 base (the InstantX `QwenControl` is retired on the
 // candle lane; the engine stays in the crate, unused by the worker). Candle-only: macOS keeps the MLX
-// `qwen_image_control` registry generator. `candle_gen_qwen_image` is already a force-link anchor (`use
-// candle_gen_qwen_image as _;`) from the Qwen txt2img wiring; this is the named-type import the bespoke
-// control route (`image_jobs/qwen_control.rs`) drives.
+// `qwen_image_control` registry generator. The bespoke control route
+// (`image_jobs/qwen_control.rs`) uses this named utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_qwen_image::{QwenFunControl, QwenFunControlPaths, QwenFunControlRequest};
+use runtime_cuda::providers::qwen_image::{
+    QwenFunControl, QwenFunControlPaths, QwenFunControlRequest,
+};
 // Qwen-Image-Edit provider (sc-5487, epic 5480) — the candle (Windows/CUDA) reference-edit lane (the
 // last family of sc-5487; SDXL + FLUX.2-klein edit already shipped). Candle-only: macOS keeps the MLX
-// `qwen_image_edit` registry path. The named-type import the bespoke edit route
-// (`image_jobs/qwen_edit_candle.rs`) drives.
+// `qwen_image_edit` registry path. The bespoke edit route (`image_jobs/qwen_edit_candle.rs`) uses
+// this named utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_qwen_image::{QwenEdit, QwenEditPaths, QwenEditRequest};
+use runtime_cuda::providers::qwen_image::{QwenEdit, QwenEditPaths, QwenEditRequest};
 // Kolors ControlNet (strict pose) provider (sc-5489, epic 5480) — the candle (Windows/CUDA) Kolors
 // sibling of the Qwen strict-pose lane, living in `candle-gen-kolors` (it reuses candle-gen-sdxl's
 // vendored UNet + the SDXL `ControlNet`, with the Kolors ChatGLM3 conditioning + leading-Euler sampler).
-// Candle-only: macOS keeps the MLX Kolors ControlNet path. `candle_gen_kolors` is already force-link
-// anchored above (the registered txt2img `kolors`); this is the named-type import the bespoke pose route
-// (`image_jobs/kolors_control.rs`) drives.
+// Candle-only: macOS keeps the MLX Kolors ControlNet path. The bespoke pose route
+// (`image_jobs/kolors_control.rs`) uses this named utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_kolors::{KolorsControl, KolorsControlPaths, KolorsControlRequest};
+use runtime_cuda::providers::kolors::{KolorsControl, KolorsControlPaths, KolorsControlRequest};
 // Z-Image Fun-ControlNet (strict pose) provider (sc-5489, epic 5480) — the candle (Windows/CUDA)
 // Z-Image sibling of the Qwen/Kolors strict-pose lanes, living in `candle-gen-z-image` (the VACE-style
 // dual-injection control on the vendored DiT). Candle-only: macOS keeps the MLX `z_image_turbo_control`
-// registry generator. `candle_gen_z_image` is already force-link anchored above (the registered txt2img
-// `z_image_turbo`); this is the named-type import the bespoke pose route (`image_jobs/zimage_control.rs`)
-// drives.
+// registry generator. The bespoke pose route (`image_jobs/zimage_control.rs`) uses this named utility
+// export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_z_image::{ZImageControl, ZImageControlPaths, ZImageControlRequest};
+use runtime_cuda::providers::z_image::{ZImageControl, ZImageControlPaths, ZImageControlRequest};
 // Z-Image img2img / edit provider (sc-6595, epic 5480) — the candle (Windows/CUDA) sibling of the MLX
 // `z_image_turbo` `Conditioning::Reference` img2img route, living in `candle-gen-z-image` (the Turbo DiT
 // + a strength-derived source-latent init). Candle-only: macOS keeps the registered MLX generator's
-// img2img path. `candle_gen_z_image` is already force-link anchored above; this is the named-type import
-// the bespoke edit route (`image_jobs/zimage_edit_candle.rs`) drives.
+// img2img path. The bespoke edit route (`image_jobs/zimage_edit_candle.rs`) uses this named runtime
+// utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_z_image::{ZImageEdit, ZImageEditPaths, ZImageEditRequest};
+use runtime_cuda::providers::z_image::{ZImageEdit, ZImageEditPaths, ZImageEditRequest};
 // PuLID-FLUX face-identity provider (sc-5492, epic 5480) — the candle (Windows/CUDA) sibling of the
 // macOS `pulid_flux` registry generator, living in `candle-gen-pulid` (the EVA02-CLIP tower + IDFormer
 // + the 20 PerceiverAttentionCA modules injected into the forked FLUX DiT via the post-block
@@ -334,7 +172,7 @@ use candle_gen_z_image::{ZImageEdit, ZImageEditPaths, ZImageEditRequest};
 // is a bespoke provider referenced BY NAME (like `InstantId`), so no `as _;` anchor is needed — this is
 // the named-type import the bespoke route (`image_jobs/pulid_candle.rs`) drives.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_pulid::{PulidFlux, PulidFluxPaths, PulidFluxRequest};
+use runtime_cuda::providers::pulid::{PulidFlux, PulidFluxPaths, PulidFluxRequest};
 
 /// The stub adapter id recorded on generated assets (matches the contract fixture
 /// `tests/fixtures/rust_migration_contracts/sidecars/asset-image.sceneworks.json`).
@@ -776,7 +614,7 @@ pub(crate) async fn run_image_generate_job(
                 }
                 // In-place ComfyUI Z-Image base (sc-10668, epic 10451): an `external_base_*` id whose
                 // forwarded row carries the DiT/TE/VAE component paths — render the user's ComfyUI weights
-                // in place via `candle_gen_z_image::load_from_comfyui_components`.
+                // in place via `runtime_cuda::providers::z_image::load_from_comfyui_components`.
                 CandleImageRoute::ZimageComfyui => {
                     generate_candle_zimage_comfyui_stream(
                         api,
@@ -803,7 +641,7 @@ pub(crate) async fn run_image_generate_job(
                 }
                 // In-place ComfyUI FLUX.2-dev fp8-mixed base (sc-10680, epic 10451): an `external_base_*`
                 // id whose forwarded row carries the DiT component path — render the user's ComfyUI
-                // weights in place via `candle_gen_flux2::load_from_comfyui_dit` (inline-scale fp8 dequant
+                // weights in place via `runtime_cuda::providers::flux2::load_from_comfyui_dit` (inline-scale fp8 dequant
                 // + BFL→diffusers remap; TE/VAE/tokenizer from a resident FLUX.2-dev snapshot).
                 CandleImageRoute::Flux2Comfyui => {
                     generate_candle_flux2_comfyui_stream(
@@ -1613,7 +1451,7 @@ fn resolve_family(request: &ImageRequest) -> String {
     }
     #[cfg(target_os = "macos")]
     {
-        if let Some(family) = gen_core::registry::generators()
+        if let Some(family) = crate::inference_runtime::generators()
             .find(|registration| (registration.descriptor)().id == request.model)
             .map(|registration| (registration.descriptor)().family)
         {
@@ -1902,7 +1740,7 @@ include!("image_jobs/krea_control_candle.rs");
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/zimage_edit_candle.rs");
 // In-place ComfyUI Z-Image base txt2img — Windows/CUDA candle lane ONLY (sc-10668, epic 10451). Renders
-// a user's ComfyUI Z-Image weights in place via `candle_gen_z_image::load_from_comfyui_components`.
+// a user's ComfyUI Z-Image weights in place via `runtime_cuda::providers::z_image::load_from_comfyui_components`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/zimage_comfyui_candle.rs");
 // Qwen-Image txt2img from an in-place ComfyUI DiT (plain fp8_e4m3fn → bf16) — the Windows/CUDA candle

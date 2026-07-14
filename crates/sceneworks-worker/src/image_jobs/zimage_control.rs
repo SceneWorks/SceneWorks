@@ -1,5 +1,5 @@
 // Candle (Windows/CUDA) Z-Image Fun-ControlNet (strict pose) route (sc-5489, epic 5480) —
-// `z_image_turbo` + `advanced.poses` off-Mac via `candle_gen_z_image::ZImageControl`. The LAST family
+// `z_image_turbo` + `advanced.poses` off-Mac via `runtime_cuda::providers::z_image::ZImageControl`. The LAST family
 // of the sc-5489 3-family ControlNet port (after Qwen + Kolors). The candle sibling of the MLX Z-Image
 // strict-pose path (zimage.rs `generate_zimage_control_stream`): one image per pose, each conditioned
 // on a full DWPose skeleton (rendered cross-platform by `openpose_skeleton::draw_wholebody`) fed to the

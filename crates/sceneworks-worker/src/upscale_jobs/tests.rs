@@ -340,7 +340,7 @@ fn cached_seedvr2_checkpoint() -> Option<std::path::PathBuf> {
 /// cached 3B checkpoint, asserting (a) the factor→`round_to_16` target dims and (b) that the `softness`
 /// request field actually reaches the engine (a softened run differs from a faithful one). On Mac this
 /// resolves to the MLX provider; on the Windows/CUDA candle build it resolves to `candle-gen-seedvr2`
-/// (the sc-5928 worker-path validation that the force-link + routing reach the candle engine end-to-
+/// (the sc-5928 worker-path validation that the bundle catalog + routing reach the candle engine end-to-
 /// end). Gated on the checkpoint being present (skips in CI, which has no weights), mirroring the
 /// family worker E2E smokes. Set `SCENEWORKS_SEEDVR2_CHECKPOINT` to the ckpt dir and run with
 /// `cargo test -p sceneworks-worker --features backend-candle -- --ignored seedvr2_upscale_real_weight_smoke`.

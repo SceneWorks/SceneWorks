@@ -1,7 +1,7 @@
 # Phase 0 Migration Checkpoint
 
-> **Status:** Complete; awaiting authorization for Phase 1 repository creation and
-> filtered-history import.
+> **Status:** Complete; the Phase 1 history import was subsequently authorized and
+> completed.
 >
 > **Completed:** 2026-07-12
 
@@ -60,12 +60,11 @@
 No product source, runtime source, dependency declaration, repository history, or
 remote repository has been changed in Phase 0.
 
-## Phase 1 authorization requested
+## Phase 1 authorization record
 
 Authorize the following as one bounded next tranche:
 
-1. Create public repository `SceneWorks/inference` with local checkout
-   `inference/`.
+1. Create repository `SceneWorks/inference` with local checkout `inference/`.
 2. Import full filtered histories for `core-llm`, `mlx-llm`, `candle-llm`,
    `mlx-gen`, and `candle-gen` without changing source behavior.
 3. Preserve and commit filter-repo old-to-new commit maps.
@@ -78,3 +77,6 @@ Authorize the following as one bounded next tranche:
 This authorization does not yet permit product dependency cutover, provider
 registry refactoring, old-repository archival, or product monorepo creation.
 
+The tranche was approved and executed. The repository was created private rather
+than adopting the original public-visibility recommendation; no later migration
+instruction changes that visibility.

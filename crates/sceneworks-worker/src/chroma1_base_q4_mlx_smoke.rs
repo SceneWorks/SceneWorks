@@ -1,6 +1,6 @@
 //! Local real-weight MLX smoke for the Chroma1-Base **Q4** worker lane (sc-8777, epic 8506 Group-B).
 //! `#[ignore]`d — run by hand on an Apple-Silicon Mac. It drives the real native-MLX `chroma1_base`
-//! engine via `gen_core::load("chroma1_base")` with a **Q4** `LoadSpec` pointed at the packed `q4/`
+//! engine via `crate::inference_runtime::load("chroma1_base")` with a **Q4** `LoadSpec` pointed at the packed `q4/`
 //! turnkey subdir — the exact runtime seam `generate_stream` uses (minus the API/job plumbing) when
 //! the router routes a `chroma1_base` MLX job (`standard_tier_subdir` → the `q4/` subdir; `resolve_quant`
 //! → `Quant::Q4`).
@@ -98,8 +98,8 @@ fn chroma1_base_q4_mlx_gpu_smoke() {
          shallow depth of field",
     );
 
-    // Same seam as the worker's MLX image path: a registry load of the `chroma1_base` generator (the
-    // worker-crate force-link anchor `use mlx_gen_chroma as _;` keeps it registered) + a Q4 `LoadSpec`
+    // Same seam as the worker's MLX image path: a catalog load of the `chroma1_base` generator + a
+    // Q4 `LoadSpec`
     // pointed at the packed q4 turnkey subdir. The packed transformer auto-detects its quant, so
     // `with_quant(Q4)` matches the manifest's `mlx.quantize: 4` tier; the dense T5 loads unchanged.
     println!(
@@ -107,7 +107,8 @@ fn chroma1_base_q4_mlx_gpu_smoke() {
         q4_dir.display()
     );
     let spec = LoadSpec::new(WeightsSource::Dir(q4_dir.clone())).with_quant(Quant::Q4);
-    let generator = gen_core::load("chroma1_base", &spec).expect("load mlx chroma1_base generator");
+    let generator = crate::inference_runtime::load("chroma1_base", &spec)
+        .expect("load mlx chroma1_base generator");
 
     // Chroma1-Base is a TRUE-CFG family: the engine advertises `supports_guidance=false` +
     // `supports_negative_prompt=true`, so the worker forwards the CFG scale as `true_cfg` (NOT the

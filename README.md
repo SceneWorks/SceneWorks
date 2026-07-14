@@ -104,6 +104,16 @@ For the full per-job-kind breakdown of which capability each build advertises an
 the routing rules that decide, see the
 [Worker Capability Matrix](crates/sceneworks-worker/ARCHITECTURE.md).
 
+Developer builds require read access to the private
+[`SceneWorks/inference`](https://github.com/SceneWorks/inference) repository. Authenticate the
+system Git client (for example with `gh auth login` followed by `gh auth setup-git`) before running
+Cargo. GitHub Actions Rust/package jobs use the repository secret
+`SCENEWORKS_INFERENCE_READ_TOKEN`, scoped to read that repository. The product repository remains
+public and the inference repository remains private; unauthenticated source builds therefore cannot
+fetch the runtime at this cutover boundary. Container builds additionally read that same environment
+variable through a BuildKit secret mount during `cargo fetch`; the value is not persisted in an
+image layer or exposed to Rust build scripts.
+
 ## LoRA training
 
 SceneWorks trains LoRAs locally with a native Rust/MLX/candle trainer — no torch.
@@ -316,8 +326,14 @@ data/
 docker/       Service Dockerfiles (rust.Dockerfile, web.Dockerfile)
 ```
 
-The proposed consolidation of the SceneWorks product and inference repositories is
-captured in the [multi-repository rearchitecture plan](documents/MULTI_REPO_REARCHITECTURE_PLAN.md).
+The active consolidation of the SceneWorks product and inference repositories is captured in the
+[multi-repository rearchitecture plan](documents/MULTI_REPO_REARCHITECTURE_PLAN.md). The durable
+decision record—including the coupling failures in the old topology, alternatives rejected, explicit
+composition rationale, tradeoffs, and rollback rules—lives with the canonical inference source in
+[`docs/architecture/inference-rearchitecture.md`](https://github.com/SceneWorks/inference/blob/main/docs/architecture/inference-rearchitecture.md).
+The exact pre-cutover dependency set, canonical runtime release, validation evidence, and product
+rollback procedure are recorded in the
+[Phase 5 consumer cutover](documents/rearchitecture/PHASE_5_CUTOVER.md).
 
 ## Development
 

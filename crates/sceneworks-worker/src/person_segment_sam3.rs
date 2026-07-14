@@ -28,12 +28,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use gen_core::CancelFlag;
-use mlx_gen::weights::Weights;
-use mlx_gen_sam3::{
+use mlx_rs::Array;
+use runtime_macos::media::weights::Weights;
+use runtime_macos::providers::sam3::{
     Sam3ImageSegmenter, Sam3TextConfig, Sam3Tokenizer, Sam3Tracker, Sam3VideoModel,
     VideoFrameOutput,
 };
-use mlx_rs::Array;
 
 use crate::person_segment_sam3_common::{
     check_segment_canceled, frame_mask_for_object, mask_to_frame, normalize_chw, paint_order,
@@ -398,7 +398,9 @@ pub(crate) fn segment_track_blocking(
                 .map(|cb| cb as &mut dyn FnMut(usize, usize)),
         )
         .map_err(|e| match e {
-            mlx_gen::Error::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
+            runtime_macos::media::Error::Canceled => {
+                WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
+            }
             e => WorkerError::Engine(format!("sam3 propagate: {e}")),
         })?;
 
@@ -736,7 +738,9 @@ pub(crate) fn segment_all_persons_in_memory(
                 .map(|cb| cb as &mut dyn FnMut(usize, usize)),
         )
         .map_err(|e| match e {
-            mlx_gen::Error::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
+            runtime_macos::media::Error::Canceled => {
+                WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
+            }
             e => WorkerError::Engine(format!("sam3 propagate: {e}")),
         })?;
 

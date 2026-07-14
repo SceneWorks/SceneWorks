@@ -1,6 +1,6 @@
 //! Local real-weight MLX smoke for the SDXL base 1.0 **Q8** worker lane (sc-8746, epic 8506 Group-B).
 //! `#[ignore]`d — run by hand on an Apple-Silicon Mac. It drives the real native-MLX `sdxl` engine via
-//! `gen_core::load("sdxl")` with a **Q8** `LoadSpec` pointed at the packed `q8/` turnkey subdir — the
+//! `crate::inference_runtime::load("sdxl")` with a **Q8** `LoadSpec` pointed at the packed `q8/` turnkey subdir — the
 //! exact runtime seam `generate_stream` uses (minus the API/job plumbing) when the router routes an
 //! `sdxl` MLX job (`standard_tier_subdir` → the `q8/` subdir; `resolve_quant` → `Quant::Q8`).
 //!
@@ -99,13 +99,13 @@ fn sdxl_base_q8_mlx_gpu_smoke() {
          shallow depth of field",
     );
 
-    // Same seam as the worker's MLX image path: a registry load of the `sdxl` generator (the worker-crate
-    // force-link anchor `use mlx_gen_sdxl as _;` keeps it registered) + a Q8 `LoadSpec` pointed at the
+    // Same seam as the worker's MLX image path: a catalog load of the `sdxl` generator + a Q8
+    // `LoadSpec` pointed at the
     // packed q8 turnkey subdir. The packed weights auto-detect their quant, so `with_quant(Q8)` matches
     // the manifest's `mlx.quantize: 8` tier.
     println!("[smoke] loading sdxl (Q8) from {} ...", q8_dir.display());
     let spec = LoadSpec::new(WeightsSource::Dir(q8_dir.clone())).with_quant(Quant::Q8);
-    let generator = gen_core::load("sdxl", &spec).expect("load mlx sdxl generator");
+    let generator = crate::inference_runtime::load("sdxl", &spec).expect("load mlx sdxl generator");
 
     // SDXL base 1.0: real CFG (negative prompt + guidance 7.0), EulerDiscrete default schedule.
     let req = GenerationRequest {

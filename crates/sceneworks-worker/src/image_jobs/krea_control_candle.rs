@@ -1,5 +1,5 @@
 // Candle (Windows/CUDA) Krea 2 pose-ControlNet route (sc-8464, epic 8459) — `krea_2_turbo` +
-// `advanced.poses` off-Mac via `candle_gen_krea::Krea2Control`. The first Krea backbone control lane and
+// `advanced.poses` off-Mac via `runtime_cuda::providers::krea::Krea2Control`. The first Krea backbone control lane and
 // the deployable form of the sc-8460 spike: a trained control-branch overlay loaded on the frozen Krea 2
 // Turbo base (dense bf16), rendering one image per library pose, each conditioned on a full DWPose
 // skeleton (rendered cross-platform by `openpose_skeleton::draw_wholebody`, the SAME renderer training
@@ -33,7 +33,7 @@ const KREA_CONTROL_BASE_REPO: &str = "krea/Krea-2-Turbo";
 const KREA_CONTROL_MLX_REPO: &str = "SceneWorks/krea-2-turbo-mlx";
 /// Pose ControlNet conditioning-scale default (candle-gen `Krea2Control::DEFAULT_CONTROL_SCALE`). The S0
 /// spike found the usable band ~0.5–0.85 for the distilled CFG-free base; ship a comfortable mid.
-const KREA_CONTROL_DEFAULT_SCALE: f32 = candle_gen_krea::DEFAULT_CONTROL_SCALE;
+const KREA_CONTROL_DEFAULT_SCALE: f32 = runtime_cuda::providers::krea::DEFAULT_CONTROL_SCALE;
 /// Hard cap on the exposed `control_scale` — above ~0.85 the frozen CFG-free base over-drives to halftone
 /// (S0 finding: graceful soft-haze, never confetti, but not a usable range).
 const KREA_CONTROL_SCALE_CAP: f32 = 0.85;
@@ -308,7 +308,7 @@ struct KreaStrictControl {
 }
 
 impl CandleStrictControl for KreaStrictControl {
-    type Model = candle_gen_krea::Krea2Control;
+    type Model = runtime_cuda::providers::krea::Krea2Control;
 
     fn engine_id(&self) -> &'static str {
         KREA_CONTROL_ENGINE_ID
@@ -331,12 +331,12 @@ impl CandleStrictControl for KreaStrictControl {
     }
 
     fn load(&self) -> WorkerResult<Self::Model> {
-        let paths = candle_gen_krea::Krea2ControlPaths {
+        let paths = runtime_cuda::providers::krea::Krea2ControlPaths {
             root: self.base.clone(),
             control: self.control.clone(),
             adapters: self.adapters.clone(),
         };
-        candle_gen_krea::Krea2Control::load(&paths).map_err(|error| {
+        runtime_cuda::providers::krea::Krea2Control::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Krea 2 strict-pose control load failed: {error}"))
         })
     }
@@ -349,7 +349,7 @@ impl CandleStrictControl for KreaStrictControl {
         cancel: &CancelFlag,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image> {
-        let req = candle_gen_krea::Krea2ControlRequest {
+        let req = runtime_cuda::providers::krea::Krea2ControlRequest {
             prompt: self.prompt.clone(),
             width: self.width,
             height: self.height,

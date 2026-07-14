@@ -1,7 +1,7 @@
 //! Shared test-support helpers for the real-weight GPU/MLX smoke harnesses (sc-8866, epic 8800).
 //!
 //! The per-lane smoke files (`*_mlx_smoke.rs` on macOS, `*_gpu_smoke.rs` on the off-Mac candle lane,
-//! plus `footprint_measure.rs`) each drive `gen_core::load(id)` + one real generation and then apply
+//! plus `footprint_measure.rs`) each drive `crate::inference_runtime::load(id)` + one real generation and then apply
 //! the same handful of degenerate-decode floor checks and env plumbing. Those helpers were copy-pasted
 //! verbatim across 10+ files; this module holds the byte-identical ones ONCE so a fix (or a stronger
 //! gate) lands in a single place instead of drifting per-copy.

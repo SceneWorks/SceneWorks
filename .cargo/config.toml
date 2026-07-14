@@ -42,3 +42,8 @@ MACOSX_DEPLOYMENT_TARGET = "26.2"
 #   export CARGO_TARGET_DIR=~/.cache/sceneworks-target   # one shared target dir
 #
 # See docs/rust-mlx-build.md.
+
+[net]
+# The canonical inference workspace is a private SceneWorks repository. Use the system Git client so
+# Cargo honors the same credential helper as `git clone` and `gh auth setup-git`.
+git-fetch-with-cli = true

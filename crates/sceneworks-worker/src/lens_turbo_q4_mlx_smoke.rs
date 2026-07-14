@@ -1,6 +1,6 @@
 //! Local real-weight MLX smoke for the Lens-Turbo **Q4** worker lane (sc-8763, epic 8506 Group-B).
 //! `#[ignore]`d — run by hand on an Apple-Silicon Mac. It drives the real native-MLX `lens_turbo`
-//! engine via `gen_core::load("lens_turbo")` with a **Q4** `LoadSpec` pointed at the packed `q4/`
+//! engine via `crate::inference_runtime::load("lens_turbo")` with a **Q4** `LoadSpec` pointed at the packed `q4/`
 //! turnkey subdir — the exact runtime seam `generate_stream` uses (minus the API/job plumbing) when
 //! the router routes a `lens_turbo` MLX job (`standard_tier_subdir` → the `q4/` subdir; `resolve_quant`
 //! → `Quant::Q4`).
@@ -108,8 +108,8 @@ fn lens_turbo_q4_mlx_gpu_smoke() {
          shallow depth of field",
     );
 
-    // Same seam as the worker's MLX image path: a registry load of the `lens_turbo` generator (the
-    // worker-crate force-link anchor `use mlx_gen_lens as _;` keeps it registered) + a Q4 `LoadSpec`
+    // Same seam as the worker's MLX image path: a catalog load of the `lens_turbo` generator + a Q4
+    // `LoadSpec`
     // pointed at the packed q4 turnkey subdir. The packed weights auto-detect their quant, so
     // `with_quant(Q4)` matches the manifest's `mlx.quantize: 4` tier.
     println!(
@@ -117,7 +117,8 @@ fn lens_turbo_q4_mlx_gpu_smoke() {
         q4_dir.display()
     );
     let spec = LoadSpec::new(WeightsSource::Dir(q4_dir.clone())).with_quant(Quant::Q4);
-    let generator = gen_core::load("lens_turbo", &spec).expect("load mlx lens_turbo generator");
+    let generator =
+        crate::inference_runtime::load("lens_turbo", &spec).expect("load mlx lens_turbo generator");
 
     // Lens-Turbo: distilled 4-step, guidance 1.0 (no real CFG).
     let req = GenerationRequest {

@@ -1,6 +1,6 @@
 //! Local real-weight MLX smoke for the SANA **quant-matrix** worker lane (sc-8489/sc-8513, epic 8506
 //! Group-B). `#[ignore]`d — run by hand on an Apple-Silicon Mac. It drives the real native-MLX
-//! `sana_1600m` + `sana_sprint_1600m` engines via `gen_core::load(id)` with a per-tier `LoadSpec`
+//! `sana_1600m` + `sana_sprint_1600m` engines via `crate::inference_runtime::load(id)` with a per-tier `LoadSpec`
 //! pointed at the packed/dense turnkey subdir — the exact runtime seam `generate_stream` uses (minus
 //! the API/job plumbing) when the router routes a SANA MLX job (`standard_tier_subdir` → the
 //! `q4/`|`q8/`|`bf16/` subdir; `resolve_quant` → `Quant::Q4`|`Quant::Q8`|`None`).
@@ -117,8 +117,8 @@ fn sana_mlx_gpu_smoke() {
                 continue;
             }
 
-            // Same seam as the worker MLX path: registry load of the SANA generator (force-linked via
-            // `use mlx_gen_sana as _;`) + a `LoadSpec` pointed at the tier subdir. Packed tiers
+            // Same seam as the worker MLX path: catalog load of the SANA generator + a `LoadSpec`
+            // pointed at the tier subdir. Packed tiers
             // (q4/q8) carry `.scales` and auto-detect; bf16 loads dense. `with_quant` mirrors
             // `resolve_quant` (advisory post-#653 — the on-disk tier dictates the real precision).
             let mut spec = LoadSpec::new(WeightsSource::Dir(tier_dir.clone()));
@@ -130,8 +130,8 @@ fn sana_mlx_gpu_smoke() {
                 model.id,
                 tier_dir.display()
             );
-            let generator =
-                gen_core::load(model.id, &spec).expect("load mlx sana generator for tier");
+            let generator = crate::inference_runtime::load(model.id, &spec)
+                .expect("load mlx sana generator for tier");
 
             let req = GenerationRequest {
                 prompt: prompt.to_owned(),

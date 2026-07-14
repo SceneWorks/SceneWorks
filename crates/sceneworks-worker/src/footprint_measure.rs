@@ -5,7 +5,7 @@
 //! measured data instead of the disk×multiplier estimate, and so the sc-8508 manifest footprint
 //! fields (`footprint.residentMemoryBytes` / `peakMemoryBytes`) can be populated.
 //!
-//! Each test drives the EXACT worker runtime seam a real job uses — a registry `gen_core::load(id)`
+//! Each test drives the EXACT worker runtime seam a real job uses — a registry `crate::inference_runtime::load(id)`
 //! of a packed tier subdir (the same one `image_jobs::base::standard_tier_subdir` resolves) + ONE
 //! generation — while sampling the MLX process-global memory counters that generator_cache.rs already
 //! publishes to telemetry:
@@ -137,7 +137,7 @@ fn quant_for(tier: &str) -> Option<Quant> {
 ///      `residentBytes = get_active_memory() - baseline` — the STEADY-STATE resident WEIGHTS only.
 ///
 /// Why resident is sampled POST-gen-and-clear rather than pre-gen: MLX evaluates lazily, so directly
-/// after `gen_core::load` NOTHING is materialized on the GPU allocator (`get_active_memory()` reads
+/// after `crate::inference_runtime::load` NOTHING is materialized on the GPU allocator (`get_active_memory()` reads
 /// ~0 — verified) — the weights are only realized when the first forward pass touches them. So a true
 /// steady-state resident is only observable AFTER a generation has forced materialization. The fix
 /// versus the original harness is the `clear_cache()` on line below: the old code sampled
@@ -173,7 +173,7 @@ fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: 
     if let Some(q) = quant_for(tier) {
         spec = spec.with_quant(q);
     }
-    let generator = gen_core::load(engine_id, &spec)
+    let generator = crate::inference_runtime::load(engine_id, &spec)
         .unwrap_or_else(|e| panic!("load {engine_id} ({tier}): {e:?}"));
 
     // 3. One generation, then the load+gen peak high-water mark (reset in step 1, never since).

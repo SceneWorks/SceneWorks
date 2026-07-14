@@ -1,7 +1,8 @@
 # SceneWorks Multi-Repository Rearchitecture Plan
 
-> **Status:** Active; Phase 1 import complete locally, remote publication blocked
-> by GitHub CLI authentication.
+> **Status:** Inference Phases 0–5 are implemented, released, and locally validated at
+> `runtime-2026.07.0`. Hosted SceneWorks validation awaits its scoped private-repository read
+> secret. Product-repository consolidation and legacy-repository archival remain separate decisions.
 >
 > **Date:** 2026-07-12
 >

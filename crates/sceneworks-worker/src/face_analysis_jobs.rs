@@ -38,10 +38,10 @@ const CANCEL_MESSAGE: &str = "Dataset face analysis canceled by user.";
 // MLX face stack (macOS): the same SCRFD + ArcFace the InstantID/kps paths use, loaded directly (not
 // through a registry — the `FaceEmbedder` contract has no gen-core registration).
 #[cfg(target_os = "macos")]
-use mlx_gen::weights::Weights;
+use runtime_macos::media::weights::Weights;
 #[cfg(target_os = "macos")]
-use mlx_gen_face::FaceAnalysis;
-// candle face stack (off-Mac): `candle_gen_face::load` builds an `impl FaceEmbedder`; importing the
+use runtime_macos::providers::face::FaceAnalysis;
+// candle face stack (off-Mac): `runtime_cuda::providers::face::load` builds an `impl FaceEmbedder`; importing the
 // trait brings `analyze` into scope.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use gen_core::FaceEmbedder;
@@ -171,7 +171,7 @@ fn analyze_faces(
     cancel: CancelFlag,
     tx: tokio::sync::mpsc::Sender<usize>,
 ) -> WorkerResult<Vec<FaceAnalysisRecord>> {
-    let analysis = candle_gen_face::load(&weights_dir)
+    let analysis = runtime_cuda::providers::face::load(&weights_dir)
         .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
     embed_largest_faces(
         &items,

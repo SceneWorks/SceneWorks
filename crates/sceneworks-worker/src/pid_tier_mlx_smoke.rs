@@ -6,7 +6,7 @@
 //! output size is the base fed to the decode. The worker translates `advanced.pidTarget` into that base
 //! via `pid_output_tier` + `pid_effective_dims` (the REAL functions, called here — not a re-derivation).
 //! For a 1024² request: `"4k"` keeps base 1024 → 4096² output; `"2k"` caps base to 512 → 2048² output.
-//! Rendering through the same `gen_core::load(...).with_pid(...)` + `GenerationRequest.use_pid` seam the
+//! Rendering through the same `crate::inference_runtime::load(...).with_pid(...)` + `GenerationRequest.use_pid` seam the
 //! worker lanes use confirms the engine emits exactly `effective_base × 4`.
 //!
 //! Uses `z_image_turbo` (8-step distilled, CFG-free — the fastest PiD-eligible MLX model) whose FLUX.1
@@ -64,8 +64,8 @@ fn resolve_base_dir(root: &Path) -> PathBuf {
 /// at the given base `w`×`h`. The PiD student super-resolves the decode 4×, so the returned image is
 /// `w*4`×`h*4`.
 fn render_pid(spec: &LoadSpec, w: u32, h: u32, steps: u32, prompt: &str) -> Image {
-    let generator =
-        gen_core::load("z_image_turbo", spec).expect("load mlx z_image_turbo generator");
+    let generator = crate::inference_runtime::load("z_image_turbo", spec)
+        .expect("load mlx z_image_turbo generator");
     let req = GenerationRequest {
         prompt: prompt.to_owned(),
         width: w,

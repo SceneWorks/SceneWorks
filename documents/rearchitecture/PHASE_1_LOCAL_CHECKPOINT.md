@@ -1,7 +1,8 @@
 # Phase 1 Local History-Import Checkpoint
 
-> **Status:** Local import complete; remote repository creation blocked by invalid
-> GitHub CLI API authentication.
+> **Status:** Complete and published. The temporary GitHub authentication blocker
+> was resolved; canonical `main` and every migration/history ref are present in
+> the private `SceneWorks/inference` repository.
 >
 > **Local repository:** `/Users/zakkeown/Code/SceneWorks/inference`
 >
@@ -37,23 +38,10 @@ a3afe0e7 chore: import mlx-llm history
 d28ea14e chore: bootstrap unified inference repository
 ```
 
-## Publication blocker
+## Publication outcome
 
-`gh auth status` reports the active `zakkeown` GitHub CLI token is invalid. Normal
-Git HTTPS credentials remain valid, as proven by pushing the SceneWorks Phase 0
-branch, but repository creation and PR creation use the GitHub API token.
-
-Required operator action:
-
-```sh
-gh auth login -h github.com
-```
-
-After authentication, migration resumes with:
-
-1. Create public `SceneWorks/inference` with no generated initial files.
-2. Add it as the local inference repository's `origin`.
-3. Push `main` and migration/history tags.
-4. Verify remote commits and tree IDs.
-5. Create the SceneWorks Phase 0/1 baseline PR.
-
+GitHub CLI authentication was restored. The empty canonical repository was
+created, configured as `origin`, and received `main`, all five
+`migration-baseline/*` tags, and `history/candle-gen-tracking-main` without a
+force push. Remote refs were verified after publication. Its actual private
+visibility is preserved; the earlier public recommendation was not adopted.

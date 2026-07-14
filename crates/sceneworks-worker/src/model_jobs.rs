@@ -467,7 +467,7 @@ fn convert_flux2_klein_diffusers(
     out_dir: &Path,
 ) -> Result<(), String> {
     // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
-    mlx_gen_flux2::convert_and_assemble(source_file, base_dir, out_dir)
+    runtime_macos::providers::flux2::convert_and_assemble(source_file, base_dir, out_dir)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -484,7 +484,7 @@ fn convert_flux2_klein_diffusers(
     out_dir: &Path,
 ) -> Result<(), String> {
     // CARVE-OUT(epic 3720 / sc-7459): backend-specific weight converter; not a registry contract.
-    candle_gen_flux2::convert_and_assemble(source_file, base_dir, out_dir)
+    runtime_cuda::providers::flux2::convert_and_assemble(source_file, base_dir, out_dir)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -517,10 +517,15 @@ fn convert_ltx_native(
     bits: i32,
 ) -> Result<(), String> {
     // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
-    let opts = mlx_gen_ltx::LtxConvertOpts::audio_quant(bits);
-    mlx_gen_ltx::convert_and_assemble(source_file, Some(upscaler_dir), out_dir, &opts)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    let opts = runtime_macos::providers::ltx::LtxConvertOpts::audio_quant(bits);
+    runtime_macos::providers::ltx::convert_and_assemble(
+        source_file,
+        Some(upscaler_dir),
+        out_dir,
+        &opts,
+    )
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -554,14 +559,14 @@ fn convert_flux2_dev_prequant(
 ) -> Result<(), String> {
     // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
     std::fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
-    mlx_gen_flux2::quantize_flux2_dit(
+    runtime_macos::providers::flux2::quantize_flux2_dit(
         &source_dir.join("transformer"),
         &out_dir.join("transformer"),
         bits,
         group_size,
     )
     .map_err(|error| format!("quantize FLUX.2-dev transformer: {error}"))?;
-    mlx_gen_flux2::quantize_flux2_text_encoder_dir(
+    runtime_macos::providers::flux2::quantize_flux2_text_encoder_dir(
         &source_dir.join("text_encoder"),
         &out_dir.join("text_encoder"),
         bits,
@@ -616,8 +621,10 @@ fn convert_sd3_prequant(
 ) -> Result<(), String> {
     // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
     let arch = match variant {
-        Sd3Variant::Large | Sd3Variant::LargeTurbo => mlx_gen_sd3::Sd3Arch::large(),
-        Sd3Variant::Medium => mlx_gen_sd3::Sd3Arch::medium(),
+        Sd3Variant::Large | Sd3Variant::LargeTurbo => {
+            runtime_macos::providers::sd3::Sd3Arch::large()
+        }
+        Sd3Variant::Medium => runtime_macos::providers::sd3::Sd3Arch::medium(),
     };
     std::fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
     let src_transformer = source_dir.join("transformer");
@@ -630,7 +637,7 @@ fn convert_sd3_prequant(
         );
     }
     // Quantize the MMDiT transformer/ on disk (validates the arch first, writes a packed dir).
-    mlx_gen_sd3::quantize_sd3_dir(
+    runtime_macos::providers::sd3::quantize_sd3_dir(
         &arch,
         &src_transformer,
         &out_dir.join("transformer"),
@@ -699,9 +706,9 @@ const ANIMA_TE_FILE: &str = "split_files/text_encoders/qwen_3_06b_base.safetenso
 const ANIMA_VAE_FILE: &str = "split_files/vae/qwen_image_vae.safetensors";
 
 /// Test-only hardcoded regression pin for the Anima DiT quant-target partition, mirroring
-/// `mlx_gen_anima::is_dit_quant_target` (`true` UNLESS the base — a key minus its `.weight` suffix — is
+/// `runtime_macos::providers::anima::is_dit_quant_target` (`true` UNLESS the base — a key minus its `.weight` suffix — is
 /// inside the bundled `AnimaTextConditioner`, `…llm_adapter.*`, kept dense bf16). The converter itself
-/// no longer uses this: `convert_anima_prequant` calls `mlx_gen_anima::quantize_anima_dit` directly
+/// no longer uses this: `convert_anima_prequant` calls `runtime_macos::providers::anima::quantize_anima_dit` directly
 /// (sc-10580 dedup — single source of the quant policy is the crate). This copy survives ONLY so
 /// `anima_dit_quant_predicate_matches_mlx_gen_anima_twin` can pin the exact partition against a
 /// hand-written table and — on macOS, where the crate is linked — assert the real crate predicate still
@@ -720,7 +727,7 @@ fn anima_is_dit_quant_target(base: &str) -> bool {
 /// 2B DiT is small; packing is quick). Unlike the single-tier converters above, this writes THREE tier
 /// subdirs — `bf16/ q8/ q4/` — each a `diffusion_models/ text_encoders/ vae/` tree the Anima loader
 /// reads; the bespoke `anima_tier_subdir` resolver (image_jobs/base.rs) picks one at gen time by
-/// `mlxQuantize`. Only the Cosmos DiT is packed (via `mlx_gen_anima::quantize_anima_dit`, whose
+/// `mlxQuantize`. Only the Cosmos DiT is packed (via `runtime_macos::providers::anima::quantize_anima_dit`, whose
 /// `is_dit_quant_target` predicate keeps the conditioner dense); the bundled
 /// `AnimaTextConditioner`, the Qwen3-0.6B TE, and the Qwen-Image VAE stay DENSE bf16 in every tier (the
 /// "dense-TE, transformer-only" quant policy the sibling converters share — a Q4 text-conditioning path
@@ -766,8 +773,10 @@ fn convert_anima_prequant(
             }
             // Packed: quantize ONLY the Cosmos DiT (the bundled conditioner stays dense) via the
             // crate's install-time quantizer — the single source of the quant policy (sc-10580).
-            Some(bits) => mlx_gen_anima::quantize_anima_dit(dit_source, &dit_dst, bits, group_size)
-                .map_err(|error| format!("quantize Anima DiT: {error}"))?,
+            Some(bits) => runtime_macos::providers::anima::quantize_anima_dit(
+                dit_source, &dit_dst, bits, group_size,
+            )
+            .map_err(|error| format!("quantize Anima DiT: {error}"))?,
         }
         // Symlink the shared dense TE + VAE into every tier (absolute targets).
         for (source, sub, name) in [
@@ -906,7 +915,7 @@ struct ConvertPlanError {
 }
 
 /// The SD3.5 MMDiT variant a `sd3_5_*_quant` conversion targets — a target-neutral mirror of
-/// `mlx_gen_sd3::Sd3Variant` (which is macOS-only), so [`ConvertPlan`] stays buildable on every
+/// `runtime_macos::providers::sd3::Sd3Variant` (which is macOS-only), so [`ConvertPlan`] stays buildable on every
 /// target. The macOS converter maps it back to the engine variant in [`convert_sd3_prequant`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Sd3Variant {
@@ -2855,10 +2864,10 @@ mod anima_convert_tests {
     }
 
     /// Equivalence pin for the Anima DiT quant-target partition. The worker no longer duplicates the
-    /// packer: `convert_anima_prequant` calls `mlx_gen_anima::quantize_anima_dit` directly (sc-10580),
+    /// packer: `convert_anima_prequant` calls `runtime_macos::providers::anima::quantize_anima_dit` directly (sc-10580),
     /// so the crate's `is_dit_quant_target` is now the single source of the "DiT ⇒ quantize, bundled
     /// conditioner ⇒ dense" policy. This test keeps a hand-written table as an INDEPENDENT pin and, on
-    /// macOS (where the crate is linked), asserts the real `mlx_gen_anima::is_dit_quant_target` still
+    /// macOS (where the crate is linked), asserts the real `runtime_macos::providers::anima::is_dit_quant_target` still
     /// matches it — so a future mlx-gen rev bump that silently repartitions the checkpoint (e.g. drops
     /// the `!contains("llm_adapter.")` rule and packs the conditioner to Q4) fails HERE. The
     /// `anima_is_dit_quant_target` local copy is the platform-independent half of the pin. Covers BOTH
@@ -2883,16 +2892,16 @@ mod anima_convert_tests {
             assert_eq!(
                 anima_is_dit_quant_target(key),
                 *expected,
-                "partition drift for `{key}` — must match mlx_gen_anima::convert::is_dit_quant_target"
+                "partition drift for `{key}` — must match runtime_macos::providers::anima::convert::is_dit_quant_target"
             );
             // On macOS the crate is linked: assert the REAL predicate the converter now delegates to
-            // (`convert_anima_prequant` → `mlx_gen_anima::quantize_anima_dit` → this) still matches the
+            // (`convert_anima_prequant` → `runtime_macos::providers::anima::quantize_anima_dit` → this) still matches the
             // pinned table, so a future mlx-gen rev can't silently repartition the checkpoint.
             #[cfg(target_os = "macos")]
             assert_eq!(
-                mlx_gen_anima::is_dit_quant_target(key),
+                runtime_macos::providers::anima::is_dit_quant_target(key),
                 *expected,
-                "crate drift for `{key}` — mlx_gen_anima::is_dit_quant_target diverged from the pin"
+                "crate drift for `{key}` — runtime_macos::providers::anima::is_dit_quant_target diverged from the pin"
             );
         }
     }
@@ -3141,7 +3150,7 @@ mod tier_builder {
                 bits > 0,
                 "boogu assemble builds a packed Q tier (set SC8513_BITS=4 or 8)"
             );
-            mlx_gen_boogu::convert::assemble_quantized_snapshot(&src, &out, bits)
+            runtime_macos::providers::boogu::convert::assemble_quantized_snapshot(&src, &out, bits)
                 .unwrap_or_else(|error| panic!("boogu assemble failed: {error}"));
             eprintln!("[sc-8513] DONE {tier} at {}", out.display());
             return;

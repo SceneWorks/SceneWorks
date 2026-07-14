@@ -427,7 +427,7 @@ pub(crate) async fn ensure_scrfd_weights(
 
 /// Resolve the face-stack DIRECTORY (`scrfd_10g.safetensors` and `arcface_iresnet100.safetensors`),
 /// staging BOTH files. The off-Mac kps-extraction capability (sc-5497, epic 5482) loads them through
-/// `candle_gen_face::load`, and the Dataset Doctor face pass (sc-6538) loads them on BOTH backends:
+/// `runtime_cuda::providers::face::load`, and the Dataset Doctor face pass (sc-6538) loads them on BOTH backends:
 /// candle from the dir, MLX by joining the two canonical file names ([`INSTANTID_SCRFD_FILE`],
 /// [`INSTANTID_ARCFACE_FILE`]) — so it is no longer candle-only. (The Mac kps path still loads SCRFD
 /// alone via [`ensure_scrfd_weights`].) Shares the env override (`SCENEWORKS_INSTANTID_WEIGHTS`), the

@@ -5,9 +5,9 @@
 //! no Python. Two `#[ignore]` tests, each parameterized by env, that produce artifacts the
 //! `lora_eval_harness` then scores:
 //!
-//! - `train_zimage_lora` — `gen_core::load_trainer("z_image_turbo", Dir(base)).train(req)` over
+//! - `train_zimage_lora` — `crate::inference_runtime::load_trainer("z_image_turbo", Dir(base)).train(req)` over
 //!   `TRAIN_DIR` → a LoRA `.safetensors` in `OUTPUT_DIR`.
-//! - `generate_zimage_grid` — `gen_core::load("z_image_turbo", Dir(base)[+adapter]).generate` over
+//! - `generate_zimage_grid` — `crate::inference_runtime::load("z_image_turbo", Dir(base)[+adapter]).generate` over
 //!   the fixed prompt grid → PNGs in `GEN_DIR` (+ `prompts.json`). With `ADAPTER_PATH` set it uses
 //!   the LoRA; unset = the no-LoRA baseline floor (protocol §2.1).
 //!
@@ -36,8 +36,8 @@ mod driver {
         AdapterKind, AdapterSpec, CancelFlag, GenerationOutput, GenerationRequest, Image, LoadSpec,
         TrainingConfig, TrainingItem, TrainingProgress, TrainingRequest, WeightsSource,
     };
-    use mlx_gen::weights::Weights;
-    use mlx_gen_face::FaceAnalysis;
+    use runtime_macos::media::weights::Weights;
+    use runtime_macos::providers::face::FaceAnalysis;
 
     use crate::image_jobs::{INSTANTID_ARCFACE_FILE, INSTANTID_SCRFD_FILE};
 
@@ -310,9 +310,11 @@ mod driver {
             cancel: CancelFlag::new(),
         };
 
-        let mut trainer =
-            gen_core::load_trainer(MODEL_ID, &LoadSpec::new(WeightsSource::Dir(base_dir())))
-                .expect("load z_image_turbo trainer");
+        let mut trainer = crate::inference_runtime::load_trainer(
+            MODEL_ID,
+            &LoadSpec::new(WeightsSource::Dir(base_dir())),
+        )
+        .expect("load z_image_turbo trainer");
         trainer.validate(&req).expect("validate training request");
 
         let mut last_loss = f32::NAN;
@@ -346,9 +348,9 @@ mod driver {
 
     /// sc-7884 — SceneWorks-WIRING real-weight smoke for the native MLX SD3.5 LoRA trainer.
     ///
-    /// Exercises the EXACT path the worker's `lora_train` job uses — `gen_core::load_trainer(id, …)`
-    /// over the SD3.5 diffusers snapshot, force-linked here via `training_jobs`' `use mlx_gen_sd3 as _`
-    /// — to prove the trainer is reachable from the SceneWorks process and emits a usable adapter that
+    /// Exercises the EXACT path the worker's `lora_train` job uses — `crate::inference_runtime::load_trainer(id, …)`
+    /// over the SD3.5 diffusers snapshot through the explicit runtime catalog — proving the trainer
+    /// is reachable from the SceneWorks process and emits a usable adapter that
     /// the inference loader (`apply_sd3_adapters`) can pick up at `sd3_5_*` generation. The deeper
     /// numeric round-trip (loss descends, adapter shapes match, applies + renders) is already proven by
     /// the mlx-gen-sd3 T2/T4 `#[ignore]` tests; this asserts the SceneWorks wiring specifically.
@@ -432,13 +434,13 @@ mod driver {
         };
 
         // The worker reaches the trainer through this exact registry call (see
-        // `training_jobs::engine_trainer_id` → `sd3_5_large`/`sd3_5_medium`). The `mlx_gen_sd3` crate
-        // is force-linked by `training_jobs` so its `register_trainer!` survives linker GC.
-        let mut trainer =
-            gen_core::load_trainer(&trainer_id, &LoadSpec::new(WeightsSource::Dir(base)))
-                .unwrap_or_else(|e| {
-                    panic!("load {trainer_id} trainer (is mlx_gen_sd3 linked?): {e}")
-                });
+        // `training_jobs::engine_trainer_id` → `sd3_5_large`/`sd3_5_medium`). `runtime-macos`
+        // explicitly owns both trainer registrations.
+        let mut trainer = crate::inference_runtime::load_trainer(
+            &trainer_id,
+            &LoadSpec::new(WeightsSource::Dir(base)),
+        )
+        .unwrap_or_else(|e| panic!("load {trainer_id} trainer (is mlx_gen_sd3 linked?): {e}"));
         trainer.validate(&req).expect("validate training request");
 
         let mut last_loss = f32::NAN;
@@ -506,9 +508,10 @@ mod driver {
 
         // Direct provider constructor, NOT the gen_core registry: the worker's test build also
         // links a stub `z_image_turbo` registration (engines.rs derivation test), so the registry
-        // `load` panics on the duplicate id. `mlx_gen_z_image::load` is the same T2I generator,
+        // `load` panics on the duplicate id. `runtime_macos::providers::z_image::load` is the same T2I generator,
         // bypassing the registry. (The trainer registry has no such stub — `load_trainer` is fine.)
-        let generator = mlx_gen_z_image::load(&spec).expect("load z_image_turbo generator");
+        let generator =
+            runtime_macos::providers::z_image::load(&spec).expect("load z_image_turbo generator");
 
         let mut prompts_json: BTreeMap<String, String> = BTreeMap::new();
         let mut written = 0usize;

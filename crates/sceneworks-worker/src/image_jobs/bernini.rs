@@ -298,7 +298,7 @@ async fn generate_bernini_image_stream(
 //
 // The off-Mac sibling of `generate_bernini_image_stream` above: the full candle Bernini planner+renderer
 // `Generator` (candle-gen-bernini, engine id `bernini`, `Modality::Video`) is reached via
-// `gen_core::load("bernini")` with `frames:1` + `video_mode:"t2i"|"i2i"` so it returns a SINGLE still —
+// `crate::inference_runtime::load("bernini")` with `frames:1` + `video_mode:"t2i"|"i2i"` so it returns a SINGLE still —
 // exactly the MLX shape, only the tensor backend + weights snapshot differ. Not `is_candle_engine` (the
 // engine is video-modality), so it rides this dedicated stream rather than the generic
 // `generate_candle_stream` txt2img lane. Shares the neutral harness (`load_spec` /

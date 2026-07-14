@@ -1013,8 +1013,8 @@ fn bernini_image_dir() -> Option<std::path::PathBuf> {
 }
 
 /// Real-weights smoke: Bernini t2i (sc-5424 / sc-4709). Loads `bernini` through the SAME
-/// `load_engine` → `gen_core::load("bernini")` seam the worker image path uses (proving the
-/// `mlx_gen_bernini` force-link survived in the worker binary), then drives the dedicated
+/// `load_engine` → `crate::inference_runtime::load("bernini")` seam the worker image path uses
+/// (proving the bundle catalog includes Bernini), then drives the dedicated
 /// `bernini_image_generate_one` with `frames:1` + `video_mode:"t2i"`, asserting it returns a single
 /// RGB8 still with denoise progress. 8 steps + 512² for speed (~44 GB Q4 peak). Run on demand:
 /// `cargo test -p sceneworks-worker --lib -- --ignored bernini_image_t2i_real_weights`.
@@ -1114,8 +1114,9 @@ fn bernini_image_i2i_real_weights_generates_one_image() {
 /// Real-weight GPU smoke (sc-11003, epic 6562): candle Bernini t2i THROUGH THE WORKER LANE. Exercises
 /// the exact off-Mac still path `generate_candle_bernini_image_stream` drives —
 /// `resolve_candle_bernini_tier_dir_and_quant(bits)` (the `SCENEWORKS_CANDLE_BERNINI_DIR` root resolver +
-/// `bf16/`|`q8/`|`q4/` tier-select) → `load_spec(dir, quant, …)` → `gen_core::load("bernini")` (the
-/// force-linked `candle_gen_bernini` registration) → `bernini_image_generate_one(frames:1,
+/// `bf16/`|`q8/`|`q4/` tier-select) → `load_spec(dir, quant, …)` →
+/// `crate::inference_runtime::load("bernini")` (the CUDA bundle registration) →
+/// `bernini_image_generate_one(frames:1,
 /// video_mode:"t2i")` — minus only the API/job/asset-write plumbing. Default bits (no `mlxQuantize`)
 /// selects the **bf16 dense** tier (the off-Mac validated baseline). Env: point
 /// `SCENEWORKS_CANDLE_BERNINI_DIR` at the tier ROOT (containing `bf16/`|`q8/`|`q4/`, e.g.
@@ -1128,7 +1129,6 @@ fn bernini_image_i2i_real_weights_generates_one_image() {
 #[test]
 fn bernini_image_t2i_candle_real_weights_generates_one_image() {
     // Anchor the provider's inventory registration into the test binary (parity with scail2_gpu_smoke).
-    use candle_gen_bernini as _;
 
     fn env_u32(key: &str, default: u32) -> u32 {
         std::env::var(key)
@@ -1169,7 +1169,8 @@ fn bernini_image_t2i_candle_real_weights_generates_one_image() {
     // Byte-identical to the lane's `load_spec(weights_dir, quant, …)` — bf16 dense loads quant None.
     let spec = load_spec(weights_dir, quant, Vec::new(), None);
     let start = std::time::Instant::now();
-    let generator = gen_core::load("bernini", &spec).expect("load bernini candle provider");
+    let generator =
+        crate::inference_runtime::load("bernini", &spec).expect("load bernini candle provider");
     println!(
         "[bernini-smoke] loaded in {:.1}s",
         start.elapsed().as_secs_f64()
@@ -1235,7 +1236,7 @@ fn bernini_image_t2i_candle_real_weights_generates_one_image() {
 
 /// Real-weight GPU smoke (sc-11003, epic 6562): candle Bernini t2v THROUGH THE VIDEO LANE's load seam.
 /// The video lane `crate::video_jobs::generate_candle_bernini` resolves the SAME tier
-/// (`resolve_candle_bernini_tier_dir_and_quant`) → `load_spec(dir, quant, …)` → `gen_core::load("bernini")`
+/// (`resolve_candle_bernini_tier_dir_and_quant`) → `load_spec(dir, quant, …)` → `crate::inference_runtime::load("bernini")`
 /// → a `GenerationRequest{frames:N, video_mode:"t2v"}` → `GenerationOutput::Video`. This drives that
 /// identical seam directly (minus the API/job/`generate_video` streaming plumbing), asserting the
 /// video-modality engine returns a coherent multi-frame clip on GPU. `bf16` dense tier (bits `None`).
@@ -1246,8 +1247,6 @@ fn bernini_image_t2i_candle_real_weights_generates_one_image() {
 #[ignore = "real-weight GPU smoke; heavy Wan renderer — needs a candle Bernini tier root + a CUDA device"]
 #[test]
 fn bernini_t2v_candle_real_weights_generates_a_clip() {
-    use candle_gen_bernini as _;
-
     fn env_u32(key: &str, default: u32) -> u32 {
         std::env::var(key)
             .ok()
@@ -1276,7 +1275,8 @@ fn bernini_t2v_candle_real_weights_generates_a_clip() {
 
     let spec = load_spec(weights_dir, quant, Vec::new(), None);
     let start = std::time::Instant::now();
-    let generator = gen_core::load("bernini", &spec).expect("load bernini candle provider");
+    let generator =
+        crate::inference_runtime::load("bernini", &spec).expect("load bernini candle provider");
     println!(
         "[bernini-v-smoke] loaded in {:.1}s",
         start.elapsed().as_secs_f64()
@@ -1387,7 +1387,7 @@ fn pulid_identity_weights_maps_paths_onto_loadspec_not_env() {
 }
 
 /// sc-3344 parity gate (worker path): drive the native `pulid_flux` registry generator through the
-/// SAME load seam the worker uses (`load_engine` → `gen_core::load("pulid_flux")` with the engine's
+/// SAME load seam the worker uses (`load_engine` → `crate::inference_runtime::load("pulid_flux")` with the engine's
 /// env-var weight resolution filled from local caches) and confirm it produces an identity-preserving
 /// render. Validates the actual cutover integration — the env-var seam + `Conditioning::Reference {
 /// strength = idWeight }` mapping — not just the engine. Asserts ArcFace cosine softly (the engine
@@ -1457,7 +1457,7 @@ fn pulid_flux_real_weights_holds_identity() {
     };
 
     // Reference ArcFace embedding (native face stack — detection + embedder only, no parser).
-    let face = mlx_gen_face::FaceAnalysis::load(
+    let face = runtime_macos::providers::face::FaceAnalysis::load(
         &Weights::from_file(&scrfd).unwrap(),
         &Weights::from_file(&arcface).unwrap(),
     )
@@ -1626,12 +1626,11 @@ fn adapter_id_reports_per_family_mlx_label() {
     );
 }
 
-/// The Z-Image + FLUX.1 + Qwen-Image providers linked into the worker
-/// self-registered via inventory.
+/// The Z-Image + FLUX.1 + Qwen-Image providers included by the worker's explicit platform catalog.
 #[cfg(target_os = "macos")]
 #[test]
 fn mlx_engine_registry_links_image_families() {
-    let ids: Vec<&str> = gen_core::registry::generators()
+    let ids: Vec<&str> = crate::inference_runtime::generators()
         .map(|reg| (reg.descriptor)().id)
         .collect();
     for id in [
@@ -1651,9 +1650,8 @@ fn mlx_engine_registry_links_image_families() {
         "kolors",
         "lens",
         "lens_turbo",
-        // Bernini still-image companion (sc-5424): the `Modality::Both` `bernini` engine must be
-        // registry-linked from the IMAGE path too — proves `use mlx_gen_bernini as _;` in
-        // image_jobs.rs keeps the `ModelRegistration` (the "no generator registered" trap).
+        // Bernini still-image companion (sc-5424): the `Modality::Both` engine must appear in the
+        // explicit IMAGE catalog too (the "no generator registered" trap).
         "bernini",
     ] {
         assert!(ids.contains(&id), "registry missing {id}");
@@ -1933,8 +1931,8 @@ fn flux2_dev_dir() -> std::path::PathBuf {
 /// set `SCENEWORKS_FLUX2_DEV_SIZE=1024` (the production default) and wrap the test binary in
 /// `/usr/bin/time -l` to read the steady-state "peak memory footprint" vs the manifest `minMemoryGb`
 /// (peak is activation-bound, reached within a couple of steps, so a low `STEPS` measures the same
-/// ceiling faster). `conditioning` adds edit reference(s); empty = T2I. Proves the worker's
-/// `gen_core::load` force-link reaches the dev loader, the packed snapshot loads + generates (the Q4
+/// ceiling faster). `conditioning` adds edit reference(s); empty = T2I. Proves the worker's explicit
+/// `crate::inference_runtime::load` catalog reaches the dev loader, the packed snapshot loads + generates (the Q4
 /// LoadSpec hint is a no-op on the already-packed weights), and the requested conditioning is
 /// consumed (a real, non-flat RGB8 frame). Returns the decoded image.
 #[cfg(target_os = "macos")]
@@ -1991,7 +1989,7 @@ fn dev_worker_generate(
 }
 
 /// Real-weights smoke (sc-5921 / sc-5923 boundary): FLUX.2-dev T2I (embedded guidance, ~28-step)
-/// through the worker `flux2_dev` engine path — proves the `mlx_gen_flux2` force-link reaches the dev
+/// through the worker `flux2_dev` engine path — proves the runtime catalog reaches the dev
 /// loader and the packed snapshot loads + generates. Env-sizable (default 512²; set
 /// `SCENEWORKS_FLUX2_DEV_SIZE=1024` for the production-default footprint run, sc-5923). Needs a
 /// previously-converted Q4 dir + a 128 GB Metal device. Run on demand:
@@ -2611,11 +2609,11 @@ fn synthetic_rgb(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> Image {
 
 /// Real-weights smoke (sc-4766 / engine sc-5012): load the combined Kolors pose spec (base + pose
 /// ControlNet + IP-Adapter-Plus) and generate one image through the **dispatchable registry** path
-/// (`gen_core::load("kolors", spec).generate(req)`) with BOTH a `Control` (skeleton) and a `Reference`
+/// (`crate::inference_runtime::load("kolors", spec).generate(req)`) with BOTH a `Control` (skeleton) and a `Reference`
 /// (identity) conditioning — the combined strict-pose tier. This is the worker-integration complement
 /// to the engine's mlx-gen#403 test (which exercised the direct `Kolors` API, NOT the registry): it
 /// proves the relaxed `validate_impl` admits Control+Reference when an IP-Adapter is loaded and the
-/// combined `generate_impl` arm runs end-to-end through the same `gen_core::load` seam the worker's
+/// combined `generate_impl` arm runs end-to-end through the same `crate::inference_runtime::load` seam the worker's
 /// `generate_kolors_control_stream` uses. Needs the three HF snapshots (Kolors-diffusers + the
 /// tokenizer overlay, Kolors-ControlNet-Pose, Kolors-IP-Adapter-Plus) + a Metal device. On demand:
 /// `cargo test -p sceneworks-worker --lib -- --ignored kolors_real_weights_pose --nocapture`.
@@ -2637,7 +2635,8 @@ fn kolors_real_weights_pose_generates_one_image() {
         .with_control(WeightsSource::Dir(controlnet))
         .with_ip_adapter(WeightsSource::Dir(ip))
         .with_quant(gen_core::Quant::Q8);
-    let generator = gen_core::load("kolors", &spec).expect("load combined kolors pose spec");
+    let generator =
+        crate::inference_runtime::load("kolors", &spec).expect("load combined kolors pose spec");
 
     let (w, h) = (512u32, 512u32);
     // Reference = the IP identity + img2img init; skeleton = the pose ControlNet. Synthetic content
@@ -6451,8 +6450,8 @@ fn ideogram_dir() -> Option<std::path::PathBuf> {
 }
 
 /// Real-weights smoke (sc-6000): drive Ideogram 4 through the SAME `load_engine` →
-/// `gen_core::load("ideogram_4")` seam the worker uses (proving the `mlx_gen_ideogram` force-link
-/// survives in the worker binary), with the resolve_quant Q8 spec over the packed q4/ weights —
+/// `crate::inference_runtime::load("ideogram_4")` seam the worker uses (proving the runtime catalog
+/// includes Ideogram), with the resolve_quant Q8 spec over the packed q4/ weights —
 /// exactly the production load. Generates from BOTH a structured JSON caption and a plain-text
 /// prompt on one load, asserting each returns a non-constant RGB8 image with denoise progress.
 /// Steps default low (env `IDEOGRAM4_SMOKE_STEPS` / `IDEOGRAM4_SMOKE_RES`): this checks mechanics,
@@ -6587,13 +6586,12 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
     //    MAX_CAPTION_ATTEMPTS re-sample). Scoped so the refiner frees before Ideogram loads, mirroring
     //    the API running this as a separate prompt_refine job (no 3B/Ideogram co-residency).
     let caption = {
-        // sc-7189: the legacy `gen_core::load_textllm`/`TextLlm` contract was retired; resolve the
+        // sc-7189: the legacy `crate::inference_runtime::load_textllm`/`TextLlm` contract was retired; resolve the
         // refiner model-first through `core_llm::TextLlm` exactly as the production magic_prompt job
         // does (prompt_refine_jobs.rs macOS lane) — the JSON constraint steers resolution to a
         // JSON-capable provider (mlx-llama), which renders the model's own chat template.
         use gen_core::core_llm::{
-            load_for_model_with, Constraint, LoadSpec, Message, ModelRequirements, Sampling,
-            StreamEvent, TextLlmRequest,
+            Constraint, LoadSpec, Message, ModelRequirements, Sampling, StreamEvent, TextLlmRequest,
         };
         let (system, user) =
             crate::prompt_refine_jobs::build_magic_prompt_messages(PLAIN_TEXT, "1:1");
@@ -6618,7 +6616,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
                 ..Default::default()
             }
         };
-        let refiner = load_for_model_with(
+        let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: refine_dir.to_string_lossy().into_owned(),
                 quantize: None,
@@ -6907,8 +6905,8 @@ fn boogu_dir() -> Option<std::path::PathBuf> {
 
 /// Real-weights smoke (sc-6402, epic 6387): drive all three Boogu ids — Base (T2I true-CFG), Turbo
 /// (DMD few-step, CFG-free) and Edit (instruction edit over a source Reference) — through the SAME
-/// `boogu_model_subdir` → `load_engine` → `gen_core::load("boogu_*")` seam the worker uses, proving
-/// the `mlx_gen_boogu` force-link survives in the worker binary and the production quant / guidance /
+/// `boogu_model_subdir` → `load_engine` → `crate::inference_runtime::load("boogu_*")` seam the
+/// worker uses, proving the runtime catalog includes Boogu and the production quant / guidance /
 /// edit-conditioning resolution is consumed end-to-end. Each variant loads with the resolved Q8 spec
 /// over its packed `<variant>/` subdir, generates once, asserts a non-constant RGB8 image of the
 /// requested size with denoise progress, then DROPS the generator before the next loads (one ~23 GB

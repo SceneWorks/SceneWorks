@@ -17,11 +17,11 @@
 //! - `q8/` + `q4/`: derived from the bf16 tier with NO extra convert — the three packable files are
 //!   quantized worker-side (group 64), the dense remainder is copied, and the two config sidecars get
 //!   the `{bits, group_size}` block the load path reads as authoritative:
-//!     * `qwen2_5_vl.safetensors` → `mlx_gen_bernini::convert::quantize_qwen_planner_backbone`
+//!     * `qwen2_5_vl.safetensors` → `runtime_macos::providers::bernini::convert::quantize_qwen_planner_backbone`
 //!       (packs the LLM backbone attention + SwiGLU linears; vision tower + embeddings + norms stay
 //!       dense) + patch `qwen2_5_vl_config.json` `quantization`.
 //!     * `high_noise_model.safetensors` + `low_noise_model.safetensors` →
-//!       `mlx_gen_wan::convert::quantize_wan_transformer` (the same public helper the Wan tiers use) +
+//!       `runtime_macos::providers::wan::convert::quantize_wan_transformer` (the same public helper the Wan tiers use) +
 //!       patch the renderer `config.json` `quantization`.
 //!
 //! A resolved tier then loads packed with the config sidecars authoritative and `quant = None` — no
@@ -150,7 +150,9 @@ fn report_tier(tier: &str, out_dir: &Path) {
 fn quantize_file(
     bf16_file: &Path,
     out_file: &Path,
-    quantize: impl FnOnce(HashMap<String, Array>) -> mlx_gen::Result<HashMap<String, Array>>,
+    quantize: impl FnOnce(
+        HashMap<String, Array>,
+    ) -> runtime_macos::media::Result<HashMap<String, Array>>,
 ) {
     let dense: HashMap<String, Array> = Array::load_safetensors(bf16_file)
         .unwrap_or_else(|e| panic!("load {}: {e:?}", bf16_file.display()));
@@ -194,7 +196,11 @@ fn build_quant_tier(bf16_dir: &Path, out_dir: &Path, tier: &str, bits: i32) {
     quantize_file(
         &bf16_dir.join(PLANNER_WEIGHTS),
         &out_dir.join(PLANNER_WEIGHTS),
-        |m| mlx_gen_bernini::convert::quantize_qwen_planner_backbone(m, bits, GROUP_SIZE),
+        |m| {
+            runtime_macos::providers::bernini::convert::quantize_qwen_planner_backbone(
+                m, bits, GROUP_SIZE,
+            )
+        },
     );
     patch_config_quant(&out_dir.join(PLANNER_CONFIG), bits);
 
@@ -202,7 +208,7 @@ fn build_quant_tier(bf16_dir: &Path, out_dir: &Path, tier: &str, bits: i32) {
     //    `WanTransformer::from_weights` loads them packed.
     for expert in RENDERER_EXPERTS {
         quantize_file(&bf16_dir.join(expert), &out_dir.join(expert), |m| {
-            mlx_gen_wan::convert::quantize_wan_transformer(m, bits, GROUP_SIZE)
+            runtime_macos::providers::wan::convert::quantize_wan_transformer(m, bits, GROUP_SIZE)
         });
     }
     patch_config_quant(&out_dir.join(RENDERER_CONFIG), bits);

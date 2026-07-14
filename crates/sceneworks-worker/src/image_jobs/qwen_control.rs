@@ -1,6 +1,6 @@
 // Candle (Windows/CUDA) Qwen-Image 2512-Fun-Controlnet-Union (strict control) route (sc-5489 origin /
 // sc-8350 repoint, epic 8236) — `qwen_image` + `advanced.poses` off-Mac via
-// `candle_gen_qwen_image::QwenFunControl`. The candle sibling of the MLX Qwen 2512-Fun strict-control path
+// `runtime_cuda::providers::qwen_image::QwenFunControl`. The candle sibling of the MLX Qwen 2512-Fun strict-control path
 // (qwen.rs `generate_qwen_control_stream`): one image per pose (or, with `advanced.controlMode =
 // canny|depth` + a source, an auto-derived canny / Depth-Anything-V2 map), each fed to the VACE-style
 // 2512-Fun-Controlnet-Union branch overlaid on the Qwen-Image-2512 base. sc-9870: the control overlay is

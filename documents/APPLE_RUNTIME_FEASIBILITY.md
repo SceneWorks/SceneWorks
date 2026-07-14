@@ -5,6 +5,11 @@
 > **Last updated:** 2026-06-18
 > **Status:** Validated empirically on Apple M5 Max / macOS 26.5.1.
 
+> **Architecture update (2026-07-13):** The empirical hardware, correctness, and
+> performance findings remain current. The link-time registration description has
+> been superseded by the explicit `runtime-macos` catalog in
+> `SceneWorks/inference`; the current seams are described below.
+
 **Provenance:** ⚙️ = empirically spiked on this machine · 📄 = grounded in shipped code/docs.
 
 ## Bottom line
@@ -117,12 +122,14 @@ is deliberate, not incidental. Windows/Linux keep the Python-torch / candle path
 ### Architecture boundaries that avoid baking in CUDA assumptions 📄
 The seams already exist and should be treated as the contract for keeping Apple a peer runtime:
 - **Engine indirection.** On macOS the worker maps a SceneWorks model id → a `gen_core` MLX engine id
-  via `MODEL_TABLE` (`crates/sceneworks-worker/src/engines.rs:37`); providers self-register at link
-  time via `inventory`. The manifest `adapter` field (`z_image_diffusers`, `ltx_video`) is the
-  *torch* label — it does **not** dictate the Mac path. So "which runtime" is a target/registry
-  decision, never hard-wired to CUDA.
+  through its owned runtime catalog (`crates/sceneworks-worker/src/inference_runtime.rs`); the
+  catalog comes from the canonical `runtime-macos` bundle and explicitly enumerates providers. The
+  manifest `adapter` field (`z_image_diffusers`, `ltx_video`) is the *torch* label — it does **not**
+  dictate the Mac path. So "which runtime" is a target/catalog decision, never hard-wired to CUDA
+  or to linker discovery.
 - **Target-gated build seam.** `mlx-gen`/`mlx-rs` are `cfg(target_os = "macos")` deps, git-pinned by
-  SHA; Linux/Windows resolve but never compile them (`docs/rust-mlx-build.md:8-11`).
+  the one immutable `SceneWorks/inference` runtime tag; Linux/Windows resolve but never compile
+  them (`docs/rust-mlx-build.md:8-11`).
 - **Routing oracle.** `mac_rust_supported(job)` (`crates/sceneworks-core/src/jobs_store.rs:2046`) is
   the single source of truth for whether a job can run on the Apple path, backed by
   `MLX_ROUTED_MODELS` / `VIDEO_MLX_ROUTED_MODELS` (`jobs_store.rs:3099`, `:2264`, `:2361`).
@@ -136,7 +143,7 @@ The seams already exist and should be treated as the contract for keeping Apple 
 
 ## Rust backend target (per AC)
 
-- **Device-capability abstraction:** present via the engine registry + `mac_rust_supported` oracle +
+- **Device-capability abstraction:** present via the explicit runtime catalog + `mac_rust_supported` oracle +
   `ModelMacSupport`. **Recommended add (from the video/image feasibility work):** a *precision-aware
   VRAM/peak-memory* field on the manifest — the current `mlx.minMemoryGb` is a single optimistic
   number that the LTX run shows undercounts the real peak by ~1.7×. Admission should compare
@@ -146,8 +153,9 @@ The seams already exist and should be treated as the contract for keeping Apple 
 - **Scheduling constraints:** Apple is memory-bound, not VRAM-count-bound; video jobs should carry a
   realistic peak so the scheduler doesn't admit an LTX clip that OOMs a 36/48 GB Mac. The 600 s
   forward-progress watchdog (`SCENEWORKS_VIDEO_STALL_SECS`) is adequate for cold loads observed here.
-- **Adapter registration:** the link-time `inventory` registration + `MODEL_TABLE` is the right seam;
-  new Apple engines register without touching the API/contract layer.
+- **Adapter registration:** `runtime-macos` plus the product-owned model-to-engine map is the seam;
+  new Apple engines are added to an ordinary reviewed catalog without touching the API/contract
+  layer or relying on link-time side effects.
 - **No new versioned Rust contract change is required** to call Apple a v1 runtime — the seams ship
   today. The one additive change worth making is the typed peak-memory/precision field above.
 

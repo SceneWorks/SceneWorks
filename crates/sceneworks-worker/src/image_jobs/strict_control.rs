@@ -15,7 +15,7 @@
 // flux2 +canny/+depth, sc-8249 z-image +canny/+depth, sc-8250 qwen +canny/+depth) flip the request to set
 // `advanced.controlMode`. Pose stays the proven path and is byte-preserved.
 //
-// macOS-only: the registry strict-control engines this drives are MLX (`gen_core::load(engine_id, …)`);
+// macOS-only: the registry strict-control engines this drives are MLX (`crate::inference_runtime::load(engine_id, …)`);
 // the candle siblings (`qwen_control.rs` / `zimage_control.rs` / `flux2_control_candle.rs`) are bespoke
 // non-registry providers and are NOT collapsed here (see the sc-8243 PR / follow-up).
 
@@ -26,7 +26,7 @@
 /// the actual checkpoint (this row is the catalog default, not a hard pin).
 #[derive(Clone, Copy, Debug)]
 struct StrictControlEngine {
-    /// The mlx-gen registry id (`gen_core::load(engine_id, spec)`).
+    /// The mlx-gen registry id (`crate::inference_runtime::load(engine_id, spec)`).
     engine_id: &'static str,
     /// The default Fun-Union control-weights HF repo for this engine.
     repo: &'static str,

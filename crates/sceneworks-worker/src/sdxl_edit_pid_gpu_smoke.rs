@@ -1,6 +1,6 @@
 //! Local real-weight GPU smoke for the candle **SDXL edit + PiD super-resolving decode** (sc-8044,
 //! epic 7840). `#[ignore]`d — run by hand on the RTX PRO 6000. Drives the bespoke
-//! `candle_gen_sdxl::SdxlEdit` provider (the same one `sdxl_edit_candle.rs` loads) with the PiD decoder
+//! `runtime_cuda::providers::sdxl::SdxlEdit` provider (the same one `sdxl_edit_candle.rs` loads) with the PiD decoder
 //! attached (`with_pid`), exercising the **inpaint** path (`generate_masked`) — a latent-space
 //! mask-blend that ends in a single decode, so PiD sees the same final latent and emits it at 4× (2K/4K)
 //! instead of the native SDXL VAE. Represents the whole `sdxl`-latent bespoke group (SdxlEdit /
@@ -23,9 +23,9 @@
 
 use std::path::{Path, PathBuf};
 
-use candle_gen_sdxl::{SdxlEdit, SdxlEditPaths, SdxlEditRequest};
 use gen_core::runtime::CancelFlag;
 use gen_core::{Image, PidWeights, WeightsSource};
+use runtime_cuda::providers::sdxl::{SdxlEdit, SdxlEditPaths, SdxlEditRequest};
 
 fn env_path(key: &str) -> PathBuf {
     PathBuf::from(

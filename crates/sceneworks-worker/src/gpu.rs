@@ -83,7 +83,7 @@ fn with_candle_capabilities(
             // registry via the concrete candle `T2iModel::{vqa, interleave_gen}` (their text /
             // text+image output the neutral contract can't express), so they are NOT in
             // `registry_capabilities`. Advertise them explicitly — the candle SenseNova provider is
-            // force-linked under `backend-candle`, and the routing gate confines them to the
+            // owned by `runtime-cuda`, and the routing gate confines them to the
             // SenseNova-U1 ids (`understanding_job_is_mlx_eligible`).
             for capability in [
                 WorkerCapability::ImageVqa,
@@ -96,7 +96,7 @@ fn with_candle_capabilities(
             // Image + video upscaling (sc-5928 SeedVR2 + sc-5499 Real-ESRGAN, epic 4811 / epic 5482):
             // off-Mac the candle worker serves `image_upscale` for BOTH Real-ESRGAN (`ort`/CUDA in
             // `upscale_jobs`, the off-Mac sibling of the Mac CoreML path — sc-5499) and SeedVR2
-            // (`candle-gen-seedvr2`, force-linked under backend-candle, via `gen_core::load("seedvr2")`),
+            // (`candle-gen-seedvr2`, bundled under backend-candle, via `crate::inference_runtime::load("seedvr2")`),
             // AND the net-new SeedVR2 `video_upscale`. These are job-type capabilities (not a generation
             // modality), so they aren't in `registry_capabilities`; advertise them explicitly. The
             // routing gate (`upscale_job_is_candle_eligible` / `video_upscale_job_is_candle_eligible`)

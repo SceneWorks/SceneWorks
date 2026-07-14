@@ -7,6 +7,10 @@ enum GenEvent {
     Decoding {
         index: usize,
     },
+    Loading {
+        index: usize,
+        phase: LoadPhase,
+    },
     Image {
         index: usize,
         seed: i64,
@@ -38,6 +42,7 @@ fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, pro
             total,
         },
         Progress::Decoding => GenEvent::Decoding { index },
+        Progress::Loading(phase) => GenEvent::Loading { index, phase },
     };
     let _ = tx.blocking_send(event);
 }

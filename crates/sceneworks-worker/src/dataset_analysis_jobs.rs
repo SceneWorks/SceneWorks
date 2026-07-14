@@ -1,7 +1,7 @@
 //! Native dataset CLIP-embedding analysis (epic 6529 P2, sc-6535).
 //!
 //! The `dataset_analysis` job embeds every dataset image with the CLIP ViT-L/14 provider through the
-//! backend-neutral `gen_core::load_image_embedder` seam (macOS MLX), then POSTs the embeddings to
+//! backend-neutral `crate::inference_runtime::load_image_embedder` seam (macOS MLX), then POSTs the embeddings to
 //! rust-api to persist the content-hash-keyed sidecar — the embedding-side analog of the caption
 //! job's `/caption-sidecars` write. Runs on macOS (MLX) and, with `--features backend-candle`,
 //! off-Mac (candle, sc-6537); on a platform with neither, the job is a precise unsupported error.
@@ -39,14 +39,6 @@ const CANCEL_MESSAGE: &str = "Dataset analysis canceled by user.";
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use gen_core::{CancelFlag, Image, LoadSpec, WeightsSource};
-// Force-link the CLIP image + text embedders so their `inventory::submit!` registrations
-// (`clip_vit_l14` + `clip_vit_l14_text`) survive the linker — the embedder analog of the JoyCaption
-// anchors in `caption_jobs.rs`. MLX on macOS; candle on the `backend-candle` lane (off-Mac, sc-6537).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_clip as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_clip as _;
-
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -141,7 +133,7 @@ pub(crate) async fn run_dataset_analysis_job(
                 "dataset_analysis_load_start",
                 json!({ "jobId": job_id, "engine": CLIP_EMBEDDER_ID }),
             );
-            let embedder = gen_core::load_image_embedder(
+            let embedder = crate::inference_runtime::load_image_embedder(
                 CLIP_EMBEDDER_ID,
                 &LoadSpec::new(WeightsSource::Dir(weights_dir.clone())),
             )
@@ -151,7 +143,7 @@ pub(crate) async fn run_dataset_analysis_job(
                 .any(|item| !item.caption_text.trim().is_empty());
             let text_embedder = if needs_text {
                 Some(
-                    gen_core::load_text_embedder(
+                    crate::inference_runtime::load_text_embedder(
                         CLIP_TEXT_EMBEDDER_ID,
                         &LoadSpec::new(WeightsSource::Dir(weights_dir)),
                     )
@@ -508,8 +500,8 @@ mod tests {
 mod real_weights_tests {
     use super::*;
 
-    /// Real-weights worker integration (sc-6535): proves the *worker binary* force-links
-    /// `mlx-gen-clip` (so `gen_core::load_image_embedder("clip_vit_l14")` resolves **and loads** —
+    /// Real-weights worker integration (sc-6535): proves the runtime catalog includes `mlx-gen-clip`
+    /// (so `crate::inference_runtime::load_image_embedder("clip_vit_l14")` resolves **and loads** —
     /// not just that the descriptor links, which the capability test already covers), and that the
     /// worker's `load_analysis_image` feeds a real image file into the real CLIP forward. `#[ignore]`
     /// per convention — the weights live outside CI; run on a Mac with the snapshot cached + Metal.
@@ -539,13 +531,13 @@ mod real_weights_tests {
         assert_eq!((image.width, image.height), (64, 64));
 
         // Load the embedder through the worker's gen_core seam, then run the real CLIP forward.
-        let embedder = gen_core::load_image_embedder(
+        let embedder = crate::inference_runtime::load_image_embedder(
             CLIP_EMBEDDER_ID,
             &LoadSpec::new(WeightsSource::Dir(weights_dir.clone())),
         )
         .expect("the worker binary links + loads mlx-gen-clip's clip_vit_l14");
         assert_eq!(embedder.descriptor().embedding_dim, 768);
-        let text_embedder = gen_core::load_text_embedder(
+        let text_embedder = crate::inference_runtime::load_text_embedder(
             CLIP_TEXT_EMBEDDER_ID,
             &LoadSpec::new(WeightsSource::Dir(weights_dir)),
         )
@@ -656,7 +648,7 @@ mod real_weights_tests {
             root.display()
         );
 
-        let embedder = gen_core::load_image_embedder(
+        let embedder = crate::inference_runtime::load_image_embedder(
             CLIP_EMBEDDER_ID,
             &LoadSpec::new(WeightsSource::Dir(weights_dir)),
         )
@@ -836,12 +828,12 @@ mod real_weights_tests {
             pairs.len()
         );
 
-        let image_embedder = gen_core::load_image_embedder(
+        let image_embedder = crate::inference_runtime::load_image_embedder(
             CLIP_EMBEDDER_ID,
             &LoadSpec::new(WeightsSource::Dir(weights_dir.clone())),
         )
         .expect("image embedder");
-        let text_embedder = gen_core::load_text_embedder(
+        let text_embedder = crate::inference_runtime::load_text_embedder(
             CLIP_TEXT_EMBEDDER_ID,
             &LoadSpec::new(WeightsSource::Dir(weights_dir)),
         )

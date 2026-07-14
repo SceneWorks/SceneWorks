@@ -362,7 +362,7 @@ pub(crate) fn decide_residency(
 }
 
 /// Pre-load admission + residency-selection gate (sc-10835 Phase 0, sc-10839 Phase 1). Called on the
-/// generator cache's cold-load path, before `gen_core::load` allocates — never on a warm cache hit,
+/// generator cache's cold-load path, before `crate::inference_runtime::load` allocates — never on a warm cache hit,
 /// so an already-resident model is never re-gated. Resolves the budget + on-disk component bytes,
 /// delegates the choice to [`decide_residency`], and returns the [`LoadSpec`] to load with:
 ///  - fits resident (or no signal / unmeasurable weights) ⇒ the spec unchanged (warm resident path);

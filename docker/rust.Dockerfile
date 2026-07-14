@@ -15,6 +15,7 @@ ARG BIN
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
+COPY .cargo/config.toml ./.cargo/config.toml
 COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
 COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
 COPY crates/sceneworks-image-quality/Cargo.toml ./crates/sceneworks-image-quality/Cargo.toml
@@ -38,7 +39,12 @@ RUN mkdir -p \
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo fetch --locked
+    --mount=type=secret,id=inference_token,required=true \
+    token="$(cat /run/secrets/inference_token)" \
+    && GIT_CONFIG_COUNT=1 \
+       GIT_CONFIG_KEY_0="url.https://x-access-token:${token}@github.com/SceneWorks/inference.insteadOf" \
+       GIT_CONFIG_VALUE_0="https://github.com/SceneWorks/inference" \
+       cargo fetch --locked
 
 COPY crates ./crates
 COPY apps/rust-api ./apps/rust-api
@@ -55,7 +61,7 @@ COPY config ./config
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build -p "${BIN}" --release \
+    cargo build --offline -p "${BIN}" --release \
     && mkdir -p /out \
     && cp "target/release/${BIN}" "/out/${BIN}"
 
@@ -118,6 +124,7 @@ WORKDIR /app
 # entrypoints, then `cargo fetch` so the candle dependency tree (candle-gen +
 # candle/cudarc, all public git deps) caches independently of source edits.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
+COPY .cargo/config.toml ./.cargo/config.toml
 COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
 COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
 COPY crates/sceneworks-image-quality/Cargo.toml ./crates/sceneworks-image-quality/Cargo.toml
@@ -135,7 +142,12 @@ RUN mkdir -p \
     && touch crates/sceneworks-core/src/lib.rs crates/sceneworks-worker/src/lib.rs crates/sceneworks-image-quality/src/lib.rs crates/sceneworks-mcp/src/lib.rs
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo fetch --locked
+    --mount=type=secret,id=inference_token,required=true \
+    token="$(cat /run/secrets/inference_token)" \
+    && GIT_CONFIG_COUNT=1 \
+       GIT_CONFIG_KEY_0="url.https://x-access-token:${token}@github.com/SceneWorks/inference.insteadOf" \
+       GIT_CONFIG_VALUE_0="https://github.com/SceneWorks/inference" \
+       cargo fetch --locked
 
 COPY crates ./crates
 COPY apps/rust-api ./apps/rust-api
@@ -150,7 +162,7 @@ COPY config ./config
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build -p sceneworks-rust-worker --release \
+    cargo build --offline -p sceneworks-rust-worker --release \
         --features sceneworks-worker/backend-candle \
     && mkdir -p /out \
     && cp target/release/sceneworks-rust-worker /out/sceneworks-rust-worker
