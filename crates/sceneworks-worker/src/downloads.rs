@@ -44,10 +44,10 @@ pub(crate) fn streaming_download_client() -> reqwest::Client {
 /// edge that keeps the connection alive and dribbles bytes just often enough to reset
 /// the 60s read timeout, so the transfer never *fails* but effectively never
 /// *progresses*. Because the bytes already on disk are kept and continued via Range,
-/// the abort is lossless and the reconnect usually lands on a healthy edge. Default 30
+/// the abort is lossless and the reconnect usually lands on a healthy edge. Default 10
 /// minutes; `SCENEWORKS_DOWNLOAD_STALL_TIMEOUT_SECONDS` overrides it, and `0` disables
 /// the watchdog entirely.
-pub(crate) const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+pub(crate) const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// Minimum bytes a download must gain within a [`DOWNLOAD_STALL_TIMEOUT`] window to
 /// count as "making progress". Any real transfer clears 1 MiB in milliseconds, so a
