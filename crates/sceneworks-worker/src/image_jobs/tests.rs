@@ -9618,6 +9618,7 @@ fn krea_control_lora_end_to_end_mlx_smoke() {
             seed,
             steps,
             conditioning,
+            None,
             &CancelFlag::new(),
             &mut |_| {},
         )

@@ -106,6 +106,7 @@ fn krea_edit_generate_one(
     steps: u32,
     guidance: Option<f32>,
     conditioning: Vec<Conditioning>,
+    text_style_gain: Option<f32>,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -119,6 +120,7 @@ fn krea_edit_generate_one(
         steps: Some(steps),
         guidance,
         conditioning,
+        text_style_gain,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -224,6 +226,9 @@ async fn generate_krea_edit_stream(
     let spec = load_spec(weights_dir, quant, adapters, None);
     // Raw → `krea_2_edit` (full-CFG); Turbo → `krea_2_turbo_edit` (CFG-free distilled, sc-11640).
     let engine_id = krea_edit_engine_id(&request.model);
+    // Krea "text style" tap-reweight gain (sc-12009) — self-gates on `ui.textStyleGain` (Krea only),
+    // applied to the edit lane's POSITIVE grounded context by the engine (inference sc-12009).
+    let text_style_gain = resolve_text_style_gain(request);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -246,6 +251,7 @@ async fn generate_krea_edit_stream(
                     steps,
                     guidance,
                     conditioning,
+                    text_style_gain,
                     &cancel,
                     on_progress,
                 )?;
