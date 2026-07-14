@@ -642,6 +642,13 @@ pub(crate) struct ImageJobRequest {
     // keep the server-side merge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) preset_loras_resolved_client_side: Option<bool>,
+    // The web studio composes the prompt from the full preset stack (base model preset +
+    // stacked general presets) client-side and sends it verbatim, so the server must not
+    // re-fold a single preset's prefix/suffix. When set, `preset_prompt` is skipped and the
+    // sent `prompt` is authoritative. Headless/API clients that send only recipePresetId
+    // omit it and keep the server-side prefix/suffix fold. (epic 11949)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) preset_prompt_resolved_client_side: Option<bool>,
     #[serde(default)]
     pub(crate) loras: Vec<Value>,
     #[serde(default)]
@@ -774,6 +781,10 @@ pub(crate) struct VideoJobRequest {
     // into `loras`, so the server skips its merge when this is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) preset_loras_resolved_client_side: Option<bool>,
+    // See ImageJobRequest::preset_prompt_resolved_client_side — the studio composes the
+    // preset-stack prompt client-side, so the server skips its prefix/suffix fold when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) preset_prompt_resolved_client_side: Option<bool>,
     #[serde(default)]
     pub(crate) loras: Vec<Value>,
     #[serde(default)]

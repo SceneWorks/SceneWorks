@@ -2357,6 +2357,143 @@ async fn preset_image_job_skips_server_lora_merge_when_client_resolved() {
 }
 
 #[tokio::test]
+async fn preset_image_job_skips_server_prompt_fold_when_client_resolved() {
+    // General presets stack (epic 11949): the studio composes the full preset-stack prompt
+    // client-side because the server only knows how to fold ONE recipePresetId's prefix/suffix.
+    // When the studio sends presetPromptResolvedClientSide, the server must take `prompt` verbatim
+    // and NOT re-apply preset_prompt — otherwise the base preset's prefix would be folded twice.
+    // Headless clients that omit the flag keep the server-side fold (asserted below as baseline).
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "img-model",
+              "name": "Img Model",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/img", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "loraCompatibility": { "families": ["z-image"] },
+              "ui": { "label": "Img" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [
+            {
+              "id": "dream_style",
+              "name": "Dream Style",
+              "workflow": "text_to_image",
+              "model": "img-model",
+              "defaults": { "count": 1, "resolution": "1024x1024" },
+              "prompt": { "prefix": "cinematic" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin recipe presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user recipe presets writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Client Prompt Preset Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    // Baseline: no flag → server folds the preset prefix into the prompt (today's behavior).
+    let (status, folded) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "a fox",
+            "model": "img-model",
+            "count": 1,
+            "width": 1024,
+            "height": 1024,
+            "recipePresetId": "dream_style"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "baseline job created: {folded:?}"
+    );
+    assert_eq!(folded["payload"]["prompt"], "cinematic, a fox");
+
+    // Client-authoritative: the studio already composed "cinematic, a fox" and sends the flag,
+    // so the server must NOT fold the prefix again (would yield "cinematic, cinematic, a fox").
+    let (status, verbatim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "cinematic, a fox",
+            "model": "img-model",
+            "count": 1,
+            "width": 1024,
+            "height": 1024,
+            "recipePresetId": "dream_style",
+            "presetPromptResolvedClientSide": true
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "client-resolved job created: {verbatim:?}"
+    );
+    assert_eq!(
+        verbatim["payload"]["prompt"], "cinematic, a fox",
+        "client-resolved prompt must be taken verbatim, not re-folded"
+    );
+    // The preset id is still stamped for usage tracking.
+    assert_eq!(
+        verbatim["payload"]["advanced"]["recipePresetId"],
+        "dream_style"
+    );
+}
+
+#[tokio::test]
 async fn generation_routes_reject_invalid_payloads() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");

@@ -245,7 +245,13 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
     // backend already sees the resolved preset id — stamp lastUsedAt now (sc-10520).
     stamp_recipe_preset_used(state, preset_id).await;
 
-    let expanded_prompt = preset_prompt(&payload.prompt, preset);
+    let expanded_prompt = if payload.preset_prompt_resolved_client_side.unwrap_or(false) {
+        // The studio already composed the full preset-stack prompt client-side; take it
+        // verbatim so we don't double-fold this preset's prefix/suffix (epic 11949).
+        payload.prompt.clone()
+    } else {
+        preset_prompt(&payload.prompt, preset)
+    };
     job_payload.insert("prompt".to_owned(), Value::String(expanded_prompt));
     if payload.model == default_image_model() {
         if let Some(model) = preset
@@ -426,7 +432,13 @@ pub(crate) async fn apply_recipe_preset_to_video_payload(
     // backend already sees the resolved preset id — stamp lastUsedAt now (sc-10520).
     stamp_recipe_preset_used(state, preset_id).await;
 
-    let expanded_prompt = preset_prompt(&payload.prompt, preset);
+    let expanded_prompt = if payload.preset_prompt_resolved_client_side.unwrap_or(false) {
+        // The studio already composed the full preset-stack prompt client-side; take it
+        // verbatim so we don't double-fold this preset's prefix/suffix (epic 11949).
+        payload.prompt.clone()
+    } else {
+        preset_prompt(&payload.prompt, preset)
+    };
     job_payload.insert("prompt".to_owned(), Value::String(expanded_prompt));
     if payload.model == default_video_model() {
         if let Some(model) = preset

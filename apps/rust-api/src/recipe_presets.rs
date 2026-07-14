@@ -310,6 +310,18 @@ pub(crate) fn finalize_recipe_preset_entry(
     let object = preset
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Recipe preset manifest entry must be an object"))?;
+    if recipe_preset_object_is_general(object) {
+        // General presets are deliberately model-agnostic (epic 11949): never infer a
+        // workflow, default a model, synthesize modes, or migrate LoRAs. Just ensure the
+        // open sub-objects exist so consumers can read prefix/suffix + defaults uniformly.
+        object
+            .entry("defaults".to_owned())
+            .or_insert_with(|| Value::Object(JsonObject::new()));
+        object
+            .entry("prompt".to_owned())
+            .or_insert_with(|| Value::Object(JsonObject::new()));
+        return Ok(());
+    }
     let mut migration_notes = Vec::new();
     if !object.contains_key("workflow") {
         if let Some(workflow) = inferred_recipe_preset_workflow(object) {
@@ -647,24 +659,70 @@ pub(crate) fn normalize_recipe_preset_for_write(
         .ok_or_else(|| ApiError::bad_request("Recipe preset must be an object"))?;
     object.insert("scope".to_owned(), Value::String(scope.to_owned()));
     validate_recipe_preset_id(object.get("id").and_then(Value::as_str))?;
+    validate_recipe_preset_kind(object.get("kind"))?;
     validate_required_string_field(
         object,
         "name",
         require_all,
         "Recipe preset name is required",
     )?;
-    validate_required_string_field(
-        object,
-        "model",
-        require_all,
-        "Recipe preset model is required",
-    )?;
-    validate_recipe_preset_workflow(object.get("workflow").and_then(Value::as_str), require_all)?;
+    if recipe_preset_object_is_general(object) {
+        // General presets are model-agnostic prompt-fragment stacks (epic 11949): they
+        // must not pin a model/workflow or carry LoRAs. Reject those fields rather than
+        // silently dropping them, so a mis-built payload is visible. `defaults`/`prompt`
+        // (prefix/suffix, negativePrompt, aspect, count) validate exactly as elsewhere.
+        for field in ["model", "workflow", "loras", "builtInLoras"] {
+            if recipe_preset_field_is_set(object, field) {
+                return Err(ApiError::bad_request(format!(
+                    "General recipe presets cannot set {field}"
+                )));
+            }
+        }
+    } else {
+        validate_required_string_field(
+            object,
+            "model",
+            require_all,
+            "Recipe preset model is required",
+        )?;
+        validate_recipe_preset_workflow(
+            object.get("workflow").and_then(Value::as_str),
+            require_all,
+        )?;
+        normalize_recipe_preset_loras(object)?;
+    }
     validate_recipe_preset_order(object.get("order"))?;
     validate_recipe_preset_defaults(object.get("defaults"))?;
     validate_recipe_preset_prompt(object.get("prompt"))?;
-    normalize_recipe_preset_loras(object)?;
     Ok(preset)
+}
+
+/// A preset is "general" (model-agnostic) when it explicitly declares `kind: "general"`.
+/// Absence of `kind` — every preset predating epic 11949 — reads as a model preset.
+fn recipe_preset_object_is_general(object: &JsonObject) -> bool {
+    object.get("kind").and_then(Value::as_str) == Some("general")
+}
+
+pub(crate) fn validate_recipe_preset_kind(value: Option<&Value>) -> Result<(), ApiError> {
+    match value {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::String(kind)) if kind == "model" || kind == "general" => Ok(()),
+        _ => Err(ApiError::bad_request(
+            "Recipe preset kind must be \"model\" or \"general\"",
+        )),
+    }
+}
+
+/// Whether a field carries a meaningful value — used to reject model/workflow/LoRA
+/// fields on a general preset while tolerating an omitted, null, or empty payload
+/// (the editor simply omits them; a stray empty array/string is not an error).
+fn recipe_preset_field_is_set(object: &JsonObject, field: &str) -> bool {
+    match object.get(field) {
+        None | Some(Value::Null) => false,
+        Some(Value::String(value)) => !value.trim().is_empty(),
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(_) => true,
+    }
 }
 
 pub(crate) fn validate_recipe_preset_id(value: Option<&str>) -> Result<(), ApiError> {
@@ -732,6 +790,23 @@ pub(crate) fn validate_recipe_preset_defaults(value: Option<&Value>) -> Result<(
         let (width, height) = parse_recipe_preset_resolution(resolution)?;
         validate_dimension(width, "width", MAX_IMAGE_DIMENSION)?;
         validate_dimension(height, "height", MAX_IMAGE_DIMENSION)?;
+    }
+    // `aspect` is the general-preset ratio (e.g. "16:9"); the studio snaps it to the
+    // active model's nearest supported resolution at apply time. Stored as W:H with both
+    // parts positive integers.
+    if let Some(aspect) = object.get("aspect").and_then(Value::as_str) {
+        let parts: Vec<&str> = aspect.split(':').collect();
+        let valid = parts.len() == 2
+            && parts.iter().all(|part| {
+                !part.is_empty()
+                    && part.chars().all(|character| character.is_ascii_digit())
+                    && part.parse::<u32>().map(|value| value > 0).unwrap_or(false)
+            });
+        if !valid {
+            return Err(ApiError::bad_request(
+                "Recipe preset aspect must be a ratio like \"16:9\"",
+            ));
+        }
     }
     if let Some(count) = object.get("count").and_then(Value::as_u64) {
         if !(1..=8).contains(&count) {
