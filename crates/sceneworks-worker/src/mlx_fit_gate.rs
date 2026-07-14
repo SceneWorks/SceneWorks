@@ -35,33 +35,34 @@ use gen_core::{LoadSpec, OffloadPolicy, WeightsSource};
 
 use crate::{WorkerError, WorkerResult};
 
-/// The MLX engine ids whose provider honors [`OffloadPolicy::Sequential`] — the sc-10839 Phase 1
-/// providers (SDXL + Z-Image-turbo), the sc-11000 T2I `qwen_image`, the sc-11006 fan-out completion of
-/// the qwen family (`qwen_image_edit` drops the Qwen2.5-VL vision-language encoder after the vision+LM
-/// pass; `qwen_image_control` keeps its VACE control branch on the heavy side of the split), and the
-/// sc-11030 `lens` + `lens_turbo` (one crate/arch — drops the gpt-oss text encoder before the DiT +
-/// denoise activations materialize; needs mlx-gen-lens's consuming encoder loader so the encoder LOAD
-/// spike isn't the peak). The gate only SELECTS sequential residency for these; for any other engine
-/// `Sequential` would be a no-op (the advisory contract treats it as `Resident`), so predicting "it
-/// fits staged" and then holding everything resident would SIGKILL — hence the allowlist, which moves
-/// in LOCKSTEP with the provider wiring. Extended per family as the fan-out (sc-10840) wires each engine.
-const SEQUENTIAL_CAPABLE_ENGINES: &[&str] = &[
-    "sdxl",
-    "z_image_turbo",
-    "qwen_image",
-    "qwen_image_edit",
-    "qwen_image_control",
-    "lens",
-    "lens_turbo",
-    "krea_2_turbo",
-    "krea_2_raw",
-    "krea_2_edit",
-    "krea_2_turbo_control",
-];
-
-/// Whether `engine_id`'s provider drops components in phase order under [`OffloadPolicy::Sequential`].
+/// Whether `engine_id`'s provider drops components in phase order under [`OffloadPolicy::Sequential`]
+/// — derived at query time from the engine's REGISTERED descriptor
+/// [`Capabilities`](gen_core::Capabilities)`::supports_sequential_offload` bit, not a hand-maintained
+/// allowlist (sc-10840, epic 10834).
+///
+/// Why the descriptor bit is the right source of truth: [`OffloadPolicy::Sequential`] is *advisory* —
+/// a provider that has NOT wired the load→use→drop residency lifecycle silently treats it as
+/// `Resident` (never an error), so predicting "it fits staged" and then holding everything resident
+/// would SIGKILL. `supports_sequential_offload` is precisely the provider's own machine-readable
+/// attestation that it wired that lifecycle (the gen-core discovery signal, sc-11126). Reading it
+/// per-engine makes the gate self-maintaining: every family the mlx-gen Phase-1 fan-out wires
+/// (sc-10840 — sd3/sana/flux/flux2/chroma/ideogram/kolors/anima/boogu/bernini alongside the earlier
+/// sdxl/z-image/qwen/lens/krea families) is covered the moment its descriptor advertises the bit, with
+/// no lockstep edit here. An engine that does not separate a text encoder (e.g. sensenova's fused MoT,
+/// `footprint` te=0) leaves the bit `false` and is correctly never offered `Sequential` — a no-op that
+/// would OOM.
+///
+/// This is a pre-load, weights-free registry lookup (`(descriptor)()` allocates no tensors), the same
+/// query shape the worker already uses for family/guidance/quant capability advertisement and the
+/// analogous [`gen_core::footprint`] size seam (sc-10894). An id with no registered generator — or a
+/// registered one that does not advertise the bit — yields `false` (the safe default: never select a
+/// residency policy the provider won't honor). Sees exactly the providers the binary force-links (the
+/// sc-4482 dead-strip rule): on macOS every `mlx_gen_*` provider is anchored in `image_jobs`, so the
+/// live worker resolves them; off-Mac the MLX gate no-ops anyway (no `sysctl` budget).
 pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
-    SEQUENTIAL_CAPABLE_ENGINES.contains(&engine_id)
+    gen_core::registry::generators()
+        .find(|reg| (reg.descriptor)().id == engine_id)
+        .is_some_and(|reg| (reg.descriptor)().capabilities.supports_sequential_offload)
 }
 
 /// Emulate a smaller Mac: force the total-unified-memory budget (GB). Set e.g.
@@ -607,29 +608,90 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// The gate derives sequential-capability from each engine's REGISTERED descriptor bit
+    /// (`Capabilities::supports_sequential_offload`) rather than a hand-maintained allowlist (sc-10840,
+    /// epic 10834). This exercises the LIVE registry, so it must see the force-linked `mlx_gen_*`
+    /// providers — anchored (`use mlx_gen_* as _;` in `image_jobs`) only on macOS, the sole platform the
+    /// MLX gate runs on. Off-Mac the image registry is empty, so this is macOS-gated exactly like the
+    /// `engines.rs` descriptor sweeps. At the pinned mlx-gen `45428fa` every image engine advertises the
+    /// bit, so every wired id resolves true through the shared registry query.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn engine_supports_sequential_is_the_wired_provider_allowlist() {
-        assert!(engine_supports_sequential("sdxl"));
-        assert!(engine_supports_sequential("z_image_turbo"));
-        assert!(engine_supports_sequential("qwen_image"));
-        // The sc-11006 fan-out wired the qwen edit + control siblings (separate engine ids).
-        assert!(engine_supports_sequential("qwen_image_edit"));
-        assert!(engine_supports_sequential("qwen_image_control"));
-        // lens + lens_turbo share one crate/arch (sc-11030): both engine ids are wired. The Q8/Q4 win
-        // (Resident 34.5 → Sequential 22.3 GiB at 768², fits a 32 GB Mac) needs the consuming encoder
-        // loader — see mlx-gen-lens `with_selected_layers`.
-        assert!(engine_supports_sequential("lens"));
-        assert!(engine_supports_sequential("lens_turbo"));
-        // The sc-11101 fan-out wired the WHOLE krea_2 family (one crate, TE < DiT — the qwen pattern):
-        // turbo/raw/edit (Q8, 22→18 / 26→20 GiB at 768²) + turbo_control (bf16, 43→35 GiB). The control
-        // branch's `spec.control` bytes are already counted by the fit-gate (sc-11006).
-        assert!(engine_supports_sequential("krea_2_turbo"));
-        assert!(engine_supports_sequential("krea_2_raw"));
-        assert!(engine_supports_sequential("krea_2_edit"));
-        assert!(engine_supports_sequential("krea_2_turbo_control"));
-        // Not-yet-wired providers must NOT be offered sequential (they'd ignore it and SIGKILL).
-        assert!(!engine_supports_sequential("z_image_turbo_control"));
-        assert!(!engine_supports_sequential("flux"));
+    fn engine_supports_sequential_is_derived_from_the_registered_capability() {
+        // The earlier-wired families (sdxl / z-image / qwen / lens / krea) still resolve true — proving
+        // dropping the hardcoded allowlist introduced no regression for the already-covered engines.
+        for id in [
+            "sdxl",
+            "z_image",
+            "z_image_control",
+            "z_image_turbo",
+            "z_image_turbo_control",
+            "qwen_image",
+            "qwen_image_edit",
+            "qwen_image_control",
+            "lens",
+            "lens_turbo",
+            "krea_2_turbo",
+            "krea_2_raw",
+            "krea_2_edit",
+            "krea_2_turbo_edit",
+            "krea_2_turbo_control",
+        ] {
+            assert!(
+                engine_supports_sequential(id),
+                "{id}: earlier-wired family must stay sequential-capable"
+            );
+        }
+        // The sc-10840 Phase-1 fan-out families are AUTO-covered by the capability query with no
+        // allowlist edit here — the whole point of deriving from the descriptor bit. A newly-wired
+        // engine (e.g. `sd3_5_large`) is sequential-capable the moment its provider advertises the bit.
+        for id in [
+            "sd3_5_large",
+            "sd3_5_large_turbo",
+            "sd3_5_medium",
+            "sana_1600m",
+            "sana_sprint_1600m",
+            "flux1_schnell",
+            "flux1_dev",
+            "flux1_dev_control",
+            "flux2_klein_9b",
+            "flux2_klein_9b_edit",
+            "flux2_klein_9b_kv_edit",
+            "flux2_dev",
+            "flux2_dev_control",
+            "flux2_dev_edit",
+            "chroma1_base",
+            "chroma1_flash",
+            "chroma1_hd",
+            "ideogram_4",
+            "ideogram_4_turbo",
+            "kolors",
+            "anima_base",
+            "anima_aesthetic",
+            "anima_turbo",
+            "boogu_image",
+            "boogu_image_turbo",
+            "boogu_image_edit",
+            "bernini",
+        ] {
+            assert!(
+                engine_supports_sequential(id),
+                "{id}: sc-10840 fan-out engine must be sequential-capable at mlx-gen 45428fa"
+            );
+        }
+        // A REGISTERED engine that does NOT advertise the bit stays false: sensenova's encoder is fused
+        // into a unified MoT (`footprint` te=0) — no separable text encoder to drop, so residency buys
+        // nothing and Sequential would be a no-op that OOMs. This proves the query reads the descriptor
+        // BIT, not mere registry membership.
+        assert!(!engine_supports_sequential("sensenova_u1_8b"));
+    }
+
+    /// An id with no registered generator is never sequential-capable (the safe default: never select a
+    /// residency policy the provider won't honor) — a cross-platform invariant that holds even off-Mac
+    /// where the image registry is empty.
+    #[test]
+    fn engine_supports_sequential_is_false_for_an_unregistered_id() {
+        assert!(!engine_supports_sequential("no_such_engine_xyz"));
     }
 
     #[test]
