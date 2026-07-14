@@ -326,6 +326,7 @@ fn krea_control_generate_one(
     seed: i64,
     steps: u32,
     conditioning: Vec<Conditioning>,
+    text_style_gain: Option<f32>,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -337,6 +338,7 @@ fn krea_control_generate_one(
         seed: Some(seed as u64),
         steps: Some(steps),
         conditioning,
+        text_style_gain,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -432,6 +434,9 @@ async fn generate_krea_control_stream(
     .await;
 
     let prompt = request.prompt.clone();
+    // Krea "text style" tap-reweight gain (sc-12009) — self-gates on `ui.textStyleGain` (Krea only),
+    // applied to the pose-control lane's CFG-free context by the engine (inference sc-12009).
+    let text_style_gain = resolve_text_style_gain(request);
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     // The base runs at the `mlxQuantize`-selected tier (sc-11730); the pose overlay rides it bf16. User
@@ -479,6 +484,7 @@ async fn generate_krea_control_stream(
                     seed,
                     steps,
                     conditioning,
+                    text_style_gain,
                     &cancel,
                     on_progress,
                 )?;
