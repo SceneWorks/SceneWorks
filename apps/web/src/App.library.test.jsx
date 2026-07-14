@@ -269,6 +269,99 @@ describe("SceneWorks app shell", () => {
     expect(updateAssetTags).toHaveBeenLastCalledWith(portrait, []);
   });
 
+  it("searches Library assets by prompt or tag and selects all results for batch actions", async () => {
+    const neonPortrait = {
+      id: "asset-neon",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Neon One",
+      tags: ["portrait"],
+      recipe: { prompt: "neon street at night" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    const neonAlley = {
+      id: "asset-neon-alley",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Second Plate",
+      tags: ["cyberpunk"],
+      recipe: { prompt: "a neon-lit rain-slicked alley" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    const forest = {
+      id: "asset-forest",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Forest",
+      tags: ["landscape"],
+      recipe: { prompt: "misty forest" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Searchable" },
+            assets: [neonPortrait, neonAlley, forest],
+            jobs: [],
+            imageModels: [],
+            createVqaJob: vi.fn(),
+            deleteAsset: () => {},
+            purgeAsset: () => {},
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            sendAssetToImage: () => {},
+            sendAssetToVideo: () => {},
+            selectedAsset: neonPortrait,
+            setSelectedAssetId: () => {},
+            setActiveView: () => {},
+            updateAssetStatus: () => {},
+            updateAssetTags: () => {},
+          },
+          <LibraryScreen />,
+        ),
+      );
+    });
+    await settle();
+
+    const searchInput = document.body.querySelector('input[aria-label="Search assets"]');
+    expect(searchInput).not.toBeNull();
+    // No query: all three tiles show and no "Select all" affordance yet.
+    expect([...document.body.querySelectorAll(".asset-tile")]).toHaveLength(3);
+    expect([...document.body.querySelectorAll("button")].some((button) => button.textContent.startsWith("Select all"))).toBe(false);
+
+    // Search matches prompt text ("neon" appears in both neon prompts, not the forest).
+    await changeField(searchInput, "neon");
+    let tiles = [...document.body.querySelectorAll(".asset-tile")];
+    expect(tiles).toHaveLength(2);
+    expect(tiles.map((tile) => tile.textContent).join(" ")).not.toContain("Forest");
+
+    // Search matches tags too — "landscape" is only a tag on the forest asset.
+    await changeField(searchInput, "landscape");
+    tiles = [...document.body.querySelectorAll(".asset-tile")];
+    expect(tiles).toHaveLength(1);
+    expect(tiles[0].textContent).toContain("Forest");
+
+    // Search matches the display name too — "Second Plate" is in neither prompt nor tags.
+    await changeField(searchInput, "second plate");
+    tiles = [...document.body.querySelectorAll(".asset-tile")];
+    expect(tiles).toHaveLength(1);
+    expect(tiles[0].textContent).toContain("Second Plate");
+
+    // Back to the neon result set, "Select all" picks every visible result for a batch action.
+    await changeField(searchInput, "neon");
+    const selectAll = [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Select all"));
+    expect(selectAll).toBeTruthy();
+    expect(selectAll.textContent).toContain("(2)");
+    await act(async () => {
+      selectAll.click();
+    });
+    const bar = document.body.querySelector(".batch-selection-bar");
+    expect(bar).toBeTruthy();
+    expect(bar.textContent).toContain("2 selected");
+  });
+
   it("moves a Library asset into a selected character's assets", async () => {
     // sc-10200: a TRUE move — the context action hits the move-to-character
     // endpoint; no character reference (Approved set entry) is created.
