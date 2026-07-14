@@ -87,6 +87,24 @@ function makeReplaceJob() {
   };
 }
 
+// A completed bridge-generation job for tl_1's main track. Like extend, applyTimelineGenerationResult
+// only appends a fresh video item to context.trackId, so its target presence hinges on the track
+// existing — it shares the identical presence-check branch as extend in production.
+function makeBridgeJob() {
+  return {
+    id: "job_bridge",
+    projectId: "proj_1",
+    result: { assetIds: ["asset_bridge"], assets: [{ displayName: "Bridge clip", createdAt: "2026-07-14T00:00:00Z" }] },
+    payload: {
+      duration: 2,
+      advanced: {
+        timelineAction: "bridge",
+        timelineContext: { timelineId: "tl_1", trackId: "track_main", timelineStart: 4, timelineEnd: 6 },
+      },
+    },
+  };
+}
+
 let container;
 let root;
 let pushNoticeSpy;
@@ -319,6 +337,47 @@ describe("useTimelines SSE apply surfaces edit/generation conflict on deleted ta
     const put = apiCalls.find((c) => c.method === "PUT");
     expect(put).toBeTruthy();
     expect(put.body.timeline.tracks.flatMap((t) => t.items).some((it) => it.assetId === "asset_gen")).toBe(true);
+    // The live working copy still reflects the user's deletion (generation not resurrected onto
+    // a phantom track), and stays dirty so the user still owns the save decision.
+    expect(get().api.activeTimeline.tracks).toHaveLength(0);
+    expect(get().api.isActiveTimelineDirty()).toBe(true);
+  });
+
+  it("BRIDGE: dirty copy deleted the target track → conflict notice, gen persisted, not injected", async () => {
+    const get = mount();
+    await loadSelected(get, makeTimeline());
+
+    // User deletes the whole target track (a structural edit → dirty).
+    act(() => {
+      const current = get().api.activeTimeline;
+      get().api.setActiveTimeline({ ...current, tracks: [] });
+    });
+    await settle();
+    expect(get().api.isActiveTimelineDirty()).toBe(true);
+
+    // Server copy still has track_main (the deletion is unsaved).
+    const serverCopy = makeTimeline();
+    apiRouter = ({ method, path, body }) => {
+      if (method === "PUT") return { ...body.timeline };
+      if (path.endsWith("/timelines")) return [{ id: "tl_1", name: "Main" }];
+      if (method === "GET") return serverCopy;
+      return serverCopy;
+    };
+
+    await act(async () => {
+      get().api.enqueueTimelineGenerationApply(makeBridgeJob());
+    });
+    await settle();
+
+    // (a) The conflict is surfaced to the user via the existing notice mechanism (a truthy
+    // message — an empty push is the clear-on-resolve signal, not a surfaced conflict).
+    const conflictCall = pushNoticeSpy.mock.calls.find((c) => c[0] === "timelineGenerationConflict" && c[1]);
+    expect(conflictCall).toBeTruthy();
+    expect(conflictCall[1]).toMatch(/generation/i);
+    // (b) The generation was NOT silently swallowed — it was durably persisted to the server.
+    const put = apiCalls.find((c) => c.method === "PUT");
+    expect(put).toBeTruthy();
+    expect(put.body.timeline.tracks.flatMap((t) => t.items).some((it) => it.assetId === "asset_bridge")).toBe(true);
     // The live working copy still reflects the user's deletion (generation not resurrected onto
     // a phantom track), and stays dirty so the user still owns the save decision.
     expect(get().api.activeTimeline.tracks).toHaveLength(0);
