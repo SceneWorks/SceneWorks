@@ -70,8 +70,16 @@ jobs:
       # Native sm_120 (Blackwell) — this runner IS the RTX PRO 6000 box; nvcc emits
       # SASS directly (no load-time JIT). compute_80 PTX would also forward-JIT.
       CUDA_COMPUTE_CAP: "120"
+      CARGO_NET_OFFLINE: "true"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Fetch the private inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
+          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
+        run: cargo fetch --locked
       # No rust-toolchain action: the self-hosted box has rustup + the repo's
       # `rust-toolchain.toml`-pinned toolchain (incl. clippy) pre-installed, and the
       # action's bash step breaks here — `bash` resolves to the box's WSL stub, not

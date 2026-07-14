@@ -171,8 +171,8 @@ fn krea_control_q8_mlx_smoke() {
     let spec = LoadSpec::new(WeightsSource::Dir(q8_dir))
         .with_control(WeightsSource::File(overlay))
         .with_quant(Quant::Q8);
-    let generator =
-        gen_core::load("krea_2_turbo_control", &spec).expect("load krea_2_turbo_control generator");
+    let generator = crate::inference_runtime::load("krea_2_turbo_control", &spec)
+        .expect("load krea_2_turbo_control generator");
 
     // A/B on the SAME pose/prompt/seed: pose-locked (scale) vs base passthrough (0.0). Only the control
     // residual differs, so a meaningful delta proves the pose actually steers the render.

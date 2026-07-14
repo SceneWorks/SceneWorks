@@ -1,11 +1,10 @@
 //! Local real-weight MLX smokes for the FLUX.1-dev strict-control worker lane (sc-8244; engine E2
 //! sc-8239). `#[ignore]`d — run by hand on an Apple-Silicon Mac with the gated FLUX.1-dev snapshot + the
 //! Shakker `FLUX.1-dev-ControlNet-Union-Pro-2.0` checkpoint. They drive the real native-MLX
-//! `flux1_dev_control` engine via `gen_core::load("flux1_dev_control")` with a `Dir` base + `with_control`
+//! `flux1_dev_control` engine via `crate::inference_runtime::load("flux1_dev_control")` with a `Dir` base + `with_control`
 //! overlay — the exact runtime seam `generate_flux1_dev_control_stream` builds (`flux1_control_spec`),
-//! minus the API/job plumbing. The point is to prove the **worker crate links + drives the engine
-//! end-to-end** per control mode (the `use mlx_gen_flux as _;` force-link anchor in `image_jobs.rs` keeps
-//! `inventory::submit!` from being GC'd), not just the engine crate in isolation (that's
+//! minus the API/job plumbing. The point is to prove the **worker drives the bundled engine
+//! end-to-end** per control mode through `runtime-macos`, not just the engine crate in isolation (that's
 //! `mlx-gen-flux`'s own `control_real_weights` test).
 //!
 //! Each mode asserts a control-vs-control-free **steer**: the same prompt/seed rendered control-free vs
@@ -147,8 +146,8 @@ fn flux1_dev_control_mlx_smoke() {
     // Same seam the worker's `flux1_control_spec` builds: a Dir base + the Shakker control overlay.
     let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.clone()))
         .with_control(WeightsSource::File(control_ckpt.clone()));
-    let generator =
-        gen_core::load("flux1_dev_control", &spec).expect("load flux1_dev_control provider");
+    let generator = crate::inference_runtime::load("flux1_dev_control", &spec)
+        .expect("load flux1_dev_control provider");
 
     // Control-free baseline (no conditioning → the union ControlNet branch is inert).
     let baseline = render(&*generator, &prompt, w, h, steps, guidance, Vec::new());

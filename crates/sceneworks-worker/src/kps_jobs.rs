@@ -32,11 +32,11 @@ use std::sync::{Mutex, OnceLock};
 use gen_core::Image;
 // Native-MLX SCRFD detector (Mac, sc-4433): the same `scrfd_10g` detector the InstantID face stack runs.
 #[cfg(target_os = "macos")]
-use mlx_gen::weights::Weights;
+use runtime_macos::media::weights::Weights;
 #[cfg(target_os = "macos")]
-use mlx_gen_face::{detector_blob, Scrfd};
+use runtime_macos::providers::face::{detector_blob, Scrfd};
 // Candle SCRFD/ArcFace face stack (off-Mac, sc-5497): `FaceEmbedder` brings the `detect` trait method
-// into scope; `candle_gen_face::load` builds it from the staged `face_dir`.
+// into scope; `runtime_cuda::providers::face::load` builds it from the staged `face_dir`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use gen_core::FaceEmbedder;
 use serde_json::{json, Value};
@@ -165,13 +165,13 @@ thread_local! {
     static SCRFD: RefCell<Option<(PathBuf, Scrfd)>> = const { RefCell::new(None) };
 
     /// Off-Mac sibling (sc-8910 / F-108): the built candle SCRFD/ArcFace stack cached per blocking
-    /// thread, keyed by the staged `face_dir`. `candle_gen_face::load` re-reads both weight files and
+    /// thread, keyed by the staged `face_dir`. `runtime_cuda::providers::face::load` re-reads both weight files and
     /// rebuilds the models on every call, so caching skips that per-job cost the same way the MLX
     /// `SCRFD`/`WEIGHTS` caches do. Thread-local (not a process-wide `Mutex`) keeps the two backends
     /// symmetric and sidesteps any Send question on the candle analysis/device. `detect(&self, …)` is
     /// a pure forward pass, so reuse across kps jobs is byte-identical.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    static CANDLE_FACE: RefCell<Option<(PathBuf, candle_gen_face::CandleFaceAnalysis)>> =
+    static CANDLE_FACE: RefCell<Option<(PathBuf, runtime_cuda::providers::face::CandleFaceAnalysis)>> =
         const { RefCell::new(None) };
 }
 
@@ -219,7 +219,7 @@ fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtra
 
     let (w, h) = (image.width, image.height);
     let largest = dets.into_iter().max_by(|a, b| {
-        let area = |d: &mlx_gen_face::Detection| {
+        let area = |d: &runtime_macos::providers::face::Detection| {
             (d.bbox[2] - d.bbox[0]).max(0.0) * (d.bbox[3] - d.bbox[1]).max(0.0)
         };
         area(a).total_cmp(&area(b))
@@ -247,7 +247,7 @@ fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtra
 
 /// Off-Mac sibling of [`detect_largest_kps`] (sc-5497, epic 5482): load the candle SCRFD/ArcFace stack
 /// from `face_dir` and detect the largest face's landmarks, normalized to the same square preset space.
-/// `candle_gen_face::detect` returns every face's 5-point `kps` + `bbox` in original-image pixels (its
+/// `runtime_cuda::providers::face::detect` returns every face's 5-point `kps` + `bbox` in original-image pixels (its
 /// inner `FaceAnalysis::detect` applies the InsightFace `det`/`nms` thresholds internally), so this picks
 /// the area-largest detection and normalizes it exactly as the MLX path does — the result is
 /// backend-identical. The candle stack runs f32 on CUDA; call inside `spawn_blocking`.
@@ -258,7 +258,7 @@ fn detect_largest_kps_candle(face_dir: &Path, image: &Image) -> WorkerResult<Kps
             let cached = cell.borrow();
             if cached.as_ref().map(|(dir, _)| dir.as_path()) != Some(face_dir) {
                 drop(cached);
-                let analysis = candle_gen_face::load(face_dir).map_err(|error| {
+                let analysis = runtime_cuda::providers::face::load(face_dir).map_err(|error| {
                     WorkerError::Engine(format!("face stack {face_dir:?}: {error}"))
                 })?;
                 *cell.borrow_mut() = Some((face_dir.to_path_buf(), analysis));
@@ -607,7 +607,7 @@ mod tests {
     /// Real-weights smoke (sc-5497, candle): run the actual candle SCRFD/ArcFace path on a real face
     /// photo and assert the extracted landmarks are well-formed + in valid frontal geometry, the same
     /// bar the MLX smoke holds — so the off-Mac kps lane is backend-identical. Exercises
-    /// `detect_largest_kps_candle` end to end (`candle_gen_face::load` → `detect` → largest →
+    /// `detect_largest_kps_candle` end to end (`runtime_cuda::providers::face::load` → `detect` → largest →
     /// normalize). Needs the staged face bundle dir (`SCENEWORKS_INSTANTID_WEIGHTS`, holding
     /// `scrfd_10g.safetensors` + `arcface_iresnet100.safetensors`) + a face image
     /// (`SCENEWORKS_TEST_FACE`) + a CUDA device. On demand: `cargo test -p sceneworks-worker

@@ -11,7 +11,7 @@
 //!    caption)` triples + `manifest.jsonl`).
 //! 3. Rewrite the plan's dataset onto that rendered control dataset, threading each item's rendered
 //!    condition onto [`TrainingPlanItem::control_image_path`].
-//! 4. Hand the rewritten plan to `run_training_execution` → `gen_core::load_trainer("krea_2_control")`
+//! 4. Hand the rewritten plan to `run_training_execution` → `crate::inference_runtime::load_trainer("krea_2_control")`
 //!    → the candle-gen-krea `ControlTrainer` writes the overlay.
 //!
 //! Backend gating mirrors [`crate::training_jobs`]: the real orchestration exists only on the

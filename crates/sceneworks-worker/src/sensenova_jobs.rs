@@ -2,7 +2,7 @@
 //!
 //! These are the two SenseNova-U1 modes the mlx-gen `Generator` contract can't express
 //! (`GenerationOutput` is Images/Video only), so they bypass the registry and call the public
-//! [`T2iModel`](mlx_gen_sensenova::T2iModel) methods directly:
+//! [`T2iModel`](runtime_macos::providers::sensenova::T2iModel) methods directly:
 //!
 //! * **VQA** (`image_vqa`): one source image + a question → a text answer. No asset write.
 //! * **Interleave / Document Studio** (`image_interleave`): a prompt (+ optional source images) →
@@ -10,8 +10,8 @@
 //!   [`InterleavedDocument`](sceneworks_core::contracts::InterleavedDocument) `document` asset.
 //!
 //! Each backend assembles its own concrete `T2iModel` from the provider's public re-exports (the
-//! `Generator` crate has no public constructor): macOS drives `mlx_gen_sensenova::T2iModel`; the
-//! candle (Windows/CUDA) lane drives `candle_gen_sensenova::T2iModel` via `load_understanding`
+//! `Generator` crate has no public constructor): macOS drives `runtime_macos::providers::sensenova::T2iModel`; the
+//! candle (Windows/CUDA) lane drives `runtime_cuda::providers::sensenova::T2iModel` via `load_understanding`
 //! (sc-5501), retiring the off-Mac Python torch VQA/interleave path. The handler shape, request
 //! parsing, and document assembly are shared and backend-neutral.
 //!
@@ -34,38 +34,38 @@ use sceneworks_core::image_request::ImageRequest;
 // CARVE-OUT(epic 3720): backend-specific; absorbed by TextLlm in Phase 5.
 // VQA + Document-Studio interleave bypass the `Generator` registry and drive the concrete unified
 // `T2iModel` directly (text / text+images output the neutral `GenerationOutput` contract can't
-// express). macOS drives `mlx_gen_sensenova::T2iModel`; off-Mac the candle (Windows/CUDA) lane drives
-// `candle_gen_sensenova::T2iModel` (the sibling carve-outs, sc-5501) — retiring the off-Mac torch
+// express). macOS drives `runtime_macos::providers::sensenova::T2iModel`; off-Mac the candle (Windows/CUDA) lane drives
+// `runtime_cuda::providers::sensenova::T2iModel` (the sibling carve-outs, sc-5501) — retiring the off-Mac torch
 // VQA/interleave path. Each lane keeps its own engine-typed imports; the document-assembly +
 // request-parsing helpers below are backend-neutral and shared.
-#[cfg(target_os = "macos")]
-use mlx_gen::image::{decoded_to_image, resize_bicubic_u8};
-#[cfg(target_os = "macos")]
-use mlx_gen::tokenizer::TextTokenizer;
-#[cfg(target_os = "macos")]
-use mlx_gen::Image;
-#[cfg(target_os = "macos")]
-use mlx_gen_sensenova::{
-    load_raw, load_tokenizer, smart_resize, NeoChatConfig, Sampler, T2iModel, T2iOptions,
-    INTERLEAVE_RESOLUTIONS, INTERLEAVE_SYSTEM_MESSAGE,
-};
 #[cfg(target_os = "macos")]
 use mlx_rs::ops::divide;
 #[cfg(target_os = "macos")]
 use mlx_rs::Array;
+#[cfg(target_os = "macos")]
+use runtime_macos::media::image::{decoded_to_image, resize_bicubic_u8};
+#[cfg(target_os = "macos")]
+use runtime_macos::media::tokenizer::TextTokenizer;
+#[cfg(target_os = "macos")]
+use runtime_macos::media::Image;
+#[cfg(target_os = "macos")]
+use runtime_macos::providers::sensenova::{
+    load_raw, load_tokenizer, smart_resize, NeoChatConfig, Sampler, T2iModel, T2iOptions,
+    INTERLEAVE_RESOLUTIONS, INTERLEAVE_SYSTEM_MESSAGE,
+};
 
 // Candle (Windows/CUDA) understanding path (sc-5501). `Image` is the neutral `gen_core::Image`
 // (`load_reference_image`'s return); the source-image preprocessing + tensor construction live in
-// `image_to_chw01_candle` (the `image` crate's resampler + `candle_gen::candle_core`).
+// `image_to_chw01_candle` (the `image` crate's resampler + `runtime_cuda::media::candle_core`).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen::candle_core::{DType, Device, Tensor};
+use gen_core::Image;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_sensenova::{
+use runtime_cuda::media::candle_core::{DType, Device, Tensor};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use runtime_cuda::providers::sensenova::{
     load_understanding, smart_resize, tensor_to_image, Sampler, T2iOptions, INTERLEAVE_RESOLUTIONS,
     INTERLEAVE_SYSTEM_MESSAGE,
 };
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use gen_core::Image;
 
 /// The adapter id recorded on the generated assets + the interleaved document, matching the
 /// per-backend `adapter_label` the image rows use: `mlx_sensenova` on macOS, `candle_sensenova` on
@@ -92,12 +92,12 @@ const INTERLEAVE_CANCEL_MESSAGE: &str = "Interleaved generation canceled by user
 /// instead of failing the job. Everything else keeps the old `Engine(context: error)` shape.
 #[cfg(target_os = "macos")]
 fn map_sensenova_engine_error(
-    error: mlx_gen::Error,
+    error: runtime_macos::media::Error,
     context: &str,
     cancel_message: &str,
 ) -> WorkerError {
     match error {
-        mlx_gen::Error::Canceled => WorkerError::Canceled(cancel_message.to_owned()),
+        runtime_macos::media::Error::Canceled => WorkerError::Canceled(cancel_message.to_owned()),
         other => WorkerError::Engine(format!("{context}: {other}")),
     }
 }
@@ -105,12 +105,14 @@ fn map_sensenova_engine_error(
 /// Candle sibling of the macOS mapping above (same typed-cancel contract, `CandleError::Canceled`).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn map_sensenova_engine_error(
-    error: candle_gen::CandleError,
+    error: runtime_cuda::media::CandleError,
     context: &str,
     cancel_message: &str,
 ) -> WorkerError {
     match error {
-        candle_gen::CandleError::Canceled => WorkerError::Canceled(cancel_message.to_owned()),
+        runtime_cuda::media::CandleError::Canceled => {
+            WorkerError::Canceled(cancel_message.to_owned())
+        }
         other => WorkerError::Engine(format!("{context}: {other}")),
     }
 }
@@ -276,7 +278,7 @@ pub(crate) async fn run_vqa_job(
 }
 
 /// macOS (MLX) VQA seam: the blocking load → preprocess → `vqa` → think-strip body run inside the
-/// shared handler's `spawn_blocking`. Builds the dense `mlx_gen_sensenova::T2iModel` via
+/// shared handler's `spawn_blocking`. Builds the dense `runtime_macos::providers::sensenova::T2iModel` via
 /// [`load_sensenova_model`] and calls `T2iModel::vqa`. The candle sibling below mirrors it exactly
 /// bar the engine-typed load/preprocess (sc-8839).
 #[cfg(target_os = "macos")]
@@ -311,7 +313,7 @@ fn vqa_generate(
 }
 
 /// Candle (Windows/CUDA) VQA seam — the off-Mac sibling of [`vqa_generate`] (sc-5501). Builds the
-/// dense `candle_gen_sensenova::T2iModel` via `load_understanding` and calls `T2iModel::vqa`,
+/// dense `runtime_cuda::providers::sensenova::T2iModel` via `load_understanding` and calls `T2iModel::vqa`,
 /// retiring the Python torch `image_vqa` path off-Mac. Same shape as the macOS seam; only the
 /// engine-typed load/preprocess differ.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -674,7 +676,7 @@ pub(crate) async fn run_interleave_job(
 }
 
 /// macOS (MLX) interleave seam: the blocking load → preprocess → `interleave_gen` → decode body run
-/// inside the shared handler's `spawn_blocking`. Builds the dense `mlx_gen_sensenova::T2iModel` via
+/// inside the shared handler's `spawn_blocking`. Builds the dense `runtime_macos::providers::sensenova::T2iModel` via
 /// [`load_sensenova_model`] and calls `T2iModel::interleave_gen`, decoding each model-space image
 /// with `decoded_to_image`. The engine's `interleave_gen` takes `width`/`height` as `i32`, an
 /// `init_noises: None`, and a no-op `on_progress` sink — arg shapes intrinsic to the MLX API, not
@@ -748,7 +750,7 @@ fn interleave_generate(
 }
 
 /// Candle (Windows/CUDA) interleave seam — the off-Mac sibling of [`interleave_generate`] (sc-5501).
-/// Builds the dense `candle_gen_sensenova::T2iModel` via `load_understanding` and calls
+/// Builds the dense `runtime_cuda::providers::sensenova::T2iModel` via `load_understanding` and calls
 /// `T2iModel::interleave_gen`, decoding each model-space tensor with `tensor_to_image`, retiring the
 /// Python torch `image_interleave` path off-Mac. The candle engine's `interleave_gen` takes
 /// `width`/`height` as `usize` and no `init_noises`/`on_progress` args — arg shapes intrinsic to the
@@ -1215,7 +1217,7 @@ mod tests {
     #[test]
     fn engine_cancel_maps_to_worker_canceled_with_terminal_message() {
         let mapped = map_sensenova_engine_error(
-            mlx_gen::Error::Canceled,
+            runtime_macos::media::Error::Canceled,
             "SenseNova VQA failed",
             VQA_CANCEL_MESSAGE,
         );
@@ -1229,7 +1231,7 @@ mod tests {
     #[test]
     fn engine_failure_keeps_the_engine_error_shape() {
         let mapped = map_sensenova_engine_error(
-            mlx_gen::Error::Msg("boom".to_owned()),
+            runtime_macos::media::Error::Msg("boom".to_owned()),
             "SenseNova interleave failed",
             INTERLEAVE_CANCEL_MESSAGE,
         );
@@ -1244,7 +1246,7 @@ mod tests {
     #[test]
     fn engine_cancel_maps_to_worker_canceled_with_terminal_message_candle() {
         let mapped = map_sensenova_engine_error(
-            candle_gen::CandleError::Canceled,
+            runtime_cuda::media::CandleError::Canceled,
             "SenseNova VQA failed",
             VQA_CANCEL_MESSAGE,
         );
@@ -1253,7 +1255,7 @@ mod tests {
             "typed engine Canceled must map to WorkerError::Canceled, got {mapped:?}"
         );
         let failed = map_sensenova_engine_error(
-            candle_gen::CandleError::Msg("boom".to_owned()),
+            runtime_cuda::media::CandleError::Msg("boom".to_owned()),
             "SenseNova interleave failed",
             INTERLEAVE_CANCEL_MESSAGE,
         );

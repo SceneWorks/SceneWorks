@@ -10,6 +10,8 @@ services:
       context: .
       dockerfile: docker/rust.Dockerfile
       target: rust-api
+      secrets:
+        - inference_token
       args:
         BIN: sceneworks-rust-api
     environment:
@@ -58,6 +60,8 @@ services:
       context: .
       dockerfile: docker/rust.Dockerfile
       target: rust-worker-candle
+      secrets:
+        - inference_token
     restart: unless-stopped
     environment:
       SCENEWORKS_API_URL: http://api:${SCENEWORKS_API_PORT:-8010}
@@ -102,6 +106,8 @@ services:
       context: .
       dockerfile: docker/rust.Dockerfile
       target: rust-worker
+      secrets:
+        - inference_token
       args:
         BIN: sceneworks-rust-worker
     restart: unless-stopped
@@ -166,3 +172,9 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+secrets:
+  # Build-only credential for Cargo's private canonical runtime dependency. BuildKit mounts it for
+  # `cargo fetch` and does not persist it in an image layer or expose it to build scripts.
+  inference_token:
+    environment: SCENEWORKS_INFERENCE_READ_TOKEN

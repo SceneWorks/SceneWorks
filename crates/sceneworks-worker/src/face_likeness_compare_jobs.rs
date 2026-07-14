@@ -33,14 +33,14 @@
 ))]
 use std::path::PathBuf;
 
-// `Image` resolves to `mlx_gen::Image` on macOS and `gen_core::Image` under the candle backend — the
+// `Image` resolves to `runtime_macos::media::Image` on macOS and `gen_core::Image` under the candle backend — the
 // same cfg-gated split the scorer (face_likeness.rs) and sibling job modules use. The whole module
 // only exists under these two configs; on the plain Linux parity build (no `backend-candle`) `Image`
 // is intentionally absent and only the unsupported stub at the bottom is compiled.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use gen_core::Image;
 #[cfg(target_os = "macos")]
-use mlx_gen::Image;
+use runtime_macos::media::Image;
 
 #[cfg(any(
     target_os = "macos",

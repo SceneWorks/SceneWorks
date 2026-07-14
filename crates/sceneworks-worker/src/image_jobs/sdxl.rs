@@ -481,6 +481,6 @@ async fn generate_sdxl_advanced_stream(
 // sc-3380 not yet ported), gated out by `instantid_available` so the torch worker claims
 // them. fp16 only for now (the validated envelope); Q8/Q4 ride explicit `mlxQuantize`
 // (unvalidated at 1024², gated by sc-3329 follow-up). The provider is the bespoke
-// `mlx_gen_instantid::InstantId` (not an inventory `Generator`), so this is a dedicated
+// `runtime_macos::providers::instantid::InstantId` (not an inventory `Generator`), so this is a dedicated
 // stream parallel to `generate_sdxl_advanced_stream`, not an MLX_MODELS row.
 // ---------------------------------------------------------------------------

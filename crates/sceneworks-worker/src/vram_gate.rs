@@ -564,7 +564,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn reclaimable_high_water_flips_a_real_warm_reject() {
-        use candle_gen::candle_core::{DType, Device, Tensor};
+        use runtime_cuda::media::candle_core::{DType, Device, Tensor};
 
         let gpu = "0";
         // Qwen-Image bf16 published tier peaks (builtin.models.jsonc `candle` block, sc-10969).

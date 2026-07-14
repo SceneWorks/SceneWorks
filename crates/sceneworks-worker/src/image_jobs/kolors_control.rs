@@ -1,5 +1,5 @@
 // Candle (Windows/CUDA) Kolors ControlNet (strict pose) route (sc-5489, epic 5480; sc-8823 driver route)
-// — `kolors` + `advanced.poses` off-Mac via `candle_gen_kolors::KolorsControl`. The Kolors sibling of the
+// — `kolors` + `advanced.poses` off-Mac via `runtime_cuda::providers::kolors::KolorsControl`. The Kolors sibling of the
 // candle Qwen strict-control path (qwen_control.rs): one image per pose, each conditioned on a full DWPose
 // skeleton (rendered cross-platform by `openpose_skeleton::draw_wholebody`) fed to the
 // `Kwai-Kolors/Kolors-ControlNet-Pose` branch, whose residuals are added into the vendored SDXL UNet the

@@ -1,5 +1,5 @@
 // Candle (Windows/CUDA) Z-Image img2img / edit route (sc-6595, epic 5480) — pixel-conditioned editing
-// on Z-Image-Turbo off-Mac via `candle_gen_z_image::ZImageEdit`. The candle sibling of the MLX z-image
+// on Z-Image-Turbo off-Mac via `runtime_cuda::providers::z_image::ZImageEdit`. The candle sibling of the MLX z-image
 // img2img path (the registered `z_image_turbo` generator's `Conditioning::Reference` route, driven by
 // `resolve_zimage_edit_init` in zimage.rs). Both `z_image_edit` and `z_image_turbo` (mode `edit_image`)
 // reach this one lane — two ids, one engine (the Turbo weights with a source-latent init).
@@ -14,7 +14,7 @@
 
 /// img2img strength default — the worker's `advanced.strength` default (`resolve_zimage_edit_init`,
 /// torch `ZImageImg2ImgPipeline` 0.6). With Z-Image's `init_time_step`, higher ⇒ closer to the source
-/// (the structure-preservation convention; the inverse of the SDXL knob — see `candle_gen_z_image::edit`).
+/// (the structure-preservation convention; the inverse of the SDXL knob — see `runtime_cuda::providers::z_image::edit`).
 const ZIMAGE_EDIT_CANDLE_DEFAULT_STRENGTH: f32 = 0.6;
 /// Denoise-steps default — the distilled 4-step Turbo schedule (the txt2img / MLX z-image default).
 const ZIMAGE_EDIT_CANDLE_DEFAULT_STEPS: u32 = 4;

@@ -5,7 +5,7 @@
 //
 // Unlike InstantID (a bespoke provider), PuLID-FLUX is an inventory-registered
 // `Generator` (engine id `pulid_flux`), so this rides the SAME cached registry
-// path as the base MLX families (`start_cached_gen_stream` → `gen_core::load`).
+// path as the base MLX families (`start_cached_gen_stream` → `crate::inference_runtime::load`).
 // What's bespoke is only the request mapping (a reference face → an
 // id-embedding via `Conditioning::Reference`, plus the PuLID-specific
 // `idWeight` / `timestepToStartCfg` knobs) and the weight provisioning: the
@@ -16,11 +16,11 @@
 
 /// SceneWorks model id for native PuLID-FLUX (FLUX.1-dev backbone + PuLID injection).
 const PULID_MODEL: &str = "pulid_flux_dev";
-/// The mlx-gen registry id the worker loads through `gen_core::load`.
+/// The mlx-gen registry id the worker loads through `crate::inference_runtime::load`.
 const PULID_ENGINE_ID: &str = "pulid_flux";
 /// FLUX.1-dev backbone repo for the MLX path (sc-9947): the SAME ungated `SceneWorks/flux1-dev-mlx`
 /// quant-matrix turnkey the base `flux_dev` built-in consumes — self-contained q4/q8/bf16 tier subdirs,
-/// packed-detected by `mlx_gen_flux::load_flux1` (which `mlx-gen-pulid` delegates the backbone to). This
+/// packed-detected by `runtime_macos::providers::flux::load_flux1` (which `mlx-gen-pulid` delegates the backbone to). This
 /// de-gates PuLID on macOS (no HF token / license-accept, the sc-8669 `flux_dev` precedent) and drops the
 /// install-time convert peak (the packed tier loads directly). The candle (Windows/Linux) lane keeps the
 /// upstream gated dense BFL layout via its own `PULID_CANDLE_FLUX_REPO` const — its packed consumption is a
@@ -62,7 +62,7 @@ const PULID_ADAPTER_LABEL: &str = "mlx_pulid_flux";
 /// pre-staged complete FLUX dir — used as-is, never tier-resolved), else the HF cache snapshot for the
 /// manifest `repo` (default `SceneWorks/flux1-dev-mlx`, sc-9947). For the quant-matrix turnkey that root
 /// holds `q4/`/`q8/`/`bf16/` tier subdirs, so pick the SELECTED tier via `standard_tier_subdir` — the SAME
-/// resolver the base `flux_dev` MLX lane uses — exactly as `mlx_gen_flux::load_flux1` (which
+/// resolver the base `flux_dev` MLX lane uses — exactly as `runtime_macos::providers::flux::load_flux1` (which
 /// `mlx-gen-pulid` delegates the backbone to) packed-loads it. `None` means the base is not present, so the
 /// job is not MLX-runnable. Mirrors `resolve_instantid_sdxl_base` + `base::snapshot_dir_for_request`.
 fn resolve_pulid_flux_base(

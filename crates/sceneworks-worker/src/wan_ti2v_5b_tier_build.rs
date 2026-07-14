@@ -4,12 +4,12 @@
 //! three hosted tier subdirs — `bf16/` + `q8/` + `q4/` — for `SceneWorks/wan2.2-ti2v-5b-mlx`:
 //!
 //! - `bf16/`: the dense converter output. Drives the SAME byte-parity-validated converter the turnkey
-//!   uses (`mlx_gen_wan::convert::convert_ti2v_5b`) → one transformer (`model.safetensors`) + the UMT5
+//!   uses (`runtime_macos::providers::wan::convert::convert_ti2v_5b`) → one transformer (`model.safetensors`) + the UMT5
 //!   T5 encoder + the z16 VAE + `config.json`; this helper then copies the `tokenizer.json` the
 //!   converter does not emit.
 //! - `q8/` + `q4/`: derived **worker-side** from the bf16 tier with NO mlx-gen change — load the bf16
 //!   `model.safetensors`, quantize the DiT Linears via the public
-//!   `mlx_gen_wan::convert::quantize_wan_transformer` (group 64, the canonical Wan group), save, reuse
+//!   `runtime_macos::providers::wan::convert::quantize_wan_transformer` (group 64, the canonical Wan group), save, reuse
 //!   the shared dense T5/VAE/tokenizer, and patch `config.json` with the `{bits, group_size}` block.
 //!   This is byte-identical to what an inline `convert_ti2v_5b(quantize)` would emit (the converter's
 //!   transformer path is exactly `sanitize → cast bf16 → quantize_wan_transformer`, and the config
@@ -150,8 +150,9 @@ fn build_quant_tier(bf16_dir: &Path, out_dir: &Path, tier: &str, bits: i32) {
     //    converter's `convert_expert` would (attn q/k/v/o + FFN fc1/fc2), and save the packed triple.
     let dense: HashMap<String, Array> = Array::load_safetensors(bf16_dir.join("model.safetensors"))
         .unwrap_or_else(|e| panic!("load bf16 model.safetensors for {tier}: {e:?}"));
-    let packed = mlx_gen_wan::convert::quantize_wan_transformer(dense, bits, GROUP_SIZE)
-        .unwrap_or_else(|e| panic!("quantize_wan_transformer {tier}: {e:?}"));
+    let packed =
+        runtime_macos::providers::wan::convert::quantize_wan_transformer(dense, bits, GROUP_SIZE)
+            .unwrap_or_else(|e| panic!("quantize_wan_transformer {tier}: {e:?}"));
     // Materialize before writing (lazy MLX graph, mirrors mlx-gen-wan's save_map).
     mlx_rs::transforms::eval(packed.values().collect::<Vec<_>>())
         .unwrap_or_else(|e| panic!("eval packed {tier}: {e:?}"));
@@ -225,7 +226,7 @@ fn wan_ti2v_5b_build_tiers() {
     // 1. Dense bf16 tier via the byte-parity-validated converter, then copy the tokenizer it omits.
     let bf16_dir = out_root.join("bf16");
     eprintln!("building bf16 tier → {}", bf16_dir.display());
-    mlx_gen_wan::convert::convert_ti2v_5b(&native_dir, &bf16_dir)
+    runtime_macos::providers::wan::convert::convert_ti2v_5b(&native_dir, &bf16_dir)
         .unwrap_or_else(|e| panic!("convert_ti2v_5b bf16 failed: {e:?}"));
     mlx_rs::memory::clear_cache();
     std::fs::copy(&tokenizer, bf16_dir.join("tokenizer.json"))

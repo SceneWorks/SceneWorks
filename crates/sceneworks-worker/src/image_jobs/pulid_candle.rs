@@ -1,5 +1,5 @@
 // Candle (Windows/CUDA) PuLID-FLUX face-identity route (sc-5492, epic 5480) — identity-preserving
-// `character_image` generation on FLUX.1-dev off-Mac via `candle_gen_pulid::PulidFlux`. The candle
+// `character_image` generation on FLUX.1-dev off-Mac via `runtime_cuda::providers::pulid::PulidFlux`. The candle
 // sibling of the macOS `pulid_flux` registry route (image_jobs/pulid.rs): the reference face →
 // SCRFD/ArcFace + BiSeNet `face_features_image` → EVA02-CLIP tower → IDFormer → 20 PerceiverAttentionCA
 // modules injected into the FLUX DiT, denoised with the FLUX flow-match schedule (a single distilled
@@ -136,7 +136,7 @@ fn pulid_candle_id_weight(request: &ImageRequest) -> f32 {
 
 /// Resolve the PuLID adapter file + the EVA tower file + the native face-stack dir the `PulidFlux`
 /// provider loads, downloading on first use into ONE bundle dir (so it doubles as the provider's
-/// `face_dir`: `candle_gen_face::load_with_parser_on` reads `scrfd_10g` + `arcface_iresnet100` +
+/// `face_dir`: `runtime_cuda::providers::face::load_with_parser_on` reads `scrfd_10g` + `arcface_iresnet100` +
 /// `bisenet_parsing` from it by name, ignoring the adapter/EVA files alongside). Resolution: a
 /// `SCENEWORKS_PULID_WEIGHTS` pre-staged bundle dir (all five files present) → a whole-repo HF cache
 /// snapshot per file → download-on-first-use into the app cache. Returns `(adapter, eva, face_dir)`.

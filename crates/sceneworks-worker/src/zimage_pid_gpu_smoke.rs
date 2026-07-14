@@ -8,7 +8,7 @@
 //! space; PiD's `zimage`/`zimage-turbo` tags alias the flux checkpoint — the 2026-06-24 epic scope
 //! correction, so there is NO dedicated `pid_zimage`), and the manifest gives both Z-Image models
 //! `ui.pid.checkpointId = "pid_flux"`. This smoke drives the exact generic candle t2i seam
-//! `generate_candle_stream` uses (sc-9727): `gen_core::load("z_image_turbo", spec.with_pid(pid_flux,
+//! `generate_candle_stream` uses (sc-9727): `crate::inference_runtime::load("z_image_turbo", spec.with_pid(pid_flux,
 //! gemma))` + `GenerationRequest.use_pid`, decoding the SAME Z-Image latent through the native VAE
 //! (render size) then the `pid_flux` student (4× → 2K/4K).
 //!
@@ -66,8 +66,8 @@ fn save_png(img: &Image, path: &Path) {
 }
 
 fn render(spec: &LoadSpec, w: u32, h: u32, steps: u32, use_pid: bool) -> Image {
-    let generator =
-        gen_core::load("z_image_turbo", spec).expect("load candle z_image_turbo provider");
+    let generator = crate::inference_runtime::load("z_image_turbo", spec)
+        .expect("load candle z_image_turbo provider");
     let req = GenerationRequest {
         prompt: env_or(
             "ZIMAGE_PID_PROMPT",

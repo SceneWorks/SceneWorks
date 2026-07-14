@@ -252,11 +252,11 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         WorkerCapability::LoraTrain,
         WorkerCapability::LoraTrainExecute,
         WorkerCapability::TrainingCaption,
-        // sc-5552: the native MLX `prompt_refine` TextLlm provider (mlx-gen-prompt-refine) is
-        // force-linked on macOS, so the registry now derives PromptRefine from its descriptor.
+        // sc-5552: runtime-macos includes the native MLX `prompt_refine` provider, so the registry
+        // derives PromptRefine from its descriptor.
         WorkerCapability::PromptRefine,
-        // sc-6535: mlx-gen-clip registers the CLIP `clip_vit_l14` ImageEmbedder (force-linked in
-        // dataset_analysis_jobs.rs), so the registry derives DatasetAnalysis from its descriptor.
+        // sc-6535: runtime-macos includes the CLIP `clip_vit_l14` ImageEmbedder, so the registry
+        // derives DatasetAnalysis from its descriptor.
         WorkerCapability::DatasetAnalysis,
         // carve-outs
         WorkerCapability::ImageEdit,

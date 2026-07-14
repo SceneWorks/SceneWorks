@@ -11,8 +11,8 @@
 //! It deliberately calls the **public** model seams directly (mirroring the
 //! `face_pass_real_weights` and `calibrate_thresholds` precedents) rather than the
 //! module-private worker wrappers, so it stays a self-contained instrument:
-//!   * face   — `mlx_gen_face::FaceAnalysis` + `mlx_gen::weights::Weights` (512-d ArcFace)
-//!   * CLIP   — `gen_core::load_image_embedder` / `load_text_embedder` (768-d, shared space)
+//!   * face   — `runtime_macos::providers::face::FaceAnalysis` + `runtime_macos::media::weights::Weights` (512-d ArcFace)
+//!   * CLIP   — `crate::inference_runtime::load_image_embedder` / `load_text_embedder` (768-d, shared space)
 //!   * sharp  — `sceneworks_image_quality::extract_tier0_scalars(..).blur_variance` (dev-dep)
 //!
 //! Y axes (protocol §4): face-detect rate, identity fidelity (cosine of each output's largest
@@ -277,7 +277,10 @@ mod harness {
     }
 
     /// Largest-face raw 512-d ArcFace embedding for an image, or `None` if no face detected.
-    fn largest_face_embedding(fa: &mlx_gen_face::FaceAnalysis, path: &Path) -> Option<Vec<f32>> {
+    fn largest_face_embedding(
+        fa: &runtime_macos::providers::face::FaceAnalysis,
+        path: &Path,
+    ) -> Option<Vec<f32>> {
         let (pixels, w, h) = decode_rgb(path)?;
         let dets = fa.detect(&pixels, h as usize, w as usize).ok()?;
         let det = dets.first()?; // detect() returns largest-first
@@ -344,7 +347,7 @@ mod harness {
 
         // --- load models once ---
         let clip_dir = clip_weights_dir();
-        let img_embedder = gen_core::load_image_embedder(
+        let img_embedder = crate::inference_runtime::load_image_embedder(
             CLIP_IMAGE_ID,
             &LoadSpec::new(WeightsSource::Dir(clip_dir.clone())),
         )
@@ -354,7 +357,7 @@ mod harness {
             None
         } else {
             Some(
-                gen_core::load_text_embedder(
+                crate::inference_runtime::load_text_embedder(
                     CLIP_TEXT_ID,
                     &LoadSpec::new(WeightsSource::Dir(clip_dir)),
                 )
@@ -362,11 +365,14 @@ mod harness {
             )
         };
         let bundle = face_bundle_dir();
-        let scrfd = mlx_gen::weights::Weights::from_file(bundle.join(INSTANTID_SCRFD_FILE))
-            .expect("load SCRFD weights");
-        let arcface = mlx_gen::weights::Weights::from_file(bundle.join(INSTANTID_ARCFACE_FILE))
-            .expect("load ArcFace weights");
-        let fa = mlx_gen_face::FaceAnalysis::load(&scrfd, &arcface).expect("load FaceAnalysis");
+        let scrfd =
+            runtime_macos::media::weights::Weights::from_file(bundle.join(INSTANTID_SCRFD_FILE))
+                .expect("load SCRFD weights");
+        let arcface =
+            runtime_macos::media::weights::Weights::from_file(bundle.join(INSTANTID_ARCFACE_FILE))
+                .expect("load ArcFace weights");
+        let fa = runtime_macos::providers::face::FaceAnalysis::load(&scrfd, &arcface)
+            .expect("load FaceAnalysis");
 
         // --- reference centroid from the held-out pool ---
         let ref_files = image_files(&ref_dir);
@@ -508,7 +514,7 @@ mod harness {
         let blur_mean = mean(&blur).unwrap_or(0.0);
 
         // CLIP image embeddings (MLX) → diversity + near-dup.
-        let embedder = gen_core::load_image_embedder(
+        let embedder = crate::inference_runtime::load_image_embedder(
             CLIP_IMAGE_ID,
             &LoadSpec::new(WeightsSource::Dir(clip_weights_dir())),
         )

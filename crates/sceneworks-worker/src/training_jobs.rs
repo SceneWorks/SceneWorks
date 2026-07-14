@@ -3,7 +3,7 @@
 //!
 //! Parses a `lora_train` job into the Rust-resolved [`TrainingPlan`], then either
 //! validates it (dry run) or maps it onto a [`gen_core::TrainingRequest`] and drives
-//! `gen_core::load_trainer(id, &LoadSpec).train(req, on_progress)` — exactly as the
+//! `crate::inference_runtime::load_trainer(id, &LoadSpec).train(req, on_progress)` — exactly as the
 //! image path maps `ImageRequest` → `GenerationRequest` and calls `Generator::generate`.
 //! The engine writes the adapter to the plan's `output.outputDir`; the API registers
 //! it from the staged `manifestEntry` + the files on disk (apps/rust-api jobs.rs
@@ -39,48 +39,6 @@ use gen_core::{
     CancelFlag, LoadSpec, LrSchedule, NetworkType, Precision, TrainingConfig, TrainingItem,
     TrainingOutput, TrainingProgress, TrainingRequest, WeightsSource,
 };
-// Force each trainer-provider crate to link so its `inventory::submit!` trainer registration
-// survives linker GC and `load_trainer` can find it. The same crates are referenced by
-// image_jobs/video_jobs for generation; re-stating the training dependency here keeps it explicit
-// and independent of those modules. `cfg(target_os)` / `feature` decides which backend's crates
-// register, not which contract types this module names — macOS links the mlx-gen trainers.
-#[cfg(target_os = "macos")]
-use mlx_gen_kolors as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_krea as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_lens as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_ltx as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_sd3 as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_sdxl as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_wan as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_z_image as _;
-// The candle (Windows/CUDA + Linux/NVIDIA) trainer-provider crates, force-linked for the off-Mac
-// training cutover (sc-7817, epic 5164). Each self-registers a `backend = "candle"` `Trainer` into
-// the SAME gen_core registry the mlx crates use, so `gen_core::load_trainer(id, …)` resolves the
-// candle trainer by id with no candle-specific dispatch (exactly like the inference path). These
-// crates are already linked for inference under `backend-candle`; the trainer `inventory::
-// submit!` is NOT behind a separate feature, so re-stating the dependency here is purely explicit.
-// Only the five families with a candle trainer are anchored: `sdxl`, `z_image_turbo`, `lens`, the
-// Krea 2 Raw 12B DiT (`krea_2_raw`, epic 7565 P4 — sc-8614), and the Wan **A14B T2V** MoE
-// (`wan2_2_t2v_14b`). The dense Wan 5B + the I2V A14B have no candle trainer yet (sc-5167
-// follow-ups) and Kolors/LTX none at all — those kernels stay on the Python torch worker off-Mac
-// (`jobs_store::training_job_is_candle_eligible` keeps them from routing here).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_krea as _;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_lens as _;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_sdxl as _;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_wan as _;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_z_image as _;
 
 /// Run a `lora_train` job: parse the resolved plan, then either validate it
 /// (dry run, the default) or execute real training. The dry-run/execute split was
@@ -775,7 +733,7 @@ pub(crate) async fn run_training_execution(
             } else {
                 Precision::Bf16
             };
-            let mut trainer = gen_core::load_trainer(
+            let mut trainer = crate::inference_runtime::load_trainer(
                 engine_id,
                 &LoadSpec {
                     precision: load_precision,
@@ -2534,9 +2492,11 @@ mod tests {
             cancel: CancelFlag::new(),
         };
 
-        let mut trainer =
-            gen_core::load_trainer("kolors", &LoadSpec::new(WeightsSource::Dir(snapshot)))
-                .expect("kolors trainer loads (tokenizer.json present)");
+        let mut trainer = crate::inference_runtime::load_trainer(
+            "kolors",
+            &LoadSpec::new(WeightsSource::Dir(snapshot)),
+        )
+        .expect("kolors trainer loads (tokenizer.json present)");
         trainer
             .validate(&request)
             .expect("trainer accepts the plan");
@@ -2641,9 +2601,11 @@ mod tests {
             cancel: CancelFlag::new(),
         };
 
-        let mut trainer =
-            gen_core::load_trainer("lens", &LoadSpec::new(WeightsSource::Dir(snapshot)))
-                .expect("lens trainer loads + is registered (mlx_gen_lens force-link survived GC)");
+        let mut trainer = crate::inference_runtime::load_trainer(
+            "lens",
+            &LoadSpec::new(WeightsSource::Dir(snapshot)),
+        )
+        .expect("lens trainer loads from the explicit runtime catalog");
         trainer
             .validate(&request)
             .expect("trainer accepts the plan");
@@ -2751,7 +2713,7 @@ mod tests {
             cancel: CancelFlag::new(),
         };
 
-        let mut trainer = gen_core::load_trainer(
+        let mut trainer = crate::inference_runtime::load_trainer(
             "z_image_turbo",
             &LoadSpec::new(WeightsSource::Dir(snapshot)),
         )
@@ -2788,9 +2750,9 @@ mod tests {
     }
 
     // ── sc-7817: candle (Windows/CUDA + Linux/NVIDIA) real-weight training smokes ──────────────────
-    // The off-Mac twins of the macOS real-weight smokes above. They prove the worker links each
-    // candle trainer's `backend = "candle"` `inventory::submit!` registration (the dead-strip trap),
-    // resolves it via `gen_core::load_trainer(id, …)`, and runs a real step on the CUDA GPU through
+    // The off-Mac twins of the macOS real-weight smokes above. They prove the CUDA bundle explicitly
+    // includes each candle trainer, resolves it via `crate::inference_runtime::load_trainer(id, …)`,
+    // and runs a real step on the CUDA GPU through
     // the full worker path. Release build only (the GPU smokes hit the debug_assert dup-id panic in
     // debug, per the candle CI-gap note).
 
@@ -2900,12 +2862,12 @@ mod tests {
             cancel: CancelFlag::new(),
         };
 
-        let mut trainer = gen_core::load_trainer(
+        let mut trainer = crate::inference_runtime::load_trainer(
             engine_id,
             &LoadSpec::new(WeightsSource::Dir(snapshot.to_path_buf())),
         )
         .unwrap_or_else(|error| {
-            panic!("candle {engine_id} trainer loads + is registered (force-link survived GC): {error}")
+            panic!("candle {engine_id} trainer loads from the runtime catalog: {error}")
         });
         trainer
             .validate(&request)
@@ -3083,7 +3045,7 @@ mod tests {
             cancel: CancelFlag::new(),
         };
 
-        let mut trainer = gen_core::load_trainer(
+        let mut trainer = crate::inference_runtime::load_trainer(
             "z_image_turbo",
             &LoadSpec::new(WeightsSource::Dir(snapshot.to_path_buf())),
         )
@@ -3219,7 +3181,7 @@ mod tests {
     }
 
     /// sc-10163 (epic 10159 B2) — the candle Krea pose-**ControlNet** training smoke. Drives the exact
-    /// studio path — `gen_core::load_trainer("krea_2_control", …).train(req)` — over real (target, pose
+    /// studio path — `crate::inference_runtime::load_trainer("krea_2_control", …).train(req)` — over real (target, pose
     /// skeleton, caption) triples from the COCO-pose dataset, proving the control trainer is reachable
     /// through the worker's registry, trains a control branch end-to-end on the frozen 12B Krea base
     /// (checkpointing forced on), and emits an overlay whose meta `kind` is derived from `control_type`
@@ -3298,7 +3260,7 @@ mod tests {
             cancel: CancelFlag::new(),
         };
 
-        let mut trainer = gen_core::load_trainer(
+        let mut trainer = crate::inference_runtime::load_trainer(
             "krea_2_control",
             &LoadSpec::new(WeightsSource::Dir(snapshot)),
         )

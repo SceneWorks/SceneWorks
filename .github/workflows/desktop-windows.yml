@@ -70,6 +70,8 @@ jobs:
     # windows-2022 ships VS2022 with an MSVC 14.4x toolset (matches the desktop
     # crate's expectations); pinned rather than windows-latest per sc-3676.
     runs-on: windows-2022
+    env:
+      CARGO_NET_OFFLINE: "true"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -80,13 +82,20 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+      - name: Fetch the private inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
+          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
+        run: cargo fetch --locked
       # MSVC (cl.exe) on PATH so the desktop crate's cargo test/clippy link cleanly.
       # Cheap (~9s).
       - name: Set up MSVC developer environment
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       # candle-gen single-rev invariant (sc-4482): a candle-gen pin resolving a
-      # different gen-core rev would split the inventory registry => runtime "engine
-      # not found". `cargo tree` only — no compile, no CUDA needed. `--target all`
+      # different gen-core rev would split contract types from the explicit runtime
+      # catalog. `cargo tree` only — no compile, no CUDA needed. `--target all`
       # also resolves the macOS-only mlx-gen transitive gen-core.
       - name: Guard against gen-core version skew (candle)
         shell: bash
@@ -117,8 +126,16 @@ jobs:
       # build in a separate target subdir from that lane's debug checks, so their
       # candle-kernels artifacts never collide or thrash each other.
       CUDA_COMPUTE_CAP: "80"
+      CARGO_NET_OFFLINE: "true"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Fetch the private inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
+          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
+        run: cargo fetch --locked
       # No setup-node / rust-toolchain / CUDA-toolkit / rust-cache actions: this box
       # has Node, rustup + the repo's pinned toolchain, the CUDA 12.9 Toolkit, and the
       # MSVC 14.44 BuildTools pre-installed, and reuses its _work target dir (warm).

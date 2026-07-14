@@ -2,7 +2,7 @@
 //!
 //! The image→video sibling of `wan_t2v_14b_tier_build`. Produces the three hosted tier subdirs —
 //! `bf16/` + `q8/` + `q4/` — from the native `Wan-AI/Wan2.2-I2V-A14B` checkpoint by driving the SAME
-//! byte-parity-validated converter the turnkey uses (`mlx_gen_wan::convert::convert_i2v_14b`), once
+//! byte-parity-validated converter the turnkey uses (`runtime_macos::providers::wan::convert::convert_i2v_14b`), once
 //! per tier with the matching quant. Each tier is a COMPLETE self-contained dual-expert snapshot
 //! (both MoE experts at `in_dim` 36 image-concat conditioning, the UMT5 T5, the z16 VAE and
 //! `config.json` with the quant baked in); this helper additionally copies the `tokenizer.json` the
@@ -135,7 +135,7 @@ fn wan_i2v_14b_build_tiers() {
             out_dir.display(),
             quant
         );
-        mlx_gen_wan::convert::convert_i2v_14b(&native_dir, &out_dir, *quant)
+        runtime_macos::providers::wan::convert::convert_i2v_14b(&native_dir, &out_dir, *quant)
             .unwrap_or_else(|e| panic!("convert_i2v_14b {tier} failed: {e:?}"));
         // Release any retained buffers before the next (heavier) tier so residue never accumulates.
         mlx_rs::memory::clear_cache();

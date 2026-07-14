@@ -3,7 +3,7 @@
 //! This is the E2E evidence the epic 10609 training half demands: not "a registry entry + a green
 //! unit test" but an actual round-trip on real weights. One `#[ignore]`d test, driven by env, that for
 //! one `(model, network_type)` cell:
-//!   1. loads the **native-MLX SDXL trainer** (`mlx_gen_sdxl::load_trainer`) from the Illustrious
+//!   1. loads the **native-MLX SDXL trainer** (`runtime_macos::providers::sdxl::load_trainer`) from the Illustrious
 //!      turnkey's **dense `bf16/` tier** — the exact tier `resolve_base_model_path` hands the worker
 //!      (`tiered_turnkey_train_dir` descends to `bf16/`), never a quantized tier,
 //!   2. trains a tiny LoRA or LoKr adapter over a small synthetic dataset (few steps — the point is the
@@ -16,11 +16,11 @@
 //!      emitting keys no inference path reads (a zero delta), and
 //!   5. records wall-clock + peak MLX memory for the manifest footprint record.
 //!
-//! Direct provider constructors (`mlx_gen_sdxl::load{,_trainer}`), NOT the `gen_core` registry: the
+//! Direct provider constructors (`runtime_macos::providers::sdxl::load{,_trainer}`), NOT the `gen_core` registry: the
 //! worker test build links a candle-backed `sdxl` **trainer stub** (engines.rs, exercises the candle
 //! training gate) and an `sdxl` generator, so the first-wins registry could resolve the stub. The
 //! direct constructors are the same trainer/generator the registry resolves on the real app, minus the
-//! id lookup — the same sidestep `lora_train_driver` makes with `mlx_gen_z_image::load`.
+//! id lookup — the same sidestep `lora_train_driver` makes with `runtime_macos::providers::z_image::load`.
 //!
 //! macOS/Metal + `RUST_TEST_THREADS=1` (MLX is `!Send`). Run one cell per invocation (each loads the
 //! full SDXL model), e.g. the v1 LoRA cell from the scratch-built turnkey, applying on the dense tier:
@@ -115,7 +115,7 @@ fn render(
     if let Some(a) = adapter {
         spec = spec.with_adapters(vec![a]);
     }
-    let generator = mlx_gen_sdxl::load(&spec).expect("load mlx sdxl generator");
+    let generator = runtime_macos::providers::sdxl::load(&spec).expect("load mlx sdxl generator");
     let req = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt: Some("blurry, low quality, deformed, watermark".to_owned()),
@@ -266,9 +266,10 @@ fn illustrious_train_apply_mlx_smoke() {
     mlx_rs::memory::clear_cache();
     mlx_rs::memory::reset_peak_memory();
     let t0 = Instant::now();
-    let mut trainer =
-        mlx_gen_sdxl::load_trainer(&LoadSpec::new(WeightsSource::Dir(bf16_dir.clone())))
-            .expect("mlx sdxl trainer loads from the Illustrious bf16 tier");
+    let mut trainer = runtime_macos::providers::sdxl::load_trainer(&LoadSpec::new(
+        WeightsSource::Dir(bf16_dir.clone()),
+    ))
+    .expect("mlx sdxl trainer loads from the Illustrious bf16 tier");
     trainer
         .validate(&request)
         .expect("trainer accepts the Illustrious training plan");

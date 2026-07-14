@@ -54,13 +54,14 @@ use crate::{WorkerError, WorkerResult};
 ///
 /// This is a pre-load, weights-free registry lookup (`(descriptor)()` allocates no tensors), the same
 /// query shape the worker already uses for family/guidance/quant capability advertisement and the
-/// analogous [`gen_core::footprint`] size seam (sc-10894). An id with no registered generator — or a
+/// analogous `ProviderRegistry::footprint` size seam (sc-10894). An id with no registered generator — or a
 /// registered one that does not advertise the bit — yields `false` (the safe default: never select a
 /// residency policy the provider won't honor). Sees exactly the providers the binary force-links (the
 /// sc-4482 dead-strip rule): on macOS every `mlx_gen_*` provider is anchored in `image_jobs`, so the
 /// live worker resolves them; off-Mac the MLX gate no-ops anyway (no `sysctl` budget).
 pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
-    gen_core::registry::generators()
+    crate::inference_runtime::media()
+        .generators()
         .find(|reg| (reg.descriptor)().id == engine_id)
         .is_some_and(|reg| (reg.descriptor)().capabilities.supports_sequential_offload)
 }
@@ -295,7 +296,7 @@ fn weights_source_bytes(src: &WeightsSource) -> u64 {
 /// `t5_encoder.safetensors`, anima's `text_encoders/` under a `split_files/` root — or that has no
 /// separable encoder at all (sensenova's flat unified MoT). A zero text-encoder collapses the staged
 /// (`max(te, rest)`) peak back to the resident peak, so no `Sequential` saving is ever selected. The
-/// provider's `gen_core::footprint` computes the split from the exact subdirs *its own* loader resolves,
+/// provider's `ProviderRegistry::footprint` computes the split from the exact subdirs *its own* loader resolves,
 /// so it is authoritative per family. `footprint_te` is `Some` when the provider declared a footprint,
 /// `None` otherwise (or the query errored) — in which case this falls back to the subdir scan, the
 /// historical behavior. The whole-model `total` stays the recursive [`sum_safetensors_bytes`] sum, so
@@ -422,7 +423,7 @@ pub(crate) fn decide_residency(
 }
 
 /// Pre-load admission + residency-selection gate (sc-10835 Phase 0, sc-10839 Phase 1). Called on the
-/// generator cache's cold-load path, before `gen_core::load` allocates — never on a warm cache hit,
+/// generator cache's cold-load path, before `crate::inference_runtime::load` allocates — never on a warm cache hit,
 /// so an already-resident model is never re-gated. Resolves the budget + on-disk component bytes,
 /// delegates the choice to [`decide_residency`], and returns the [`LoadSpec`] to load with:
 ///  - fits resident (or no signal / unmeasurable weights) ⇒ the spec unchanged (warm resident path);
@@ -444,7 +445,8 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
     // (`mllm/`), bernini (flat `t5_encoder.safetensors`), anima (`text_encoders/` under `split_files/`),
     // etc. `Ok(None)` (provider declares no footprint) or an `Err` (unknown id / single-file source)
     // fall open to the subdir scan. Query BEFORE the match so both `Dir`/`File` arms see it.
-    let footprint_te = gen_core::footprint(engine_id, &spec)
+    let footprint_te = crate::inference_runtime::media()
+        .footprint(engine_id, &spec)
         .ok()
         .flatten()
         .map(|fp| fp.text_encoder);

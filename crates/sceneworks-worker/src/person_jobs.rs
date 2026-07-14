@@ -11,7 +11,7 @@
 //!  - **macOS = native MLX (mlx-rs)** (Michael's call, 2026-06-08). The whole Mac stack is
 //!    MLX (mlx-gen), and the `ort` CoreML EP *hangs indefinitely* in `commit_from_file` on
 //!    the Ultralytics YOLO11 ONNX export, so the `ort` path was abandoned for this model
-//!    *on CoreML*. The YOLO11m forward is assembled here from `mlx_gen::nn` primitives
+//!    *on CoreML*. The YOLO11m forward is assembled here from `runtime_macos::media::nn` primitives
 //!    (`conv2d`/`silu`/`upsample_nearest`) plus `mlx_rs::ops` for the CSP splits, depthwise
 //!    convs, SPPF max-pool, C2PSA attention, and the DFL/anchor decode head. Weights are the
 //!    conv+BN-fused `yolo11m_fused_mlx.safetensors` (MLX `(out, kH, kW, in)` layout — loaded
@@ -55,12 +55,6 @@ use serde_json::{json, Value};
 // CARVE-OUT(epic 3720): backend-specific; absorbed by Detector in Phase 6.
 // The native-MLX YOLO11m forward is the macOS backend.
 #[cfg(target_os = "macos")]
-use mlx_gen::nn::{conv2d, silu, upsample_nearest};
-#[cfg(target_os = "macos")]
-use mlx_gen::weights::Weights;
-#[cfg(target_os = "macos")]
-use mlx_gen::Result as MlxResult;
-#[cfg(target_os = "macos")]
 use mlx_rs::ops::indexing::TryIndexOp;
 #[cfg(target_os = "macos")]
 use mlx_rs::ops::{
@@ -69,6 +63,12 @@ use mlx_rs::ops::{
 };
 #[cfg(target_os = "macos")]
 use mlx_rs::Array;
+#[cfg(target_os = "macos")]
+use runtime_macos::media::nn::{conv2d, silu, upsample_nearest};
+#[cfg(target_os = "macos")]
+use runtime_macos::media::weights::Weights;
+#[cfg(target_os = "macos")]
+use runtime_macos::media::Result as MlxResult;
 
 // The off-Mac (Windows/Linux candle GPU-worker lane) backend is `ort` (onnxruntime) with the
 // CUDA execution provider + a CPU fallback (sc-5498) — the same EP pattern as `pose_jobs`.
@@ -199,7 +199,7 @@ fn sample_rgb(img: &RgbImage, x: f32, y: f32, c: usize, border: f32) -> f32 {
 }
 
 /// Destination layout for the shared letterbox preprocessor: NHWC (the layout
-/// `mlx_gen::nn::conv2d` expects, macOS) or NCHW (the `yolo11m.onnx` export expects,
+/// `runtime_macos::media::nn::conv2d` expects, macOS) or NCHW (the `yolo11m.onnx` export expects,
 /// off-Mac). The two backends' letterbox + cv2 half-pixel sampling are byte-identical;
 /// only the destination index differs (sc-8906, F-104).
 #[derive(Clone, Copy)]

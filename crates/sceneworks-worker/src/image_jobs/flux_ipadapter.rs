@@ -1,5 +1,5 @@
 // Candle (Windows/CUDA) FLUX XLabs IP-Adapter reference route (sc-5872, epic 5480) — reference-image
-// (identity) conditioning on FLUX.1 [dev]/[schnell] off-Mac via `candle_gen_flux::IpAdapterFlux`. The
+// (identity) conditioning on FLUX.1 [dev]/[schnell] off-Mac via `runtime_cuda::providers::flux::IpAdapterFlux`. The
 // FLUX sibling of the candle SDXL/Kolors IP-Adapter lanes (sdxl_ipadapter.rs / kolors_ipadapter.rs):
 // the pooled CLIP-ViT-L image embedding is projected (XLabs `ImageProjModel`) into image-prompt tokens
 // and injected as a decoupled cross-attention into the forked FLUX DiT's double blocks, denoised with

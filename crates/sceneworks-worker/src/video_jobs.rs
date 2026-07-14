@@ -35,15 +35,12 @@ use sceneworks_core::contracts::GenerationMetrics;
 use super::*;
 use crate::media_jobs::{run_ffmpeg, FfmpegContext};
 
-// Real MLX Wan2.2 generation (macOS, sc-3034). The provider crate self-registers its
-// three models via `inventory` only when linked + referenced (`use mlx_gen_wan as _;`,
-// the same link-time pattern as the image families in `image_jobs.rs`).
+// Real MLX Wan2.2 generation (macOS, sc-3034). `runtime-macos` explicitly includes all three Wan
+// registrations in its validated media catalog.
 #[cfg(target_os = "macos")]
 use crate::image_jobs::{classify_adapter, load_reference_image, lora_path};
-// epic 3720 (sc-3724): the backend-neutral generation contract types come from `gen_core`; the
-// `as _;` provider links below stay mlx-gen-specific (they register the video engines into the
-// registry). `cfg(target_os)` decides which backend crates link, not which contract types this
-// module names.
+// epic 3720 (sc-3724): the backend-neutral generation contract types come from `gen_core` while the
+// compile-time runtime bundle decides which backend catalog this module loads from.
 // Backend-neutral contract types shared by the macOS MLX video path AND the Windows candle video
 // lane (sc-5097): the streaming driver (`generate_video`), the output decode
 // (`run_loaded_video_generation`), and `VideoGenInput`/`video_load_spec` are all backend-neutral, so
@@ -55,7 +52,7 @@ use crate::image_jobs::{classify_adapter, load_reference_image, lora_path};
 ))]
 use gen_core::{
     AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Generator,
-    LoadSpec, Precision, Progress, Quant, WeightsSource,
+    LoadPhase, LoadSpec, Precision, Progress, Quant, WeightsSource,
 };
 // MLX-only contract types (LoRA classification, MoE experts) — the candle video lane uses none of these.
 #[cfg(target_os = "macos")]
@@ -67,54 +64,6 @@ use gen_core::{AdapterKind, MoeExpert};
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use gen_core::{Image, ReplacementMode};
-#[cfg(target_os = "macos")]
-use mlx_gen_ltx as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_seedvr2 as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_svd as _;
-#[cfg(target_os = "macos")]
-use mlx_gen_wan as _;
-// Bernini (epic 4699): the full planner+renderer `Generator` registers under `bernini` via
-// `inventory::submit!`; force-link so the registration survives the linker (reached only through
-// `gen_core::load("bernini")`, no direct type contact — the "no generator registered" trap).
-#[cfg(target_os = "macos")]
-use mlx_gen_bernini as _;
-// SCAIL-2 (epic 5439): the character-animation `Generator` registers under `scail2_14b` via
-// `inventory::submit!`; force-link so the registration survives the linker (reached only through
-// `gen_core::load("scail2_14b")`, no direct type contact — the "no generator registered" trap).
-#[cfg(target_os = "macos")]
-use mlx_gen_scail2 as _;
-// Candle (Windows/CUDA) video providers (sc-5097; sc-5493 adds svd) — force-link anchors so their
-// `inventory::submit!` registrations (`wan2_2_ti2v_5b` / `ltx_2_3_distilled` / `svd_xt`) survive the
-// MSVC release linker, mirroring the image providers in image_jobs.rs.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_ltx as _;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_svd as _;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_wan as _;
-// Candle SeedVR2 video upscaler (sc-5928, epic 4811 / epic 5482) — the Windows/CUDA sibling of the
-// Mac `mlx_gen_seedvr2` anchor above. Self-registers `seedvr2_3b` (+ `seedvr2` / `seedvr2_7b`) into
-// the shared gen_core inventory; the `video_upscale` path reaches it via `gen_core::load` from
-// `run_video_upscale_job`. Force-linked so the MSVC release linker keeps the `inventory::submit!`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_seedvr2 as _;
-// Candle SCAIL-2 (sc-6837, epic 6563): the character-animation + cross-identity replace_person
-// `Generator` registers under `scail2_14b` via `inventory::submit!`; force-link so the registration
-// survives the MSVC release linker (reached only through `gen_core::load("scail2_14b")`, no direct type
-// contact — the "no generator registered" trap). The off-Mac sibling of the macOS `mlx_gen_scail2`
-// anchor above.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_scail2 as _;
-// Candle Bernini (sc-10997, epic 6562): the full Qwen planner + Wan2.2-T2V-A14B renderer `Generator`
-// registers under `bernini` via `inventory::submit!`; force-link so the registration survives the MSVC
-// release linker (reached only through `gen_core::load("bernini")`, no direct type contact — the "no
-// generator registered" trap). The off-Mac VIDEO sibling of the macOS `mlx_gen_bernini` anchor above
-// (image_jobs.rs already force-links the same crate for the still lane; inventory is global, but the
-// video lane keeps its own anchor for parity with the `candle_gen_scail2` video anchor).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_bernini as _;
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -299,7 +248,7 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
     } else if let Some(engine_id) = candle_bernini_engine_id(&request.model) {
         // Bernini (sc-10997, epic 6562): the full Qwen planner + Wan2.2-T2V-A14B renderer serves t2v +
         // the editing/reference/multi-source modes (v2v / r2v / rv2v / mv2v / ads2v). A DISTINCT engine
-        // (`gen_core::load("bernini")`), NOT a wan/ltx `is_candle_video_engine` id, so it is routed off the
+        // (`crate::inference_runtime::load("bernini")`), NOT a wan/ltx `is_candle_video_engine` id, so it is routed off the
         // model id BEFORE the generic candle-video arm below. Routed by model id, not weight availability —
         // `generate_candle_bernini` resolves-or-errors loudly if the `SceneWorks/bernini` snapshot is
         // unprovisioned (sc-11003), never degrading to a stub. The per-mode source media is validated when
@@ -1323,14 +1272,14 @@ fn video_progress(
 // ---------------------------------------------------------------------------
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_seedvr2::video as seedvr2_video;
+use runtime_cuda::providers::seedvr2::video as seedvr2_video;
 /// The SeedVR2 provider's pure temporal-chunk planning/blend module (`video::plan_chunks`,
 /// `video::assemble_overlap`, `DEFAULT_OVERLAP`, `Chunk`), reused ONE LEVEL UP for worker-window
 /// streaming (sc-9595). Both provider crates expose an identical `video` module over `gen_core::Image`
 /// (byte-identical seam math), so the worker-window cross-fade is the engine's own — the worker never
 /// reimplements the blend. Aliased per platform: MLX on Mac, candle on the Windows/CUDA lane.
 #[cfg(target_os = "macos")]
-use mlx_gen_seedvr2::video as seedvr2_video;
+use runtime_macos::providers::seedvr2::video as seedvr2_video;
 
 /// HF repo hosting the raw SeedVR2 checkpoint (`numz/SeedVR2_comfyUI`); the engine converts it
 /// in-memory at load (no Python). Override the staged dir with `SCENEWORKS_SEEDVR2_DIR`.
@@ -3763,12 +3712,12 @@ fn scail2_sampling(
 fn scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
     adapters
         .iter()
-        .any(|a| mlx_gen_scail2::has_diff_patch_keys(&a.path).unwrap_or(false))
+        .any(|a| runtime_macos::providers::scail2::has_diff_patch_keys(&a.path).unwrap_or(false))
 }
 
 /// In-place ComfyUI Wan2.2 A14B experts for the sc-10671 base lane (epic 10451 Phase 2c). When set on a
 /// [`VideoGenInput`], [`generate_video`] builds the two experts from these files (key remap +
-/// scaled-fp8 dequant, `candle_gen_wan::load_from_comfyui_experts`) via the uncached bespoke load path
+/// scaled-fp8 dequant, `runtime_cuda::providers::wan::load_from_comfyui_experts`) via the uncached bespoke load path
 /// instead of the registry snapshot. The UMT5 TE + VAE are read in place too when `te_file` / `vae_file`
 /// are set (sc-10909), else they come from `model_dir` (a resident Wan snapshot tier); the tiny
 /// tokenizer always comes from `model_dir`. Read in place, never copied.
@@ -3998,7 +3947,7 @@ fn run_loaded_video_generation(
 #[cfg(all(target_os = "macos", test))]
 fn load_video_generation_for_tests(input: &VideoGenInput) -> WorkerResult<Box<dyn Generator>> {
     let spec = video_load_spec(input);
-    gen_core::load(input.engine_id, &spec)
+    crate::inference_runtime::load(input.engine_id, &spec)
         .map_err(|error| crate::classify_engine_error("video load failed", error))
 }
 
@@ -4102,7 +4051,7 @@ pub(crate) async fn begin_video_cancel(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn video_engine_sampling_surface(engine_id: &str) -> (Vec<&'static str>, Vec<&'static str>) {
-    gen_core::registry::generators()
+    crate::inference_runtime::generators()
         .map(|reg| (reg.descriptor)())
         .find(|descriptor| descriptor.id == engine_id)
         .map(|descriptor| {
@@ -4315,7 +4264,7 @@ async fn generate_video(
                 Some((high, low, te, vae, snapshot, i2v)) => {
                     crate::generator_cache::with_uncached_generator(
                         move || {
-                            candle_gen_wan::wan14b::load_from_comfyui_experts(
+                            runtime_cuda::providers::wan::wan14b::load_from_comfyui_experts(
                                 high, low, te, vae, snapshot, i2v,
                             )
                             .map_err(|error| {
@@ -4371,7 +4320,7 @@ async fn generate_video(
     // Time of the most recent progress event; the forward-progress watchdog fails the job if
     // this goes stale for `stall_timeout` (covers both the silent load phase and step-to-step).
     let mut last_progress = Instant::now();
-    // Interval arm so the cold model-load phase (gen_core::load emits no progress)
+    // Interval arm so the cold model-load phase (crate::inference_runtime::load emits no progress)
     // still heartbeats and polls cancel, instead of looking dead to the API's
     // staleness check until the first denoise step (sc-4276 / F-MLXW-12; mirrors
     // the caption-job select!-with-interval).
@@ -4423,25 +4372,38 @@ async fn generate_video(
                             }
                         }
                         Progress::Decoding => phase_timer.mark_decoding(Instant::now()),
-                        // Sequential-residency component-load boundary (gen-core sc-11126) — no phase mark.
                         Progress::Loading(_) => {}
                     }
-                    let (fraction, message) = match progress {
+                    let (status, stage, fraction, message) = match progress {
                         Progress::Step { current, total } => (
+                            JobStatus::Running,
+                            ProgressStage::Generating,
                             0.25 + 0.30 * (current as f64 / total.max(1) as f64),
                             format!("Generating frames — step {current}/{total}."),
                         ),
-                        Progress::Decoding => (0.58, "Decoding frames.".to_owned()),
-                        // A Sequential-residency component (text encoder / renderer) is (re)loading before
-                        // denoise starts; surface a stable pre-generation status without regressing the bar.
-                        Progress::Loading(_) => (0.22, "Loading model components.".to_owned()),
+                        Progress::Decoding => (
+                            JobStatus::Running,
+                            ProgressStage::Generating,
+                            0.58,
+                            "Decoding frames.".to_owned(),
+                        ),
+                        Progress::Loading(phase) => (
+                            JobStatus::LoadingModel,
+                            ProgressStage::LoadingModel,
+                            0.24,
+                            match phase {
+                                LoadPhase::TextEncoder => "Loading text encoder.",
+                                LoadPhase::Renderer => "Loading render components.",
+                            }
+                            .to_owned(),
+                        ),
                     };
                     update_job(
                         api,
                         &job.id,
                         video_progress(
-                            JobStatus::Running,
-                            ProgressStage::Generating,
+                            status,
+                            stage,
                             fraction,
                             &message,
                             None,
@@ -5296,7 +5258,7 @@ async fn generate_candle_video(
 // Candle (Windows/CUDA) in-place ComfyUI Wan2.2 base generation (epic 10451 Phase 2c, sc-10671): the
 // video sibling of the z-image/qwen ComfyUI base image lanes. Reads a user's two ComfyUI Wan A14B
 // expert files in place (native-Wan keys + companion scaled-fp8), remapped + dequant'd off-Mac via
-// `candle_gen_wan::load_from_comfyui_experts`. The UMT5 TE + VAE are read in place too when the tree
+// `runtime_cuda::providers::wan::load_from_comfyui_experts`. The UMT5 TE + VAE are read in place too when the tree
 // carries them (sc-10909, folded into `components[]` by the API); the tokenizer (and either component
 // when absent) comes from a resident `SceneWorks/wan2.2-*-candle` snapshot tier. T2V only for now
 // (I2V's channel-concat reference conditioning is a follow-up); the model id is an `external_base_*`
@@ -5517,7 +5479,7 @@ async fn generate_candle_wan_comfyui(
 // `replace_person` (engine `replace_flag`) over the saved YOLO11 → ByteTrack → SAM3 person track. The
 // worker paints the color-coded masks from the candle SAM3 segmenter (`person_segment_sam3_candle`);
 // the painters (`scail2_masks`) are shared with the MLX lane. A distinct candle engine, NOT VACE — no
-// torch fallback (`gen_core::load("scail2_14b")` resolves the `candle_gen_scail2` provider, sc-6836).
+// torch fallback (`crate::inference_runtime::load("scail2_14b")` resolves the `candle_gen_scail2` provider, sc-6836).
 // ---------------------------------------------------------------------------
 
 /// Adapter id recorded on a real candle SCAIL-2 asset (the candle sibling of `mlx_scail2`).
@@ -5614,7 +5576,7 @@ const CANDLE_SCAIL2_LIGHTNING_SHIFT: f32 = 1.0;
 /// Build the candle SCAIL-2 adapter specs from `request.loras` — the candle sibling of the macOS
 /// `resolve_scail2_adapters` (sc-5451). SCAIL-2 is a single dense Wan2.1-14B-I2V transformer (no MoE
 /// high/low), so every adapter is shared (`moe_expert: None`); the engine merges LoRA / LoKr / LoHa and
-/// the lightx2v lightning diff-patch into the dense DiT before build ([`candle_gen_scail2::merge_adapters`]).
+/// the lightx2v lightning diff-patch into the dense DiT before build ([`runtime_cuda::providers::scail2::merge_adapters`]).
 /// Carries both a user-selected SCAIL-2 LoRA and the bundled Bias-Aware DPO quality LoRA (both surface
 /// through `request.loras`); selecting a lightning diff-patch LoRA makes the worker apply the
 /// step-distill recipe ([`candle_scail2_sampling`]). Delegates to the shared [`resolve_dense_adapters`]
@@ -5637,7 +5599,7 @@ fn candle_resolve_scail2_adapters(
 fn candle_scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
     adapters
         .iter()
-        .any(|a| candle_gen_scail2::has_diff_patch_keys(&a.path).unwrap_or(false))
+        .any(|a| runtime_cuda::providers::scail2::has_diff_patch_keys(&a.path).unwrap_or(false))
 }
 
 /// SCAIL-2 sampling recipe `(steps, guidance, scheduler_shift)`. When a lightx2v diff-patch "lightning"
@@ -6686,8 +6648,8 @@ async fn generate_bernini(
 // Real candle Bernini VIDEO generation (Windows/CUDA, via candle-gen-bernini, sc-10997 / epic 6562):
 // the off-Mac sibling of the macOS `generate_bernini` above. The full Qwen2.5-VL planner + Wan2.2-T2V-
 // A14B renderer registers under `bernini` (`Modality::Video`); the video path reaches it via
-// `gen_core::load("bernini")` (no direct type contact — the force-link near the top keeps the linker
-// from dropping the registration). Serves `text_to_video` + the editing/reference/multi-source video
+// `crate::inference_runtime::load("bernini")` through runtime-cuda's explicit catalog. Serves
+// `text_to_video` + the editing/reference/multi-source video
 // modes (v2v / r2v / rv2v / mv2v / ads2v); `generate_candle_bernini` maps the SceneWorks mode to the
 // engine guidance task and resolves the source media into the planner conditioning. Loads the converted
 // `SceneWorks/bernini` snapshot DENSE (the candle loader reads the tree as-is; the off-Mac
@@ -8217,7 +8179,7 @@ fn ic_lora_marker(text: &str) -> bool {
 
 /// Build the in-context [`Conditioning::VideoClip`] set for extend_clip / video_bridge (sc-3522).
 /// Source-of-truth = torch `_ltx_video_conditioning` (video_adapters.py) + the engine consumer
-/// `mlx_gen_ltx::build_clips`: each source clip's frames are appended as IC-LoRA in-context tokens
+/// `runtime_macos::providers::ltx::build_clips`: each source clip's frames are appended as IC-LoRA in-context tokens
 /// at an output **latent** frame index, with a `1 − strength` denoise mask.
 /// - **extend_clip** → one clip pinned at latent frame `0`, strength `videoConditioningStrength`.
 /// - **video_bridge** → a left clip at `0` (strength `videoConditioningStrength`) + a right clip at
@@ -8920,7 +8882,7 @@ fn replacement_mode_from(value: &str) -> ReplacementMode {
 }
 
 /// Whether `dir` is a load-ready assembled Wan-VACE snapshot — the diffusers VACE
-/// `transformer/` plus the shared base-Wan UMT5/VAE/tokenizer that `gen_core::load("wan_vace")`
+/// `transformer/` plus the shared base-Wan UMT5/VAE/tokenizer that `crate::inference_runtime::load("wan_vace")`
 /// reads (sc-3467 `assemble_wan_vace_snapshot` layout).
 #[cfg(target_os = "macos")]
 fn wan_vace_dir_is_complete(dir: &Path) -> bool {
@@ -8977,8 +8939,13 @@ fn resolve_wan_vace_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
             )
         })?;
     // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
-    mlx_gen_wan::convert::assemble_wan_vace_snapshot(&out_dir, &transformer_dir, &base_wan, true)
-        .map_err(|error| {
+    runtime_macos::providers::wan::convert::assemble_wan_vace_snapshot(
+        &out_dir,
+        &transformer_dir,
+        &base_wan,
+        true,
+    )
+    .map_err(|error| {
         WorkerError::InvalidPayload(format!(
             "replace_person: failed to assemble the Wan-VACE snapshot: {error}"
         ))
@@ -8988,7 +8955,7 @@ fn resolve_wan_vace_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
 
 /// Whether `dir` is a load-ready assembled Wan2.2 VACE-Fun snapshot — BOTH diffusers VACE-Fun
 /// expert dirs (`transformer/` high-noise + `transformer_2/` low-noise) plus the shared base-Wan
-/// UMT5/VAE/tokenizer that `gen_core::load("wan2_2_vace_fun_14b")` reads (sc-6604
+/// UMT5/VAE/tokenizer that `crate::inference_runtime::load("wan2_2_vace_fun_14b")` reads (sc-6604
 /// `assemble_wan_vace_fun_snapshot` layout).
 #[cfg(target_os = "macos")]
 fn wan_vace_fun_dir_is_complete(dir: &Path) -> bool {
@@ -9051,12 +9018,14 @@ fn resolve_wan_vace_fun_model_dir(settings: &Settings) -> WorkerResult<PathBuf> 
             )
         })?;
     // CARVE-OUT(epic 3720): backend-specific weight packager; not a registry contract.
-    mlx_gen_wan::convert::assemble_wan_vace_fun_snapshot(&out_dir, &high, &low, &base_wan, true)
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "wan_2_2_vace_fun_14b: failed to assemble the VACE-Fun snapshot: {error}"
-            ))
-        })?;
+    runtime_macos::providers::wan::convert::assemble_wan_vace_fun_snapshot(
+        &out_dir, &high, &low, &base_wan, true,
+    )
+    .map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "wan_2_2_vace_fun_14b: failed to assemble the VACE-Fun snapshot: {error}"
+        ))
+    })?;
     Ok(out_dir)
 }
 
@@ -10901,8 +10870,8 @@ mod tests {
     }
 
     /// Real in-process Bernini text-to-video through the WORKER registry path (epic 4699 / sc-4707):
-    /// `gen_core::load("bernini")` (proves the `mlx_gen_bernini` force-link survived in the worker
-    /// binary — the "no generator registered" trap) → Q4 → a tiny t2v clip, asserting RGB8 frames
+    /// `crate::inference_runtime::load("bernini")` (proves runtime-macos includes Bernini — the
+    /// "no generator registered" trap) → Q4 → a tiny t2v clip, asserting RGB8 frames
     /// stream back with denoise progress. Also confirms the lean published `SceneWorks/bernini-mlx`
     /// snapshot loads. `#[ignore]` — weights live outside CI; run on a Mac with the snapshot present.
     /// The quant tier (`SCENEWORKS_BERNINI_SMOKE_QUANT`) and dims (`..._W`/`_H`/`_FRAMES`/`_STEPS`)
@@ -11478,8 +11447,8 @@ mod tests {
     /// Real in-process SCAIL-2 through the WORKER registry path (epic 5439 / sc-5450): drive both
     /// engine tasks — `animation` (standalone `animate_character`) and `replacement` (cross-identity
     /// `replace_person`) — with a synthetic reference + color mask + driving clip + per-frame color
-    /// masks, asserting each `video_mode` loads via `gen_core::load("scail2_14b")` (proving the
-    /// `mlx_gen_scail2` force-link survived in the worker binary — the "no generator registered"
+    /// masks, asserting each `video_mode` loads via `crate::inference_runtime::load("scail2_14b")`
+    /// (proving runtime-macos includes SCAIL-2 — the "no generator registered"
     /// trap), consumes the conditioning, and streams RGB8 frames with denoise progress. The driving
     /// background follows the replacement convention (animation → black, replacement → white).
     /// `#[ignore]` — the ~47 GB snapshot lives outside CI; run manually on a Mac where it is present
@@ -12691,7 +12660,7 @@ mod tests {
 
     /// **sc-10049 (epic 10043) — the on-device close of the loop on sc-10030.** Drives the REAL
     /// Wan2.2 T2V-A14B **q4** tier through the exact engine path a job uses (`run_video_generation`
-    /// → `gen_core::load` → `Generator::generate`) with the Lightning distill pair installed as
+    /// → `crate::inference_runtime::load` → `Generator::generate`) with the Lightning distill pair installed as
     /// **forward-time additive adapters** on the pre-quantized (packed) experts. This is the exact
     /// case that FAILED before this epic with the mlx-gen `model.rs:614` rejection —
     /// `"LoRA adapters on a pre-quantized snapshot need dequantize-then-merge … not yet wired"` —
@@ -13470,7 +13439,6 @@ mod tests {
                 // Peak so far = the DiT-denoise peak (the VAE decode is the *next* stage).
                 dit_peak_bytes.get_or_insert(mlx_rs::memory::get_peak_memory());
             }
-            // Sequential-residency component-load boundary (gen-core sc-11126) — not a step/decode marker.
             Progress::Loading(_) => {}
         };
         let decoded =

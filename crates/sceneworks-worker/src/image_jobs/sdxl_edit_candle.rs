@@ -1,5 +1,5 @@
 // Candle (Windows/CUDA) SDXL img2img / inpaint / outpaint edit route (sc-5487, epic 5480) — pixel-
-// conditioned editing on SDXL/RealVisXL off-Mac via `candle_gen_sdxl::SdxlEdit`. The edit sibling of the
+// conditioned editing on SDXL/RealVisXL off-Mac via `runtime_cuda::providers::sdxl::SdxlEdit`. The edit sibling of the
 // candle SDXL IP-Adapter lane (sdxl_ipadapter.rs): the same SDXL base resolution + stream plumbing, but
 // a SOURCE (and optional mask) instead of a reference, across the three edit sub-modes.
 //

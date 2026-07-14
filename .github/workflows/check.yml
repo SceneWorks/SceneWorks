@@ -31,6 +31,10 @@ jobs:
 
   parity:
     runs-on: ubuntu-latest
+    env:
+      # Fetch the private inference source once with a scoped credential, then force every build
+      # and build.rs process offline so the token is absent from their environment.
+      CARGO_NET_OFFLINE: "true"
     # A stalled step (e.g. a transient `docker compose up --build` layer/registry
     # hang in the Docker smoke) otherwise rides GitHub's 6-hour default timeout,
     # blocking the PR and holding a runner for hours — this bit PR #1300 / sc-10354
@@ -53,6 +57,13 @@ jobs:
           toolchain: stable
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+      - name: Fetch the private inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
+          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
+        run: cargo fetch --locked
       - name: Install contract test dependencies
         # pillow / numpy / opencv were only needed by the retired Python worker's
         # adapter tests, deleted in sc-8863; the surviving suite (Rust-API
@@ -83,7 +94,7 @@ jobs:
           npm run check:nc-weights
       - name: Guard against gen-core version skew (sc-4482, epic 3720)
         # Fails if more than one distinct `sceneworks-gen-core` rev resolves in the worker's
-        # build graph (the inventory skew trap => runtime "engine not found"). `--target all`
+        # build graph (split contract types can invalidate explicit catalog wiring). `--target all`
         # resolves the macOS-only mlx-gen transitive gen-core even on this Linux lane. The
         # self-test proves the gate fires without a deliberately-broken pin checked in.
         run: |
@@ -142,4 +153,6 @@ jobs:
           fi
       - name: Smoke default Rust API Docker runtime
         if: steps.docker_smoke_gate.outputs.run == 'true'
+        env:
+          SCENEWORKS_INFERENCE_READ_TOKEN: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}
         run: npm run check:docker:rust-api

@@ -89,7 +89,7 @@ mod tests {
     // error through `classify_engine_error`, which must surface it as a USER-FACING validation error
     // (`WorkerError::InvalidPayload`) — distinct from an opaque internal `Engine` failure — WITHOUT
     // swallowing the engine's message text. This injects the typed error at the seam (no real
-    // checkpoint) exactly as `gen_core::load` would return it.
+    // checkpoint) exactly as `crate::inference_runtime::load` would return it.
     #[test]
     fn unsupported_engine_error_surfaces_as_user_facing_validation_with_message_intact() {
         let steer = "LoHa adapters require a bf16 base; this model is quantized (q4). \

@@ -1,7 +1,7 @@
 //! Local real-weight GPU smoke for the candle SCAIL-2 worker lane (sc-6837 / sc-6836). `#[ignore]`d —
 //! run by hand on the RTX PRO 6000. It drives the **shipped** worker conditioning code
 //! ([`crate::person_segment_sam3_candle::segment_all_persons_in_memory`] + the [`crate::scail2_masks`]
-//! painters) and then the real candle SCAIL-2 engine via `gen_core::load("scail2_14b")` — the same
+//! painters) and then the real candle SCAIL-2 engine via `crate::inference_runtime::load("scail2_14b")` — the same
 //! runtime seam the worker uses, minus the API/job plumbing. This is the engine + worker-conditioning
 //! validation that backs both stories' GPU merge gate.
 //!
@@ -74,7 +74,6 @@ fn avg_frame_std(frames: &[Image]) -> f64 {
 #[ignore = "real-weight GPU smoke; needs the candle SCAIL-2 snapshot + SAM3 weights + driving assets"]
 fn scail2_candle_gpu_smoke() {
     // Anchor the provider's inventory registration into the test binary (mirrors video_jobs.rs).
-    use candle_gen_scail2 as _;
 
     let snapshot = env_path("SCENEWORKS_CANDLE_SCAIL2_DIR");
     let sam3_dir = env_path("SCAIL2_SAM3_DIR");
@@ -167,7 +166,7 @@ fn scail2_candle_gpu_smoke() {
         height
     );
 
-    // --- build the request + run the engine via the worker's runtime seam (gen_core::load) ---
+    // --- build the request + run the engine via the worker's runtime seam (crate::inference_runtime::load) ---
     let conditioning = vec![
         Conditioning::Reference {
             image: reference,
@@ -222,7 +221,8 @@ fn scail2_candle_gpu_smoke() {
         }
         _ => LoadSpec::new(WeightsSource::Dir(snapshot)),
     };
-    let generator = gen_core::load("scail2_14b", &spec).expect("load scail2_14b candle provider");
+    let generator = crate::inference_runtime::load("scail2_14b", &spec)
+        .expect("load scail2_14b candle provider");
 
     let mut last = String::new();
     let output = generator

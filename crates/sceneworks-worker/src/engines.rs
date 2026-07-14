@@ -22,7 +22,7 @@
 pub(crate) struct ModelRow {
     /// SceneWorks model id (the job payload `model`).
     pub sceneworks_id: &'static str,
-    /// registry id passed to `gen_core::load`.
+    /// registry id passed to `crate::inference_runtime::load`.
     pub engine_id: &'static str,
     /// Default HuggingFace repo when the manifest entry omits `repo`.
     pub default_repo: &'static str,
@@ -219,7 +219,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         // repo is single-file (GGUF/safetensors) with no diffusers tree, so it loads from a
         // locally-assembled converted dir via the `modelPath` seam (manifest `modelPath`),
         // NOT the source repo below. The convert step is now native Rust/MLX
-        // (mlx_gen_flux2::convert_and_assemble, sc-3136; run by the model_convert job).
+        // (runtime_macos::providers::flux2::convert_and_assemble, sc-3136; run by the model_convert job).
         sceneworks_id: "flux2_klein_9b_true_v2",
         engine_id: "flux2_klein_9b",
         default_repo: "wikeeyang/Flux2-Klein-9B-True-V2",
@@ -582,8 +582,8 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // distinct (smaller) transformer + its own recipe — 40 steps / guidance 5.0 (Stability's card notes
     // Medium is more guidance-sensitive than Large). The `sd3_5_medium` descriptor advertises
     // supports_guidance + supports_negative + supports_true_cfg. Installs a packed dir via the
-    // `sd3_5_medium_quant` converter (model_jobs.rs). The generator self-registers via the shared
-    // force-link (`use mlx_gen_sd3 as _;` in image_jobs.rs) now that M3 is on mlx-gen main (rev 1a784cd).
+    // `sd3_5_medium_quant` converter (model_jobs.rs). `runtime-macos` explicitly includes the M3
+    // registration in its platform catalog.
     ModelRow {
         sceneworks_id: "sd3_5_medium",
         engine_id: "sd3_5_medium",
@@ -601,8 +601,8 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // Loads the un-gated `SceneWorks/Sana_1600M_1024px_mlx` MLX snapshot (transformer/ vae/ text_encoder/,
     // the latter bundling the SceneWorks/gemma-2-2b-it TE so the load path resolves one snapshot dir —
     // SanaTextEncoder::from_snapshot reads `<dir>/text_encoder/gemma-2-2b-it.safetensors` + tokenizer.json).
-    // Generator self-registers via the shared force-link (`use mlx_gen_sana as _;` in image_jobs.rs);
-    // reaches the generic MODEL_TABLE / `generate_stream` path. Quant matrix (sc-8489/sc-8513): ships
+    // The runtime catalog exposes this through the generic MODEL_TABLE / `generate_stream` path.
+    // Quant matrix (sc-8489/sc-8513): ships
     // pre-packed q4/q8/bf16 tiers (transformer + Gemma-2 TE packed, DC-AE VAE dense), packed-detected
     // on load — NOT the (unported) 2-bit SANA quant. 32× DC-AE divisor → W/H must be multiples of 32.
     ModelRow {
@@ -615,7 +615,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     },
     // SANA-Sprint 1.6B 1024px (epic 8485 / sc-8490) — the few-step distillation of SANA over the SAME
     // Linear-DiT trunk + gemma-2-2b-it CHI encoder + 32× DC-AE decoder, ported natively to mlx-gen (engine
-    // id `sana_sprint_1600m`, registered by `SanaPipeline::new_sprint` via the shared force-link). Sprint
+    // id `sana_sprint_1600m`, explicitly included by `runtime-macos`). Sprint
     // is CFG-FREE: a guidance scalar is folded into the trunk via a guidance-embedding (no negative-prompt
     // second pass) and sampled by the SCM (continuous-time consistency / trigflow) sampler — so it runs in
     // ~2 steps (the `sana_sprint_1600m` descriptor advertises NO supports_true_cfg / supports_negative).
@@ -642,7 +642,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // `default_repo` is that source repo, not a SceneWorks re-host. The engine descriptor advertises the
     // full curated sampler/scheduler menu (er_sde default, sc-10519); the manifest `limits` menu is a
     // subset (the drift guard). All three reach the generic `generate_stream` path via
-    // `use mlx_gen_anima as _;`. supports_lora/lokr = true; quant + LoRA together is unsupported (sc-10578).
+    // `runtime-macos` catalog. supports_lora/lokr = true; quant + LoRA together is unsupported (sc-10578).
     ModelRow {
         sceneworks_id: "anima_base",
         engine_id: "anima_base",
@@ -815,7 +815,7 @@ pub(crate) fn mlx_model(sceneworks_id: &str) -> Option<ResolvedModel> {
     let row = MODEL_TABLE
         .iter()
         .find(|r| r.sceneworks_id == sceneworks_id)?;
-    let descriptor = gen_core::registry::generators()
+    let descriptor = crate::inference_runtime::generators()
         .map(|reg| (reg.descriptor)())
         .find(|d| d.id == row.engine_id)?;
     Some(ResolvedModel { row, descriptor })
@@ -835,6 +835,18 @@ pub(crate) fn mlx_model(sceneworks_id: &str) -> Option<ResolvedModel> {
 pub(crate) fn registry_capabilities(
     settings: &crate::Settings,
 ) -> Vec<sceneworks_core::contracts::WorkerCapability> {
+    registry_capabilities_from(
+        settings,
+        crate::inference_runtime::media(),
+        crate::inference_runtime::text(),
+    )
+}
+
+fn registry_capabilities_from(
+    settings: &crate::Settings,
+    media: &gen_core::ProviderRegistry,
+    text: &gen_core::core_llm::TextLlmRegistry,
+) -> Vec<sceneworks_core::contracts::WorkerCapability> {
     use sceneworks_core::contracts::WorkerCapability as Cap;
 
     let mut backends: Vec<&'static str> = Vec::new();
@@ -852,7 +864,7 @@ pub(crate) fn registry_capabilities(
         }
     };
 
-    for reg in gen_core::registry::generators() {
+    for reg in media.generators() {
         let d = (reg.descriptor)();
         if !backends.contains(&d.backend) {
             continue;
@@ -878,7 +890,7 @@ pub(crate) fn registry_capabilities(
     // generators above — a candle-only trainer no longer lights up under `backend_mlx_enabled`
     // alone, and vice versa. `lora_train` (dry-run plan validation) and `lora_train_execute` (real
     // run) are both served in-process by the same trainer registry, so they light up together.
-    if gen_core::registry::trainers().any(|r| {
+    if media.trainers().any(|r| {
         let d = (r.descriptor)();
         backends.contains(&d.backend) && TRAINER_IDS.contains(&d.id)
     }) {
@@ -887,7 +899,7 @@ pub(crate) fn registry_capabilities(
     }
     // The JoyCaption captioner registers under the HF repo id (mlx-gen `JOY_CAPTION_MODEL_ID`),
     // not a short name.
-    if gen_core::registry::captioners().any(|r| {
+    if media.captioners().any(|r| {
         let d = (r.descriptor)();
         backends.contains(&d.backend) && d.id == "fancyfeast/llama-joycaption-beta-one-hf-llava"
     }) {
@@ -897,11 +909,11 @@ pub(crate) fn registry_capabilities(
     // embedders under `clip_vit_l14` + `clip_vit_l14_text`. Advertise `dataset_analysis` only when
     // both are registered on an enabled backend, so the worker cannot claim a caption-alignment job
     // with only half the CLIP pair linked.
-    let has_clip_image = gen_core::registry::image_embedders().any(|r| {
+    let has_clip_image = media.image_embedders().any(|r| {
         let d = (r.descriptor)();
         backends.contains(&d.backend) && d.id == "clip_vit_l14"
     });
-    let has_clip_text = gen_core::registry::text_embedders().any(|r| {
+    let has_clip_text = media.text_embedders().any(|r| {
         let d = (r.descriptor)();
         backends.contains(&d.backend) && d.id == "clip_vit_l14_text"
     });
@@ -928,7 +940,7 @@ pub(crate) fn registry_capabilities(
     // image_caption job on the JSON constraint alone (see `prompt_refine_jobs.rs`). Do NOT broaden this
     // gate to admit vision-only providers (e.g. `mlx-joycaption`) — they carry no constraints and would
     // over-advertise `prompt_refine` on a vision-only worker without serving the Json caption path.
-    let native_prompt_refine = gen_core::core_llm::textllms().any(|r| {
+    let native_prompt_refine = text.registrations().any(|r| {
         let d = (r.descriptor)();
         backends.contains(&d.backend.as_str()) && !d.capabilities.supports_vision
     });
@@ -1230,7 +1242,7 @@ mod tests {
         if ids.is_empty() {
             return None;
         }
-        gen_core::registry::generators()
+        crate::inference_runtime::generators()
             .map(|reg| (reg.descriptor)())
             .find(|d| ids.contains(&d.id))
     }
@@ -1263,7 +1275,7 @@ mod tests {
         };
         match sceneworks_id {
             "instantid_realvisxl" => Some(curated()),
-            "pulid_flux_dev" => gen_core::registry::generators()
+            "pulid_flux_dev" => crate::inference_runtime::generators()
                 .map(|reg| (reg.descriptor)())
                 .find(|d| d.id == "pulid_flux")
                 .map(|d| {
@@ -1445,10 +1457,8 @@ mod tests {
         }
     }
 
-    // An MLX-backed stub generator registered into the same `inventory` registry the real
-    // provider crates use, with an id that IS in MODEL_TABLE (`z_image_turbo`). On Linux/Windows
-    // no real provider crate is linked, so this is the only generator the derivation sees — which
-    // is exactly the point: it proves the derivation works off-macOS purely from the registry.
+    // Explicit test registrations exercise capability derivation without mutating a process-global
+    // provider inventory. Their ids deliberately cover in-table, unknown, LLM, and trainer cases.
     fn stub_mlx_descriptor() -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
             id: "z_image_turbo",
@@ -1461,9 +1471,11 @@ mod tests {
     fn stub_mlx_load(_spec: &gen_core::LoadSpec) -> gen_core::Result<Box<dyn gen_core::Generator>> {
         unimplemented!("registry-derivation test stub never loads")
     }
-    inventory::submit! {
-        gen_core::registry::ModelRegistration { descriptor: stub_mlx_descriptor, load: stub_mlx_load, footprint: None }
-    }
+    const STUB_MLX: gen_core::ModelRegistration = gen_core::ModelRegistration {
+        descriptor: stub_mlx_descriptor,
+        load: stub_mlx_load,
+        footprint: None,
+    };
 
     // A candle-backed stub whose id is also in MODEL_TABLE (`sdxl`): proves a Windows/candle
     // backend lights up `image_generate` with zero worker code changes once its backend is
@@ -1482,9 +1494,11 @@ mod tests {
     ) -> gen_core::Result<Box<dyn gen_core::Generator>> {
         unimplemented!("registry-derivation test stub never loads")
     }
-    inventory::submit! {
-        gen_core::registry::ModelRegistration { descriptor: stub_candle_descriptor, load: stub_candle_load, footprint: None }
-    }
+    const STUB_CANDLE: gen_core::ModelRegistration = gen_core::ModelRegistration {
+        descriptor: stub_candle_descriptor,
+        load: stub_candle_load,
+        footprint: None,
+    };
 
     // An MLX-backed stub whose id is NOT in MODEL_TABLE / VIDEO_ENGINE_IDS: proves an unknown
     // engine id contributes no capability (absence, not a runtime failure).
@@ -1502,9 +1516,11 @@ mod tests {
     ) -> gen_core::Result<Box<dyn gen_core::Generator>> {
         unimplemented!("registry-derivation test stub never loads")
     }
-    inventory::submit! {
-        gen_core::registry::ModelRegistration { descriptor: stub_unknown_descriptor, load: stub_unknown_load, footprint: None }
-    }
+    const STUB_UNKNOWN: gen_core::ModelRegistration = gen_core::ModelRegistration {
+        descriptor: stub_unknown_descriptor,
+        load: stub_unknown_load,
+        footprint: None,
+    };
 
     // A candle-backed core-llm `TextLlm` stub (backend "candle", non-vision): proves the prompt-refine
     // derivation lights up `prompt_refine` purely from a registered `core_llm::TextLlm` descriptor on an
@@ -1526,30 +1542,25 @@ mod tests {
     fn stub_textllm_can_load(_spec: &gen_core::core_llm::LoadSpec) -> bool {
         false
     }
-    inventory::submit! {
+    const STUB_TEXT_LLM: gen_core::core_llm::TextLlmRegistration =
         gen_core::core_llm::TextLlmRegistration {
             descriptor: stub_textllm_descriptor,
             load: stub_textllm_load,
             can_load: stub_textllm_can_load,
-            // No per-snapshot vision probe (sc-8077 / mlx-llm 7041411): this candle text-only stub
-            // never serves vision, so it stays as the static `supports_vision=false` descriptor says.
             weightless_vision: None,
-        }
-    }
+        };
 
     // A candle-backed stub `Trainer` (backend "candle") registered under an id that IS in TRAINER_IDS
     // (`sdxl`): proves a Windows/candle backend lights up `lora_train` + `lora_train_execute` from a
-    // registered `backend = "candle"` trainer descriptor alone (sc-7817), so the default (Linux) CI
-    // lane exercises the per-backend training gate without linking a real provider crate. The real
-    // lanes register the candle-gen-{sdxl,z-image,lens,wan} trainers into this SAME registry.
+    // registered `backend = "candle"` trainer descriptor alone (sc-7817), so the CI lane exercises the
+    // per-backend training gate without linking a real provider crate.
     //
-    // Compiled out of the `backend-candle` build: there the REAL `candle-gen-sdxl` trainer registers
-    // `sdxl` already (so the capability test still lights up off it), and a stub `sdxl` would be a
-    // DUPLICATE — `load_trainer("sdxl")` is first-wins, so in --release (where the candle GPU smokes
-    // run, debug_assert off) the smoke could resolve THIS `unimplemented!()` stub instead of the real
-    // trainer. On macOS the real trainers are `backend = "mlx"`, so the candle stub is still needed
-    // there to exercise the candle branch, and no macOS smoke loads `sdxl`, so no collision.
-    #[cfg(any(target_os = "macos", not(feature = "backend-candle")))]
+    // Registered in EVERY build. Under the canonical `inference` runtime `ProviderRegistryBuilder::new()`
+    // is an empty explicit registry — nothing self-registers by being linked — so this test's hand-built
+    // `media` never receives the real `sdxl` trainer, and the backend-candle lane must supply its own
+    // stub or the training caps never light up. The stub lives ONLY in this test-local registry and never
+    // reaches the global `inference_runtime` catalog the GPU smokes load from, so the old first-wins
+    // `load_trainer("sdxl")` collision worry (real vs `unimplemented!()` stub) no longer applies.
     fn stub_candle_trainer_descriptor() -> gen_core::TrainerDescriptor {
         gen_core::TrainerDescriptor {
             id: "sdxl",
@@ -1561,20 +1572,33 @@ mod tests {
             supports_control: false,
         }
     }
-    #[cfg(any(target_os = "macos", not(feature = "backend-candle")))]
     fn stub_candle_trainer_load(
         _spec: &gen_core::LoadSpec,
     ) -> gen_core::Result<Box<dyn gen_core::Trainer>> {
         unimplemented!("registry-derivation test stub never loads")
     }
-    #[cfg(any(target_os = "macos", not(feature = "backend-candle")))]
-    inventory::submit! {
-        gen_core::registry::TrainerRegistration { descriptor: stub_candle_trainer_descriptor, load: stub_candle_trainer_load }
+    fn registry_capabilities_with_stubs(
+        settings: &crate::Settings,
+    ) -> Vec<sceneworks_core::contracts::WorkerCapability> {
+        let media = gen_core::ProviderRegistryBuilder::new()
+            .register_generator(STUB_MLX)
+            .register_generator(STUB_CANDLE)
+            .register_generator(STUB_UNKNOWN)
+            .register_trainer(gen_core::TrainerRegistration {
+                descriptor: stub_candle_trainer_descriptor,
+                load: stub_candle_trainer_load,
+            });
+        let media = media.build().expect("test media registry");
+        let text = gen_core::core_llm::TextLlmRegistryBuilder::new()
+            .register(STUB_TEXT_LLM)
+            .build()
+            .expect("test LLM registry");
+        registry_capabilities_from(settings, &media, &text)
     }
 
     #[test]
     fn mlx_enabled_advertises_image_generate_from_registry() {
-        let caps = registry_capabilities(&settings_with_backends(true, false));
+        let caps = registry_capabilities_with_stubs(&settings_with_backends(true, false));
         assert!(
             caps.contains(&Cap::ImageGenerate),
             "MLX stub generator (z_image_turbo) should derive image_generate"
@@ -1584,7 +1608,7 @@ mod tests {
     #[test]
     fn mlx_disabled_drops_mlx_derived_image_generate() {
         // With both backends off, the mlx + candle stubs are filtered out → no image_generate.
-        let caps = registry_capabilities(&settings_with_backends(false, false));
+        let caps = registry_capabilities_with_stubs(&settings_with_backends(false, false));
         assert!(
             !caps.contains(&Cap::ImageGenerate),
             "no enabled backend ⇒ no derived image_generate"
@@ -1651,26 +1675,26 @@ mod tests {
     #[test]
     fn candle_backend_lights_up_with_zero_worker_changes() {
         // candle enabled (mlx off) ⇒ the candle `sdxl` stub alone derives image_generate.
-        let on = registry_capabilities(&settings_with_backends(false, true));
+        let on = registry_capabilities_with_stubs(&settings_with_backends(false, true));
         assert!(
             on.contains(&Cap::ImageGenerate),
             "an enabled candle backend should derive image_generate from its descriptor alone"
         );
         // candle disabled ⇒ that descriptor contributes nothing.
-        let off = registry_capabilities(&settings_with_backends(false, false));
+        let off = registry_capabilities_with_stubs(&settings_with_backends(false, false));
         assert!(!off.contains(&Cap::ImageGenerate));
     }
 
     #[test]
     fn candle_textllm_lights_up_prompt_refine() {
         // candle enabled ⇒ the candle core-llm `TextLlm` stub (non-vision) derives the PromptRefine cap.
-        let on = registry_capabilities(&settings_with_backends(false, true));
+        let on = registry_capabilities_with_stubs(&settings_with_backends(false, true));
         assert!(
             on.contains(&Cap::PromptRefine),
             "an enabled candle backend should derive prompt_refine from its core-llm TextLlm descriptor"
         );
         // both off ⇒ nothing (neither the candle stub nor — on macOS — the real mlx twin is enabled).
-        let off = registry_capabilities(&settings_with_backends(false, false));
+        let off = registry_capabilities_with_stubs(&settings_with_backends(false, false));
         assert!(!off.contains(&Cap::PromptRefine));
     }
 
@@ -1679,7 +1703,7 @@ mod tests {
         // candle enabled ⇒ the candle `sdxl` trainer stub (backend "candle", id in TRAINER_IDS)
         // derives BOTH the dry-run `lora_train` and the real-run `lora_train_execute` caps — the
         // off-Mac training cutover (sc-7817). They light up together (same in-process trainer registry).
-        let on = registry_capabilities(&settings_with_backends(false, true));
+        let on = registry_capabilities_with_stubs(&settings_with_backends(false, true));
         assert!(
             on.contains(&Cap::LoraTrain),
             "an enabled candle backend with a registered trainer should derive lora_train"
@@ -1690,7 +1714,7 @@ mod tests {
         );
         // both off ⇒ no training caps from the candle trainer (and on macOS the real mlx trainers are
         // filtered out too, since neither backend is enabled).
-        let off = registry_capabilities(&settings_with_backends(false, false));
+        let off = registry_capabilities_with_stubs(&settings_with_backends(false, false));
         assert!(!off.contains(&Cap::LoraTrain));
         assert!(!off.contains(&Cap::LoraTrainExecute));
     }
@@ -1703,7 +1727,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn mlx_only_does_not_advertise_training_from_a_candle_trainer() {
-        let mlx_only = registry_capabilities(&settings_with_backends(true, false));
+        let mlx_only = registry_capabilities_with_stubs(&settings_with_backends(true, false));
         assert!(
             !mlx_only.contains(&Cap::LoraTrainExecute),
             "off-macOS the only trainer is candle-backed, so an mlx-only worker must not advertise \
@@ -1716,7 +1740,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn mlx_only_does_not_advertise_prompt_refine_without_the_mlx_twin() {
-        let mlx_only = registry_capabilities(&settings_with_backends(true, false));
+        let mlx_only = registry_capabilities_with_stubs(&settings_with_backends(true, false));
         assert!(
             !mlx_only.contains(&Cap::PromptRefine),
             "off-macOS there is no mlx prompt_refine provider, so an mlx-only worker must not \
@@ -1724,9 +1748,7 @@ mod tests {
         );
     }
 
-    // On macOS the native mlx prompt_refine provider (sc-5552, force-linked in prompt_refine_jobs.rs)
-    // is in the registry, so an mlx-only worker DOES advertise prompt_refine — the MLX twin of the
-    // candle path (sc-5525).
+    // On macOS the named runtime catalog explicitly includes the native MLX prompt-refine provider.
     #[cfg(target_os = "macos")]
     #[test]
     fn mlx_only_advertises_prompt_refine_via_the_mlx_twin() {
@@ -1746,7 +1768,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn unknown_engine_id_contributes_no_capability() {
-        let caps = registry_capabilities(&settings_with_backends(true, false));
+        let caps = registry_capabilities_with_stubs(&settings_with_backends(true, false));
         // image_generate is present here (the in-table z_image_turbo mlx stub), but the unknown
         // id adds nothing — and it never introduces video_generate (no video stub registered).
         assert!(

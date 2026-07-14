@@ -1,5 +1,5 @@
 // Candle (Windows/CUDA) FLUX.2-dev strict-pose Fun-Controlnet-Union route (sc-7736, epic 6564) —
-// `flux2_dev` + `advanced.poses` off-Mac via `candle_gen_flux2::Flux2Control`. The candle sibling of the
+// `flux2_dev` + `advanced.poses` off-Mac via `runtime_cuda::providers::flux2::Flux2Control`. The candle sibling of the
 // MLX FLUX.2-dev strict-pose path (flux2.rs `generate_flux2_dev_control_stream`, sc-6055 / engine
 // sc-2292): one image per library pose, each conditioned on a full DWPose skeleton (rendered
 // cross-platform by `openpose_skeleton::draw_wholebody`) fed to the VACE-style control branch overlaid on

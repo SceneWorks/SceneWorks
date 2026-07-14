@@ -22,9 +22,7 @@ use std::sync::{mpsc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use gen_core::core_llm::{
-    load_for_model_with, Constraint, LoadSpec, ModelRequirements, Quantize, TextLlm,
-};
+use gen_core::core_llm::{Constraint, LoadSpec, ModelRequirements, Quantize, TextLlm};
 
 use crate::cache_thread::{self, CacheJob, CacheThread, Fingerprint, SeamMessages};
 use crate::{WorkerError, WorkerResult};
@@ -155,7 +153,7 @@ where
     // The loader owns the refine-specific error-context wrapping; evict-before-load happens in the
     // generic `CacheThread::with_model` before this runs (see `REFINE_EVICT_BEFORE_LOAD`).
     let load = move || {
-        load_for_model_with(&spec, &reqs)
+        crate::inference_runtime::load_for_model_with(&spec, &reqs)
             .map_err(|error| WorkerError::Engine(format!("{load_error_context}: {error}")))
     };
     // Adapt the user's `&dyn TextLlm` run closure to the generic cache's resident `Box<dyn TextLlm>`.

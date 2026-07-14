@@ -1,5 +1,5 @@
 // Candle (Windows/CUDA) FLUX.1-dev strict-control Fun-Controlnet-Union route (sc-8412, epic 8236) —
-// `flux_dev` + `advanced.poses` off-Mac via `candle_gen_flux::Flux1DevControl`. The candle sibling of the
+// `flux_dev` + `advanced.poses` off-Mac via `runtime_cuda::providers::flux::Flux1DevControl`. The candle sibling of the
 // MLX FLUX.1-dev strict-control path (flux1_control.rs `generate_flux1_dev_control_stream`, sc-8244 /
 // engine sc-8239): one image per library pose (or, with `advanced.controlMode = canny|depth` + a source,
 // an auto-derived canny / Depth-Anything-V2 map), each fed to the Shakker

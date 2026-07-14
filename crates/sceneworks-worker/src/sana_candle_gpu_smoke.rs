@@ -102,8 +102,8 @@ fn sana_worker_lane_gpu_smoke() {
 
     // DENSE load (no quant) — the candle SANA base path advertises no packed tier off-Mac.
     let spec = LoadSpec::new(WeightsSource::Dir(dir));
-    let generator =
-        gen_core::load("sana_1600m", &spec).unwrap_or_else(|e| panic!("load sana_1600m: {e}"));
+    let generator = crate::inference_runtime::load("sana_1600m", &spec)
+        .unwrap_or_else(|e| panic!("load sana_1600m: {e}"));
     assert_eq!(
         generator.descriptor().backend,
         "candle",
@@ -243,7 +243,7 @@ fn sana_sprint_worker_lane_gpu_smoke() {
 
     // DENSE load (no quant) — the candle Sprint path advertises no packed tier off-Mac.
     let spec = LoadSpec::new(WeightsSource::Dir(dir));
-    let generator = gen_core::load("sana_sprint_1600m", &spec)
+    let generator = crate::inference_runtime::load("sana_sprint_1600m", &spec)
         .unwrap_or_else(|e| panic!("load sana_sprint_1600m: {e}"));
     assert_eq!(
         generator.descriptor().backend,

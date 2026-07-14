@@ -296,10 +296,32 @@ pub(crate) async fn with_cached_generator<R>(
 where
     R: Send + 'static,
 {
+    with_cached_generator_using(
+        engine_id,
+        spec,
+        load_error_context,
+        crate::inference_runtime::load,
+        run,
+    )
+    .await
+}
+
+async fn with_cached_generator_using<R>(
+    engine_id: &'static str,
+    spec: LoadSpec,
+    load_error_context: impl Into<String>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(&dyn Generator) -> WorkerResult<R> + Send + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
     let key = GeneratorCacheKey::from_load_spec(engine_id, &spec);
     let load_error_context = load_error_context.into();
     // The loader owns the generator-specific cold-load policy. Pre-load unified-memory fit-gate +
-    // residency selection (epic 10834; sc-10835 Phase 0, sc-10839 Phase 1): BEFORE gen_core::load
+    // residency selection (epic 10834; sc-10835 Phase 0, sc-10839 Phase 1): BEFORE crate::inference_runtime::load
     // allocates, either reject a model that can't fit this machine's unified memory (a wired
     // overcommit SIGKILLs the worker mid-load rather than returning a catchable error) OR, for a
     // provider that supports sequential component residency, select `OffloadPolicy::Sequential` when
@@ -307,7 +329,7 @@ where
     // miss (a warm cache hit never invokes the loader), so an already-resident model is never re-gated.
     let load = move || {
         let spec = crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?;
-        gen_core::load(engine_id, &spec)
+        load_generator(engine_id, &spec)
             .map_err(|error| crate::classify_engine_error(&load_error_context, error))
     };
     // Adapt the user's `&dyn Generator` run closure to the generic cache's resident
@@ -320,7 +342,7 @@ where
 
 /// Run `run` against a freshly-loaded, **uncached** generator on the shared cache thread (epic 10451
 /// Phase 2c, sc-10671). Unlike [`with_cached_generator`], the generator is built by the caller-supplied
-/// `load` closure (not `gen_core::load` from a `LoadSpec`) — the path an in-place ComfyUI base takes,
+/// `load` closure (not `crate::inference_runtime::load` from a `LoadSpec`) — the path an in-place ComfyUI base takes,
 /// whose weights are per-file and don't fit a registry `(engine_id, spec)` key. Any resident cached
 /// generator is **evicted first** (freeing its VRAM back to the backend pool) so a large fresh load —
 /// e.g. a ~28 GB in-place Wan MoE (two 14B experts) — has room; the fresh generator is dropped when
@@ -565,11 +587,10 @@ mod tests {
 
     // -------------------------------------------------------------------------
     // Backend-neutral acceptance seam (epic 3720, sc-3724). A pure-`gen_core`
-    // `Generator` registered into the same `inventory` registry the real provider crates use
-    // (with a UNIQUE id so it never collides with a real engine or the engines.rs derivation
-    // stubs). It links NO tensor backend, so these tests run on Linux/Windows AND macOS, proving
+    // `Generator` injected through the cache's explicit loader seam. It links NO tensor backend,
+    // so these tests run on Linux/Windows AND macOS, proving
     // the load→progress→cancel→output contract that `with_cached_generator` is the production seam
-    // for. Mirrors the inventory pattern at engines.rs.
+    // for without mutating process-global discovery state.
     struct StubGenerator {
         descriptor: gen_core::ModelDescriptor,
     }
@@ -621,10 +642,6 @@ mod tests {
         Ok(Box::new(StubGenerator {
             descriptor: stub_descriptor(),
         }))
-    }
-
-    inventory::submit! {
-        gen_core::registry::ModelRegistration { descriptor: stub_descriptor, load: stub_load, footprint: None }
     }
 
     fn stub_cache_key() -> GeneratorCacheKey {
@@ -756,39 +773,47 @@ mod tests {
         let png_path = assets.path().join("stub.png");
         let png_path_for_run = png_path.clone();
 
-        let fact = with_cached_generator("sc3724_stub", spec, "stub load", move |generator| {
-            let req = gen_core::GenerationRequest {
-                width: 2,
-                height: 2,
-                ..Default::default()
-            };
-            let mut steps: Vec<gen_core::Progress> = Vec::new();
-            let output = generator
-                .generate(&req, &mut |progress| steps.push(progress))
-                .map_err(|error| WorkerError::Engine(error.to_string()))?;
-            let image = match output {
-                gen_core::GenerationOutput::Images(mut images) => images.remove(0),
-                other => {
-                    return Err(WorkerError::Engine(format!(
-                        "expected images, got {other:?}"
-                    )))
-                }
-            };
-            let buffer = image::RgbImage::from_raw(image.width, image.height, image.pixels)
-                .ok_or_else(|| WorkerError::Engine("stub image buffer size mismatch".to_owned()))?;
-            buffer
-                .save(&png_path_for_run)
-                .map_err(|error| WorkerError::Engine(error.to_string()))?;
-            let step_count = steps
-                .iter()
-                .filter(|p| matches!(p, gen_core::Progress::Step { .. }))
-                .count();
-            Ok(serde_json::json!({
-                "assetId": uuid::Uuid::new_v4().to_string(),
-                "path": png_path_for_run.display().to_string(),
-                "steps": step_count,
-            }))
-        })
+        let fact = with_cached_generator_using(
+            "sc3724_stub",
+            spec,
+            "stub load",
+            |_id, spec| stub_load(spec),
+            move |generator| {
+                let req = gen_core::GenerationRequest {
+                    width: 2,
+                    height: 2,
+                    ..Default::default()
+                };
+                let mut steps: Vec<gen_core::Progress> = Vec::new();
+                let output = generator
+                    .generate(&req, &mut |progress| steps.push(progress))
+                    .map_err(|error| WorkerError::Engine(error.to_string()))?;
+                let image = match output {
+                    gen_core::GenerationOutput::Images(mut images) => images.remove(0),
+                    other => {
+                        return Err(WorkerError::Engine(format!(
+                            "expected images, got {other:?}"
+                        )))
+                    }
+                };
+                let buffer = image::RgbImage::from_raw(image.width, image.height, image.pixels)
+                    .ok_or_else(|| {
+                        WorkerError::Engine("stub image buffer size mismatch".to_owned())
+                    })?;
+                buffer
+                    .save(&png_path_for_run)
+                    .map_err(|error| WorkerError::Engine(error.to_string()))?;
+                let step_count = steps
+                    .iter()
+                    .filter(|p| matches!(p, gen_core::Progress::Step { .. }))
+                    .count();
+                Ok(serde_json::json!({
+                    "assetId": uuid::Uuid::new_v4().to_string(),
+                    "path": png_path_for_run.display().to_string(),
+                    "steps": step_count,
+                }))
+            },
+        )
         .await
         .expect("stub generate succeeds");
 
@@ -816,23 +841,29 @@ mod tests {
         let weights = tempfile::tempdir().expect("weights tempdir");
         let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
 
-        let result = with_cached_generator("sc3724_stub", spec, "stub load", move |generator| {
-            let cancel = gen_core::runtime::CancelFlag::new();
-            cancel.cancel();
-            let req = gen_core::GenerationRequest {
-                width: 2,
-                height: 2,
-                cancel,
-                ..Default::default()
-            };
-            generator
-                .generate(&req, &mut |_progress| {})
-                .map(|_| ())
-                .map_err(|error| match error {
-                    gen_core::Error::Canceled => WorkerError::Canceled(error.to_string()),
-                    other => WorkerError::Engine(other.to_string()),
-                })
-        })
+        let result = with_cached_generator_using(
+            "sc3724_stub",
+            spec,
+            "stub load",
+            |_id, spec| stub_load(spec),
+            move |generator| {
+                let cancel = gen_core::runtime::CancelFlag::new();
+                cancel.cancel();
+                let req = gen_core::GenerationRequest {
+                    width: 2,
+                    height: 2,
+                    cancel,
+                    ..Default::default()
+                };
+                generator
+                    .generate(&req, &mut |_progress| {})
+                    .map(|_| ())
+                    .map_err(|error| match error {
+                        gen_core::Error::Canceled => WorkerError::Canceled(error.to_string()),
+                        other => WorkerError::Engine(other.to_string()),
+                    })
+            },
+        )
         .await;
 
         assert!(
@@ -852,10 +883,11 @@ mod tests {
         let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
 
         // A run closure that panics mid-generation → comes back as a clean Engine error, not a hang.
-        let panicked = with_cached_generator(
+        let panicked = with_cached_generator_using(
             "sc3724_stub",
             spec.clone(),
             "stub load",
+            |_id, spec| stub_load(spec),
             move |_generator| -> WorkerResult<()> {
                 panic!("simulated mlx-rs Metal allocation panic");
             },
@@ -874,17 +906,23 @@ mod tests {
         );
 
         // The shared cache thread must still be alive and serving: a subsequent job succeeds.
-        let after = with_cached_generator("sc3724_stub", spec, "stub load", move |generator| {
-            let req = gen_core::GenerationRequest {
-                width: 2,
-                height: 2,
-                ..Default::default()
-            };
-            generator
-                .generate(&req, &mut |_progress| {})
-                .map(|_| ())
-                .map_err(|error| WorkerError::Engine(error.to_string()))
-        })
+        let after = with_cached_generator_using(
+            "sc3724_stub",
+            spec,
+            "stub load",
+            |_id, spec| stub_load(spec),
+            move |generator| {
+                let req = gen_core::GenerationRequest {
+                    width: 2,
+                    height: 2,
+                    ..Default::default()
+                };
+                generator
+                    .generate(&req, &mut |_progress| {})
+                    .map(|_| ())
+                    .map_err(|error| WorkerError::Engine(error.to_string()))
+            },
+        )
         .await;
         assert!(
             after.is_ok(),

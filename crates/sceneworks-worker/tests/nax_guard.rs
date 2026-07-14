@@ -16,12 +16,12 @@
 
 #![cfg(target_os = "macos")]
 
-use mlx_gen::array::scalar;
 use mlx_rs::{
     fast::scaled_dot_product_attention,
     ops::{matmul, multiply, softmax_axis},
     random, Array, Dtype,
 };
+use runtime_macos::media::array::scalar;
 
 /// Mean-absolute relative error: sum|a-b| / sum|b|, computed in f32.
 fn rel(a: &Array, b: &Array) -> f64 {

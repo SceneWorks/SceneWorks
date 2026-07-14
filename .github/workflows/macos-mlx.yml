@@ -56,12 +56,21 @@ jobs:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [self-hosted, macOS, ARM64, nax]
+    env:
+      CARGO_NET_OFFLINE: "true"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: stable
           components: clippy
+      - name: Fetch the private inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
+          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
+        run: cargo fetch --locked
       # No MACOSX_DEPLOYMENT_TARGET override: the workspace /.cargo/config.toml pins
       # 26.2, so the NAX kernels compile in and the fast path is actually built.
       - name: Build the MLX GPU worker (mlx-gen linked, NAX at 26.2)

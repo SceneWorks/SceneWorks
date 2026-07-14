@@ -1,0 +1,212 @@
+schema_version = 1
+captured_at_utc = "2026-07-13T00:06:44Z"
+captured_at_local = "2026-07-12T18:06:44-0600"
+workspace_root = "/Users/zakkeown/Code/SceneWorks"
+purpose = "Pre-migration release-set and source-tree baseline for MRP-001"
+
+[toolchains]
+rustc = "1.96.0 (ac68faa20 2026-05-25)"
+cargo = "1.96.0 (30a34c682 2026-05-25)"
+node = "22.23.0"
+npm = "10.9.8"
+pnpm = "11.8.0"
+git = "2.50.1 (Apple Git-155)"
+cmake = "4.3.4"
+xcode = "26.6 (17F113)"
+inference_rust_channel = "1.96.0"
+sceneworks_rust_channel = "stable"
+
+[released_versions]
+sceneworks_app = "0.7.3"
+sceneworks_rust_workspace = "0.2.0"
+chatworks_app = "0.1.0"
+soundworks_app = "0.1.0"
+ui_source = "0.1.0"
+ui_exported_constant = "0.1.0"
+ui_chatworks_resolved = "0.2.0"
+ui_soundworks_resolved = "0.2.0"
+core_gen = "0.0.0"
+core_llm = "0.0.0"
+llm_engine_core = "0.0.0"
+mlx_llm = "0.0.0"
+candle_llm = "0.0.0"
+mlx_gen = "0.0.0"
+candle_gen = "0.0.0"
+pmetal_mlx_rs = "0.25.8"
+
+[baseline_hashes]
+sceneworks_cargo_lock_sha256 = "e3a92ffe674c938c8d20d3bf60e80e459587fcc9f6a661de862379cd4b728fde"
+sceneworks_builtin_models_sha256 = "f133fca3b6c3fe5451bc386d1eac74c767442584b9d3d3013040c8f119c34ad0"
+sceneworks_worker_engines_sha256 = "64339f718bc84e1e41bb7149130646d4bde3fd289b7f107b27396c40c1a5e424"
+chatworks_cargo_lock_sha256 = "49492bbd3ece517873aa93f1bd98f79a029c37ee92b346821899fe436ed0332f"
+chatworks_package_lock_sha256 = "7a675091d5fb721d46304a867af80904952dda7d4f5a4fe32ff4de447543de00"
+soundworks_package_lock_sha256 = "7584a4bf07ba6e28cf4f45ddd7b805bbea673a7a0db9d622fe2504610b1c1b6c"
+ui_package_sha256 = "cdcab53e1f132b385c6e0d5d71f8aef598d2712373d80c40e8f415372da97ac6"
+ui_index_sha256 = "99e44bec72bfdf55fc72a5dd0cc99ee756651ad0ff40da485c5640ed321130a1"
+
+[[repositories]]
+name = "core-gen"
+role = "placeholder generative contract repository"
+path = "core-gen"
+origin = "https://github.com/SceneWorks/core-gen.git"
+branch = "main"
+head = "0b972cdfec3a5e214a7b9e4bdbbb8176f9d720df"
+head_tree = "b39b62a481929ac80b0d3eb3e75b488620e32236"
+tracking_head = "0b972cdfec3a5e214a7b9e4bdbbb8176f9d720df"
+ahead = 0
+behind = 0
+dirty = false
+
+[[repositories]]
+name = "core-llm"
+role = "working backend-neutral LLM contract"
+path = "core-llm"
+origin = "https://github.com/SceneWorks/core-llm.git"
+branch = "main"
+head = "54cbac806304e823470ce3ded08f78589acdbb62"
+head_tree = "e115397e83414217c3384698318522f6f4e8593a"
+tracking_head = "54cbac806304e823470ce3ded08f78589acdbb62"
+ahead = 0
+behind = 0
+dirty = false
+
+[[repositories]]
+name = "llm-engine-core"
+role = "placeholder LLM contract repository"
+path = "llm-engine-core"
+origin = "https://github.com/SceneWorks/llm-engine-core.git"
+branch = "main"
+head = "7d30443c147697868f26b3b92e776d58df3053b3"
+head_tree = "3ea588fff78a608466b4f004d0817dd474524e84"
+tracking_head = "7d30443c147697868f26b3b92e776d58df3053b3"
+ahead = 0
+behind = 0
+dirty = false
+
+[[repositories]]
+name = "mlx-llm"
+role = "MLX LLM backend"
+path = "mlx-llm"
+origin = "https://github.com/SceneWorks/mlx-llm.git"
+branch = "main"
+head = "af5d0e83f4afb921241b7e965076e22f23c107fb"
+head_tree = "4e19df11b186c864879ed871b55e55eeb147335b"
+tracking_head = "af5d0e83f4afb921241b7e965076e22f23c107fb"
+ahead = 0
+behind = 0
+dirty = false
+
+[[repositories]]
+name = "candle-llm"
+role = "Candle LLM backend"
+path = "candle-llm"
+origin = "https://github.com/SceneWorks/candle-llm.git"
+branch = "main"
+head = "482ba5e5e99770967dd0c912f7f87b31c6f08576"
+head_tree = "40ec531d2d6735930227a1e84175e8c894726add"
+tracking_head = "482ba5e5e99770967dd0c912f7f87b31c6f08576"
+ahead = 0
+behind = 0
+dirty = false
+
+[[repositories]]
+name = "mlx-gen"
+role = "MLX generative-media backend and current gen-core home"
+path = "mlx-gen"
+origin = "https://github.com/SceneWorks/mlx-gen.git"
+branch = "main"
+head = "b568fdbfd7cfe3cc6c93dc836c2bd92b348ab2b7"
+head_tree = "a8cf8de2713df6ff9a426ee40018fedfb64b3809"
+tracking_head = "b568fdbfd7cfe3cc6c93dc836c2bd92b348ab2b7"
+gen_core_tree = "ad595fc035ebd7901ff2f218fb839a28287fec1e"
+gen_core_testkit_tree = "59834dd4dc437509a539d376900f48c41937c1d2"
+ahead = 0
+behind = 0
+dirty = false
+
+[[repositories]]
+name = "candle-gen"
+role = "Candle generative-media backend"
+path = "candle-gen"
+origin = "https://github.com/SceneWorks/candle-gen.git"
+branch = "main"
+head = "102436012b24072c9cfc58b1b88e1c95655872e5"
+head_tree = "b610bdf1565ceb810e7b938122473cca8b785b83"
+tracking_head = "b0fc60a3c39fa7c15a563e26453a2bde123c3413"
+ahead = 0
+behind = 4
+dirty = false
+note = "The migration baseline records the checked-out HEAD and tracking HEAD separately; do not silently replace one with the other during import."
+
+[[repositories]]
+name = "mlx-rs"
+role = "upstream-derived MLX Rust fork retained as a separate repository"
+path = "mlx-rs"
+origin = "https://github.com/SceneWorks/mlx-rs.git"
+branch = "main"
+head = "e1eb468fa4b9efd7e923a58719edbc1172fe34f1"
+head_tree = "38b5dd2c2631bb462e790c91775dfa076519659c"
+tracking_head = "e1eb468fa4b9efd7e923a58719edbc1172fe34f1"
+ahead = 0
+behind = 0
+dirty = false
+describe = "v0.25.3-46-ge1eb468f"
+
+[[repositories]]
+name = "SceneWorks"
+role = "primary product and current inference integration owner"
+path = "SceneWorks"
+origin = "https://github.com/SceneWorks/SceneWorks.git"
+branch = "main"
+head = "b6a80282b8b52458c3b285b9308db14fdc9f9ec6"
+head_tree = "c40e34248d1587dd529e07c7710a47c111f47c26"
+tracking_head = "b6a80282b8b52458c3b285b9308db14fdc9f9ec6"
+ahead = 0
+behind = 0
+dirty = true
+dirty_paths_at_phase_start = [
+  "README.md",
+  "documents/MULTI_REPO_REARCHITECTURE_PLAN.md",
+]
+note = "Both dirty paths are migration-planning changes created immediately before Phase 0; application and runtime sources were clean."
+
+[[repositories]]
+name = "ChatWorks"
+role = "LLM product"
+path = "ChatWorks"
+origin = "https://github.com/SceneWorks/ChatWorks.git"
+branch = "main"
+head = "78db3e53c3c541ed720452cfb3f1d1c3ce632e68"
+head_tree = "93c75dda3bb15ae4a175a5e90aaf4e2e3b74ff3d"
+tracking_head = "78db3e53c3c541ed720452cfb3f1d1c3ce632e68"
+ahead = 0
+behind = 0
+dirty = false
+
+[[repositories]]
+name = "SoundWorks"
+role = "audio product"
+path = "SoundWorks"
+origin = "https://github.com/SceneWorks/SoundWorks.git"
+branch = "main"
+head = "b51ed11f63d4ce6ebbcb1ebf578d178407413d4a"
+head_tree = "b32004840d4835522e65c5b8e16dd7bad3db9d4a"
+tracking_head = "b51ed11f63d4ce6ebbcb1ebf578d178407413d4a"
+ahead = 0
+behind = 0
+dirty = false
+
+[[repositories]]
+name = "ui"
+role = "shared UI package"
+path = "ui"
+origin = "https://github.com/SceneWorks/ui.git"
+branch = "main"
+head = "7d227475680318cef49c3db85c0ba3a0f9b8c851"
+head_tree = "300c79a720d9f1323d786f69b92c7a79c15ee8ff"
+tracking_head = "7d227475680318cef49c3db85c0ba3a0f9b8c851"
+ahead = 0
+behind = 0
+dirty = false
+describe = "v0.1.0"
+

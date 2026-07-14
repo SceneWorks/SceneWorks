@@ -1,5 +1,5 @@
 // Candle (Windows/CUDA) Kolors IP-Adapter-Plus reference route (sc-5488, epic 5480) — reference-image
-// (identity) conditioning on Kolors off-Mac via `candle_gen_kolors::IpAdapterKolors`. The Kolors sibling
+// (identity) conditioning on Kolors off-Mac via `runtime_cuda::providers::kolors::IpAdapterKolors`. The Kolors sibling
 // of the candle SDXL IP-Adapter lane (sdxl_ipadapter.rs): CLIP ViT-L/14-336 image tokens injected into
 // the vendored SDXL UNet alongside the encoder_hid_proj-projected ChatGLM3 text path, denoised with the
 // Kolors leading-Euler sampler.

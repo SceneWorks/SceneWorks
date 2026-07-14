@@ -31,14 +31,14 @@
 
 use serde_json::{json, Value};
 
-// `Image` resolves to `mlx_gen::Image` on macOS and `gen_core::Image` under the candle backend —
+// `Image` resolves to `runtime_macos::media::Image` on macOS and `gen_core::Image` under the candle backend —
 // the same cfg-gated split the sibling job modules use (sensenova_jobs.rs / video_jobs.rs). The whole
 // scorer (and its test stub) only exists under these two configs, so on the plain Linux parity build
 // (no `backend-candle`) `Image` is intentionally absent and nothing here is compiled.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use gen_core::Image;
 #[cfg(target_os = "macos")]
-use mlx_gen::Image;
+use runtime_macos::media::Image;
 
 use sceneworks_core::contracts::JsonObject;
 
@@ -285,7 +285,7 @@ fn score_against_source(
 #[cfg_attr(test, allow(clippy::large_enum_variant))]
 enum FaceBackend {
     #[cfg(target_os = "macos")]
-    Mlx(mlx_gen_face::FaceAnalysis),
+    Mlx(runtime_macos::providers::face::FaceAnalysis),
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     Candle(Box<dyn gen_core::FaceEmbedder>),
     /// Weight-free deterministic backend for the wiring tests (sc-4409): keyed on the image's first
@@ -426,13 +426,13 @@ impl FaceLikenessScorer {
     /// kps / dataset-face provision) and embed the source face once. Runs `!Send` MLX work — call
     /// inside `spawn_blocking`.
     pub(crate) fn load_mlx(weights_dir: &std::path::Path, source: &Image) -> WorkerResult<Self> {
-        use mlx_gen::weights::Weights;
+        use runtime_macos::media::weights::Weights;
         let scrfd = Weights::from_file(weights_dir.join(crate::image_jobs::INSTANTID_SCRFD_FILE))
             .map_err(|error| WorkerError::Engine(format!("SCRFD weights: {error}")))?;
         let arcface =
             Weights::from_file(weights_dir.join(crate::image_jobs::INSTANTID_ARCFACE_FILE))
                 .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
-        let analysis = mlx_gen_face::FaceAnalysis::load(&scrfd, &arcface)
+        let analysis = runtime_macos::providers::face::FaceAnalysis::load(&scrfd, &arcface)
             .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
         Self::with_backend(FaceBackend::Mlx(analysis), source)
     }
@@ -442,7 +442,7 @@ impl FaceLikenessScorer {
 impl FaceLikenessScorer {
     /// Load the candle SCRFD + ArcFace stack from `weights_dir` and embed the source face once.
     pub(crate) fn load_candle(weights_dir: &std::path::Path, source: &Image) -> WorkerResult<Self> {
-        let analysis = candle_gen_face::load(weights_dir)
+        let analysis = runtime_cuda::providers::face::load(weights_dir)
             .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
         Self::with_backend(FaceBackend::Candle(Box::new(analysis)), source)
     }

@@ -1,11 +1,10 @@
 //! Local real-weight MLX smoke for the Krea 2 Turbo worker lane (epic 7565 sc-7575, the P2 worker-path
 //! validation). `#[ignore]`d — run by hand on an Apple-Silicon Mac. It drives the real native-MLX
-//! `krea_2_turbo` engine via `gen_core::load("krea_2_turbo")` with a **Q8** `LoadSpec` pointed at the
+//! `krea_2_turbo` engine via `crate::inference_runtime::load("krea_2_turbo")` with a **Q8** `LoadSpec` pointed at the
 //! packed `q8/` turnkey subdir — the exact runtime seam `generate_stream` uses (minus the API/job
 //! plumbing) when the router routes `krea_2_turbo` to the in-process MLX generator. The point is to prove
-//! the **worker crate links + drives the engine end-to-end** (the `use mlx_gen_krea as _;` force-link
-//! anchor in `image_jobs.rs` keeps `inventory::submit!` from being GC'd, so `gen_core::load` resolves the
-//! registered generator), not just the engine crate in isolation (that's `mlx-gen-krea`'s own real-weight
+//! the **worker drives the bundled engine end-to-end** through `crate::inference_runtime::load`, not
+//! just the engine crate in isolation (that's `mlx-gen-krea`'s own real-weight
 //! tests). Turbo is TDM-distilled few-step (8) + CFG-free (no negative pass, guidance inert).
 //!
 //! Setup — point at the published turnkey `SceneWorks/krea-2-turbo-mlx` (the worker default). With the
@@ -90,8 +89,8 @@ fn krea_turbo_mlx_gpu_smoke() {
          shallow depth of field",
     );
 
-    // Same seam as the worker's MLX image path: a registry load of the `krea_2_turbo` generator (the
-    // worker-crate force-link anchor keeps it registered) + a Q8 `LoadSpec` pointed at the packed q8
+    // Same seam as the worker's MLX image path: a catalog load of the `krea_2_turbo` generator + a
+    // Q8 `LoadSpec` pointed at the packed q8
     // turnkey subdir. The packed weights auto-detect their quant, so `with_quant(Q8)` is a no-op match
     // to the manifest's `mlx.quantize: 8`.
     println!(
@@ -99,7 +98,8 @@ fn krea_turbo_mlx_gpu_smoke() {
         q8_dir.display()
     );
     let spec = LoadSpec::new(WeightsSource::Dir(q8_dir.clone())).with_quant(Quant::Q8);
-    let generator = gen_core::load("krea_2_turbo", &spec).expect("load mlx krea_2_turbo generator");
+    let generator = crate::inference_runtime::load("krea_2_turbo", &spec)
+        .expect("load mlx krea_2_turbo generator");
 
     // Turbo: few-step + CFG-free. `guidance: None` mirrors the worker's `resolve_guidance` (the
     // descriptor advertises supports_guidance=false, so no value is forwarded and there is no negative

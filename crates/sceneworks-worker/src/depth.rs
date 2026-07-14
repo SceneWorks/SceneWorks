@@ -50,9 +50,9 @@ pub const DEPTH_ANYTHING_V2_FILE: &str = "model.safetensors";
 // the candle/CUDA `candle_gen_depth` sibling (sc-8413). Both expose the same
 // `DepthAnythingV2::from_dir` + `estimate_control_rgb8` surface, so only the crate differs.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_depth as depth_backend;
+use runtime_cuda::providers::depth as depth_backend;
 #[cfg(target_os = "macos")]
-use mlx_gen_depth as depth_backend;
+use runtime_macos::providers::depth as depth_backend;
 
 /// Estimate a depth control image from an arbitrary RGB input, loading the Depth Anything V2
 /// estimator from `weights_dir` (a directory containing `model.safetensors`).

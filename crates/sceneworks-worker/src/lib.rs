@@ -68,6 +68,7 @@ mod credentials_ipc;
 // production seams are cfg'd out, so allow dead_code there (mirrors the generator_cache precedent).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod cache_thread;
+mod inference_runtime;
 // Backend-neutral generator load/run cache (epic 3720, sc-3724). Typed entirely against
 // `gen_core::*` (no tensor types leak), so it links on ALL targets — the production load seam
 // (`with_cached_generator`) is reached only from the macOS image/video paths, but the all-targets
@@ -209,25 +210,25 @@ mod lora_train_driver;
 ))]
 mod smoke_support;
 // Real-weight GPU smoke for the candle SCAIL-2 lane (sc-7078). Test-only + candle-only; never built
-// in normal compiles. Drives the shipped worker conditioning + `gen_core::load("scail2_14b")`.
+// in normal compiles. Drives the shipped worker conditioning + `crate::inference_runtime::load("scail2_14b")`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod scail2_gpu_smoke;
 // Real-weight GPU smoke for the candle RealVisXL Lightning lane (sc-7176). Test-only + candle-only;
-// drives `gen_core::load("sdxl")` with the forced `lightning` sampler against the distilled checkpoint.
+// drives `crate::inference_runtime::load("sdxl")` with the forced `lightning` sampler against the distilled checkpoint.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod realvisxl_lightning_gpu_smoke;
 // Real-weight GPU smoke for the candle SDXL edit + PiD super-resolving decode (epic 7840, sc-8044).
-// Test-only + candle-only; drives the bespoke `candle_gen_sdxl::SdxlEdit` provider (inpaint) with the
+// Test-only + candle-only; drives the bespoke `runtime_cuda::providers::sdxl::SdxlEdit` provider (inpaint) with the
 // `pid_sdxl` student attached, asserting the PiD decode super-resolves the render-sized native decode.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod sdxl_edit_pid_gpu_smoke;
 // Real-weight GPU smoke for the candle FLUX.2-dev lane (epic 6564 sc-7458). Test-only + candle-only;
-// drives `gen_core::load("flux2_dev")` with a Q4 LoadSpec (CPU-stage → quantize-onto-GPU) against the
+// drives `crate::inference_runtime::load("flux2_dev")` with a Q4 LoadSpec (CPU-stage → quantize-onto-GPU) against the
 // dense diffusers snapshot — the worker-lane validation backing the off-Mac candle routing wire.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod flux2_dev_gpu_smoke;
 // Real-weight GPU smoke for the candle Anima 2B lane (epic 10512, sc-10625 — the hardware-gated
-// acceptance extracted from sc-10525). Test-only + candle-only; drives `gen_core::load("anima_base" |
+// acceptance extracted from sc-10525). Test-only + candle-only; drives `crate::inference_runtime::load("anima_base" |
 // "anima_aesthetic" | "anima_turbo")` against the dense bf16 circlestone-labs/Anima split_files
 // snapshot (± an official LoRA/LoKr), proving the candle Anima port renders coherently on real CUDA —
 // the evidence that unblocks flipping `macOnly: false` / `candle_routed = true` (sc-10625).
@@ -241,19 +242,19 @@ mod anima_gpu_smoke;
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod sana_candle_gpu_smoke;
 // Real-weight GPU smoke for the candle InstantID + PiD super-resolving decode (epic 7840, sc-8386).
-// Test-only + candle-only; drives the bespoke `candle_gen_instantid::InstantId` provider across
+// Test-only + candle-only; drives the bespoke `runtime_cuda::providers::instantid::InstantId` provider across
 // Identity/Angle/Pose with the `pid_sdxl` student attached, asserting the PiD decode 4×-super-resolves
 // the native decode AND the ArcFace identity likeness survives. Validates the sc-8373 InstantID lane.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod instantid_pid_gpu_smoke;
 // Real-weight GPU smoke for the candle Z-Image + PiD decode (epic 7840, sc-8033). Test-only +
-// candle-only; drives `gen_core::load("z_image_turbo", spec.with_pid(pid_flux, gemma))` — the generic
+// candle-only; drives `crate::inference_runtime::load("z_image_turbo", spec.with_pid(pid_flux, gemma))` — the generic
 // candle t2i lane (sc-9727) — proving Z-Image's flux-aliased latent decodes through the pid_flux
 // student at 4× (native 1024² -> 4096²). Z-Image has no dedicated pid_zimage; it reuses pid_flux.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod zimage_pid_gpu_smoke;
 // Real-weight MLX smoke for the Krea 2 Turbo worker lane (epic 7565 sc-7575). Test-only + macOS-only;
-// drives `gen_core::load("krea_2_turbo")` with a Q8 LoadSpec against the packed `q8/` turnkey subdir —
+// drives `crate::inference_runtime::load("krea_2_turbo")` with a Q8 LoadSpec against the packed `q8/` turnkey subdir —
 // the worker-lane validation (the crate links + drives the engine), not just the mlx-gen-krea crate.
 #[cfg(all(test, target_os = "macos"))]
 mod krea_turbo_mlx_smoke;
@@ -264,48 +265,48 @@ mod krea_turbo_mlx_smoke;
 #[cfg(all(test, target_os = "macos"))]
 mod krea_control_mlx_smoke;
 // Real-weight MLX smoke for the FLUX.1-dev strict-control worker lane (sc-8244; engine E2 sc-8239).
-// Test-only + macOS-only; drives `gen_core::load("flux1_dev_control")` (Dir base + Shakker control
+// Test-only + macOS-only; drives `crate::inference_runtime::load("flux1_dev_control")` (Dir base + Shakker control
 // overlay) per control mode (pose/canny/depth) and asserts a control-vs-control-free steer — the
 // worker-lane validation that the crate links + drives the registered control generator end-to-end.
 #[cfg(all(test, target_os = "macos"))]
 mod flux1_control_mlx_smoke;
 // Real-weight MLX smokes for the SD3.5 worker lane (epic 7841 S6 sc-7875 — the MLX-path validation
-// boundary). Test-only + macOS-only; drive `gen_core::load("sd3_5_large" | "sd3_5_large_turbo" |
+// boundary). Test-only + macOS-only; drive `crate::inference_runtime::load("sd3_5_large" | "sd3_5_large_turbo" |
 // "sd3_5_medium")` against the gated stabilityai/* diffusers snapshots (the worker crate links + drives
 // all three registered generators + the LoRA `with_adapters` apply seam), not just mlx-gen-sd3 in
 // isolation.
 #[cfg(all(test, target_os = "macos"))]
 mod sd3_5_mlx_smoke;
 // Real-weight MLX smoke for the SDXL base 1.0 Q8 worker lane (sc-8746, epic 8506 Group-B). Test-only +
-// macOS-only; drives `gen_core::load("sdxl")` with a Q8 LoadSpec against the packed `q8/` turnkey subdir.
+// macOS-only; drives `crate::inference_runtime::load("sdxl")` with a Q8 LoadSpec against the packed `q8/` turnkey subdir.
 // Closes the stale sc-1975 Q8-on-SDXL loop on-device: asserts the fixed mlx-gen Q8 path (sc-2641) renders
 // non-degenerate AND specifically NOT all-zero (the retired Apple recipe's exact failure signature).
 #[cfg(all(test, target_os = "macos"))]
 mod sdxl_base_q8_mlx_smoke;
 // Real-weight MLX train→apply smoke for the Illustrious-XL SDXL-family lane (sc-10618, epic 10609).
-// Test-only + macOS-only; drives `mlx_gen_sdxl::load_trainer` from the Illustrious turnkey's dense
+// Test-only + macOS-only; drives `runtime_macos::providers::sdxl::load_trainer` from the Illustrious turnkey's dense
 // `bf16/` tier, trains a tiny LoRA/LoKr, then renders WITHOUT vs WITH the adapter via
-// `mlx_gen_sdxl::load(...).with_adapters` and asserts it visibly changes the output — the E2E evidence
+// `runtime_macos::providers::sdxl::load(...).with_adapters` and asserts it visibly changes the output — the E2E evidence
 // (not a registry entry + a green unit test) the training half of the epic demands. For LoKr it also
 // asserts no `mid_block` factors were emitted (sc-2640: the SDXL LoKr surface is down/up attention only).
 #[cfg(all(test, target_os = "macos"))]
 mod illustrious_train_apply_mlx_smoke;
 // Real-weight MLX smoke for the Lens-Turbo Q4 worker lane (sc-8763, epic 8506 Group-B). Test-only +
-// macOS-only; drives `gen_core::load("lens_turbo")` with a Q4 LoadSpec against the packed `q4/` turnkey
+// macOS-only; drives `crate::inference_runtime::load("lens_turbo")` with a Q4 LoadSpec against the packed `q4/` turnkey
 // subdir. On-device evidence that the SceneWorks/lens-turbo-mlx pre-quantized q4 tier loads through the
 // worker packed path (`mlx.standardTierLayout` → `standard_tier_subdir` resolves `q4/`) and renders
 // non-degenerate (both transformer + gpt-oss MoE TE are packed per-tier; NOT a dense-TE model).
 #[cfg(all(test, target_os = "macos"))]
 mod lens_turbo_q4_mlx_smoke;
 // Real-weight MLX smoke for the recovered base Lens Q4 worker lane (sc-8767, epic 8506 Group-B).
-// Test-only + macOS-only; drives `gen_core::load("lens")` with a Q4 LoadSpec against the packed `q4/`
+// Test-only + macOS-only; drives `crate::inference_runtime::load("lens")` with a Q4 LoadSpec against the packed `q4/`
 // turnkey subdir. On-device evidence that the SceneWorks/lens-mlx pre-quantized q4 tier loads through the
 // worker packed path (`mlx.standardTierLayout` → `standard_tier_subdir` resolves `q4/`) and renders
 // non-degenerate (both transformer + gpt-oss MoE TE are packed per-tier; NOT a dense-TE model).
 #[cfg(all(test, target_os = "macos"))]
 mod lens_base_q4_mlx_smoke;
 // Real-weight MLX smoke for the Chroma1-Base Q4 worker lane (sc-8777, epic 8506 Group-B). Test-only +
-// macOS-only; drives `gen_core::load("chroma1_base")` with a Q4 LoadSpec against the packed `q4/` turnkey
+// macOS-only; drives `crate::inference_runtime::load("chroma1_base")` with a Q4 LoadSpec against the packed `q4/` turnkey
 // subdir. On-device evidence that the SceneWorks/chroma1-base-mlx pre-quantized q4 tier loads through the
 // worker packed path (`mlx.standardTierLayout` → `standard_tier_subdir` resolves `q4/`) and renders
 // non-degenerate. Chroma packs ONLY the transformer per-tier (the T5-XXL TE + VAE stay dense — chroma
@@ -314,13 +315,13 @@ mod lens_base_q4_mlx_smoke;
 mod chroma1_base_q4_mlx_smoke;
 // Real-weight MLX smoke for the PiD 2K/4K output tier (epic 7840, sc-10054). Test-only + macOS-only;
 // drives the REAL `pid_output_tier` + `pid_effective_dims` mapping then renders z_image_turbo through
-// `gen_core::load(...).with_pid(pid_flux, gemma)` + `use_pid`, asserting `pidTarget:"2k"` yields a 2048²
+// `crate::inference_runtime::load(...).with_pid(pid_flux, gemma)` + `use_pid`, asserting `pidTarget:"2k"` yields a 2048²
 // image (base 512 × 4) and `"4k"` yields 4096² (base 1024 × 4) — the on-device evidence that the tier
 // mapping actually changes the output resolution on real weights.
 #[cfg(all(test, target_os = "macos"))]
 mod pid_tier_mlx_smoke;
 // Real-weight MLX smoke for the SANA quant-matrix lane (sc-8489/sc-8513, epic 8506). macOS-only;
-// drives `gen_core::load("sana_1600m"|"sana_sprint_1600m")` with a per-tier LoadSpec against the
+// drives `crate::inference_runtime::load("sana_1600m"|"sana_sprint_1600m")` with a per-tier LoadSpec against the
 // packed q4/q8 + dense bf16 turnkey subdirs. On-device evidence that the SceneWorks/Sana_*_mlx
 // pre-quantized turnkeys load through the worker packed path (`STANDARD_TIER_MODELS` →
 // `standard_tier_subdir` resolves the tier) and render non-degenerate at EVERY downloaded tier. SANA
@@ -329,7 +330,7 @@ mod pid_tier_mlx_smoke;
 #[cfg(all(test, target_os = "macos"))]
 mod sana_mlx_smoke;
 // On-device per-tier memory-footprint measurement harness (sc-8516, epic 8506). Test-only + macOS-only;
-// #[ignore]d real-weight smokes that drive `gen_core::load(id)` + ONE generation while sampling the MLX
+// #[ignore]d real-weight smokes that drive `crate::inference_runtime::load(id)` + ONE generation while sampling the MLX
 // process-global memory counters (mlx_rs::memory::{reset_peak_memory, get_active_memory, get_peak_memory})
 // generator_cache.rs already publishes — producing measured resident + peak footprint per (model, tier)
 // to calibrate the sc-8509 RAM→tier suggestion (apps/web/src/tierSuggestion.js) and backfill the sc-8508
@@ -337,21 +338,21 @@ mod sana_mlx_smoke;
 #[cfg(all(test, target_os = "macos"))]
 mod footprint_measure;
 // On-device build helper for the Wan2.2 T2V-A14B quant matrix (sc-9942, epic 8506). Test-only +
-// macOS-only; an #[ignore]d helper that drives `mlx_gen_wan::convert::convert_t2v_14b` once per tier
+// macOS-only; an #[ignore]d helper that drives `runtime_macos::providers::wan::convert::convert_t2v_14b` once per tier
 // (bf16/q8/q4) against the native checkpoint to produce the self-contained hosted tier subdirs, then
 // copies the tokenizer the converter omits. Run one-off to build the artifacts for
 // `SceneWorks/wan2.2-t2v-a14b-mlx`; not exercised in CI (needs the ~126GB native weights).
 #[cfg(all(test, target_os = "macos"))]
 mod wan_t2v_14b_tier_build;
 // On-device build helper for the Wan2.2 I2V-A14B quant matrix (sc-9943, epic 8506). The image→video
-// sibling of the above; drives `mlx_gen_wan::convert::convert_i2v_14b` (in_dim 36 image-concat) once
+// sibling of the above; drives `runtime_macos::providers::wan::convert::convert_i2v_14b` (in_dim 36 image-concat) once
 // per tier (bf16/q8/q4) against the native checkpoint to produce the self-contained hosted tier
 // subdirs, then copies the tokenizer the converter omits. Run one-off to build the artifacts for
 // `SceneWorks/wan2.2-i2v-a14b-mlx`; not exercised in CI (needs the ~126GB native weights).
 #[cfg(all(test, target_os = "macos"))]
 mod wan_i2v_14b_tier_build;
 // On-device build helper for the Wan2.2 TI2V-5B quant matrix (sc-9941, epic 8506). The single-expert
-// sibling of the A14B helpers: drives `mlx_gen_wan::convert::convert_ti2v_5b` for the dense bf16 tier,
+// sibling of the A14B helpers: drives `runtime_macos::providers::wan::convert::convert_ti2v_5b` for the dense bf16 tier,
 // then derives the q8/q4 tiers worker-side (load the bf16 `model.safetensors` →
 // `quantize_wan_transformer` → save + reuse the shared dense T5/VAE/tokenizer + a `config.json` quant
 // patch) — byte-identical to an inline convert, no mlx-gen change. Run one-off to build the artifacts
@@ -360,8 +361,8 @@ mod wan_i2v_14b_tier_build;
 mod wan_ti2v_5b_tier_build;
 // On-device build helper for the Bernini quant matrix (sc-9945, epic 8506). Composite model: derives
 // all three tiers (bf16/q8/q4) worker-side from the already-hosted lean bf16 snapshot — copy the dense
-// remainder, quantize the planner backbone (`mlx_gen_bernini::convert::quantize_qwen_planner_backbone`)
-// + both renderer experts (`mlx_gen_wan::convert::quantize_wan_transformer`), patch the two config
+// remainder, quantize the planner backbone (`runtime_macos::providers::bernini::convert::quantize_qwen_planner_backbone`)
+// + both renderer experts (`runtime_macos::providers::wan::convert::quantize_wan_transformer`), patch the two config
 // sidecars. Run one-off to build the artifacts for `SceneWorks/bernini-mlx`; not exercised in CI.
 #[cfg(all(test, target_os = "macos"))]
 mod bernini_tier_build;
@@ -481,7 +482,7 @@ mod kps_jobs;
 // SeedVR2 one-step diffusion upscaler — native MLX on Mac (sc-4815) and the candle CUDA backend on
 // Windows (sc-5928). So the module compiles on Mac AND the Windows/CUDA candle lane; the ort/CoreML
 // Real-ESRGAN path inside stays Mac-gated (the Python torch Real-ESRGAN / AuraSR path is the
-// Windows/Linux backend), while the SeedVR2 path is backend-neutral (`gen_core::load("seedvr2")`).
+// Windows/Linux backend), while the SeedVR2 path is backend-neutral (`crate::inference_runtime::load("seedvr2")`).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")

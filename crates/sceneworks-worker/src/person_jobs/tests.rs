@@ -7,9 +7,9 @@
 use super::*;
 // CARVE-OUT(epic 3720): backend-specific; absorbed by Detector in Phase 6.
 #[cfg(target_os = "macos")]
-use mlx_gen::weights::Weights;
-#[cfg(target_os = "macos")]
 use mlx_rs::Array;
+#[cfg(target_os = "macos")]
+use runtime_macos::media::weights::Weights;
 use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use tokio::io::AsyncWriteExt;

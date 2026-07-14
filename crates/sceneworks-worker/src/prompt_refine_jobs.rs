@@ -1,7 +1,7 @@
 //! Native prompt refinement (epic 5095): candle on Windows/CUDA (sc-5525) + MLX on macOS (sc-5552).
 //!
 //! Routes the `prompt_refine` job to a native LLM provider through the unified LLM engine (epic 7153)
-//! — a generic `core_llm::TextLlm` resolved model-first via `gen_core::core_llm::load_for_model`
+//! — a generic `core_llm::TextLlm` resolved model-first via `crate::inference_runtime::load_for_model`
 //! (Anubis-Mini-8B, sc-6550), so the dispatch body is one backend-agnostic path: macOS (sc-7158) picks
 //! mlx-llm's `mlx-llama`, the Windows/CUDA candle build (sc-7404) picks candle-llm's `candle-llama`.
 //! Both retired their bespoke hand-rolled Llama decoders (`mlx-gen-prompt-refine` /
@@ -18,16 +18,6 @@
 //! refinedPrompt}` result shape.
 
 use super::*;
-
-// Prompt-refine provider force-link anchors: keep each backend's `inventory::submit!` provider
-// registration from being dropped by the release linker, so model-first `core_llm::load_for_model`
-// resolution can discover it. macOS (sc-7158, epic 7153) force-links `mlx_llm` for `mlx-llama`; the
-// Windows/CUDA candle build (sc-7404) force-links `candle_llm` for `candle-llama` — both generic
-// `core_llm::TextLlm` providers (retiring the bespoke `mlx-gen-prompt-refine` / `candle-gen-prompt-refine`).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_llm as _;
-#[cfg(target_os = "macos")]
-use mlx_llm as _;
 
 // The prompt-refinement / magic-prompt checkpoint — the coherent Anubis-8B (sc-6550 bake-off). It
 // serves BOTH the free-text "Refine my prompt" rewrite AND the Ideogram magic-prompt JSON caption:
@@ -751,7 +741,7 @@ pub(crate) fn clean_json_output(text: &str) -> String {
 // ----------------------------------------------------------------------------------------------
 // Job handler — native MLX on macOS (sc-5552 / sc-7158) and candle on the Windows candle build
 // (sc-5525 / sc-7404). The body is backend-agnostic: `core_llm::load_for_model` resolves whichever
-// provider is force-linked above (mlx-llama on macOS, candle-llama on the candle build) model-first.
+// platform catalog supplies mlx-llama on macOS or candle-llama on the candle build model-first.
 // A build with neither native provider never advertises the capability, so the job never arrives.
 // ----------------------------------------------------------------------------------------------
 
@@ -965,7 +955,7 @@ pub(crate) async fn run_prompt_refine_job(
             );
 
             // Resolve the native provider model-first (no provider id) and stream through the
-            // `core_llm::TextLlm` contract. One backend-agnostic path: the force-linked provider
+            // `core_llm::TextLlm` contract. One backend-agnostic path: the bundled provider
             // (mlx-llama on macOS, candle-llama on the Windows candle build) wins resolution. The provider
             // renders the model's own chat template, so the worker supplies only the system + user turns
             // (the product policy stays caller-side).
@@ -2122,8 +2112,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn vision_plus_json_resolution_now_resolves_for_qwen_vl_snapshot() {
-        use gen_core::core_llm::{load_for_model_with, Constraint, LoadSpec, ModelRequirements};
-        use mlx_llm as _; // force-link the providers into core-llm's inventory
+        use gen_core::core_llm::{Constraint, LoadSpec, ModelRequirements};
 
         let dir = tempfile::tempdir().expect("tempdir");
         write_qwen_vl_config(dir.path());
@@ -2132,7 +2121,7 @@ mod tests {
         let reqs = ModelRequirements::default()
             .with_vision()
             .with_constraint(Constraint::Json);
-        let err = load_for_model_with(
+        let err = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: dir.path().to_string_lossy().into_owned(),
                 quantize: None,
@@ -2162,10 +2151,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn json_only_resolution_selects_a_provider_for_qwen_vl_snapshot() {
-        use gen_core::core_llm::{
-            load_for_model_with, textllms, Constraint, LoadSpec, ModelRequirements,
-        };
-        use mlx_llm as _; // force-link the providers into core-llm's inventory
+        use gen_core::core_llm::{Constraint, LoadSpec, ModelRequirements};
 
         let dir = tempfile::tempdir().expect("tempdir");
         write_qwen_vl_config(dir.path());
@@ -2176,7 +2162,7 @@ mod tests {
             source: dir.path().to_string_lossy().into_owned(),
             quantize: None,
         };
-        let err = load_for_model_with(&spec, &reqs)
+        let err = crate::inference_runtime::load_for_model_with(&spec, &reqs)
             .err()
             .expect("no weights on disk, so the LOAD fails after the provider is selected");
         let msg = err.to_string();
@@ -2196,7 +2182,7 @@ mod tests {
         // registry: architecture `can_load` AND the capability filter (vision/constraints) the resolver
         // applies. A future regression that resolved the snapshot to a DIFFERENT Json provider would
         // surface here, not slip past the generic "some provider resolved" check above.
-        let viable: Vec<String> = textllms()
+        let viable: Vec<String> = crate::inference_runtime::textllms()
             .filter(|r| (r.can_load)(&spec))
             .filter(|r| {
                 let caps = (r.descriptor)().capabilities;
@@ -2263,10 +2249,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn json_only_resolution_selects_vision_capable_provider_for_qwen3_vl_snapshot() {
-        use gen_core::core_llm::{
-            load_for_model_with, textllms, Constraint, LoadSpec, ModelRequirements,
-        };
-        use mlx_llm as _; // force-link the providers into core-llm's inventory
+        use gen_core::core_llm::{Constraint, LoadSpec, ModelRequirements};
 
         let dir = tempfile::tempdir().expect("tempdir");
         write_qwen3_vl_config(dir.path());
@@ -2279,7 +2262,7 @@ mod tests {
         // resolve a provider for the qwen3_vl snapshot — the LOAD then fails on missing weights, NOT
         // the `Unsupported` capability-resolution error (proving a provider WAS selected).
         let reqs = ModelRequirements::default().with_constraint(Constraint::Json);
-        let err = load_for_model_with(&spec, &reqs)
+        let err = crate::inference_runtime::load_for_model_with(&spec, &reqs)
             .err()
             .expect("no weights on disk, so the LOAD fails after the provider is selected");
         let msg = err.to_string();
@@ -2292,7 +2275,7 @@ mod tests {
 
         // (2) The selected Json provider for this qwen3_vl snapshot is `mlx-llama` — the one whose
         // loaded Qwen3-VL tower reads the `Content::Image` at generate time.
-        let json_viable: Vec<String> = textllms()
+        let json_viable: Vec<String> = crate::inference_runtime::textllms()
             .filter(|r| (r.can_load)(&spec))
             .filter(|r| {
                 let caps = (r.descriptor)().capabilities;
@@ -2312,7 +2295,7 @@ mod tests {
         // 7041411 / sc-8077, OR a statically-vision descriptor) over the live registry. At least one
         // provider that `can_load` this snapshot must serve it WITH vision — impossible on the old
         // engine, where `qwen3_vl` was a text-only `Qwen3` with no probe.
-        let vision_capable: Vec<String> = textllms()
+        let vision_capable: Vec<String> = crate::inference_runtime::textllms()
             .filter(|r| (r.can_load)(&spec))
             .filter(|r| {
                 r.weightless_vision.map(|p| p(&spec)).unwrap_or(false)
@@ -2334,7 +2317,7 @@ mod tests {
         let vision_json = ModelRequirements::default()
             .with_vision()
             .with_constraint(Constraint::Json);
-        let vj_msg = load_for_model_with(&spec, &vision_json)
+        let vj_msg = crate::inference_runtime::load_for_model_with(&spec, &vision_json)
             .err()
             .expect("no weight shards on disk, so the LOAD fails after the provider is selected")
             .to_string();
@@ -2359,8 +2342,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn unconstrained_resolution_selects_a_provider_for_qwen3_vl_snapshot() {
-        use gen_core::core_llm::{load_for_model_with, textllms, LoadSpec, ModelRequirements};
-        use mlx_llm as _; // force-link the providers into core-llm's inventory
+        use gen_core::core_llm::{LoadSpec, ModelRequirements};
 
         let dir = tempfile::tempdir().expect("tempdir");
         write_qwen3_vl_config(dir.path());
@@ -2371,7 +2353,7 @@ mod tests {
 
         // The worker's image_describe resolution requirements: no constraint, no vision filter.
         let reqs = ModelRequirements::default();
-        let err = load_for_model_with(&spec, &reqs)
+        let err = crate::inference_runtime::load_for_model_with(&spec, &reqs)
             .err()
             .expect("no weights on disk, so the LOAD fails after the provider is selected");
         let msg = err.to_string();
@@ -2386,7 +2368,7 @@ mod tests {
         // — the only one that `can_load`s a Qwen-VL wrapper. With no constraint/vision filter the viable
         // predicate reduces to `can_load` alone, so a regression that admitted a non-image provider (or
         // failed to admit `mlx-llama`) surfaces here.
-        let viable: Vec<String> = textllms()
+        let viable: Vec<String> = crate::inference_runtime::textllms()
             .filter(|r| (r.can_load)(&spec))
             .map(|r| (r.descriptor)().id)
             .collect();
@@ -2396,7 +2378,7 @@ mod tests {
         );
         // And the admitted provider is vision-capable at load (the weightless_vision probe), so the prose
         // describe path examines the `Content::Image` exactly like the caption path does.
-        let vision_capable = textllms()
+        let vision_capable = crate::inference_runtime::textllms()
             .filter(|r| (r.can_load)(&spec))
             .filter(|r| (r.descriptor)().id == "mlx-llama")
             .any(|r| {
@@ -2411,7 +2393,7 @@ mod tests {
 
     /// Real-weight image-caption smoke (sc-8105 → validated under sc-8113): examines a reference image
     /// and emits an Ideogram JSON caption through the unified mlx-llm VISION engine —
-    /// `gen_core::core_llm::load_for_model_with` resolves `mlx-llama` on a Qwen-VL snapshot. The pick is
+    /// `crate::inference_runtime::load_for_model_with` resolves `mlx-llama` on a Qwen-VL snapshot. The pick is
     /// steered by the JSON constraint ALONE (the request DOES carry the image, but resolution must NOT
     /// demand vision: no provider statically advertises both vision and Json for a Qwen-VL snapshot, so
     /// `mlx-llama` is selected text+Json and flips to vision only at LOAD time — see the resolution note
@@ -2429,10 +2411,9 @@ mod tests {
     #[ignore = "real-weight (sc-8113): needs a vision model snapshot + reference image; set VISION_CAPTION_SNAPSHOT + IMAGE_CAPTION_REF"]
     fn image_caption_examines_reference_image() {
         use gen_core::core_llm::{
-            load_for_model_with, Constraint, Content, ImageRef, LoadSpec, Message,
-            ModelRequirements, Role, Sampling, StreamEvent, TextLlmRequest,
+            Constraint, Content, ImageRef, LoadSpec, Message, ModelRequirements, Role, Sampling,
+            StreamEvent, TextLlmRequest,
         };
-        use mlx_llm as _;
 
         let snapshot = std::env::var("VISION_CAPTION_SNAPSHOT")
             .expect("set VISION_CAPTION_SNAPSHOT to a vision model snapshot dir");
@@ -2471,7 +2452,7 @@ mod tests {
         for constraint in request.constraint.iter().copied() {
             reqs = reqs.with_constraint(constraint);
         }
-        let captioner = load_for_model_with(
+        let captioner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: snapshot,
                 quantize: None,
@@ -2504,10 +2485,9 @@ mod tests {
     #[test]
     #[ignore = "real-weight (sc-8116): needs a Qwen3-VL snapshot + reference image; set VISION_CAPTION_SNAPSHOT + IMAGE_CAPTION_REF"]
     fn image_caption_examines_reference_image_candle() {
-        use candle_llm as _;
         use gen_core::core_llm::{
-            load_for_model_with, Constraint, Content, ImageRef, LoadSpec, Message,
-            ModelRequirements, Role, Sampling, StreamEvent, TextLlmRequest,
+            Constraint, Content, ImageRef, LoadSpec, Message, ModelRequirements, Role, Sampling,
+            StreamEvent, TextLlmRequest,
         };
 
         let snapshot = std::env::var("VISION_CAPTION_SNAPSHOT")
@@ -2545,7 +2525,7 @@ mod tests {
         for constraint in request.constraint.iter().copied() {
             reqs = reqs.with_constraint(constraint);
         }
-        let captioner = load_for_model_with(
+        let captioner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: snapshot,
                 quantize: None,
@@ -2579,10 +2559,9 @@ mod tests {
     #[ignore = "real-weight (sc-8209): needs a vision model snapshot + reference image; set VISION_CAPTION_SNAPSHOT + IMAGE_CAPTION_REF"]
     fn image_describe_examines_reference_image() {
         use gen_core::core_llm::{
-            load_for_model_with, Content, LoadSpec, Message, ModelRequirements, Role, Sampling,
-            StreamEvent, TextLlmRequest,
+            Content, LoadSpec, Message, ModelRequirements, Role, Sampling, StreamEvent,
+            TextLlmRequest,
         };
-        use mlx_llm as _;
 
         let snapshot = std::env::var("VISION_CAPTION_SNAPSHOT")
             .expect("set VISION_CAPTION_SNAPSHOT to a vision model snapshot dir");
@@ -2617,7 +2596,7 @@ mod tests {
         // (no constraint, no vision filter). `can_load` alone admits `mlx-llama`, which flips to vision at
         // load — the risk gate this smoke exercises on real weights.
         let reqs = ModelRequirements::default();
-        let describer = load_for_model_with(
+        let describer = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: snapshot,
                 quantize: None,
@@ -2642,7 +2621,7 @@ mod tests {
     }
 
     /// Real-weight magic-prompt smoke (sc-7158): expands a plain idea into a JSON caption through the
-    /// unified mlx-llm engine — `gen_core::core_llm::load_for_model` resolves `mlx-llama` on the Anubis
+    /// unified mlx-llm engine — `crate::inference_runtime::load_for_model` resolves `mlx-llama` on the Anubis
     /// snapshot (the JSON constraint steers the model-first pick) — and asserts the cleaned reply parses
     /// with the caption's required section. `#[ignore]` — the weights live outside CI; run on a Mac with
     /// the model staged in the HF cache:
@@ -2652,8 +2631,7 @@ mod tests {
     #[ignore = "real-weight: needs the Anubis-Mini-8B prompt-refine model in the HF cache"]
     fn magic_prompt_expands_plain_text_to_caption() {
         use gen_core::core_llm::{
-            load_for_model_with, Constraint, LoadSpec, Message, ModelRequirements, Sampling,
-            StreamEvent, TextLlmRequest,
+            Constraint, LoadSpec, Message, ModelRequirements, Sampling, StreamEvent, TextLlmRequest,
         };
 
         let home = std::env::var("HOME").expect("HOME");
@@ -2682,7 +2660,7 @@ mod tests {
             constraint: Some(Constraint::Json), // sc-6585: exercise constrained decoding
             ..Default::default()
         };
-        let refiner = load_for_model_with(
+        let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: weights_dir.to_string_lossy().into_owned(),
                 quantize: None,
@@ -2708,7 +2686,7 @@ mod tests {
     }
 
     /// Real-weight magic-prompt smoke (sc-7404) — the Windows/CUDA twin of the macOS test above. Expands
-    /// a plain idea into a JSON caption through the unified candle engine: `gen_core::core_llm::load_for_model`
+    /// a plain idea into a JSON caption through the unified candle engine: `crate::inference_runtime::load_for_model`
     /// resolves candle-llm's `candle-llama` on the Anubis snapshot (the JSON constraint steers the
     /// model-first pick + masks the decode), and the cleaned reply must parse with the caption's required
     /// section. This is the candle parity gate for retiring `candle-gen-prompt-refine`. `#[ignore]` — the
@@ -2720,13 +2698,11 @@ mod tests {
     #[ignore = "real-weight: needs the Anubis-Mini-8B prompt-refine model staged + a CUDA GPU"]
     fn magic_prompt_expands_plain_text_to_caption_candle() {
         use gen_core::core_llm::{
-            load_for_model_with, Constraint, LoadSpec, Message, ModelRequirements, Sampling,
-            StreamEvent, TextLlmRequest,
+            Constraint, LoadSpec, Message, ModelRequirements, Sampling, StreamEvent, TextLlmRequest,
         };
 
         // Force-link `candle-llama` so model-first resolution can discover it in this test binary
-        // (the worker's force-link anchor is cfg'd to the job path, not the test module).
-        use candle_llm as _;
+        // (the worker's platform catalog is available to the job path and this test module).
 
         // An explicit snapshot override wins; otherwise resolve the HF cache under the Windows home.
         let weights_dir = match std::env::var("PROMPT_REFINE_SNAPSHOT") {
@@ -2762,7 +2738,7 @@ mod tests {
             constraint: Some(Constraint::Json), // sc-6585: exercise constrained decoding on candle
             ..Default::default()
         };
-        let refiner = load_for_model_with(
+        let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: weights_dir.to_string_lossy().into_owned(),
                 quantize: None,
@@ -2978,7 +2954,7 @@ mod tests {
 
     /// Real-weight magic-prompt bake-off (sc-6550, ported to the unified engine in sc-7158). Runs the
     /// shipping magic-prompt system prompt over `BAKEOFF_PROMPTS` × N seeds through mlx-llm's `mlx-llama`
-    /// (resolved model-first by `gen_core::core_llm::load_for_model`) and prints per-run + aggregate
+    /// (resolved model-first by `crate::inference_runtime::load_for_model`) and prints per-run + aggregate
     /// degeneracy metrics. `#[ignore]` — the weights live outside CI. Point it at any Llama-3.x-Instruct
     /// snapshot dir (the 3B baseline, a Llama-3.1-8B, an Anubis-8B …). Measure footprint by wrapping the
     /// TEST BINARY with `/usr/bin/time -l` (NOT `cargo test`, which reports the cargo parent's peak):
@@ -2989,8 +2965,7 @@ mod tests {
     #[ignore = "real-weight: set BAKEOFF_MODEL_DIR to a Llama-3.x-Instruct snapshot dir"]
     fn magic_prompt_bakeoff() {
         use gen_core::core_llm::{
-            load_for_model_with, Constraint, LoadSpec, Message, ModelRequirements, Sampling,
-            StreamEvent, TextLlmRequest,
+            Constraint, LoadSpec, Message, ModelRequirements, Sampling, StreamEvent, TextLlmRequest,
         };
         use std::time::Instant;
 
@@ -3010,7 +2985,7 @@ mod tests {
         if constrain {
             reqs = reqs.with_constraint(Constraint::Json);
         }
-        let refiner = load_for_model_with(
+        let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: weights_dir.to_string_lossy().into_owned(),
                 quantize: None,

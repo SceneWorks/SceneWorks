@@ -1,5 +1,5 @@
 // Candle (Windows/CUDA) FLUX.2 image-edit route (sc-5487 klein, epic 5480; sc-7736 dev, epic 6564) —
-// Kontext-style reference-conditioned editing off-Mac via `candle_gen_flux2::Flux2Edit`. FLUX.2-klein has
+// Kontext-style reference-conditioned editing off-Mac via `runtime_cuda::providers::flux2::Flux2Edit`. FLUX.2-klein has
 // no torch path (it is diffusers/MLX-only), so before this an off-Mac `edit_image` job on klein had no
 // real lane; this routes it to candle instead of the torch fallback. **sc-7736** generalizes the lane to
 // the 32B **dev** flagship (`flux2_dev`): the same DiT token-concat edit, loaded via the Q4 CPU-stage →

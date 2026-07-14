@@ -1,6 +1,6 @@
 //! Local real-weight GPU smoke for the candle RealVisXL Lightning worker lane (sc-7176, the worker
 //! half of sc-6128). `#[ignore]`d — run by hand on the RTX PRO 6000. It drives the real candle SDXL
-//! engine via `gen_core::load("sdxl")` — the same runtime seam `generate_candle_stream` uses, minus
+//! engine via `crate::inference_runtime::load("sdxl")` — the same runtime seam `generate_candle_stream` uses, minus
 //! the API/job plumbing — with the **forced** few-step `lightning` (Euler-trailing, CFG-off) sampler
 //! the worker pins for `realvisxl_lightning`, against the distilled RealVisXL_V5.0_Lightning weights.
 //! This is the end-to-end worker-lane validation that backs the macOnly drop.
@@ -61,7 +61,7 @@ fn render(
 ) -> Image {
     // The generator is loaded ONCE by the caller and reused across the lightning + optional ddim
     // contrast render (sc-8925): the SDXL snapshot is multi-GB, so re-loading it per render() (as the
-    // old per-call `gen_core::load` did) doubled the load wall-clock + VRAM on the RVXL_CONTRAST=1 run.
+    // old per-call `crate::inference_runtime::load` did) doubled the load wall-clock + VRAM on the RVXL_CONTRAST=1 run.
     let req = GenerationRequest {
         prompt: prompt.to_owned(),
         width: w,
@@ -125,7 +125,7 @@ fn realvisxl_lightning_candle_gpu_smoke() {
     let weights_dir = env_path("REALVISXL_LIGHTNING_DIR");
     // Accept EITHER a dense diffusers snapshot (model_index.json root) OR a packed q4/q8 standard-tier
     // dir (sc-10812: engine-complete unet/+text_encoder/+vae/, no model_index.json). candle-gen-sdxl
-    // packed-detects the tier from disk, so both load through the same `gen_core::load("sdxl")` seam.
+    // packed-detects the tier from disk, so both load through the same `crate::inference_runtime::load("sdxl")` seam.
     let is_diffusers_snapshot = weights_dir.join("model_index.json").is_file();
     let is_packed_tier = weights_dir.join("unet").is_dir()
         && weights_dir.join("text_encoder").is_dir()
@@ -152,7 +152,8 @@ fn realvisxl_lightning_candle_gpu_smoke() {
     // ONCE here and reused across both renders (sc-8925) — the multi-GB snapshot is not re-loaded for
     // the RVXL_CONTRAST=1 ddim run.
     let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
-    let generator = gen_core::load("sdxl", &spec).expect("load candle sdxl provider");
+    let generator =
+        crate::inference_runtime::load("sdxl", &spec).expect("load candle sdxl provider");
 
     // The shipped behavior: realvisxl_lightning forces the few-step `lightning` sampler, CFG-off
     // (guidance 1.0 — the distilled checkpoint is trained CFG-free). Overridable so this harness can also

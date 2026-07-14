@@ -4,10 +4,10 @@
 //!
 //! These are the **worker-layer** counterpart to the engine-layer E5/E6/M3 smokes (which live in
 //! `mlx-gen-sd3`'s own `tests/`). The point here is NOT to re-prove the engine in isolation — it is to
-//! prove the **`sceneworks-worker` crate links + drives the registered SD3.5 generators end-to-end**:
-//! the `use mlx_gen_sd3 as _;` force-link anchor in `image_jobs.rs` keeps the three `inventory::submit!`
-//! `ModelRegistration`s from being GC'd, so `gen_core::load("sd3_5_large" | "sd3_5_large_turbo" |
-//! "sd3_5_medium")` resolves the generator from inside this crate exactly as `generate_stream` does at
+//! prove the **`sceneworks-worker` crate drives the bundled SD3.5 generators end-to-end**:
+//! `runtime-macos` explicitly includes all three registrations, so
+//! `crate::inference_runtime::load("sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium")` resolves
+//! the generator through the same catalog as `generate_stream` at
 //! runtime (minus the API/job plumbing). A coherent 1024² render through this seam is the worker-path
 //! proof.
 //!
@@ -158,8 +158,8 @@ fn mean_neighbor_gradient(img: &Image) -> f64 {
 }
 
 /// Drive the worker-lane load→generate seam for one SD3.5 engine id and assert a coherent image.
-/// `engine_id` is the `gen_core::load` id (`sd3_5_large` | `sd3_5_large_turbo` | `sd3_5_medium`),
-/// resolved through the worker's force-link anchor. `guidance` mirrors the worker's `resolve_guidance`:
+/// `engine_id` is the `crate::inference_runtime::load` id (`sd3_5_large` | `sd3_5_large_turbo` | `sd3_5_medium`),
+/// resolved through the worker's platform catalog. `guidance` mirrors the worker's `resolve_guidance`:
 /// `None` for the CFG-free Turbo (the descriptor advertises supports_guidance=false), `Some(scale)` for
 /// the true-CFG Large/Medium. `adapters` exercises the `LoadSpec::with_adapters` apply seam.
 #[allow(clippy::too_many_arguments)]
@@ -190,16 +190,15 @@ fn run_worker_smoke(
     );
 
     // The exact runtime seam `image_jobs::base::load_spec` builds: a Dir LoadSpec (+ quant, + any
-    // adapters via `with_adapters`). `gen_core::load` resolves the generator the worker force-link
-    // keeps registered — if the `use mlx_gen_sd3 as _;` anchor were dropped this would fail with
-    // "no generator registered for <id>", which is precisely the worker-wiring failure this guards.
+    // adapters via `with_adapters`). `crate::inference_runtime::load` resolves the generator from the
+    // explicit `runtime-macos` catalog; a missing bundle entry fails here before any weights run.
     let mut spec = LoadSpec::new(WeightsSource::Dir(snapshot)).with_quant(quant);
     if !adapters.is_empty() {
         spec = spec.with_adapters(adapters);
     }
     let t_load = std::time::Instant::now();
-    let generator =
-        gen_core::load(engine_id, &spec).unwrap_or_else(|e| panic!("load {engine_id}: {e:?}"));
+    let generator = crate::inference_runtime::load(engine_id, &spec)
+        .unwrap_or_else(|e| panic!("load {engine_id}: {e:?}"));
     println!("loaded in {:.1}s", t_load.elapsed().as_secs_f32());
 
     // True-CFG Large/Medium take a negative prompt; CFG-free Turbo's is inert (guidance=None).

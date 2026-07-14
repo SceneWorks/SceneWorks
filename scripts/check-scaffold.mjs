@@ -29,6 +29,16 @@ const requiredPaths = [
   "docker-compose.yml",
   "docker/rust.Dockerfile",
   "docker/web.Dockerfile",
+  ".cargo/config.toml",
+];
+
+const inferenceCargoWorkflows = [
+  ".github/workflows/check.yml",
+  ".github/workflows/desktop-windows.yml",
+  ".github/workflows/macos-mlx.yml",
+  ".github/workflows/release.yml",
+  ".github/workflows/server-candle-linux.yml",
+  ".github/workflows/windows-candle.yml",
 ];
 
 const manifestSchemaPaths = [
@@ -265,8 +275,18 @@ await assertContains("docker-compose.yml", "dockerfile: docker/rust.Dockerfile")
 await assertContains("docker-compose.yml", "SCENEWORKS_RUST_WORKER_GPU_ID:-cpu");
 await assertContains("docker-compose.yml", "/sceneworks/data/cache/jobs.db");
 await assertContains("docker-compose.yml", "SCENEWORKS_ALLOW_OPEN_BIND");
+await assertContains("docker-compose.yml", "environment: SCENEWORKS_INFERENCE_READ_TOKEN");
 await assertContains(".env.example", "SCENEWORKS_RUST_WORKER_GPU_ID=cpu");
+await assertContains(".env.example", "SCENEWORKS_INFERENCE_READ_TOKEN=");
 await assertContains("docker/rust.Dockerfile", "sceneworks-rust-api");
+await assertContains("docker/rust.Dockerfile", "type=secret,id=inference_token,required=true");
+await assertContains("docker/rust.Dockerfile", "cargo build --offline");
+await assertContains(".cargo/config.toml", "git-fetch-with-cli = true");
+for (const workflowPath of inferenceCargoWorkflows) {
+  await assertContains(workflowPath, "SCENEWORKS_INFERENCE_READ_TOKEN");
+  await assertContains(workflowPath, 'CARGO_NET_OFFLINE: "true"');
+  await assertContains(workflowPath, "cargo fetch --locked");
+}
 await assertContains("README.md", "SCENEWORKS_ACCESS_TOKEN");
 await assertManifestSchemasParse();
 await assertManifestSchemaReferences();

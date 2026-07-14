@@ -1,6 +1,6 @@
 // Candle (Windows/CUDA) in-place ComfyUI Qwen-Image txt2img route (epic 10451 Phase 2b, sc-10670 +
 // sc-10830). Renders a user's existing ComfyUI Qwen-Image DiT — read in place, no copy, no
-// re-download — via `candle_gen_qwen_image::load_from_comfyui_dit`, which strips the
+// re-download — via `runtime_cuda::providers::qwen_image::load_from_comfyui_dit`, which strips the
 // `model.diffusion_model.` prefix and upcasts the plain `fp8_e4m3fn` DiT to bf16 in memory (candle-gen
 // sc-10670). The tree's **VAE** is also read in place when the API folded it into the row (sc-10830:
 // native WAN-VAE keys → diffusers remap); when absent it falls back to the snapshot VAE. The tree's
@@ -226,7 +226,7 @@ async fn generate_candle_qwen_comfyui_stream(
                 vae,
             } = paths;
             let model =
-                candle_gen_qwen_image::load_from_comfyui_dit(transformer, snapshot_dir, vae)
+                runtime_cuda::providers::qwen_image::load_from_comfyui_dit(transformer, snapshot_dir, vae)
                     .map_err(|error| {
                         WorkerError::Engine(format!("ComfyUI Qwen-Image load failed: {error}"))
                     })?;

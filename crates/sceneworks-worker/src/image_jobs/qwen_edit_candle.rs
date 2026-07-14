@@ -1,5 +1,5 @@
 // Candle (Windows/CUDA) Qwen-Image-Edit route (sc-5487, epic 5480) — reference-conditioned image
-// editing on the Qwen-Image-Edit family off-Mac via `candle_gen_qwen_image::QwenEdit`. The reference
+// editing on the Qwen-Image-Edit family off-Mac via `runtime_cuda::providers::qwen_image::QwenEdit`. The reference
 // + edit prompt go through the Qwen2.5-VL vision-language encoder, the reference is VAE-encoded into
 // the transformer's dual-latent sequence, and the MMDiT denoises a reference-respecting edit. Before
 // this an off-Mac `edit_image` job on a Qwen-Image-Edit model fell back to the Python torch worker.

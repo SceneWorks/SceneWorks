@@ -1,5 +1,5 @@
 // Candle (Windows/CUDA) SDXL IP-Adapter-Plus reference route (sc-5488, epic 5480) — reference-image
-// (identity) conditioning on SDXL/RealVisXL off-Mac via `candle_gen_sdxl::IpAdapterSdxl`. The
+// (identity) conditioning on SDXL/RealVisXL off-Mac via `runtime_cuda::providers::sdxl::IpAdapterSdxl`. The
 // reference-conditioning sibling of the candle InstantID lane (instantid.rs), but plain SDXL: no face
 // stack, no IdentityNet/OpenPose ControlNet — just the CLIP ViT-H image tokens → pure-IP denoise.
 //

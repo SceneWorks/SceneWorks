@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 # sc-4482 (epic 3720): version-skew guard for the backend-neutral gen-core contract.
 #
-# THE TRAP: everything is git-SHA-pinned. If `mlx-gen` (macOS) resolves `sceneworks-gen-core`
-# at rev A while the worker's direct dep resolves rev B, cargo silently builds BOTH. The
-# provider crates (linked `as _`, no type contact with worker code) register into rev A's
-# `inventory` registry while the worker queries rev B's. The symptom is "engine not found" at
-# RUNTIME, not a compile error.
+# THE TRAP: if a platform runtime resolves `sceneworks-gen-core` at revision A while the worker's
+# direct contract dependency resolves revision B, Cargo silently builds both. Provider factories
+# then speak revision A's traits while worker requests use revision B's nominally-similar types.
 #
 # This gate fails the build if more than one distinct `sceneworks-gen-core` resolution exists in
 # the root package's dependency graph. It is reusable: pass the root package as $1 (default
-# `sceneworks-worker`); the candle-gen repo wires this same script against its own worker package
-# (epic 3672). `--target all` is REQUIRED so the macOS-only `mlx-gen` transitive gen-core is
+# `sceneworks-worker`). `--target all` is REQUIRED so the macOS and CUDA runtime bundles are
 # resolved even when this runs on a Linux CI lane (otherwise the skew is invisible off-macOS).
 #
 # Self-test: `check-gen-core-skew.sh --self-test` exercises the verdict logic on canned input
@@ -47,11 +44,9 @@ evaluate() {
     printf '  %s\n' "${lines[@]}"
     cat <<'MSG'
 
-Two gen-core revs => provider crates register into ONE inventory registry while the worker
-queries ANOTHER => the engine is "not found" at RUNTIME (not a compile error, because provider
-crates link `as _` and their types never meet the worker). Align the pins: the `mlx-gen` git rev
-and the direct `sceneworks-gen-core` git rev in crates/sceneworks-worker/Cargo.toml MUST be
-identical (and any candle-gen pin must match too). Bump them together.
+Two gen-core revisions split the supposedly-neutral contract identity across the product and its
+runtime bundle. Align `sceneworks-gen-core`, `runtime-macos`, and `runtime-cuda` to the same immutable
+SceneWorks/inference release in crates/sceneworks-worker/Cargo.toml.
 MSG
   } >&2
   return 1
@@ -90,9 +85,8 @@ self_test() {
 
 # Args: [PKG] [--features <list>]. PKG defaults to sceneworks-worker. `--features` is
 # passed through to `cargo tree` so the Windows candle lane (epic 5558, sc-5562) can
-# resolve the optional, feature-gated candle-gen providers
-# (`--features backend-candle`) that the default check can't see — the gate is blind
-# to them otherwise, so a candle-gen pin skew would only surface on the GPU box.
+# resolve the optional `runtime-cuda` bundle (`--features backend-candle`) that the default check
+# cannot see.
 PKG=""
 FEATURES=""
 while [ $# -gt 0 ]; do

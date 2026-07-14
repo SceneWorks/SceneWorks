@@ -1,6 +1,6 @@
 //! Local real-weight GPU smoke for the candle **InstantID + PiD super-resolving decode** (sc-8386,
 //! epic 7840). `#[ignore]`d — run by hand on the RTX PRO 6000. Drives the bespoke
-//! `candle_gen_instantid::InstantId` provider (the same one `image_jobs/instantid.rs` loads off-Mac)
+//! `runtime_cuda::providers::instantid::InstantId` provider (the same one `image_jobs/instantid.rs` loads off-Mac)
 //! with the PiD decoder attached (`with_pid`), across **all three InstantID modes** the story names:
 //!
 //!   * **Identity** (`generate`) — the reference face's ArcFace embedding + its detected kps,
@@ -42,9 +42,9 @@
 
 use std::path::{Path, PathBuf};
 
-use candle_gen_instantid::{BodyPoint, InstantId, InstantIdPaths, InstantIdRequest};
 use gen_core::runtime::CancelFlag;
 use gen_core::{Image, PidWeights, WeightsSource};
+use runtime_cuda::providers::instantid::{BodyPoint, InstantId, InstantIdPaths, InstantIdRequest};
 
 /// The InstantID identity-preservation floor. InstantID's target envelope is ArcFace-cosine ~0.82
 /// @1024²; a conservative 0.35 floor proves the reference identity clearly transferred (an unrelated

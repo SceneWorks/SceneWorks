@@ -634,6 +634,11 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         .spawn()
         .map_err(|error| format!("spawn api: {error}"))?;
     record_api_pid(app, child.pid());
+    // sc-11946: confine the API sidecar (and every process it later spawns — notably the `hf`
+    // download CLI and the `python.exe` its shim forks) to a kill-on-close Job Object, so the
+    // whole subtree dies with the desktop and no orphan can pin the API port on the next launch.
+    #[cfg(windows)]
+    sidecar_job::confine(child.pid());
     app.state::<Managed>()
         .api
         .lock()
@@ -1288,6 +1293,115 @@ fn record_api_pid(app: &AppHandle, pid: u32) {
     let mut pids = state.pids.lock().expect("pids lock");
     pids.api = Some(pid);
     write_sidecar_pidfile(&pids);
+}
+
+/// Windows sidecar-tree containment (sc-11946).
+///
+/// The API sidecar shells out to the `hf` CLI for whole-repo model downloads, and that
+/// `hf.exe` pip shim in turn forks a `python.exe` (`huggingface_hub`). If the desktop dies
+/// without cleanly reaping that subtree — a clean API self-exit orphans it, and a force-quit
+/// races the `taskkill /T` walk — the orphaned child keeps the API's listening socket handle
+/// it inherited, pinning the port so the next launch fails to bind ("local API stopped
+/// unexpectedly" / AddrInUse).
+///
+/// We create ONE process-lifetime Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and
+/// assign the API sidecar to it. Descendants a job member spawns join the job automatically
+/// (nested jobs, Win8+), so the whole `api → hf.exe → python.exe` tree is in it. When the
+/// desktop process ends for ANY reason — graceful exit, panic, or hard kill — the OS closes
+/// our handle and terminates every process still in the job. Nothing can be orphaned. This is
+/// the OS-enforced backstop the pidfile `taskkill /T` reaping ([`kill_pid`]) can't guarantee
+/// once the tracked parent has already exited.
+///
+/// Best-effort: any failure is logged and left to the existing reaping, never fatal.
+#[cfg(windows)]
+mod sidecar_job {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+
+    /// A raw job handle held for the process's whole life. `HANDLE` is a raw pointer and thus
+    /// not `Send`/`Sync`; a job handle is safe to share across threads, so we assert it.
+    struct SharedJob(HANDLE);
+    // SAFETY: a Windows job-object handle is a plain kernel handle with no thread affinity.
+    unsafe impl Send for SharedJob {}
+    unsafe impl Sync for SharedJob {}
+
+    /// The one kill-on-close job. Never dropped explicitly — the handle closes when the
+    /// process exits, which is exactly when we want the job's KILL_ON_JOB_CLOSE to fire.
+    static JOB: OnceLock<SharedJob> = OnceLock::new();
+
+    fn job_handle() -> Option<HANDLE> {
+        let raw = JOB.get_or_init(|| SharedJob(create())).0;
+        (!raw.is_null()).then_some(raw)
+    }
+
+    fn create() -> HANDLE {
+        // SAFETY: FFI to the Job Object APIs. The limit-info struct is fully zeroed and only
+        // the documented KILL_ON_JOB_CLOSE flag is set; on any failure the handle is closed and
+        // a null handle returned so callers degrade to the existing taskkill reaping.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() || job == INVALID_HANDLE_VALUE {
+                return std::ptr::null_mut();
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of!(info).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) == 0
+            {
+                CloseHandle(job);
+                return std::ptr::null_mut();
+            }
+            job
+        }
+    }
+
+    /// Assign sidecar process `pid` to the shared kill-on-close job.
+    pub(super) fn confine(pid: u32) {
+        let Some(job) = job_handle() else {
+            tracing::warn!(
+                event = "sidecar_job_unavailable",
+                pid,
+                "could not create kill-on-close job; relying on taskkill reaping"
+            );
+            return;
+        };
+        // SAFETY: OpenProcess with exactly the rights AssignProcessToJobObject needs; the
+        // process handle is closed immediately after the (single) assignment call.
+        unsafe {
+            let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, pid);
+            if process.is_null() {
+                tracing::warn!(event = "sidecar_job_open_failed", pid, "OpenProcess failed");
+                return;
+            }
+            let assigned = AssignProcessToJobObject(job, process) != 0;
+            CloseHandle(process);
+            if assigned {
+                tracing::info!(
+                    event = "sidecar_job_assigned",
+                    pid,
+                    "API sidecar confined to kill-on-close job"
+                );
+            } else {
+                tracing::warn!(
+                    event = "sidecar_job_assign_failed",
+                    pid,
+                    "assign to job failed"
+                );
+            }
+        }
+    }
 }
 
 /// Clear the recorded API PID after the sidecar exits unexpectedly (F-128, sc-8930), so

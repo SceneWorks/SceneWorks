@@ -7,6 +7,10 @@ enum GenEvent {
     Decoding {
         index: usize,
     },
+    Loading {
+        index: usize,
+        phase: LoadPhase,
+    },
     Image {
         index: usize,
         seed: i64,
@@ -38,10 +42,7 @@ fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, pro
             total,
         },
         Progress::Decoding => GenEvent::Decoding { index },
-        // Sequential-residency in-`generate` component-load signal (gen-core sc-11126). The image gallery
-        // doesn't surface a load phase yet, so ignore it — identical to pre-bump behavior, when the variant
-        // didn't exist. Surfacing it as a UI status is the F-179 follow-up.
-        Progress::Loading(_) => return,
+        Progress::Loading(phase) => GenEvent::Loading { index, phase },
     };
     let _ = tx.blocking_send(event);
 }
