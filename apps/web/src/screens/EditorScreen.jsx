@@ -14,6 +14,7 @@ import {
 } from "../timeline.js";
 import { useAppStatic } from "../context/AppContext.js";
 import { useScreenActive } from "../context/ScreenActiveContext.js";
+import { appConfirm } from "../appConfirm.jsx";
 
 export function EditorScreen() {
   const {
@@ -151,17 +152,21 @@ export function EditorScreen() {
   // replaces the in-memory working copy, dropping any unsaved structural edits. Guard the
   // switch when the active timeline is dirty. The <select> is controlled by
   // `selectedTimelineId`, so returning early (no state change) snaps its value back to the
-  // current timeline. Uses window.confirm to match the app's existing discard-edits confirm
-  // (ImageEditor.confirmDiscardEdits / App.purgeAsset); when confirm is unavailable it falls
-  // through to allow, matching those call sites.
-  function handleSelectTimeline(nextId) {
+  // current timeline. sc-12018 (S8 follow-up): routed through the desktop-safe appConfirm
+  // (a real in-app dialog) rather than the raw window.confirm — window.confirm silently
+  // no-ops inside the Tauri WebView, so the guard would neither confirm nor cancel there.
+  async function handleSelectTimeline(nextId) {
     if (nextId === selectedTimelineId) {
       return;
     }
     if (isActiveTimelineDirty?.()) {
-      const proceed =
-        typeof window.confirm !== "function" ||
-        window.confirm("You have unsaved timeline edits. Switch timelines and discard them?");
+      const proceed = await appConfirm({
+        title: "Discard timeline edits?",
+        message: "You have unsaved timeline edits. Switch timelines and discard them?",
+        confirmLabel: "Discard & switch",
+        cancelLabel: "Keep editing",
+        tone: "danger",
+      });
       if (!proceed) {
         return;
       }
