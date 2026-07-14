@@ -6,6 +6,19 @@ import { isLibraryAsset, terminalStatuses } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 
+// Free-text Library search across an asset's display name, prompt, and tags.
+// Case-insensitive substring match; an empty needle matches everything so callers
+// can pass the query unconditionally. `needle` is expected pre-lowercased/trimmed.
+export function assetMatchesSearch(asset, needle) {
+  if (!needle) {
+    return true;
+  }
+  const displayName = asset.displayName ?? "";
+  const prompt = asset.recipe?.prompt ?? "";
+  const tags = Array.isArray(asset.tags) ? asset.tags.join(" ") : "";
+  return `${displayName} ${prompt} ${tags}`.toLowerCase().includes(needle);
+}
+
 export function LibraryScreen() {
   const {
     activeProject,
@@ -41,9 +54,13 @@ export function LibraryScreen() {
   const vqaEnabled = Boolean(createVqaJob) && imageModels.some((model) => (model.capabilities ?? []).includes("vqa"));
   const [typeFilter, setTypeFilter] = useState("all");
   const [tagFilter, setTagFilter] = useState("all");
+  const [searchQuery, setSearchQuery] = useState("");
   const [showRejected, setShowRejected] = useState(false);
   const [assetMode, setAssetMode] = useState("assets");
   const [isImporting, setIsImporting] = useState(false);
+  // Free-text search over prompt + tags. Normalized once here; the matcher expects it
+  // pre-lowercased/trimmed and treats an empty needle as "match everything".
+  const searchNeedle = searchQuery.trim().toLowerCase();
   // Asset Library hygiene (sc-2024 / sc-8339): show only studio-generated and uploaded
   // media via a positive origin allow-list (isLibraryAsset). Character Studio outputs,
   // Pose/Key Point library assets, and any future/foreign origin stay out by default —
@@ -66,6 +83,9 @@ export function LibraryScreen() {
       return false;
     }
     if (tagFilter !== "all" && !(asset.tags ?? []).includes(tagFilter)) {
+      return false;
+    }
+    if (!assetMatchesSearch(asset, searchNeedle)) {
       return false;
     }
     return true;
@@ -98,6 +118,9 @@ export function LibraryScreen() {
     if (tagFilter !== "all" && !(asset.tags ?? []).includes(tagFilter)) {
       return false;
     }
+    if (!assetMatchesSearch(asset, searchNeedle)) {
+      return false;
+    }
     return Boolean(asset.status?.trashed);
   });
 
@@ -125,6 +148,22 @@ export function LibraryScreen() {
             <input accept="image/*,video/*" disabled={isImporting} onChange={handleImport} type="file" />
             {isImporting ? "Importing..." : "Import"}
           </label>
+          <input
+            type="search"
+            aria-label="Search assets"
+            placeholder="Search name, prompt, or tags…"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+          />
+          {searchNeedle ? (
+            <button
+              type="button"
+              disabled={!visibleAssets.length}
+              onClick={() => batch.selectAll(visibleAssets.map((asset) => asset.id))}
+            >
+              Select all ({visibleAssets.length})
+            </button>
+          ) : null}
           <select aria-label="Asset type" onChange={(event) => setTypeFilter(event.target.value)} value={typeFilter}>
             <option value="all">All media</option>
             <option value="image">Images</option>

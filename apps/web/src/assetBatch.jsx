@@ -80,6 +80,14 @@ export function useAssetBatch() {
       else next.add(id);
       return next;
     });
+  // Add every id in `ids` to the selection (union — never drops an existing pick), so a
+  // "Select all" over the current result set stacks onto anything already chosen.
+  const selectAll = (ids) =>
+    setSelectedAssetIds((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) next.add(id);
+      return next;
+    });
   const clearSelection = () => {
     setSelectedAssetIds(new Set());
     setMoveOpen(false);
@@ -224,6 +232,7 @@ export function useAssetBatch() {
   return {
     selectedAssetIds,
     toggleSelect,
+    selectAll,
     clearSelection,
     selectedAssetList,
     eligibleSelected,
