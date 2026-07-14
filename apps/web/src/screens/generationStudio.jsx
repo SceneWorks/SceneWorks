@@ -152,8 +152,24 @@ export function useGenerationStudio({
     }
   }, [models, model, setModel, fallbackModelId]);
 
-  // Drop a character selection that's no longer in the catalog.
+  // Drop a character selection that's no longer in the catalog. Guard on a loaded catalog
+  // (sc-11964): on the first mount after a restart the character catalog is still resolving
+  // (empty), and an empty `characters` would otherwise drop a restored characterId before the
+  // catalog lands — permanently, since it never comes back once it does.
+  //
+  // `.length` alone can't tell "still loading" from "legitimately empty", so a raw length guard
+  // would leave a stale characterId dangling when the user deletes their last-and-only character
+  // (empty catalog reads as "still loading" and skips the drop). Latch a loaded-once flag on the
+  // first non-empty catalog and guard ONLY the pre-first-load window: once the catalog has ever
+  // landed, a now-empty catalog is a genuine delete, so the stale characterId still drops.
+  const charactersLoadedRef = useRef(false);
   useEffect(() => {
+    if (characters.length) {
+      charactersLoadedRef.current = true;
+    }
+    if (!charactersLoadedRef.current) {
+      return;
+    }
     if (characterId && !characters.some((character) => character.id === characterId)) {
       setCharacterId("");
       setCharacterLookId("");

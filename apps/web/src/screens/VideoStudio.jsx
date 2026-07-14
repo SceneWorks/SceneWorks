@@ -112,6 +112,7 @@ export function VideoStudio() {
     requestedGpu,
     saveTrackCorrections,
     selectedAsset,
+    selectedAssetId,
     setRequestedGpu,
     updateAssetStatus,
     videoModels,
@@ -234,28 +235,47 @@ export function VideoStudio() {
   const [bridgeRightVideoConditioningStrength, setBridgeRightVideoConditioningStrength] = useState(
     saved.bridgeRightVideoConditioningStrength ?? "",
   );
-  const [sourceAssetId, setSourceAssetId] = useState(["image", "frame"].includes(selectedAsset?.type) ? selectedAsset.id : "");
+  // Source/reference/character/person-track selections are USER selections, so they persist in
+  // the studio snapshot and restore across a full restart (sc-11964). When the snapshot carries a
+  // restored source, it WINS at seed time: VideoStudio mounts lazily (keep-alive), usually AFTER
+  // App's startup auto-default has already set `selectedAssetId`/`selectedAsset` to the newest
+  // asset (App.jsx:1270/768), so seeding from the live `selectedAsset` here would silently clobber
+  // the restored source with the newest asset. Only when there is NO restored source at all do we
+  // fall back to seeding from the live `selectedAsset` context (the historical behavior). A launch
+  // (sendAssetToVideo) still sets the source directly in an effect below, overriding this seed. A
+  // one-shot restore-validation effect drops any restored id that no longer resolves once the asset
+  // / person-track catalogs land.
+  const hasRestoredSource = Boolean(saved.sourceAssetId || saved.sourceClipAssetId);
+  const [sourceAssetId, setSourceAssetId] = useState(
+    hasRestoredSource
+      ? (saved.sourceAssetId ?? "")
+      : (["image", "frame"].includes(selectedAsset?.type) ? selectedAsset.id : ""),
+  );
   // How the starting image is fitted to the output resolution for the image-conditioned
   // modes (sc-6139), mirroring Image Studio Edit. Crop/Pad only — video has no inpaint
   // mask, so Outpaint is hidden (`inpaintCapable={false}`). Default crop = fill, not stretch.
   const [fitMode, setFitMode] = useState(saved.fitMode ?? "crop");
-  const [lastFrameAssetId, setLastFrameAssetId] = useState("");
-  const [sourceClipAssetId, setSourceClipAssetId] = useState(selectedAsset?.type === "video" ? selectedAsset.id : "");
-  const [bridgeRightClipAssetId, setBridgeRightClipAssetId] = useState("");
+  const [lastFrameAssetId, setLastFrameAssetId] = useState(saved.lastFrameAssetId ?? "");
+  const [sourceClipAssetId, setSourceClipAssetId] = useState(
+    hasRestoredSource
+      ? (saved.sourceClipAssetId ?? "")
+      : (selectedAsset?.type === "video" ? selectedAsset.id : ""),
+  );
+  const [bridgeRightClipAssetId, setBridgeRightClipAssetId] = useState(saved.bridgeRightClipAssetId ?? "");
   // Subject reference images for Bernini's reference-driven video modes
   // (reference_to_video / reference_video_to_video / ads2v, sc-4703 / sc-5425). 1–N images.
-  const [referenceAssetIds, setReferenceAssetIds] = useState([]);
+  const [referenceAssetIds, setReferenceAssetIds] = useState(saved.referenceAssetIds ?? []);
   // Multiple source clips for Bernini's multi-source-video edit (multi_video_to_video, sc-5425).
-  const [sourceClipAssetIds, setSourceClipAssetIds] = useState([]);
+  const [sourceClipAssetIds, setSourceClipAssetIds] = useState(saved.sourceClipAssetIds ?? []);
   // Reference video for Bernini's ads2v mode (sc-5425): a second source clip distinct from the
   // edited source clip (sourceClipAssetId).
-  const [referenceClipAssetId, setReferenceClipAssetId] = useState("");
-  const [characterId, setCharacterId] = useState("");
-  const [characterLookId, setCharacterLookId] = useState("");
-  const [personTrackId, setPersonTrackId] = useState("");
-  const [replacementMode, setReplacementMode] = useState("face_only");
-  const [selectedDetectionId, setSelectedDetectionId] = useState("");
-  const [trackName, setTrackName] = useState("Selected person");
+  const [referenceClipAssetId, setReferenceClipAssetId] = useState(saved.referenceClipAssetId ?? "");
+  const [characterId, setCharacterId] = useState(saved.characterId ?? "");
+  const [characterLookId, setCharacterLookId] = useState(saved.characterLookId ?? "");
+  const [personTrackId, setPersonTrackId] = useState(saved.personTrackId ?? "");
+  const [replacementMode, setReplacementMode] = useState(saved.replacementMode ?? "face_only");
+  const [selectedDetectionId, setSelectedDetectionId] = useState(saved.selectedDetectionId ?? "");
+  const [trackName, setTrackName] = useState(saved.trackName ?? "Selected person");
   const [comparisonMode, setComparisonMode] = useState("side_by_side");
   const [abSide, setAbSide] = useState("replacement");
   const [submitting, setSubmitting] = useState(false);
@@ -381,14 +401,48 @@ export function VideoStudio() {
   const requiresLtxIcLora = selectedModel?.id === ltxVideoModelId && ltxIcLoraRequiredModes.has(mode);
   const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing && loraLooksLikeIcLora(lora));
 
+  // Sync the source from a genuine USER asset-selection TRANSITION after mount — but NEVER from
+  // App's non-user auto-default (sc-11964). App derives `selectedAsset = assets.find(id ===
+  // selectedAssetId) ?? assets[0]` (App.jsx:768) and `refreshAssets` auto-selects the newest asset
+  // once the catalog lands at STARTUP (`setSelectedAssetId((current) => current ?? defaultAsset.id)`,
+  // App.jsx:1270) — regardless of the active view. VideoStudio mounts LAZILY (keep-alive: it only
+  // mounts when the user first navigates to it), so it almost always mounts AFTER that startup
+  // auto-default has already fired, i.e. with `selectedAssetId` ALREADY set to the newest asset. A
+  // plain "does selectedAssetId resolve" gate would then push that newest asset onto a source
+  // restored from the snapshot and clobber it (empirically: restored "clip-old" -> "clip-new").
+  //
+  // Model: track the previously-synced selectedAssetId in a ref and sync ONLY on a real post-mount
+  // change (selectedAssetId !== prevRef). When a restored source is present, the auto-default must
+  // never count as that transition — whether it is ALREADY present at first mount (late mount, the
+  // primary flow) OR arrives after mount while the studio was mounted during the restart window
+  // (early mount, selectedAssetId still null at mount). So the ref seeds to a sentinel that absorbs
+  // the FIRST resolved selection (the auto-default) exactly once, then tracks transitions normally.
+  // With NO restored source the ref seeds to null, so the first resolved selection IS a transition
+  // and the source defaults to the selected asset exactly as before. A launch (sendAssetToVideo)
+  // sets the source directly in the effect below, independent of this sync.
+  const AUTO_DEFAULT_PENDING = undefined;
+  const prevSelectedAssetIdRef = useRef(hasRestoredSource ? AUTO_DEFAULT_PENDING : null);
   useEffect(() => {
-    if (selectedAsset?.type === "image" || selectedAsset?.type === "frame") {
+    // Wait for the selection to resolve to a real asset before treating it as a transition; a
+    // selectedAssetId whose asset the catalog hasn't landed yet is not yet a user-visible pick.
+    if (!selectedAssetId || selectedAsset?.id !== selectedAssetId) {
+      return;
+    }
+    const prevSelectedAssetId = prevSelectedAssetIdRef.current;
+    prevSelectedAssetIdRef.current = selectedAssetId;
+    // Absorb the first resolved selection (the restart auto-default) once when a restored source
+    // is present, so navigating INTO Video Studio can't clobber it. Also a no-op when the value
+    // hasn't actually changed since the last sync.
+    if (prevSelectedAssetId === AUTO_DEFAULT_PENDING || selectedAssetId === prevSelectedAssetId) {
+      return;
+    }
+    if (selectedAsset.type === "image" || selectedAsset.type === "frame") {
       setSourceAssetId(selectedAsset.id);
     }
-    if (selectedAsset?.type === "video") {
+    if (selectedAsset.type === "video") {
       setSourceClipAssetId(selectedAsset.id);
     }
-  }, [selectedAsset?.id, selectedAsset?.type]);
+  }, [selectedAssetId, selectedAsset?.id, selectedAsset?.type]);
 
   useEffect(() => {
     if (launchRequest?.view !== "Video") {
@@ -425,6 +479,41 @@ export function VideoStudio() {
       setSourceAssetId(selectedAsset.id);
     }
   }, [launchRequest?.id, selectedAsset?.id, selectedAsset?.type]);
+
+  // Restore-time validation of the persisted asset selections (sc-11964). The snapshot seeds
+  // sourceAssetId / referenceAssetIds / etc. at mount, but the asset catalog resolves
+  // asynchronously after a restart. Once it first lands, drop any restored id that no longer
+  // resolves to a real asset so we never carry a dangling reference to a deleted one. A ref
+  // latches on the first non-empty catalog so this validates only the RESTORED values — it
+  // won't fight a later user selection whose freshly generated asset the catalog hasn't caught
+  // up to yet.
+  const restoredAssetsValidatedRef = useRef(false);
+  useEffect(() => {
+    if (restoredAssetsValidatedRef.current || assets.length === 0) {
+      return;
+    }
+    restoredAssetsValidatedRef.current = true;
+    const assetExists = (id) => assets.some((asset) => asset.id === id);
+    const dropMissing = (setter) => setter((current) => (current && assetExists(current) ? current : ""));
+    dropMissing(setSourceAssetId);
+    dropMissing(setLastFrameAssetId);
+    dropMissing(setSourceClipAssetId);
+    dropMissing(setBridgeRightClipAssetId);
+    dropMissing(setReferenceClipAssetId);
+    setReferenceAssetIds((current) => (current.some((id) => !assetExists(id)) ? current.filter(assetExists) : current));
+    setSourceClipAssetIds((current) => (current.some((id) => !assetExists(id)) ? current.filter(assetExists) : current));
+  }, [assets]);
+
+  // Same restore-time validation for the restored person-track selection (sc-11964): once the
+  // person-track catalog first lands, drop personTrackId if it no longer resolves to a real track.
+  const restoredPersonTrackValidatedRef = useRef(false);
+  useEffect(() => {
+    if (restoredPersonTrackValidatedRef.current || personTracks.length === 0) {
+      return;
+    }
+    restoredPersonTrackValidatedRef.current = true;
+    setPersonTrackId((current) => (current && personTracks.some((track) => track.id === current) ? current : ""));
+  }, [personTracks]);
 
   useEffect(() => {
     if (!selectedModel) {
@@ -597,6 +686,22 @@ export function VideoStudio() {
     videoConditioningStrength,
     bridgeRightVideoConditioningStrength,
     fitMode,
+    // User asset/reference/character/person-track selections (sc-11964). These are USER choices,
+    // not model defaults, so they persist here and restore across a full restart — kept out of the
+    // defaults-reset path. Restore-validation (above) drops any id whose asset/track is gone.
+    sourceAssetId,
+    lastFrameAssetId,
+    sourceClipAssetId,
+    bridgeRightClipAssetId,
+    referenceAssetIds,
+    sourceClipAssetIds,
+    referenceClipAssetId,
+    characterId,
+    characterLookId,
+    personTrackId,
+    replacementMode,
+    selectedDetectionId,
+    trackName,
   },
   // Suppress the live writer until the video catalog has loaded (sc-11962), so a transient
   // defaults-reset during the restart-restore/settle window can't overwrite the restored

@@ -713,6 +713,284 @@ describe("SceneWorks app shell", () => {
     expect(cardFor("Cinematic").textContent).not.toContain("Edit");
   });
 
+  // sc-11964 (S5): the source/reference/character/person-track selections are USER choices, so
+  // they persist in the studio snapshot and restore across a FULL app restart — not just via the
+  // in-session keep-alive. The restart is simulated by seeding the snapshot, mounting while the
+  // model/asset/character/track catalogs are still empty (the restart-restore window, when the
+  // writer is ready-gated off), then letting the catalogs resolve on a re-render.
+  const readVideoSnapshot = () =>
+    JSON.parse(window.localStorage.getItem("sceneworks-studio-video-project-1") ?? "{}");
+
+  const berniniModel = {
+    id: "bernini",
+    name: "Bernini",
+    type: "video",
+    capabilities: ["text_to_video", "reference_video_to_video"],
+    defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+    limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
+  };
+
+  const renderVideoStudio = async (context) => {
+    const value = {
+      activeProject: { id: "project-1", name: "Noir" },
+      createPersonDetectionJob: () => {},
+      createPersonTrackJob: () => {},
+      createVideoJob: () => {},
+      gpuOptions: ["auto"],
+      latestVideoAssets: [],
+      loras: [],
+      setPreviewAsset: () => {},
+      rememberLocalGenerationJob: () => {},
+      purgeAsset: () => {},
+      presets: [],
+      requestedGpu: "auto",
+      setRequestedGpu: () => {},
+      updateAssetStatus: () => {},
+      assets: [],
+      characters: [],
+      personTracks: [],
+      videoModels: [],
+      ...context,
+    };
+    // Mirror App.jsx's derivation exactly (App.jsx:767): an explicit `selectedAssetId` resolves
+    // to that asset, otherwise `selectedAsset` FALLS BACK to assets[0] (the newest). Reproducing
+    // that fallback is what makes the sc-11964 clobber path real in the test — without it the
+    // selectedAsset-sync effect never fires and the restore assertion is a false green.
+    const assets = value.assets ?? [];
+    const selectedAssetId = value.selectedAssetId ?? null;
+    value.selectedAssetId = selectedAssetId;
+    value.selectedAsset = assets.find((asset) => asset.id === selectedAssetId) ?? assets[0] ?? null;
+    await act(async () => {
+      root.render(withAppContext(value, <VideoStudio />));
+    });
+    await settle();
+  };
+
+  it("restores source-clip / reference / character / person-track selections after a restart", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project-1",
+      JSON.stringify({
+        mode: "reference_video_to_video",
+        model: "bernini",
+        sourceClipAssetId: "clip-1",
+        referenceAssetIds: ["ref-1", "ref-2"],
+        characterId: "char-1",
+        characterLookId: "look-1",
+        personTrackId: "track-1",
+        replacementMode: "full_person_keep_outfit",
+        trackName: "Hero",
+      }),
+    );
+
+    root = createRoot(container);
+    // Restart window: everything still resolving, so the ready-gated writer stays off.
+    await renderVideoStudio({});
+    // The catalogs land after mount.
+    await renderVideoStudio({
+      videoModels: [berniniModel],
+      assets: [
+        { id: "clip-1", type: "video", displayName: "Source Clip One" },
+        { id: "ref-1", type: "image", displayName: "Ref One" },
+        { id: "ref-2", type: "image", displayName: "Ref Two" },
+      ],
+      characters: [{ id: "char-1", name: "Hero Char", looks: [{ id: "look-1", name: "Look A" }] }],
+      personTracks: [{ id: "track-1", sourceAssetId: "clip-1", name: "Hero" }],
+    });
+
+    // The restored source clip + reference images surface in their pickers (UI-level restore).
+    expect(container.textContent).toContain("Source Clip One");
+    expect(container.textContent).toContain("Ref One");
+    expect(container.textContent).toContain("Ref Two");
+
+    // The restored character resolves too (advanced holds the Character select).
+    await openAdvancedSection();
+    expect(field(container, "Character").value).toBe("char-1");
+
+    // And the settled snapshot round-trips every selection — proving they were seeded from the
+    // restore, not reset to defaults, and are persisted for the next restart.
+    const snapshot = readVideoSnapshot();
+    expect(snapshot.sourceClipAssetId).toBe("clip-1");
+    expect(snapshot.referenceAssetIds).toEqual(["ref-1", "ref-2"]);
+    expect(snapshot.characterId).toBe("char-1");
+    expect(snapshot.characterLookId).toBe("look-1");
+    expect(snapshot.personTrackId).toBe("track-1");
+    expect(snapshot.replacementMode).toBe("full_person_keep_outfit");
+    expect(snapshot.trackName).toBe("Hero");
+  });
+
+  // sc-11964 (S5) regression guard: on a cold restart nothing is explicitly selected, so App
+  // derives `selectedAsset = assets[0]` (the NEWEST asset). The selectedAsset-sync effect must
+  // NOT push that newest asset onto the restored source when the restored source isn't the newest
+  // one — otherwise the two most important persisted fields silently fail to restore. Here the
+  // restored clip ("clip-old") is deliberately NOT assets[0] ("clip-new"), so a regression would
+  // clobber it to "clip-new".
+  it("keeps a restored source clip that is NOT the newest asset (no assets[0] clobber)", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project-1",
+      JSON.stringify({
+        mode: "reference_video_to_video",
+        model: "bernini",
+        sourceClipAssetId: "clip-old",
+      }),
+    );
+
+    root = createRoot(container);
+    // Restart window: catalogs empty, no explicit selection.
+    await renderVideoStudio({});
+    // Catalogs land. App's refreshAssets auto-selects the default/newest asset once the catalog
+    // lands (`setSelectedAssetId((current) => current ?? defaultAsset.id)`, App.jsx:1270), so
+    // selectedAssetId resolves to the NEWEST clip ("clip-new") — NOT the restored source. This is
+    // what the real app does; without it the sync effect never fires and the assertion false-greens.
+    // With the pre-fix gate this auto-default clobbers the restored source to "clip-new"; the
+    // one-shot auto-default skip must keep "clip-old".
+    await renderVideoStudio({
+      videoModels: [berniniModel],
+      selectedAssetId: "clip-new",
+      assets: [
+        { id: "clip-new", type: "video", displayName: "Newest Clip" },
+        { id: "clip-old", type: "video", displayName: "Restored Clip" },
+      ],
+    });
+
+    // The restored (non-newest) clip survives; the newest clip did not hijack the source.
+    expect(container.textContent).toContain("Restored Clip");
+    expect(readVideoSnapshot().sourceClipAssetId).toBe("clip-old");
+  });
+
+  // sc-11964 (S5) regression guard — the PRIMARY real flow. VideoStudio mounts LAZILY (keep-alive),
+  // so on a cold restart it almost always mounts AFTER App's startup auto-default has already run
+  // (App loads the asset catalog regardless of the active view and auto-selects the newest asset,
+  // App.jsx:1270). That means the studio's FIRST mount already has selectedAssetId === the newest
+  // asset — there is NO selectedAssetId=null window to arm a mount-time skip against. A single
+  // render reproduces exactly that: catalog already loaded AND selectedAssetId already the newest
+  // asset at first mount, restored source is a DIFFERENT (older) clip. The source-sync effect must
+  // treat the auto-default already sitting at mount as NOT a user transition and leave the restored
+  // source intact. (Mounting with selectedAssetId=null first would mask this bug, so we do not.)
+  it("keeps a restored source clip when it mounts late with selectedAssetId already the newest asset", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project-1",
+      JSON.stringify({
+        mode: "reference_video_to_video",
+        model: "bernini",
+        sourceClipAssetId: "clip-old",
+      }),
+    );
+
+    root = createRoot(container);
+    // Single render: no selectedAssetId=null window. The catalog is already loaded and App has
+    // already auto-selected the newest clip ("clip-new") before the studio ever mounts.
+    await renderVideoStudio({
+      videoModels: [berniniModel],
+      selectedAssetId: "clip-new",
+      assets: [
+        { id: "clip-new", type: "video", displayName: "Newest Clip" },
+        { id: "clip-old", type: "video", displayName: "Restored Clip" },
+      ],
+    });
+
+    // The restored (non-newest) clip survives the mount-time auto-default; it was not hijacked.
+    expect(container.textContent).toContain("Restored Clip");
+    expect(readVideoSnapshot().sourceClipAssetId).toBe("clip-old");
+  });
+
+  // sc-11964 (S5) — with NO restored source the studio must still default the source to the
+  // selected asset (the mount-time auto-default), preserving the original behavior. Here nothing is
+  // restored, so the newest selected clip SHOULD become the source.
+  it("defaults the source to the selected asset when there is no restored source", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project-1",
+      JSON.stringify({ mode: "reference_video_to_video", model: "bernini" }),
+    );
+
+    root = createRoot(container);
+    await renderVideoStudio({
+      videoModels: [berniniModel],
+      selectedAssetId: "clip-new",
+      assets: [
+        { id: "clip-new", type: "video", displayName: "Newest Clip" },
+        { id: "clip-old", type: "video", displayName: "Older Clip" },
+      ],
+    });
+
+    // No snapshot source to protect, so the selected (newest) clip becomes the source as before.
+    expect(readVideoSnapshot().sourceClipAssetId).toBe("clip-new");
+  });
+
+  // sc-11964 (S5) regression guard for the shared character-drop effect (generationStudio.jsx):
+  // deleting the LAST-and-only selected character empties the catalog. A `.length` guard can't
+  // tell "still loading" from "genuinely empty" and would leave the now-dangling characterId in
+  // place. The loaded-once latch must still drop it once the catalog has landed at least once.
+  it("drops the stale characterId when the last-and-only character is deleted", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project-1",
+      JSON.stringify({
+        mode: "reference_video_to_video",
+        model: "bernini",
+        characterId: "char-1",
+        characterLookId: "look-1",
+      }),
+    );
+
+    root = createRoot(container);
+    // Restart window: catalogs empty.
+    await renderVideoStudio({});
+    // The character catalog lands with the restored character present — the loaded-once latch trips
+    // and the restored characterId is kept (it still resolves).
+    await renderVideoStudio({
+      videoModels: [berniniModel],
+      characters: [{ id: "char-1", name: "Hero Char", looks: [{ id: "look-1", name: "Look A" }] }],
+    });
+    expect(readVideoSnapshot().characterId).toBe("char-1");
+
+    // The user deletes their last-and-only character: the catalog is now legitimately empty. The
+    // now-dangling characterId must drop (a pre-fix `.length` guard would leave it stale).
+    await renderVideoStudio({
+      videoModels: [berniniModel],
+      characters: [],
+    });
+
+    const snapshot = readVideoSnapshot();
+    expect(snapshot.characterId).toBe("");
+    expect(snapshot.characterLookId).toBe("");
+  });
+
+  it("drops restored selections whose asset / character / track no longer exists", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project-1",
+      JSON.stringify({
+        mode: "reference_video_to_video",
+        model: "bernini",
+        sourceClipAssetId: "clip-gone",
+        referenceAssetIds: ["ref-1", "ref-gone"],
+        characterId: "char-gone",
+        characterLookId: "look-gone",
+        personTrackId: "track-gone",
+      }),
+    );
+
+    root = createRoot(container);
+    await renderVideoStudio({});
+    // Only ref-1 survives; the source clip, one reference, the character and the track are gone.
+    await renderVideoStudio({
+      videoModels: [berniniModel],
+      assets: [{ id: "ref-1", type: "image", displayName: "Ref One" }],
+      characters: [{ id: "char-1", name: "Hero Char", looks: [] }],
+      personTracks: [{ id: "track-1", sourceAssetId: "clip-1", name: "Hero" }],
+    });
+
+    // The dangling source clip cleanly drops to the empty state; the surviving reference stays.
+    expect(container.textContent).toContain("No source clip selected");
+    expect(container.textContent).toContain("Ref One");
+    expect(container.textContent).not.toContain("Ref Two");
+
+    const snapshot = readVideoSnapshot();
+    expect(snapshot.sourceClipAssetId).toBe("");
+    expect(snapshot.referenceAssetIds).toEqual(["ref-1"]);
+    expect(snapshot.characterId).toBe("");
+    expect(snapshot.characterLookId).toBe("");
+    expect(snapshot.personTrackId).toBe("");
+  });
+
   it("explains preset save blockers and selected LoRA warning states", async () => {
     const updatePreset = vi.fn();
     root = createRoot(container);
