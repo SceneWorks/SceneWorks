@@ -2411,7 +2411,7 @@ export function App() {
 
         {keepAliveMounted("Document") ? (
           <KeepAlivePane active={activeView === "Document"}>
-            <DocumentStudio />
+            <DocumentStudio key={activeProject?.id ?? "default"} />
           </KeepAlivePane>
         ) : null}
 

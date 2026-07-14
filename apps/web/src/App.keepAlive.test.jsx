@@ -74,6 +74,10 @@ describe("selective lazy keep-alive shell (sc-11959)", () => {
   const videoStudio = () => document.body.querySelector(".video-studio");
   const modelsSurface = () => document.body.querySelector(".models-surface");
   const promptField = () => document.body.querySelector("textarea[aria-label='Prompt']");
+  const documentStudio = () => document.body.querySelector(".document-studio");
+  // DocumentStudio's Prompt textarea is the first textarea in its compose form (it wraps
+  // the control in a <label> rather than carrying an aria-label).
+  const documentPromptField = () => document.body.querySelector(".document-studio .studio-form textarea");
 
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
@@ -182,6 +186,68 @@ describe("selective lazy keep-alive shell (sc-11959)", () => {
     expect(studioAfter).not.toBe(studioBefore);
     expect(promptField().value).toBe(defaultPrompt);
     expect(promptField().value).not.toBe("project-1 in-progress prompt");
+  });
+
+  it("DocumentStudio survives a same-project nav round trip but RESETS on a project switch (sc-11959)", async () => {
+    // DocumentStudio holds project-scoped local state (prompt + sourceAssetIds) with no
+    // activeProject.id reset effect, so like its sibling studios it must be keyed on the
+    // project id — otherwise a project switch keeps the previous project's draft + source-
+    // asset selection and submit() would stamp those stale ids under the NEW project.
+    mockFetch({
+      projects: [
+        { id: "project-1", name: "Project One" },
+        { id: "project-2", name: "Project Two" },
+      ],
+      // Compose form only renders behind the model-availability gate, so provide an
+      // interleave-capable model.
+      models: [
+        {
+          id: "sensenova_u1",
+          name: "SenseNova-U1",
+          type: "image",
+          family: "sensenova",
+          capabilities: ["interleave"],
+        },
+      ],
+    });
+    await renderApp();
+    await clickButton("Document");
+
+    const studioBefore = documentStudio();
+    expect(studioBefore).not.toBeNull();
+    expect(documentPromptField().value).toBe("");
+
+    await changeField(documentPromptField(), "project-1 illustrated guide");
+    expect(documentPromptField().value).toBe("project-1 illustrated guide");
+
+    // Same-project nav round trip: the studio stays mounted (kept alive), so its in-
+    // progress draft survives with no remount.
+    await clickButton("Assets");
+    expect(documentStudio()).not.toBeNull();
+    await clickButton("Document");
+    expect(documentStudio()).toBe(studioBefore);
+    expect(documentPromptField().value).toBe("project-1 illustrated guide");
+
+    // Switch workspace via the project switcher.
+    await act(async () => {
+      document.body.querySelector(".project-pill")?.click();
+    });
+    await settle();
+    await act(async () => {
+      [...document.body.querySelectorAll(".project-menu-item")]
+        .find((item) => item.textContent.includes("Project Two"))
+        ?.click();
+    });
+    await settle();
+
+    // key={activeProject.id} changed → DocumentStudio remounts (a fresh DOM node) and its
+    // project-scoped prompt drops back to the new workspace's defaults, so no stale draft
+    // or sourceAssetIds can leak across the project boundary.
+    const studioAfter = documentStudio();
+    expect(studioAfter).not.toBeNull();
+    expect(studioAfter).not.toBe(studioBefore);
+    expect(documentPromptField().value).toBe("");
+    expect(documentPromptField().value).not.toBe("project-1 illustrated guide");
   });
 
   it("applies a 'Use this recipe' injection on an ALREADY-mounted studio (token-id re-fire)", async () => {

@@ -77,6 +77,7 @@ import {
   editReferenceIds,
   MAX_EDIT_REFERENCES,
   leaveGuardMessage,
+  leaveGuardArming,
 } from "./ImageEditor.jsx";
 import { verifyCaption, serializeCaption, ELEMENT_KEY_ORDER_OBJ } from "../ideogramCaption.js";
 
@@ -293,6 +294,34 @@ describe("in-flight AI-op scratch survival (sc-8850)", () => {
     // Unsaved edits still take precedence over the AI-op wording.
     expect(leaveGuardMessage({ dirty: true, aiOpPending: false })).toContain("unsaved edits");
     expect(leaveGuardMessage({ dirty: true, aiOpPending: true })).toContain("unsaved edits");
+  });
+
+  it("arms the beforeunload guard even when backgrounded, but the in-app guard only when foregrounded (sc-11959)", () => {
+    // The regression under keep-alive: gating BOTH guards on screenActive meant a dirty
+    // BACKGROUNDED (kept-alive) editor registered no beforeunload handler, so an app
+    // close/refresh discarded its unsaved edits with no warning.
+
+    // Dirty + backgrounded: browser-unload guard still arms; in-app nav guard does not.
+    expect(leaveGuardArming({ dirty: true, aiOpPending: false, screenActive: false })).toMatchObject({
+      beforeUnload: true,
+      inApp: false,
+    });
+    // Dirty + foregrounded: both guards arm.
+    expect(leaveGuardArming({ dirty: true, aiOpPending: false, screenActive: true })).toMatchObject({
+      beforeUnload: true,
+      inApp: true,
+    });
+    // In-flight AI op + backgrounded: browser-unload guard arms (the op is still abandonable).
+    expect(leaveGuardArming({ dirty: false, aiOpPending: true, screenActive: false })).toMatchObject({
+      beforeUnload: true,
+      inApp: false,
+    });
+    // Clean + foregrounded: neither guard arms.
+    expect(leaveGuardArming({ dirty: false, aiOpPending: false, screenActive: true })).toMatchObject({
+      message: null,
+      beforeUnload: false,
+      inApp: false,
+    });
   });
 
   it("registers a survivor claim with App on mount and drops it on unmount", async () => {
