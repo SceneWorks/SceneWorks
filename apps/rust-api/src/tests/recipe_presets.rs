@@ -1289,3 +1289,199 @@ mod recipe_presets_parity {
         assert!(preset["name"] != "My Cinematic", "new name is different");
     }
 }
+
+#[tokio::test]
+async fn recipe_preset_general_presets_are_model_agnostic() {
+    // General presets (epic 11949) are model-agnostic: no model, no workflow, no LoRAs — just
+    // prompt prefix/suffix, negativePrompt, aspect, and count. The read path must NOT inject a
+    // model/workflow/modes (as it does for legacy model presets), and the write path must reject
+    // model/workflow/loras on a general preset.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    // An installed text_to_image model is present precisely so a regression that re-enabled
+    // model-defaulting would have something to inject — proving the general preset stays bare.
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "z_image_turbo",
+              "name": "Z Image Turbo",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image"],
+              "downloads": [],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "loraCompatibility": {},
+              "ui": {}
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("builtin recipe presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user recipe presets writes");
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("builtin loras writes");
+    std::fs::write(
+        config_dir.join("user.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("user loras writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // 1. Create a general preset with no model/workflow.
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/recipe-presets",
+        json!({
+            "name": "Cinematic Look",
+            "kind": "general",
+            "prompt": { "prefix": "cinematic still", "suffix": "shot on 35mm film" },
+            "defaults": { "aspect": "16:9", "count": 2, "negativePrompt": "blurry" }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "general preset creates: {created:?}"
+    );
+    assert_eq!(created["id"], "cinematic_look");
+    assert_eq!(created["kind"], "general");
+    assert_eq!(created["scope"], "global");
+    assert!(
+        created.get("model").is_none(),
+        "no model injected: {created:?}"
+    );
+    assert!(
+        created.get("workflow").is_none(),
+        "no workflow injected: {created:?}"
+    );
+    assert!(
+        created.get("modes").is_none(),
+        "no modes injected: {created:?}"
+    );
+    assert!(
+        created.get("builtInLoras").is_none(),
+        "no builtInLoras mirror for a general preset: {created:?}"
+    );
+    assert_eq!(created["prompt"]["prefix"], "cinematic still");
+    assert_eq!(created["defaults"]["aspect"], "16:9");
+    assert_eq!(created["defaults"]["count"], 2);
+
+    // 2. GET it back — still model-agnostic after the read-side finalize.
+    let (status, fetched) = request(
+        app.clone(),
+        "GET",
+        "/api/v1/recipe-presets/cinematic_look",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["kind"], "general");
+    assert!(
+        fetched.get("model").is_none(),
+        "GET keeps it model-less: {fetched:?}"
+    );
+
+    // 3. PATCH the prompt + aspect — round-trips without re-binding a model or dropping aspect.
+    let (status, updated) = request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/recipe-presets/cinematic_look",
+        json!({
+            "prompt": { "prefix": "moody cinematic still" },
+            "defaults": { "aspect": "2:3", "count": 1 }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "general preset patches: {updated:?}"
+    );
+    assert_eq!(updated["prompt"]["prefix"], "moody cinematic still");
+    assert_eq!(updated["defaults"]["aspect"], "2:3");
+    assert!(
+        updated.get("model").is_none(),
+        "PATCH keeps it model-less: {updated:?}"
+    );
+
+    // 4. A general preset may not pin a model.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/recipe-presets",
+        json!({ "name": "Bad Model", "kind": "general", "model": "z_image_turbo" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "general preset rejects model"
+    );
+
+    // 5. A general preset may not carry LoRAs.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/recipe-presets",
+        json!({ "name": "Bad Loras", "kind": "general", "loras": [{ "id": "style_lora" }] }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "general preset rejects loras"
+    );
+
+    // 6. Aspect must be a W:H ratio.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/recipe-presets",
+        json!({ "name": "Bad Aspect", "kind": "general", "defaults": { "aspect": "16-9" } }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "general preset rejects malformed aspect"
+    );
+
+    // 7. kind must be one of the known values.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/recipe-presets",
+        json!({ "name": "Bad Kind", "kind": "banana" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "unknown kind rejected");
+}

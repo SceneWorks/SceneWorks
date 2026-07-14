@@ -93,6 +93,91 @@ describe("SceneWorks app shell", () => {
     expect(onLocalJobCreated).toHaveBeenCalledWith({ id: "image-job-1" });
   });
 
+  // epic 11949: the flagship stacking case — camera + lens + film general presets on an
+  // arbitrary model. Asserts the flat concatenation IN SELECTION ORDER, the model left
+  // untouched, no LoRA seeded, the aspect snapped to the model's menu, and the
+  // client-authoritative flag. This fails if any guard is reverted (setModel fires, the
+  // matches-any availability is removed, composition falls back to a single preset, or the
+  // presetPromptResolvedClientSide flag is dropped).
+  it("stacks camera + lens + film, composing flat in order without touching the model", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob,
+          gpuOptions: ["auto"],
+          imageModels: [
+            {
+              id: "z_image_turbo",
+              name: "Z-Image",
+              type: "image",
+              family: "z-image",
+              capabilities: ["text_to_image"],
+              limits: { resolutions: ["1024x1024", "1280x720", "720x1280"] },
+            },
+          ],
+          latestAssets: [],
+          loras: [],
+          presets: [
+            { id: "camera", name: "Arri", kind: "general", prompt: { suffix: "shot on Arri Alexa" } },
+            { id: "lens", name: "85mm", kind: "general", prompt: { suffix: "85mm f/1.4" } },
+            {
+              id: "film",
+              name: "Portra",
+              kind: "general",
+              prompt: { suffix: "Kodak Portra 400" },
+              defaults: { aspect: "16:9", negativePrompt: "grain" },
+            },
+          ],
+          requestedGpu: "auto",
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+    await settle();
+
+    const userPrompt = container.querySelector(".image-studio textarea").value;
+    const modelBefore = field(container, "Model").value;
+    expect(userPrompt.length).toBeGreaterThan(0);
+
+    const clickGeneral = async (name) => {
+      await act(async () => {
+        [...container.querySelectorAll(".general-preset-chips .preset-chip")]
+          .find((chip) => chip.textContent.trim() === name)
+          .click();
+      });
+    };
+    await clickGeneral("Arri");
+    await clickGeneral("85mm");
+    await clickGeneral("Portra");
+    await settle();
+
+    // Model untouched; the preview shows the flat concatenation in selection order.
+    expect(field(container, "Model").value).toBe(modelBefore);
+    const expected = `${userPrompt}, shot on Arri Alexa, 85mm f/1.4, Kodak Portra 400`;
+    expect(container.querySelector(".preset-stack-preview .preset-stack-prompt p").textContent).toBe(expected);
+
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+    await settle();
+
+    const call = createImageJob.mock.calls[0][0];
+    expect(call.prompt).toBe(expected);
+    expect(call.presetPromptResolvedClientSide).toBe(true);
+    expect(call.negativePrompt).toBe("grain");
+    // aspect 16:9 snapped to the model's nearest supported resolution.
+    expect(call.width).toBe(1280);
+    expect(call.height).toBe(720);
+    // General presets carry no LoRAs, so nothing is seeded into the picker.
+    expect(call.loras).toEqual([]);
+  });
+
   it("remembers studio settings per workspace across remounts", async () => {
     const imageProps = {
       activeProject: { id: "project-1", name: "Noir" },

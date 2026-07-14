@@ -38,6 +38,7 @@ export function buildImageJobRequest(state) {
     width,
     height,
     recipePresetId,
+    presetPromptResolvedClientSide,
     characterId,
     characterLookId,
     multiReference,
@@ -108,6 +109,11 @@ export function buildImageJobRequest(state) {
     // server to skip its own preset-LoRA merge so an edited or removed preset LoRA sticks.
     // Headless/API clients that send only recipePresetId omit it and keep the server merge.
     presetLorasResolvedClientSide: recipePresetId ? true : undefined,
+    // When a general-preset stack is active the studio composes the prompt client-side (base +
+    // stacked fragments — the server can't reconstruct a stack from one recipePresetId), so it
+    // sends the composed prompt verbatim and this flag tells the server to skip its own
+    // prefix/suffix fold (epic 11949, mirrors presetLorasResolvedClientSide).
+    presetPromptResolvedClientSide: presetPromptResolvedClientSide || undefined,
     characterId: mode === "character_image" ? characterId || null : null,
     characterLookId: mode === "character_image" ? characterLookId || null : null,
     // edit_image: a single source image, except for a multi-reference model (sc-6211,

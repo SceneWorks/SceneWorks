@@ -1668,6 +1668,15 @@ export function App() {
     if (!preset?.id) {
       return;
     }
+    // General (model-agnostic) presets don't pin a model/mode — they layer onto whatever the
+    // studio is on (epic 11949). Launching one just toggles it into the general stack; default
+    // to Image Studio, and it stays active if the user switches to Video. Model presets keep
+    // carrying model + sub-mode so they resolve in the target studio (sc-10516).
+    if (preset.kind === "general") {
+      setStudioLaunch({ id: crypto.randomUUID(), view: "Image", presetGeneralId: preset.id });
+      setActiveView("Image");
+      return;
+    }
     const view = workflowModelType(preset.workflow) === "video" ? "Video" : "Image";
     setStudioLaunch({
       id: crypto.randomUUID(),

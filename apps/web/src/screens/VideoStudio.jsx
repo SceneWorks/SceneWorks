@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { pickClosestResolution } from "../resolutionMatch.js";
+import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
@@ -36,11 +36,13 @@ import {
   loraLooksLikeIcLora,
   noPresetId,
   serializeLora,
+  composePreset,
 } from "../presetUtils.js";
 import {
   LoraPickerSection,
   onPromptKeyDown,
   PresetGuidanceStrip,
+  PresetStackPreview,
   SavePresetPanel,
   useGenerationStudio,
   useSavePreset,
@@ -289,6 +291,10 @@ export function VideoStudio() {
     selectedPreset,
     selectedPresetId,
     setSelectedPresetId,
+    availableGeneralPresets,
+    generalStack,
+    generalStackIds,
+    toggleGeneralPreset,
     presetPromptParts,
     presetLoraDetails,
     presetValidationResult,
@@ -327,6 +333,7 @@ export function VideoStudio() {
     initialSelectedLoraIds: saved.selectedLoraIds ?? [],
     initialLoraWeights: saved.loraWeights ?? {},
     initialShowIncompatibleLoras: saved.showIncompatibleLoras ?? false,
+    initialGeneralStackIds: saved.generalStackIds ?? [],
   });
   // Sampler / scheduler menus declared by the model. Video Wan torch
   // declares the full menu; sealed paths (LTX native, MLX) drop to
@@ -568,6 +575,7 @@ export function VideoStudio() {
     seed,
     negativePrompt,
     selectedPresetId,
+    generalStackIds,
     sampler,
     scheduler,
     schedulerShift,
@@ -699,6 +707,22 @@ export function VideoStudio() {
   const [width, height] = resolution.split("x").map((value) => Number(value));
   const durationOptions = selectedModel?.limits?.durations ?? [4, 6, 8, 10];
   const resolutionOptions = selectedModel?.limits?.resolutions ?? ["768x512", "640x640", "1280x720", "720x1280"];
+
+  // Effective inputs once the general-preset stack folds in (epic 11949); drives the live
+  // preview and (Phase 5) the client-authoritative submit.
+  const composedStack = useMemo(
+    () =>
+      composePreset({
+        base: selectedPreset,
+        generalStack,
+        userText: prompt,
+        userNegative: negativePrompt,
+        resolutionOptions,
+      }),
+    [selectedPreset, generalStack, prompt, negativePrompt, resolutionOptions],
+  );
+  const stackAddsNegative = generalStack.some((preset) => Boolean(preset?.defaults?.negativePrompt));
+  const stackAddsCount = generalStack.some((preset) => Number.isFinite(Number(preset?.defaults?.count)));
   const fpsOptions = selectedModel?.limits?.fps ?? [24, 25, 30];
   const durationHint =
     selectedModel?.ui?.durationHint ??
@@ -716,15 +740,21 @@ export function VideoStudio() {
     }
     setSubmitting(true);
     try {
+      // Fold the general-preset stack (epic 11949): send the composed prompt + negative and,
+      // when a general sets aspect, the snapped resolution. The client is authoritative for the
+      // composed prompt, so presetPromptResolvedClientSide tells the server to skip its fold.
+      // (Video has no `count` field, so the stack's variations don't apply here.)
+      const stackActive = generalStack.length > 0;
+      const stackResolution = stackActive && composedStack.resolution ? parseResolution(composedStack.resolution) : null;
       const job = await createVideoJob({
         mode,
-        prompt,
-        negativePrompt,
+        prompt: stackActive ? composedStack.prompt : prompt,
+        negativePrompt: stackActive ? composedStack.negativePrompt : negativePrompt,
         model,
         duration: Number(duration),
         fps: Number(fps),
-        width,
-        height,
+        width: stackResolution?.width ?? width,
+        height: stackResolution?.height ?? height,
         quality,
         seed: seed === "" ? null : Number(seed),
         recipePresetId: selectedPreset?.id ?? null,
@@ -732,6 +762,7 @@ export function VideoStudio() {
         // preset-LoRA seed effect), so the client is authoritative for preset LoRAs — tell the
         // server to skip its own merge so edits/removals stick. Parity with the Image Studio.
         presetLorasResolvedClientSide: selectedPreset ? true : undefined,
+        presetPromptResolvedClientSide: stackActive || undefined,
         characterId: characterId || null,
         characterLookId: characterLookId || null,
         sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
@@ -1178,12 +1209,36 @@ export function VideoStudio() {
                 ))}
               </div>
             </div>
+            {availableGeneralPresets.length ? (
+              <div className="settings-bar-styles">
+                <span className="settings-bar-label">General</span>
+                <div className="preset-chips general-preset-chips">
+                  {availableGeneralPresets.map((preset) => (
+                    <button
+                      className={generalStackIds.includes(preset.id) ? "preset-chip active" : "preset-chip"}
+                      key={preset.id}
+                      onClick={() => toggleGeneralPreset(preset.id)}
+                      type="button"
+                    >
+                      {preset.name ?? preset.id}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <PresetGuidanceStrip
             selectedPreset={selectedPreset}
             presetPromptParts={presetPromptParts}
             presetLoraDetails={presetLoraDetails}
+          />
+
+          <PresetStackPreview
+            generalStack={generalStack}
+            composed={composedStack}
+            stackAddsNegative={stackAddsNegative}
+            stackAddsCount={stackAddsCount}
           />
 
           {durationHint ? <p className="helper-copy">{durationHint}</p> : null}
