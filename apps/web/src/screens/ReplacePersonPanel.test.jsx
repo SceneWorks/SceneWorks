@@ -173,6 +173,99 @@ describe("ReplacePersonPanel track corrections drafts (sc-11966)", () => {
     expect(field(container, "Box x").value).toBe("0.7");
   });
 
+  it("preserves a box edit made WHILE a save is in flight (not clobbered by the post-save refetch)", async () => {
+    // sc-12020 — a deferred save lets us edit a box while the request is still
+    // pending. Pre-fix the post-save re-baseline captured draftsRef.current (the
+    // LATEST drafts, including the mid-save edit) at resolve time, marking the
+    // drafts clean against themselves, so the post-save corrections refetch
+    // reseeded the SAVED value over — and clobbered — the concurrent edit.
+    let resolveSave;
+    const saveTrackCorrections = vi.fn(() => new Promise((resolve) => {
+      resolveSave = resolve;
+    }));
+
+    await renderPanel(track("track-1", []), saveTrackCorrections);
+
+    // 1) User nudges frame 0's box, then clicks Save -> the POST carries x=0.55.
+    await changeField(field(container, "Box x"), "0.55");
+    expect(container.textContent).toContain("1 unsaved");
+    await act(async () => {
+      buttonInside(container, "Save corrections").click();
+    });
+    expect(saveTrackCorrections).toHaveBeenCalledWith("track-1", [
+      { frameIndex: 0, box: { x: 0.55, y: 0.2, width: 0.3, height: 0.4 }, rejected: false, author: "ui", source: "manual" },
+    ]);
+
+    // 2) While the save is IN FLIGHT the user keeps editing the same box -> x=0.77.
+    //    (The correction inputs stay enabled so in-progress work is never blocked.)
+    await changeField(field(container, "Box x"), "0.77");
+    expect(field(container, "Box x").value).toBe("0.77");
+
+    // 3) The save RESOLVES with the persisted track (x=0.55 -- the mid-save x=0.77
+    //    was NOT part of this save). save() re-baselines here.
+    await act(async () => {
+      resolveSave(track("track-1", [{ frameIndex: 0, box: { x: 0.55, y: 0.2, width: 0.3, height: 0.4 }, rejected: false }]));
+    });
+    await settle();
+
+    // 4) The post-save refetch replaces the track with the persisted corrections
+    //    (x=0.55) on the SAME track id (no remount).
+    await renderPanel(
+      track("track-1", [{ frameIndex: 0, box: { x: 0.55, y: 0.2, width: 0.3, height: 0.4 }, rejected: false }]),
+      saveTrackCorrections,
+    );
+
+    // The mid-save edit survives and is still dirty. Pre-fix Box x reverted to
+    // 0.55 and the panel read "1 saved" (the edit was silently dropped).
+    expect(field(container, "Box x").value).toBe("0.77");
+    expect(container.textContent).toContain("1 unsaved");
+  });
+
+  it("preserves a reject toggle made WHILE a save is in flight (not clobbered by the post-save refetch)", async () => {
+    // sc-12020 — same race as the box variant, exercised through the reject
+    // checkbox to cover BOTH correction input types.
+    let resolveSave;
+    const saveTrackCorrections = vi.fn(() => new Promise((resolve) => {
+      resolveSave = resolve;
+    }));
+
+    const rejectCheckbox = () => container.querySelector('.person-correction-reject input[type="checkbox"]');
+
+    await renderPanel(track("track-1", []), saveTrackCorrections);
+
+    // 1) Dirty the box and Save it (POST carries frame 0 box x=0.55, rejected:false).
+    await changeField(field(container, "Box x"), "0.55");
+    await act(async () => {
+      buttonInside(container, "Save corrections").click();
+    });
+    expect(saveTrackCorrections).toHaveBeenCalledWith("track-1", [
+      { frameIndex: 0, box: { x: 0.55, y: 0.2, width: 0.3, height: 0.4 }, rejected: false, author: "ui", source: "manual" },
+    ]);
+
+    // 2) While the save is IN FLIGHT the user rejects frame 0 (a distinct edit).
+    await act(async () => {
+      rejectCheckbox().click();
+    });
+    expect(rejectCheckbox().checked).toBe(true);
+
+    // 3) The save resolves with the persisted track (rejected:false).
+    await act(async () => {
+      resolveSave(track("track-1", [{ frameIndex: 0, box: { x: 0.55, y: 0.2, width: 0.3, height: 0.4 }, rejected: false }]));
+    });
+    await settle();
+
+    // 4) The refetch lands the persisted corrections (rejected:false).
+    await renderPanel(
+      track("track-1", [{ frameIndex: 0, box: { x: 0.55, y: 0.2, width: 0.3, height: 0.4 }, rejected: false }]),
+      saveTrackCorrections,
+    );
+
+    // The mid-save reject survives and stays dirty. Pre-fix the checkbox reverted
+    // to unrejected and the panel read "1 saved".
+    expect(rejectCheckbox().checked).toBe(true);
+    expect(container.textContent).toContain("1 unsaved");
+  });
+
   it("a no-op touched draft (reject on->off) reads clean, so a concurrent external correction is reflected, not hidden or dropped", async () => {
     await renderPanel(track("track-1", []));
 

@@ -94,6 +94,20 @@ function meaningfulDraftsSignature(drafts, frames) {
   return JSON.stringify(pendingCorrectionsFromDrafts(drafts, frames).map(comparableCorrection).sort());
 }
 
+// Signature of a persisted corrections ARRAY in the SAME comparable form as
+// meaningfulDraftsSignature. The post-save re-baseline keys off what was actually
+// saved (this save's corrections payload) instead of the live drafts, so an edit
+// made WHILE the save was in flight stays measured as dirty and survives the
+// post-save refetch instead of being folded into the clean baseline (sc-12020).
+function meaningfulCorrectionsSignature(corrections) {
+  return JSON.stringify(
+    (corrections ?? [])
+      .filter((correction) => Number.isInteger(correction?.frameIndex))
+      .map(comparableCorrection)
+      .sort(),
+  );
+}
+
 function maskUrl(projectId, relPath) {
   if (!projectId || !relPath) {
     return "";
@@ -263,8 +277,17 @@ function PersonTrackCorrections({ track, sourceClip, saveTrackCorrections }) {
       // is treated as a dirty conflict and skipped — hiding the external change and
       // letting the next Save silently drop it. Baseline on the MEANINGFUL-
       // corrections signature so it matches the seed effect's dirty measure.
+      //
+      // sc-12020: baseline on the corrections THIS save persisted (`pendingCorrections`,
+      // the POST body captured when Save was clicked) — NOT draftsRef.current at
+      // resolve time. The correction inputs stay enabled during the in-flight save,
+      // so draftsRef.current can already hold an edit the user made mid-save. Keying
+      // the clean baseline off draftsRef.current would fold that concurrent edit into
+      // "clean", and the post-save corrections refetch would then reseed the persisted
+      // value over — clobbering — it. Keying off the saved payload keeps a mid-save
+      // edit measured as dirty, so it survives the refetch.
       if (result) {
-        seededSignatureRef.current = meaningfulDraftsSignature(draftsRef.current, frames);
+        seededSignatureRef.current = meaningfulCorrectionsSignature(pendingCorrections);
       }
     } finally {
       setSaving(false);
