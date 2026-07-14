@@ -1552,17 +1552,15 @@ mod tests {
 
     // A candle-backed stub `Trainer` (backend "candle") registered under an id that IS in TRAINER_IDS
     // (`sdxl`): proves a Windows/candle backend lights up `lora_train` + `lora_train_execute` from a
-    // registered `backend = "candle"` trainer descriptor alone (sc-7817), so the default (Linux) CI
-    // lane exercises the per-backend training gate without linking a real provider crate. The real
-    // lanes register the candle-gen-{sdxl,z-image,lens,wan} trainers into this SAME registry.
+    // registered `backend = "candle"` trainer descriptor alone (sc-7817), so the CI lane exercises the
+    // per-backend training gate without linking a real provider crate.
     //
-    // Compiled out of the `backend-candle` build: there the REAL `candle-gen-sdxl` trainer registers
-    // `sdxl` already (so the capability test still lights up off it), and a stub `sdxl` would be a
-    // DUPLICATE — `load_trainer("sdxl")` is first-wins, so in --release (where the candle GPU smokes
-    // run, debug_assert off) the smoke could resolve THIS `unimplemented!()` stub instead of the real
-    // trainer. On macOS the real trainers are `backend = "mlx"`, so the candle stub is still needed
-    // there to exercise the candle branch, and no macOS smoke loads `sdxl`, so no collision.
-    #[cfg(any(target_os = "macos", not(feature = "backend-candle")))]
+    // Registered in EVERY build. Under the canonical `inference` runtime `ProviderRegistryBuilder::new()`
+    // is an empty explicit registry — nothing self-registers by being linked — so this test's hand-built
+    // `media` never receives the real `sdxl` trainer, and the backend-candle lane must supply its own
+    // stub or the training caps never light up. The stub lives ONLY in this test-local registry and never
+    // reaches the global `inference_runtime` catalog the GPU smokes load from, so the old first-wins
+    // `load_trainer("sdxl")` collision worry (real vs `unimplemented!()` stub) no longer applies.
     fn stub_candle_trainer_descriptor() -> gen_core::TrainerDescriptor {
         gen_core::TrainerDescriptor {
             id: "sdxl",
@@ -1574,7 +1572,6 @@ mod tests {
             supports_control: false,
         }
     }
-    #[cfg(any(target_os = "macos", not(feature = "backend-candle")))]
     fn stub_candle_trainer_load(
         _spec: &gen_core::LoadSpec,
     ) -> gen_core::Result<Box<dyn gen_core::Trainer>> {
@@ -1583,17 +1580,14 @@ mod tests {
     fn registry_capabilities_with_stubs(
         settings: &crate::Settings,
     ) -> Vec<sceneworks_core::contracts::WorkerCapability> {
-        let mut media = gen_core::ProviderRegistryBuilder::new()
+        let media = gen_core::ProviderRegistryBuilder::new()
             .register_generator(STUB_MLX)
             .register_generator(STUB_CANDLE)
-            .register_generator(STUB_UNKNOWN);
-        #[cfg(any(target_os = "macos", not(feature = "backend-candle")))]
-        {
-            media = media.register_trainer(gen_core::TrainerRegistration {
+            .register_generator(STUB_UNKNOWN)
+            .register_trainer(gen_core::TrainerRegistration {
                 descriptor: stub_candle_trainer_descriptor,
                 load: stub_candle_trainer_load,
             });
-        }
         let media = media.build().expect("test media registry");
         let text = gen_core::core_llm::TextLlmRegistryBuilder::new()
             .register(STUB_TEXT_LLM)
