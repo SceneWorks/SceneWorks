@@ -9,6 +9,35 @@ function serializeTimeline(timeline) {
   return timeline ? JSON.stringify(timeline) : null;
 }
 
+// sc-12018: the notice `kind` for the edit/generation conflict (a completed generation whose
+// target the dirty working copy has removed). A dedicated kind so it neither clobbers nor is
+// clobbered by the "general" error notice, and can be cleared once the conflict is resolved.
+const TIMELINE_GENERATION_CONFLICT_NOTICE = "timelineGenerationConflict";
+
+// sc-12018: whether the generation's target still exists in `timeline`. A replace rewrites a
+// specific item (context.itemId) inside its track; an extend/bridge only appends a new item to
+// the target track (context.trackId). applyTimelineGenerationResult ALWAYS returns a fresh
+// object when the timelineId matches (it maps `tracks`), so a reference check cannot detect a
+// content no-op — this presence check can. Absent target ⇒ applying the generation to this
+// copy changes nothing, so it would silently vanish from the live editor.
+function timelineGenerationTargetPresent(timeline, job) {
+  const payload = job.payload ?? {};
+  const action = payload.advanced?.timelineAction;
+  const context = payload.advanced?.timelineContext ?? {};
+  if (!action || !timeline || context.timelineId !== timeline.id) {
+    return false;
+  }
+  const track = (timeline.tracks ?? []).find((candidate) => candidate.id === context.trackId);
+  if (!track) {
+    return false;
+  }
+  if (action === "replace") {
+    return (track.items ?? []).some((item) => item.id === context.itemId);
+  }
+  // extend / bridge only need the target track to exist — they append a new item to it.
+  return true;
+}
+
 // Owns the editor's timeline state (list, selection, the loaded timeline) plus every
 // timeline mutation, frame extraction, and the SSE-driven "apply generated clip to the
 // timeline" pipeline. Extracted from App.jsx (sc-1651) — the largest, most coupled
@@ -23,6 +52,7 @@ export function useTimelines({
   activeProject,
   activeProjectRef,
   setError,
+  pushNotice,
   requestedGpu,
   setActiveView,
   createVideoJob,
@@ -114,6 +144,9 @@ export function useTimelines({
       setActiveTimeline(timeline);
       activeTimelineRef.current = timeline;
       savedTimelineSnapshotRef.current = serializeTimeline(timeline);
+      // sc-12018: a fresh load pulls the server copy (which received any conflicting
+      // generation), so a prior edit/generation conflict notice is now stale — clear it.
+      pushNotice?.(TIMELINE_GENERATION_CONFLICT_NOTICE, "");
       setError("");
     } catch (err) {
       setError(err.message);
@@ -163,6 +196,9 @@ export function useTimelines({
         // re-select/SSE guards kept firing on an already-saved timeline).
         activeTimelineRef.current = saved;
         savedTimelineSnapshotRef.current = serializeTimeline(saved);
+        // sc-12018: the saved copy is now authoritative, so any prior edit/generation conflict
+        // notice ("saving will discard it") has been resolved one way or the other — clear it.
+        pushNotice?.(TIMELINE_GENERATION_CONFLICT_NOTICE, "");
         refreshTimelines(activeProject.id);
         setError("");
         return saved;
@@ -171,7 +207,7 @@ export function useTimelines({
         return null;
       }
     },
-    [token, activeProject, setError, refreshTimelines],
+    [token, activeProject, setError, pushNotice, refreshTimelines],
   );
 
   const exportTimeline = useCallback(
@@ -361,10 +397,27 @@ export function useTimelines({
           // the server copy would silently discard them, so merge the generation onto the
           // working copy instead. The baseline is left untouched, so the copy stays dirty and
           // the user still owns the decision to save their edits.
-          const merged = applyTimelineGenerationResult(workingCopy, job);
-          if (merged !== workingCopy) {
+          if (timelineGenerationTargetPresent(workingCopy, job)) {
+            const merged = applyTimelineGenerationResult(workingCopy, job);
             setActiveTimeline(merged);
             activeTimelineRef.current = merged;
+          } else {
+            // sc-12018 (S8 follow-up): the dirty working copy has DELETED the item/track this
+            // generation targets, so merging is a content no-op — the generation would be
+            // invisible in the live editor. It IS durably persisted to the server copy above,
+            // but if the user now SAVES their conflicting deletion the server copy is
+            // overwritten and the generation is lost. Surface the conflict instead of silently
+            // swallowing it; the working copy is left untouched so the user's deletion — and
+            // the ownership of the save decision — is preserved.
+            const action = job.payload?.advanced?.timelineAction;
+            const clipName = job.result?.assets?.[0]?.displayName;
+            const target = action === "replace" ? "a clip you removed" : "a track you removed";
+            pushNotice?.(
+              TIMELINE_GENERATION_CONFLICT_NOTICE,
+              `A generation finished for ${target} from this timeline${clipName ? ` (“${clipName}”)` : ""}. ` +
+                "It was saved to the stored timeline, but saving your current edits will discard it. " +
+                "Re-open this timeline to keep the generated clip.",
+            );
           }
         } else {
           // Clean (or the item the generation targets is gone) → adopt the persisted server

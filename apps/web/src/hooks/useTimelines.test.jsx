@@ -70,12 +70,31 @@ function makeExtendJob() {
   };
 }
 
+// A completed replace-generation job for an existing item on tl_1's main track.
+// applyTimelineGenerationResult rewrites context.itemId in place; if that item is gone the
+// apply is a content no-op.
+function makeReplaceJob() {
+  return {
+    id: "job_replace",
+    projectId: "proj_1",
+    result: { assetIds: ["asset_replace"], assets: [{ displayName: "Replacement clip", createdAt: "2026-07-14T00:00:00Z" }] },
+    payload: {
+      advanced: {
+        timelineAction: "replace",
+        timelineContext: { timelineId: "tl_1", trackId: "track_main", itemId: "item_target" },
+      },
+    },
+  };
+}
+
 let container;
 let root;
+let pushNoticeSpy;
 
 beforeEach(() => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
   apiCalls.length = 0;
+  pushNoticeSpy = vi.fn();
   container = document.createElement("div");
   document.body.appendChild(container);
 });
@@ -97,6 +116,7 @@ function mount() {
         activeProject,
         activeProjectRef,
         setError: () => {},
+        pushNotice: pushNoticeSpy,
         requestedGpu: "auto",
         setActiveView: () => {},
         createVideoJob: async () => null,
@@ -253,5 +273,149 @@ describe("useTimelines SSE apply is unchanged when clean (sc-11967 no-regression
     // Clean timeline that received a generation is still clean afterwards — the server
     // copy it adopted is the persisted one, so a later re-select must not prompt.
     expect(get().api.isActiveTimelineDirty()).toBe(false);
+    // No conflict was surfaced on the happy path.
+    expect(pushNoticeSpy.mock.calls.some((c) => c[0] === "timelineGenerationConflict" && c[1])).toBe(false);
+  });
+});
+
+// sc-12018 (S8 follow-up): the dirty working copy has DELETED the item/track a completed
+// generation targets. Merging is a content no-op, so the generation is invisible in the live
+// editor — and if the user then saves their deletion, the server copy (which DID receive the
+// generation) is overwritten and the generation is lost. The apply must not silently swallow
+// this: it surfaces a conflict notice while preserving the durable server-copy persistence.
+describe("useTimelines SSE apply surfaces edit/generation conflict on deleted target (sc-12018)", () => {
+  it("EXTEND: dirty copy deleted the target track → conflict notice, gen persisted, not injected", async () => {
+    const get = mount();
+    await loadSelected(get, makeTimeline());
+
+    // User deletes the whole target track (a structural edit → dirty).
+    act(() => {
+      const current = get().api.activeTimeline;
+      get().api.setActiveTimeline({ ...current, tracks: [] });
+    });
+    await settle();
+    expect(get().api.isActiveTimelineDirty()).toBe(true);
+
+    // Server copy still has track_main (the deletion is unsaved).
+    const serverCopy = makeTimeline();
+    apiRouter = ({ method, path, body }) => {
+      if (method === "PUT") return { ...body.timeline };
+      if (path.endsWith("/timelines")) return [{ id: "tl_1", name: "Main" }];
+      if (method === "GET") return serverCopy;
+      return serverCopy;
+    };
+
+    await act(async () => {
+      get().api.enqueueTimelineGenerationApply(makeExtendJob());
+    });
+    await settle();
+
+    // (a) The conflict is surfaced to the user via the existing notice mechanism (a truthy
+    // message — an empty push is the clear-on-resolve signal, not a surfaced conflict).
+    const conflictCall = pushNoticeSpy.mock.calls.find((c) => c[0] === "timelineGenerationConflict" && c[1]);
+    expect(conflictCall).toBeTruthy();
+    expect(conflictCall[1]).toMatch(/generation/i);
+    // (b) The generation was NOT silently swallowed — it was durably persisted to the server.
+    const put = apiCalls.find((c) => c.method === "PUT");
+    expect(put).toBeTruthy();
+    expect(put.body.timeline.tracks.flatMap((t) => t.items).some((it) => it.assetId === "asset_gen")).toBe(true);
+    // The live working copy still reflects the user's deletion (generation not resurrected onto
+    // a phantom track), and stays dirty so the user still owns the save decision.
+    expect(get().api.activeTimeline.tracks).toHaveLength(0);
+    expect(get().api.isActiveTimelineDirty()).toBe(true);
+  });
+
+  it("REPLACE: dirty copy deleted the target item → conflict notice, gen persisted", async () => {
+    const get = mount();
+    const withItem = makeTimeline({
+      tracks: [
+        {
+          id: "track_main",
+          name: "Main",
+          items: [{ id: "item_target", assetId: "orig_asset", type: "video", trackId: "track_main", timelineStart: 0, timelineEnd: 4 }],
+        },
+      ],
+    });
+    await loadSelected(get, withItem);
+
+    // User deletes the item the replacement targets (dirty).
+    act(() => {
+      const current = get().api.activeTimeline;
+      get().api.setActiveTimeline({
+        ...current,
+        tracks: current.tracks.map((t) => ({ ...t, items: t.items.filter((it) => it.id !== "item_target") })),
+      });
+    });
+    await settle();
+    expect(get().api.isActiveTimelineDirty()).toBe(true);
+
+    // Server copy still has item_target.
+    const serverCopy = makeTimeline({
+      tracks: [
+        {
+          id: "track_main",
+          name: "Main",
+          items: [{ id: "item_target", assetId: "orig_asset", type: "video", trackId: "track_main", timelineStart: 0, timelineEnd: 4 }],
+        },
+      ],
+    });
+    apiRouter = ({ method, path, body }) => {
+      if (method === "PUT") return { ...body.timeline };
+      if (path.endsWith("/timelines")) return [{ id: "tl_1", name: "Main" }];
+      if (method === "GET") return serverCopy;
+      return serverCopy;
+    };
+
+    await act(async () => {
+      get().api.enqueueTimelineGenerationApply(makeReplaceJob());
+    });
+    await settle();
+
+    const conflictCall = pushNoticeSpy.mock.calls.find((c) => c[0] === "timelineGenerationConflict" && c[1]);
+    expect(conflictCall).toBeTruthy();
+    expect(conflictCall[1]).toBeTruthy();
+    // Generation durably persisted onto the server copy's surviving item.
+    const put = apiCalls.find((c) => c.method === "PUT");
+    expect(put).toBeTruthy();
+    const replaced = put.body.timeline.tracks.flatMap((t) => t.items).find((it) => it.id === "item_target");
+    expect(replaced.assetId).toBe("asset_replace");
+    // Working copy still has the item removed and stays dirty.
+    expect(get().api.activeTimeline.tracks.flatMap((t) => t.items).some((it) => it.id === "item_target")).toBe(false);
+    expect(get().api.isActiveTimelineDirty()).toBe(true);
+  });
+
+  it("does NOT fire a conflict notice when the dirty copy still has the target (merge path)", async () => {
+    const get = mount();
+    await loadSelected(get, makeTimeline());
+
+    // Dirty edit that keeps the target track intact.
+    act(() => {
+      const current = get().api.activeTimeline;
+      get().api.setActiveTimeline({
+        ...current,
+        tracks: current.tracks.map((t) => ({
+          ...t,
+          items: [...t.items, { id: "item_user_edit", assetId: "user_asset", type: "video", trackId: "track_main", timelineStart: 0, timelineEnd: 4 }],
+        })),
+      });
+    });
+    await settle();
+
+    const serverCopy = makeTimeline();
+    apiRouter = ({ method, path, body }) => {
+      if (method === "PUT") return { ...body.timeline };
+      if (path.endsWith("/timelines")) return [{ id: "tl_1", name: "Main" }];
+      if (method === "GET") return serverCopy;
+      return serverCopy;
+    };
+
+    await act(async () => {
+      get().api.enqueueTimelineGenerationApply(makeExtendJob());
+    });
+    await settle();
+
+    // Merged in place, no conflict.
+    expect(get().api.activeTimeline.tracks.flatMap((t) => t.items).some((it) => it.assetId === "asset_gen")).toBe(true);
+    expect(pushNoticeSpy.mock.calls.some((c) => c[0] === "timelineGenerationConflict" && c[1])).toBe(false);
   });
 });
