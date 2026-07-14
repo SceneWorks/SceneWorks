@@ -2410,6 +2410,10 @@ export function ImageStudio() {
               >
                 <span className="prompt-tool-title">
                   <Icon.Image size={15} /> Image reference
+                  {/* Armed indicator: the panel is a collapsible accordion, so once a reference is
+                      picked and the tile is collapsed there's otherwise no sign it's still driving
+                      every generation. Show "On" whenever a reference is set, regardless of expansion. */}
+                  {img2imgReferenceAssetId ? <span className="prompt-tool-flag">On</span> : null}
                 </span>
                 <span className="prompt-tool-desc">Guide the render with an image (image-to-image)</span>
               </button>
@@ -2426,6 +2430,7 @@ export function ImageStudio() {
                     buttonLabel="Select reference image"
                     changeLabel="Change reference"
                     characters={characters}
+                    clearable
                     emptyLabel="No reference image selected"
                     importAsset={importAsset}
                     label="Reference image"
@@ -2594,6 +2599,7 @@ export function ImageStudio() {
                           assets={editImageAssets}
                           buttonLabel="Select image"
                           characters={characters}
+                          clearable
                           emptyLabel="No second image selected (optional)"
                           importAsset={importAsset}
                           label={editReferences.secondaryLabel ?? "Image 2 (optional)"}

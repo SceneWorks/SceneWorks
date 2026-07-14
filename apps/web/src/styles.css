@@ -1875,6 +1875,21 @@ label {
   color: var(--text-muted);
 }
 
+/* Armed badge on a prompt-tool tile (e.g. img2img has a reference set). Signals
+   the tool is active even when its accordion panel is collapsed. */
+.prompt-tool-flag {
+  margin-left: auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+}
+
 /* The inline panel a prompt-tool tile reveals (UI-refinement 1b) — a bordered surface-2 card.
    It wraps the reused ReferenceCaptionPicker / RefinePromptControl, so normalize their internal
    spacing and flatten the refine-review so it's not a card inside a card. */
@@ -10207,6 +10222,24 @@ details[open] > summary.lora-scope-group-heading::before,
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.01em;
+}
+
+/* Keep the Change / Remove buttons grouped on the right (the head is a
+   space-between flex row, so bare siblings would spread apart). */
+.asset-picker-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* "Remove" reads as the quieter, secondary action next to "Change". */
+.asset-picker-clear {
+  color: var(--text-muted);
+}
+
+.asset-picker-clear:hover:not(:disabled) {
+  color: var(--danger, var(--text));
+  border-color: var(--danger, var(--border-strong));
 }
 
 /* Edit fit-mode selector (epic 2551): caption above a segmented crop/pad/outpaint control. */
