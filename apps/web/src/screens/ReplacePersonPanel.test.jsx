@@ -172,4 +172,44 @@ describe("ReplacePersonPanel track corrections drafts (sc-11966)", () => {
     await changeField(field(container, "Scrub tracking frames"), "1");
     expect(field(container, "Box x").value).toBe("0.7");
   });
+
+  it("a no-op touched draft (reject on->off) reads clean, so a concurrent external correction is reflected, not hidden or dropped", async () => {
+    await renderPanel(track("track-1", []));
+
+    const rejectCheckbox = () => container.querySelector('.person-correction-reject input[type="checkbox"]');
+
+    // Frame 0 starts clean at the tracked box.
+    expect(field(container, "Box x").value).toBe("0.1");
+    expect(container.textContent).toContain("0 saved");
+
+    // User toggles Reject ON (a meaningful, dirty draft) ...
+    await act(async () => {
+      rejectCheckbox().click();
+    });
+    expect(container.textContent).toContain("1 unsaved");
+
+    // ... then changes their mind and toggles it OFF. The draft is now a NO-OP
+    // touched entry (box unchanged, not rejected): the display correctly reads
+    // clean. The seed effect must agree it is clean — the bug was that it measured
+    // dirtiness on the RAW drafts object (a lingering no-op entry != the seed),
+    // so it treated this as dirty and skipped reseeding.
+    await act(async () => {
+      rejectCheckbox().click();
+    });
+    expect(container.textContent).toContain("0 saved");
+
+    // A concurrent external correction lands on a DIFFERENT frame (frame 1) on the
+    // SAME track id (no remount). Because the no-op draft reads clean, the seed
+    // effect reseeds and the external correction is shown/converged. Pre-fix it
+    // was HIDDEN (seed skipped) and the next Save would have posted only [] —
+    // dropping the external frame-1 correction (regression vs. main).
+    await renderPanel(track("track-1", [{ frameIndex: 1, box: { x: 0.7, y: 0.7, width: 0.2, height: 0.2 }, rejected: false }]));
+
+    // Converged: clean "1 saved" (not "0 unsaved"), so a subsequent Save posts the
+    // external frame-1 correction instead of dropping it.
+    expect(container.textContent).toContain("1 saved");
+    // And the externally-added frame-1 box is visible when scrubbed to.
+    await changeField(field(container, "Scrub tracking frames"), "1");
+    expect(field(container, "Box x").value).toBe("0.7");
+  });
 });
