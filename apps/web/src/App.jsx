@@ -49,6 +49,7 @@ import {
 } from "./assetVariants.js";
 import { buildWorkersById } from "./workers.js";
 import { createEditorScratchRegistry } from "./editorScratch.js";
+import { ConfirmHost } from "./appConfirm.jsx";
 import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
 import {
   buildLocalJobStack,
@@ -568,7 +569,22 @@ export function App() {
   const navTo = useCallback((viewId) => {
     if (viewId === activeViewRef.current) return;
     const guard = leaveGuardRef.current;
-    if (guard && !guard()) return; // guard returned false → user cancelled the leave
+    if (!guard) {
+      setActiveView(viewId);
+      return;
+    }
+    // The guard may answer synchronously (a bare boolean, legacy) or asynchronously
+    // (a Promise<boolean> — the Image Editor's desktop-safe appConfirm dialog, sc-11968).
+    // Only a strict `false` / a promise resolving falsy cancels the leave; anything else
+    // proceeds. A promise defers the view switch until the user answers the dialog.
+    const decision = guard();
+    if (decision && typeof decision.then === "function") {
+      decision.then((ok) => {
+        if (ok) setActiveView(viewId);
+      });
+      return;
+    }
+    if (decision === false) return; // guard returned false → user cancelled the leave
     setActiveView(viewId);
   }, []);
 
@@ -2504,6 +2520,12 @@ export function App() {
           updateAssetStatus={updateAssetStatus}
         />
       ) : null}
+
+      {/* Desktop-safe confirm dialog host (sc-11968). Mounted once at the app root so
+          appConfirm()/useConfirm() anywhere — including a leave-guard callback handed to
+          navTo — resolve through a real React dialog instead of window.confirm (which
+          silently no-ops in the Tauri WebView). Renders nothing until a confirm is asked. */}
+      <ConfirmHost />
     </main>
     </AppLiveContext.Provider>
     </AppStaticContext.Provider>
