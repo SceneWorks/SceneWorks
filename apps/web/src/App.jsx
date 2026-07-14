@@ -85,7 +85,7 @@ const ImageEditor = React.lazy(() =>
 // Library/Assets) keeps today's conditional unmount-on-navigation behavior. Training
 // contributes two view ids — the default "Train" workspace and the "LibraryDataSets"
 // Data Sets mode — both part of the Training Studio family.
-const KEEP_ALIVE_VIEWS = Object.freeze(
+export const KEEP_ALIVE_VIEWS = Object.freeze(
   new Set([
     "Image",
     "Video",
@@ -587,6 +587,46 @@ export function App() {
     if (decision === false) return; // guard returned false → user cancelled the leave
     setActiveView(viewId);
   }, []);
+
+  // A screen holding an unsaved draft (Training Studio / Data Sets, sc-11970) can register
+  // a guard consulted before the active PROJECT is switched — which would otherwise silently
+  // reset the screen and discard the draft. Distinct from the nav leave-guard above: project
+  // switch bypasses navTo entirely, and keep-alive screens must NOT prompt on plain nav, only
+  // on a project change. Like the nav guard, a promise defers the switch until the user
+  // answers; only a falsy answer cancels it. The guard receives the target project.
+  const projectSwitchGuardRef = useRef(null);
+  const registerProjectSwitchGuard = useCallback((guard) => {
+    projectSwitchGuardRef.current = guard;
+    return () => {
+      if (projectSwitchGuardRef.current === guard) projectSwitchGuardRef.current = null;
+    };
+  }, []);
+  // Consult the project-switch guard (if any) then switch. Resolves to whether the switch
+  // actually happened, so imperative callers — creating a NEW workspace (createProject) — can
+  // gate their follow-up (navigating into it) on the user confirming the discard (sc-11970).
+  const requestProjectSwitch = useCallback(async (project) => {
+    // No-op re-selection (same project) and clears bypass the guard — nothing is discarded.
+    if (!project || project.id === activeProjectRef.current?.id) {
+      setActiveProject(project);
+      return true;
+    }
+    const guard = projectSwitchGuardRef.current;
+    if (guard) {
+      const decision = guard(project);
+      const proceed =
+        decision && typeof decision.then === "function" ? await decision : decision !== false;
+      if (!proceed) return false; // guard cancelled → user kept editing, nothing discarded
+    }
+    setActiveProject(project);
+    return true;
+  }, []);
+  // The ProjectSwitcher's onSelect fires the guarded switch and forgets the result.
+  const selectProject = useCallback(
+    (project) => {
+      void requestProjectSwitch(project);
+    },
+    [requestProjectSwitch],
+  );
 
   // sc-4194: defined here (above the data hooks) because useTimelines takes it as a
   // dependency; a stable identity keeps the timeline hook's queue action stable too.
@@ -1349,8 +1389,14 @@ export function App() {
         body: JSON.stringify({ name: trimmed }),
       });
       setProjects((items) => [created, ...items.filter((item) => item.id !== created.id)]);
-      setActiveProject(created);
-      setActiveView("Image");
+      // Switching to the new workspace resets keep-alive screens — including a Data Sets draft.
+      // Route through the guard so a dirty draft prompts (consistent with picking an EXISTING
+      // project) instead of silently wiping it (sc-11970). On cancel: stay on the current
+      // project + view, draft intact; the created workspace remains in the list to open later.
+      const switched = await requestProjectSwitch(created);
+      if (switched) {
+        setActiveView("Image");
+      }
       setError("");
       return created;
     } catch (err) {
@@ -2186,6 +2232,8 @@ export function App() {
     // Navigation
     setActiveView,
     registerLeaveGuard,
+    // Unsaved-draft guard consulted before a project switch (sc-11970)
+    registerProjectSwitchGuard,
     // Image-Editor scratch-op survivor coordination (sc-8850)
     trackEditorScratchOp,
     releaseEditorScratchOp,
@@ -2236,7 +2284,7 @@ export function App() {
     refreshTrainingDatasets, loadTrainingDataset, loadTrainingDatasetReadiness, setTrainingDatasetItemQualityAck, createTrainingDataset, uploadTrainingDatasetItem,
     updateTrainingDataset, batchRenameTrainingDataset, writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob, createTrainingDatasetUpscaleJob, createTrainingDatasetAnalysisJob, createTrainingDatasetFaceAnalysisJob, smartCropTrainingDataset, stripExifTrainingDataset, createTrainingJob, trainingPresets, trainingPresetsError,
-    trainingTargets, trainingTargetsError, setActiveView, registerLeaveGuard,
+    trainingTargets, trainingTargetsError, setActiveView, registerLeaveGuard, registerProjectSwitchGuard,
     trackEditorScratchOp, releaseEditorScratchOp, registerEditorScratchClaim, characters,
     createCharacter, updateCharacter, archiveCharacter, unarchiveCharacter, listArchivedCharacters,
     addCharacterReference, updateCharacterReference,
@@ -2264,7 +2312,7 @@ export function App() {
           activeProject={activeProject}
           disabled={!authenticated}
           onCreate={createProject}
-          onSelect={setActiveProject}
+          onSelect={selectProject}
           projects={projects}
         />
 

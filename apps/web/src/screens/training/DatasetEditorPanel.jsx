@@ -94,6 +94,7 @@ export function DatasetEditorPanel({
   draftName,
   setDraftName,
   dirty,
+  discardDraft,
   setAddDialogOpen,
   renamePrefix,
   setRenamePrefix,
@@ -193,10 +194,25 @@ export function DatasetEditorPanel({
   // never silently ready (sc-6534).
   const readyCount = readiness ? memberAssets.filter((asset) => !isFlagged(asset)).length : 0;
 
+  // The unsaved-state chip is now a real affordance (sc-11970): when there are unsaved
+  // changes it pairs the "Unsaved changes" pill with a Discard action that reverts the
+  // draft to the last saved state (Save lives in the actions row above). A saved, clean
+  // dataset shows its version; an unstarted draft shows "Draft".
   const statusPill = dirty ? (
-    <span className="dataset-status-pill unsaved">
-      <span className="dataset-status-dot" aria-hidden="true" />
-      Unsaved changes
+    <span className="dataset-status-row">
+      <span className="dataset-status-pill unsaved">
+        <span className="dataset-status-dot" aria-hidden="true" />
+        Unsaved changes
+      </span>
+      {typeof discardDraft === "function" ? (
+        <button
+          className="link-button dataset-discard-button"
+          onClick={discardDraft}
+          type="button"
+        >
+          Discard
+        </button>
+      ) : null}
     </span>
   ) : activeDataset ? (
     <span className="dataset-status-pill">Version {activeDataset.version}</span>
