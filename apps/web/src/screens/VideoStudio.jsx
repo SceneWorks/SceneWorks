@@ -112,6 +112,7 @@ export function VideoStudio() {
     requestedGpu,
     saveTrackCorrections,
     selectedAsset,
+    selectedAssetId,
     setRequestedGpu,
     updateAssetStatus,
     videoModels,
@@ -390,14 +391,24 @@ export function VideoStudio() {
   const requiresLtxIcLora = selectedModel?.id === ltxVideoModelId && ltxIcLoraRequiredModes.has(mode);
   const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing && loraLooksLikeIcLora(lora));
 
+  // Seed the source from an EXPLICIT asset selection only — never App's assets[0] fallback
+  // (sc-11964). App derives `selectedAsset = assets.find(id === selectedAssetId) ?? assets[0]`,
+  // so on a cold restart (selectedAssetId still null) `selectedAsset` resolves to the NEWEST
+  // asset once the catalog lands; syncing that would clobber the source restored from the
+  // snapshot whenever the user's source isn't the newest asset. Gating on a real `selectedAssetId`
+  // (and confirming `selectedAsset` actually resolves to it) keeps a genuine library/launch
+  // selection working while leaving a restored, still-valid source untouched.
   useEffect(() => {
-    if (selectedAsset?.type === "image" || selectedAsset?.type === "frame") {
+    if (!selectedAssetId || selectedAsset?.id !== selectedAssetId) {
+      return;
+    }
+    if (selectedAsset.type === "image" || selectedAsset.type === "frame") {
       setSourceAssetId(selectedAsset.id);
     }
-    if (selectedAsset?.type === "video") {
+    if (selectedAsset.type === "video") {
       setSourceClipAssetId(selectedAsset.id);
     }
-  }, [selectedAsset?.id, selectedAsset?.type]);
+  }, [selectedAssetId, selectedAsset?.id, selectedAsset?.type]);
 
   useEffect(() => {
     if (launchRequest?.view !== "Video") {

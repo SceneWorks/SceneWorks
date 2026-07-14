@@ -2055,6 +2055,10 @@ export function App() {
     // Assets / library (sc-1651 Phase B batch 1)
     assets,
     selectedAsset,
+    // The RAW selection id (null when nothing is explicitly selected). Studios need it
+    // to tell an explicit user selection apart from `selectedAsset`'s assets[0] fallback
+    // so a restored source isn't clobbered by the newest asset on a cold restart (sc-11964).
+    selectedAssetId,
     setSelectedAssetId,
     deleteAsset,
     purgeAsset,
@@ -2197,7 +2201,7 @@ export function App() {
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline, isActiveTimelineDirty,
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
-    assets, selectedAsset, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
+    assets, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob,
     jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects,
