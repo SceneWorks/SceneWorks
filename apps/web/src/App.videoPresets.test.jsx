@@ -857,6 +857,65 @@ describe("SceneWorks app shell", () => {
     expect(readVideoSnapshot().sourceClipAssetId).toBe("clip-old");
   });
 
+  // sc-11964 (S5) regression guard — the PRIMARY real flow. VideoStudio mounts LAZILY (keep-alive),
+  // so on a cold restart it almost always mounts AFTER App's startup auto-default has already run
+  // (App loads the asset catalog regardless of the active view and auto-selects the newest asset,
+  // App.jsx:1270). That means the studio's FIRST mount already has selectedAssetId === the newest
+  // asset — there is NO selectedAssetId=null window to arm a mount-time skip against. A single
+  // render reproduces exactly that: catalog already loaded AND selectedAssetId already the newest
+  // asset at first mount, restored source is a DIFFERENT (older) clip. The source-sync effect must
+  // treat the auto-default already sitting at mount as NOT a user transition and leave the restored
+  // source intact. (Mounting with selectedAssetId=null first would mask this bug, so we do not.)
+  it("keeps a restored source clip when it mounts late with selectedAssetId already the newest asset", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project-1",
+      JSON.stringify({
+        mode: "reference_video_to_video",
+        model: "bernini",
+        sourceClipAssetId: "clip-old",
+      }),
+    );
+
+    root = createRoot(container);
+    // Single render: no selectedAssetId=null window. The catalog is already loaded and App has
+    // already auto-selected the newest clip ("clip-new") before the studio ever mounts.
+    await renderVideoStudio({
+      videoModels: [berniniModel],
+      selectedAssetId: "clip-new",
+      assets: [
+        { id: "clip-new", type: "video", displayName: "Newest Clip" },
+        { id: "clip-old", type: "video", displayName: "Restored Clip" },
+      ],
+    });
+
+    // The restored (non-newest) clip survives the mount-time auto-default; it was not hijacked.
+    expect(container.textContent).toContain("Restored Clip");
+    expect(readVideoSnapshot().sourceClipAssetId).toBe("clip-old");
+  });
+
+  // sc-11964 (S5) — with NO restored source the studio must still default the source to the
+  // selected asset (the mount-time auto-default), preserving the original behavior. Here nothing is
+  // restored, so the newest selected clip SHOULD become the source.
+  it("defaults the source to the selected asset when there is no restored source", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project-1",
+      JSON.stringify({ mode: "reference_video_to_video", model: "bernini" }),
+    );
+
+    root = createRoot(container);
+    await renderVideoStudio({
+      videoModels: [berniniModel],
+      selectedAssetId: "clip-new",
+      assets: [
+        { id: "clip-new", type: "video", displayName: "Newest Clip" },
+        { id: "clip-old", type: "video", displayName: "Older Clip" },
+      ],
+    });
+
+    // No snapshot source to protect, so the selected (newest) clip becomes the source as before.
+    expect(readVideoSnapshot().sourceClipAssetId).toBe("clip-new");
+  });
+
   // sc-11964 (S5) regression guard for the shared character-drop effect (generationStudio.jsx):
   // deleting the LAST-and-only selected character empties the catalog. A `.length` guard can't
   // tell "still loading" from "genuinely empty" and would leave the now-dangling characterId in
