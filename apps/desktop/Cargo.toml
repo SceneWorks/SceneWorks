@@ -54,6 +54,11 @@ sha2 = "0.10"
 # buffered whole in RAM (F-129, sc-8931). Already in the workspace lock (0.3.x), so no
 # new locked version is pulled; `alloc` is needed for the stream combinators.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+# Confine the API sidecar (and its whole descendant tree — the `hf` download CLI and the
+# `python.exe` it forks) to a kill-on-close Job Object, so no orphan can outlive the
+# desktop and pin the API's listening port on the next launch (sc-11946). Already in the
+# workspace lock (pulled transitively by tauri), so no new locked version is added.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [lints.rust]
 # Tauri's generate_context!/Builder can emit unsafe at the webview FFI boundary,
