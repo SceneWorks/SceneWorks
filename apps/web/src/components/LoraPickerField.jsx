@@ -1,6 +1,14 @@
 import React from "react";
 import { LoraKeywordSummary } from "./LoraKeywordSummary.jsx";
-import { MAX_JOB_LORAS_TOTAL, loraMatchesModel, loraWeight, serializeLora } from "../presetUtils.js";
+import {
+  LORA_WEIGHT_MAX,
+  LORA_WEIGHT_MIN,
+  LORA_WEIGHT_STEP,
+  MAX_JOB_LORAS_TOTAL,
+  loraMatchesModel,
+  loraWeight,
+  serializeLora,
+} from "../presetUtils.js";
 
 // The per-job total cap (sc-8936): this Character Studio picker doesn't distinguish
 // builtin vs user LoRAs, so it gates on the hard total the worker enforces.
@@ -95,10 +103,10 @@ export function LoraPickerField({ selection, label = "Style LoRAs (optional)" })
                   <span>Weight</span>
                   <input
                     aria-label={`${lora.name ?? lora.id} weight`}
-                    max="2"
-                    min="0"
+                    max={LORA_WEIGHT_MAX}
+                    min={LORA_WEIGHT_MIN}
                     onChange={(event) => setWeight(lora.id, Number(event.target.value))}
-                    step="0.05"
+                    step={LORA_WEIGHT_STEP}
                     type="range"
                     value={weight}
                   />

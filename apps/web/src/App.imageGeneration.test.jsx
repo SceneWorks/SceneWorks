@@ -778,7 +778,7 @@ describe("SceneWorks app shell", () => {
     expect(createImageJob).not.toHaveBeenCalled();
   });
 
-  it("applies preset defaults and hidden preset LoRAs to image jobs", async () => {
+  it("applies preset defaults and seeds the preset's LoRAs into the visible picker for image jobs", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);
     await act(async () => {
@@ -799,7 +799,6 @@ describe("SceneWorks app shell", () => {
               family: "z-image",
               scope: "builtin",
               defaultWeight: 0.55,
-              presetManaged: true,
             },
           ],
           onPreview: () => {},
@@ -832,12 +831,22 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Cinematic");
     expect(container.textContent).toContain("Balanced cinematic color, contrast, and detail.");
     expect(container.textContent).toContain("Adds: cinematic lighting");
-    expect(container.textContent).toContain("Preset LoRA applied at generation: Cinematic Detail");
+    // The preset's installed LoRA is now seeded into the visible picker (not hidden), so the
+    // guidance strip no longer claims it's "applied at generation" — it's a normal selection.
+    expect(container.textContent).not.toContain("Preset LoRA applied at generation");
+    // Open Advanced (where the LoRA rail lives): the preset's LoRA is a real selection sitting
+    // at the preset's weight (0.4), ready to retune.
+    await act(async () => {
+      document.body.querySelector(".advanced-section-toggle").click();
+    });
+    expect(document.body.querySelector(".lora-slot-weight-value").textContent).toBe("0.40");
 
     await act(async () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
 
+    // The seeded preset LoRA rides in `loras` at its preset weight, and the client tells the
+    // server it already resolved the preset's LoRAs so the server won't re-merge them.
     expect(createImageJob).toHaveBeenCalledWith(
       expect.objectContaining({
         count: 2,
@@ -846,10 +855,18 @@ describe("SceneWorks app shell", () => {
         negativePrompt: "flat lighting",
         prompt: "A cinematic frame of a neon street at midnight",
         recipePresetId: "cinematic",
-        loras: [],
+        presetLorasResolvedClientSide: true,
+        loras: [expect.objectContaining({ id: "cinematic_detail", weight: 0.4 })],
         advanced: { resolution: "1280x720" },
       }),
     );
+
+    // Deselecting the preset (→ None) removes the LoRA it seeded — the picker restores to the
+    // pre-preset selection (empty here), so the seed is a reversible overlay, not a one-way dump.
+    await act(async () => {
+      [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "None").click();
+    });
+    expect(document.body.querySelector(".lora-slot-weight-value")).toBeNull();
   });
 
   it("prefills Image Studio from a saved generation recipe launch without reusing the seed", async () => {
@@ -2120,6 +2137,12 @@ describe("SceneWorks app shell", () => {
     await settle();
     const weightSlider = document.body.querySelector(".lora-slot-weight input[type=range]");
     expect(weightSlider).toBeTruthy();
+    // The weight slider is the shared bidirectional -2..2 range (LORA_WEIGHT_*), not the
+    // old 0..2 — slider LoRAs run negative for the inverse direction, and the range must
+    // match the studios, the Preset Manager, and the recipe-preset normalizer (a preset
+    // LoRA stuck at the old center of 0 generated at scale 0 and looked "not applied").
+    expect(weightSlider.getAttribute("min")).toBe("-2");
+    expect(weightSlider.getAttribute("max")).toBe("2");
     expect(document.body.querySelector(".lora-slot-weight-value").textContent).toBe("0.80");
     await changeField(weightSlider, "0.5");
 

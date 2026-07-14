@@ -194,7 +194,9 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Dream Motion");
     expect(container.textContent).toContain("Soft camera motion.");
     expect(container.textContent).toContain("Adds: smooth camera motion");
-    expect(container.textContent).toContain("Preset LoRA applied at generation: Video Motion");
+    // The preset's installed LoRA is seeded into the visible picker, so the strip no longer
+    // claims it's applied invisibly at generation.
+    expect(container.textContent).not.toContain("Preset LoRA applied at generation");
 
     await act(async () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip").click();
@@ -209,11 +211,13 @@ describe("SceneWorks app shell", () => {
         quality: "best",
         negativePrompt: "jitter",
         recipePresetId: "dream_motion",
-        // Preset prompt prefix/suffix and preset LoRAs are now folded in
-        // server-side from recipePresetId, so the client sends the raw prompt
-        // and only its own picker selections (none here).
+        // The preset prompt prefix/suffix is still folded in server-side from recipePresetId,
+        // so the client sends the raw prompt. The preset's LoRA, though, is now a visible
+        // picker selection: it rides in `loras` at its resolved weight and the client flags
+        // presetLorasResolvedClientSide so the server won't re-merge it.
         prompt: "Camera slowly pushes in while the scene comes alive",
-        loras: [],
+        presetLorasResolvedClientSide: true,
+        loras: [expect.objectContaining({ id: "video_motion", weight: 0.8 })],
         advanced: expect.objectContaining({
           resolution: "1280x720",
         }),

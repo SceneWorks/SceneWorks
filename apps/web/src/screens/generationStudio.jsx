@@ -3,6 +3,9 @@ import { LoraKeywordSummary } from "../components/LoraKeywordSummary.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import {
+  LORA_WEIGHT_MAX,
+  LORA_WEIGHT_MIN,
+  LORA_WEIGHT_STEP,
   MAX_USER_JOB_LORAS,
   applyPresetDefault,
   buildStudioPresetPayload,
@@ -11,6 +14,7 @@ import {
   loraMatchesModel,
   loraWeight,
   noPresetId,
+  presetLoraSeedEntries,
   presetLoraDetails as buildPresetLoraDetails,
   presetMatchesModel,
   presetMatchesWorkflow,
@@ -290,6 +294,61 @@ export function useGenerationStudio({
     setLoraWeights((current) => ({ ...current, [id]: value }));
   }
 
+  // Preset LoRAs are first-class, visible picker entries — not a hidden server-side merge.
+  // Selecting a preset seeds its LoRAs (at the preset's weights) into the selection so they
+  // show up and can be retuned, added to, or removed; deselecting it (→ None or another
+  // preset) removes the LoRAs it added and restores any weights it overrode. A user's own
+  // LoRAs are preserved (the seed is a union computed from the live selection). The server
+  // skips its own preset-LoRA merge when the studio sends presetLorasResolvedClientSide, so
+  // a removed preset LoRA stays removed instead of being silently re-added at generation.
+  const presetLoraSeed = useRef({ presetId: null, addedIds: [], prevWeights: {} });
+  // On hydrate, the persisted selection already includes the snapshot preset's LoRAs, so the
+  // first pass must adopt (not re-seed) it. Mirrors useSavePreset's skipPresetDefaultsOnHydrate.
+  const skipPresetLoraSeedOnHydrate = useRef(initialPresetId != null && initialPresetId !== noPresetId);
+  useEffect(() => {
+    if (skipPresetLoraSeedOnHydrate.current) {
+      skipPresetLoraSeedOnHydrate.current = false;
+      if (selectedPreset && selectedPreset.id === initialPresetId) {
+        // The restored selection already reflects this preset; adopt it without re-seeding.
+        // addedIds is left empty so a post-reload deselect doesn't strip LoRAs we can't prove
+        // the preset added (the user removes them by hand instead).
+        presetLoraSeed.current = { presetId: selectedPreset.id, addedIds: [], prevWeights: {} };
+        return;
+      }
+    }
+    const seed = presetLoraSeed.current;
+    const nextPresetId = selectedPreset?.id ?? null;
+    if (seed.presetId === nextPresetId) {
+      return;
+    }
+    // Undo the previous preset's contributions, then apply the new preset's LoRAs — both
+    // computed from the current selection so the user's own LoRAs survive the switch.
+    let ids = selectedLoraIds.filter((id) => !seed.addedIds.includes(id));
+    const weights = { ...loraWeights };
+    for (const [id, prev] of Object.entries(seed.prevWeights)) {
+      if (prev === undefined) {
+        delete weights[id];
+      } else {
+        weights[id] = prev;
+      }
+    }
+    const entries = selectedPreset ? presetLoraSeedEntries(selectedPreset, compatibleLoras) : [];
+    const addedIds = [];
+    const prevWeights = {};
+    for (const { id, weight } of entries) {
+      if (!ids.includes(id)) {
+        ids = [...ids, id];
+        addedIds.push(id);
+      }
+      prevWeights[id] = Object.prototype.hasOwnProperty.call(weights, id) ? weights[id] : undefined;
+      weights[id] = weight;
+    }
+    setSelectedLoraIds(ids);
+    setLoraWeights(weights);
+    presetLoraSeed.current = { presetId: nextPresetId, addedIds, prevWeights };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPreset?.id]);
+
   return {
     availablePresets,
     selectedPreset,
@@ -541,10 +600,10 @@ export function LoraPickerSection({
                       </label>
                       <input
                         aria-label={`${lora.name ?? lora.id} weight`}
-                        max="2"
-                        min="0"
+                        max={LORA_WEIGHT_MAX}
+                        min={LORA_WEIGHT_MIN}
                         onChange={(event) => setLoraWeight(lora.id, Number(event.target.value))}
-                        step="0.05"
+                        step={LORA_WEIGHT_STEP}
                         type="range"
                         value={weight}
                       />
@@ -690,15 +749,18 @@ export function PresetGuidanceStrip({ selectedPreset, presetPromptParts, presetL
   if (!selectedPreset) {
     return null;
   }
+  // A selected preset's installed LoRAs are seeded into the LoRA picker (visible + adjustable),
+  // so the strip no longer lists them — it only calls out ones that couldn't be seeded because
+  // they aren't installed, so the user knows to import them before the preset fully applies.
+  const missingLoras = presetLoraDetails.filter((lora) => lora.missing);
   return (
     <div className="guidance-strip">
       <strong>{selectedPreset.ui?.description ?? "Preset defaults active"}</strong>
       <span>
         {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}
-        {presetLoraDetails.length
-          ? ` | Preset LoRA applied at generation: ${presetLoraDetails.map((lora) => lora.name ?? lora.id).join(", ")}`
-          : " | No preset LoRAs"}
-        {presetLoraDetails.some((lora) => lora.missing) ? " | Import still pending" : ""}
+        {missingLoras.length
+          ? ` | Preset LoRA not installed: ${missingLoras.map((lora) => lora.name ?? lora.id).join(", ")} — import to apply`
+          : ""}
       </span>
     </div>
   );

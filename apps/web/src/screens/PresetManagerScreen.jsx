@@ -4,6 +4,9 @@ import { AdvancedSection } from "../components/AdvancedSection.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import {
+  LORA_WEIGHT_MAX,
+  LORA_WEIGHT_MIN,
+  LORA_WEIGHT_STEP,
   MAX_PRESET_LORAS,
   compactModeList,
   loraMatchesModel,
@@ -1228,15 +1231,16 @@ export function PresetManagerScreen() {
                     <span>Weight</span>
                     <span className="lora-slot-weight-value">{Number.isFinite(weight) ? weight.toFixed(2) : "—"}</span>
                   </label>
-                  {/* -2..2 is the range the preset normalizer accepts, wider than the
-                      studios' 0..2 slider — a preset may carry a negative weight. */}
+                  {/* Bidirectional -2..2 (LORA_WEIGHT_*), matching the studio pickers and
+                      the preset normalizer: slider LoRAs run negative for the inverse
+                      direction, and 0 is a valid neutral. */}
                   <input
                     aria-label={`${name} weight`}
                     disabled={!editable || missing || incompatible}
-                    max="2"
-                    min="-2"
+                    max={LORA_WEIGHT_MAX}
+                    min={LORA_WEIGHT_MIN}
                     onChange={(event) => updateLoraWeight(selected.id, event.target.value)}
-                    step="0.05"
+                    step={LORA_WEIGHT_STEP}
                     type="range"
                     value={Number.isFinite(weight) ? weight : 0}
                   />

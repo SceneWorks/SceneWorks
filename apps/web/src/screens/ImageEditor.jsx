@@ -10,7 +10,14 @@ import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { useLoraSelection } from "../components/LoraPickerField.jsx";
-import { MAX_JOB_LORAS_TOTAL, findModelEditLora, loraIsInstalled } from "../presetUtils.js";
+import {
+  LORA_WEIGHT_MAX,
+  LORA_WEIGHT_MIN,
+  LORA_WEIGHT_STEP,
+  MAX_JOB_LORAS_TOTAL,
+  findModelEditLora,
+  loraIsInstalled,
+} from "../presetUtils.js";
 import { guidanceDefaultFromModel } from "../samplerOptions.js";
 import {
   BLEND_MODES,
@@ -2975,10 +2982,10 @@ export function ImageEditor() {
                   <input
                     aria-label={`${lora.name ?? lora.id} weight`}
                     className="ie-range"
-                    max={2}
-                    min={0}
+                    max={LORA_WEIGHT_MAX}
+                    min={LORA_WEIGHT_MIN}
                     onChange={(event) => setWeight(lora.id, Number(event.target.value))}
-                    step={0.05}
+                    step={LORA_WEIGHT_STEP}
                     type="range"
                     value={weightFor(lora)}
                   />

@@ -728,6 +728,10 @@ export function VideoStudio() {
         quality,
         seed: seed === "" ? null : Number(seed),
         recipePresetId: selectedPreset?.id ?? null,
+        // The studio seeds a selected preset's LoRAs into the visible `loras` (generationStudio's
+        // preset-LoRA seed effect), so the client is authoritative for preset LoRAs — tell the
+        // server to skip its own merge so edits/removals stick. Parity with the Image Studio.
+        presetLorasResolvedClientSide: selectedPreset ? true : undefined,
         characterId: characterId || null,
         characterLookId: characterLookId || null,
         sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,

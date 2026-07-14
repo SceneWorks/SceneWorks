@@ -17,6 +17,21 @@ export const MAX_JOB_LORAS_TOTAL = 5;
 export const MAX_USER_JOB_LORAS = 4;
 export const MAX_PRESET_LORAS = 5;
 
+// LoRA apply-weight slider bounds. Single source of truth so the range can't drift
+// between surfaces — it used to: the studios' pickers were 0..2 while the Preset
+// Manager (and character-LoRA editor) were -2..2, and a preset LoRA that landed on
+// the -2..2 slider's *center* (0) generated at scale 0 with no effect, reading as
+// "the preset's LoRA isn't applied". The scale is bidirectional on purpose: many
+// LoRAs (Civitai "slider" LoRAs — Detail Tweaker, age/weight/style axes) are trained
+// to be run negative for the inverse direction, and 0 is a valid neutral. Applies to
+// user-selected LoRA weights only; specialized magnitude knobs (edit/identity
+// strength, ControlNet pose-lock) keep their own semantics-specific ranges. The
+// recipe-preset normalizer (apps/rust-api/src/recipe_presets.rs) accepts the same
+// -2..=2 band. The worker applies the weight as a raw adapter scale (no clamp).
+export const LORA_WEIGHT_MIN = -2;
+export const LORA_WEIGHT_MAX = 2;
+export const LORA_WEIGHT_STEP = 0.05;
+
 export function rememberPresetDefault(snapshots, key, currentValue, appliedValue) {
   const previousSnapshot = snapshots.current[key];
   snapshots.current[key] = {
@@ -296,6 +311,32 @@ export function loraWeight(lora, presetLora = {}) {
   const fallback = loraFamilies(lora).includes("krea-2") ? KREA_LORA_DEFAULT_WEIGHT : 0.8;
   const value = Number(presetLora.weight ?? lora?.defaultWeight ?? lora?.weight ?? fallback);
   return Number.isFinite(value) ? value : fallback;
+}
+
+// Resolve a preset's declared LoRAs into [{ id, weight }] entries ready to seed into the
+// studio's visible LoRA picker. Only LoRAs present in `catalogLoras` (the studio's
+// installed + model-compatible set) are returned — a preset LoRA that isn't installed or
+// isn't compatible can't be a live selection, so it's left out (the preset guidance strip
+// still surfaces it). Weight resolution matches the server's preset_lora_weight (explicit
+// preset weight → catalog defaultWeight/weight → family fallback), so the seeded weight is
+// exactly what a plain preset job would have applied.
+export function presetLoraSeedEntries(preset, catalogLoras = []) {
+  const byId = new Map(catalogLoras.map((lora) => [lora.id, lora]));
+  const entries = [];
+  const seen = new Set();
+  for (const presetLora of presetLoras(preset)) {
+    const id = presetLoraId(presetLora);
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    const catalogLora = byId.get(id);
+    if (!catalogLora) {
+      continue;
+    }
+    seen.add(id);
+    entries.push({ id, weight: loraWeight(catalogLora, presetLora) });
+  }
+  return entries;
 }
 
 export function serializePresetLora(lora, presetLora = {}) {

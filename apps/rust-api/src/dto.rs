@@ -636,6 +636,12 @@ pub(crate) struct ImageJobRequest {
     pub(crate) style_preset: String,
     #[serde(default)]
     pub(crate) recipe_preset_id: Option<String>,
+    // The web studio seeds a selected preset's LoRAs straight into `loras`, so it — not the
+    // server — is authoritative for which preset LoRAs apply. When set, the preset-LoRA merge
+    // is skipped so an edited or removed preset LoRA sticks. Headless/API clients omit it and
+    // keep the server-side merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) preset_loras_resolved_client_side: Option<bool>,
     #[serde(default)]
     pub(crate) loras: Vec<Value>,
     #[serde(default)]
@@ -764,6 +770,10 @@ pub(crate) struct VideoJobRequest {
     pub(crate) seed: Option<i64>,
     #[serde(default)]
     pub(crate) recipe_preset_id: Option<String>,
+    // See ImageJobRequest::preset_loras_resolved_client_side — the studio seeds preset LoRAs
+    // into `loras`, so the server skips its merge when this is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) preset_loras_resolved_client_side: Option<bool>,
     #[serde(default)]
     pub(crate) loras: Vec<Value>,
     #[serde(default)]

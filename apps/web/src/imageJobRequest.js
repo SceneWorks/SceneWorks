@@ -102,6 +102,12 @@ export function buildImageJobRequest(state) {
     width: resolutionOverride?.width ?? width,
     height: resolutionOverride?.height ?? height,
     recipePresetId,
+    // The studio seeds a selected preset's LoRAs straight into the visible `loras` above
+    // (generationStudio's preset-LoRA seed effect), so the client — not the server — is
+    // authoritative for which preset LoRAs apply and at what weight. This flag tells the
+    // server to skip its own preset-LoRA merge so an edited or removed preset LoRA sticks.
+    // Headless/API clients that send only recipePresetId omit it and keep the server merge.
+    presetLorasResolvedClientSide: recipePresetId ? true : undefined,
     characterId: mode === "character_image" ? characterId || null : null,
     characterLookId: mode === "character_image" ? characterLookId || null : null,
     // edit_image: a single source image, except for a multi-reference model (sc-6211,
