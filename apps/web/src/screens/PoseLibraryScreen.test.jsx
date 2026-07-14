@@ -7,6 +7,11 @@ import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
 const apiCalls = [];
 let poseAssets = [];
 
+// Desktop-safe confirm (sc-11971): mocked so the explicit-discard guard is deterministic
+// and observable. Defaults to "confirm"; individual tests flip it to "cancel".
+const { appConfirmMock } = vi.hoisted(() => ({ appConfirmMock: vi.fn(async () => true) }));
+vi.mock("../appConfirm.jsx", () => ({ appConfirm: appConfirmMock }));
+
 vi.mock("../api.js", async (importOriginal) => {
   const actual = await importOriginal();
   return {
@@ -183,6 +188,8 @@ describe("PoseLibraryScreen — Create tab", () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     apiCalls.length = 0;
     poseAssets = [];
+    appConfirmMock.mockClear();
+    appConfirmMock.mockResolvedValue(true);
     ({ container, root } = mountRoot());
   });
 
@@ -204,6 +211,19 @@ describe("PoseLibraryScreen — Create tab", () => {
 
   const byText = (text, selector = "button") =>
     [...document.body.querySelectorAll(selector)].find((el) => el.textContent.includes(text));
+
+  // Drive photo → detect → review so the tests below start from a completed detection with
+  // one editable candidate (mirrors the save-path test's setup).
+  async function reachReview() {
+    await render();
+    await click(document.body.querySelector("#pose-library-tab-create"));
+    await click(byText("Add images"));
+    await click(byText("Asset Library"));
+    await click(byText("Photo"));
+    await click(exactBtn("Add 1"));
+    await click(exactBtn("Done"));
+    await click(byText("Generate poses"));
+  }
   const exactBtn = (text) =>
     [...document.body.querySelectorAll("button")].find((el) => el.textContent.trim() === text);
 
@@ -326,5 +346,43 @@ describe("PoseLibraryScreen — Create tab", () => {
     await render(makeContext({ activeProject: null }));
     await click(document.body.querySelector("#pose-library-tab-create"));
     expect(document.body.querySelector("#pose-library-panel-create").textContent).toContain("Open a workspace");
+  });
+
+  it("flags a completed detection as unsaved and prompts NO confirm to reach review (sc-11971)", async () => {
+    await reachReview();
+    // A completed detection with editable candidates surfaces the unsaved-work pill…
+    expect(container.textContent).toContain("Review 1 candidate");
+    expect(document.body.querySelector(".library-unsaved-badge")).toBeTruthy();
+    // …and simply running detection + landing in review never prompts (only an explicit
+    // discard does). Plain navigation is likewise non-destructive under keep-alive.
+    expect(appConfirmMock).not.toHaveBeenCalled();
+  });
+
+  it("explicit 'Discard all' confirms via appConfirm and clears the review (sc-11971)", async () => {
+    await reachReview();
+    expect(document.body.querySelector('input[list="pose-category-suggestions"]')).toBeTruthy();
+
+    appConfirmMock.mockResolvedValueOnce(true);
+    await click(exactBtn("Discard all"));
+
+    // Guarded through the desktop-safe dialog (danger tone), NOT window.confirm.
+    expect(appConfirmMock).toHaveBeenCalledTimes(1);
+    expect(appConfirmMock.mock.calls[0][0]).toMatchObject({ tone: "danger" });
+    // Review is gone: candidates cleared and phase back to idle (no category input, no
+    // review toolbar, no unsaved pill).
+    expect(document.body.querySelector('input[list="pose-category-suggestions"]')).toBeNull();
+    expect(container.textContent).not.toContain("Review 1 candidate");
+    expect(document.body.querySelector(".library-unsaved-badge")).toBeNull();
+  });
+
+  it("keeps the review when 'Discard all' is cancelled (sc-11971)", async () => {
+    await reachReview();
+    appConfirmMock.mockResolvedValueOnce(false);
+    await click(exactBtn("Discard all"));
+
+    expect(appConfirmMock).toHaveBeenCalledTimes(1);
+    // Cancelled → the detected poses + edits stay put.
+    expect(container.textContent).toContain("Review 1 candidate");
+    expect(document.body.querySelector('input[list="pose-category-suggestions"]')).toBeTruthy();
   });
 });

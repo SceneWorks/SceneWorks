@@ -8032,6 +8032,33 @@ details[open] > summary.lora-scope-group-heading::before,
   background: var(--ie-warn, #d97706);
 }
 
+/* Shared unsaved-work pill for the library screens (sc-11971): the Pose Library Create
+   review, the Key Point Capture review, and the Collections builder all flag in-progress
+   work not yet saved, pairing with the appConfirm-guarded Discard/Cancel controls. Uses
+   the global --warn tokens (theme-aware) rather than the editor-scoped --ie-* ones. */
+.library-unsaved-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklch, var(--warn) 40%, var(--border));
+  background: var(--warn-soft);
+  color: color-mix(in oklch, var(--warn) 82%, var(--text));
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: none;
+  vertical-align: middle;
+}
+.library-unsaved-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
 /* ── Tool rail ── */
 .ie-rail {
   display: flex;

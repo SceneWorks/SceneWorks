@@ -7,6 +7,11 @@ const apiCalls = [];
 let presets = [];
 let collections = [];
 
+// Desktop-safe confirm (sc-11971): mocked so the explicit discard / cancel guards are
+// deterministic and observable. Defaults to "confirm"; tests flip it to "cancel".
+const { appConfirmMock } = vi.hoisted(() => ({ appConfirmMock: vi.fn(async () => true) }));
+vi.mock("../appConfirm.jsx", () => ({ appConfirm: appConfirmMock }));
+
 vi.mock("../api.js", async (importOriginal) => {
   const actual = await importOriginal();
   return {
@@ -74,10 +79,35 @@ describe("KeyPointLibraryScreen", () => {
     apiCalls.length = 0;
     presets = [];
     collections = [];
+    appConfirmMock.mockClear();
+    appConfirmMock.mockResolvedValue(true);
     window.URL.createObjectURL = () => "blob:test";
     window.URL.revokeObjectURL = () => {};
     ({ container, root } = mountRoot());
   });
+
+  const exactBtn = (text) =>
+    [...document.body.querySelectorAll("button")].find((el) => el.textContent.trim() === text);
+
+  // Drive upload → extract → review so the capture-guard tests start from a completed
+  // extraction with a seeded name (mirrors the capture save-path test's setup).
+  async function reachCaptureReview() {
+    const job = {
+      id: "job_kps_1",
+      type: "kps_extract",
+      status: "completed",
+      result: { detected: true, kps: FRONT_KPS, lowConfidence: false, sourceWidth: 800, sourceHeight: 1000 },
+    };
+    presets = [builtinPreset()];
+    await render(makeContext({ jobs: [job] }));
+    await click(document.body.querySelector("#keypoint-tab-capture"));
+    await click(byText("Choose image"));
+    const fileInput = document.body.querySelector('.modal-backdrop input[type="file"]');
+    const file = new File(["x"], "face.png", { type: "image/png" });
+    Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
+    await act(async () => fileInput.dispatchEvent(new window.Event("change", { bubbles: true })));
+    await act(async () => {}); // flush staging + job post + the job-watch effect
+  }
 
   afterEach(async () => {
     await unmountRoot(root, container);
@@ -266,5 +296,84 @@ describe("KeyPointLibraryScreen", () => {
     expect(
       apiCalls.some((c) => c.method === "PUT" && c.path === "/api/v1/keypoints/collections/col_user/default"),
     ).toBe(true);
+  });
+
+  it("flags a completed capture as unsaved and prompts NO confirm to reach review (sc-11971)", async () => {
+    await reachCaptureReview();
+    // A completed extraction with a seeded name surfaces the unsaved-work pill…
+    expect(document.body.querySelector("#keypoint-panel-capture .library-unsaved-badge")).toBeTruthy();
+    // …and reaching review never prompts; only an explicit discard does.
+    expect(appConfirmMock).not.toHaveBeenCalled();
+  });
+
+  it("explicit capture Discard confirms via appConfirm and resets the review (sc-11971)", async () => {
+    await reachCaptureReview();
+    const nameInput = document.body.querySelector(
+      '#keypoint-panel-capture input[type="text"], #keypoint-panel-capture input:not([type])',
+    );
+    expect(nameInput).toBeTruthy();
+
+    appConfirmMock.mockResolvedValueOnce(true);
+    await click(exactBtn("Discard"));
+
+    expect(appConfirmMock).toHaveBeenCalledTimes(1);
+    expect(appConfirmMock.mock.calls[0][0]).toMatchObject({ tone: "danger" });
+    // Review gone → back to the empty prompt, unsaved pill cleared.
+    expect(document.body.querySelector("#keypoint-panel-capture").textContent).toContain("Choose a clear");
+    expect(document.body.querySelector("#keypoint-panel-capture .library-unsaved-badge")).toBeNull();
+  });
+
+  it("keeps the capture review when Discard is cancelled (sc-11971)", async () => {
+    await reachCaptureReview();
+    appConfirmMock.mockResolvedValueOnce(false);
+    await click(exactBtn("Discard"));
+
+    expect(appConfirmMock).toHaveBeenCalledTimes(1);
+    // Cancelled → the captured landmarks + name stay put.
+    expect(document.body.querySelector("#keypoint-panel-capture .library-unsaved-badge")).toBeTruthy();
+    expect(
+      document.body.querySelector(
+        '#keypoint-panel-capture input[type="text"], #keypoint-panel-capture input:not([type])',
+      ),
+    ).toBeTruthy();
+  });
+
+  it("flags an in-progress collection as unsaved and confirms Cancel via appConfirm (sc-11971)", async () => {
+    presets = [builtinPreset(), customPreset()];
+    collections = [];
+    await render();
+    await click(document.body.querySelector("#keypoint-tab-collections"));
+
+    // Empty builder → no unsaved pill, no Cancel control yet.
+    expect(document.body.querySelector("#keypoint-panel-collections .library-unsaved-badge")).toBeNull();
+
+    const nameInput = document.body.querySelector("#keypoint-panel-collections input");
+    await setInputValue(nameInput, "LoRA coverage");
+    await click(byText("Front", ".keypoint-pick"));
+
+    // In-progress collection → the unsaved pill appears.
+    expect(document.body.querySelector("#keypoint-panel-collections .library-unsaved-badge")).toBeTruthy();
+
+    // Cancel is guarded by appConfirm; confirming clears the builder.
+    appConfirmMock.mockResolvedValueOnce(true);
+    await click(exactBtn("Cancel"));
+    expect(appConfirmMock).toHaveBeenCalledTimes(1);
+    expect(appConfirmMock.mock.calls[0][0]).toMatchObject({ tone: "danger" });
+    expect(document.body.querySelector("#keypoint-panel-collections input").value).toBe("");
+    expect(document.body.querySelector("#keypoint-panel-collections .library-unsaved-badge")).toBeNull();
+  });
+
+  it("keeps an in-progress collection when Cancel is declined (sc-11971)", async () => {
+    presets = [builtinPreset()];
+    collections = [];
+    await render();
+    await click(document.body.querySelector("#keypoint-tab-collections"));
+    const nameInput = document.body.querySelector("#keypoint-panel-collections input");
+    await setInputValue(nameInput, "Keep me");
+
+    appConfirmMock.mockResolvedValueOnce(false);
+    await click(exactBtn("Cancel"));
+    expect(appConfirmMock).toHaveBeenCalledTimes(1);
+    expect(document.body.querySelector("#keypoint-panel-collections input").value).toBe("Keep me");
   });
 });
