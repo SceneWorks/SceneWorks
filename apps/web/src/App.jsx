@@ -37,6 +37,7 @@ import { useAccessGate } from "./hooks/useAccessGate.js";
 import { useDropNavigationGuard } from "./hooks/useDropNavigationGuard.js";
 import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
+import { ScreenActiveContext } from "./context/ScreenActiveContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import { isAccentId } from "./accents.js";
 import { writeDefaultGenerationQuality } from "./generationQuality.js";
@@ -74,6 +75,46 @@ import {
 const ImageEditor = React.lazy(() =>
   import("./screens/ImageEditor.jsx").then((module) => ({ default: module.ImageEditor })),
 );
+
+// Selective lazy keep-alive (sc-11959, backbone for epic 11949's edit persistence).
+// These view ids mount on FIRST visit and then stay mounted (hidden) so their React
+// state — in-progress prompt, settings, edits — survives leaving and returning, and
+// the studios stop re-hydrating (and clobbering) from localStorage on every visit.
+// Everything NOT listed here (Queue, Settings, Stats, Logs, Licenses, Models, and
+// Library/Assets) keeps today's conditional unmount-on-navigation behavior. Training
+// contributes two view ids — the default "Train" workspace and the "LibraryDataSets"
+// Data Sets mode — both part of the Training Studio family.
+const KEEP_ALIVE_VIEWS = Object.freeze(
+  new Set([
+    "Image",
+    "Video",
+    "Characters",
+    "Document",
+    "Train",
+    "LibraryDataSets",
+    "Presets",
+    "Poses",
+    "Keypoints",
+    "Editor",
+    "ImageEditor",
+  ]),
+);
+
+// Wrapper for a kept-alive screen (sc-11959). The screen mounts once and then stays
+// mounted; navigating away toggles `active` false, which hides the pane instead of
+// unmounting it. `display: contents` (see .keep-alive-pane in styles.css) keeps the
+// wrapper transparent to the .workspace flex column while visible — the child screen
+// lays out exactly as a direct .workspace child would — and the `hidden` attribute
+// drops it from layout and the accessibility tree while backgrounded. The pane also
+// publishes `active` on ScreenActiveContext so the screen can pause expensive work
+// when hidden (S2) or drop a leave-guard when it isn't the foreground view.
+function KeepAlivePane({ active, children }) {
+  return (
+    <div className="keep-alive-pane" hidden={!active}>
+      <ScreenActiveContext.Provider value={active}>{children}</ScreenActiveContext.Provider>
+    </div>
+  );
+}
 
 // Product version, injected at build time from package.json (see vite.config.js).
 // Empty in unconfigured contexts (e.g. some test paths); the footer is hidden then.
@@ -342,6 +383,10 @@ export function App() {
   const [setupCompleted, setSetupCompleted] = useState(isDesktopShell ? null : true);
   const [activeProject, setActiveProject] = useState(null);
   const [activeView, setActiveView] = useState("Library");
+  // Selective lazy keep-alive (sc-11959): the set of keep-alive views the user has
+  // visited at least once. A view mounts on first visit (activeView === view) and,
+  // once here, stays mounted (hidden) across navigation so its state survives.
+  const [visitedKeepAliveViews, setVisitedKeepAliveViews] = useState(() => new Set());
   const [jobs, setJobs] = useState([]);
   const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [], document: [] });
   const [workers, setWorkers] = useState([]);
@@ -850,6 +895,15 @@ export function App() {
 
   useEffect(() => {
     activeViewRef.current = activeView;
+  }, [activeView]);
+
+  // Record a keep-alive view the first time it becomes active so it stays mounted
+  // thereafter (sc-11959). Never-visited keep-alive views are absent from the DOM.
+  useEffect(() => {
+    if (!KEEP_ALIVE_VIEWS.has(activeView)) {
+      return;
+    }
+    setVisitedKeepAliveViews((prev) => (prev.has(activeView) ? prev : new Set(prev).add(activeView)));
   }, [activeView]);
 
   useEffect(() => {
@@ -1928,6 +1982,9 @@ export function App() {
   );
 
   const titleInfo = viewTitles[activeView] ?? { title: activeView, blurb: "" };
+  // A keep-alive view is rendered once it is active OR has been visited before
+  // (sc-11959): it mounts on first visit and then stays mounted (hidden) thereafter.
+  const keepAliveMounted = (view) => activeView === view || visitedKeepAliveViews.has(view);
   // Activity dots only — counts live in the topbar so nav button textContent stays clean.
   const activeIndicators = {
     Editor: timelines.length > 0,
@@ -2316,67 +2373,91 @@ export function App() {
           <FirstRunProjectGate disabled={!authenticated} onCreate={createProject} />
         ) : (
           <>
-        {activeView === "Library" ? (
-          <LibraryScreen />
-        ) : null}
-
-        {activeView === "LibraryDataSets" ? (
-          <TrainingDataSetsLibrary />
-        ) : null}
-
-        {activeView === "Poses" ? (
-          <PoseLibraryScreen />
-        ) : null}
-
-        {activeView === "Keypoints" ? (
-          <KeyPointLibraryScreen />
-        ) : null}
-
-        {activeView === "Image" ? (
-          <ImageStudio key={activeProject?.id ?? "default"} />
-        ) : null}
-
-        {activeView === "Video" ? (
-          <VideoStudio key={activeProject?.id ?? "default"} />
-        ) : null}
-
-        {activeView === "Document" ? (
-          <DocumentStudio />
-        ) : null}
-
-        {activeView === "Train" ? (
-          <TrainingStudio />
-        ) : null}
-
-        {activeView === "Presets" ? (
-          <PresetManagerScreen />
-        ) : null}
-
-        {activeView === "Queue" ? (
-          <QueueScreen />
-        ) : null}
-
-        {activeView === "Models" ? (
-          <ModelManagerScreen />
-        ) : null}
-
-        {activeView === "Editor" ? (
-          <EditorScreen />
-        ) : null}
-
-        {activeView === "ImageEditor" ? (
-          <React.Suspense fallback={<section className="page-frame">Loading editor…</section>}>
-            <ImageEditor key={activeProject?.id ?? "default"} />
-          </React.Suspense>
-        ) : null}
-
-        {activeView === "Characters" ? (
-          <CharacterStudio key={activeProject?.id ?? "default"} />
-        ) : null}
+        {/* OUT screens (Library/Assets, Queue, Models, Settings, Stats, Logs,
+            Licenses): keep the conditional-unmount behavior — mounted only while
+            active, unmounted on navigation (sc-11959). */}
+        {activeView === "Library" ? <LibraryScreen /> : null}
+        {activeView === "Queue" ? <QueueScreen /> : null}
+        {activeView === "Models" ? <ModelManagerScreen /> : null}
         {activeView === "Settings" ? <SettingsScreen /> : null}
         {activeView === "Stats" ? <StatsScreen /> : null}
         {activeView === "Logs" ? <LogsScreen /> : null}
         {activeView === "Licenses" ? <LicensesScreen /> : null}
+
+        {/* Keep-alive screens (sc-11959): mounted on first visit via keepAliveMounted,
+            then kept mounted and toggled visible/hidden by KeepAlivePane so their
+            state survives navigation. The key={activeProject?.id} on the studios +
+            Image Editor is preserved so a PROJECT switch still remounts (resets) them
+            even while kept alive. The studioLaunch apply effects inside each studio are
+            keyed on the launch token id, not on mount, so a fresh "Use this Recipe" /
+            "Use in Studio" injection still fires on an already-mounted studio. */}
+        {keepAliveMounted("Image") ? (
+          <KeepAlivePane active={activeView === "Image"}>
+            <ImageStudio key={activeProject?.id ?? "default"} />
+          </KeepAlivePane>
+        ) : null}
+
+        {keepAliveMounted("Video") ? (
+          <KeepAlivePane active={activeView === "Video"}>
+            <VideoStudio key={activeProject?.id ?? "default"} />
+          </KeepAlivePane>
+        ) : null}
+
+        {keepAliveMounted("Characters") ? (
+          <KeepAlivePane active={activeView === "Characters"}>
+            <CharacterStudio key={activeProject?.id ?? "default"} />
+          </KeepAlivePane>
+        ) : null}
+
+        {keepAliveMounted("Document") ? (
+          <KeepAlivePane active={activeView === "Document"}>
+            <DocumentStudio />
+          </KeepAlivePane>
+        ) : null}
+
+        {keepAliveMounted("Train") ? (
+          <KeepAlivePane active={activeView === "Train"}>
+            <TrainingStudio />
+          </KeepAlivePane>
+        ) : null}
+
+        {keepAliveMounted("LibraryDataSets") ? (
+          <KeepAlivePane active={activeView === "LibraryDataSets"}>
+            <TrainingDataSetsLibrary />
+          </KeepAlivePane>
+        ) : null}
+
+        {keepAliveMounted("Presets") ? (
+          <KeepAlivePane active={activeView === "Presets"}>
+            <PresetManagerScreen />
+          </KeepAlivePane>
+        ) : null}
+
+        {keepAliveMounted("Poses") ? (
+          <KeepAlivePane active={activeView === "Poses"}>
+            <PoseLibraryScreen />
+          </KeepAlivePane>
+        ) : null}
+
+        {keepAliveMounted("Keypoints") ? (
+          <KeepAlivePane active={activeView === "Keypoints"}>
+            <KeyPointLibraryScreen />
+          </KeepAlivePane>
+        ) : null}
+
+        {keepAliveMounted("Editor") ? (
+          <KeepAlivePane active={activeView === "Editor"}>
+            <EditorScreen />
+          </KeepAlivePane>
+        ) : null}
+
+        {keepAliveMounted("ImageEditor") ? (
+          <KeepAlivePane active={activeView === "ImageEditor"}>
+            <React.Suspense fallback={<section className="page-frame">Loading editor…</section>}>
+              <ImageEditor key={activeProject?.id ?? "default"} />
+            </React.Suspense>
+          </KeepAlivePane>
+        ) : null}
           </>
         )}
       </section>
