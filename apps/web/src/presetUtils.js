@@ -434,7 +434,7 @@ export function presetValidation(preset, loras, model) {
 //
 // `valueErrors` are the out-of-range / out-of-menu default values from defaultValueErrors
 // (sc-10589) — pre-formatted message strings, one error each.
-export function presetSaveValidation({ editable, name, model }, { validation, valueErrors = [] } = {}) {
+export function presetSaveValidation({ editable, name, model, kind }, { validation, valueErrors = [] } = {}) {
   const issues = [];
   if (!editable) {
     issues.push(issue.error(null, "Built-in presets are read-only. Duplicate it to make an editable copy."));
@@ -443,7 +443,9 @@ export function presetSaveValidation({ editable, name, model }, { validation, va
   if (!name?.trim()) {
     issues.push(issue.requirement("name", "Name is required."));
   }
-  if (!model) {
+  // General (model-agnostic) presets have no model to require — they layer prompt
+  // fragments onto whatever model the Studio is on (epic 11949).
+  if (kind !== "general" && !model) {
     issues.push(issue.requirement("model", "Choose a model before saving."));
   }
   for (const message of valueErrors) {

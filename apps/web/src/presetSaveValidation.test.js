@@ -42,6 +42,16 @@ describe("presetSaveValidation", () => {
     expect(summarize(issues).ready).toBe(false);
   });
 
+  // epic 11949: a general preset is model-agnostic, so a missing model must NOT block save.
+  it("does not require a model for a general preset", () => {
+    const issues = presetSaveValidation({ editable: true, name: "Film", model: "", kind: "general" }, clean);
+    expect(kinds(issues, "model")).toEqual([]);
+    expect(summarize(issues).ready).toBe(true);
+    // But a model preset (default) still requires one.
+    const modelIssues = presetSaveValidation({ editable: true, name: "Film", model: "" }, clean);
+    expect(kinds(modelIssues, "model")).toEqual(["requirement"]);
+  });
+
   it("surfaces a preset LoRA still importing, preserving the recognizable copy", () => {
     const summary = summarize(presetSaveValidation(whole, { validation: { missing: ["pending_style"], incompatible: [] } }));
     expect(summary.surfaced).toHaveLength(1);

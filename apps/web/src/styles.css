@@ -6288,6 +6288,22 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--accent-strong);
 }
 
+/* General (model-agnostic) preset badge on the card — epic 11949. Sits beside the scope
+   chip; uses the accent-soft treatment so it reads as a distinct preset kind, not a scope. */
+.preset-kind-chip {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  border: 1px solid transparent;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .preset-card-preview {
   padding: 9px 11px;
   background: var(--bg);

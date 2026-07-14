@@ -340,4 +340,76 @@ describe("PresetManagerScreen", () => {
     await changeField(field(container, "Name"), "Cinematic Portrait v2");
     expect(container.querySelector(".preset-status-pill").textContent).toContain("Unsaved changes");
   });
+
+  // epic 11949: a general (model-agnostic) preset carries only prompt fragments + aspect +
+  // variations + negative, with no model/workflow/LoRA controls, and saves with kind:general.
+  it("creates a general preset with prompt fragments and aspect, and no model", async () => {
+    const context = await render();
+    await clickButton("New preset");
+    await clickButton("General preset");
+
+    // The model-specific controls are gone.
+    expect(field(container, "Model")).toBeUndefined();
+    expect(container.querySelector(".preset-workflow")).toBeNull();
+    // Prompt inputs are relabelled to signal the fragment/stacking model.
+    expect(field(container, "Prepend to prompt")).toBeDefined();
+    expect(field(container, "Append to prompt")).toBeDefined();
+    // Aspect is a ratio menu, not a WxH resolution list.
+    expect([...field(container, "Aspect").options].map((o) => o.value)).toEqual([
+      "",
+      "1:1",
+      "3:2",
+      "2:3",
+      "16:9",
+      "9:16",
+      "4:3",
+      "3:4",
+    ]);
+
+    await changeField(field(container, "Name"), "Kodak Portra");
+    await changeField(field(container, "Append to prompt"), "Kodak Portra 400");
+    await changeField(field(container, "Aspect"), "16:9");
+    await changeField(field(container, "Variations"), "2");
+    await changeField(field(container, "Negative prompt"), "blurry");
+    await clickButton("Create preset");
+
+    expect(context.createPreset).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "kodak_portra",
+        kind: "general",
+        prompt: { suffix: "Kodak Portra 400" },
+        defaults: expect.objectContaining({ aspect: "16:9", count: 2, negativePrompt: "blurry" }),
+      }),
+    );
+    const [payload] = context.createPreset.mock.calls[0];
+    expect(payload.model).toBeUndefined();
+    expect(payload.workflow).toBeUndefined();
+    expect(payload.loras).toBeUndefined();
+  });
+
+  it("lists a general preset with a badge, always runnable, and filters by General type", async () => {
+    const generalPreset = {
+      id: "film_stock",
+      name: "Film Stock",
+      kind: "general",
+      scope: "global",
+      updatedAt: "2026-07-10T00:00:00Z",
+      prompt: { suffix: "Kodak Portra 400" },
+      defaults: { aspect: "3:2", count: 2 },
+    };
+    await render(baseContext({ presets: [...presets, generalPreset] }));
+
+    const card = [...container.querySelectorAll(".preset-card")].find((c) => c.textContent.includes("Film Stock"));
+    expect(card.querySelector(".preset-kind-chip")?.textContent).toBe("General");
+    expect(card.textContent).toContain("General · any model");
+    // Runnable even though it pins no model (no install gate).
+    expect(card.querySelector(".preset-card-use").disabled).toBe(false);
+
+    // The General type filter shows only general presets…
+    await changeField(container.querySelector("select[aria-label='Type']"), "general");
+    expect(cardNames()).toEqual(["Film Stock"]);
+    // …and a workflow filter never surfaces a general preset.
+    await changeField(container.querySelector("select[aria-label='Type']"), "text_to_image");
+    expect(cardNames()).not.toContain("Film Stock");
+  });
 });

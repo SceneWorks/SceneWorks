@@ -97,6 +97,19 @@ const SORT_CHOICES = [
   ["scope", "Scope"],
 ];
 
+// Aspect ratios a general (model-agnostic) preset can pin. A general preset can't store a
+// concrete WxH — resolution menus differ per model — so it stores a ratio and the Studio
+// snaps it to the active model's nearest supported resolution at apply time (epic 11949).
+const GENERAL_ASPECT_RATIOS = [
+  ["1:1", "1:1 · Square"],
+  ["3:2", "3:2 · Landscape"],
+  ["2:3", "2:3 · Portrait"],
+  ["16:9", "16:9 · Wide"],
+  ["9:16", "9:16 · Tall"],
+  ["4:3", "4:3"],
+  ["3:4", "3:4"],
+];
+
 const scopeRank = { builtin: 0, global: 1, project: 2 };
 
 // The `defaults` keys this editor renders. Everything else a preset carries —
@@ -114,6 +127,7 @@ const EDITOR_OWNED_DEFAULTS = [
   "fps",
   "quality",
   "resolution",
+  "aspect",
   "negativePrompt",
   "sampler",
   "scheduler",
@@ -201,11 +215,13 @@ function formFromPreset(preset, fallbackModel) {
   return {
     id: preset?.id ?? "",
     name: preset?.name ?? "",
+    kind: preset?.kind === "general" ? "general" : "model",
     scope: preset?.scope === "project" ? "project" : "global",
     segment: presetSegmentKey(preset),
     model: preset?.model ?? fallbackModel ?? "",
     order: numberFieldValue(preset?.order),
     count: numberFieldValue(defaults.count),
+    aspect: defaults.aspect ?? "",
     duration: numberFieldValue(defaults.duration),
     fps: numberFieldValue(defaults.fps),
     quality: defaults.quality ?? "",
@@ -308,6 +324,9 @@ export function PresetManagerScreen() {
 
   const editable = !selectedPreset || selectedPreset.scope !== "builtin";
   const busy = saving;
+  // General (model-agnostic) presets hide the model/workflow/LoRA/model-specific controls
+  // and carry only prompt fragments + aspect + variations (epic 11949).
+  const isGeneral = form.kind === "general";
   const selectedModel = allModels.find((model) => model.id === form.model) ?? null;
   const modelInstalled = models.some((model) => model.id === form.model);
   const segments = availableSegments(selectedModel);
@@ -339,7 +358,10 @@ export function PresetManagerScreen() {
   // cannot drift (epic 10644, sc-10651). This generalizes the local sc-10500 split into the
   // shared core: name/model stay silent requirements; a read-only built-in, broken default
   // values (valueErrors, sc-10589), and the preset's own LoRA problems surface as chips.
-  const saveDraft = useMemo(() => ({ editable, name: form.name, model: form.model }), [editable, form.name, form.model]);
+  const saveDraft = useMemo(
+    () => ({ editable, name: form.name, model: form.model, kind: form.kind }),
+    [editable, form.name, form.model, form.kind],
+  );
   const saveContext = useMemo(() => ({ validation, valueErrors }), [validation, valueErrors]);
   const saveValidity = useValidation(presetSaveValidation, saveDraft, saveContext);
   const canSave = saveValidity.ready;
@@ -457,7 +479,52 @@ export function PresetManagerScreen() {
     }));
   }
 
+  // A general (model-agnostic) preset carries only prompt fragments + aspect + variations +
+  // negative. It never writes model/workflow/modes/loras — the backend rejects those on a
+  // general preset (epic 11949). Defaults still spread-then-replace so unrendered keys a
+  // studio snapshot wrote survive, and clearing a field really clears it.
+  function buildGeneralPayload() {
+    const defaults = { ...(selectedPreset?.defaults ?? {}) };
+    for (const key of EDITOR_OWNED_DEFAULTS) {
+      delete defaults[key];
+    }
+    if (form.aspect) {
+      defaults.aspect = form.aspect;
+    }
+    if (form.count !== "") {
+      defaults.count = Number(form.count);
+    }
+    if (form.negativePrompt.trim()) {
+      defaults.negativePrompt = form.negativePrompt.trim();
+    }
+    const prompt = {};
+    if (form.promptPrefix.trim()) {
+      prompt.prefix = form.promptPrefix.trim();
+    }
+    if (form.promptSuffix.trim()) {
+      prompt.suffix = form.promptSuffix.trim();
+    }
+    const payload = {
+      id: slugify(form.id || form.name),
+      name: form.name.trim(),
+      kind: "general",
+      scope: form.scope,
+      defaults,
+      ui: { description: form.description.trim() },
+    };
+    if (form.order !== "") {
+      payload.order = Number(form.order);
+    }
+    if (Object.keys(prompt).length) {
+      payload.prompt = prompt;
+    }
+    return payload;
+  }
+
   function buildPayload() {
+    if (form.kind === "general") {
+      return buildGeneralPayload();
+    }
     const segment = segmentByKey(form.segment);
     // Start from the preset's stored defaults so unrendered keys survive; drop the ones
     // this form owns so clearing a field really clears it, then re-add from the form.
@@ -605,8 +672,17 @@ export function PresetManagerScreen() {
       if (scopeFilter !== "all" && (preset.scope ?? "global") !== scopeFilter) {
         return false;
       }
-      if (typeFilter !== "all" && presetSegmentKey(preset) !== typeFilter) {
-        return false;
+      // General presets have no workflow segment, so they only match the "General" and
+      // "All" filters — never a specific workflow segment (which would falsely match the
+      // "text_to_image" default presetSegmentKey returns for them).
+      if (typeFilter !== "all") {
+        if (typeFilter === "general") {
+          if (preset.kind !== "general") {
+            return false;
+          }
+        } else if (preset.kind === "general" || presetSegmentKey(preset) !== typeFilter) {
+          return false;
+        }
       }
       if (!needle) {
         return true;
@@ -649,21 +725,31 @@ export function PresetManagerScreen() {
         <form className="preset-editor-form" onSubmit={savePreset}>
           <WorkPanel className="preset-editor-panel">
             {renderEditorHead()}
+            {renderKind()}
             {renderIdentity()}
-            {renderModel()}
-            {renderWorkflow()}
-            {renderPromptTemplate()}
-            {renderDefaults()}
-            {renderLoras()}
-            <div className="preset-form-section">
-              <AdvancedSection
-                hint="cleared values → model default"
-                onToggle={() => setAdvancedOpen((value) => !value)}
-                open={advancedOpen}
-              >
-                {renderAdvanced()}
-              </AdvancedSection>
-            </div>
+            {isGeneral ? (
+              <>
+                {renderPromptTemplate()}
+                {renderGeneralDefaults()}
+              </>
+            ) : (
+              <>
+                {renderModel()}
+                {renderWorkflow()}
+                {renderPromptTemplate()}
+                {renderDefaults()}
+                {renderLoras()}
+                <div className="preset-form-section">
+                  <AdvancedSection
+                    hint="cleared values → model default"
+                    onToggle={() => setAdvancedOpen((value) => !value)}
+                    open={advancedOpen}
+                  >
+                    {renderAdvanced()}
+                  </AdvancedSection>
+                </div>
+              </>
+            )}
             {renderFooter()}
           </WorkPanel>
         </form>
@@ -719,6 +805,7 @@ export function PresetManagerScreen() {
           </div>
           <select aria-label="Type" onChange={(event) => setTypeFilter(event.target.value)} value={typeFilter}>
             <option value="all">All types</option>
+            <option value="general">General</option>
             {WORKFLOW_SEGMENTS.map((segment) => (
               <option key={segment.key} value={segment.key}>
                 {segment.label}
@@ -765,11 +852,13 @@ export function PresetManagerScreen() {
   );
 
   function renderPresetCard(preset) {
+    const isGeneralPreset = preset.kind === "general";
     const segment = segmentByKey(presetSegmentKey(preset));
     const model = allModels.find((item) => item.id === preset.model);
-    // The studio snaps its model back into the installed catalog, so launching a preset
-    // pinned to an uninstalled model would silently land on a different one.
-    const runnable = models.some((item) => item.id === preset.model);
+    // The studio snaps its model back into the installed catalog, so launching a model preset
+    // pinned to an uninstalled model would silently land on a different one. A general preset
+    // is model-agnostic, so it's always runnable.
+    const runnable = isGeneralPreset || models.some((item) => item.id === preset.model);
     const scope = preset.scope ?? "global";
     const builtin = scope === "builtin";
     const defaults = preset.defaults ?? {};
@@ -777,14 +866,20 @@ export function PresetManagerScreen() {
     const prefix = preset.prompt?.prefix ?? "";
     const suffix = preset.prompt?.suffix ?? "";
 
-    const chips = [defaults.resolution ? defaults.resolution.replace("x", " × ") : "Any size"];
-    if (segment.type === "video") {
-      chips.push(defaults.duration ? `${defaults.duration}s` : "Default length");
-      chips.push(defaults.fps ? `${defaults.fps} fps` : "Default fps");
-    } else {
+    const chips = [];
+    if (isGeneralPreset) {
+      chips.push(defaults.aspect ? `${defaults.aspect} aspect` : "Any aspect");
       chips.push(defaults.count ? `${defaults.count} variations` : "Default count");
+    } else {
+      chips.push(defaults.resolution ? defaults.resolution.replace("x", " × ") : "Any size");
+      if (segment.type === "video") {
+        chips.push(defaults.duration ? `${defaults.duration}s` : "Default length");
+        chips.push(defaults.fps ? `${defaults.fps} fps` : "Default fps");
+      } else {
+        chips.push(defaults.count ? `${defaults.count} variations` : "Default count");
+      }
+      chips.push(qualityLabel(defaults.quality) ?? "Default quality");
     }
-    chips.push(qualityLabel(defaults.quality) ?? "Default quality");
 
     return (
       <article className="preset-card" key={`${scope}-${preset.id}`}>
@@ -792,9 +887,16 @@ export function PresetManagerScreen() {
           <div className="preset-card-title">
             <strong>{preset.name ?? preset.id}</strong>
             <div>
-              {segment.label} · <span className="preset-card-model">{model?.name ?? preset.model}</span>
+              {isGeneralPreset ? (
+                <span className="preset-card-model">General · any model</span>
+              ) : (
+                <>
+                  {segment.label} · <span className="preset-card-model">{model?.name ?? preset.model}</span>
+                </>
+              )}
             </div>
           </div>
+          {isGeneralPreset ? <span className="preset-kind-chip">General</span> : null}
           <span className={scope === "global" ? "preset-scope-chip global" : "preset-scope-chip"}>{scope}</span>
         </div>
 
@@ -810,9 +912,11 @@ export function PresetManagerScreen() {
               {chip}
             </span>
           ))}
-          <span className={loraCount ? "chip accent" : "chip"}>
-            {loraCount ? `${loraCount} LoRA${loraCount === 1 ? "" : "s"}` : "No LoRAs"}
-          </span>
+          {isGeneralPreset ? null : (
+            <span className={loraCount ? "chip accent" : "chip"}>
+              {loraCount ? `${loraCount} LoRA${loraCount === 1 ? "" : "s"}` : "No LoRAs"}
+            </span>
+          )}
         </div>
 
         <div className="preset-card-actions">
@@ -900,6 +1004,40 @@ export function PresetManagerScreen() {
           {optional ? <span className="preset-optional">optional</span> : null}
         </h3>
         {help ? <p>{help}</p> : null}
+      </div>
+    );
+  }
+
+  function renderKind() {
+    // Kind is locked after create (like the id): switching an existing preset between kinds
+    // would strand its model-specific fields or its stacked-fragment semantics. New presets
+    // choose; existing presets show it read-only.
+    const kinds = [
+      ["model", "Model preset", "Pinned to one model + workflow. Full controls and LoRAs."],
+      ["general", "General preset", "Model-agnostic. Prompt + aspect only; stacks onto any model."],
+    ];
+    return (
+      <div className="preset-form-section">
+        {renderSectionHead(
+          "Type",
+          "General presets layer prompt fragments onto any model in any workflow; model presets are pinned to one model.",
+        )}
+        <div aria-label="Preset type" className="segmented-control preset-kind" role="radiogroup">
+          {kinds.map(([value, label, help]) => (
+            <button
+              aria-checked={form.kind === value}
+              className={form.kind === value ? "active" : ""}
+              disabled={!creating || !editable}
+              key={value}
+              onClick={() => updateField("kind", value)}
+              role="radio"
+              title={help}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
     );
   }
@@ -1070,11 +1208,13 @@ export function PresetManagerScreen() {
       <div className="preset-form-section">
         {renderSectionHead(
           "Prompt template",
-          "Text wrapped around whatever you type in the Studio. The preview updates as you edit.",
+          isGeneral
+            ? "Fragments added around your Studio prompt. Stack several general presets to combine them."
+            : "Text wrapped around whatever you type in the Studio. The preview updates as you edit.",
         )}
         <div className="preset-prompt-grid">
           <label className="field">
-            <span>Prefix</span>
+            <span>{isGeneral ? "Prepend to prompt" : "Prefix"}</span>
             <textarea
               disabled={!editable}
               onChange={(event) => updateField("promptPrefix", event.target.value)}
@@ -1084,7 +1224,7 @@ export function PresetManagerScreen() {
             />
           </label>
           <label className="field">
-            <span>Suffix</span>
+            <span>{isGeneral ? "Append to prompt" : "Suffix"}</span>
             <textarea
               disabled={!editable}
               onChange={(event) => updateField("promptSuffix", event.target.value)}
@@ -1182,6 +1322,57 @@ export function PresetManagerScreen() {
             </div>
           </label>
         </div>
+      </div>
+    );
+  }
+
+  function renderGeneralDefaults() {
+    return (
+      <div className="preset-form-section">
+        {renderSectionHead("Defaults", "Applied on top of whatever model and mode the Studio is on.")}
+        <div className="preset-defaults-grid">
+          <label className="field">
+            <span>Aspect</span>
+            <select disabled={!editable} onChange={(event) => updateField("aspect", event.target.value)} value={form.aspect}>
+              <option value="">No default</option>
+              {GENERAL_ASPECT_RATIOS.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Variations</span>
+            <select disabled={!editable} onChange={(event) => updateField("count", event.target.value)} value={form.count}>
+              <option value="">No default</option>
+              {[1, 2, 3, 4, 6, 8].map((n) => (
+                <option key={n} value={String(n)}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Sort order</span>
+            <input
+              disabled={!editable}
+              onChange={(event) => updateField("order", event.target.value)}
+              placeholder="0"
+              type="number"
+              value={form.order}
+            />
+          </label>
+        </div>
+        <label className="field prompt-field">
+          <span>Negative prompt</span>
+          <input
+            disabled={!editable}
+            onChange={(event) => updateField("negativePrompt", event.target.value)}
+            placeholder="oversaturated, hands, text, watermark"
+            value={form.negativePrompt}
+          />
+        </label>
       </div>
     );
   }
@@ -1391,18 +1582,24 @@ export function PresetManagerScreen() {
 
   function renderFooter() {
     const loraCount = form.loras.length;
-    const chips = [
-      selectedModel?.name ?? form.model,
-      form.resolution ? form.resolution.replace("x", " × ") : "Any size",
-      isVideo
-        ? form.duration
-          ? `${form.duration}s`
-          : "Default length"
-        : form.count
-          ? `${form.count} variations`
-          : "Default count",
-      loraCount ? `${loraCount} LoRA${loraCount === 1 ? "" : "s"}` : "No LoRAs",
-    ].filter(Boolean);
+    const chips = isGeneral
+      ? [
+          "General · any model",
+          form.aspect ? `${form.aspect} aspect` : "Any aspect",
+          form.count ? `${form.count} variations` : "Default count",
+        ]
+      : [
+          selectedModel?.name ?? form.model,
+          form.resolution ? form.resolution.replace("x", " × ") : "Any size",
+          isVideo
+            ? form.duration
+              ? `${form.duration}s`
+              : "Default length"
+            : form.count
+              ? `${form.count} variations`
+              : "Default count",
+          loraCount ? `${loraCount} LoRA${loraCount === 1 ? "" : "s"}` : "No LoRAs",
+        ].filter(Boolean);
 
     return (
       <>
