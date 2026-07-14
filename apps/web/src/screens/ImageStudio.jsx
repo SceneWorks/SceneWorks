@@ -1247,6 +1247,9 @@ export function ImageStudio() {
     selectedPreset,
     selectedPresetId,
     setSelectedPresetId,
+    availableGeneralPresets,
+    generalStackIds,
+    toggleGeneralPreset,
     presetPromptParts,
     presetLoraDetails,
     presetValidationResult,
@@ -1287,6 +1290,7 @@ export function ImageStudio() {
     initialSelectedLoraIds: saved.selectedLoraIds ?? [],
     initialLoraWeights: saved.loraWeights ?? {},
     initialShowIncompatibleLoras: saved.showIncompatibleLoras ?? false,
+    initialGeneralStackIds: saved.generalStackIds ?? [],
   });
 
   // ---- Krea-style image edit LoRA (epic 10871, P4.1) ----
@@ -1673,6 +1677,7 @@ export function ImageStudio() {
     loraWeights,
     showIncompatibleLoras,
     selectedPresetId,
+    generalStackIds,
     batchMode,
     batchPromptsText,
     batchVariableValues,
@@ -2820,6 +2825,23 @@ export function ImageStudio() {
                 ))}
               </div>
             </div>
+            {availableGeneralPresets.length ? (
+              <div className="settings-bar-styles">
+                <span className="settings-bar-label">General</span>
+                <div className="preset-chips general-preset-chips">
+                  {availableGeneralPresets.map((preset) => (
+                    <button
+                      className={generalStackIds.includes(preset.id) ? "preset-chip active" : "preset-chip"}
+                      key={preset.id}
+                      onClick={() => toggleGeneralPreset(preset.id)}
+                      type="button"
+                    >
+                      {preset.name ?? preset.id}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
 
           {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}

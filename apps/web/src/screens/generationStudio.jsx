@@ -126,8 +126,13 @@ export function useGenerationStudio({
   initialSelectedLoraIds = [],
   initialLoraWeights = {},
   initialShowIncompatibleLoras = false,
+  // The general-preset stack (epic 11949): an ordered set of model-agnostic presets layered
+  // on top of whatever model + mode the studio is on. Separate from the base model preset
+  // (selectedPresetId) — model presets stay single-select, general presets stack.
+  initialGeneralStackIds = [],
 }) {
   const [selectedPresetId, setSelectedPresetId] = useState(initialPresetId);
+  const [generalStackIds, setGeneralStackIds] = useState(initialGeneralStackIds);
   const [resultFallbackTick, setResultFallbackTick] = useState(0);
   const [selectedLoraIds, setSelectedLoraIds] = useState(initialSelectedLoraIds);
   const [loraWeights, setLoraWeights] = useState(initialLoraWeights);
@@ -148,9 +153,31 @@ export function useGenerationStudio({
     }
   }, [characters, characterId, setCharacterId, setCharacterLookId]);
 
+  // The base slot: model presets that match the current workflow + model, single-select
+  // exactly as before. General presets are excluded here — they live in their own stack.
   const availablePresets = useMemo(
-    () => presets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel, models)),
+    () =>
+      presets.filter(
+        (preset) =>
+          preset.kind !== "general" &&
+          presetMatchesWorkflow(preset, mode) &&
+          presetMatchesModel(preset, selectedModel, models),
+      ),
     [mode, presets, selectedModel?.id, models],
+  );
+  // General (model-agnostic) presets are available on every model in every mode.
+  const availableGeneralPresets = useMemo(
+    () => presets.filter((preset) => preset.kind === "general"),
+    [presets],
+  );
+  const availableGeneralKey = useMemo(
+    () => availableGeneralPresets.map((preset) => preset.id).join("|"),
+    [availableGeneralPresets],
+  );
+  // The active general stack, in selection order. Drops ids no longer in the catalog.
+  const generalStack = useMemo(
+    () => generalStackIds.map((id) => availableGeneralPresets.find((preset) => preset.id === id)).filter(Boolean),
+    [generalStackIds, availableGeneralPresets],
   );
   // sc-5875: presets are opt-in. With no explicit selection (fresh screen / None),
   // resolve to no preset so an unchosen preset's LoRA/resolution/prompt are never
@@ -176,6 +203,22 @@ export function useGenerationStudio({
       setSelectedPresetId(availablePresets[0]?.id ?? noPresetId);
     }
   }, [availablePresets, selectedPresetId, selectedPreset]);
+
+  // Prune stacked general presets that leave the catalog (archived/deleted). Unlike the
+  // base slot this drops silently — a stack has no single "fall back to the first" notion.
+  useEffect(() => {
+    setGeneralStackIds((ids) => {
+      const next = ids.filter((id) => availableGeneralPresets.some((preset) => preset.id === id));
+      return next.length === ids.length ? ids : next;
+    });
+  }, [availableGeneralKey]);
+
+  // Add/remove a general preset from the stack. Toggling never touches the model, mode, or
+  // the LoRA picker — general presets carry none of those. Composition into the prompt is
+  // the studio's job (epic 11949 Phase 4).
+  const toggleGeneralPreset = useCallback((id) => {
+    setGeneralStackIds((ids) => (ids.includes(id) ? ids.filter((existing) => existing !== id) : [...ids, id]));
+  }, []);
 
   const resultVisible = useCallback((job) => {
     if (job.result?.generationSetId) {
@@ -354,6 +397,11 @@ export function useGenerationStudio({
     selectedPreset,
     selectedPresetId,
     setSelectedPresetId,
+    // General-preset stack (epic 11949).
+    availableGeneralPresets,
+    generalStack,
+    generalStackIds,
+    toggleGeneralPreset,
     presetPromptParts,
     presetLoraDetails,
     presetValidationResult,

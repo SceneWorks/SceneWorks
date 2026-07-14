@@ -125,6 +125,72 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Steps").value).toBe("41");
   });
 
+  // epic 11949 Phase 3: a general (model-agnostic) preset appears in its own chip group on
+  // any model and toggles into a stack, independently of the single-select model preset,
+  // without changing the model. (Composition into the prompt lands in Phase 4.)
+  it("stacks a general preset onto any model without changing the model", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [],
+            characters: [],
+            createVideoJob: () => {},
+            gpuOptions: ["auto"],
+            latestVideoAssets: [],
+            loras: [],
+            setPreviewAsset: () => {},
+            rememberLocalGenerationJob: () => {},
+            personTracks: [],
+            purgeAsset: () => {},
+            presets: [
+              {
+                id: "film_look",
+                name: "Film Look",
+                kind: "general",
+                prompt: { suffix: "Kodak Portra 400" },
+                defaults: { aspect: "16:9" },
+              },
+            ],
+            requestedGpu: "auto",
+            setRequestedGpu: () => {},
+            updateAssetStatus: () => {},
+            videoModels: [
+              {
+                id: "ltx_2_3",
+                name: "LTX",
+                type: "video",
+                capabilities: ["text_to_video", "image_to_video"],
+                limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
+              },
+            ],
+          },
+          <VideoStudio />,
+        ),
+      );
+    });
+    await settle();
+
+    // The general preset lives in its own chip group, not the model-preset row.
+    const generalGroup = container.querySelector(".general-preset-chips");
+    expect(generalGroup).not.toBeNull();
+    const chip = [...generalGroup.querySelectorAll(".preset-chip")].find((c) => c.textContent.trim() === "Film Look");
+    expect(chip).toBeDefined();
+    expect(chip.classList.contains("active")).toBe(false);
+
+    const modelBefore = field(container, "Model").value;
+    await act(async () => chip.click());
+
+    // Toggling activates the chip and leaves the model untouched (Phase 3 is state only).
+    const activeGeneral = [...container.querySelectorAll(".general-preset-chips .preset-chip.active")].map((c) =>
+      c.textContent.trim(),
+    );
+    expect(activeGeneral).toEqual(["Film Look"]);
+    expect(field(container, "Model").value).toBe(modelBefore);
+  });
+
   it("applies preset defaults to video jobs", async () => {
     const createVideoJob = vi.fn();
     root = createRoot(container);

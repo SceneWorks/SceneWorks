@@ -261,6 +261,11 @@ export function loraIsInstalled(lora) {
 }
 
 export function presetMatchesWorkflow(preset, mode) {
+  // General (model-agnostic) presets stack onto any model in any workflow, so they match
+  // every mode (epic 11949). Model presets keep their workflow/modes gating.
+  if (preset?.kind === "general") {
+    return true;
+  }
   // A preset has one primary workflow for persistence, but modes describe every
   // Studio entry point where the picker should surface it.
   if (preset?.modes?.length) {

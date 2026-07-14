@@ -289,6 +289,9 @@ export function VideoStudio() {
     selectedPreset,
     selectedPresetId,
     setSelectedPresetId,
+    availableGeneralPresets,
+    generalStackIds,
+    toggleGeneralPreset,
     presetPromptParts,
     presetLoraDetails,
     presetValidationResult,
@@ -327,6 +330,7 @@ export function VideoStudio() {
     initialSelectedLoraIds: saved.selectedLoraIds ?? [],
     initialLoraWeights: saved.loraWeights ?? {},
     initialShowIncompatibleLoras: saved.showIncompatibleLoras ?? false,
+    initialGeneralStackIds: saved.generalStackIds ?? [],
   });
   // Sampler / scheduler menus declared by the model. Video Wan torch
   // declares the full menu; sealed paths (LTX native, MLX) drop to
@@ -568,6 +572,7 @@ export function VideoStudio() {
     seed,
     negativePrompt,
     selectedPresetId,
+    generalStackIds,
     sampler,
     scheduler,
     schedulerShift,
@@ -1178,6 +1183,23 @@ export function VideoStudio() {
                 ))}
               </div>
             </div>
+            {availableGeneralPresets.length ? (
+              <div className="settings-bar-styles">
+                <span className="settings-bar-label">General</span>
+                <div className="preset-chips general-preset-chips">
+                  {availableGeneralPresets.map((preset) => (
+                    <button
+                      className={generalStackIds.includes(preset.id) ? "preset-chip active" : "preset-chip"}
+                      key={preset.id}
+                      onClick={() => toggleGeneralPreset(preset.id)}
+                      type="button"
+                    >
+                      {preset.name ?? preset.id}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <PresetGuidanceStrip
