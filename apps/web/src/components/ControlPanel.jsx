@@ -142,6 +142,7 @@ export function ControlPanel({
                 assets={controlImageAssets}
                 buttonLabel="Select image"
                 characters={characters}
+                clearable
                 emptyLabel={`No ${activeMode} control image selected`}
                 importAsset={importAsset}
                 label={

@@ -229,6 +229,12 @@ export function ImageEditSourcePickerField({
   assets,
   buttonLabel = "Select image",
   characters = [],
+  // clearable=true renders a "Remove" control next to "Change" that resets the
+  // selection to "" (onChange("")). Opt-in because some callers (e.g. the edit
+  // Source image) require a picked asset; enable it where the source is optional
+  // — img2img reference, the optional second edit image, control images — so a
+  // once-picked image can actually be un-picked rather than sticking until reload.
+  clearable = false,
   emptyLabel = "No source image selected",
   importAsset,
   label = "Source image",
@@ -252,9 +258,18 @@ export function ImageEditSourcePickerField({
     <div className="asset-picker-field">
       <div className="asset-picker-head">
         <span className="asset-picker-label">{label}</span>
-        <button aria-haspopup="dialog" onClick={() => setOpen(true)} type="button">
-          {selectedAsset ? "Change" : buttonLabel}
-        </button>
+        <div className="asset-picker-actions">
+          {/* Gate on `value`, not `selectedAsset`: a still-sent id that no longer
+              resolves (asset trashed/filtered out) must still be clearable. */}
+          {clearable && value ? (
+            <button className="asset-picker-clear" onClick={() => onChange("")} type="button">
+              Remove
+            </button>
+          ) : null}
+          <button aria-haspopup="dialog" onClick={() => setOpen(true)} type="button">
+            {selectedAsset ? "Change" : buttonLabel}
+          </button>
+        </div>
       </div>
       <AssetPreviewChips assets={selectedAsset ? [selectedAsset] : []} emptyLabel={emptyLabel} />
       {open ? (
