@@ -2167,4 +2167,131 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Name").value).toBe("Mira Updated");
   });
 
+  // sc-11996: dirty detection is FIELD-level, not whole-object. A background/SSE refresh
+  // syncs each untouched field while preserving only the fields the user actually edited —
+  // a single dirty field no longer freezes its untouched siblings.
+  it("field-level sync: an untouched name syncs while a dirty description is preserved (sc-11996)", async () => {
+    const baseChar = {
+      id: "char-1",
+      name: "Mira",
+      type: "person",
+      description: "",
+      references: [],
+      approvedReferences: [],
+      looks: [],
+      loras: [],
+      updatedAt: "t1",
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(characterStudioContext([{ ...baseChar }]), <CharacterStudio />));
+    });
+
+    // Dirty ONLY the description; leave the name untouched.
+    await changeField(field(container, "Notes"), "work in progress");
+
+    // A background refresh changes the untouched `name` (bumped updatedAt).
+    await act(async () => {
+      root.render(
+        withAppContext(characterStudioContext([{ ...baseChar, name: "Mira Updated", updatedAt: "t2" }]), <CharacterStudio />),
+      );
+    });
+
+    // The untouched sibling syncs; the dirty field is preserved.
+    expect(field(container, "Name").value).toBe("Mira Updated");
+    expect(field(container, "Notes").value).toBe("work in progress");
+  });
+
+  it("field-level sync: an untouched LoRA entry syncs while a dirty sibling entry is preserved (sc-11996)", async () => {
+    const baseChar = {
+      id: "char-1",
+      name: "Mira",
+      type: "person",
+      description: "",
+      references: [],
+      approvedReferences: [],
+      looks: [],
+      loras: [
+        { id: "lk1", name: "Kelsie", triggerWords: [], defaultWeight: 0.8, scope: "project" },
+        { id: "lk2", name: "Rowan", triggerWords: [], defaultWeight: 0.8, scope: "project" },
+      ],
+      updatedAt: "t1",
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(characterStudioContext([{ ...baseChar }]), <CharacterStudio />));
+    });
+
+    const weightInputs = () => [...document.body.querySelectorAll(".lora-editor input[type='number']")];
+    expect(weightInputs().map((input) => input.value)).toEqual(["0.8", "0.8"]);
+
+    // Dirty ONLY the first LoRA's weight.
+    await changeField(weightInputs()[0], "1.5");
+
+    // A background refresh changes the untouched second LoRA's weight (bumped updatedAt).
+    await act(async () => {
+      root.render(
+        withAppContext(
+          characterStudioContext([
+            { ...baseChar, loras: [{ ...baseChar.loras[0] }, { ...baseChar.loras[1], defaultWeight: 1.2 }], updatedAt: "t2" },
+          ]),
+          <CharacterStudio />,
+        ),
+      );
+    });
+
+    // The dirty entry is preserved; the untouched sibling entry syncs.
+    expect(weightInputs()[0].value).toBe("1.5");
+    expect(weightInputs()[1].value).toBe("1.2");
+  });
+
+  it("overall dirty + save: syncs untouched fields, preserves edits, and persists the merged draft (sc-11996)", async () => {
+    const updateCharacter = vi.fn();
+    const baseChar = {
+      id: "char-1",
+      name: "Mira",
+      type: "person",
+      description: "original",
+      references: [],
+      approvedReferences: [],
+      looks: [],
+      loras: [],
+      updatedAt: "t1",
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(characterStudioContext([{ ...baseChar }], { updateCharacter }), <CharacterStudio />));
+    });
+
+    // Dirty the description; leave the name untouched.
+    await changeField(field(container, "Notes"), "edited notes");
+
+    // A background refresh changes the untouched name.
+    await act(async () => {
+      root.render(
+        withAppContext(
+          characterStudioContext([{ ...baseChar, name: "Mira Updated", updatedAt: "t2" }], { updateCharacter }),
+          <CharacterStudio />,
+        ),
+      );
+    });
+
+    // Untouched field synced, edited field preserved — the draft is still dirty overall.
+    expect(field(container, "Name").value).toBe("Mira Updated");
+    expect(field(container, "Notes").value).toBe("edited notes");
+
+    // Saving persists the merged draft: the synced name plus the preserved edit.
+    await act(async () => {
+      container.querySelector(".character-editor button[type='submit']").click();
+    });
+    expect(updateCharacter).toHaveBeenCalledWith("char-1", {
+      name: "Mira Updated",
+      type: "person",
+      description: "edited notes",
+    });
+  });
+
 });

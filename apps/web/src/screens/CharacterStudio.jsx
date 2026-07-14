@@ -42,41 +42,86 @@ function typeLabel(value) {
   return characterTypes.find(([id]) => id === value)?.[1] ?? "Person";
 }
 
-// sc-11965: tell an untouched draft (safe to re-sync from the server) from an
-// in-progress edit (must be preserved) by comparing the current editable state to
-// the last snapshot we seeded from the server. Comparison is by value (not object
-// identity, which a background/SSE refetch always breaks) and whole-object: the
-// draft counts as clean only when every field still matches the last seed, so any
-// one edited field makes the entire draft compare dirty.
+// sc-11965 / sc-11996: tell an untouched *field* (safe to re-sync from the server)
+// from an in-progress edit (must be preserved) by comparing the current editable
+// state to the last snapshot we seeded from the server. Comparison is by value (not
+// object identity, which a background/SSE refetch always breaks). sc-11996 makes the
+// clean/dirty decision FIELD-level rather than whole-object: a single edited field no
+// longer freezes its untouched siblings — each untouched field re-syncs while only the
+// touched fields are preserved (see mergeDraft / mergeLoraEdits below).
+const DRAFT_FIELDS = ["name", "type", "description"];
+
+// Per-field draft equality (name/type/description each compared as text). Used only to
+// tell whether a *field* moved relative to the last seed.
+function draftFieldEqual(a, b, field) {
+  return (a?.[field] ?? "") === (b?.[field] ?? "");
+}
+
+// Whole-draft equality — the "overall dirty" primitive. The draft is clean overall only
+// when every field still matches the last seed, so any one edited field reads dirty
+// overall (preserved for the unsaved-guard semantics from S6).
 function draftsEqual(a, b) {
+  return DRAFT_FIELDS.every((field) => draftFieldEqual(a, b, field));
+}
+
+// Per-entry LoRA-edit equality (one link.id's editable fields). The weight input hands
+// back a string while the seed is a number, so compare weight as text.
+function loraEntryEqual(left, right) {
+  if (!left || !right) {
+    return left === right;
+  }
   return (
-    (a?.name ?? "") === (b?.name ?? "") &&
-    (a?.type ?? "") === (b?.type ?? "") &&
-    (a?.description ?? "") === (b?.description ?? "")
+    (left.name ?? "") === (right.name ?? "") &&
+    (left.triggerWords ?? "") === (right.triggerWords ?? "") &&
+    String(left.defaultWeight ?? "") === String(right.defaultWeight ?? "") &&
+    (left.families ?? "") === (right.families ?? "") &&
+    (left.scope ?? "") === (right.scope ?? "")
   );
 }
 
+// Whole-map LoRA-edit equality — the "overall dirty" primitive for the LoRA edits.
 function loraEditsEqual(a, b) {
   const aKeys = Object.keys(a ?? {});
   const bKeys = Object.keys(b ?? {});
   if (aKeys.length !== bKeys.length) {
     return false;
   }
-  return aKeys.every((key) => {
-    const left = a[key];
-    const right = b?.[key];
-    if (!left || !right) {
-      return left === right;
+  return aKeys.every((key) => loraEntryEqual(a[key], b?.[key]));
+}
+
+// Per-field merge (sc-11996): for each draft field, keep the user's current value when it
+// differs from the last seed (the field is dirty / in-progress), otherwise take the
+// incoming server value. So an untouched `name` still syncs from an SSE/updatedAt refresh
+// even while `description` is being edited, and vice-versa.
+function mergeDraft(current, seed, server) {
+  const merged = {};
+  for (const field of DRAFT_FIELDS) {
+    merged[field] = draftFieldEqual(current, seed, field) ? server?.[field] : current?.[field];
+  }
+  return merged;
+}
+
+// Per-entry merge (sc-11996): each LoRA edit is merged independently by link.id. A dirty
+// entry is preserved; every clean entry re-syncs from the server (including newly attached
+// LoRAs appearing and detached ones being dropped), so one edited LoRA no longer freezes
+// its untouched siblings.
+function mergeLoraEdits(current, seed, server) {
+  const merged = {};
+  const keys = new Set([...Object.keys(server ?? {}), ...Object.keys(current ?? {})]);
+  for (const key of keys) {
+    const dirty = !loraEntryEqual(current?.[key], seed?.[key]);
+    if (dirty) {
+      // Preserve the in-progress edit for this entry. (A dirty entry the server has since
+      // dropped is kept too — harmless, since the panel only renders server-linked LoRAs.)
+      if (current?.[key] !== undefined) {
+        merged[key] = current[key];
+      }
+    } else if (server?.[key] !== undefined) {
+      merged[key] = server[key];
     }
-    return (
-      (left.name ?? "") === (right.name ?? "") &&
-      (left.triggerWords ?? "") === (right.triggerWords ?? "") &&
-      // The weight input hands back a string; the seed is a number. Compare as text.
-      String(left.defaultWeight ?? "") === String(right.defaultWeight ?? "") &&
-      (left.families ?? "") === (right.families ?? "") &&
-      (left.scope ?? "") === (right.scope ?? "")
-    );
-  });
+    // Clean and absent from the server → the server dropped it, so leave it out.
+  }
+  return merged;
 }
 
 export function CharacterStudio() {
@@ -306,16 +351,17 @@ export function CharacterStudio() {
 
   // Seed the editable draft / LoRA edits from the selected character. A genuine
   // identity change (different id) always loads fresh. An `updatedAt` bump on the
-  // SAME character — a background/SSE refetch — re-syncs at object granularity, NOT
-  // per field: the whole draft is re-synced only while it is clean as a whole
-  // (name/type/description compared as a unit via draftsEqual), and the whole loraEdits
-  // map only while it is clean as a whole (loraEditsEqual over the entire map), so it
-  // never clobbers an in-progress, unsaved edit (sc-11965, "class B" clobber,
-  // independent of navigation). Because each check is whole-object, one dirty field
-  // holds its siblings too — a single edited field pins the entire draft (and one
-  // edited LoRA pins the entire loraEdits map) to the prior snapshot until saved.
-  // Reference-pick pruning stays unconditional since it only drops now-invalid ids, and
-  // the CharacterReferences panel keeps its own reference-pick guard (characterPanels.jsx:554).
+  // SAME character — a background/SSE refetch — re-syncs at FIELD granularity
+  // (sc-11996): each untouched field takes the incoming server value while only the
+  // fields the user has actually edited (relative to the last seed) are preserved, so
+  // it never clobbers an in-progress, unsaved edit (sc-11965, "class B" clobber,
+  // independent of navigation) yet a single dirty field no longer freezes its untouched
+  // siblings. The last-seed baseline records the SERVER snapshot each pass, so a field
+  // reads dirty exactly when it differs from the server truth we last observed — and
+  // because a preserved edit never matches that recorded server value, re-recording it
+  // can never later clobber the edit. Reference-pick pruning stays unconditional since it
+  // only drops now-invalid ids, and the CharacterReferences panel keeps its own
+  // reference-pick guard (characterPanels.jsx:554).
   useEffect(() => {
     if (!selectedCharacter) {
       setDraft({ name: "", type: "person", description: "" });
@@ -333,16 +379,16 @@ export function CharacterStudio() {
     const seeded = lastSeededRef.current;
     const identityChanged = !seeded || seeded.id !== selectedCharacter.id;
 
-    let seededDraft = seeded?.draft;
-    if (identityChanged || draftsEqual(draftRef.current, seeded.draft)) {
-      setDraft(serverDraft);
-      seededDraft = serverDraft;
+    const nextDraft = identityChanged ? serverDraft : mergeDraft(draftRef.current, seeded.draft, serverDraft);
+    if (identityChanged || !draftsEqual(nextDraft, draftRef.current)) {
+      setDraft(nextDraft);
     }
 
-    let seededLoraEdits = seeded?.loraEdits;
-    if (identityChanged || loraEditsEqual(loraEditsRef.current, seeded.loraEdits)) {
-      setLoraEdits(serverLoraEdits);
-      seededLoraEdits = serverLoraEdits;
+    const nextLoraEdits = identityChanged
+      ? serverLoraEdits
+      : mergeLoraEdits(loraEditsRef.current, seeded.loraEdits, serverLoraEdits);
+    if (identityChanged || !loraEditsEqual(nextLoraEdits, loraEditsRef.current)) {
+      setLoraEdits(nextLoraEdits);
     }
 
     setSelectedReferenceIds((ids) =>
@@ -352,13 +398,13 @@ export function CharacterStudio() {
       setTestLookId("");
     }
 
-    // Record what we last seeded so the next bump can classify clean vs dirty. Whatever
-    // we kept (a dirty draft or a dirty loraEdits map, each held as a whole) stays pinned
-    // to its prior snapshot, not the newer server value.
+    // Record the SERVER snapshot as the next clean baseline. A field then reads dirty
+    // exactly when the current editable value differs from this last-observed server truth;
+    // any edit we just preserved differs from it, so recording it can never clobber the edit.
     lastSeededRef.current = {
       id: selectedCharacter.id,
-      draft: seededDraft ?? serverDraft,
-      loraEdits: seededLoraEdits ?? serverLoraEdits,
+      draft: serverDraft,
+      loraEdits: serverLoraEdits,
     };
   }, [selectedCharacter?.id, selectedCharacter?.updatedAt]);
 
