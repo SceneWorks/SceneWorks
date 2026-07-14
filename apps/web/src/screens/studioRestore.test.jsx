@@ -1,6 +1,6 @@
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
+import { click, mountRoot, unmountRoot, setSelect } from "../testUtils/dom.js";
 
 // Pose loaders + any best-effort fetches must never touch the network on mount.
 vi.mock("../api.js", async (importOriginal) => {
@@ -409,5 +409,69 @@ describe("studio restart-restore does not clobber the restored snapshot (sc-1196
     expect(snap.selectedLoraIds).toEqual(["vlora-a"]);
     expect(snap.selectedPresetId).toBe("vcine");
     expect(snap.generalStackIds).toEqual(["venhance"]);
+  });
+
+  // ---- The OTHER side of the sc-11962 fix (S4 / sc-11963) --------------------------
+  // S3 made the reference-tuning + advanced-defaults resets fire only on a genuine model
+  // VALUE change, not on an async catalog "snap" that leaves the model unchanged — the
+  // tests above lock that async loads DON'T reset. This locks the complementary guarantee:
+  // once the catalogs are LOADED (restore already settled, ready-gated writer live), a real
+  // USER model change STILL resets both the reference tuning and the advanced defaults to the
+  // newly-chosen model's declared values. A one-shot skip bug that silenced the async snap
+  // would also (wrongly) swallow this real change, so the two halves must be tested together.
+  it("Image: a genuine post-load user model change STILL resets reference tuning + advanced defaults", async () => {
+    seedSnapshot("image", IMAGE_SNAPSHOT);
+    // Catalogs resolve after mount → the restore settles with no reset (the S3 guarantee).
+    await renderSequence(ImageStudio, [imageContext(), imageContext(IMAGE_FULL)]);
+
+    // Sanity: the restored FLUX tuning/defaults survived the async catalog arrival.
+    expect(modelSelectValue()).toBe("flux2_dev");
+    let snap = readSnapshot("image");
+    expect(snap.resolution).toBe("1536x1536");
+    expect(snap.sampler).toBe("dpmpp_2m");
+    expect(snap.ipAdapterScale).toBe(0.85);
+
+    // A genuine USER model change (FLUX → Z-Image) through the picker.
+    await act(async () => {
+      setSelect(document.body.querySelector(".settings-field-model select"), "z_image_turbo");
+    });
+    await act(async () => {});
+
+    // Advanced-defaults reset: Z-Image only serves 1024x1024 + the "default" sampler, so the
+    // restored FLUX resolution/sampler snap to Z-Image's declared values.
+    // Reference-tuning reset: Z-Image declares no referenceStrengthDefault, so ipAdapterScale
+    // falls back to the model-agnostic 0.6 — proving the restored 0.85 was NOT preserved here.
+    expect(modelSelectValue()).toBe("z_image_turbo");
+    snap = readSnapshot("image");
+    expect(snap.model).toBe("z_image_turbo");
+    expect(snap.resolution).toBe("1024x1024");
+    expect(snap.sampler).toBe("default");
+    expect(snap.ipAdapterScale).toBe(0.6);
+  });
+
+  // Video counterpart: VideoStudio has no ipAdapter reference-tuning, but its duration/
+  // resolution/fps snap must still fire on a genuine user model change. The restore preserves
+  // WAN's 1280x720 (valid for WAN); switching to LTX — which does not serve 1280x720 — snaps
+  // the resolution to LTX's declared default, so a real user change is not swallowed.
+  it("Video: a genuine post-load user model change snaps a now-invalid resolution to the new model default", async () => {
+    seedSnapshot("video", VIDEO_SNAPSHOT);
+    await renderSequence(VideoStudio, [videoContext(), videoContext(VIDEO_FULL)]);
+
+    // Sanity: WAN's restored resolution survived the async catalog arrival.
+    expect(modelSelectValue()).toBe("wan_t2v");
+    expect(readSnapshot("video").resolution).toBe("1280x720");
+
+    // User switches to LTX, whose limits do not include 1280x720.
+    await act(async () => {
+      setSelect(document.body.querySelector(".settings-field-model select"), "ltx_2_3");
+    });
+    await act(async () => {});
+
+    expect(modelSelectValue()).toBe("ltx_2_3");
+    const snap = readSnapshot("video");
+    expect(snap.model).toBe("ltx_2_3");
+    // LTX declares defaults.resolution "768x512" and no resolution list → the invalid restored
+    // 1280x720 snaps to that default rather than lingering.
+    expect(snap.resolution).toBe("768x512");
   });
 });
