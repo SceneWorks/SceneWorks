@@ -2459,12 +2459,20 @@ export function App() {
 
         {keepAliveMounted("Poses") ? (
           <KeepAlivePane active={activeView === "Poses"}>
-            <PoseLibraryScreen />
+            {/* Keyed on the project id (sc-11971): the Create tab's staged sources / phase
+                are PROJECT-SCOPED, so a project switch must remount (reset) the screen —
+                exactly like the studios — while keep-alive preserves in-progress review
+                across a plain nav round trip. Otherwise project-A source picks could submit
+                a pose_detect job under project B. */}
+            <PoseLibraryScreen key={activeProject?.id ?? "default"} />
           </KeepAlivePane>
         ) : null}
 
         {keepAliveMounted("Keypoints") ? (
           <KeepAlivePane active={activeView === "Keypoints"}>
+            {/* NOT keyed on the project id (sc-11971): the Key Point Library is GLOBAL
+                (GLOBAL_KEYPOINTS_PROJECT_ID), so its capture / collection work must survive
+                a project switch as well as a plain nav — keep-alive alone, no remount. */}
             <KeyPointLibraryScreen />
           </KeepAlivePane>
         ) : null}

@@ -8,6 +8,7 @@ import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { GLOBAL_POSES_PROJECT_ID } from "../poseLibrary.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
+import { appConfirm } from "../appConfirm.jsx";
 
 // The Pose Library screen (epic 2282). Two tabs:
 //  - "Poses": manage the global pose store — user-created type:"pose" assets in the
@@ -259,6 +260,44 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
 
   const keepCount = candidates.filter((candidate) => candidate.keep).length;
 
+  // Clear the in-progress create session: revoke staged upload URLs and drop the sources,
+  // candidates, phase, and any error. Shared by save (after a successful commit) and the
+  // explicit Discard control. Under keep-alive this local state survives a plain nav round
+  // trip; a project switch remounts the screen (App keys it on activeProject.id), which is
+  // the ONLY reset that fires without going through here.
+  const resetSession = useCallback(() => {
+    setSources((prev) => {
+      for (const source of prev) if (source.objectUrl) URL.revokeObjectURL(source.objectUrl);
+      return [];
+    });
+    setCandidates([]);
+    setPhase("idle");
+    setJobId(null);
+    setError("");
+  }, []);
+
+  // A completed detection whose per-candidate edits (category / tags / keep) are not yet
+  // saved — the destructive-loss surface a nav round trip must preserve and an explicit
+  // discard / project switch must confirm-or-reset (sc-11971).
+  const hasUnsavedWork = phase === "review" && candidates.length > 0;
+
+  // Explicit, desktop-safe discard of the whole review (sc-11971). Confirms via appConfirm
+  // (NOT window.confirm — a no-op in the Tauri WebView) before dropping detected poses +
+  // edits, so a completed detection isn't lost on a stray click.
+  const discardSession = useCallback(async () => {
+    if (hasUnsavedWork) {
+      const ok = await appConfirm({
+        title: "Discard detected poses?",
+        message: "Discard the detected poses and your category / tag edits? This can't be undone.",
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        tone: "danger",
+      });
+      if (!ok) return;
+    }
+    resetSession();
+  }, [hasUnsavedWork, resetSession]);
+
   const save = useCallback(async () => {
     const keep = candidates.filter((candidate) => candidate.keep);
     if (!keep.length) return;
@@ -278,19 +317,14 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
         pose: candidate.pose,
       }));
       await apiFetch("/api/v1/poses", token, { method: "POST", body: JSON.stringify({ poses }) });
-      setSources((prev) => {
-        for (const source of prev) if (source.objectUrl) URL.revokeObjectURL(source.objectUrl);
-        return [];
-      });
-      setCandidates([]);
-      setPhase("idle");
+      resetSession();
       onSaved?.();
     } catch (err) {
       setError(String(err?.message ?? err));
     } finally {
       setSaving(false);
     }
-  }, [candidates, token, onSaved]);
+  }, [candidates, token, onSaved, resetSession]);
 
   return (
     <div aria-labelledby="pose-library-tab-create" hidden={hidden} id="pose-library-panel-create" role="tabpanel">
@@ -342,6 +376,15 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
                 <p className="eyebrow">
                   Review {candidates.length} candidate{candidates.length === 1 ? "" : "s"} — {keepCount} kept
                 </p>
+                {hasUnsavedWork ? (
+                  <span className="library-unsaved-badge" role="status" title="You have unsaved detected poses">
+                    <span className="library-unsaved-dot" aria-hidden="true" />
+                    Unsaved
+                  </span>
+                ) : null}
+                <button disabled={saving} onClick={discardSession} type="button">
+                  Discard all
+                </button>
                 <button className="primary-action" disabled={!keepCount || saving} onClick={save} type="button">
                   {saving ? "Saving…" : `Save ${keepCount} pose${keepCount === 1 ? "" : "s"}`}
                 </button>

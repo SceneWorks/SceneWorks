@@ -6,6 +6,7 @@ import { KpsOverlay } from "../components/KpsOverlay.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { assetUrl } from "../components/assetMedia.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
+import { appConfirm } from "../appConfirm.jsx";
 import {
   BUILTIN_DEFAULT_COLLECTION_ID,
   GLOBAL_KEYPOINTS_PROJECT_ID,
@@ -145,6 +146,28 @@ function KeypointCapturePanel({ hidden, onSaved }) {
     setPhase("idle");
     setJobId(null);
   }, [clearSource]);
+
+  // A completed extraction whose landmarks + typed name are not yet saved — the
+  // destructive-loss surface (the Key Point Library is GLOBAL, so this survives both a
+  // plain nav round trip AND a project switch under keep-alive; only an explicit discard
+  // or a successful save clears it, sc-11971).
+  const hasUnsavedWork = phase === "review" && Boolean(extraction);
+
+  // Explicit, desktop-safe discard (sc-11971): confirm via appConfirm before dropping a
+  // captured face's landmarks + name, so a review isn't lost on a stray click.
+  const discard = useCallback(async () => {
+    if (hasUnsavedWork) {
+      const ok = await appConfirm({
+        title: "Discard captured landmarks?",
+        message: "Discard the detected face landmarks and the preset name you entered?",
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        tone: "danger",
+      });
+      if (!ok) return;
+    }
+    reset();
+  }, [hasUnsavedWork, reset]);
 
   // Stage a source, seed the name, and fire the extraction. `previewUrl` backs the overlay
   // preview; `sourceAssetId` records provenance when the source was an existing asset.
@@ -287,6 +310,12 @@ function KeypointCapturePanel({ hidden, onSaved }) {
               <KpsOverlay kps={extraction.kps} imageUrl={source?.previewUrl} label="captured face landmarks" />
             </div>
             <div className="keypoint-capture-form">
+              {hasUnsavedWork ? (
+                <span className="library-unsaved-badge" role="status" title="You have unsaved captured landmarks">
+                  <span className="library-unsaved-dot" aria-hidden="true" />
+                  Unsaved
+                </span>
+              ) : null}
               {extraction.lowConfidence ? (
                 <p className="inline-warning">
                   Low detection confidence — the angle may be extreme or the face small. Check the overlay before
@@ -301,7 +330,7 @@ function KeypointCapturePanel({ hidden, onSaved }) {
                 <button className="primary-action" disabled={!name.trim() || saving} onClick={save} type="button">
                   {saving ? "Saving…" : "Save preset"}
                 </button>
-                <button onClick={reset} type="button">
+                <button disabled={saving} onClick={discard} type="button">
                   Discard
                 </button>
               </div>
@@ -352,6 +381,28 @@ function KeypointCollectionsPanel({ hidden, presets, collections, collectionsLoa
     setEditingId(null);
     setError("");
   }, []);
+
+  // An in-progress (unsaved) collection — a typed name and/or a picked, ordered set — that
+  // a plain nav round trip must preserve (keep-alive) and an explicit Cancel must confirm
+  // before dropping (sc-11971). The Key Point Library is GLOBAL, so this also survives a
+  // project switch.
+  const hasUnsavedWork = Boolean(name.trim()) || orderedIds.length > 0;
+
+  // Explicit, desktop-safe cancel (sc-11971): confirm via appConfirm before discarding an
+  // in-progress collection so a composed, ordered set isn't lost on a stray click.
+  const cancelBuilder = useCallback(async () => {
+    if (hasUnsavedWork) {
+      const ok = await appConfirm({
+        title: editingId ? "Discard changes?" : "Discard collection?",
+        message: "Discard this in-progress collection? Your name and ordered angle set will be cleared.",
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        tone: "danger",
+      });
+      if (!ok) return;
+    }
+    resetBuilder();
+  }, [hasUnsavedWork, editingId, resetBuilder]);
 
   const startEdit = useCallback((collection) => {
     setEditingId(collection.id);
@@ -457,7 +508,15 @@ function KeypointCollectionsPanel({ hidden, presets, collections, collectionsLoa
         </div>
 
         <div className="keypoint-section">
-          <p className="eyebrow">{editingId ? "Edit collection" : "New collection"}</p>
+          <p className="eyebrow">
+            {editingId ? "Edit collection" : "New collection"}
+            {hasUnsavedWork ? (
+              <span className="library-unsaved-badge" role="status" title="You have an unsaved collection">
+                <span className="library-unsaved-dot" aria-hidden="true" />
+                Unsaved
+              </span>
+            ) : null}
+          </p>
           <label>
             Name
             <input onChange={(event) => setName(event.target.value)} value={name} placeholder="e.g. LoRA coverage" />
@@ -532,7 +591,7 @@ function KeypointCollectionsPanel({ hidden, presets, collections, collectionsLoa
               {editingId ? "Save changes" : "Create collection"}
             </button>
             {editingId || name || orderedIds.length ? (
-              <button onClick={resetBuilder} type="button">
+              <button onClick={cancelBuilder} type="button">
                 Cancel
               </button>
             ) : null}
