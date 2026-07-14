@@ -268,7 +268,10 @@ const SDXL_SENTINEL: &str = "unet/diffusion_pytorch_model.safetensors";
 const SDXL_BF16_SENTINEL: &str = "unet/diffusion_pytorch_model.fp16.safetensors";
 // Lens turnkeys pack the DiT under transformer/diffusion_pytorch_model.safetensors …
 const LENS_SENTINEL: &str = "transformer/diffusion_pytorch_model.safetensors";
-// … while Z-Image turnkeys pack it under transformer/model.safetensors.
+// … but the DENSE bf16 lens-turbo DiT is SHARDED (diffusion_pytorch_model-0000N-of-0000M.safetensors),
+// so its tier-presence sentinel is the shard index file that the plain name would otherwise miss.
+const LENS_SHARDED_SENTINEL: &str = "transformer/diffusion_pytorch_model.safetensors.index.json";
+// … while Z-Image AND Qwen-Image turnkeys pack the DiT under transformer/model.safetensors.
 const ZIMAGE_SENTINEL: &str = "transformer/model.safetensors";
 
 #[test]
@@ -432,4 +435,183 @@ fn footprint_lens_turbo_q4() {
         &dir,
         turbo_request(4, Some(1.0)),
     );
+}
+
+// ── sc-10863 HEADROOM calibration set ─────────────────────────────────────────────────────────────
+// Four already-on-disk tiers spanning a small→large hold-all spread (illustrious q8 ~5 GiB → qwen-image
+// q8 ~36 GiB) drive the fit-gate `HEADROOM_GB` calibration: the gate predicts peak = Σon-disk-weights +
+// HEADROOM, so the measured `headroom = peakMemoryBytes − diskSizeBytes` (Σsafetensors) per tier fixes
+// the constant. Each RESIDENT hold-all peak is measured through the SAME `measure_footprint` seam as the
+// tiers above (default `LoadSpec` ⇒ `OffloadPolicy::Resident`, no fit-gate in the loop, no memory cap),
+// so the peak is the true hold-all ceiling over summed weights — not a Sequential-staged number.
+// illustrious q8 is covered by `footprint_illustrious_v{1,2}_q8` above; the other three are here.
+
+#[test]
+#[ignore = "footprint measurement; needs SceneWorks/lens-mlx q4 cached + an Apple-Silicon Mac"]
+fn footprint_lens_q4() {
+    // Base (non-turbo) lens: real CFG at 20 steps / guidance 5.0 (the `lens_base_q4_mlx_smoke` defaults).
+    let dir = resolve_tier_dir(
+        "FP_LENS_BASE_Q4_DIR",
+        "SceneWorks/lens-mlx",
+        "q4",
+        LENS_SENTINEL,
+    );
+    measure_footprint("lens", "q4", "lens", &dir, turbo_request(20, Some(5.0)));
+}
+
+#[test]
+#[ignore = "footprint measurement; needs SceneWorks/lens-turbo-mlx bf16 cached + an Apple-Silicon Mac"]
+fn footprint_lens_turbo_bf16() {
+    // Dense bf16 lens-turbo: SHARDED DiT ⇒ the shard-index sentinel. Turbo schedule (4 steps, CFG-scale 1).
+    let dir = resolve_tier_dir(
+        "FP_LENS_TURBO_BF16_DIR",
+        "SceneWorks/lens-turbo-mlx",
+        "bf16",
+        LENS_SHARDED_SENTINEL,
+    );
+    measure_footprint(
+        "lens_turbo",
+        "bf16",
+        "lens_turbo",
+        &dir,
+        turbo_request(4, Some(1.0)),
+    );
+}
+
+#[test]
+#[ignore = "footprint measurement; needs SceneWorks/qwen-image-mlx q8 cached + an Apple-Silicon Mac"]
+fn footprint_qwen_image_q8() {
+    // Qwen-Image base is a non-distilled true-CFG model (packs the DiT under transformer/model.safetensors
+    // like Z-Image). 1024², guidance 4.0; few steps (the peak is set by load + one denoise, not step count).
+    let dir = resolve_tier_dir(
+        "FP_QWEN_IMAGE_Q8_DIR",
+        "SceneWorks/qwen-image-mlx",
+        "q8",
+        ZIMAGE_SENTINEL,
+    );
+    measure_footprint(
+        "qwen_image",
+        "q8",
+        "qwen_image",
+        &dir,
+        turbo_request(8, Some(4.0)),
+    );
+}
+
+// ── sc-10863 emulation A/B: the calibrated HEADROOM_GB through the REAL cold-load gate ─────────────
+/// End-to-end check that the sc-10863-calibrated `HEADROOM_GB` behaves correctly through the exact gate
+/// the worker's cold-load path runs — `mlx_fit_gate::apply_residency_policy`, which `generator_cache.rs`
+/// invokes right before `gen_core::load` (the piece the pure `mlx_fit_gate` unit tests can't cover: the
+/// real on-disk byte sums + the live `SCENEWORKS_MLX_MEMORY_CAP_GB` budget resolution). Emulates three
+/// Mac sizes via the cap and asserts the decision at each, then runs a REAL generation on the Resident
+/// path so the calibrated value is confirmed against an actual load+gen, not just arithmetic:
+///   * cap BELOW even the staged peak ⇒ Reject with the actionable over-budget message (the reject event);
+///   * cap BETWEEN the staged and resident peaks ⇒ Sequential selected (emits
+///     `mlx_sequential_residency_selected`, surfaced on stdout by the dev-only tracing subscriber);
+///   * cap ABOVE the resident peak ⇒ Resident (spec unchanged) AND a real render succeeds.
+///
+/// Caps are derived from the SAME predictor the gate uses (`predicted_peak_gb` /
+/// `predicted_sequential_peak_gb`), so the A/B stays valid if `HEADROOM_GB` is retuned. Mutates the
+/// process-global cap env ⇒ `#[ignore]`d and run one-per-process like the footprint smokes.
+#[test]
+#[ignore = "sc-10863 fit-gate A/B; needs SceneWorks/illustrious-xl-v1-mlx q8 cached + an Apple-Silicon Mac"]
+fn fit_gate_ab_illustrious_q8() {
+    use crate::mlx_fit_gate::{
+        apply_residency_policy, predicted_peak_gb, predicted_sequential_peak_gb,
+        sum_safetensors_bytes, sum_text_encoder_bytes, MLX_MEMORY_CAP_ENV,
+    };
+    use gen_core::OffloadPolicy;
+
+    // Dev-only stdout subscriber so the real `mlx_sequential_residency_selected` INFO event is visible
+    // under --nocapture (the gate emits it via `tracing::info!` — silent without a subscriber).
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_target(false)
+        .without_time()
+        .try_init();
+
+    let dir = resolve_tier_dir(
+        "FP_ILL_V1_DIR",
+        "SceneWorks/illustrious-xl-v1-mlx",
+        "q8",
+        SDXL_SENTINEL,
+    );
+    // Illustrious loads on the sequential-capable `sdxl` engine, so all three outcomes are reachable.
+    let engine = "sdxl";
+    let disk = sum_safetensors_bytes(&dir);
+    let te = sum_text_encoder_bytes(&dir);
+    let resident_peak = predicted_peak_gb(disk).expect("weights measured");
+    let staged_peak = predicted_sequential_peak_gb(disk, te).expect("weights measured");
+    let gib = 1024.0 * 1024.0 * 1024.0;
+    assert!(
+        staged_peak < resident_peak,
+        "need a text-encoder split for a Sequential window (staged {staged_peak:.1} < resident {resident_peak:.1})"
+    );
+    println!(
+        "[ab] illustrious q8: disk {:.2} GiB, te {:.2} GiB ⇒ predicted resident peak {resident_peak:.1} GiB, staged peak {staged_peak:.1} GiB",
+        disk as f64 / gib,
+        te as f64 / gib,
+    );
+
+    let make_spec = || LoadSpec::new(WeightsSource::Dir(dir.to_path_buf())).with_quant(Quant::Q8);
+    let set_cap = |gb: f64| std::env::set_var(MLX_MEMORY_CAP_ENV, format!("{gb}"));
+
+    // (C) cap BELOW the staged peak ⇒ reject even one-component-at-a-time, with the actionable message.
+    let cap_reject = staged_peak - 2.0;
+    set_cap(cap_reject);
+    let err = apply_residency_policy(make_spec(), engine)
+        .expect_err("cap below the staged peak must reject");
+    let crate::WorkerError::InvalidPayload(msg) = &err else {
+        panic!("expected an actionable InvalidPayload reject, got {err:?}");
+    };
+    assert!(msg.contains("unified memory"), "actionable reject: {msg}");
+    assert!(
+        msg.contains("one component at a time"),
+        "reject names the staged requirement: {msg}"
+    );
+    println!("[ab] cap {cap_reject:.1} GiB (< staged) ⇒ REJECT: {msg}");
+
+    // (B) cap BETWEEN the staged and resident peaks ⇒ Sequential (won't fit resident, staged will).
+    let cap_seq = (staged_peak + resident_peak) / 2.0;
+    set_cap(cap_seq);
+    let spec = apply_residency_policy(make_spec(), engine).expect("staged fits ⇒ Ok(Sequential)");
+    assert_eq!(
+        spec.offload_policy,
+        OffloadPolicy::Sequential,
+        "a cap between staged and resident selects Sequential"
+    );
+    println!("[ab] cap {cap_seq:.1} GiB (staged < cap < resident) ⇒ SEQUENTIAL (mlx_sequential_residency_selected)");
+
+    // (A) cap ABOVE the resident peak ⇒ Resident, and a real generation confirms the calibrated value
+    //     lets the hold-all path actually load + render.
+    let cap_resident = resident_peak + 8.0;
+    set_cap(cap_resident);
+    let spec = apply_residency_policy(make_spec(), engine).expect("fits resident ⇒ Ok(Resident)");
+    assert_eq!(
+        spec.offload_policy,
+        OffloadPolicy::Resident,
+        "a cap above the resident peak keeps the warm Resident path"
+    );
+    println!(
+        "[ab] cap {cap_resident:.1} GiB (> resident) ⇒ RESIDENT; running a real generation ..."
+    );
+    let generator =
+        gen_core::load(engine, &spec).unwrap_or_else(|e| panic!("resident load: {e:?}"));
+    let output = generator
+        .generate(&sdxl_request(), &mut |_| {})
+        .unwrap_or_else(|e| panic!("resident generate: {e:?}"));
+    let image = match output {
+        GenerationOutput::Images(mut images) => images.pop().expect("engine returned no image"),
+        other => panic!("expected Images output, got {other:?}"),
+    };
+    let std = image_std(&image);
+    assert!(
+        std > DEGENERATE_STD_FLOOR_DEFAULT,
+        "resident render looks degenerate (std {std:.2})"
+    );
+    println!(
+        "[ab] RESIDENT generation ok (render std {std:.1}) — calibrated HEADROOM_GB confirmed through the real gate"
+    );
+
+    std::env::remove_var(MLX_MEMORY_CAP_ENV);
 }
