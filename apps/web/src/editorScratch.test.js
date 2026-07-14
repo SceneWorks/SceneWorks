@@ -126,3 +126,61 @@ describe("createEditorScratchRegistry survivor sweep (sc-8850)", () => {
     expect(purgeAsset).toHaveBeenCalledTimes(2); // entry already gone
   });
 });
+
+// sc-11968 / epic 11958: under keep-alive the Image Editor stays MOUNTED across navigation,
+// so it keeps CLAIMING its in-flight op the whole time. The survivor sweep must therefore
+// NOT fire on a mere nav round trip (the editor is still the owner) — only on a genuine
+// Close/Discard (the editor clears the op, dropping the claim) or a project-switch remount
+// (unmount drops the claim). These tests pin that keep-alive reconciliation at the registry
+// seam, where it is deterministic without mounting the editor.
+describe("keep-alive nav vs. close/discard reconciliation (sc-11968)", () => {
+  function setup() {
+    const purgeAsset = vi.fn().mockResolvedValue(undefined);
+    const registry = createEditorScratchRegistry({ purgeAsset });
+    return { purgeAsset, registry };
+  }
+
+  it("does NOT purge across repeated jobs ticks while the mounted editor keeps claiming the op", () => {
+    const { purgeAsset, registry } = setup();
+    registry.track("job-1", [scratchAsset]);
+    // Editor stays mounted (kept alive) and keeps claiming job-1 while the user navigates
+    // between other screens — the claim getter always reports it.
+    registry.registerClaim(() => new Set(["job-1"]), () => [completedJob()]);
+    // Several nav-driven jobs ticks, even after the job has terminated: still owned → skipped.
+    registry.sweep([completedJob()]);
+    registry.sweep([completedJob()]);
+    registry.sweep([completedJob()]);
+    expect(purgeAsset).not.toHaveBeenCalled();
+    expect(registry._size()).toBe(1);
+  });
+
+  it("purges scratch + result once the editor Closes/Discards (claim drops) and the job is terminal", () => {
+    const { purgeAsset, registry } = setup();
+    registry.track("job-1", [scratchAsset]);
+    // A mutable claim mirrors the mounted editor's live `aiOp` — Close/Discard clears it.
+    let claimed = new Set(["job-1"]);
+    registry.registerClaim(() => claimed, () => [completedJob()]);
+    // While claimed (foregrounded or backgrounded), nav ticks never purge.
+    registry.sweep([completedJob()]);
+    expect(purgeAsset).not.toHaveBeenCalled();
+    // The editor Closes/Discards → aiOp cleared → the claim getter now reports no ownership.
+    claimed = new Set();
+    registry.sweep([completedJob()]);
+    expect(purgeAsset).toHaveBeenCalledWith(scratchAsset);
+    expect(purgeAsset).toHaveBeenCalledWith({ id: "result-1", projectId: "project-1" });
+    expect(registry._size()).toBe(0);
+  });
+
+  it("purges on a project-switch remount (key change → unmount → claim-release sweep)", () => {
+    const { purgeAsset, registry } = setup();
+    registry.track("job-1", [scratchAsset]);
+    const jobs = [completedJob()];
+    // The editor is keyed on the project id, so a project switch remounts it — the old
+    // instance unmounts and its claim unregister sweeps the still-tracked terminal op.
+    const unregister = registry.registerClaim(() => new Set(["job-1"]), () => jobs);
+    unregister();
+    expect(purgeAsset).toHaveBeenCalledWith(scratchAsset);
+    expect(purgeAsset).toHaveBeenCalledWith({ id: "result-1", projectId: "project-1" });
+    expect(registry._size()).toBe(0);
+  });
+});

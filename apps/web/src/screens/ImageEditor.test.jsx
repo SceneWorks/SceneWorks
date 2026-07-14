@@ -78,6 +78,8 @@ import {
   MAX_EDIT_REFERENCES,
   leaveGuardMessage,
   leaveGuardArming,
+  closeConfirmMessage,
+  saveStatusIndicator,
 } from "./ImageEditor.jsx";
 import { verifyCaption, serializeCaption, ELEMENT_KEY_ORDER_OBJ } from "../ideogramCaption.js";
 
@@ -355,6 +357,34 @@ describe("in-flight AI-op scratch survival (sc-8850)", () => {
     await act(async () => root.unmount());
     expect(unregister).toHaveBeenCalledTimes(1);
     container.remove();
+  });
+});
+
+// sc-11968: explicit Close/Discard + the unsaved-edits indicator. The confirm dialog it
+// drives is covered end-to-end in appConfirm.test.jsx; here we pin the pure decision logic
+// the editor top bar renders from (the actual bitmap/canvas surface needs a real canvas,
+// verified in the browser).
+describe("Close/Discard + unsaved indicator logic (sc-11968)", () => {
+  it("only prompts a Close when there is something to lose", () => {
+    // A clean doc closes silently (no confirm needed).
+    expect(closeConfirmMessage({ dirty: false, aiOpPending: false })).toBeNull();
+    // Unsaved edits win the wording.
+    expect(closeConfirmMessage({ dirty: true, aiOpPending: false })).toBe(
+      "Discard your unsaved edits and close this image?",
+    );
+    expect(closeConfirmMessage({ dirty: true, aiOpPending: true })).toContain("unsaved edits");
+    // An in-flight AI op (which never sets dirty) is the fallback reason to confirm.
+    expect(closeConfirmMessage({ dirty: false, aiOpPending: true })).toBe(
+      "An image edit is still running. Close and abandon it?",
+    );
+  });
+
+  it("reflects dirty as the unsaved indicator, else the saved hint, with dirty winning", () => {
+    expect(saveStatusIndicator({ dirty: true, savedAssetId: null })).toBe("unsaved");
+    expect(saveStatusIndicator({ dirty: false, savedAssetId: "asset-9" })).toBe("saved");
+    expect(saveStatusIndicator({ dirty: false, savedAssetId: null })).toBeNull();
+    // A dirty edit made after a Save reads as unsaved again, not "saved".
+    expect(saveStatusIndicator({ dirty: true, savedAssetId: "asset-9" })).toBe("unsaved");
   });
 });
 

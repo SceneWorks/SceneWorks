@@ -6,6 +6,7 @@ import { apiFetch } from "../api.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
 import { useScreenActive } from "../context/ScreenActiveContext.js";
+import { appConfirm } from "../appConfirm.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
@@ -318,6 +319,25 @@ export function leaveGuardArming({ dirty, aiOpPending, screenActive }) {
     beforeUnload: Boolean(message),
     inApp: Boolean(message) && Boolean(screenActive),
   };
+}
+
+// The confirm prompt shown when the user EXPLICITLY closes/discards the working image
+// (the Close button, sc-11968). Unlike the passive leave guard, a deliberate close of a
+// CLEAN document loses nothing, so it needs no confirm (null → proceed silently). Unsaved
+// edits win the wording; an in-flight AI op is the fallback (its result would be abandoned).
+export function closeConfirmMessage({ dirty, aiOpPending }) {
+  if (dirty) return "Discard your unsaved edits and close this image?";
+  if (aiOpPending) return "An image edit is still running. Close and abandon it?";
+  return null;
+}
+
+// Which save-state indicator the top bar shows (sc-11968): the unsaved-edits pill while
+// `dirty`, the "Saved ✓" hint once a Save has landed and nothing has changed since, else
+// nothing. Pure so the badge logic is unit-testable without a mounted canvas.
+export function saveStatusIndicator({ dirty, savedAssetId }) {
+  if (dirty) return "unsaved";
+  if (savedAssetId) return "saved";
+  return null;
 }
 
 // Compose the multi-reference edit's `referenceAssetIds`: the working image (staged as the scratch
@@ -1473,15 +1493,15 @@ export function ImageEditor() {
   );
 
   async function createBlankLayout() {
-    if (!confirmDiscardEdits()) return;
+    if (!(await confirmDiscardEdits())) return;
     setNewLayoutOpen(false);
     await newBlankLayout(blankCanvasDims(layoutAspect, layoutSize));
   }
 
-  function handleDrop(event) {
+  async function handleDrop(event) {
     event.preventDefault();
     const file = event.dataTransfer?.files?.[0];
-    if (file && confirmDiscardEdits()) openFile(file);
+    if (file && (await confirmDiscardEdits())) openFile(file);
   }
 
   function handleWheel(event) {
@@ -1643,10 +1663,13 @@ export function ImageEditor() {
   const confirmFlatten = useCallback(() => {
     const n = workingRef.current?.layers?.length ?? 0;
     if (n <= 1) return true;
-    return (
-      typeof window.confirm !== "function" ||
-      window.confirm(`This will flatten ${n} layers into a single layer. Continue?`)
-    );
+    // Desktop-safe confirm (sc-11968): returns a Promise the caller awaits.
+    return appConfirm({
+      title: "Flatten layers?",
+      message: `This will flatten ${n} layers into a single layer. Continue?`,
+      confirmLabel: "Flatten",
+      cancelLabel: "Cancel",
+    });
   }, []);
 
   // Apply: document-level crop — crop every layer to the rect, set the doc dims,
@@ -2045,7 +2068,7 @@ export function ImageEditor() {
     }) => {
       if (!working || aiOp || !activeProject) return;
       // A composite-source op flattens the stack into one base layer — confirm first.
-      if (layerSource === "composite" && !confirmFlatten()) return;
+      if (layerSource === "composite" && !(await confirmFlatten())) return;
       setStatus({ loading: false, error: "" });
       const targetLayerId = activeLayerOf(working)?.id ?? null;
       // Stage the source (and, for a masked edit, the mask) as scratch assets. An
@@ -2303,14 +2326,49 @@ export function ImageEditor() {
   }, [working, workingImageToFile]);
 
   // Confirm before an action that would discard unsaved edits (Open / drag-drop a
-  // new image while dirty). Returns true when it's safe to proceed.
+  // new image while dirty). Resolves true when it's safe to proceed. Async + desktop-safe
+  // (sc-11968): callers `await` it, so the confirm works in the Tauri WebView where a raw
+  // window.confirm silently no-ops.
   function confirmDiscardEdits() {
-    if (!dirty) return true;
-    return (
-      typeof window.confirm !== "function" ||
-      window.confirm("You have unsaved edits. Open a new image and discard them?")
-    );
+    if (!dirty) return Promise.resolve(true);
+    return appConfirm({
+      title: "Discard unsaved edits?",
+      message: "You have unsaved edits. Open a new image and discard them?",
+      confirmLabel: "Discard & open",
+      cancelLabel: "Keep editing",
+      tone: "danger",
+    });
   }
+
+  // Explicitly close the working document (the top-bar Close button, sc-11968). Under
+  // keep-alive the editor no longer unmounts on navigation, so this is the intentional
+  // path that clears the working doc, edit/undo history, and save state. A dirty doc (or
+  // an in-flight AI op) prompts first via the desktop-safe confirm; a clean doc closes
+  // silently. Clearing `aiOp` drops the survivor claim, so App's scratch registry
+  // (editorScratch.js) purges any in-flight op's scratch/result when its job terminates —
+  // nothing is orphaned.
+  const closeDoc = useCallback(async () => {
+    if (!workingRef.current) return;
+    const message = closeConfirmMessage({ dirty: dirtyRef.current, aiOpPending: Boolean(aiOpRef.current) });
+    if (message) {
+      const proceed = await appConfirm({
+        title: "Close image?",
+        message,
+        confirmLabel: "Discard & close",
+        cancelLabel: "Keep editing",
+        tone: "danger",
+      });
+      if (!proceed) return;
+    }
+    revokeLayerUrls(workingRef.current?.layers);
+    setWorking(null);
+    setEdits([]);
+    setDirty(false);
+    setSavedAssetId(null);
+    setAiOp(null);
+    resetHistory();
+    setStatus({ loading: false, error: "" });
+  }, [resetHistory]);
 
   // Warn before leaving with unsaved edits OR an in-flight AI op (sc-2434 / sc-8850): a
   // browser unload (close/refresh) and an in-app navigation away (the App nav consults
@@ -2330,9 +2388,18 @@ export function ImageEditor() {
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", onBeforeUnload);
+    // Desktop-safe in-app leave guard (sc-11968): the guard returns a Promise<boolean> from
+    // appConfirm (a real dialog), which navTo awaits before switching views — replacing the
+    // raw window.confirm that silently no-ops in the Tauri WebView.
     const unregister = inApp
-      ? registerLeaveGuard?.(
-          () => typeof window.confirm !== "function" || window.confirm(message),
+      ? registerLeaveGuard?.(() =>
+          appConfirm({
+            title: "Leave the Image Editor?",
+            message,
+            confirmLabel: "Leave",
+            cancelLabel: "Stay",
+            tone: "danger",
+          }),
         )
       : undefined;
     return () => {
@@ -3797,14 +3864,22 @@ export function ImageEditor() {
         {working ? (
           <>
             <div className="ie-divider" />
-            <button className="ie-btn sm" onClick={runDownload} title="Download a PNG to your computer" type="button">
-              Download
-            </button>
-            {savedAssetId && !dirty ? (
+            {/* Unsaved-edits indicator (sc-11968): a pill while the working doc has edits not
+                yet saved to the Library, swapped for the "Saved ✓" hint once a Save lands. */}
+            {saveStatusIndicator({ dirty, savedAssetId }) === "unsaved" ? (
+              <span className="ie-unsaved-badge" role="status" title="You have unsaved edits">
+                <span className="ie-unsaved-dot" aria-hidden="true" />
+                Unsaved
+              </span>
+            ) : null}
+            {saveStatusIndicator({ dirty, savedAssetId }) === "saved" ? (
               <span className="ie-doc-sub" style={{ color: "var(--ie-accent)" }}>
                 Saved ✓
               </span>
             ) : null}
+            <button className="ie-btn sm" onClick={runDownload} title="Download a PNG to your computer" type="button">
+              Download
+            </button>
             <button
               className="ie-btn sm primary"
               disabled={!dirty || saving}
@@ -3813,6 +3888,16 @@ export function ImageEditor() {
               type="button"
             >
               {saving ? "Saving…" : "Save"}
+            </button>
+            {/* Explicit Close/Discard (sc-11968): intentionally clears the working doc.
+                Guarded by the desktop-safe confirm when there are unsaved edits / a running op. */}
+            <button
+              className="ie-btn sm ghost danger"
+              onClick={closeDoc}
+              title="Close this image (discard unsaved edits)"
+              type="button"
+            >
+              Close
             </button>
           </>
         ) : null}
@@ -4198,15 +4283,15 @@ export function ImageEditor() {
           fileAccept="image/*"
           fileHint="Drag an image here, or"
           multiple={false}
-          onAdd={(ids) => {
+          onAdd={async (ids) => {
             setPickerOpen(false);
-            if (ids[0] && confirmDiscardEdits()) openAsset(ids[0]);
+            if (ids[0] && (await confirmDiscardEdits())) openAsset(ids[0]);
           }}
           onClose={() => setPickerOpen(false)}
-          onImport={(files) => {
+          onImport={async (files) => {
             const file = files?.[0];
             setPickerOpen(false);
-            if (file && confirmDiscardEdits()) openFile(file);
+            if (file && (await confirmDiscardEdits())) openFile(file);
           }}
           title="Open image"
         />
