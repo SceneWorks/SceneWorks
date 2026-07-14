@@ -713,6 +713,144 @@ describe("SceneWorks app shell", () => {
     expect(cardFor("Cinematic").textContent).not.toContain("Edit");
   });
 
+  // sc-11964 (S5): the source/reference/character/person-track selections are USER choices, so
+  // they persist in the studio snapshot and restore across a FULL app restart — not just via the
+  // in-session keep-alive. The restart is simulated by seeding the snapshot, mounting while the
+  // model/asset/character/track catalogs are still empty (the restart-restore window, when the
+  // writer is ready-gated off), then letting the catalogs resolve on a re-render.
+  const readVideoSnapshot = () =>
+    JSON.parse(window.localStorage.getItem("sceneworks-studio-video-project-1") ?? "{}");
+
+  const berniniModel = {
+    id: "bernini",
+    name: "Bernini",
+    type: "video",
+    capabilities: ["text_to_video", "reference_video_to_video"],
+    defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+    limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
+  };
+
+  const renderVideoStudio = async (context) => {
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            createPersonDetectionJob: () => {},
+            createPersonTrackJob: () => {},
+            createVideoJob: () => {},
+            gpuOptions: ["auto"],
+            latestVideoAssets: [],
+            loras: [],
+            setPreviewAsset: () => {},
+            rememberLocalGenerationJob: () => {},
+            purgeAsset: () => {},
+            presets: [],
+            requestedGpu: "auto",
+            setRequestedGpu: () => {},
+            updateAssetStatus: () => {},
+            assets: [],
+            characters: [],
+            personTracks: [],
+            videoModels: [],
+            ...context,
+          },
+          <VideoStudio />,
+        ),
+      );
+    });
+    await settle();
+  };
+
+  it("restores source-clip / reference / character / person-track selections after a restart", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project-1",
+      JSON.stringify({
+        mode: "reference_video_to_video",
+        model: "bernini",
+        sourceClipAssetId: "clip-1",
+        referenceAssetIds: ["ref-1", "ref-2"],
+        characterId: "char-1",
+        characterLookId: "look-1",
+        personTrackId: "track-1",
+        replacementMode: "full_person_keep_outfit",
+        trackName: "Hero",
+      }),
+    );
+
+    root = createRoot(container);
+    // Restart window: everything still resolving, so the ready-gated writer stays off.
+    await renderVideoStudio({});
+    // The catalogs land after mount.
+    await renderVideoStudio({
+      videoModels: [berniniModel],
+      assets: [
+        { id: "clip-1", type: "video", displayName: "Source Clip One" },
+        { id: "ref-1", type: "image", displayName: "Ref One" },
+        { id: "ref-2", type: "image", displayName: "Ref Two" },
+      ],
+      characters: [{ id: "char-1", name: "Hero Char", looks: [{ id: "look-1", name: "Look A" }] }],
+      personTracks: [{ id: "track-1", sourceAssetId: "clip-1", name: "Hero" }],
+    });
+
+    // The restored source clip + reference images surface in their pickers (UI-level restore).
+    expect(container.textContent).toContain("Source Clip One");
+    expect(container.textContent).toContain("Ref One");
+    expect(container.textContent).toContain("Ref Two");
+
+    // The restored character resolves too (advanced holds the Character select).
+    await openAdvancedSection();
+    expect(field(container, "Character").value).toBe("char-1");
+
+    // And the settled snapshot round-trips every selection — proving they were seeded from the
+    // restore, not reset to defaults, and are persisted for the next restart.
+    const snapshot = readVideoSnapshot();
+    expect(snapshot.sourceClipAssetId).toBe("clip-1");
+    expect(snapshot.referenceAssetIds).toEqual(["ref-1", "ref-2"]);
+    expect(snapshot.characterId).toBe("char-1");
+    expect(snapshot.characterLookId).toBe("look-1");
+    expect(snapshot.personTrackId).toBe("track-1");
+    expect(snapshot.replacementMode).toBe("full_person_keep_outfit");
+    expect(snapshot.trackName).toBe("Hero");
+  });
+
+  it("drops restored selections whose asset / character / track no longer exists", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project-1",
+      JSON.stringify({
+        mode: "reference_video_to_video",
+        model: "bernini",
+        sourceClipAssetId: "clip-gone",
+        referenceAssetIds: ["ref-1", "ref-gone"],
+        characterId: "char-gone",
+        characterLookId: "look-gone",
+        personTrackId: "track-gone",
+      }),
+    );
+
+    root = createRoot(container);
+    await renderVideoStudio({});
+    // Only ref-1 survives; the source clip, one reference, the character and the track are gone.
+    await renderVideoStudio({
+      videoModels: [berniniModel],
+      assets: [{ id: "ref-1", type: "image", displayName: "Ref One" }],
+      characters: [{ id: "char-1", name: "Hero Char", looks: [] }],
+      personTracks: [{ id: "track-1", sourceAssetId: "clip-1", name: "Hero" }],
+    });
+
+    // The dangling source clip cleanly drops to the empty state; the surviving reference stays.
+    expect(container.textContent).toContain("No source clip selected");
+    expect(container.textContent).toContain("Ref One");
+    expect(container.textContent).not.toContain("Ref Two");
+
+    const snapshot = readVideoSnapshot();
+    expect(snapshot.sourceClipAssetId).toBe("");
+    expect(snapshot.referenceAssetIds).toEqual(["ref-1"]);
+    expect(snapshot.characterId).toBe("");
+    expect(snapshot.characterLookId).toBe("");
+    expect(snapshot.personTrackId).toBe("");
+  });
+
   it("explains preset save blockers and selected LoRA warning states", async () => {
     const updatePreset = vi.fn();
     root = createRoot(container);

@@ -152,8 +152,15 @@ export function useGenerationStudio({
     }
   }, [models, model, setModel, fallbackModelId]);
 
-  // Drop a character selection that's no longer in the catalog.
+  // Drop a character selection that's no longer in the catalog. Guard on a loaded catalog
+  // (sc-11964): on the first mount after a restart the character catalog is still resolving
+  // (empty), and an empty `characters` would otherwise drop a restored characterId before the
+  // catalog lands — permanently, since it never comes back once it does. Only validate against a
+  // real catalog; the async resolve then drops a genuinely deleted character.
   useEffect(() => {
+    if (!characters.length) {
+      return;
+    }
     if (characterId && !characters.some((character) => character.id === characterId)) {
       setCharacterId("");
       setCharacterLookId("");
