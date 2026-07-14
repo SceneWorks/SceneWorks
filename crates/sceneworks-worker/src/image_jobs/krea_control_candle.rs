@@ -319,6 +319,10 @@ struct KreaStrictControl {
     height: u32,
     steps: u32,
     control_scale: f32,
+    /// Krea "text style" tap-reweight gain (sc-12009) — self-gates on `ui.textStyleGain` (Krea only);
+    /// `None`/g≈1 is a byte-exact no-op. Applied to the pose-control lane's CFG-free context by the
+    /// engine (inference sc-12009, `Krea2ControlRequest.text_style_gain`).
+    text_style_gain: Option<f32>,
 }
 
 impl CandleStrictControl for KreaStrictControl {
@@ -374,6 +378,7 @@ impl CandleStrictControl for KreaStrictControl {
             height: self.height,
             steps: self.steps as usize,
             control_scale: self.control_scale,
+            text_style_gain: self.text_style_gain,
             seed,
             tile_vae_decode: self.tile_vae_decode,
             cancel: cancel.clone(),
@@ -508,6 +513,7 @@ async fn generate_candle_krea_control_stream(
         height: request.height,
         steps,
         control_scale,
+        text_style_gain: resolve_text_style_gain(request),
     };
 
     run_candle_strict_control(

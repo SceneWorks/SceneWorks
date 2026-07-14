@@ -5,7 +5,7 @@ import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "reac
 import { apiFetch } from "../api.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
-import { useScreenActive } from "../context/ScreenActiveContext.js";
+import { appConfirm } from "../appConfirm.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
@@ -293,31 +293,54 @@ const EDITOR_SHORTCUTS = [
 // (image_jobs/flux2.rs). The working image takes one slot, so the editor allows up to 3 user refs.
 export const MAX_EDIT_REFERENCES = 4;
 
-// The leave-guard prompt shown before navigating away from the editor, or null when it's
-// safe to leave silently (sc-2434 / sc-8850). Unsaved edits win the message. Crucially the
-// guard also fires while an AI op is in flight — starting one does NOT set `dirty` (its
-// result only lands on success), so without this branch the user could silently abandon a
-// running edit (losing the result and, before the App survivor sweep, orphaning scratch).
+// The browser CLOSE/REFRESH (beforeunload) warning shown while there is unsaved work, or
+// null when a real unload would lose nothing (sc-2434 / sc-8850). Under keep-alive the
+// editor stays mounted across in-app navigation, so a plain nav is non-destructive and gets
+// NO prompt (see leaveGuardArming); only a genuine browser unload drops the in-memory state,
+// which is what this wording addresses. Unsaved edits win the message. It also fires while an
+// AI op is in flight — starting one does NOT set `dirty` (its result only lands on success) —
+// so an unload mid-op is still flagged (its result would be lost).
 export function leaveGuardMessage({ dirty, aiOpPending }) {
-  if (dirty) return "You have unsaved edits in the Image Editor. Leave and discard them?";
-  if (aiOpPending) return "An image edit is still running. Leave and abandon it?";
+  if (dirty) return "You have unsaved edits in the Image Editor that will be lost if you close or reload.";
+  if (aiOpPending) return "An image edit is still running; its result will be lost if you close or reload.";
   return null;
 }
 
-// Decide which of the two leave-guards to arm (sc-11959). The browser-unload
-// (close/refresh) guard must arm whenever there are unsaved edits or an in-flight AI op,
-// EVEN when the editor is backgrounded under keep-alive — an app close/refresh would
-// otherwise silently discard a backgrounded editor's unsaved edits (a safeguard that
-// predates keep-alive). The in-app nav guard, by contrast, only arms while the editor is
-// the foreground view, so a backgrounded (still-mounted) editor doesn't re-fire its
-// confirm() on every UNRELATED navigation between other screens.
-export function leaveGuardArming({ dirty, aiOpPending, screenActive }) {
+// Decide which leave-guard to arm (sc-11959 / sc-11968). Under selective keep-alive an in-app
+// navigation away does NOT unmount the editor — unsaved edits, undo history, and an in-flight
+// AI op all survive on the still-resident editor and the op's result lands back on return — so
+// a plain nav is NON-DESTRUCTIVE and the in-app nav guard is permanently disarmed (`inApp:
+// false`); prompting there would falsely warn users of loss that won't happen, undermining the
+// keep-alive promise. Only a real browser close/refresh drops the in-memory state, so the
+// beforeunload guard still arms whenever there are unsaved edits or an in-flight op — EVEN when
+// the editor is backgrounded under keep-alive (an app close/refresh would otherwise silently
+// discard a backgrounded editor's unsaved edits, a safeguard that predates keep-alive).
+export function leaveGuardArming({ dirty, aiOpPending }) {
   const message = leaveGuardMessage({ dirty, aiOpPending });
   return {
     message,
     beforeUnload: Boolean(message),
-    inApp: Boolean(message) && Boolean(screenActive),
+    inApp: false,
   };
+}
+
+// The confirm prompt shown when the user EXPLICITLY closes/discards the working image
+// (the Close button, sc-11968). Unlike the passive leave guard, a deliberate close of a
+// CLEAN document loses nothing, so it needs no confirm (null → proceed silently). Unsaved
+// edits win the wording; an in-flight AI op is the fallback (its result would be abandoned).
+export function closeConfirmMessage({ dirty, aiOpPending }) {
+  if (dirty) return "Discard your unsaved edits and close this image?";
+  if (aiOpPending) return "An image edit is still running. Close and abandon it?";
+  return null;
+}
+
+// Which save-state indicator the top bar shows (sc-11968): the unsaved-edits pill while
+// `dirty`, the "Saved ✓" hint once a Save has landed and nothing has changed since, else
+// nothing. Pure so the badge logic is unit-testable without a mounted canvas.
+export function saveStatusIndicator({ dirty, savedAssetId }) {
+  if (dirty) return "unsaved";
+  if (savedAssetId) return "saved";
+  return null;
 }
 
 // Compose the multi-reference edit's `referenceAssetIds`: the working image (staged as the scratch
@@ -631,7 +654,6 @@ export function ImageEditor() {
     jobs,
     importAsset,
     purgeAsset,
-    registerLeaveGuard,
     // App-level scratch-op survivor coordination (sc-8850). The editor stages an ephemeral
     // scratch asset per AI op; these let App purge it (and the result) even if the user
     // navigates away mid-job and this component unmounts before its own watcher can run.
@@ -658,11 +680,6 @@ export function ImageEditor() {
     theme = "light",
     changeTheme,
   } = useAppContext();
-  // Under the keep-alive shell (sc-11959) the editor stays mounted (hidden) after the
-  // user navigates away, so it can no longer rely on unmount to drop its leave-guard.
-  // `true` unless a KeepAlivePane says this editor is backgrounded (defaults to true
-  // for the direct-render unit tests, which carry no ScreenActiveContext).
-  const screenActive = useScreenActive();
   // Mac UI gating (sc-3486): the upscale tool itself runs in-process on Rust (Real-ESRGAN,
   // sc-3489), so it is available on a gated Mac — this block is a defensive guard that stays
   // null. The second engine (AuraSR) is dropped on Mac (sc-3668) and gated per-engine below.
@@ -1473,15 +1490,15 @@ export function ImageEditor() {
   );
 
   async function createBlankLayout() {
-    if (!confirmDiscardEdits()) return;
+    if (!(await confirmDiscardEdits())) return;
     setNewLayoutOpen(false);
     await newBlankLayout(blankCanvasDims(layoutAspect, layoutSize));
   }
 
-  function handleDrop(event) {
+  async function handleDrop(event) {
     event.preventDefault();
     const file = event.dataTransfer?.files?.[0];
-    if (file && confirmDiscardEdits()) openFile(file);
+    if (file && (await confirmDiscardEdits())) openFile(file);
   }
 
   function handleWheel(event) {
@@ -1643,10 +1660,13 @@ export function ImageEditor() {
   const confirmFlatten = useCallback(() => {
     const n = workingRef.current?.layers?.length ?? 0;
     if (n <= 1) return true;
-    return (
-      typeof window.confirm !== "function" ||
-      window.confirm(`This will flatten ${n} layers into a single layer. Continue?`)
-    );
+    // Desktop-safe confirm (sc-11968): returns a Promise the caller awaits.
+    return appConfirm({
+      title: "Flatten layers?",
+      message: `This will flatten ${n} layers into a single layer. Continue?`,
+      confirmLabel: "Flatten",
+      cancelLabel: "Cancel",
+    });
   }, []);
 
   // Apply: document-level crop — crop every layer to the rect, set the doc dims,
@@ -2045,7 +2065,7 @@ export function ImageEditor() {
     }) => {
       if (!working || aiOp || !activeProject) return;
       // A composite-source op flattens the stack into one base layer — confirm first.
-      if (layerSource === "composite" && !confirmFlatten()) return;
+      if (layerSource === "composite" && !(await confirmFlatten())) return;
       setStatus({ loading: false, error: "" });
       const targetLayerId = activeLayerOf(working)?.id ?? null;
       // Stage the source (and, for a masked edit, the mask) as scratch assets. An
@@ -2303,43 +2323,73 @@ export function ImageEditor() {
   }, [working, workingImageToFile]);
 
   // Confirm before an action that would discard unsaved edits (Open / drag-drop a
-  // new image while dirty). Returns true when it's safe to proceed.
+  // new image while dirty). Resolves true when it's safe to proceed. Async + desktop-safe
+  // (sc-11968): callers `await` it, so the confirm works in the Tauri WebView where a raw
+  // window.confirm silently no-ops.
   function confirmDiscardEdits() {
-    if (!dirty) return true;
-    return (
-      typeof window.confirm !== "function" ||
-      window.confirm("You have unsaved edits. Open a new image and discard them?")
-    );
+    if (!dirty) return Promise.resolve(true);
+    return appConfirm({
+      title: "Discard unsaved edits?",
+      message: "You have unsaved edits. Open a new image and discard them?",
+      confirmLabel: "Discard & open",
+      cancelLabel: "Keep editing",
+      tone: "danger",
+    });
   }
 
-  // Warn before leaving with unsaved edits OR an in-flight AI op (sc-2434 / sc-8850): a
-  // browser unload (close/refresh) and an in-app navigation away (the App nav consults
-  // this guard). Starting an AI op does NOT set `dirty` — its result only lands on
-  // success — so the guard must also fire while `aiOp` is non-null, otherwise the user
-  // can silently navigate away and abandon the running op (losing the result and, before
-  // the App-level survivor sweep, orphaning the scratch upload).
+  // Explicitly close the working document (the top-bar Close button, sc-11968). Under
+  // keep-alive the editor no longer unmounts on navigation, so this is the intentional
+  // path that clears the working doc, edit/undo history, and save state. A dirty doc (or
+  // an in-flight AI op) prompts first via the desktop-safe confirm; a clean doc closes
+  // silently. Clearing `aiOp` drops the survivor claim, so App's scratch registry
+  // (editorScratch.js) purges any in-flight op's scratch/result when its job terminates —
+  // nothing is orphaned.
+  const closeDoc = useCallback(async () => {
+    if (!workingRef.current) return;
+    const message = closeConfirmMessage({ dirty: dirtyRef.current, aiOpPending: Boolean(aiOpRef.current) });
+    if (message) {
+      const proceed = await appConfirm({
+        title: "Close image?",
+        message,
+        confirmLabel: "Discard & close",
+        cancelLabel: "Keep editing",
+        tone: "danger",
+      });
+      if (!proceed) return;
+    }
+    revokeLayerUrls(workingRef.current?.layers);
+    setWorking(null);
+    setEdits([]);
+    setDirty(false);
+    setSavedAssetId(null);
+    setAiOp(null);
+    resetHistory();
+    setStatus({ loading: false, error: "" });
+  }, [resetHistory]);
+
+  // Warn before a browser CLOSE/REFRESH that would drop unsaved edits OR an in-flight AI op
+  // (sc-2434 / sc-8850 / sc-11968). Under keep-alive an in-app navigation away does NOT
+  // unmount this editor (App keeps it resident), so unsaved edits, undo history, and an
+  // in-flight op all SURVIVE the nav and the op's result lands back on return — a plain nav
+  // is non-destructive and shows NO prompt. Only a real unload drops the in-memory state, so
+  // just the beforeunload guard arms here (even when backgrounded). Starting an AI op does
+  // NOT set `dirty` — its result only lands on success — so the guard must also arm while
+  // `aiOp` is non-null, else an unload mid-op silently loses the result. The intentional
+  // lose-work prompts live elsewhere: the explicit Close/Discard button (closeDoc) and the
+  // open-new / flatten confirms, all via the desktop-safe appConfirm dialog.
   const aiOpPending = Boolean(aiOp);
   useEffect(() => {
-    // See leaveGuardArming: the beforeunload handler arms whenever there are unsaved
-    // edits / an in-flight op (even backgrounded); the in-app nav guard only arms while
-    // this editor is foregrounded (sc-11959).
-    const { message, beforeUnload, inApp } = leaveGuardArming({ dirty, aiOpPending, screenActive });
+    const { beforeUnload } = leaveGuardArming({ dirty, aiOpPending });
     if (!beforeUnload) return undefined;
     const onBeforeUnload = (event) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", onBeforeUnload);
-    const unregister = inApp
-      ? registerLeaveGuard?.(
-          () => typeof window.confirm !== "function" || window.confirm(message),
-        )
-      : undefined;
     return () => {
       window.removeEventListener("beforeunload", onBeforeUnload);
-      if (typeof unregister === "function") unregister();
     };
-  }, [dirty, aiOpPending, registerLeaveGuard, screenActive]);
+  }, [dirty, aiOpPending]);
 
   // Claim the in-flight AI op's jobId with App so its survivor sweep (sc-8850) knows this
   // editor is alive and owns loading the result back before the scratch/result assets are
@@ -3797,14 +3847,22 @@ export function ImageEditor() {
         {working ? (
           <>
             <div className="ie-divider" />
-            <button className="ie-btn sm" onClick={runDownload} title="Download a PNG to your computer" type="button">
-              Download
-            </button>
-            {savedAssetId && !dirty ? (
+            {/* Unsaved-edits indicator (sc-11968): a pill while the working doc has edits not
+                yet saved to the Library, swapped for the "Saved ✓" hint once a Save lands. */}
+            {saveStatusIndicator({ dirty, savedAssetId }) === "unsaved" ? (
+              <span className="ie-unsaved-badge" role="status" title="You have unsaved edits">
+                <span className="ie-unsaved-dot" aria-hidden="true" />
+                Unsaved
+              </span>
+            ) : null}
+            {saveStatusIndicator({ dirty, savedAssetId }) === "saved" ? (
               <span className="ie-doc-sub" style={{ color: "var(--ie-accent)" }}>
                 Saved ✓
               </span>
             ) : null}
+            <button className="ie-btn sm" onClick={runDownload} title="Download a PNG to your computer" type="button">
+              Download
+            </button>
             <button
               className="ie-btn sm primary"
               disabled={!dirty || saving}
@@ -3813,6 +3871,16 @@ export function ImageEditor() {
               type="button"
             >
               {saving ? "Saving…" : "Save"}
+            </button>
+            {/* Explicit Close/Discard (sc-11968): intentionally clears the working doc.
+                Guarded by the desktop-safe confirm when there are unsaved edits / a running op. */}
+            <button
+              className="ie-btn sm ghost danger"
+              onClick={closeDoc}
+              title="Close this image (discard unsaved edits)"
+              type="button"
+            >
+              Close
             </button>
           </>
         ) : null}
@@ -4198,15 +4266,15 @@ export function ImageEditor() {
           fileAccept="image/*"
           fileHint="Drag an image here, or"
           multiple={false}
-          onAdd={(ids) => {
+          onAdd={async (ids) => {
             setPickerOpen(false);
-            if (ids[0] && confirmDiscardEdits()) openAsset(ids[0]);
+            if (ids[0] && (await confirmDiscardEdits())) openAsset(ids[0]);
           }}
           onClose={() => setPickerOpen(false)}
-          onImport={(files) => {
+          onImport={async (files) => {
             const file = files?.[0];
             setPickerOpen(false);
-            if (file && confirmDiscardEdits()) openFile(file);
+            if (file && (await confirmDiscardEdits())) openFile(file);
           }}
           title="Open image"
         />
