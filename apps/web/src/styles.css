@@ -5162,12 +5162,28 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .model-tier-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  /* label | size | install-state badge | per-tier delete (sc-12024). The 4th column is `auto`,
+     so a not-installed row (which renders an empty spacer instead of a button) collapses it. */
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
+}
+
+/* Compact per-tier delete button (sc-12024): reclaims one installed tier's disk. Inherits
+   `.danger-action` colors but overrides the 36px min-height so it fits the tier row. */
+.model-tier-delete {
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Keeps the delete column aligned on rows that don't render a button (not-installed tiers). */
+.model-tier-delete-spacer {
+  display: block;
 }
 
 /* The RAM-suggested tier: highlighted so the recommended default reads at a glance. */

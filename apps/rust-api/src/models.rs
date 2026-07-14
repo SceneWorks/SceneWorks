@@ -520,6 +520,358 @@ pub(crate) async fn delete_model(
     })))
 }
 
+/// Delete ONE installed quant tier of a model and reclaim its disk, leaving the other tiers
+/// (and the catalog entry) intact (sc-12024, epic 8506). The counterpart to per-tier download
+/// (sc-8509): a user who fetched q8 to A/B against q4 can drop the unused tier without nuking
+/// the whole model. Unlike `delete_model` — which removes the whole repo dir AND the registry
+/// entry — this is scoped to the tier's `files` and never touches the manifest, so the model
+/// stays catalogued and re-downloadable; deleting the last remaining tier simply flips it back
+/// to not-installed. Mirrors `delete_model`'s trash-first → `trashUnavailable` → `?permanent`
+/// retry contract and the same ownership guard (`<data>/models` + the HF hub cache).
+pub(crate) async fn delete_model_variant(
+    State(state): State<AppState>,
+    Path((model_id, variant)): Path<(String, String)>,
+    Query(query): Query<CatalogDeleteQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let permanent = query.permanent.unwrap_or(false);
+    let variant = variant.trim().to_ascii_lowercase();
+    let catalog = model_catalog(&state).await?;
+    let model = catalog
+        .into_iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            detail: "Model not found".to_owned(),
+        })?;
+    let data_dir = &state.settings.data_dir;
+    let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+    // A tier lives in one of two storage shapes. Download-matrix models (`hasVariantMatrix`) keep the
+    // tier as a `files`-filtered slice of a shared HF cache repo (sc-12024); convert-at-install
+    // models (Anima) keep it as a real `<converted>/<tier>/` dir emitted by one convert job
+    // (sc-12025). Resolve whichever this model uses; a variant that is neither has nothing to delete.
+    let removal = if let Some(download) = model_download_for_variant(&model, &variant) {
+        let repo = download
+            .get("repo")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let files = string_array_field(&download, "files");
+        // A tier with no `files` scope is the whole repo (a single-variant "default"), not a
+        // deletable slice of a shared cache — refuse rather than risk wiping every tier. The UI
+        // only offers this on real quant tiers (bf16/q8/q4), which always carry a `files` glob.
+        if files.is_empty() {
+            return Err(ApiError::bad_request(format!(
+                "Tier '{variant}' has no file scope; delete the whole model instead"
+            )));
+        }
+        let repo_cache = huggingface_repo_cache_path(data_dir, &repo);
+        let managed_dir = Some(data_dir.join("models").join(safe_download_dir(&repo)));
+        remove_tier_artifacts(repo_cache, managed_dir, &files, &allowed_roots, permanent).await?
+    } else if model_has_convert_tier(&model, &variant) {
+        // Convert-at-install: the tier is a real dir under the converted MLX tree. Prefer the
+        // catalog's resolved `mlxConvertedPath`; fall back to the canonical convert output dir.
+        let converted = model
+            .get("mlxConvertedPath")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("models").join("mlx").join(&model_id));
+        remove_converted_tier(converted.join(&variant), &allowed_roots, permanent).await?
+    } else {
+        return Err(ApiError::bad_request(format!(
+            "Model does not advertise a '{variant}' quant tier"
+        )));
+    };
+    // Some owned files could not reach the OS trash and nothing was permanently deleted — ask
+    // the client to confirm a permanent delete (same contract as `delete_model`).
+    if !permanent && !removal.trash_failed_paths.is_empty() {
+        return Ok(Json(json!({
+            "id": model_id,
+            "variant": variant,
+            "kind": "model-variant",
+            "trashUnavailable": true,
+            "trashFailedPaths": removal.trash_failed_paths,
+            "removedLocalArtifacts": !removal.removed_paths.is_empty(),
+            "reclaimedBytes": removal.reclaimed_bytes,
+            "removedPaths": removal.removed_paths,
+            "retainedPaths": removal.retained_paths,
+        })));
+    }
+    if removal.removed_paths.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "Tier '{variant}' is not installed"
+        )));
+    }
+    Ok(Json(json!({
+        "id": model_id,
+        "variant": variant,
+        "kind": "model-variant",
+        "trashed": !permanent,
+        // A tier delete NEVER removes the registry entry: the model stays in the catalog so the
+        // tier can be re-downloaded. Emitted false so the web keeps the model card in place.
+        "removedManifestEntry": false,
+        "removedLocalArtifacts": !removal.removed_paths.is_empty(),
+        "reclaimedBytes": removal.reclaimed_bytes,
+        "reclaimedLabel": format_bytes(removal.reclaimed_bytes),
+        "removedPaths": removal.removed_paths,
+        "retainedPaths": removal.retained_paths,
+    })))
+}
+
+/// Result of removing a single quant tier's on-disk artifacts (sc-12024).
+#[derive(Default)]
+pub(crate) struct TierRemoval {
+    /// Paths (tier symlinks/files + their exclusive blobs) moved to the OS trash or unlinked.
+    pub(crate) removed_paths: Vec<String>,
+    /// Paths left in place because they are not inside a SceneWorks-owned root.
+    pub(crate) retained_paths: Vec<String>,
+    /// Owned paths that could NOT be moved to the OS trash (recycle bin disabled, unsupported
+    /// volume, …). Nothing was deleted for these; the caller prompts before a permanent delete.
+    pub(crate) trash_failed_paths: Vec<String>,
+    /// Bytes actually reclaimed — the summed size of the data-bearing files/blobs removed.
+    pub(crate) reclaimed_bytes: u64,
+}
+
+/// Remove ONE quant tier's artifacts from a download-matrix model's storage, reclaiming disk.
+///
+/// A download-matrix model keeps every tier (bf16/q8/q4) in ONE shared Hugging Face hub-cache
+/// repo: the real bytes live in `blobs/<etag>` and each tier's files are relative SYMLINKS into
+/// `blobs/` (`download_snapshot_into_cache`, crates/sceneworks-worker/src/downloads.rs). Deleting
+/// the tier's snapshot symlinks alone frees nothing — the blobs behind them must go too. This
+/// walks every snapshot revision under the repo cache (and the app-managed mirror dir, where a
+/// turnkey install lands real files), selects the files matching the tier's `files` globs, and
+/// removes those directory entries PLUS the blobs they resolve to — while PROTECTING any blob
+/// still referenced by a retained tier (a shared etag). Emptied tier/snapshot dirs, and the whole
+/// repo cache dir once no tier's payload remains, are pruned (best-effort; only ever unlinks EMPTY
+/// dirs, so a surviving tier is never touched). `reclaimed_bytes` reflects only what actually left
+/// disk. An empty `tier_files` is a no-op — the caller must never scope a delete to "everything".
+pub(crate) async fn remove_tier_artifacts(
+    repo_cache: Option<PathBuf>,
+    managed_dir: Option<PathBuf>,
+    tier_files: &[String],
+    allowed_roots: &[PathBuf],
+    permanent: bool,
+) -> Result<TierRemoval, ApiError> {
+    if tier_files.is_empty() {
+        return Ok(TierRemoval::default());
+    }
+    // The directories to scan: every snapshot revision under the HF repo cache, plus the managed
+    // mirror dir. Each is scanned independently and files are matched RELATIVE to their scan dir.
+    let mut scan_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(repo_cache) = repo_cache.as_ref() {
+        if huggingface_repo_cache_exists(repo_cache) {
+            scan_dirs.extend(huggingface_snapshot_dirs(repo_cache));
+        }
+    }
+    if let Some(managed_dir) = managed_dir.as_ref() {
+        if managed_dir.is_dir() {
+            scan_dirs.push(managed_dir.clone());
+        }
+    }
+
+    // Split every file under the scan dirs into this tier's entries vs the retained rest. A
+    // retained file's real data (blob) must survive even if a tier symlink shares its etag.
+    let mut tier_entries: Vec<PathBuf> = Vec::new();
+    let mut retained_reals: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for dir in &scan_dirs {
+        for rel in snapshot_files(dir) {
+            let abs = dir.join(&rel);
+            if tier_files
+                .iter()
+                .any(|pattern| pattern_matches(pattern, &rel))
+            {
+                tier_entries.push(abs);
+            } else if let Ok(real) = tokio::fs::canonicalize(&abs).await {
+                retained_reals.insert(real);
+            }
+        }
+    }
+
+    // Build the ordered removal plan: unlink the tier's directory ENTRIES first (so a symlink
+    // still resolves to its blob for the ownership check), THEN the blobs those symlinks resolve
+    // to (skipping any shared with a retained tier). `data_sizes` records the byte size of every
+    // data-bearing path so reclaimed bytes reflect exactly what leaves disk.
+    let mut ordered: Vec<PathBuf> = Vec::new();
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut data_sizes: std::collections::HashMap<PathBuf, u64> = std::collections::HashMap::new();
+    for entry in &tier_entries {
+        // A real file (managed mirror) IS its own data holder; a symlink's bytes live in its blob.
+        if let Ok(link_meta) = tokio::fs::symlink_metadata(entry).await {
+            if !link_meta.file_type().is_symlink() && link_meta.is_file() {
+                data_sizes.insert(entry.clone(), link_meta.len());
+            }
+        }
+        if seen.insert(entry.clone()) {
+            ordered.push(entry.clone());
+        }
+    }
+    for entry in &tier_entries {
+        // Resolve the snapshot entry to the blob it references and remove that blob unless a retained
+        // tier shares it. On macOS/Linux the entry is a SYMLINK so `canonicalize` yields the blob. On
+        // Windows the HF cache uses HARDLINKS, which `canonicalize` does NOT resolve to a different
+        // path (`real == entry`), so the blob's second name under blobs/ is not reclaimed here — the
+        // Windows hardlink reverse-map is tracked in sc-12038. macOS/Linux (primary targets) reclaim
+        // fully; the unix `variant_delete_tests` cover it.
+        if let Ok(real) = tokio::fs::canonicalize(entry).await {
+            if &real != entry && !retained_reals.contains(&real) {
+                if let Ok(meta) = tokio::fs::metadata(&real).await {
+                    data_sizes.entry(real.clone()).or_insert(meta.len());
+                }
+                if seen.insert(real.clone()) {
+                    ordered.push(real);
+                }
+            }
+        }
+    }
+
+    let removal = remove_owned_artifacts(ordered, allowed_roots, permanent).await?;
+    let reclaimed_bytes = removal
+        .removed_paths
+        .iter()
+        .filter_map(|path| data_sizes.get(FsPath::new(path)))
+        .sum();
+    let tier_removal = TierRemoval {
+        removed_paths: removal.removed_paths,
+        retained_paths: removal.retained_paths,
+        trash_failed_paths: removal.trash_failed_paths,
+        reclaimed_bytes,
+    };
+
+    // Best-effort tidy once the removal itself succeeded: drop now-empty tier/snapshot dirs, and
+    // the whole repo cache dir once no tier's payload remains (otherwise only the tiny refs/
+    // skeleton would linger). Only ever removes EMPTY dirs.
+    if tier_removal.trash_failed_paths.is_empty() {
+        if let Some(repo_cache) = repo_cache.as_ref() {
+            prune_empty_repo_cache(repo_cache).await;
+        }
+        if let Some(managed_dir) = managed_dir.as_ref() {
+            remove_empty_dirs(managed_dir).await;
+        }
+    }
+
+    Ok(tier_removal)
+}
+
+/// Recursively remove empty subdirectories under `dir`, then `dir` itself if it ends up empty.
+/// Best-effort (ignores errors) and only ever unlinks EMPTY directories, so a sibling tier's
+/// surviving files can never be removed by it.
+async fn remove_empty_dirs(dir: &FsPath) {
+    let mut children: Vec<PathBuf> = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            children.push(entry.path());
+        }
+    } else {
+        return;
+    }
+    for child in children {
+        if child.is_dir() {
+            Box::pin(remove_empty_dirs(&child)).await;
+        }
+    }
+    let _ = tokio::fs::remove_dir(dir).await;
+}
+
+/// Prune a download-matrix repo cache dir after a tier delete: remove emptied snapshot/blob
+/// subtrees, and — when no payload remains (no blobs, no snapshot files) — the whole repo cache
+/// dir, so a fully-drained repo doesn't linger as a bare `refs/` skeleton. Best-effort.
+async fn prune_empty_repo_cache(repo_cache: &FsPath) {
+    remove_empty_dirs(&repo_cache.join("snapshots")).await;
+    remove_empty_dirs(&repo_cache.join("blobs")).await;
+    let has_blobs = std::fs::read_dir(repo_cache.join("blobs"))
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    let has_snapshot_files = huggingface_snapshot_dirs(repo_cache)
+        .iter()
+        .any(|snapshot| !snapshot_files(snapshot).is_empty());
+    if !has_blobs && !has_snapshot_files {
+        let _ = tokio::fs::remove_dir_all(repo_cache).await;
+    }
+}
+
+/// Whether `model` advertises `variant` as a convert-at-install tier — i.e. it appears in the
+/// catalog's `mlxTiers` (the on-disk convert-output tiers of a converted MLX model, sc-10730).
+fn model_has_convert_tier(model: &Value, variant: &str) -> bool {
+    model
+        .get("mlxTiers")
+        .and_then(Value::as_array)
+        .is_some_and(|tiers| {
+            tiers
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|tier| tier.eq_ignore_ascii_case(variant))
+        })
+}
+
+/// Remove ONE convert-at-install tier dir (`<converted>/<tier>/`) and reclaim its disk (sc-12025).
+/// Convert-at-install models (Anima) emit every tier from one convert job as a real per-tier dir
+/// holding a packed DiT plus SYMLINKS to the shared dense TE/VAE (whose targets live OUTSIDE the tier
+/// dir). Removing the tier dir frees only the packed DiT + the symlink entries — never the shared
+/// source, which the other tiers still reference — so `reclaimed_bytes` counts only the real
+/// (non-symlink) files under the tier. When this was the LAST tier with weights, the whole converted
+/// dir is dropped so the model cleanly reverts to "needs conversion" rather than lingering as a bare
+/// `model_index.json` marker.
+async fn remove_converted_tier(
+    tier_dir: PathBuf,
+    allowed_roots: &[PathBuf],
+    permanent: bool,
+) -> Result<TierRemoval, ApiError> {
+    if !tier_dir.is_dir() {
+        return Ok(TierRemoval::default());
+    }
+    let reclaimable = converted_tier_real_bytes(&tier_dir);
+    let removal = remove_owned_artifacts(vec![tier_dir.clone()], allowed_roots, permanent).await?;
+    let removed = removal
+        .removed_paths
+        .iter()
+        .any(|path| FsPath::new(path) == tier_dir);
+    // If no sibling tier retains weights, drop the whole converted dir (marker included) so the model
+    // reverts to a clean not-converted state instead of a bare marker. Best-effort.
+    if removed && removal.trash_failed_paths.is_empty() {
+        if let Some(converted) = tier_dir.parent() {
+            let any_tier_left = ["bf16", "q8", "q4"]
+                .iter()
+                .any(|tier| tier_subdir_has_weights(&converted.join(tier)));
+            if !any_tier_left {
+                let _ = tokio::fs::remove_dir_all(converted).await;
+            }
+        }
+    }
+    Ok(TierRemoval {
+        removed_paths: removal.removed_paths,
+        retained_paths: removal.retained_paths,
+        trash_failed_paths: removal.trash_failed_paths,
+        reclaimed_bytes: if removed { reclaimable } else { 0 },
+    })
+}
+
+/// Sum the bytes of the REAL (non-symlink) files under a converted tier dir — the packed DiT — so a
+/// tier delete reports only what it actually frees. The shared TE/VAE are symlinks to a source
+/// outside the tier dir; following them would over-count disk that a tier delete does not reclaim.
+fn converted_tier_real_bytes(tier_dir: &FsPath) -> u64 {
+    let mut total: u64 = 0;
+    let mut stack = vec![tier_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue; // shared TE/VAE — its target lives outside the tier dir; not reclaimed
+            }
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
+}
+
 /// Kill-switch for the model upload/import endpoint (sc-7081, epic 7080). Disabled on
 /// every platform until a real compatibility-check + conversion pipeline exists behind it:
 /// today an imported checkpoint never reaches a runnable engine. macOS dropped the torch
@@ -2852,5 +3204,243 @@ mod mlx_tier_probe_tests {
         assert_eq!(apply(json!({ "requiresConversion": true })), None);
         // An invalid floor value is dropped rather than surfaced.
         assert_eq!(apply(json!({ "minQualityTier": "q2" })), None);
+    }
+}
+
+// Per-tier delete (sc-12024, epic 8506). Exercises the blob-aware reclamation on a realistic HF
+// hub-cache layout — real `blobs/<etag>` files with snapshot SYMLINKS into them — which is the whole
+// reason a tier delete is non-trivial: unlinking the tier's snapshot symlinks alone frees nothing.
+// unix-gated because the fixtures use symlinks (the production cache layout on macOS/Linux).
+#[cfg(all(test, unix))]
+mod variant_delete_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    /// Write (once) a `blobs/<etag>` file of `bytes.len()` bytes and return its path.
+    fn blob(repo: &FsPath, etag: &str, bytes: &[u8]) -> PathBuf {
+        let blobs = repo.join("blobs");
+        std::fs::create_dir_all(&blobs).unwrap();
+        let path = blobs.join(etag);
+        if !path.exists() {
+            std::fs::write(&path, bytes).unwrap();
+        }
+        path
+    }
+
+    /// Materialize `snapshots/rev/<rel>` as a symlink to `blob_path` (the production cache links
+    /// relatively; an absolute link resolves identically under `canonicalize`).
+    fn link(repo: &FsPath, rel: &str, blob_path: &FsPath) {
+        let link_path = repo.join("snapshots").join("rev").join(rel);
+        std::fs::create_dir_all(link_path.parent().unwrap()).unwrap();
+        symlink(blob_path, &link_path).unwrap();
+    }
+
+    /// Seed one snapshot file backed by its own fresh blob of `size` bytes.
+    fn seed(repo: &FsPath, rel: &str, etag: &str, size: usize) {
+        let blob_path = blob(repo, etag, &vec![0u8; size]);
+        link(repo, rel, &blob_path);
+    }
+
+    #[tokio::test]
+    async fn deletes_only_the_target_tiers_blobs_and_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let repo = hub.join("models--Org--repo");
+        seed(&repo, "q4/model.safetensors", "q4a", 100);
+        seed(&repo, "q4/config.json", "q4b", 200);
+        seed(&repo, "q8/model.safetensors", "q8a", 500);
+
+        let removal = remove_tier_artifacts(
+            Some(repo.clone()),
+            None,
+            &["q4/*".to_owned()],
+            std::slice::from_ref(&hub),
+            true,
+        )
+        .await
+        .unwrap();
+
+        // q4's blobs AND snapshot symlinks are gone; the emptied q4 dir is pruned.
+        assert!(!repo.join("blobs/q4a").exists());
+        assert!(!repo.join("blobs/q4b").exists());
+        assert!(!repo.join("snapshots/rev/q4").exists());
+        // q8 is fully intact.
+        assert!(repo.join("blobs/q8a").exists());
+        assert!(repo.join("snapshots/rev/q8/model.safetensors").exists());
+        // Reclaimed bytes = q4's blob sizes only (100 + 200), never the shared skeleton.
+        assert_eq!(removal.reclaimed_bytes, 300);
+        assert!(removal.trash_failed_paths.is_empty());
+        assert!(!removal.removed_paths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn retains_a_blob_shared_with_a_surviving_tier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let repo = hub.join("models--Org--repo");
+        // A single blob referenced by BOTH tiers (identical etag/content), plus a q4-only blob.
+        let shared = blob(&repo, "shared", &vec![0u8; 400]);
+        link(&repo, "q4/shared.safetensors", &shared);
+        link(&repo, "q8/shared.safetensors", &shared);
+        seed(&repo, "q4/only.safetensors", "q4only", 100);
+
+        let removal = remove_tier_artifacts(
+            Some(repo.clone()),
+            None,
+            &["q4/*".to_owned()],
+            std::slice::from_ref(&hub),
+            true,
+        )
+        .await
+        .unwrap();
+
+        // The shared blob survives — q8 still references it — and q8's link still resolves.
+        assert!(repo.join("blobs/shared").exists());
+        assert!(repo.join("snapshots/rev/q8/shared.safetensors").exists());
+        // q4's exclusive blob and all q4 links are removed.
+        assert!(!repo.join("blobs/q4only").exists());
+        assert!(!repo.join("snapshots/rev/q4").exists());
+        // Only the exclusive blob's bytes count as reclaimed; the shared blob does not.
+        assert_eq!(removal.reclaimed_bytes, 100);
+    }
+
+    #[tokio::test]
+    async fn draining_the_last_tier_removes_the_repo_cache_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let repo = hub.join("models--Org--repo");
+        seed(&repo, "q4/model.safetensors", "q4a", 100);
+
+        let removal = remove_tier_artifacts(
+            Some(repo.clone()),
+            None,
+            &["q4/*".to_owned()],
+            std::slice::from_ref(&hub),
+            true,
+        )
+        .await
+        .unwrap();
+
+        // No tier remains → the whole models--repo dir is pruned (no bare refs/ skeleton left behind).
+        assert!(!repo.exists());
+        assert_eq!(removal.reclaimed_bytes, 100);
+    }
+
+    #[tokio::test]
+    async fn removes_real_tier_files_from_the_managed_mirror() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models = tmp.path().join("models");
+        let managed = models.join("Org__repo");
+        let write = |rel: &str, size: usize| {
+            let path = managed.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, vec![0u8; size]).unwrap();
+        };
+        // A turnkey install writes REAL files (not blob symlinks) under the managed dir.
+        write("q4/model.safetensors", 300);
+        write("q8/model.safetensors", 500);
+
+        let removal = remove_tier_artifacts(
+            None,
+            Some(managed.clone()),
+            &["q4/*".to_owned()],
+            std::slice::from_ref(&models),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(!managed.join("q4").exists());
+        assert!(managed.join("q8/model.safetensors").exists());
+        assert_eq!(removal.reclaimed_bytes, 300);
+    }
+
+    #[tokio::test]
+    async fn empty_tier_files_is_a_no_op() {
+        // The "never scope a delete to everything" guard: an empty file filter removes nothing.
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let repo = hub.join("models--Org--repo");
+        seed(&repo, "q4/model.safetensors", "q4a", 100);
+
+        let removal = remove_tier_artifacts(
+            Some(repo.clone()),
+            None,
+            &[],
+            std::slice::from_ref(&hub),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(repo.join("blobs/q4a").exists());
+        assert!(removal.removed_paths.is_empty());
+        assert_eq!(removal.reclaimed_bytes, 0);
+    }
+
+    // Convert-at-install (Anima) tiers are real `<converted>/<tier>/` dirs with a packed DiT plus
+    // SYMLINKS to a shared TE/VAE source that lives outside the tier dirs (sc-12025).
+    fn seed_convert_tier(converted: &FsPath, tier: &str, dit_bytes: usize, shared_te: &FsPath) {
+        let tier_dir = converted.join(tier);
+        let dm = tier_dir.join("diffusion_models");
+        std::fs::create_dir_all(&dm).unwrap();
+        std::fs::write(dm.join("dit.safetensors"), vec![0u8; dit_bytes]).unwrap();
+        let te = tier_dir.join("text_encoders");
+        std::fs::create_dir_all(&te).unwrap();
+        symlink(shared_te, te.join("te.safetensors")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn removes_a_convert_tier_counting_only_real_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models = tmp.path().join("models");
+        let converted = models.join("mlx").join("anima_base");
+        std::fs::create_dir_all(&converted).unwrap();
+        std::fs::write(converted.join("model_index.json"), b"{}").unwrap();
+        // The shared TE source lives OUTSIDE the tier dirs — deleting a tier must never free it.
+        let shared = models.join("source").join("te.safetensors");
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        std::fs::write(&shared, vec![0u8; 999]).unwrap();
+        seed_convert_tier(&converted, "q4", 300, &shared);
+        seed_convert_tier(&converted, "q8", 500, &shared);
+
+        let removal =
+            remove_converted_tier(converted.join("q4"), std::slice::from_ref(&models), true)
+                .await
+                .unwrap();
+
+        assert!(!converted.join("q4").exists());
+        assert!(converted
+            .join("q8/diffusion_models/dit.safetensors")
+            .exists());
+        // The shared TE source and the converted marker both survive (q8 still installed).
+        assert!(shared.exists());
+        assert!(converted.join("model_index.json").exists());
+        // Only q4's real DiT bytes count — the symlinked shared TE is not reclaimed.
+        assert_eq!(removal.reclaimed_bytes, 300);
+    }
+
+    #[tokio::test]
+    async fn draining_the_last_convert_tier_removes_the_converted_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models = tmp.path().join("models");
+        let converted = models.join("mlx").join("anima_base");
+        std::fs::create_dir_all(&converted).unwrap();
+        std::fs::write(converted.join("model_index.json"), b"{}").unwrap();
+        let shared = models.join("source").join("te.safetensors");
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        std::fs::write(&shared, vec![0u8; 999]).unwrap();
+        seed_convert_tier(&converted, "q4", 300, &shared);
+
+        let removal =
+            remove_converted_tier(converted.join("q4"), std::slice::from_ref(&models), true)
+                .await
+                .unwrap();
+
+        // No tier remains → the whole converted dir (marker included) is gone; the shared source is
+        // NOT (it belongs to the download, not the convert output).
+        assert!(!converted.exists());
+        assert!(shared.exists());
+        assert_eq!(removal.reclaimed_bytes, 300);
     }
 }

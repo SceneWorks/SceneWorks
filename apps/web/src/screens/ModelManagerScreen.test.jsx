@@ -901,6 +901,7 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
   let root;
   let apiFetch;
   let createModelDownloadJob;
+  let deleteModelVariant;
   let hostMemoryGb;
   let ModelManagerScreen;
   let AppContext;
@@ -959,6 +960,7 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     delete window.__TAURI__;
     hostMemoryGb = 32;
     createModelDownloadJob = vi.fn(async () => ({ id: "job", payload: {} }));
+    deleteModelVariant = vi.fn(async () => ({ reclaimedBytes: 1, reclaimedLabel: "18.0 GB" }));
     apiFetch = vi.fn(async (path) => {
       if (path === "/api/v1/host-capabilities") {
         return { platform: "macos", unifiedMemoryGb: hostMemoryGb };
@@ -999,6 +1001,7 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
       setActiveView: () => {},
       deleteLora: () => {},
       deleteModel: () => {},
+      deleteModelVariant,
       createModelDownloadJob,
       createModelConvertJob: () => {},
       createLoraImportJob: () => {},
@@ -1097,6 +1100,61 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     await click(downloadButton);
     const variants = createModelDownloadJob.mock.calls.map((call) => call[1].variant);
     expect(variants).toContain("bf16");
+  });
+
+  // sc-12024: an installed tier gets a Delete control that reclaims only that tier's disk; a
+  // not-installed tier has none. Clicking it (after the confirm) calls deleteModelVariant with the
+  // tier key, so the backend removes just that tier's files/blobs and leaves the rest installed.
+  it("shows a per-tier delete on installed tiers only, and deletes that tier", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await render([matrixModel({ installed: ["q8"] })]);
+    const rowFor = (label) =>
+      tierRows().find((row) => row.querySelector(".model-tier-label").textContent.includes(label));
+    // Only the installed q8 tier exposes a delete control.
+    expect(rowFor("Q8").querySelector(".model-tier-delete")).toBeTruthy();
+    expect(rowFor("Q4").querySelector(".model-tier-delete")).toBeNull();
+    expect(rowFor("bf16").querySelector(".model-tier-delete")).toBeNull();
+    await click(rowFor("Q8").querySelector(".model-tier-delete"));
+    expect(deleteModelVariant).toHaveBeenCalledTimes(1);
+    expect(deleteModelVariant).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "z_image_turbo" }),
+      "q8",
+    );
+    confirmSpy.mockRestore();
+  });
+
+  // sc-12025: convert-at-install models (mlxTiers, e.g. Anima) render no download panel, so they get
+  // a compact installed-tiers list with per-tier delete instead — reusing the same deleteModelVariant.
+  it("shows an installed-tiers delete list for a convert-at-install (mlxTiers) model", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const convertModel = {
+      id: "anima_base",
+      name: "Anima",
+      type: "image",
+      family: "anima",
+      downloadable: true,
+      installState: "installed",
+      hasVariantMatrix: false,
+      mlxTiers: ["bf16", "q8", "q4"],
+      mlxConvertedPath: "/data/models/mlx/anima_base",
+      variants: [{ variant: "default", installState: "installed" }],
+      ui: { description: "Convert-at-install model." },
+    };
+    await render([convertModel]);
+    // One row per installed convert tier (fidelity order), each with a delete control.
+    const rows = tierRows();
+    const labels = rows.map((row) => row.querySelector(".model-tier-label").textContent);
+    expect(labels).toHaveLength(3);
+    expect(labels[0]).toContain("bf16");
+    expect(labels[1]).toContain("Q8");
+    expect(labels[2]).toContain("Q4");
+    const q4Row = rows.find((row) => row.querySelector(".model-tier-label").textContent.includes("Q4"));
+    await click(q4Row.querySelector(".model-tier-delete"));
+    expect(deleteModelVariant).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "anima_base" }),
+      "q4",
+    );
+    confirmSpy.mockRestore();
   });
 
   it("leaves a single-variant model's download UX unchanged (no tier panel)", async () => {

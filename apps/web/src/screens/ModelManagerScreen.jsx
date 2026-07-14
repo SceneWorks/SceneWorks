@@ -341,6 +341,8 @@ function ModelTierDownloadPanel({
   downloadJobs,
   licenseAckRequired,
   onDownloadVariant,
+  onDeleteVariant,
+  deletingItem,
 }) {
   const variants = orderedMatrixVariants(model);
   const suggested = suggestTier(model, unifiedMemoryGb);
@@ -456,6 +458,28 @@ function ModelTierDownloadPanel({
               <span className={installed ? "status-badge installed" : "status-badge"}>
                 {activeJob ? activeJob.status : installed ? "installed" : "not installed"}
               </span>
+              {/* Reclaim an installed tier's disk (sc-12024). Only this tier's files/blobs are
+                  removed; the model and its other tiers stay installed. Disabled while a download
+                  for this tier is in flight or this tier is mid-delete. */}
+              {installed && onDeleteVariant ? (
+                <button
+                  type="button"
+                  className="model-tier-delete danger-action"
+                  disabled={Boolean(activeJob) || deletingItem === `variant:${model.id}:${tier}`}
+                  title={`Delete the ${tierLabel(tier)} tier and reclaim its disk space`}
+                  onClick={() =>
+                    onDeleteVariant(
+                      model,
+                      tier,
+                      variant.footprint?.diskSizeBytes ?? variant.downloadSizeBytes,
+                    )
+                  }
+                >
+                  {deletingItem === `variant:${model.id}:${tier}` ? "Deleting" : "Delete"}
+                </button>
+              ) : (
+                <span className="model-tier-delete-spacer" aria-hidden="true" />
+              )}
             </li>
           );
         })}
@@ -478,6 +502,49 @@ function ModelTierDownloadPanel({
   );
 }
 
+// Per-tier delete for convert-at-install models (sc-12025). These models (e.g. Anima) emit every
+// tier from ONE convert job and surface them via `mlxTiers` — decoupled from the download matrix, so
+// they render no ModelTierDownloadPanel and had NO per-tier control on the Models page (only
+// whole-model delete). This compact list lets the user reclaim an unused convert tier's disk. The
+// catalog carries no per-tier size for these, so rows show the tier + an installed badge; the backend
+// reports the actual bytes reclaimed. Reuses the same `onDeleteVariant(model, tier)` path.
+function ConvertedTierList({ model, onDeleteVariant, deletingItem }) {
+  const tiers = Array.isArray(model.mlxTiers) ? model.mlxTiers : [];
+  const ordered = TIER_DISPLAY_ORDER.filter((tier) => tiers.includes(tier));
+  if (ordered.length === 0 || !onDeleteVariant) {
+    return null;
+  }
+  return (
+    <div className="model-tier-panel">
+      <div className="model-tier-panel-heading">
+        <span className="eyebrow">Installed tiers</span>
+        <span className="helper-copy">Delete a tier you&apos;re not using to reclaim its disk space.</span>
+      </div>
+      <ul className="model-tier-list">
+        {ordered.map((tier) => {
+          const deleting = deletingItem === `variant:${model.id}:${tier}`;
+          return (
+            <li className="model-tier-row" key={tier}>
+              <span className="model-tier-label">{tierLabel(tier)}</span>
+              <span className="model-tier-size" />
+              <span className="status-badge installed">installed</span>
+              <button
+                type="button"
+                className="model-tier-delete danger-action"
+                disabled={deleting}
+                title={`Delete the ${tierLabel(tier)} tier and reclaim its disk space`}
+                onClick={() => onDeleteVariant(model, tier)}
+              >
+                {deleting ? "Deleting" : "Delete"}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 export function ModelManagerScreen() {
   const {
     activeProject,
@@ -488,6 +555,7 @@ export function ModelManagerScreen() {
     setActiveView,
     deleteLora: deleteLoraAction,
     deleteModel: deleteModelAction,
+    deleteModelVariant: deleteModelVariantAction,
     createModelDownloadJob,
     createLoraDownloadJob,
     createModelConvertJob,
@@ -898,6 +966,46 @@ export function ModelManagerScreen() {
     }
   }
 
+  // Delete ONE installed quant tier of a model to reclaim its disk (sc-12024/sc-12025). Unlike
+  // deleteModel this leaves the model (and its other tiers) in place; the catalog refetch flips the
+  // tier back to "not installed". `tier` is the tier key; `sizeBytes` (optional) is the tier's
+  // declared on-disk size for the confirm — download-matrix rows have it, convert-at-install
+  // (mlxTiers) rows don't, so the confirm omits the estimate there and the result reports the real
+  // reclaimed bytes from the backend.
+  async function deleteModelVariant(model, tier, sizeBytes) {
+    if (!deleteModelVariantAction) {
+      return;
+    }
+    const tierName = tierLabel(tier);
+    const sizeClause =
+      sizeBytes != null ? `This reclaims about ${formatTierSize(sizeBytes)} and removes` : "This removes";
+    const message = [
+      `Delete the ${tierName} tier of "${model.name ?? model.id}"?`,
+      `${sizeClause} only this tier — the model and its other tiers stay installed.`,
+    ].join("\n\n");
+    if (typeof window.confirm === "function" && !window.confirm(message)) {
+      return;
+    }
+    setDeletingItem(`variant:${model.id}:${tier}`);
+    setDeleteMessage({ tone: "neutral", text: "" });
+    try {
+      const result = await deleteModelVariantAction(model, tier);
+      if (result?.cancelled) {
+        setDeleteMessage({ tone: "neutral", text: "" });
+      } else {
+        const freed = result?.reclaimedLabel ?? "";
+        setDeleteMessage({
+          tone: "success",
+          text: `Deleted the ${tierName} tier of ${model.name ?? model.id}${freed ? ` and reclaimed ${freed}` : ""}.`,
+        });
+      }
+    } catch (err) {
+      setDeleteMessage({ tone: "error", text: err.message });
+    } finally {
+      setDeletingItem("");
+    }
+  }
+
   async function deleteLora(lora) {
     if (!onDeleteLora || lora.removable === false) {
       return;
@@ -1124,6 +1232,17 @@ export function ModelManagerScreen() {
             downloadJobs={downloadJobs}
             licenseAckRequired={licenseAckRequired}
             onDownloadVariant={onDownloadVariant}
+            onDeleteVariant={deleteModelVariant}
+            deletingItem={deletingItem}
+          />
+        ) : null}
+        {/* Convert-at-install models (mlxTiers) have no download panel; surface their installed
+            tiers with a per-tier delete so unused convert outputs can be reclaimed (sc-12025). */}
+        {!hasTierMatrix ? (
+          <ConvertedTierList
+            model={model}
+            onDeleteVariant={deleteModelVariant}
+            deletingItem={deletingItem}
           />
         ) : null}
         <div className="model-card-footer">

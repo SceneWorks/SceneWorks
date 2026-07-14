@@ -91,6 +91,30 @@ export function useModelsAndLoras({
     [token, setError, refreshData],
   );
 
+  // Delete ONE installed quant tier of a model and reclaim its disk (sc-12024). Counterpart to
+  // createModelDownloadJob's per-tier install: hits DELETE …/variants/:variant, which removes only
+  // that tier's files/blobs and NEVER the registry entry. So — unlike deleteModel — the model card
+  // stays put; the catalog refetch flips the tier from "installed" to "not installed". Mirrors the
+  // trash-first → trashUnavailable → permanent retry contract.
+  const deleteModelVariant = useCallback(
+    async (model, variant) => {
+      const base = `/api/v1/models/${encodeURIComponent(model.id)}/variants/${encodeURIComponent(
+        variant,
+      )}`;
+      let result = await apiFetch(base, token, { method: "DELETE" });
+      if (result?.trashUnavailable) {
+        if (!confirmPermanentDelete()) {
+          return { cancelled: true };
+        }
+        result = await apiFetch(`${base}?permanent=true`, token, { method: "DELETE" });
+      }
+      setError("");
+      await refreshData();
+      return result;
+    },
+    [token, setError, refreshData],
+  );
+
   const deleteLora = useCallback(
     async (lora) => {
     const params = new URLSearchParams();
@@ -323,6 +347,7 @@ export function useModelsAndLoras({
     setLoras,
     refreshLoras,
     deleteModel,
+    deleteModelVariant,
     deleteLora,
     updateLora,
     fetchLoraEmbeddedTags,
