@@ -2214,6 +2214,149 @@ async fn preset_image_job_builds_each_catalog_once() {
 }
 
 #[tokio::test]
+async fn preset_image_job_skips_server_lora_merge_when_client_resolved() {
+    // The web studio seeds a selected preset's LoRAs into the visible picker and sends them in
+    // `loras`, so it — not the server — is authoritative for which preset LoRAs apply. When it
+    // also sends presetLorasResolvedClientSide, the server must NOT re-merge the preset's LoRAs:
+    // that is what lets a user REMOVE a preset LoRA (send it absent) and have the removal stick,
+    // instead of the server silently adding it back. Headless clients that omit the flag keep the
+    // server-side merge (covered by preset_image_job_builds_each_catalog_once).
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "img-model",
+              "name": "Img Model",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/img", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "loraCompatibility": { "families": ["z-image"] },
+              "ui": { "label": "Img" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "loras": [
+            {
+              "id": "style-lora",
+              "name": "Style LoRA",
+              "family": "z-image",
+              "triggerWords": ["style"],
+              "compatibility": { "families": ["z-image"] },
+              "source": { "provider": "local", "path": "loras/style.safetensors" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin loras writes");
+    std::fs::write(
+        config_dir.join("user.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("user loras writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [
+            {
+              "id": "dream_style",
+              "name": "Dream Style",
+              "workflow": "text_to_image",
+              "model": "img-model",
+              "defaults": { "count": 1, "resolution": "1024x1024" },
+              "prompt": { "prefix": "cinematic" },
+              "loras": [{ "id": "style-lora", "weight": 0.5 }]
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin recipe presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user recipe presets writes");
+    let lora_dir = temp_dir.path().join("data/loras");
+    std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+    write_test_safetensors(&lora_dir.join("style.safetensors"));
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Client Resolved Preset Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    // The client selected the preset (recipePresetId) but removed its only LoRA in the picker, so
+    // it sends an empty `loras` plus the client-resolved flag.
+    let (status, image_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "a fox",
+            "model": "img-model",
+            "count": 1,
+            "width": 1024,
+            "height": 1024,
+            "recipePresetId": "dream_style",
+            "presetLorasResolvedClientSide": true,
+            "loras": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "job created: {image_job:?}");
+
+    // The preset prompt is still folded in and the preset id is stamped, but the server left the
+    // client's (empty) `loras` untouched — style-lora was NOT re-added.
+    assert_eq!(image_job["payload"]["prompt"], "cinematic, a fox");
+    assert_eq!(
+        image_job["payload"]["advanced"]["recipePresetId"],
+        "dream_style"
+    );
+    assert_eq!(
+        image_job["payload"]["loras"],
+        json!([]),
+        "client-resolved preset LoRAs must not be re-merged by the server"
+    );
+}
+
+#[tokio::test]
 async fn generation_routes_reject_invalid_payloads() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");

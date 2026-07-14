@@ -11,7 +11,12 @@ import { LoraPickerField, useLoraSelection } from "../components/LoraPickerField
 import { CharacterAdvancedOptions, useCharacterAdvancedOptions } from "../components/CharacterAdvancedOptions.jsx";
 import { KeypointCollectionField } from "../components/KeypointCollectionField.jsx";
 import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
-import { extractFamilies } from "../presetUtils.js";
+import {
+  LORA_WEIGHT_MAX,
+  LORA_WEIGHT_MIN,
+  LORA_WEIGHT_STEP,
+  extractFamilies,
+} from "../presetUtils.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
 
 // Curated negative prompts seeded into the advanced panel for each Character
@@ -305,10 +310,10 @@ export function CharacterLoras({
                 <label>
                   Weight
                   <input
-                    max="2"
-                    min="-2"
+                    max={LORA_WEIGHT_MAX}
+                    min={LORA_WEIGHT_MIN}
                     onChange={(event) => setLoraEdit(link.id, "defaultWeight", event.target.value)}
-                    step="0.05"
+                    step={LORA_WEIGHT_STEP}
                     type="number"
                     value={edit.defaultWeight}
                   />

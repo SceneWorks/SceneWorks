@@ -271,6 +271,7 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
         preset,
         job_payload,
         Some(snapshot),
+        payload.preset_loras_resolved_client_side.unwrap_or(false),
     )
     .await
 }
@@ -279,6 +280,13 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
 /// skipping ids that are already present. Records ids the catalog can't resolve
 /// under advanced.presetMissingLoras and stamps advanced.recipePresetId. Shared
 /// by the image and video job paths so preset-LoRA semantics stay identical.
+///
+/// When `client_resolved` is set (the web studio seeds a selected preset's LoRAs
+/// straight into `loras` and sends presetLorasResolvedClientSide), the client is
+/// authoritative for the preset's LoRAs — including weight edits and removals — so
+/// the merge is skipped and `loras` is left exactly as sent; only the advanced
+/// recipePresetId stamp is applied. Headless/API clients that send only
+/// recipePresetId leave the flag unset and get the server-side merge.
 pub(crate) async fn merge_preset_loras_into_payload(
     state: &AppState,
     project_id: &str,
@@ -286,7 +294,33 @@ pub(crate) async fn merge_preset_loras_into_payload(
     preset: &Value,
     job_payload: &mut JsonObject,
     snapshot: Option<&JobCatalogSnapshot>,
+    client_resolved: bool,
 ) -> Result<(), ApiError> {
+    // Stamp the resolved preset id onto advanced regardless of who owns the LoRAs.
+    let advanced = job_payload
+        .entry("advanced".to_owned())
+        .or_insert_with(|| Value::Object(JsonObject::new()));
+    if !advanced.is_object() {
+        *advanced = Value::Object(JsonObject::new());
+    }
+    let advanced = advanced
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("advanced payload must be an object"))?;
+    advanced.insert(
+        "recipePresetId".to_owned(),
+        Value::String(preset_id.to_owned()),
+    );
+    advanced.remove("recipePresetName");
+    advanced.remove("recipePresetPrompt");
+
+    // Client owns the preset LoRAs — leave `loras` untouched. There's no server-resolved
+    // "missing" set in this path (the studio only seeds LoRAs it can actually apply), so
+    // clear any stale marker and return.
+    if client_resolved {
+        advanced.remove("presetMissingLoras");
+        return Ok(());
+    }
+
     // Reuse the request-scoped LoRA catalog snapshot when threaded (sc-8819), else build
     // fresh. Both paths see identical catalog contents.
     let loras = match snapshot {
@@ -323,21 +357,12 @@ pub(crate) async fn merge_preset_loras_into_payload(
         preset_loras.push(serialize_preset_lora(lora, &preset_lora, lora_id));
         seen_lora_ids.push(lora_id.to_owned());
     }
+
+    // Re-borrow advanced (the stamp borrow above has ended) to record any unresolved ids.
     let advanced = job_payload
-        .entry("advanced".to_owned())
-        .or_insert_with(|| Value::Object(JsonObject::new()));
-    if !advanced.is_object() {
-        *advanced = Value::Object(JsonObject::new());
-    }
-    let advanced = advanced
-        .as_object_mut()
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
         .ok_or_else(|| ApiError::internal("advanced payload must be an object"))?;
-    advanced.insert(
-        "recipePresetId".to_owned(),
-        Value::String(preset_id.to_owned()),
-    );
-    advanced.remove("recipePresetName");
-    advanced.remove("recipePresetPrompt");
     if missing_lora_ids.is_empty() {
         advanced.remove("presetMissingLoras");
     } else {
@@ -420,6 +445,7 @@ pub(crate) async fn apply_recipe_preset_to_video_payload(
         preset,
         job_payload,
         Some(snapshot),
+        payload.preset_loras_resolved_client_side.unwrap_or(false),
     )
     .await
 }
