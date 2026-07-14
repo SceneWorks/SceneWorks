@@ -6,13 +6,8 @@
 
 use std::sync::OnceLock;
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+// Used only by the macOS-gated `textllms()` introspection seam below.
+#[cfg(all(test, target_os = "macos"))]
 use gen_core::core_llm::TextLlmRegistration;
 use gen_core::core_llm::{LoadSpec as TextLoadSpec, ModelRequirements, TextLlm, TextLlmRegistry};
 #[cfg(any(
@@ -94,13 +89,9 @@ pub(crate) fn generators() -> impl ExactSizeIterator<Item = &'static ModelRegist
     media().generators()
 }
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+// Only the macOS prompt-refine tests iterate the TextLlm registry; on the Windows/candle build
+// nothing calls this, so gate it to match its callers and stay warning-clean under -D warnings.
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn textllms() -> impl ExactSizeIterator<Item = &'static TextLlmRegistration> {
     text().registrations()
 }
