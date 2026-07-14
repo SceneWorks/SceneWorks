@@ -44,8 +44,10 @@ function typeLabel(value) {
 
 // sc-11965: tell an untouched draft (safe to re-sync from the server) from an
 // in-progress edit (must be preserved) by comparing the current editable state to
-// the last snapshot we seeded from the server. Field-level equality avoids relying
-// on object identity, which a background/SSE refetch always breaks.
+// the last snapshot we seeded from the server. Comparison is by value (not object
+// identity, which a background/SSE refetch always breaks) and whole-object: the
+// draft counts as clean only when every field still matches the last seed, so any
+// one edited field makes the entire draft compare dirty.
 function draftsEqual(a, b) {
   return (
     (a?.name ?? "") === (b?.name ?? "") &&
@@ -304,11 +306,16 @@ export function CharacterStudio() {
 
   // Seed the editable draft / LoRA edits from the selected character. A genuine
   // identity change (different id) always loads fresh. An `updatedAt` bump on the
-  // SAME character — a background/SSE refetch — only re-syncs a field while its draft
-  // is clean, so it never clobbers an in-progress, unsaved edit (sc-11965, "class B"
-  // clobber, independent of navigation). Reference-pick pruning stays unconditional
-  // since it only drops now-invalid ids, and the CharacterReferences panel keeps its
-  // own reference-pick guard (characterPanels.jsx:554).
+  // SAME character — a background/SSE refetch — re-syncs at object granularity, NOT
+  // per field: the whole draft is re-synced only while it is clean as a whole
+  // (name/type/description compared as a unit via draftsEqual), and the whole loraEdits
+  // map only while it is clean as a whole (loraEditsEqual over the entire map), so it
+  // never clobbers an in-progress, unsaved edit (sc-11965, "class B" clobber,
+  // independent of navigation). Because each check is whole-object, one dirty field
+  // holds its siblings too — a single edited field pins the entire draft (and one
+  // edited LoRA pins the entire loraEdits map) to the prior snapshot until saved.
+  // Reference-pick pruning stays unconditional since it only drops now-invalid ids, and
+  // the CharacterReferences panel keeps its own reference-pick guard (characterPanels.jsx:554).
   useEffect(() => {
     if (!selectedCharacter) {
       setDraft({ name: "", type: "person", description: "" });
@@ -345,8 +352,9 @@ export function CharacterStudio() {
       setTestLookId("");
     }
 
-    // Record what we last seeded so the next bump can classify clean vs dirty. Fields
-    // we kept (dirty) stay pinned to their prior snapshot, not the newer server value.
+    // Record what we last seeded so the next bump can classify clean vs dirty. Whatever
+    // we kept (a dirty draft or a dirty loraEdits map, each held as a whole) stays pinned
+    // to its prior snapshot, not the newer server value.
     lastSeededRef.current = {
       id: selectedCharacter.id,
       draft: seededDraft ?? serverDraft,
