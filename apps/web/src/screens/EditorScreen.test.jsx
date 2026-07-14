@@ -9,6 +9,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppContext } from "../context/AppContext.js";
 import { ScreenActiveContext } from "../context/ScreenActiveContext.js";
+
+// sc-12018 (S8 follow-up): the re-select guard now routes through the desktop-safe appConfirm
+// dialog (not the raw window.confirm, which no-ops in the Tauri WebView). Mock it so a test
+// controls the user's choice and can assert the guard fired, without mounting a ConfirmHost.
+const { appConfirmMock } = vi.hoisted(() => ({ appConfirmMock: vi.fn(async () => true) }));
+vi.mock("../appConfirm.jsx", () => ({ appConfirm: appConfirmMock }));
+
 import { EditorScreen } from "./EditorScreen.jsx";
 
 function makeTimeline(id, name) {
@@ -20,9 +27,19 @@ let root;
 
 beforeEach(() => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
+  appConfirmMock.mockClear();
+  appConfirmMock.mockResolvedValue(true);
   container = document.createElement("div");
   document.body.appendChild(container);
 });
+
+// The re-select guard awaits appConfirm, so its setSelectedTimelineId runs a microtask later.
+async function flush() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
 
 afterEach(() => {
   act(() => root?.unmount());
@@ -73,36 +90,40 @@ function selectTimeline(nextId) {
   return select;
 }
 
-describe("EditorScreen timeline re-select guard (sc-11967)", () => {
-  it("switches without prompting when the timeline is clean (no regression)", () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+describe("EditorScreen timeline re-select guard (sc-11967, sc-12018)", () => {
+  it("switches without prompting when the timeline is clean (no regression)", async () => {
     const { setSelectedTimelineId } = render({ isActiveTimelineDirty: () => false });
 
     selectTimeline("tl_2");
+    await flush();
 
-    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(appConfirmMock).not.toHaveBeenCalled();
     expect(setSelectedTimelineId).toHaveBeenCalledWith("tl_2");
   });
 
-  it("does NOT switch (keeps the current timeline) when dirty and the user cancels the confirm", () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+  it("does NOT switch (keeps the current timeline) when dirty and the user cancels the confirm", async () => {
+    appConfirmMock.mockResolvedValue(false);
     const { setSelectedTimelineId } = render({ isActiveTimelineDirty: () => true });
 
     const select = selectTimeline("tl_2");
+    await flush();
 
-    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    // sc-12018: the guard used the desktop-safe appConfirm dialog (not the raw window.confirm).
+    expect(appConfirmMock).toHaveBeenCalledTimes(1);
+    expect(appConfirmMock.mock.calls[0][0]).toMatchObject({ tone: "danger" });
     expect(setSelectedTimelineId).not.toHaveBeenCalled();
     // Controlled <select> snaps back to the still-active timeline.
     expect(select.value).toBe("tl_1");
   });
 
-  it("switches when dirty and the user accepts the confirm", () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  it("switches when dirty and the user accepts the confirm", async () => {
+    appConfirmMock.mockResolvedValue(true);
     const { setSelectedTimelineId } = render({ isActiveTimelineDirty: () => true });
 
     selectTimeline("tl_2");
+    await flush();
 
-    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(appConfirmMock).toHaveBeenCalledTimes(1);
     expect(setSelectedTimelineId).toHaveBeenCalledWith("tl_2");
   });
 });

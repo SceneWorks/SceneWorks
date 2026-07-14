@@ -800,6 +800,7 @@ export function App() {
     activeProject,
     activeProjectRef,
     setError,
+    pushNotice,
     requestedGpu,
     setActiveView,
     createVideoJob,
