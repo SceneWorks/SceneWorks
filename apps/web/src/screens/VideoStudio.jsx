@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { pickClosestResolution } from "../resolutionMatch.js";
+import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
@@ -740,15 +740,21 @@ export function VideoStudio() {
     }
     setSubmitting(true);
     try {
+      // Fold the general-preset stack (epic 11949): send the composed prompt + negative and,
+      // when a general sets aspect, the snapped resolution. The client is authoritative for the
+      // composed prompt, so presetPromptResolvedClientSide tells the server to skip its fold.
+      // (Video has no `count` field, so the stack's variations don't apply here.)
+      const stackActive = generalStack.length > 0;
+      const stackResolution = stackActive && composedStack.resolution ? parseResolution(composedStack.resolution) : null;
       const job = await createVideoJob({
         mode,
-        prompt,
-        negativePrompt,
+        prompt: stackActive ? composedStack.prompt : prompt,
+        negativePrompt: stackActive ? composedStack.negativePrompt : negativePrompt,
         model,
         duration: Number(duration),
         fps: Number(fps),
-        width,
-        height,
+        width: stackResolution?.width ?? width,
+        height: stackResolution?.height ?? height,
         quality,
         seed: seed === "" ? null : Number(seed),
         recipePresetId: selectedPreset?.id ?? null,
@@ -756,6 +762,7 @@ export function VideoStudio() {
         // preset-LoRA seed effect), so the client is authoritative for preset LoRAs — tell the
         // server to skip its own merge so edits/removals stick. Parity with the Image Studio.
         presetLorasResolvedClientSide: selectedPreset ? true : undefined,
+        presetPromptResolvedClientSide: stackActive || undefined,
         characterId: characterId || null,
         characterLookId: characterLookId || null,
         sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,

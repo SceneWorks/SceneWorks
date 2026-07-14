@@ -301,6 +301,79 @@ describe("SceneWorks app shell", () => {
     expect(submittedAdvanced).not.toHaveProperty("recipePresetPrompt");
   });
 
+  // epic 11949 Phase 5: with a general preset stacked, the client composes the prompt + negative
+  // and flags presetPromptResolvedClientSide so the server takes them verbatim (no double-fold).
+  it("sends the client-composed prompt + flag when a general preset is stacked", async () => {
+    const createVideoJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [],
+            characters: [],
+            createPersonDetectionJob: () => {},
+            createPersonTrackJob: () => {},
+            createVideoJob,
+            gpuOptions: ["auto"],
+            latestVideoAssets: [],
+            loras: [],
+            setPreviewAsset: () => {},
+            rememberLocalGenerationJob: () => {},
+            personTracks: [],
+            purgeAsset: () => {},
+            presets: [
+              {
+                id: "film_look",
+                name: "Film Look",
+                kind: "general",
+                prompt: { suffix: "Kodak Portra 400" },
+                defaults: { negativePrompt: "flicker" },
+              },
+            ],
+            requestedGpu: "auto",
+            setRequestedGpu: () => {},
+            updateAssetStatus: () => {},
+            videoModels: [
+              {
+                id: "ltx_2_3",
+                name: "LTX",
+                type: "video",
+                capabilities: ["text_to_video", "image_to_video"],
+                defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+                limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
+              },
+            ],
+          },
+          <VideoStudio />,
+        ),
+      );
+    });
+    await settle();
+
+    // Toggle the general preset into the stack (no base model preset selected).
+    await act(async () => {
+      [...container.querySelectorAll(".general-preset-chips .preset-chip")]
+        .find((chip) => chip.textContent.trim() === "Film Look")
+        .click();
+    });
+    await settle();
+
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip").click();
+    });
+
+    expect(createVideoJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        // base=none, so the user's prompt + the general's append fragment, composed client-side.
+        prompt: "Camera slowly pushes in while the scene comes alive, Kodak Portra 400",
+        negativePrompt: "flicker",
+        presetPromptResolvedClientSide: true,
+      }),
+    );
+  });
+
   it("lets a promptless video model (SVD) submit without a text prompt", async () => {
     const createVideoJob = vi.fn();
     root = createRoot(container);

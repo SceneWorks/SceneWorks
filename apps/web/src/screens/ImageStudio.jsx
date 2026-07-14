@@ -141,7 +141,7 @@ import {
 import { readLastTier, writeLastTier } from "../lastTierStore.js";
 import { readDefaultGenerationQuality } from "../generationQuality.js";
 import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
-import { pickClosestResolution } from "../resolutionMatch.js";
+import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
@@ -1383,6 +1383,17 @@ export function ImageStudio() {
     }
     setSelectedPresetId(launchRequest.presetId);
   }, [launchRequest?.id]);
+  // A general-preset launch (epic 11949): toggle it into the stack without touching the model
+  // or mode. The chip is available in every studio, so a Video-bound user can re-add it there.
+  useEffect(() => {
+    if (launchRequest?.view !== "Image" || !launchRequest.presetGeneralId) {
+      return;
+    }
+    if (!generalStackIds.includes(launchRequest.presetGeneralId)) {
+      toggleGeneralPreset(launchRequest.presetGeneralId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [launchRequest?.id]);
   useEffect(() => {
     if (launchRequest?.view !== "Image" || !launchRequest.recipe) {
       return;
@@ -1826,26 +1837,42 @@ export function ImageStudio() {
   // sendStructured / submitCaption / submitBackend / resolutionOverride). This replaced a
   // hand-copied batch twin that had drifted (dropped the img2img reference + pidTarget/img2img
   // advanced knobs), silently ignoring an img2img reference and PiD "2K" tier on batch runs.
-  const buildJobRequest = (overrides = {}) =>
-    buildImageJobRequest({
+  const buildJobRequest = (overrides = {}) => {
+    // Fold the general-preset stack (epic 11949) into this request. The prompt is composed per
+    // call so it wraps either the single prompt or a per-batch-item prompt; a structured JSON
+    // caption can't take flat fragments, so the prompt fold is skipped there (the stack's
+    // negative/aspect/count still apply). When the stack folds the prompt, the client is
+    // authoritative — presetPromptResolvedClientSide tells the server to skip its own fold.
+    const stackActive = generalStack.length > 0;
+    const isStructured = overrides.sendStructured ?? false;
+    const foldPrompt = stackActive && !isStructured;
+    const promptToSend =
+      foldPrompt && overrides.promptToSend != null
+        ? composePreset({ base: selectedPreset, generalStack, userText: overrides.promptToSend, resolutionOptions })
+            .prompt
+        : overrides.promptToSend;
+    const stackResolution = stackActive && composedStack.resolution ? parseResolution(composedStack.resolution) : null;
+    return buildImageJobRequest({
       // Overrides — the one legitimate single-vs-batch difference.
-      promptToSend: overrides.promptToSend,
+      promptToSend,
       submitIntent: overrides.submitIntent,
-      sendStructured: overrides.sendStructured ?? false,
+      sendStructured: isStructured,
       submitCaption: overrides.submitCaption,
       submitBackend: overrides.submitBackend,
-      resolutionOverride: overrides.resolutionOverride ?? null,
+      // A per-prompt [WxH] batch directive wins; otherwise the stack's aspect drives resolution.
+      resolutionOverride: overrides.resolutionOverride ?? stackResolution,
       // Shared studio settings (identical for both paths).
       resolution,
       mode,
-      negativePrompt,
+      negativePrompt: stackActive ? composedStack.negativePrompt : negativePrompt,
       model,
-      count,
+      count: stackActive && composedStack.count != null ? composedStack.count : count,
       seed,
       posePayload,
       width,
       height,
       recipePresetId: selectedPreset?.id ?? null,
+      presetPromptResolvedClientSide: foldPrompt,
       characterId,
       characterLookId,
       multiReference,
@@ -1897,6 +1924,7 @@ export function ImageStudio() {
       effectiveControlScale,
       controlOverlayId,
     });
+  };
 
   // One image-job request for a single resolved batch prompt. Thin adapter over the shared
   // buildJobRequest: resolves the per-prompt override defaults (structured-caption payload and a
