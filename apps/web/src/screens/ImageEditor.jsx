@@ -5,6 +5,7 @@ import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "reac
 import { apiFetch } from "../api.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
+import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
@@ -301,6 +302,22 @@ export function leaveGuardMessage({ dirty, aiOpPending }) {
   if (dirty) return "You have unsaved edits in the Image Editor. Leave and discard them?";
   if (aiOpPending) return "An image edit is still running. Leave and abandon it?";
   return null;
+}
+
+// Decide which of the two leave-guards to arm (sc-11959). The browser-unload
+// (close/refresh) guard must arm whenever there are unsaved edits or an in-flight AI op,
+// EVEN when the editor is backgrounded under keep-alive — an app close/refresh would
+// otherwise silently discard a backgrounded editor's unsaved edits (a safeguard that
+// predates keep-alive). The in-app nav guard, by contrast, only arms while the editor is
+// the foreground view, so a backgrounded (still-mounted) editor doesn't re-fire its
+// confirm() on every UNRELATED navigation between other screens.
+export function leaveGuardArming({ dirty, aiOpPending, screenActive }) {
+  const message = leaveGuardMessage({ dirty, aiOpPending });
+  return {
+    message,
+    beforeUnload: Boolean(message),
+    inApp: Boolean(message) && Boolean(screenActive),
+  };
 }
 
 // Compose the multi-reference edit's `referenceAssetIds`: the working image (staged as the scratch
@@ -641,6 +658,11 @@ export function ImageEditor() {
     theme = "light",
     changeTheme,
   } = useAppContext();
+  // Under the keep-alive shell (sc-11959) the editor stays mounted (hidden) after the
+  // user navigates away, so it can no longer rely on unmount to drop its leave-guard.
+  // `true` unless a KeepAlivePane says this editor is backgrounded (defaults to true
+  // for the direct-render unit tests, which carry no ScreenActiveContext).
+  const screenActive = useScreenActive();
   // Mac UI gating (sc-3486): the upscale tool itself runs in-process on Rust (Real-ESRGAN,
   // sc-3489), so it is available on a gated Mac — this block is a defensive guard that stays
   // null. The second engine (AuraSR) is dropped on Mac (sc-3668) and gated per-engine below.
@@ -2298,21 +2320,26 @@ export function ImageEditor() {
   // the App-level survivor sweep, orphaning the scratch upload).
   const aiOpPending = Boolean(aiOp);
   useEffect(() => {
-    const message = leaveGuardMessage({ dirty, aiOpPending });
-    if (!message) return undefined;
+    // See leaveGuardArming: the beforeunload handler arms whenever there are unsaved
+    // edits / an in-flight op (even backgrounded); the in-app nav guard only arms while
+    // this editor is foregrounded (sc-11959).
+    const { message, beforeUnload, inApp } = leaveGuardArming({ dirty, aiOpPending, screenActive });
+    if (!beforeUnload) return undefined;
     const onBeforeUnload = (event) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", onBeforeUnload);
-    const unregister = registerLeaveGuard?.(
-      () => typeof window.confirm !== "function" || window.confirm(message),
-    );
+    const unregister = inApp
+      ? registerLeaveGuard?.(
+          () => typeof window.confirm !== "function" || window.confirm(message),
+        )
+      : undefined;
     return () => {
       window.removeEventListener("beforeunload", onBeforeUnload);
       if (typeof unregister === "function") unregister();
     };
-  }, [dirty, aiOpPending, registerLeaveGuard]);
+  }, [dirty, aiOpPending, registerLeaveGuard, screenActive]);
 
   // Claim the in-flight AI op's jobId with App so its survivor sweep (sc-8850) knows this
   // editor is alive and owns loading the result back before the scratch/result assets are

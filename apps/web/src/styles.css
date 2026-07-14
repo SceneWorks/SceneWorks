@@ -1104,6 +1104,36 @@ button:focus-visible {
   margin-top: 18px;
 }
 
+/* Selective keep-alive panes (sc-11959). A kept-alive creative screen is wrapped in a
+   .keep-alive-pane so it can stay mounted (state preserved) and merely toggle
+   visibility on navigation. `display: contents` makes the pane transparent to the
+   .workspace flex column — its child screen becomes the flex item and lays out exactly
+   as a direct .workspace child would — so the flex/margin rules above are mirrored here
+   for that grandchild. When backgrounded the pane carries the `hidden` attribute →
+   display:none (dropped from layout and the a11y tree). */
+.keep-alive-pane {
+  display: contents;
+}
+.keep-alive-pane[hidden] {
+  display: none;
+}
+.workspace > .keep-alive-pane > * {
+  flex: 0 0 auto;
+}
+.workspace > .keep-alive-pane > section[class*="-surface"],
+.workspace > .keep-alive-pane > section[class*="-layout"],
+.workspace > .keep-alive-pane > .page-frame {
+  margin: 0 22px;
+}
+.workspace > .keep-alive-pane > section[class*="-surface"]:first-of-type,
+.workspace > .keep-alive-pane > .page-frame:first-of-type {
+  margin-top: var(--pad-panel);
+}
+.workspace > .keep-alive-pane > section[class*="-surface"]:last-of-type,
+.workspace > .keep-alive-pane > .page-frame:last-of-type {
+  margin-bottom: 30px;
+}
+
 .notice {
   padding: 10px 14px;
   border: 1px solid color-mix(in oklch, var(--danger) 35%, var(--border));
@@ -8199,6 +8229,14 @@ details[open] > summary.lora-scope-group-heading::before,
 /* The editor is a full-bleed canvas app: cancel the workspace edge margin the
    `[class*="-surface"]` rules apply to every other screen. */
 .workspace > section.image-editor-surface {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+}
+
+/* Keep-alive (sc-11959): the Image Editor is a full-bleed canvas; mirror the direct-child
+   full-bleed override for when it renders inside a .keep-alive-pane (display:contents). */
+.workspace > .keep-alive-pane > section.image-editor-surface {
   flex: 1 1 auto;
   min-height: 0;
   margin: 0;
