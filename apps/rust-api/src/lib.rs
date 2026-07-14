@@ -166,7 +166,8 @@ use manifest::{strip_jsonc_comments, API_MANAGED_MANIFEST_HEADER};
 mod models;
 use models::{
     create_model_convert_job, create_model_download_job, create_model_import_job, delete_model,
-    list_models, model_catalog, model_is_installed, resolve_model_manifest_entry, ModelSizeCache,
+    delete_model_variant, list_models, model_catalog, model_is_installed,
+    resolve_model_manifest_entry, ModelSizeCache,
 };
 #[cfg(test)]
 use models::{
@@ -1249,6 +1250,10 @@ pub(crate) fn create_app_with_state(
         )
         .route("/api/v1/models", get(list_models))
         .route("/api/v1/models/:model_id", delete(delete_model))
+        .route(
+            "/api/v1/models/:model_id/variants/:variant",
+            delete(delete_model_variant),
+        )
         .route(
             "/api/v1/models/:model_id/download",
             post(create_model_download_job),
