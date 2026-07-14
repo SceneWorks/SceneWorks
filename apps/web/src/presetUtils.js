@@ -1,4 +1,5 @@
 import { issue } from "./validation/issues.js";
+import { pickClosestResolution } from "./resolutionMatch.js";
 
 export const noPresetId = "__no_preset__";
 
@@ -412,6 +413,85 @@ export function presetPromptParts(preset) {
   return [preset?.prompt?.prefix, preset?.prompt?.suffix]
     .map((part) => String(part ?? "").trim())
     .filter(Boolean);
+}
+
+function trimmedFragment(preset, key) {
+  const value = preset?.prompt?.[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+const ASPECT_RATIO_RE = /^[0-9]+:[0-9]+$/;
+
+// Compose the effective generation inputs from the optional base model preset, the ordered
+// general-preset stack, and the user's own prompt/negative (epic 11949). Fragments compose
+// FLAT, not as nested wraps: base prefix/suffix bracket the whole thing (outermost), the
+// stacked general fragments fill in between in selection order. This is what keeps stacking
+// several presets from turning into an unreadable mess — and the studio surfaces the result
+// in a live preview so a bad fragment is visible before generating. Pure and side-effect free.
+//
+//   prompt   = [base.prefix, ...gen.prefix]  +  userText  +  [...gen.suffix, base.suffix]
+//   negative = userNegative + every stacked general's negativePrompt (tags concat cleanly)
+//   resolution = base.resolution if set, else the last stacked general's aspect → nearest
+//                supported resolution (needs resolutionOptions, the active model's menu)
+//   count      = base.count if set, else the last stacked general's count
+//
+// resolution/count are returned as null when nothing in the stack sets them, so the caller
+// keeps the studio's own value. The base model preset's fragments are ALWAYS included so the
+// preview equals what a client-authoritative generation sends (the server skips its fold).
+export function composePreset({
+  base = null,
+  generalStack = [],
+  userText = "",
+  userNegative = "",
+  resolutionOptions = [],
+} = {}) {
+  const stack = Array.isArray(generalStack) ? generalStack.filter(Boolean) : [];
+  const prepends = [trimmedFragment(base, "prefix"), ...stack.map((preset) => trimmedFragment(preset, "prefix"))].filter(
+    Boolean,
+  );
+  const appends = [...stack.map((preset) => trimmedFragment(preset, "suffix")), trimmedFragment(base, "suffix")].filter(
+    Boolean,
+  );
+  const trimmedUser = String(userText ?? "").trim();
+  const prompt = [...prepends, ...(trimmedUser ? [trimmedUser] : []), ...appends].join(", ");
+
+  const negativePrompt = [
+    String(userNegative ?? "").trim(),
+    ...stack.map((preset) => String(preset?.defaults?.negativePrompt ?? "").trim()),
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  // aspect: the last stacked general that declares one wins.
+  let aspect = null;
+  for (const preset of stack) {
+    const value = preset?.defaults?.aspect;
+    if (typeof value === "string" && ASPECT_RATIO_RE.test(value)) {
+      aspect = value;
+    }
+  }
+  const baseResolution =
+    typeof base?.defaults?.resolution === "string" && /^[0-9]+x[0-9]+$/.test(base.defaults.resolution)
+      ? base.defaults.resolution
+      : null;
+  let resolution = baseResolution;
+  if (!resolution && aspect && Array.isArray(resolutionOptions) && resolutionOptions.length) {
+    const [width, height] = aspect.split(":").map(Number);
+    resolution = pickClosestResolution(width, height, resolutionOptions.map(String));
+  }
+
+  // count: base preset's if set, else the last stacked general that declares one.
+  let count = Number.isFinite(Number(base?.defaults?.count)) ? Number(base.defaults.count) : null;
+  if (count === null) {
+    for (const preset of stack) {
+      const value = preset?.defaults?.count;
+      if (Number.isFinite(Number(value))) {
+        count = Number(value);
+      }
+    }
+  }
+
+  return { prompt, negativePrompt, aspect, resolution, count };
 }
 
 export function presetValidation(preset, loras, model) {

@@ -791,6 +791,44 @@ export function SavePresetPanel({
   );
 }
 
+// The live composed-prompt preview shown when a general-preset stack is active (epic 11949).
+// It is the safeguard against messy concatenation: the user sees the exact prompt (and any
+// negative/aspect/count the stack contributes) BEFORE generating, so a bad fragment or a
+// surprising order is obvious and fixable. Renders nothing when the stack is empty.
+export function PresetStackPreview({ generalStack, composed, stackAddsNegative, stackAddsCount }) {
+  if (!generalStack.length) {
+    return null;
+  }
+  const extras = [];
+  if (composed.aspect) {
+    extras.push(`Aspect ${composed.aspect}${composed.resolution ? ` → ${composed.resolution}` : ""}`);
+  }
+  if (stackAddsCount && composed.count != null) {
+    extras.push(`${composed.count} variation${composed.count === 1 ? "" : "s"}`);
+  }
+  if (stackAddsNegative && composed.negativePrompt) {
+    extras.push(`Negative: ${composed.negativePrompt}`);
+  }
+  return (
+    <div className="preset-stack-preview">
+      <div className="preset-stack-order">
+        <span className="eyebrow">Stacked</span>
+        {generalStack.map((preset, index) => (
+          <React.Fragment key={preset.id}>
+            {index > 0 ? <span className="preset-stack-arrow" aria-hidden="true">→</span> : null}
+            <span className="preset-stack-name">{preset.name ?? preset.id}</span>
+          </React.Fragment>
+        ))}
+      </div>
+      <div className="preset-stack-prompt">
+        <span className="eyebrow">Prompt sent</span>
+        <p>{composed.prompt ? composed.prompt : <span className="token">your prompt</span>}</p>
+      </div>
+      {extras.length ? <p className="preset-stack-extras">{extras.join(" · ")}</p> : null}
+    </div>
+  );
+}
+
 // The "what this preset adds" strip shown under the preset picker in both studios.
 export function PresetGuidanceStrip({ selectedPreset, presetPromptParts, presetLoraDetails }) {
   // Nothing to say when no preset is active — the visible controls already describe the run.

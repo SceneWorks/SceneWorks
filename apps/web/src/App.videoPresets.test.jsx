@@ -189,6 +189,13 @@ describe("SceneWorks app shell", () => {
     );
     expect(activeGeneral).toEqual(["Film Look"]);
     expect(field(container, "Model").value).toBe(modelBefore);
+
+    // epic 11949 Phase 4: toggling a general preset surfaces a live composed-prompt preview
+    // showing exactly what the run will send — the safeguard against messy concatenation.
+    const preview = container.querySelector(".preset-stack-preview");
+    expect(preview).not.toBeNull();
+    expect(preview.querySelector(".preset-stack-prompt p").textContent).toContain("Kodak Portra 400");
+    expect(preview.textContent).toContain("Film Look");
   });
 
   it("applies preset defaults to video jobs", async () => {

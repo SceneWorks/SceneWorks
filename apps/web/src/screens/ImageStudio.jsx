@@ -106,11 +106,13 @@ import {
   loraIsInstalled,
   serializeLora,
   noPresetId,
+  composePreset,
 } from "../presetUtils.js";
 import {
   LoraPickerSection,
   onPromptKeyDown,
   PresetGuidanceStrip,
+  PresetStackPreview,
   SavePresetPanel,
   useGenerationStudio,
   useSavePreset,
@@ -1248,6 +1250,7 @@ export function ImageStudio() {
     selectedPresetId,
     setSelectedPresetId,
     availableGeneralPresets,
+    generalStack,
     generalStackIds,
     toggleGeneralPreset,
     presetPromptParts,
@@ -1292,6 +1295,22 @@ export function ImageStudio() {
     initialShowIncompatibleLoras: saved.showIncompatibleLoras ?? false,
     initialGeneralStackIds: saved.generalStackIds ?? [],
   });
+
+  // The effective generation inputs once the general-preset stack is folded in (epic 11949).
+  // The live preview shows exactly this; a client-authoritative submit sends it (Phase 5).
+  const composedStack = useMemo(
+    () =>
+      composePreset({
+        base: selectedPreset,
+        generalStack,
+        userText: prompt,
+        userNegative: negativePrompt,
+        resolutionOptions,
+      }),
+    [selectedPreset, generalStack, prompt, negativePrompt, resolutionOptions],
+  );
+  const stackAddsNegative = generalStack.some((preset) => Boolean(preset?.defaults?.negativePrompt));
+  const stackAddsCount = generalStack.some((preset) => Number.isFinite(Number(preset?.defaults?.count)));
 
   // ---- Krea-style image edit LoRA (epic 10871, P4.1) ----
   // The Krea 2 edit surface REQUIRES a dual-conditioning `image_edit` LoRA (R5) that the base
@@ -2850,6 +2869,13 @@ export function ImageStudio() {
             selectedPreset={selectedPreset}
             presetPromptParts={presetPromptParts}
             presetLoraDetails={presetLoraDetails}
+          />
+
+          <PresetStackPreview
+            generalStack={generalStack}
+            composed={composedStack}
+            stackAddsNegative={stackAddsNegative}
+            stackAddsCount={stackAddsCount}
           />
 
           <AdvancedSection

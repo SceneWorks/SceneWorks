@@ -7326,6 +7326,63 @@ details[open] > summary.lora-scope-group-heading::before,
   font-size: 13px;
 }
 
+/* Live composed-prompt preview for a general-preset stack (epic 11949). The safeguard
+   against messy concatenation: shows the exact prompt the run will send, plus the active
+   stack order and any negative/aspect/count the stack contributes. */
+.preset-stack-preview {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+.preset-stack-order {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.preset-stack-name {
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.preset-stack-arrow {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.preset-stack-prompt {
+  display: grid;
+  gap: 3px;
+}
+
+.preset-stack-prompt p {
+  margin: 0;
+  font: 400 12.5px/1.55 var(--font-mono);
+  color: var(--text);
+  word-break: break-word;
+}
+
+.preset-stack-prompt .token {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.preset-stack-extras {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 .lora-picker {
   display: grid;
   gap: 10px;

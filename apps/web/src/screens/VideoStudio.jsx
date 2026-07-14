@@ -36,11 +36,13 @@ import {
   loraLooksLikeIcLora,
   noPresetId,
   serializeLora,
+  composePreset,
 } from "../presetUtils.js";
 import {
   LoraPickerSection,
   onPromptKeyDown,
   PresetGuidanceStrip,
+  PresetStackPreview,
   SavePresetPanel,
   useGenerationStudio,
   useSavePreset,
@@ -290,6 +292,7 @@ export function VideoStudio() {
     selectedPresetId,
     setSelectedPresetId,
     availableGeneralPresets,
+    generalStack,
     generalStackIds,
     toggleGeneralPreset,
     presetPromptParts,
@@ -704,6 +707,22 @@ export function VideoStudio() {
   const [width, height] = resolution.split("x").map((value) => Number(value));
   const durationOptions = selectedModel?.limits?.durations ?? [4, 6, 8, 10];
   const resolutionOptions = selectedModel?.limits?.resolutions ?? ["768x512", "640x640", "1280x720", "720x1280"];
+
+  // Effective inputs once the general-preset stack folds in (epic 11949); drives the live
+  // preview and (Phase 5) the client-authoritative submit.
+  const composedStack = useMemo(
+    () =>
+      composePreset({
+        base: selectedPreset,
+        generalStack,
+        userText: prompt,
+        userNegative: negativePrompt,
+        resolutionOptions,
+      }),
+    [selectedPreset, generalStack, prompt, negativePrompt, resolutionOptions],
+  );
+  const stackAddsNegative = generalStack.some((preset) => Boolean(preset?.defaults?.negativePrompt));
+  const stackAddsCount = generalStack.some((preset) => Number.isFinite(Number(preset?.defaults?.count)));
   const fpsOptions = selectedModel?.limits?.fps ?? [24, 25, 30];
   const durationHint =
     selectedModel?.ui?.durationHint ??
@@ -1206,6 +1225,13 @@ export function VideoStudio() {
             selectedPreset={selectedPreset}
             presetPromptParts={presetPromptParts}
             presetLoraDetails={presetLoraDetails}
+          />
+
+          <PresetStackPreview
+            generalStack={generalStack}
+            composed={composedStack}
+            stackAddsNegative={stackAddsNegative}
+            stackAddsCount={stackAddsCount}
           />
 
           {durationHint ? <p className="helper-copy">{durationHint}</p> : null}
