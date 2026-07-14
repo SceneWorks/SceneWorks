@@ -1,7 +1,7 @@
 # Phase 5 Inference Consumer Cutover
 
 > **Status:** Immutable inference release published; both product cutovers pass local validation.
-> Hosted SceneWorks validation awaits the scoped private-repository read secret described below.
+> Hosted SceneWorks validation uses the configured scoped private-repository read secret below.
 > **Cutover release:** `SceneWorks/inference` tag `runtime-2026.07.0`
 > **Release commit:** `48cc2d87e14de0189ac4f7763fddc0a8581c2e68`
 
@@ -123,9 +123,9 @@ labels are preserved. Six repository variables select revision-addressed persist
 the real-weight workflow materializes a missing immutable snapshot on demand and reuses it on later
 runs.
 
-Public product workflows still require a least-privilege `SCENEWORKS_INFERENCE_READ_TOKEN` secret
-before a hosted Cargo job can fetch the private release. Local validation uses the authenticated
-system Git client and does not weaken that boundary.
+Public product workflows use the configured least-privilege `SCENEWORKS_INFERENCE_READ_TOKEN`
+secret before a hosted Cargo job fetches the private release. Local validation uses the
+authenticated system Git client and does not weaken that boundary.
 
 Release evidence for exact commit `48cc2d87e14de0189ac4f7763fddc0a8581c2e68` is:
 

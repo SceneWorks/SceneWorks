@@ -6,13 +6,21 @@
 
 use std::sync::OnceLock;
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
 use gen_core::core_llm::TextLlmRegistration;
 use gen_core::core_llm::{LoadSpec as TextLoadSpec, ModelRequirements, TextLlm, TextLlmRegistry};
-use gen_core::{
-    Captioner, Generator, ImageEmbedder, LoadSpec, ModelRegistration, ProviderRegistry,
-    TextEmbedder, Trainer,
-};
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use gen_core::{Captioner, ImageEmbedder, ModelRegistration, TextEmbedder, Trainer};
+use gen_core::{Generator, LoadSpec, ProviderRegistry};
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use runtime_cuda as platform_runtime;
@@ -78,11 +86,21 @@ pub(crate) fn text() -> &'static TextLlmRegistry {
     }
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn generators() -> impl ExactSizeIterator<Item = &'static ModelRegistration> {
     media().generators()
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
 pub(crate) fn textllms() -> impl ExactSizeIterator<Item = &'static TextLlmRegistration> {
     text().registrations()
 }
@@ -91,14 +109,26 @@ pub(crate) fn load(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Genera
     media().load(id, spec)
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn load_trainer(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Trainer>> {
     media().load_trainer(id, spec)
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn load_captioner(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Captioner>> {
     media().load_captioner(id, spec)
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn load_image_embedder(
     id: &str,
     spec: &LoadSpec,
@@ -106,6 +136,10 @@ pub(crate) fn load_image_embedder(
     media().load_image_embedder(id, spec)
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn load_text_embedder(
     id: &str,
     spec: &LoadSpec,

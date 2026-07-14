@@ -1,8 +1,9 @@
 # SceneWorks Multi-Repository Rearchitecture Plan
 
 > **Status:** Inference Phases 0–5 are implemented, released, and locally validated at
-> `runtime-2026.07.0`. Hosted SceneWorks validation awaits its scoped private-repository read
-> secret. Product-repository consolidation and legacy-repository archival remain separate decisions.
+> `runtime-2026.07.0`. Hosted SceneWorks validation uses its configured scoped private-repository
+> read secret. Product-repository consolidation and legacy-repository archival remain separate
+> decisions.
 >
 > **Date:** 2026-07-12
 >
