@@ -5,10 +5,11 @@
 // (the Raw pipeline routed to `generate_edit_with_progress`: each source rides as
 // in-context VAE tokens at a distinct RoPE frame AND grounds the Qwen3-VL vision
 // tower). Conditions on one source (`Conditioning::Reference`) or two in FIXED order
-// — scene = image 1, person = image 2 (`Conditioning::MultiReference`, epic 10871
-// P1.3). One output per requested count, each an edit of the same source(s) under the
-// instruction prompt. Krea is MLX-only, so this is the only Krea edit path (the candle
-// mirror is a separate slice, P1.2/P2.2 + the sc-11085 seam registration). Mirrors
+// — image 1 (required) + image 2 (optional) (`Conditioning::MultiReference`, epic 10871
+// P1.3); either image can be a person. One output per requested count, each an edit of
+// the same source(s) under the instruction prompt. Krea is MLX-only, so this is the only
+// Krea edit path (the candle mirror is a separate slice, P1.2/P2.2 + the sc-11085 seam
+// registration). Mirrors
 // `generate_flux2_edit_stream`'s blocking-thread + streamed-events shape and reuses
 // `consume_gen_events`.
 // ---------------------------------------------------------------------------
@@ -26,8 +27,9 @@ fn krea_edit_engine_id(model: &str) -> &'static str {
     }
 }
 
-/// The most source images a Krea edit conditions on (epic 10871 P1.3): scene = image 1, person =
-/// image 2, a FIXED order (swapping degrades identity per the LoRA authors). Mirrors the engine cap
+/// The most source images a Krea edit conditions on (epic 10871 P1.3): image 1 (required) + image 2
+/// (optional), a FIXED order (swapping degrades identity per the LoRA authors); either can be a
+/// person. Mirrors the engine cap
 /// (`mlx-gen-krea` / `candle-gen-krea` `MAX_EDIT_REFERENCES`); the worker rejects a longer list up
 /// front so the error is clear rather than surfacing from the engine seam.
 const KREA_MAX_EDIT_REFERENCES: usize = 2;
@@ -139,7 +141,7 @@ fn krea_edit_generate_one(
 /// Real Krea 2 edit generation: load the `krea_2_edit` generator once, then one output per requested
 /// count, each an edit of the shared source(s) under the instruction prompt. Mirrors
 /// [`generate_flux2_edit_stream`]'s blocking-thread + streamed-events shape and reuses
-/// [`consume_gen_events`]; differs in the required edit LoRA (R5) and the scene+person edit
+/// [`consume_gen_events`]; differs in the required edit LoRA (R5) and the two-reference edit
 /// conditioning (one `Reference` or a two-source `MultiReference`, epic 10871 P1.3).
 async fn generate_krea_edit_stream(
     api: &ApiClient,
@@ -177,7 +179,7 @@ async fn generate_krea_edit_stream(
     let adapter_label = model.adapter_label();
 
     // Resolve the source image(s) on the async side (decode → Send Image moved into the worker thread).
-    // Krea edit conditions on scene = image 1, person = image 2 (fixed order, epic 10871 P1.3): the
+    // Krea edit conditions on image 1 (required) + image 2 (optional) (fixed order, epic 10871 P1.3): the
     // multi-image picker sends the plural `referenceAssetIds`, and a single Image-Edit `sourceAssetId`
     // is the one-source case (both via `edit_reference_ids`). Capped at [`KREA_MAX_EDIT_REFERENCES`] —
     // `build_edit_conditioning` then emits a single `Reference` (1) or a `MultiReference` (2), which the
@@ -190,7 +192,7 @@ async fn generate_krea_edit_stream(
     }
     if reference_ids.len() > KREA_MAX_EDIT_REFERENCES {
         return Err(WorkerError::InvalidPayload(format!(
-            "Krea 2 edit takes at most {KREA_MAX_EDIT_REFERENCES} images (scene, then person)."
+            "Krea 2 edit takes at most {KREA_MAX_EDIT_REFERENCES} images (image 1, then image 2)."
         )));
     }
     let mut sources = Vec::with_capacity(reference_ids.len());

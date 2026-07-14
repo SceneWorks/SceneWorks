@@ -79,6 +79,8 @@ export function buildImageJobRequest(state) {
     variationStrength,
     trueCfgScale,
     img2imgStrength,
+    supportsTextStyle,
+    textStyleGain,
     viewAngles,
     viewAngle,
     faceRestore,
@@ -182,6 +184,9 @@ export function buildImageJobRequest(state) {
       supportsImg2img,
       img2imgReferenceAssetId,
       img2imgStrength,
+      // Krea "text style" tap-reweight gain (sc-11878).
+      supportsTextStyle,
+      textStyleGain,
       identityStructure,
       controlnetScale,
       variationStrength,

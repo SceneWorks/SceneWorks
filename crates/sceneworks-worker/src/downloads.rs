@@ -37,6 +37,44 @@ pub(crate) fn streaming_download_client() -> reqwest::Client {
         .expect("static download client config is always valid")
 }
 
+/// Forward-progress watchdog window: the longest a streaming download may run WITHOUT
+/// gaining at least [`DOWNLOAD_STALL_MIN_PROGRESS`] bytes before the worker abandons
+/// the current connection and resumes it with a fresh HTTP Range request. This catches
+/// the Hugging Face failure mode the chunk-level [`HTTP_READ_TIMEOUT`] cannot: a CDN
+/// edge that keeps the connection alive and dribbles bytes just often enough to reset
+/// the 60s read timeout, so the transfer never *fails* but effectively never
+/// *progresses*. Because the bytes already on disk are kept and continued via Range,
+/// the abort is lossless and the reconnect usually lands on a healthy edge. Default 10
+/// minutes; `SCENEWORKS_DOWNLOAD_STALL_TIMEOUT_SECONDS` overrides it, and `0` disables
+/// the watchdog entirely.
+pub(crate) const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Minimum bytes a download must gain within a [`DOWNLOAD_STALL_TIMEOUT`] window to
+/// count as "making progress". Any real transfer clears 1 MiB in milliseconds, so a
+/// window that fails to move even this much is hung, not slow-but-live. This threshold
+/// is what makes the watchdog robust to a byte-at-a-time trickle that a naive
+/// "any byte resets the clock" check would never flag.
+pub(crate) const DOWNLOAD_STALL_MIN_PROGRESS: u64 = 1024 * 1024;
+
+/// Give up after this many CONSECUTIVE stall-triggered resumes that each fail to
+/// advance the on-disk byte count. A resume that makes real progress resets the
+/// counter, so a genuinely slow-but-live transfer keeps going indefinitely; only an
+/// endpoint wedged at the same offset trips this and surfaces a clear timeout error
+/// instead of looping forever.
+const MAX_STALL_RESUMES_WITHOUT_PROGRESS: u32 = 3;
+
+/// Resolve the stall-watchdog window: [`DOWNLOAD_STALL_TIMEOUT`] by default,
+/// overridable via `SCENEWORKS_DOWNLOAD_STALL_TIMEOUT_SECONDS`. An explicit `0`
+/// disables the watchdog (returns `None`), matching the "no total timeout" posture of
+/// the streaming clients.
+fn download_stall_timeout() -> Option<Duration> {
+    let seconds = crate::settings::env_u64_any(
+        &["SCENEWORKS_DOWNLOAD_STALL_TIMEOUT_SECONDS"],
+        DOWNLOAD_STALL_TIMEOUT.as_secs(),
+    );
+    (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
 // The cross-process download lock (F-098 / sc-8900) is only reachable from
 // `ensure_cached_file_verified`, which is gated to the macOS MLX runtime and the
 // off-Mac candle InstantID lane; gate the whole apparatus the same way so the bare
@@ -614,6 +652,14 @@ async fn download_file_inner(
     } else {
         AUTO_RESUME_ATTEMPTS
     };
+    // Forward-progress watchdog (independent of the network-error resume budget above):
+    // a hung-but-alive stream is abort-and-resumed as often as it keeps advancing, and
+    // only a source wedged at the same offset for MAX_STALL_RESUMES_WITHOUT_PROGRESS
+    // consecutive windows gives up. `last_stall_bytes` starts at 0 so the FIRST stall
+    // never counts as no-progress (any partial file already beats it).
+    let stall_timeout = download_stall_timeout();
+    let mut stall_resumes_without_progress = 0_u32;
+    let mut last_stall_bytes = 0_u64;
     loop {
         let existing_bytes = existing_download_bytes(dest, expected_size).await?;
         if expected_size.is_some_and(|size| existing_bytes == size) {
@@ -656,7 +702,11 @@ async fn download_file_inner(
         // A tokio interval's first tick is immediate; consume it so the first chunk
         // doesn't spuriously fire a zero-byte progress report before any transfer.
         interval.tick().await;
+        // Give this connection a fresh stall window: the time spent (re)issuing the
+        // request must not count against forward progress.
+        progress.reset_stall_clock();
         let mut transfer_error = None;
+        let mut stalled = false;
         loop {
             tokio::select! {
                 chunk = response.chunk() => {
@@ -674,10 +724,43 @@ async fn download_file_inner(
                 }
                 _ = interval.tick() => {
                     report_download_progress(context, progress).await?;
+                    // A live-but-hung stream (bytes trickling in under HTTP_READ_TIMEOUT
+                    // yet never advancing) is caught here and abort-and-resumed below.
+                    if stall_timeout
+                        .is_some_and(|timeout| progress.is_stalled(timeout, DOWNLOAD_STALL_MIN_PROGRESS))
+                    {
+                        stalled = true;
+                        break;
+                    }
                 }
             }
         }
         output.flush().await?;
+        if stalled {
+            // Resume from the bytes already on disk. As long as each stalled attempt
+            // advances the on-disk count, keep going; only a source stuck at the same
+            // offset for consecutive windows is fatal.
+            let on_disk = existing_download_bytes(dest, expected_size).await?;
+            if on_disk > last_stall_bytes {
+                stall_resumes_without_progress = 0;
+            } else {
+                stall_resumes_without_progress += 1;
+            }
+            last_stall_bytes = on_disk;
+            if stall_resumes_without_progress >= MAX_STALL_RESUMES_WITHOUT_PROGRESS {
+                let timeout_secs = stall_timeout.map_or(0, |timeout| timeout.as_secs());
+                return Err(WorkerError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "{label} download stalled: no forward progress for \
+                         {MAX_STALL_RESUMES_WITHOUT_PROGRESS} consecutive {timeout_secs}s windows \
+                         (stuck at {}). The source appears hung; try again.",
+                        format_bytes_with_exact(on_disk),
+                    ),
+                )));
+            }
+            continue;
+        }
         if let Some(error) = transfer_error {
             if let Some(expected) = expected_size {
                 let written = tokio::fs::metadata(dest).await?.len();
@@ -1327,6 +1410,12 @@ pub(crate) struct DownloadProgress<'a> {
     total_bytes: Option<u64>,
     started_at: Instant,
     report_interval: Duration,
+    /// Downloaded-byte count at the last point the stall watchdog observed at least
+    /// [`DOWNLOAD_STALL_MIN_PROGRESS`] of forward progress.
+    stall_checkpoint_bytes: u64,
+    /// When [`Self::stall_checkpoint_bytes`] was last advanced; its `elapsed()` is the
+    /// time this transfer has gone without meaningful progress.
+    stall_checkpoint_at: Instant,
 }
 
 impl<'a> DownloadProgress<'a> {
@@ -1344,6 +1433,8 @@ impl<'a> DownloadProgress<'a> {
             total_bytes,
             started_at: now,
             report_interval,
+            stall_checkpoint_bytes: started_bytes,
+            stall_checkpoint_at: now,
         }
     }
 
@@ -1353,6 +1444,29 @@ impl<'a> DownloadProgress<'a> {
 
     fn record_transferred(&mut self, bytes: u64) {
         self.transferred_bytes = self.transferred_bytes.saturating_add(bytes);
+    }
+
+    /// Reset the stall watchdog to "made progress just now", granting the next
+    /// (re)connect a full stall window before it can be judged hung. Called at the
+    /// start of each attempt so the idle gap spent re-issuing the request is not
+    /// counted against the transfer.
+    fn reset_stall_clock(&mut self) {
+        self.stall_checkpoint_bytes = self.downloaded_bytes();
+        self.stall_checkpoint_at = Instant::now();
+    }
+
+    /// Advance the stall checkpoint when at least `min_progress` bytes have moved since
+    /// it was last set, then report whether the transfer has now gone a full `timeout`
+    /// without that much progress — i.e. it is hung and should be abort-and-resumed. A
+    /// byte-at-a-time trickle never clears `min_progress`, so it is correctly flagged
+    /// as stalled, unlike a naive "time since last byte" check.
+    fn is_stalled(&mut self, timeout: Duration, min_progress: u64) -> bool {
+        let current = self.downloaded_bytes();
+        if current.saturating_sub(self.stall_checkpoint_bytes) >= min_progress {
+            self.stall_checkpoint_bytes = current;
+            self.stall_checkpoint_at = Instant::now();
+        }
+        self.stall_checkpoint_at.elapsed() >= timeout
     }
 
     fn discard_started_bytes(&mut self, bytes: u64) {
@@ -1573,5 +1687,61 @@ mod http_timeout_tests {
         );
 
         server.abort();
+    }
+}
+
+/// sc-download-hang: the forward-progress watchdog. `HTTP_READ_TIMEOUT` only catches a
+/// *fully idle* stream (any received byte resets it), so a Hugging Face CDN edge that
+/// dribbles bytes under that window keeps the transfer alive yet never advancing. These
+/// tests pin the decision logic — advance-on-progress, flag-on-stall, reset-per-attempt
+/// — that drives the abort-and-resume in `download_file_inner`.
+#[cfg(test)]
+mod stall_watchdog_tests {
+    use super::{DownloadProgress, DOWNLOAD_STALL_MIN_PROGRESS};
+    use std::time::Duration;
+
+    fn progress() -> DownloadProgress<'static> {
+        DownloadProgress::new("repo", 0, Some(1_000_000_000), Duration::from_millis(10))
+    }
+
+    /// A transfer that receives nothing is flagged stalled once the window elapses.
+    #[test]
+    fn flags_a_fully_idle_transfer() {
+        let mut progress = progress();
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(progress.is_stalled(Duration::from_millis(1), DOWNLOAD_STALL_MIN_PROGRESS));
+    }
+
+    /// The load-bearing case: a trickle *below* the progress threshold still counts as
+    /// stalled, where a naive "time since last byte" check would be reset by every drip.
+    #[test]
+    fn flags_a_sub_threshold_trickle() {
+        let mut progress = progress();
+        // Far less than 1 MiB — exactly what a wedged CDN edge dribbles out.
+        progress.record_transferred(64);
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(progress.is_stalled(Duration::from_millis(1), DOWNLOAD_STALL_MIN_PROGRESS));
+    }
+
+    /// Real progress (≥ the threshold) advances the checkpoint, so a healthy transfer is
+    /// never flagged even after a long elapsed time.
+    #[test]
+    fn ignores_a_healthy_transfer() {
+        let mut progress = progress();
+        std::thread::sleep(Duration::from_millis(10));
+        progress.record_transferred(DOWNLOAD_STALL_MIN_PROGRESS);
+        // The checkpoint advances on this call; with a generous window it is not stalled.
+        assert!(!progress.is_stalled(Duration::from_secs(3600), DOWNLOAD_STALL_MIN_PROGRESS));
+    }
+
+    /// `reset_stall_clock` grants a resumed attempt a fresh window — the idle gap spent
+    /// re-issuing the request must not immediately re-trip the watchdog.
+    #[test]
+    fn reset_grants_a_fresh_window() {
+        let mut progress = progress();
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(progress.is_stalled(Duration::from_millis(1), DOWNLOAD_STALL_MIN_PROGRESS));
+        progress.reset_stall_clock();
+        assert!(!progress.is_stalled(Duration::from_secs(3600), DOWNLOAD_STALL_MIN_PROGRESS));
     }
 }

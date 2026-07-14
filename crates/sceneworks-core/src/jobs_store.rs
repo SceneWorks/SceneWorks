@@ -3661,17 +3661,48 @@ mod candle_routing_tests {
 
     #[test]
     fn non_candle_families_and_variants_are_never_candle_eligible() {
-        // A family with no candle provider at all (`sana_1600m` — MLX-only) AND the still-unwired
-        // weight/shape variants of wired families (edit ids) all stay on the Python torch worker.
-        // (chroma / kolors / sensenova ARE candle-routed now — sc-5484 / sc-5576 — for txt2img; the
-        // FLUX.2-klein `_kv` / `_true_v2` weight variants are too — sc-7459 — see the dedicated test below.
-        // `bernini_image` is now candle-routed off-Mac too — sc-10996 — see `bernini_candle_txt2img_and_\
-        // i2i_route_to_candle` below.)
-        for model in ["sana_1600m", "z_image_edit", "qwen_image_edit"] {
+        // The still-unwired weight/shape variants of wired families (edit ids) plus a genuinely
+        // txt2img-torch-only image id (`pulid_flux_dev` — its only candle lane is the bespoke
+        // character-reference path, so a PLAIN txt2img prompt has no candle route) all stay on the Python
+        // torch worker. (chroma / kolors / sensenova ARE candle-routed now — sc-5484 / sc-5576 — for
+        // txt2img; the FLUX.2-klein `_kv` / `_true_v2` weight variants are too — sc-7459 — see the
+        // dedicated test below. `bernini_image` is now candle-routed off-Mac too — sc-10996. Base
+        // `sana_1600m` AND the Sprint distill `sana_sprint_1600m` are candle-routed off-Mac too —
+        // sc-11780 / sc-11781 — see `sana_candle_txt2img_routes_to_candle` below.)
+        for model in ["pulid_flux_dev", "z_image_edit", "qwen_image_edit"] {
             assert!(
                 !image_request_candle_eligible(model, &object(json!({ "prompt": "p" }))),
                 "{model} must fall back to the Python worker"
             );
+        }
+    }
+
+    #[test]
+    fn sana_candle_txt2img_routes_to_candle() {
+        // sc-11780 (epic 8485): base `sana_1600m` plain txt2img rides the candle lane (the
+        // `candle-gen-sana` provider, candle-gen #495 — the whole `Efficient-Large-Model/
+        // Sana_1600M_1024px_diffusers` snapshot). sc-11781: the CFG-free SANA-Sprint distill
+        // `sana_sprint_1600m` rides it too (the `candle-gen-sana` Sprint pipeline, candle-gen #498 — the
+        // whole `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` snapshot). Pure txt2img on BOTH:
+        // any conditioning / LoRA / quant shape still defers to the Python torch worker (neither candle
+        // base path advertises adapters or quant — the Sprint adapter rejects all three).
+        for model in ["sana_1600m", "sana_sprint_1600m"] {
+            assert!(
+                image_request_candle_eligible(model, &object(json!({ "prompt": "a red fox" }))),
+                "{model} plain txt2img must be candle-eligible (sc-11780 / sc-11781)"
+            );
+            for payload in [
+                json!({ "prompt": "p", "mode": "edit_image", "sourceAssetId": "a" }),
+                json!({ "prompt": "p", "referenceAssetId": "a" }),
+                json!({ "prompt": "p", "maskAssetId": "a" }),
+                json!({ "prompt": "p", "loras": [{ "path": "x", "weight": 0.8 }] }),
+                json!({ "prompt": "p", "advanced": { "mlxQuantize": 4 } }),
+            ] {
+                assert!(
+                    !image_request_candle_eligible(model, &object(payload.clone())),
+                    "{model} conditioning/adapter/quant shape must fall back to torch: {payload}"
+                );
+            }
         }
     }
 
@@ -3795,11 +3826,51 @@ mod candle_routing_tests {
             assert!(!ideogram_edit_candle_eligible(&object(json!({
                 "model": model, "mode": "edit_image"
             }))));
-            // Pure IP-Adapter reference (Ideogram has no candle IP path) still defers to torch.
+            // The raw txt2img gate still rejects any `referenceAssetId` (it stays txt2img-only). A
+            // text_to_image reference is the `ui.img2img` "Image reference" tile, handled by the bespoke
+            // `ideogram_img2img_candle_eligible` branch in the dispatcher (covered by
+            // `ideogram_img2img_routes_to_candle`), NOT the generic gate.
             assert!(!image_request_candle_eligible(
                 model,
                 &object(json!({ "referenceAssetId": "a" }))
             ));
+        }
+    }
+
+    #[test]
+    fn ideogram_img2img_routes_to_candle() {
+        // sc-10261 (epic 8588): the candle parity of the MLX Ideogram generic img2img arm (sc-10192). An
+        // `ideogram_4` / `ideogram_4_turbo` job in a non-edit mode with a `referenceAssetId` is the
+        // `ui.img2img` "Image reference" tile — a single `Conditioning::Reference` with NO `Mask`, which
+        // the candle `candle-gen-ideogram` pipeline denoises as plain img2img (`resolve_edit` →
+        // `prepare_edit` with `mask = None`). Branched before the txt2img gate (which rejects any
+        // `referenceAssetId`), disjoint from the `edit_image` Remix/inpaint lane. No worker/candle-gen
+        // change — the worker `generate_candle_stream` already resolves the init generically (sc-10134).
+        for model in ["ideogram_4", "ideogram_4_turbo"] {
+            let img2img = json!({
+                "model": model,
+                "referenceAssetId": "asset_1",
+                "advanced": { "strength": 0.6 }
+            });
+            assert!(
+                image_job_is_candle_eligible(&image_generate_job(img2img.clone())),
+                "{model} img2img (referenceAssetId, non-edit) must be candle-eligible (sc-10261)"
+            );
+            // The eligibility predicate: a non-edit reference is img2img; an `edit_image` reference is the
+            // Remix/inpaint edit lane, NOT this img2img arm.
+            assert!(ideogram_img2img_candle_eligible(&object(json!({
+                "model": model, "referenceAssetId": "asset_1"
+            }))));
+            assert!(!ideogram_img2img_candle_eligible(&object(json!({
+                "model": model, "mode": "edit_image", "referenceAssetId": "asset_1"
+            }))));
+            // A blank/absent reference is plain txt2img, not img2img.
+            assert!(!ideogram_img2img_candle_eligible(&object(json!({
+                "model": model, "referenceAssetId": "  "
+            }))));
+            assert!(!ideogram_img2img_candle_eligible(&object(
+                json!({ "model": model })
+            )));
         }
     }
 
@@ -3926,6 +3997,47 @@ mod candle_routing_tests {
                 ),
                 "{model} with a LoRA must defer to torch (no candle inference LoRA)"
             );
+        }
+    }
+
+    #[test]
+    fn boogu_base_and_turbo_img2img_route_to_candle() {
+        // sc-11786 (epic 8588): a `boogu_image` / `boogu_image_turbo` job in a non-edit mode with a
+        // `referenceAssetId` is now the REGISTRY img2img path — the candle Base/Turbo generators advertise
+        // `Reference` and VAE-encode it into the reduced-schedule denoise. Branched before the txt2img gate
+        // (which rejects any `referenceAssetId`), disjoint from the `boogu_image_edit` instruction-edit lane.
+        for model in ["boogu_image", "boogu_image_turbo"] {
+            let img2img = json!({
+                "model": model,
+                "referenceAssetId": "asset_1",
+                "advanced": { "strength": 0.6 }
+            });
+            assert!(
+                image_job_is_candle_eligible(&image_generate_job(img2img.clone())),
+                "{model} img2img (referenceAssetId, non-edit) must be candle-eligible (sc-11786)"
+            );
+            // The eligibility predicate: a non-edit reference is img2img; an `edit_image` reference is NOT
+            // (that is the `boogu_image_edit` instruction-edit lane, a different engine id).
+            assert!(boogu_img2img_candle_eligible(&object(json!({
+                "model": model, "referenceAssetId": "asset_1"
+            }))));
+            assert!(!boogu_img2img_candle_eligible(&object(json!({
+                "model": model, "mode": "edit_image", "referenceAssetId": "asset_1"
+            }))));
+            // A blank/absent reference is plain txt2img, not img2img.
+            assert!(!boogu_img2img_candle_eligible(&object(json!({
+                "model": model, "referenceAssetId": "  "
+            }))));
+            assert!(!boogu_img2img_candle_eligible(&object(
+                json!({ "model": model })
+            )));
+        }
+        // Base/Turbo carry NO separate edit lane, so an `edit_image` job on them stays ineligible (the
+        // img2img branch is gated to a non-edit mode; the edit branch is gated to `boogu_image_edit`).
+        for model in ["boogu_image", "boogu_image_turbo"] {
+            assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
+                "model": model, "mode": "edit_image", "sourceAssetId": "asset_1"
+            }))));
         }
     }
 
@@ -4147,7 +4259,10 @@ mod candle_routing_tests {
                 "{model} Q{bits} tier-select should stay on candle"
             );
         }
-        // Every conditioning shape defers (txt2img + LoRA only).
+        // Every conditioning shape defers AT THE TXT2IMG GATE (txt2img + LoRA only). NB `referenceAssetId`
+        // here tests the low-level `image_request_candle_eligible` gate, which still rejects a raw
+        // reference; the sc-10134 img2img lane is a SEPARATE branch in `image_job_is_candle_eligible` that
+        // claims a `krea_2_turbo` reference BEFORE this gate (see `krea_2_turbo_img2img_routes_to_candle`).
         for case in [
             json!({ "mode": "edit_image", "sourceAssetId": "a" }),
             json!({ "referenceAssetId": "a" }),
@@ -4158,6 +4273,151 @@ mod candle_routing_tests {
                 !image_request_candle_eligible(model, &object(case.clone())),
                 "{model} conditioning shape must fall back to torch: {case}"
             );
+        }
+    }
+
+    #[test]
+    fn krea_2_turbo_img2img_routes_to_candle() {
+        // sc-10134 (epic 8588 slice A): a `krea_2_turbo` job in a NON-edit mode carrying a
+        // `referenceAssetId` is the bespoke candle `render_img2img` lane, branched out in
+        // `image_job_is_candle_eligible` BEFORE the txt2img gate (which still rejects any raw reference —
+        // see `krea_lora_and_quant_stay_on_candle_but_conditioning_defers`). The job-level predicate is
+        // what claims it; the gate keeps deferring the reference shape.
+        let img2img = json!({
+            "model": "krea_2_turbo",
+            "referenceAssetId": "asset_1",
+            "advanced": { "strength": 0.55 }
+        });
+        assert!(
+            image_job_is_candle_eligible(&image_generate_job(img2img.clone())),
+            "krea_2_turbo img2img (referenceAssetId, non-edit) must be candle-eligible"
+        );
+        assert!(krea_img2img_candle_eligible(&object(img2img)));
+        // An explicit `text_to_image` mode is still img2img (the tile may send the mode or omit it).
+        assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "krea_2_turbo",
+            "mode": "text_to_image",
+            "referenceAssetId": "asset_1"
+        }))));
+        // NOT the img2img lane: an `edit_image` reference is the Kontext `KreaEdit` surface.
+        assert!(!krea_img2img_candle_eligible(&object(json!({
+            "mode": "edit_image",
+            "referenceAssetId": "asset_1"
+        }))));
+        // A plain txt2img job (no reference) is not img2img — it falls to the generic candle txt2img lane.
+        assert!(!krea_img2img_candle_eligible(&object(
+            json!({ "prompt": "an emerald forest" })
+        )));
+        // Raw img2img (sc-10226): the undistilled `krea_2_raw` sibling gets its own branch (engine
+        // `render_base_img2img`), so a non-edit `krea_2_raw` reference job is candle-eligible too.
+        let raw_img2img = json!({
+            "model": "krea_2_raw",
+            "referenceAssetId": "asset_1",
+            "advanced": { "strength": 0.55 }
+        });
+        assert!(
+            image_job_is_candle_eligible(&image_generate_job(raw_img2img.clone())),
+            "krea_2_raw img2img (referenceAssetId, non-edit) must be candle-eligible (sc-10226)"
+        );
+        assert!(krea_img2img_candle_eligible(&object(raw_img2img)));
+        // An `edit_image` `krea_2_raw` reference is still the Kontext edit surface, not img2img.
+        assert!(!krea_img2img_candle_eligible(&object(json!({
+            "mode": "edit_image",
+            "referenceAssetId": "asset_1"
+        }))));
+    }
+
+    #[test]
+    fn zimage_base_img2img_routes_to_candle() {
+        // sc-10265 (epic 8588): a `z_image` (base, NOT Turbo) job in a non-edit mode with a
+        // `referenceAssetId` is the REGISTRY img2img path — the base candle engine already serves it
+        // (sc-8646) and the worker resolves the init generically (sc-10134), so only the router branch was
+        // missing. Branched before the txt2img gate that rejects references.
+        let img2img = json!({
+            "model": "z_image",
+            "referenceAssetId": "asset_1",
+            "advanced": { "strength": 0.6 }
+        });
+        assert!(
+            image_job_is_candle_eligible(&image_generate_job(img2img.clone())),
+            "z_image base img2img (referenceAssetId, non-edit) must be candle-eligible"
+        );
+        assert!(zimage_img2img_candle_eligible(&object(img2img)));
+        // NOT the edit lane: `edit_image` is the bespoke `ZimageEdit` stream, not registry img2img.
+        assert!(!zimage_img2img_candle_eligible(&object(json!({
+            "mode": "edit_image",
+            "referenceAssetId": "asset_1"
+        }))));
+        // A pose job stays on the control lane (poses branch first), not img2img.
+        assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "z_image",
+            "advanced": { "poses": [{ "keypoints": [] }] }
+        }))));
+    }
+
+    #[test]
+    fn zimage_turbo_img2img_routes_to_candle() {
+        // sc-11783 (epic 8588): `z_image_turbo` in a non-edit mode with a `referenceAssetId` is now the
+        // REGISTRY img2img path too — the candle Turbo generator advertises `Reference` and blends the
+        // reference into the CFG-free denoise. Branched AFTER identity/edit/control, before the txt2img gate.
+        let img2img = json!({
+            "model": "z_image_turbo",
+            "referenceAssetId": "asset_1",
+            "advanced": { "strength": 0.6 }
+        });
+        assert!(
+            image_job_is_candle_eligible(&image_generate_job(img2img.clone())),
+            "z_image_turbo img2img (referenceAssetId, non-edit) must be candle-eligible (sc-11783)"
+        );
+        // Precedence: the identity-init shape (`character_image` mode + `referenceStrength`) stays on the
+        // `zimage_identity` lane, NOT this img2img branch (both reach the candle worker, different lanes).
+        assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "z_image_turbo",
+            "mode": "character_image",
+            "referenceAssetId": "asset_1",
+            "advanced": { "referenceStrength": 0.7 }
+        }))));
+        // The `edit_image` masked-edit shape is the bespoke `ZimageEdit` stream, not this img2img branch.
+        assert!(!zimage_img2img_candle_eligible(&object(json!({
+            "model": "z_image_turbo",
+            "mode": "edit_image",
+            "referenceAssetId": "asset_1"
+        }))));
+        // A pose job stays on the Turbo control lane (poses branch first), not img2img.
+        assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "z_image_turbo",
+            "advanced": { "poses": [{ "keypoints": [] }] }
+        }))));
+    }
+
+    #[test]
+    fn sd3_img2img_routes_to_candle() {
+        // sc-11784 (epic 8588): each SD3.5 variant in a non-edit mode with a `referenceAssetId` is the
+        // REGISTRY img2img path — the candle `candle-gen-sd3` generators advertise `Reference` and
+        // VAE-encode it into the reduced denoise tail (real CFG for Large/Medium, distilled for Turbo).
+        // Branched before the txt2img gate that rejects references. Candle/CUDA parity of MLX sc-10189.
+        for model in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
+            let img2img = json!({
+                "model": model,
+                "referenceAssetId": "asset_1",
+                "advanced": { "strength": 0.6 }
+            });
+            assert!(
+                image_job_is_candle_eligible(&image_generate_job(img2img.clone())),
+                "{model} img2img (referenceAssetId, non-edit) must be candle-eligible (sc-11784)"
+            );
+            assert!(is_sd3_family_candle_model(model));
+            assert!(sd3_img2img_candle_eligible(&object(img2img)));
+            // A plain txt2img (no reference) still rides the generic candle gate — not the img2img branch.
+            assert!(!sd3_img2img_candle_eligible(&object(
+                json!({ "model": model })
+            )));
+            // The `edit_image` shape is NOT registry img2img (SD3.5 has no candle edit lane).
+            assert!(!sd3_img2img_candle_eligible(&object(json!({
+                "model": model,
+                "mode": "edit_image",
+                "referenceAssetId": "asset_1"
+            }))));
         }
     }
 
@@ -4215,6 +4475,14 @@ mod candle_routing_tests {
             // sc-10996 (epic 6562): the candle Bernini still-image companion routes to candle for plain
             // t2i (the dedicated `generate_candle_bernini_image_stream` lane, `frames:1`).
             "bernini_image",
+            // sc-11780 (epic 8485): base `sana_1600m` plain txt2img rides the candle lane now (the
+            // `candle-gen-sana` provider, candle-gen #495). Pure txt2img — its conditioning/adapter/quant
+            // refusal is asserted just below.
+            "sana_1600m",
+            // sc-11781 (epic 8485): the CFG-free SANA-Sprint distill `sana_sprint_1600m` rides the candle
+            // lane too (the `candle-gen-sana` Sprint pipeline, candle-gen #498). Pure txt2img (1–4 step
+            // SCM/TrigFlow) — the Sprint adapter rejects quant / LoRA / control, so those defer to torch.
+            "sana_sprint_1600m",
         ] {
             assert!(
                 worker_supports_job(
@@ -4224,12 +4492,25 @@ mod candle_routing_tests {
                 "candle worker should claim {model} plain txt2img"
             );
         }
-        // Refuses a family with no candle provider (`sana_1600m` — MLX-only, candle_routed=false), and a
-        // conditioning shape on a wired family — both defer to torch.
+        // Refuses a genuinely txt2img-torch-only image id (`pulid_flux_dev` — its only candle lane is the
+        // bespoke character-reference path, so a PLAIN txt2img prompt has no candle route, candle_routed=
+        // false), an adapter shape on the txt2img-only SANA base (candle SANA advertises neither quant nor
+        // LoRA — sc-11780/sc-11781), and a conditioning shape on a wired family — all defer to torch.
         assert!(!worker_supports_job(
             &candle,
-            &image_generate_job(json!({ "model": "sana_1600m", "prompt": "p" }))
+            &image_generate_job(json!({ "model": "pulid_flux_dev", "prompt": "p" }))
         ));
+        assert!(
+            !worker_supports_job(
+                &candle,
+                &image_generate_job(json!({
+                    "model": "sana_1600m",
+                    "prompt": "p",
+                    "loras": [{ "path": "x", "weight": 0.8 }]
+                }))
+            ),
+            "candle SANA base is pure txt2img — a LoRA request defers to torch (sc-11780)"
+        );
         assert!(!worker_supports_job(
             &candle,
             &image_generate_job(json!({

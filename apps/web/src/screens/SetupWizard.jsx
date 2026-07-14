@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { Logo } from "../components/Logo.jsx";
 import { terminalStatuses } from "../constants.js";
+import { isDesktop, tauriInvoke } from "../runtime.js";
 
 // The curated "getting started" set is catalog-driven: a model is recommended when
 // its manifest entry carries `recommended: true` (config/manifests/builtin.models.jsonc).
@@ -49,6 +50,12 @@ export function SetupWizard({ models, jobs, onDownloadModel, onCreateProject, on
   const [started, setStarted] = useState(() => new Set());
   const [projectName, setProjectName] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // When the first project can't be created — almost always because the chosen
+  // workspace folder rejects writes (issue #1435 / sc-11855) — the wizard is the
+  // ONLY surface the user can see (it overlays the whole app, including Settings),
+  // so it must offer its own recovery: repoint the workspace folder + restart.
+  const [createFailed, setCreateFailed] = useState(false);
+  const [workspaceNotice, setWorkspaceNotice] = useState("");
   const initializedRef = useRef(false);
 
   // The catalog may arrive a tick after mount; seed the recommended selection
@@ -110,13 +117,37 @@ export function SetupWizard({ models, jobs, onDownloadModel, onCreateProject, on
       return;
     }
     setSubmitting(true);
+    setCreateFailed(false);
     try {
       const created = await onCreateProject(trimmed);
       if (created) {
         await onComplete();
+      } else {
+        // onCreateProject returns null on failure (the exact error is shown in the
+        // app-level banner). Reveal the in-wizard recovery so the user isn't stuck.
+        setCreateFailed(true);
       }
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  // Repoint the workspace folder from inside the wizard. Mirrors the Settings
+  // data-directory control: pick a folder, persist it, then apply on restart
+  // (the data dir is bound when the API sidecar spawns, so it can't move live).
+  async function changeWorkspaceFolder() {
+    setWorkspaceNotice("");
+    try {
+      const picked = await tauriInvoke("choose_data_dir");
+      if (!picked) {
+        return;
+      }
+      await tauriInvoke("set_data_dir", { path: picked });
+      setWorkspaceNotice(
+        `Workspace folder set to ${picked}. Quit and reopen SceneWorks to apply, then finish setup.`,
+      );
+    } catch (error) {
+      setWorkspaceNotice(String(error?.message ?? error));
     }
   }
 
@@ -217,6 +248,25 @@ export function SetupWizard({ models, jobs, onDownloadModel, onCreateProject, on
                 {submitting ? "Setting up…" : "Finish setup"}
               </button>
             </form>
+            {createFailed ? (
+              <div className="setup-wizard-recovery" role="alert">
+                <p>
+                  SceneWorks couldn&apos;t create the project in your current workspace folder — this
+                  is almost always a permissions problem with that location. Choose a different
+                  workspace folder, then restart to finish setup.
+                </p>
+                {isDesktop ? (
+                  <button
+                    className="setup-wizard-secondary"
+                    onClick={changeWorkspaceFolder}
+                    type="button"
+                  >
+                    Change workspace folder…
+                  </button>
+                ) : null}
+                {workspaceNotice ? <p className="setup-wizard-notice">{workspaceNotice}</p> : null}
+              </div>
+            ) : null}
             <button className="setup-wizard-back" onClick={() => setStep("models")} type="button">
               ← Back to models
             </button>

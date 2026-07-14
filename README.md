@@ -34,15 +34,17 @@ per device, so the UI only offers what the current machine can actually run.
 
 - **Image Studio** — text-to-image, image-to-image, and reference-guided
   generation with variations rendered side by side; edit, detail, and inpaint
-  workflows on edit-capable models.
+  workflows on edit-capable models, including two-reference edits (compose a
+  scene image with a person) and pose-locked generation through ControlNet
+  overlays.
 - **Video Studio** — text-to-video and image-to-video, plus clip extend, bridge
   (first/last-frame), and person replacement (VACE).
 - **Character Studio** — keep the same face across every shot using identity
   models (InstantID, PuLID-FLUX) and character LoRAs.
 - **Document Studio** — generate interleaved text-and-image documents such as
   guides, storyboards, and tutorials.
-- **Training Studio** — build captioned datasets and train image/video LoRAs
-  locally (see [LoRA training](#lora-training)).
+- **Training Studio** — build captioned datasets and train image/video LoRAs —
+  and ControlNet pose overlays — locally (see [LoRA training](#lora-training)).
 - **Image Editor** — crop, straighten, flip, transform, upscale, and refine a
   single image on a canvas.
 - **Video Editor** — cut, sequence, and export a timeline to MP4.
@@ -65,14 +67,14 @@ per device, so the UI only offers what the current machine can actually run.
 ## Models
 
 SceneWorks ships a built-in catalog of models it can download and run natively;
-weights are pulled on first use, not bundled. The catalog currently spans **40+
-image models, 9 video models, and utility models**, including:
+weights are pulled on first use, not bundled. The catalog currently spans **45
+image models, 9 video models, and 10 utility models**, including:
 
 - **Image** — Z-Image / Z-Image-Edit, Qwen-Image (+ Edit), FLUX.1
-  [schnell/dev], FLUX.2 [klein/dev], Krea 2 (Raw/Turbo), Ideogram 4, Lens,
-  SenseNova-U1, Boogu, Chroma1, Kolors, Stable Diffusion 3.5 (Large/Medium/
-  Turbo), SANA / SANA-Sprint, SDXL / RealVisXL, plus identity models InstantID
-  and PuLID-FLUX.
+  [schnell/dev], FLUX.2 [klein 9B / dev], Krea 2 (Raw/Turbo), Ideogram 4, Lens,
+  SenseNova-U1, Boogu, Anima 2B, Chroma1, Kolors, Stable Diffusion 3.5
+  (Large/Medium), SANA / SANA-Sprint, SDXL / RealVisXL / Illustrious-XL,
+  Bernini, plus identity models InstantID and PuLID-FLUX.
 - **Video** — LTX-2.3 (and 10Eros), Wan 2.2 (TI2V-5B, T2V/I2V-14B, VACE-Fun
   A14B), Stable Video Diffusion, Bernini, SCAIL-2.
 - **Utility** — Real-ESRGAN and AuraSR v2 upscalers, JoyCaption and Qwen3-VL
@@ -81,8 +83,22 @@ image models, 9 video models, and utility models**, including:
 
 Most models offer bf16 / Q8 / Q4 quantization tiers; each declares its own memory
 floor, and a job that needs more memory than the device has fails with a precise
-reason rather than hanging. Model licenses vary — see
-[Licensing](#licensing).
+reason rather than hanging. You can set a global **default generation quality**,
+each screen remembers the last tier you picked per model, and a model can declare
+a minimum quality floor so it never quietly renders below it. Model licenses vary
+— see [Licensing](#licensing).
+
+## Reuse an existing ComfyUI library
+
+If you already keep models under a ComfyUI `models/` tree, SceneWorks can read
+them **in place** — no copy, no re-download. Set
+`SCENEWORKS_EXTERNAL_MODEL_ROOTS` to the folder(s); the LoRAs and any recognized
+base checkpoints appear in **Model Manager** as external entries. **LoRAs** are
+usable immediately. **Base checkpoints** are assembled from ComfyUI's split
+component directories and run in place for the families whose native loaders have
+landed (Z-Image, Qwen-Image, Wan video, FLUX.2); other families are detected and
+listed but marked not-yet-runnable, with a reason, until their loader ships. This
+is an operator opt-in (off by default) on the Windows/Linux/server builds.
 
 ## Native inference engines
 
@@ -126,6 +142,11 @@ image LoRAs selectable in Image Studio, video LoRAs in Video Studio.
   3.5 (Large/Medium).
 - **Video LoRAs** — LTX-2.3 and Wan 2.2 (TI2V-5B single-expert, and the A14B
   mixture-of-experts denoisers trained as a high/low-noise LoRA pair).
+- **ControlNet overlays** — train a Krea 2 pose-control overlay from your own
+  data: point at a folder of images and let the studio derive the control
+  conditions (e.g. pose skeletons), or bring an already-prepared / COCO-annotated
+  dataset. Trained overlays register in the ControlNet picker and can be selected
+  at generation time, alongside the built-in hosted pose overlay.
 
 Some targets are Apple-Silicon/MLX-only and some run on both backends; see
 [documents/TRAINING_QUICKSTART.md](documents/TRAINING_QUICKSTART.md) for the

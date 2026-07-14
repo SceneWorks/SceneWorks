@@ -95,6 +95,13 @@ pub enum ProjectStoreError {
     Json(serde_json::Error),
     BadRequest(String),
     NotFound(String),
+    /// The workspace storage location rejected the writes a project needs — the
+    /// raw SQLite/IO error ("attempt to write a readonly database", permission
+    /// denied) is opaque, so this carries an actionable, path-naming message
+    /// instead (issue #1435 / sc-11855). Surfaced when the projects tree can be
+    /// read/created but not modified in place (e.g. a macOS inherited ACL or an
+    /// endpoint-security/backup agent that blocks in-place file rewrites).
+    StorageNotWritable(String),
 }
 
 impl std::fmt::Display for ProjectStoreError {
@@ -105,6 +112,7 @@ impl std::fmt::Display for ProjectStoreError {
             Self::Json(error) => write!(formatter, "{error}"),
             Self::BadRequest(detail) => write!(formatter, "{detail}"),
             Self::NotFound(detail) => write!(formatter, "{detail}"),
+            Self::StorageNotWritable(detail) => write!(formatter, "{detail}"),
         }
     }
 }
@@ -321,6 +329,17 @@ impl ProjectStore {
 
         let _guard = self.lock.lock();
         self.ensure_data_dirs()?;
+        // Fail fast with an actionable error if the workspace folder rejects writes,
+        // rather than surfacing an opaque SQLITE_READONLY from deep in provisioning
+        // after a half-built project dir already exists (issue #1435 / sc-11855).
+        if let Err(error) = probe_storage_writable(&self.projects_dir()) {
+            if is_write_denied(&error) {
+                return Err(ProjectStoreError::StorageNotWritable(
+                    storage_not_writable_message(&self.projects_dir()),
+                ));
+            }
+            return Err(error);
+        }
         let project_id = format!("project_{}", random_hex(16)?);
         let slug = slugify(name, "project", None);
         let mut project_path = self.projects_dir().join(format!("{slug}.sceneworks"));
@@ -348,7 +367,21 @@ impl ProjectStore {
             fs::create_dir_all(project_path.join(folder))?;
         }
         write_project_file(&self.app_version, project_path, project_id, name)?;
-        apply_project_migrations(&connect_project_db(project_path)?)?;
+        // Backstop for the create_project preflight (and the only guard on the
+        // lazily-provisioned global pose/keypoint projects): translate a write
+        // denial on the project.db migration into the actionable, path-naming
+        // error instead of a raw SQLITE_READONLY (issue #1435 / sc-11855).
+        if let Err(error) =
+            connect_project_db(project_path).and_then(|conn| apply_project_migrations(&conn))
+        {
+            return Err(if is_write_denied(&error) {
+                ProjectStoreError::StorageNotWritable(storage_not_writable_message(
+                    project_path.parent().unwrap_or(project_path),
+                ))
+            } else {
+                error
+            });
+        }
 
         let mut registry = self
             .load_registry()?
@@ -3533,6 +3566,66 @@ fn connect_project_db(project_path: &Path) -> ProjectStoreResult<Connection> {
     let connection = Connection::open(project_path.join("project.db"))?;
     connection.busy_timeout(Duration::from_millis(5000))?;
     Ok(connection)
+}
+
+/// True when `error` means the storage location rejected a write (as opposed to a
+/// logic/validation error). Covers SQLite `SQLITE_READONLY` ("attempt to write a
+/// readonly database"), `SQLITE_CANTOPEN` (read-only directory), `SQLITE_PERM`,
+/// and IO `PermissionDenied`/`ReadOnlyFilesystem` — the whole family a
+/// non-writable workspace folder produces (issue #1435 / sc-11855).
+fn is_write_denied(error: &ProjectStoreError) -> bool {
+    match error {
+        ProjectStoreError::Sqlite(rusqlite::Error::SqliteFailure(err, _)) => matches!(
+            err.code,
+            rusqlite::ErrorCode::ReadOnly
+                | rusqlite::ErrorCode::CannotOpen
+                | rusqlite::ErrorCode::PermissionDenied
+        ),
+        ProjectStoreError::Io(err) => matches!(
+            err.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+        ),
+        _ => false,
+    }
+}
+
+/// Actionable, path-naming message for a non-writable workspace folder. Replaces
+/// the opaque raw SQLite/IO text the user would otherwise see (issue #1435).
+fn storage_not_writable_message(dir: &Path) -> String {
+    format!(
+        "SceneWorks can't write to your workspace folder ({}). This is almost always a \
+         permissions problem with that location — pick a different workspace folder in \
+         Settings, or fix the folder's permissions, then try again.",
+        dir.display()
+    )
+}
+
+/// Exercise the exact write path a `project.db` needs, so a non-writable
+/// workspace folder fails fast with an actionable error instead of surfacing an
+/// opaque `SQLITE_READONLY` from deep in project provisioning (issue #1435 /
+/// sc-11855). A plain "can I create a file here" check is NOT enough: a granular
+/// write denial (a macOS inherited ACL, or an endpoint-security/backup agent) can
+/// permit creating and appending to files while blocking the in-place rewrites a
+/// rollback-journal SQLite db performs — which is exactly why the WAL-mode
+/// `jobs.db` keeps working while `project.db` writes are refused. So we open a
+/// throwaway rollback-mode db in `dir`, write to it, and clean up.
+///
+/// Public so the rust-api startup path can run the same faithful probe against
+/// the projects tree and log the result for diagnosis (sc-11855 fix C).
+pub fn probe_storage_writable(dir: &Path) -> ProjectStoreResult<()> {
+    fs::create_dir_all(dir)?;
+    let probe = dir.join(format!(".sceneworks-write-test-{}.db", random_hex(8)?));
+    let outcome = (|| -> rusqlite::Result<()> {
+        let connection = Connection::open(&probe)?;
+        connection.execute_batch("create table t (x); insert into t values (1); drop table t;")
+    })();
+    // Best-effort cleanup of the probe db and any rollback-journal sidecar,
+    // regardless of outcome — never mask the real error with a cleanup failure.
+    let _ = fs::remove_file(&probe);
+    let mut journal = probe.clone().into_os_string();
+    journal.push("-journal");
+    let _ = fs::remove_file(PathBuf::from(journal));
+    outcome.map_err(ProjectStoreError::from)
 }
 
 /// Open `project.db` with the shared `busy_timeout` AND run the version-gated
@@ -7239,5 +7332,38 @@ mod tests {
             .and_then(Value::as_array)
             .expect("looks array");
         assert_eq!(looks.len(), threads * per_thread);
+    }
+
+    /// issue #1435 / sc-11855: a workspace folder that rejects writes must fail
+    /// with the actionable `StorageNotWritable` error (naming the folder), not a
+    /// raw `SQLITE_READONLY`/`unable to open database file` that the UI shows
+    /// verbatim. A read-only `projects` dir is the portable stand-in for the
+    /// user's granular write denial.
+    #[cfg(unix)]
+    #[test]
+    fn create_project_on_unwritable_projects_dir_reports_storage_not_writable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test-app");
+        let projects = store.projects_dir();
+        std::fs::create_dir_all(&projects).expect("seed projects dir");
+        std::fs::set_permissions(&projects, std::fs::Permissions::from_mode(0o555))
+            .expect("lock projects dir read-only");
+
+        let result = store.create_project("Test");
+
+        // Restore perms so the tempdir teardown can remove the tree.
+        let _ = std::fs::set_permissions(&projects, std::fs::Permissions::from_mode(0o755));
+
+        match result {
+            Err(ProjectStoreError::StorageNotWritable(detail)) => {
+                assert!(
+                    detail.contains("workspace folder") && detail.contains("Settings"),
+                    "message should be actionable and name the workspace folder: {detail}"
+                );
+            }
+            other => panic!("expected StorageNotWritable, got {other:?}"),
+        }
     }
 }

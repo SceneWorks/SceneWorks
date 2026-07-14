@@ -300,6 +300,20 @@ struct KreaStrictControl {
     /// User LoRA/LoKr adapters applied additively to the frozen base DiT (sc-11721) — a character/style
     /// adapter reshapes the subject while the control branch keeps the pose lock. Empty ⇒ stock control.
     adapters: Vec<AdapterSpec>,
+    /// Control-branch quant the VRAM fit ladder selected (sc-11754, candle-gen #483). `None` (bf16) is the
+    /// big-card default; `Some(Q8)`/`Some(Q4)` is the last-resort rung engaged only when the predicted
+    /// peak wouldn't otherwise fit the (possibly emulated) card. Folds the ~6.6 GB dense branch onto the
+    /// GPU packed (dequant-on-forward) so it never lands dense in VRAM.
+    branch_quant: Option<gen_core::Quant>,
+    /// Force the seam-free tiled VAE decode (sc-11744) — the fit ladder's cheapest rung, engaged only
+    /// when the predicted decode-phase peak exceeds free VRAM. `false` (the big-card default) is the
+    /// monolithic full-speed decode. A *speed* cost, no quality cost.
+    tile_vae_decode: bool,
+    /// Engage sc-6217-style query-row attention chunking on the composable base stack + control branch
+    /// (sc-11745, candle-gen #496) — the fit ladder's rung between VAE-decode tiling and branch quant,
+    /// engaged only when the predicted denoise-phase activation peak exceeds free VRAM. `false` (the
+    /// big-card default) is the unchunked full-speed forward. A *speed* cost (~+6%), byte-identical output.
+    chunk_attention: bool,
     prompt: String,
     width: u32,
     height: u32,
@@ -335,6 +349,11 @@ impl CandleStrictControl for KreaStrictControl {
             root: self.base.clone(),
             control: self.control.clone(),
             adapters: self.adapters.clone(),
+            // bf16 by default; the fit ladder (sc-11754) sets q8/q4 only to fit a constrained card.
+            branch_quant: self.branch_quant,
+            // Unchunked (full speed) by default; the fit ladder (sc-11745) forces query-row attention
+            // chunking only to bound the denoise activation peak on a constrained card — byte-identical.
+            chunk_attention: self.chunk_attention,
         };
         runtime_cuda::providers::krea::Krea2Control::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Krea 2 strict-pose control load failed: {error}"))
@@ -356,6 +375,7 @@ impl CandleStrictControl for KreaStrictControl {
             steps: self.steps as usize,
             control_scale: self.control_scale,
             seed,
+            tile_vae_decode: self.tile_vae_decode,
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
@@ -409,10 +429,80 @@ async fn generate_candle_krea_control_stream(
     let raw_settings =
         krea_control_candle_raw_settings(request, &repo, steps, control_scale, pose_count);
 
+    // VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The control lane is diverted around the base.rs
+    // `generate_candle_stream` fit-gate, so it gets its own here: predict the control-lane peak (base tier
+    // + the ~6.6 GB bf16 control branch + activations + the end-of-render VAE-decode spike) and compare it
+    // against the live/capped free VRAM. On a big card the bf16 branch fits — nothing engages, zero speed/
+    // quality penalty. On a constrained card (or one emulated via `SCENEWORKS_CUDA_VRAM_CAP_GB`) the ladder
+    // engages the last-resort branch-quant rung (q8 near-lossless, then q4 pose-locked) until it fits, else
+    // rejects-before-OOM. The cheaper rungs (VAE-decode tiling sc-11744, activation chunking / res-cap
+    // sc-11745) slot in ahead of branch-quant here once their candle-gen mechanism lands. NB: this lane uses
+    // the UNcached `start_gen_stream` (it doesn't evict the single-slot generator cache), so budget against
+    // raw live free VRAM — the cache's pages are NOT reclaimable by this load, unlike the base.rs gate.
+    let tier =
+        crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
+    let budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    let (tile_vae_decode, chunk_attention, branch_quant) = match crate::krea_control_fit::fit_ladder(
+        crate::krea_control_fit::predicted_control_peak_gb(&request.model_manifest_entry, tier),
+        budget,
+        crate::krea_control_fit::decode_tile_save_gb(&request.model_manifest_entry, tier),
+        crate::krea_control_fit::chunk_attn_save_gb(&request.model_manifest_entry),
+        crate::krea_control_fit::branch_quant_save_gb(&request.model_manifest_entry, "q8"),
+        crate::krea_control_fit::branch_quant_save_gb(&request.model_manifest_entry, "q4"),
+    ) {
+        // Big-card fast path (or no signal): monolithic full-speed decode, unchunked attention, bf16 branch.
+        crate::krea_control_fit::KreaControlFit::Unknown
+        | crate::krea_control_fit::KreaControlFit::Fits {
+            tile_vae_decode: false,
+            chunk_attention: false,
+            branch_quant: None,
+        } => (false, false, None),
+        // Constrained card: the fit ladder engaged the cheapest sufficient set of rungs to fit — the
+        // seam-free tiled VAE decode (sc-11744) and/or query-row attention chunking (sc-11745), both
+        // speed-only, and/or the last-resort branch quant (sc-11743, a quality cost).
+        crate::krea_control_fit::KreaControlFit::Fits {
+            tile_vae_decode: tile,
+            chunk_attention: chunk,
+            branch_quant: quant,
+        } => {
+            tracing::info!(
+                model = %request.model,
+                tier,
+                tile_vae_decode = tile,
+                chunk_attention = chunk,
+                branch_quant = ?quant,
+                "Krea control VRAM fit ladder: predicted peak exceeds free VRAM — engaging rungs \
+                 (VAE-decode tiling, attention chunking, and/or control-branch quant) to fit"
+            );
+            (tile, chunk, quant)
+        }
+        // Won't fit even at the last rung ⇒ reject before the reactive CUDA OOM.
+        crate::krea_control_fit::KreaControlFit::TooBig {
+            needed_gb,
+            available_gb,
+        } => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Krea 2 pose-ControlNet at the {tier} base tier needs ~{needed} GB of VRAM (with \
+                 headroom, tiled VAE decode + attention chunking + control branch quantized to q4) but \
+                 GPU {gpu} has ~{available} GB available. Lower the output resolution or run on a card \
+                 with more VRAM.",
+                needed = needed_gb.round() as i64,
+                available = available_gb.round() as i64,
+                gpu = settings.gpu_id,
+            )));
+        }
+    };
+
     let provider = KreaStrictControl {
         base,
         control,
         adapters,
+        branch_quant,
+        tile_vae_decode,
+        chunk_attention,
         prompt: request.prompt.clone(),
         width: request.width,
         height: request.height,

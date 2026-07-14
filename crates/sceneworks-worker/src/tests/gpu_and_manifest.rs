@@ -542,6 +542,213 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
     );
 }
 
+/// sc-11754 + sc-11744 (epic 8459 → epic 10765): the Krea 2 Turbo `candle.control` block drives the
+/// pose-ControlNet VRAM fit LADDER end-to-end against the SHIPPED manifest bytes. The control-lane sibling
+/// of `flux2_candle_blocks_drive_the_fit_gate_and_reject`: guards the DATA half — dropping the `control`
+/// block makes `predicted_control_peak_gb` return `None` → the control fit-gate goes INERT (bf16 branch
+/// always, the pre-sc-11754 behavior). Exercises the `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card emulation via
+/// `apply_vram_cap` across the cost-ordered rungs: big card → untiled bf16 branch (no penalty); the
+/// VAE-tiling rung (sc-11744) engaging first (a bf16 branch kept where it would otherwise quantize); then
+/// tiling composing with branch-quant; then reject-before-OOM. Expectations are expressed relative to the
+/// SHIPPED deltas (a manifest edit that drifts `decodeTileSaveGb` / `branchQuantSaveGb` fails here) rather
+/// than hard-coded arithmetic.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn krea_control_candle_block_drives_the_fit_ladder() {
+    use crate::krea_control_fit::{
+        branch_quant_save_gb, chunk_attn_save_gb, decode_tile_save_gb, fit_ladder,
+        predicted_control_peak_gb, KreaControlFit,
+    };
+    use crate::vram_gate::apply_vram_cap;
+    use gen_core::Quant;
+
+    let krea = builtin_model_entry("krea_2_turbo");
+    let entry = krea.as_object().expect("krea_2_turbo entry object");
+    let candle = entry
+        .get("candle")
+        .and_then(Value::as_object)
+        .expect("krea_2_turbo candle block");
+    assert!(
+        candle.get("control").and_then(Value::as_object).is_some(),
+        "krea_2_turbo candle.control block present (absent ⇒ control fit-gate inert → always bf16 branch)"
+    );
+
+    // Shipped MEASURED branch-quant deltas (sc-11743): q8 −8.4 (near-lossless), q4 −10.2 (pose-locked).
+    let q8 = branch_quant_save_gb(entry, "q8");
+    let q4 = branch_quant_save_gb(entry, "q4");
+    assert_eq!(q8, Some(8.4));
+    assert_eq!(q4, Some(10.2));
+
+    // Shipped MEASURED activation-chunking delta (sc-11745): the denoise-peak rung between tiling and
+    // branch-quant — a SCALAR (tier-independent), speed-only, byte-identical output.
+    let chunk = chunk_attn_save_gb(entry);
+    let chunk_save = chunk.expect("chunkAttnSaveGb shipped (the sc-11745 chunking rung)");
+    assert!(chunk_save > 0.0, "chunking must recover VRAM, got {chunk_save}");
+
+    // The common small-card install: q4 BASE tier. Peak 30.9 (measured sc-11744) + 2 headroom = 32.9,
+    // and the shipped VAE-decode tiling saving (sc-11744) that caps the decode spike.
+    let q4_peak = predicted_control_peak_gb(entry, "q4");
+    let peak = q4_peak.expect("q4 control peak");
+    assert!((peak - 32.9).abs() < 1e-6);
+    let tile = decode_tile_save_gb(entry, "q4");
+    let tile_save = tile.expect("q4 decodeTileSaveGb shipped (the sc-11744 tiling rung)");
+    assert!(tile_save > 0.0, "tiling must recover VRAM, got {tile_save}");
+    let tiled_peak = peak - tile_save; // tiling only (bf16 branch, cheapest rung)
+    let chunked_peak = tiled_peak - chunk_save; // + chunking (both speed-only, bf16 branch kept)
+
+    // 96 GB card: the monolithic peak fits outright — nothing engages, untiled full-speed bf16 branch.
+    assert_eq!(
+        fit_ladder(q4_peak, apply_vram_cap(None, Some(96.0)), tile, chunk, q8, q4),
+        KreaControlFit::Fits {
+            tile_vae_decode: false,
+            chunk_attention: false,
+            branch_quant: None,
+        }
+    );
+    // A card that fits the TILED peak but not the monolithic one ⇒ the cheapest rung: tiling on, bf16
+    // branch kept (no quality penalty). This is sc-11744's win — a card that used to drop to a q8 branch.
+    assert_eq!(
+        fit_ladder(q4_peak, apply_vram_cap(None, Some(tiled_peak)), tile, chunk, q8, q4),
+        KreaControlFit::Fits {
+            tile_vae_decode: true,
+            chunk_attention: false,
+            branch_quant: None,
+        }
+    );
+    // Just below the tiled peak: tiling alone no longer fits, but the next speed-only rung (chunking) does
+    // (chunked_peak fits) ⇒ tiling + chunking, STILL a bf16 branch — sc-11745's win over dropping to q8.
+    assert_eq!(
+        fit_ladder(q4_peak, apply_vram_cap(None, Some(tiled_peak - 0.5)), tile, chunk, q8, q4),
+        KreaControlFit::Fits {
+            tile_vae_decode: true,
+            chunk_attention: true,
+            branch_quant: None,
+        }
+    );
+    // Just below the chunked peak: both speed rungs stay on and q8 composes (chunked_peak − 8.4 fits) ⇒
+    // tiling + chunking + q8, near-lossless — a shallower quant than the chunk-less ladder would have taken.
+    assert_eq!(
+        fit_ladder(q4_peak, apply_vram_cap(None, Some(chunked_peak - 0.5)), tile, chunk, q8, q4),
+        KreaControlFit::Fits {
+            tile_vae_decode: true,
+            chunk_attention: true,
+            branch_quant: Some(Quant::Q8),
+        }
+    );
+    // A card between (…+q8) and (…+q4): tiling + chunking + q4 (chunked_peak − 10.2) fits ⇒ the deepest rung.
+    assert_eq!(
+        fit_ladder(q4_peak, apply_vram_cap(None, Some(chunked_peak - 8.9)), tile, chunk, q8, q4),
+        KreaControlFit::Fits {
+            tile_vae_decode: true,
+            chunk_attention: true,
+            branch_quant: Some(Quant::Q4),
+        }
+    );
+    // A card below even (tiling + chunking + q4) ⇒ reject-before-OOM at the best-case peak.
+    match fit_ladder(q4_peak, apply_vram_cap(None, Some(chunked_peak - 11.0)), tile, chunk, q8, q4) {
+        KreaControlFit::TooBig { needed_gb, .. } => {
+            assert!(
+                (needed_gb - (chunked_peak - 10.2)).abs() < 1e-6,
+                "best-case (tiling + chunking + q4) peak, got {needed_gb}"
+            );
+        }
+        other => panic!("below tiling+chunking+q4 → reject, got {other:?}"),
+    }
+
+    // The bf16 BASE tier (peak 46.2 measured sc-11743 + 2 = 48.2) carries NO tiling saving (its denoise
+    // steady-state, not the decode, is the peak), but the SCALAR chunking rung applies to every tier: a
+    // 41 GB card engages chunking (speed-only) then q8 (48.2 − chunk_save − 8.4 ≤ 41), the near-lossless
+    // preference before q4 — a shallower quant than the chunk-less walk (which took bare q8 at 39.8).
+    let bf16_peak = predicted_control_peak_gb(entry, "bf16");
+    assert!((bf16_peak.expect("bf16 control peak") - 48.2).abs() < 1e-6);
+    assert_eq!(decode_tile_save_gb(entry, "bf16"), None);
+    assert_eq!(
+        fit_ladder(
+            bf16_peak,
+            apply_vram_cap(None, Some(41.0)),
+            decode_tile_save_gb(entry, "bf16"),
+            chunk,
+            q8,
+            q4
+        ),
+        KreaControlFit::Fits {
+            tile_vae_decode: false,
+            chunk_attention: true,
+            branch_quant: Some(Quant::Q8),
+        }
+    );
+}
+
+/// Live real-hardware validation (sc-11754): the REAL `nvidia-smi` VRAM reading on GPU 0 + the cap →
+/// predict → ladder chain against the SHIPPED krea_2_turbo control block — the one piece the pure/data
+/// tests can't cover (they use a synthetic budget). Mirrors `vram_gate`'s
+/// `live_cuda_budget_drives_a_real_fit_decision`. Ignored by default (needs a CUDA GPU); run on the 96 GB
+/// box with `cargo test -p sceneworks-worker --lib --features backend-candle -- --ignored --nocapture
+/// krea_control_live`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[tokio::test]
+#[ignore]
+async fn krea_control_live_ladder_on_a_real_card() {
+    use crate::krea_control_fit::{
+        branch_quant_save_gb, chunk_attn_save_gb, decode_tile_save_gb, fit_ladder,
+        predicted_control_peak_gb, KreaControlFit,
+    };
+    use crate::vram_gate::apply_vram_cap;
+
+    let krea = builtin_model_entry("krea_2_turbo");
+    let entry = krea.as_object().expect("krea_2_turbo entry object");
+    let tile = decode_tile_save_gb(entry, "q4");
+    let chunk = chunk_attn_save_gb(entry);
+    let q8 = branch_quant_save_gb(entry, "q8");
+    let q4 = branch_quant_save_gb(entry, "q4");
+    // The common small-card install: q4 base tier.
+    let peak = predicted_control_peak_gb(entry, "q4");
+    let tiled_peak = peak.unwrap() - tile.expect("q4 decodeTileSaveGb shipped");
+    let chunked_peak = tiled_peak - chunk.expect("chunkAttnSaveGb shipped");
+
+    let real = crate::gpu::nvidia_vram_budget_gb("0")
+        .await
+        .expect("GPU 0 should report a live VRAM budget on a CUDA box");
+    eprintln!("live CUDA budget GPU0: {real:?}");
+
+    // Uncapped real 96 GB card → untiled monolithic decode, unchunked, bf16 branch, no rung engages.
+    assert_eq!(
+        fit_ladder(peak, apply_vram_cap(Some(real), None), tile, chunk, q8, q4),
+        KreaControlFit::Fits {
+            tile_vae_decode: false,
+            chunk_attention: false,
+            branch_quant: None,
+        },
+        "uncapped 96 GB card keeps the untiled bf16 branch"
+    );
+    // Cap just at the tiled peak (off the REAL reading) → the cheapest rung engages: tiling on, bf16
+    // branch kept (no quality penalty).
+    assert_eq!(
+        fit_ladder(peak, apply_vram_cap(Some(real), Some(tiled_peak)), tile, chunk, q8, q4),
+        KreaControlFit::Fits {
+            tile_vae_decode: true,
+            chunk_attention: false,
+            branch_quant: None,
+        },
+        "cap at the tiled peak → VAE tiling keeps the bf16 branch"
+    );
+    // Cap below (tiling + chunking + q8) off the REAL reading → all three cheaper rungs on + q4 to fit,
+    // where the old tiling-only ladder rejected-before-OOM.
+    assert_eq!(
+        fit_ladder(peak, apply_vram_cap(Some(real), Some(chunked_peak - 8.9)), tile, chunk, q8, q4),
+        KreaControlFit::Fits {
+            tile_vae_decode: true,
+            chunk_attention: true,
+            branch_quant: Some(gen_core::Quant::Q4),
+        },
+        "cap below tiling+chunking+q8 → tiling + chunking + q4 fits"
+    );
+    eprintln!(
+        "krea control fit ladder on a real card: 96→untiled bf16, tiled-peak→tiling, \
+         below-chunk-peak→tiling+chunking, deep→+q4 ✓"
+    );
+}
+
 /// epic 10765 sc-11019: the Qwen-Image-Edit `candle` blocks drive the EDIT fit-gate (qwen_edit_candle.rs,
 /// sc-10968) end-to-end against the SHIPPED manifest bytes — resident-fits → sequential-offload →
 /// reject-before-OOM. The edit sibling of `flux2_candle_blocks_drive_the_fit_gate_and_reject`: guards the

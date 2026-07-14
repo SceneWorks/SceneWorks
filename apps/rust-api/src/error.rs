@@ -103,6 +103,14 @@ impl From<ProjectStoreError> for ApiError {
                 status: StatusCode::NOT_FOUND,
                 detail,
             },
+            // A non-writable workspace folder is an environment problem, not a bad
+            // request — 507 keeps the actionable, path-naming detail intact and out
+            // of the 4xx validation bucket, while still logging server-side for
+            // diagnosis (issue #1435 / sc-11855).
+            ProjectStoreError::StorageNotWritable(detail) => Self {
+                status: StatusCode::INSUFFICIENT_STORAGE,
+                detail,
+            },
             other => Self::internal(other.to_string()),
         }
     }

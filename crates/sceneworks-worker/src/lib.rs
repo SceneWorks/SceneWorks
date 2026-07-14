@@ -111,6 +111,12 @@ mod job_metrics;
 mod supervisor;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod vram_gate;
+// Krea pose-ControlNet VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The dedicated fit-gate for the
+// control lane, which is diverted around the base.rs `generate_candle_stream` gate. Same candle cfg as
+// `vram_gate` (its only consumer, krea_control_candle.rs, is under that cfg) so its pub(crate) helpers
+// aren't dead code under `-D warnings` on the non-candle / macOS builds.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod krea_control_fit;
 use supervisor::*;
 mod model_jobs;
 use model_jobs::*;
@@ -228,6 +234,13 @@ mod flux2_dev_gpu_smoke;
 // the evidence that unblocks flipping `macOnly: false` / `candle_routed = true` (sc-10625).
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod anima_gpu_smoke;
+// Real-weight GPU smoke for the candle SANA 1600M lane (epic 8485, sc-11780). Test-only + candle-only;
+// drives the WORKER's `resolve_weights_dir("sana_1600m")` (the diffusers-snapshot-root resolution) +
+// `gen_core::load("sana_1600m")` against the whole `Efficient-Large-Model/Sana_1600M_1024px_diffusers`
+// snapshot, proving the candle SANA port renders a coherent true-CFG 1024² image on real CUDA — the
+// hardware evidence backing `macOnly: false` / `candle_routed = true`.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod sana_candle_gpu_smoke;
 // Real-weight GPU smoke for the candle InstantID + PiD super-resolving decode (epic 7840, sc-8386).
 // Test-only + candle-only; drives the bespoke `runtime_cuda::providers::instantid::InstantId` provider across
 // Identity/Angle/Pose with the `pid_sdxl` student attached, asserting the PiD decode 4×-super-resolves
@@ -245,6 +258,12 @@ mod zimage_pid_gpu_smoke;
 // the worker-lane validation (the crate links + drives the engine), not just the mlx-gen-krea crate.
 #[cfg(all(test, target_os = "macos"))]
 mod krea_turbo_mlx_smoke;
+// Real-weight MLX smoke for the Krea 2 Turbo pose-ControlNet worker lane on a PACKED Q8 base (sc-11796).
+// Test-only + macOS-only; drives `gen_core::load("krea_2_turbo_control")` with the exact packed-q8
+// `LoadSpec` `krea_control_spec` builds and asserts the pose steers the render vs a base passthrough —
+// the worker-lane proof that pose control is honored on the installed quant tier (not silently dropped).
+#[cfg(all(test, target_os = "macos"))]
+mod krea_control_mlx_smoke;
 // Real-weight MLX smoke for the FLUX.1-dev strict-control worker lane (sc-8244; engine E2 sc-8239).
 // Test-only + macOS-only; drives `crate::inference_runtime::load("flux1_dev_control")` (Dir base + Shakker control
 // overlay) per control mode (pose/canny/depth) and asserts a control-vs-control-free steer — the

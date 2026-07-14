@@ -1067,7 +1067,6 @@
     },
     {
       "id": "sensenova_u1_8b",
-      "recommended": true,
       "name": "SenseNova-U1 8B",
       "family": "sensenova-u1",
       "type": "image",
@@ -2052,11 +2051,8 @@
     },
     {
       "id": "boogu_image",
-      // Recommended (sc-6616): render quality validated real-weight in S5 (sc-6402). autoDownload:false
-      // because the Q8 turnkey is ~23 GB/variant — surfaced in the Models Recommended section +
-      // SetupWizard (with its size) so users discover it, but they opt in rather than the wizard
-      // auto-pulling it on first run (mirrors ltx_2_3 / prompt_refine_anubis_8b).
-      "recommended": true,
+      // Available (render quality validated real-weight in S5, sc-6402), but no longer in the curated
+      // Recommended set. autoDownload:false because the Q8 turnkey is ~23 GB/variant — users opt in.
       "autoDownload": false,
       "name": "Boogu Image",
       "family": "boogu",
@@ -2173,9 +2169,8 @@
     },
     {
       "id": "boogu_image_turbo",
-      // Recommended (sc-6616): the fast few-step variant (S5-validated); same autoDownload:false opt-in
-      // as Base. Edit is intentionally NOT recommended (a specialized mode, only shown in the Edit tab).
-      "recommended": true,
+      // Available: the fast few-step variant (S5-validated); same autoDownload:false opt-in as Base.
+      // No longer in the curated Recommended set. Edit stays Edit-tab-only.
       "autoDownload": false,
       "name": "Boogu Image Turbo",
       "family": "boogu",
@@ -2359,6 +2354,11 @@
       // Same gen_core engine code (the `krea_2_turbo` descriptor / KreaPipeline::generate_turbo); loads
       // the packed Q8 (default) / Q4 turnkey subdir. Krea 2 Community License (non-commercial OK; the
       // re-host carries the license + "Krea" name prefix + attribution — sc-7573).
+      // Recommended but opt-in: it's one of the three curated getting-started image models (badged in the
+      // Setup Wizard / Models Recommended section), yet autoDownload:false leaves it badged-but-unchecked
+      // because the q8 default is ~20.6 GB — unlike the auto-pulled z_image_turbo / sdxl, the user opts in
+      // rather than the wizard pulling it on first run (mirrors ltx_2_3 / prompt_refine_anubis_8b).
+      "recommended": true,
       "autoDownload": false,
       "name": "Krea 2 Turbo",
       "family": "krea_2",
@@ -2515,7 +2515,44 @@
         // path as q4/q8/bf16 (the third of the three ConvRot gates; the candle lane + sm_89 compute-cap
         // are the worker's `int8_convrot` capability).
         "vramGbByTier": { "q4": 26.4, "q8": 31.0, "bf16": 44.0, "int8-convrot": 31.0 },
-        "measured": false
+        "measured": false,
+        // Pose-ControlNet lane VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The control lane loads
+        // the base at the installed tier PLUS the trained ~6.6 GB bf16 control branch, so its render peak
+        // (the end-of-render VAE-decode spike, sc-11744) EXCEEDS the txt2img `vramGbByTier` above — it needs
+        // its own numbers. The worker's Krea control fit-gate (`krea_control_fit`) reads these vs live/capped
+        // free VRAM and, only when constrained, engages the cheapest sufficient rung. @1024²/8-step/scale 0.6
+        // on an RTX PRO 6000 (Blackwell sm_120).
+        "control": {
+          // Overall render peak (GB) by BASE tier, bf16 control branch, NO rungs engaged (monolithic VAE
+          // decode). q4 MEASURED 30.9 (sc-11744 GPU timeline, the VAE-decode spike); bf16 MEASURED 46.2
+          // (sc-11743, dense base + bf16 branch); q8 ESTIMATED ~35.5 (between the two) pending measurement.
+          "peakGbByTier": { "q4": 30.9, "q8": 35.5, "bf16": 46.2 },
+          // CHEAPEST rung (sc-11744, candle-gen #492): the peak reduction (GB) from forcing the seam-free
+          // tiled VAE decode (`Krea2ControlRequest.tile_vae_decode`) — a SPEED cost, no quality cost. The
+          // fit-gate engages it BEFORE branch-quant. GPU-MEASURED on an RTX PRO 6000 (Blackwell sm_120),
+          // 1024²/8-step: the monolithic decode peaks at +6.7 GiB over the tiled tail (40.2 → 33.4 GiB
+          // whole-render), at a decode cost of +0.14 s (0.56 → 0.71 s, +26%). Seam-free: the tiled render
+          // is bit-near-identical to monolithic (mean |Δ| 0.05/255, no tile-boundary spike). Keyed to the
+          // q4 BASE tier, where the ~30.9 GB decode spike IS the render peak; 6.7 brings it to ~24.2 GB,
+          // essentially the denoise steady floor. Higher tiers omit it (their denoise steady-state, not the
+          // decode, is the peak — tiling there recovers little, so branch-quant is the operative rung).
+          "decodeTileSaveGb": { "q4": 6.7 },
+          // MIDDLE rung (sc-11745, candle-gen #496): the peak reduction (GB) from engaging sc-6217-style
+          // query-row attention chunking on the composable base stack + control branch
+          // (`Krea2ControlPaths.chunk_attention`) — a SPEED cost, no quality cost (the chunked forward is
+          // byte-identical to the unchunked one). Bounds the DENOISE-phase activation peak, so it slots
+          // between VAE-decode tiling (decode-phase) and the last-resort branch quant. GPU-MEASURED on an
+          // RTX PRO 6000 (Blackwell sm_120), dense bf16 base, 1024²/8-step: the ~11 GB-of-activations denoise
+          // steady-state peak drops −2.43 GiB, at a cost of +2.6 s (~+6%). A SCALAR (not tier-keyed): the
+          // activation peak is bf16 regardless of the base weight tier, so the saving is tier-independent.
+          "chunkAttnSaveGb": 2.43,
+          // Last-resort rung: the peak reduction (GB) from quantizing the control branch bf16 → q8/q4
+          // (candle-gen #483, sc-11743), MEASURED (dense base holds the rest fixed to isolate the branch):
+          // q8 −8.4 (near-lossless), q4 −10.2 (pose-locked; non-pose details drift). The gate prefers q8
+          // before q4, and composes it with the two cheaper (speed-only) rungs above — tiling then chunking.
+          "branchQuantSaveGb": { "q8": 8.4, "q4": 10.2 },
+          "measured": false
+        }
       },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
       "ui": {
@@ -2526,14 +2563,22 @@
         // Full 0–1 slider (default 0.5), NOT clamped — usable band is model-specific (A0/sc-8589 ~0.35–0.65).
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
+        // "Text style" — Krea Qwen3-VL tap reweight (sc-11878, impl of the sc-8596 spike). Presence of this
+        // slider is the gate: only Krea (Qwen-Image-family) declares it, so the worker sets
+        // `GenerationRequest.text_style_gain` (candle-gen-krea `tap_gain_weights`) only for these models.
+        // A single scalar > 1 emphasizes the early (low-level) Qwen3-VL taps for a warmer/richer look; < 1
+        // biases the late (semantic) taps; 1.0 (default) is a byte-exact no-op. NOT reference/identity
+        // transfer — a stylistic nudge distinct from `img2imgStrength`. GPU-validated safe over [0.25, 1.75].
+        "textStyleGain": { "label": "Text style", "default": 1.0, "min": 0.25, "max": 1.75, "step": 0.05 },
         // Two-reference Kontext edit (sc-11640, mirrors Krea 2 Raw): the `krea2_identity_edit` edit
-        // optionally takes a SECOND source — scene = image 1 (the required Source image), person = image 2
-        // (optional) — in a FIXED order. Presence of this object makes the Studio render the optional
-        // person slot in Edit mode; the worker + engine (`krea_2_turbo_edit` MultiReference) cap at two and
-        // preserve order. Ignored outside `edit_image` (t2i/img2img).
+        // optionally takes a SECOND source — any two images, image 1 (the required Source image) + image 2
+        // (optional) — in a FIXED order (swapping degrades results per the LoRA authors; the instruction
+        // describes how to combine them). Presence of this object makes the Studio render the optional
+        // second-image slot in Edit mode; the worker + engine (`krea_2_turbo_edit` MultiReference) cap at
+        // two and preserve order. Ignored outside `edit_image` (t2i/img2img).
         "editReferences": {
-          "secondaryLabel": "Person image",
-          "secondaryHint": "Optional — a person to place into the scene. Fixed order: the Source image is the scene (image 1), this is the person (image 2)."
+          "secondaryLabel": "Image 2 (optional)",
+          "secondaryHint": "Optional — a second image combined with Image 1 in a fixed order (Image 1, then Image 2). In your instruction, refer to each subject by position (\"the person in image 1 / image 2\") or by description (\"the woman in the green jacket\") — either works."
         },
         "label": "Krea 2 Turbo",
         "description": "Krea 2 Turbo — Krea AI's from-scratch foundation image model, distilled to a fast few-step (~8), CFG-free variant: a 28-block single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). Strong photorealism up to 2048². Pre-quantized Q8 (~20.5 GB download, default). Krea 2 Community License (non-commercial). Needs a 48 GB-class Mac. Candle (Windows/Linux) adds an INT8-ConvRot tier (online-rotation int8 DiT), an sm_89-exclusive visibility feature: A/B @1024²/8-step — bf16 ~8.8 s (reference, coherent) · Q4-packed ~9.8 s (PSNR 22.7 dB vs bf16, coherent) · INT8-ConvRot (coherent, PSNR 34.4 dB vs bf16 — visibly closer to full precision than Q4). Requires an RTX 40xx / RTX PRO Blackwell (sm_89+) GPU; hidden on Mac and pre-Ada cards.",
@@ -2719,10 +2764,16 @@
         // generic arm (resolve_img2img_init_generic → Conditioning::Reference) to the engine's Raw CFG
         // entrypoint `generate_base_img2img_with_progress` (mlx-gen #670 / sc-10224), so guidance + the
         // negative prompt are honored. Full 0–1 slider (default 0.5), NOT clamped — usable band is
-        // model-specific. macOS/MLX only for now (the worker generic img2img arm is Mac-gated); the
-        // candle/Windows-Linux twin is sc-10226.
+        // model-specific. Both backends: MLX (sc-10224/10225) and candle/CUDA (sc-10226 —
+        // `krea_2_raw` router branch + engine `render_base_img2img`; the worker generic img2img arm is
+        // cross-platform, gated on this `ui.img2img` flag).
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
+        // "Text style" — Krea Qwen3-VL tap reweight (sc-11878, impl of the sc-8596 spike). Same control as
+        // Turbo; on Raw it reweights the POSITIVE context of the TRUE-CFG denoise (the CFG-negative is left
+        // untouched, so the knob steers only the conditional prediction). > 1 warmer/richer, < 1 late-biased,
+        // 1.0 (default) no-op. GPU-validated safe over [0.25, 1.75]; Krea/Qwen-Image-family only.
+        "textStyleGain": { "label": "Text style", "default": 1.0, "min": 0.25, "max": 1.75, "step": 0.05 },
         // Two-reference Kontext edit (epic 10871 P1.3): the `krea2_identity_edit` edit optionally takes a
         // SECOND source — any two images, image 1 (the required Source image) + image 2 (optional) — in a
         // FIXED order (swapping degrades results per the LoRA authors; the instruction describes how to
@@ -2731,7 +2782,7 @@
         // Ignored outside `edit_image` (t2i/img2img).
         "editReferences": {
           "secondaryLabel": "Image 2 (optional)",
-          "secondaryHint": "Optional — a second image to combine with Image 1. Order is fixed (Image 1, then Image 2); describe in your instruction how to combine them (e.g. place the subject from Image 2 into Image 1)."
+          "secondaryHint": "Optional — a second image combined with Image 1 in a fixed order (Image 1, then Image 2). In your instruction, refer to each subject by position (\"the person in image 1 / image 2\") or by description (\"the woman in the green jacket\") — either works."
         },
         "label": "Krea 2 Raw",
         "description": "Krea 2 Raw — Krea AI's undistilled 12B single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). The full-fidelity, TRUE classifier-free-guidance counterpart to the fast CFG-free Krea 2 Turbo: run ~52 steps with a real guidance scale (~3.5) and an optional negative prompt for the highest quality and the most control. Pre-quantized Q8 (~20.5 GB download, default); the dense bf16 tier doubles as the Krea 2 LoRA training base. Krea 2 Community License (non-commercial). Runs on Apple Silicon (MLX) and Windows/Linux NVIDIA GPUs (candle/CUDA, sc-9994); needs a 48 GB-class Mac or a ~32 GB-class CUDA GPU.",
@@ -3818,11 +3869,9 @@
     },
     {
       "id": "sd3_5_large_turbo",
-      // Recommended (the fast default per epic 7841): the few-step distilled flagship — discoverable
-      // in the Models Recommended section. autoDownload:false because it is a gated, large turnkey
-      // (mirrors the Boogu / krea_2 opt-in pattern) — users acknowledge the license + opt in rather
-      // than the wizard auto-pulling it.
-      "recommended": true,
+      // Available: the few-step distilled flagship, but no longer in the curated Recommended set.
+      // autoDownload:false because it is a gated, large turnkey (mirrors the Boogu / krea_2 opt-in
+      // pattern) — users acknowledge the license + opt in rather than the wizard auto-pulling it.
       "autoDownload": false,
       "name": "Stable Diffusion 3.5 Large Turbo",
       "family": "sd3",
@@ -4060,23 +4109,30 @@
       // ported natively to mlx-gen (engine id `sana_1600m`). A 1.6B Linear-DiT trunk (ReLU linear
       // attention + Mix-FFN + NoPE) conditioned by a gemma-2-2b-it Complex-Human-Instruction (CHI)
       // caption encoder (reused from the PiD epic 7840 — SceneWorks/gemma-2-2b-it) + the deeply-
-      // compressed 32× DC-AE (f32) decoder. Native MLX only (mlx-gen-sana, no torch/candle backend) →
-      // macOnly. True-CFG text-to-image (20 steps / guidance 4.5). `adapter` is the asset stamp
-      // (mirrors mlx_<family>). Worker routing through engines::MODEL_TABLE / the gen_core registry +
-      // the MLX_ROUTED_MODELS gate (jobs_store.rs) lands in this same story (sc-8489 Phase B2).
+      // compressed 32× DC-AE (f32) decoder. Runs on MLX (macOS) AND the candle off-Mac lane
+      // (Windows/Linux CUDA): the candle port sc-11780 (candle-gen #495, `candle-gen-sana`) is
+      // catalog-routed off-Mac, so `macOnly: false` — availability is driven by the routing tables
+      // (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag. True-CFG text-to-image (20 steps
+      // / guidance 4.5). `adapter` is the asset stamp (mirrors mlx_<family>).
       //
       // NVIDIA non-commercial: SANA-1.6B is distributed under the NVIDIA Open Model License /
-      // NSCLv1 (research & evaluation, non-commercial). The re-hosted `SceneWorks/Sana_1600M_1024px_mlx`
-      // mirror carries the upstream LICENSE + NOTICE + attribution (the Krea/Ideogram re-host
-      // precedent — OK to ship gated-with-notice). SceneWorks's overall non-commercial posture covers
-      // this; generations are for non-commercial use only.
+      // NSCLv1 (research & evaluation, non-commercial). On macOS the re-hosted
+      // `SceneWorks/Sana_1600M_1024px_mlx` mirror carries the upstream LICENSE + NOTICE + attribution
+      // (the Krea/Ideogram re-host precedent). Off-Mac the candle lane pulls the ORIGINAL public NVIDIA
+      // repo `Efficient-Large-Model/Sana_1600M_1024px_diffusers` (un-gated — `gated: false` on HF), which
+      // ships the upstream LICENSE.txt (the NVIDIA Open Model License) alongside the weights; the bundled
+      // gemma-2-2b-it text encoder remains under the Gemma Terms of Use. `candle-gen-sana`'s NOTICE
+      // documents the same. SceneWorks's overall non-commercial posture covers this; generations are for
+      // non-commercial / research use only.
       "autoDownload": false,
       "name": "SANA 1600M",
       "family": "sana",
       "type": "image",
       "adapter": "mlx_sana",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
+      "nonCommercial": true,
+      "gated": false,
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8489/sc-8513, epic 8506): per-tier
         // subdirs (q4/ default, q8/, bf16/), each a complete `SanaPipeline::from_snapshot`-loadable
@@ -4114,15 +4170,37 @@
           "platforms": ["macos"],
           "estimatedSizeBytes": 9704258849,
           "footprint": { "diskSizeBytes": 9704258849, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // Candle off-Mac dense (sc-11780, epic 8485): the ORIGINAL public NVIDIA diffusers repo, pulled
+          // WHOLE (empty `files` list = the whole-repo HF snapshot, per the model-download convention).
+          // The `candle-gen-sana` pipeline (`from_diffusers_snapshot`) reads the diffusers-layout tree
+          // (`transformer/` Linear-DiT + `vae/` 32× DC-AE f32 + `text_encoder/` gemma-2-2b-it CHI encoder +
+          // `tokenizer/`) directly and `resolve_component_files` tolerates the repo's fp16/fp32 +
+          // single/sharded duplication, so NO curated allow-list is needed — the whole snapshot loads
+          // dense bf16 (there is no packed q4/q8 tier off-Mac; the worker resolves this repo's snapshot
+          // ROOT, never a tier subdir). Un-gated on HF (`gated: false`); ships the upstream NVIDIA Open
+          // Model License LICENSE.txt. Size is the whole-repo on-disk footprint (fp16 + fp32 duplication).
+          "provider": "huggingface",
+          "repo": "Efficient-Large-Model/Sana_1600M_1024px_diffusers",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 25830116527,
+          "footprint": { "diskSizeBytes": 25830116527, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/Sana_1600M_1024px_mlx"
       },
       "defaults": {
-        // diffusers `SanaPipeline` reference defaults: flow-match Euler with a static time-shift of
-        // 3.0, 20 steps, true CFG 4.5 (negative-prompt capable). The shift is the orthogonal
-        // schedulerShift knob (epic 7114) rather than a scheduler choice.
+        // Flow-match Euler, static time-shift 3.0, 20 steps, true CFG 4.5 (negative-prompt capable).
+        // The shift is the orthogonal schedulerShift knob (epic 7114), not a scheduler choice.
+        // IMPORTANT (sc-11760): NVIDIA's shipped `Sana_1600M_1024px_diffusers` pipeline actually
+        // DEFAULTS to `DPMSolverMultistepScheduler` (2nd-order flow), NOT Euler — but that 2nd-order
+        // DPM solver produces a garish / over-saturated / chromatic-aberration artifact on this base
+        // model (clean fox/apple/portrait under Euler render blown + false-color under DPM, same
+        // weights/seed). We deliberately run flow-match Euler. Do NOT "restore" a DPM-Solver default
+        // to "match the reference" — it reintroduces the artifact.
         "resolution": "1024x1024",
         "steps": 20,
         "guidanceScale": 4.5,
@@ -4188,23 +4266,30 @@
       // (SceneWorks/gemma-2-2b-it, reused — NOT duplicated) + 32× DC-AE (f32) decoder as base SANA. The
       // distillation is CFG-FREE: a guidance scalar is folded into the trunk via a guidance-embedding
       // (no negative-prompt second pass) and sampled by the SCM (continuous-time consistency / trigflow)
-      // sampler, so it runs in ~2 steps. Native MLX only (mlx-gen-sana, no torch/candle backend) →
-      // macOnly. `adapter` is the asset stamp (mirrors mlx_<family>). Worker routing through
-      // engines::MODEL_TABLE / the gen_core registry + the MLX_ROUTED_MODELS gate (jobs_store.rs) lands in
-      // this story (sc-8490 Phase B).
+      // sampler, so it runs in ~2 steps. Runs on MLX (macOS) AND the candle off-Mac lane (Windows/Linux
+      // CUDA): the candle Sprint port sc-11781 (candle-gen #498, `candle-gen-sana`'s Sprint pipeline +
+      // adapter) is catalog-routed off-Mac, so `macOnly: false` — availability is driven by the routing
+      // tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag. `adapter` is the asset stamp
+      // (mirrors mlx_<family>).
       //
       // NVIDIA non-commercial: SANA-Sprint is distributed under the NVIDIA Open Model License / NSCLv1
-      // (research & evaluation, non-commercial). The re-hosted `SceneWorks/Sana_Sprint_1.6B_1024px_mlx`
-      // mirror carries the upstream LICENSE + NOTICE + attribution (the Krea/Ideogram re-host precedent —
-      // OK to ship gated-with-notice). SceneWorks's overall non-commercial posture covers this;
-      // generations are for non-commercial use only.
+      // (research & evaluation, non-commercial). On macOS the re-hosted `SceneWorks/Sana_Sprint_1.6B_1024px_mlx`
+      // mirror carries the upstream LICENSE + NOTICE + attribution (the Krea/Ideogram re-host precedent).
+      // Off-Mac the candle lane pulls the ORIGINAL public NVIDIA repo
+      // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` (un-gated — `gated: false` on HF), which
+      // ships the upstream LICENSE.txt (the NVIDIA Open Model License) alongside the weights; the bundled
+      // gemma-2-2b-it text encoder remains under the Gemma Terms of Use. `candle-gen-sana`'s NOTICE documents
+      // the same. SceneWorks's overall non-commercial posture covers this; generations are for
+      // non-commercial / research use only.
       "autoDownload": false,
       "name": "SANA-Sprint 1.6B",
       "family": "sana",
       "type": "image",
       "adapter": "mlx_sana",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
+      "nonCommercial": true,
+      "gated": false,
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8490/sc-8513, epic 8506): per-tier subdirs
         // (q4/ default, q8/, bf16/), each a complete `SanaPipeline::new_sprint`-loadable tree —
@@ -4241,6 +4326,25 @@
           "platforms": ["macos"],
           "estimatedSizeBytes": 9715818241,
           "footprint": { "diskSizeBytes": 9715818241, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // Candle off-Mac dense (sc-11781, epic 8485): the ORIGINAL public NVIDIA Sprint diffusers repo,
+          // pulled WHOLE (empty `files` list = the whole-repo HF snapshot, per the model-download
+          // convention). The `candle-gen-sana` Sprint pipeline (`from_diffusers_snapshot` with the Sprint
+          // config) reads the diffusers-layout tree (`transformer/` Sprint Linear-DiT + guidance embedder +
+          // `vae/` 32× DC-AE f32 + `text_encoder/` gemma-2-2b-it CHI encoder + `tokenizer/`) directly and
+          // `resolve_component_files` tolerates the repo's fp16/fp32 + single/sharded duplication, so NO
+          // curated allow-list is needed — the whole snapshot loads dense bf16 (there is no packed q4/q8
+          // tier off-Mac; the worker resolves this repo's snapshot ROOT, never a tier subdir). CFG-free
+          // 1–4 step SCM/TrigFlow. Un-gated on HF (`gated: false`); ships the upstream NVIDIA Open Model
+          // License LICENSE.txt. Size is the whole-repo on-disk footprint (single-precision — unlike the
+          // base repo the Sprint diffusers tree ships no fp16/fp32 duplication, so it is the smaller ~9.7GB).
+          "provider": "huggingface",
+          "repo": "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 9736976627,
+          "footprint": { "diskSizeBytes": 9736976627, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -5151,7 +5255,6 @@
     },
     {
       "id": "instantid_realvisxl",
-      "recommended": true,
       "name": "InstantID (RealVisXL)",
       "family": "sdxl",
       "type": "image",
@@ -7157,6 +7260,57 @@
           "path": "/prompt-guides/clip-vit-l14.md",
           "sources": [
             { "label": "openai/clip-vit-large-patch14 model card", "url": "https://huggingface.co/openai/clip-vit-large-patch14" }
+          ]
+        }
+      }
+    },
+    {
+      // SDXL tile ControlNet — the auxiliary weights the Image Editor Detail enhancer needs
+      // (`JobType::ImageDetail`, sc-2437/sc-2438). The native worker (`image_jobs/detail.rs`) resolves it
+      // by REPO STRING (`TILE_CONTROLNET_REPO = "xinsir/controlnet-tile-sdxl-1.0"`, overridable via
+      // `advanced.tileControlNetRepo`) through `huggingface_snapshot_dir` — which only RESOLVES an
+      // already-cached snapshot, never auto-downloads (the JoyCaption / CLIP seam, epic 3482). Without a
+      // catalog entry Detail dead-ended with "tile ControlNet weights not found (download
+      // xinsir/controlnet-tile-sdxl-1.0)" and there was no UI to install it. Cataloging it as a utility
+      // lets Model Manager pull the snapshot into the HF cache the worker reads, and lets the Detail panel
+      // surface it as a required dependency with a one-click download (mirrors the managed edit-LoRA CTA).
+      // apache-2.0, ungated; stock repo pulled as-is (a plain SDXL ControlNet safetensors — no conversion).
+      // Shared by every SDXL-family `image_detail` backbone (realvisxl / sdxl / …), so it is a single
+      // standalone artifact rather than a per-model co-requisite bolted onto each base's footprint.
+      "id": "controlnet_tile_sdxl",
+      "autoDownload": false,
+      "name": "SDXL Tile ControlNet (Detail enhance)",
+      "family": "controlnet-tile",
+      "type": "utility",
+      "adapter": "controlnet-tile",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-tile-sdxl-1.0",
+          "files": ["diffusion_pytorch_model.safetensors", "config.json"],
+          "estimatedSizeBytes": 2500000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/xinsir/controlnet-tile-sdxl-1.0"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "SDXL Tile ControlNet (Detail enhance)",
+        "description": "Optional tile ControlNet weights used only by the Image Editor's Detail enhancer to refine texture on an SDXL/RealVisXL backbone. A small utility dependency shared by every SDXL detail-capable model — not a generation model of its own. apache-2.0, commercial-use OK, ungated.",
+        "recommendedFor": ["image_detail"],
+        "promptGuide": {
+          "title": "SDXL Tile ControlNet (Detail enhance)",
+          "path": "/prompt-guides/controlnet-tile-sdxl.md",
+          "sources": [
+            { "label": "xinsir/controlnet-tile-sdxl-1.0 model card", "url": "https://huggingface.co/xinsir/controlnet-tile-sdxl-1.0" },
+            { "label": "ControlNet paper", "url": "https://arxiv.org/abs/2302.05543" }
           ]
         }
       }

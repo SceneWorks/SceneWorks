@@ -94,8 +94,47 @@ enum ImageRoute {
     SdxlAdvanced,
     SensenovaEdit,
     Bernini,
+    /// A strict-pose job on a WIRED MLX pose family (one with a `…_control_available` lane, i.e. a
+    /// [`WIRED_MLX_POSE_FAMILIES`] id) whose control base/overlay is NOT installed — its
+    /// `…_control_available` gate failed, so it reached the fall-through. Reject loudly instead of
+    /// falling through to `Mlx` (plain txt2img) and silently dropping the poses (sc-11796 generalized to
+    /// every wired family, sc-11814) — the MLX twin of the candle `CandleImageRoute::PoseControlBaseMissing`.
+    PoseControlBaseMissing,
+    /// A strict-pose job on an MLX model with NO pose-control lane (e.g. a plain `sdxl` pose job with no
+    /// reference — SDXL identity-pose ships via InstantID / IP-Adapter) that `mlx_available` would
+    /// otherwise render as plain txt2img, dropping the poses. Reject loudly (sc-5968) — the MLX twin of
+    /// the candle `CandleImageRoute::PoseReject`.
+    PoseReject,
     Mlx,
 }
+
+/// Image model ids the MLX router HAS a bespoke strict-pose control lane for — each is claimed by an
+/// `… _control_available` arm in [`resolve_image_route`] BEFORE the generic `mlx_available` txt2img arm,
+/// but only when its control base/overlay resolves locally. This is the SINGLE source for the
+/// fall-through reject: a wired family that reached the fall-through means its control base is absent
+/// (its lane's local weight-gate failed) → [`ImageRoute::PoseControlBaseMissing`], never silent txt2img.
+/// The MLX twin of [`WIRED_CANDLE_POSE_FAMILIES`] (sc-11171/F-008), and the SAME id set — every candle
+/// wired family has a matching MLX control lane:
+///   - `z_image_turbo` → `zimage_control_available` (Turbo Fun-Controlnet-Union)
+///   - `z_image`       → `zimage_base_control_available` (base full-CFG Fun-Controlnet-Union, sc-8251)
+///   - `qwen_image`    → `qwen_control_available` (2512 Fun-Controlnet-Union)
+///   - `kolors`        → `kolors_control_available` (Kolors ControlNet; also needs a reference)
+///   - `krea_2_turbo`  → `krea_control_available` (trained control-branch overlay, sc-8465)
+///   - `flux_dev`      → `flux1_dev_control_available` (Shakker Union-Pro-2.0)
+///   - `flux2_dev`     → `flux2_dev_control_available` (Fun-Controlnet-Union)
+///
+/// Distinct from a non-wired MLX pose family (e.g. `sdxl`), which reaches the sc-5968
+/// [`ImageRoute::PoseReject`] instead. (sc-11814.)
+#[cfg(target_os = "macos")]
+const WIRED_MLX_POSE_FAMILIES: &[&str] = &[
+    "z_image_turbo",
+    "z_image",
+    "qwen_image",
+    "kolors",
+    "krea_2_turbo",
+    "flux_dev",
+    "flux2_dev",
+];
 
 #[cfg(target_os = "macos")]
 fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<ImageRoute> {
@@ -148,6 +187,30 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         // `mlx_available` would match it), but the generic `generate_stream` leaves `frames`/
         // `video_mode` unset, which the engine treats as a multi-frame video request.
         Some(ImageRoute::Bernini)
+    } else if request.mode != "edit_image"
+        && !pose_entries(request).is_empty()
+        && (WIRED_MLX_POSE_FAMILIES.contains(&request.model.as_str())
+            || mlx_available(request, settings))
+    {
+        // A strict-pose job that fell past every `…_control_available` lane above (and the edit / identity /
+        // bernini lanes) must be REJECTED, not silently rendered as plain txt2img with the poses dropped —
+        // the MLX twin of the candle fall-through reject (base.rs, sc-11171/F-008 + sc-5968). Two sub-cases,
+        // distinguished by whether the family has a wired MLX pose lane at all:
+        //  - WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`): its control lane exists but the base/overlay
+        //    snapshot is absent (the lane's `…_control_available` weight-gate failed) → `PoseControlBaseMissing`.
+        //    Fires regardless of whether the plain base weights resolve, because the control gate can fail while
+        //    `mlx_available` succeeds — for `krea_2_turbo` the control base (`resolve_krea_control_base`) diverges
+        //    from the txt2img base (the reported sc-11796 silent-drop), and for `kolors` the lane additionally
+        //    needs a `referenceAssetId`. Generalizes the sc-11796 krea-only reject to every wired family (sc-11814).
+        //  - A non-wired MLX pose family that `mlx_available` would render as plain txt2img (e.g. a plain `sdxl`
+        //    pose job with no reference — SDXL identity-pose ships via InstantID / IP-Adapter, claimed above) →
+        //    the sc-5968 no-silent-T2I `PoseReject`.
+        // Checked BEFORE the generic `mlx_available` arm.
+        if WIRED_MLX_POSE_FAMILIES.contains(&request.model.as_str()) {
+            Some(ImageRoute::PoseControlBaseMissing)
+        } else {
+            Some(ImageRoute::PoseReject)
+        }
     } else if mlx_available(request, settings) {
         Some(ImageRoute::Mlx)
     } else {
@@ -176,11 +239,15 @@ impl ImageRoute {
             },
             // PuLID-FLUX is one identity image per seed (no angle/pose grouping) — like the base
             // MLX + SDXL-advanced + Bernini paths, the effective count is the requested count. Krea
-            // edit (epic 10871) is likewise plain per-image: `count` edits of the one source.
+            // edit (epic 10871) is likewise plain per-image: `count` edits of the one source. The
+            // pose reject arms (`PoseControlBaseMissing` / `PoseReject`) error before generation, so
+            // their count is inert.
             ImageRoute::PulidFlux
             | ImageRoute::SdxlAdvanced
             | ImageRoute::Bernini
             | ImageRoute::KreaEdit
+            | ImageRoute::PoseControlBaseMissing
+            | ImageRoute::PoseReject
             | ImageRoute::Mlx => request.count,
         }
     }
@@ -525,6 +592,26 @@ fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
 ))]
 const IDEOGRAM_BF16_REPO: &str = "SceneWorks/ideogram-4";
 
+/// The whole-repo `Efficient-Large-Model/Sana_1600M_1024px_diffusers` HF snapshot the candle SANA
+/// lane loads (sc-11780, epic 8485). The `candle-gen-sana` pipeline reads the diffusers-layout tree
+/// (`transformer/` + `vae/` + `text_encoder/`) directly, so the off-Mac lane resolves this repo's
+/// snapshot root — NOT the MLX-packed `SceneWorks/Sana_1600M_1024px_mlx` turnkey (the `MODEL_TABLE`
+/// `default_repo`, which the macOS/MLX path loads) and NOT a `q4/q8/bf16` tier subdir. Matches the
+/// manifest's windows/linux whole-repo download entry.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const SANA_CANDLE_DIFFUSERS_REPO: &str = "Efficient-Large-Model/Sana_1600M_1024px_diffusers";
+
+/// The whole-repo `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` HF snapshot the candle
+/// SANA-Sprint lane loads (sc-11781, epic 8485). The `candle-gen-sana` Sprint pipeline reads the same
+/// diffusers-layout tree (`transformer/` Sprint Linear-DiT + guidance embedder + `vae/` + `text_encoder/`)
+/// as base SANA, so the off-Mac lane resolves this repo's snapshot root — NOT the MLX-packed
+/// `SceneWorks/Sana_Sprint_1.6B_1024px_mlx` turnkey (the `MODEL_TABLE` `default_repo`, which the macOS/MLX
+/// path loads) and NOT a `q4/q8/bf16` tier subdir. Matches the manifest's windows/linux whole-repo
+/// download entry.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const SANA_SPRINT_CANDLE_DIFFUSERS_REPO: &str =
+    "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers";
+
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
 /// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
 /// engine family or its snapshot is absent. Available on the candle lane too (sc-5501): the
@@ -625,6 +712,37 @@ pub(crate) fn resolve_weights_dir(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     if is_anima_model(&request.model) {
         return Ok(snapshot.map(anima_dense_split_files_dir));
+    }
+    // SANA 1600M off-Mac (candle, sc-11780, epic 8485): the `candle-gen-sana` pipeline
+    // (`from_diffusers_snapshot`) loads the WHOLE `Efficient-Large-Model/Sana_1600M_1024px_diffusers`
+    // HF snapshot (diffusers layout: `transformer/` + `vae/` + `text_encoder/`) — NOT the MLX-packed
+    // `SceneWorks/Sana_1600M_1024px_mlx` turnkey the macOS/MLX path loads (which has no diffusers tree
+    // the candle pipeline can read) and NOT a `q4/q8/bf16` tier subdir. So resolve the diffusers repo's
+    // snapshot ROOT directly, BYPASSING the `STANDARD_TIER_MODELS` `standard_tier_subdir` descent below
+    // (`sana_1600m` is registered there for the MLX turnkey, which would otherwise append a nonexistent
+    // `q4/` to the diffusers root). The whole-repo download (manifest windows/linux entry, empty files
+    // list) provisions this snapshot; an unfetched repo surfaces as a loud "snapshot not found" load
+    // error above. macOS never compiles this branch (it keeps the MLX turnkey path).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if request.model == "sana_1600m" {
+        return Ok(huggingface_snapshot_dir(
+            &settings.data_dir,
+            SANA_CANDLE_DIFFUSERS_REPO,
+        ));
+    }
+    // SANA-Sprint 1.6B off-Mac (candle, sc-11781, epic 8485): identical treatment to base SANA above —
+    // the `candle-gen-sana` Sprint pipeline loads the WHOLE `Efficient-Large-Model/
+    // Sana_Sprint_1.6B_1024px_diffusers` HF snapshot (same diffusers layout: `transformer/` + `vae/` +
+    // `text_encoder/`), NOT the MLX-packed turnkey and NOT a `q4/q8/bf16` tier subdir. Resolve the
+    // diffusers repo's snapshot ROOT directly, BYPASSING the `STANDARD_TIER_MODELS` descent below
+    // (`sana_sprint_1600m` is registered there for the MLX turnkey, which would otherwise append a
+    // nonexistent `q4/`). macOS never compiles this branch (it keeps the MLX turnkey path).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if request.model == "sana_sprint_1600m" {
+        return Ok(huggingface_snapshot_dir(
+            &settings.data_dir,
+            SANA_SPRINT_CANDLE_DIFFUSERS_REPO,
+        ));
     }
     // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
     // turnkeys with self-contained `q4/` (default) + `q8/` + `bf16/` subdirs (replacing any
@@ -2546,6 +2664,10 @@ fn generate_one(
     // generator was loaded with `LoadSpec::with_pid` (the engine rejects a mismatch); the caller keeps
     // the two in lockstep. The candle path passes `false` (candle PiD is Phase 4, sc-7853).
     use_pid: bool,
+    // Krea "text style" tap-reweight gain (sc-11878) — `None` for every non-Krea family (the engine
+    // ignores the field regardless). The caller resolves it from the manifest `textStyleGain` slider +
+    // `advanced` only when the model declares the control, so a non-Krea render passes `None`.
+    text_style_gain: Option<f32>,
     enhance: &PromptEnhance,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
@@ -2587,6 +2709,7 @@ fn generate_one(
         scheduler_shift,
         guidance_method: guidance_method.map(str::to_owned),
         use_pid,
+        text_style_gain,
         conditioning,
         cancel: cancel.clone(),
         ..Default::default()
@@ -2732,7 +2855,15 @@ fn resolve_identity_init(
 /// `generate_turbo_img2img` (sc-10135), whose `preprocess_init_image` LANCZOS-resizes the reference to
 /// the output W×H — so, like Z-Image's [`resolve_identity_init`], the reference is fed raw (the
 /// `edit_image`-only [`should_fit_edit_source`] crop/pad-fit never applies to Krea's t2i-only surface).
-#[cfg(target_os = "macos")]
+///
+/// Available to the candle lane too (sc-10134): the candle `generate_candle_stream` calls this to resolve
+/// the Krea 2 Turbo img2img init off-Mac, feeding the same `(image, strength)` into `generate_one`'s
+/// `reference` → `Conditioning::Reference` → the engine's `render_img2img`. (The broader `ui.img2img`
+/// candle roll-out for SD3.5 / Z-Image / Boogu / Ideogram is sc-10265.)
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn resolve_img2img_init_generic(
     request: &ImageRequest,
     settings: &Settings,
@@ -2766,7 +2897,14 @@ fn resolve_img2img_init_generic(
 /// model-specific reference arms (z-image identity-init, FLUX IP-Adapter, Kolors, Ideogram edit) so
 /// those bespoke surfaces keep precedence; the generic arm then catches Krea + SD3.5 + any future
 /// `ui.img2img` model uniformly.
-#[cfg(target_os = "macos")]
+///
+/// Available to the candle lane too (sc-10134): `generate_candle_stream` gates its Krea 2 Turbo img2img
+/// resolve on this same manifest flag off-Mac. (Today the candle router only lets `krea_2_turbo` reach the
+/// candle lane with a reference; the other `ui.img2img` families follow in sc-10265.)
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn model_supports_img2img(request: &ImageRequest) -> bool {
     request
         .model_manifest_entry
@@ -3619,6 +3757,15 @@ async fn generate_stream(
     // base picks whether the output lands on ~2K or ~4K. `4k`/native leave the requested dims untouched;
     // `2k` caps the base (also lowering the F-013 decode peak). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
+    // Krea "text style" tap-reweight gain (sc-11878): set ONLY when the model's manifest (`ui`) declares
+    // the `textStyleGain` slider — Krea/Qwen-Image-family only, so this self-gates and every other family
+    // passes `None`. The user value comes from `advanced.textStyleGain` (the manifest object isn't a
+    // scalar, so the helper's `1.0` default applies when absent), clamped to the GPU-validated [0.25, 1.75].
+    let text_style_gain = request
+        .model_manifest_entry
+        .get("textStyleGain")
+        .is_some()
+        .then(|| advanced::f32_clamped(&request.advanced, "textStyleGain", 1.0, 0.25..=1.75));
     let mut spec = load_spec(weights_dir, quant, adapters, flux_ip_dir);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
@@ -3682,6 +3829,7 @@ async fn generate_stream(
                         scheduler_shift,
                         guidance_method.as_deref(),
                         use_pid,
+                        text_style_gain,
                         &enhance,
                         &cancel,
                         on_progress,
@@ -3843,6 +3991,23 @@ fn is_candle_engine(model: &str) -> bool {
             | "sd3_5_large"
             | "sd3_5_large_turbo"
             | "sd3_5_medium"
+            // SANA 1600M (sc-11780, epic 8485): NVIDIA's 1.6B Linear-DiT true-CFG txt2img rides the
+            // generic candle lane (the `candle-gen-sana` provider, candle-gen #495 — the off-Mac sibling
+            // of `mlx-gen-sana`). `generate_candle_stream` resolves the whole `Efficient-Large-Model/
+            // Sana_1600M_1024px_diffusers` diffusers snapshot (transformer/ + vae/ + text_encoder/) via the
+            // candle-sana branch in `resolve_weights_dir` — NOT the MLX-packed turnkey, NOT a tier subdir.
+            // Pure txt2img (20 steps / guidance 4.5 + negative prompt); no edit/reference/control/LoRA/quant
+            // candle path (those defer to torch via `image_request_candle_eligible`).
+            | "sana_1600m"
+            // SANA-Sprint 1.6B (sc-11781, epic 8485): NVIDIA's CFG-free few-step distill of SANA rides the
+            // generic candle lane too (the `candle-gen-sana` Sprint pipeline, candle-gen #498 — the off-Mac
+            // sibling of `mlx-gen-sana`'s Sprint id). `generate_candle_stream` resolves the whole
+            // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` diffusers snapshot (transformer/ +
+            // vae/ + text_encoder/) via the candle-sana branch in `resolve_weights_dir` — NOT the MLX-packed
+            // turnkey, NOT a tier subdir. Pure txt2img, CFG-free 1–4 step SCM/TrigFlow (guidance embedded,
+            // no negative-prompt second pass); no edit/reference/control/LoRA/quant candle path (the Sprint
+            // adapter rejects those — they defer to torch via `image_request_candle_eligible`).
+            | "sana_sprint_1600m"
             // Anima 2B base / aesthetic / turbo (sc-10676, epic 10512): the candle port (sc-10525,
             // GPU-validated sc-10625) rides the generic candle txt2img lane off-Mac. `generate_candle_\
             // stream` dense-loads bf16 from the raw `circlestone-labs/Anima` split_files/ tree (no
@@ -3883,6 +4048,9 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "krea_2_turbo" | "krea_2_raw" => "candle_krea",
         // Stable Diffusion 3.5 (sc-7880): Large / Large Turbo / Medium share the candle SD3.5 engine.
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => "candle_sd3",
+        // SANA 1600M + SANA-Sprint (sc-11780 / sc-11781): both share the candle SANA engine (the off-Mac
+        // sibling of the `mlx_sana` label).
+        "sana_1600m" | "sana_sprint_1600m" => "candle_sana",
         // Anima 2B (sc-10676): base / aesthetic / turbo share the candle Anima engine (the off-Mac
         // sibling of the `mlx_anima` label).
         "anima_base" | "anima_aesthetic" | "anima_turbo" => "candle_anima",
@@ -4079,6 +4247,24 @@ async fn generate_candle_stream(
     } else {
         Vec::new()
     };
+    // Generic img2img (reference-guided latent-init, sc-10134, epic 8588): a `ui.img2img` model in a
+    // NON-edit mode carrying a `referenceAssetId` resolves to the img2img init `(image, advanced.strength)`,
+    // threaded to `generate_one` as the single `Conditioning::Reference` the candle engine routes to its
+    // img2img entrypoint (VAE-encode the reference → blend at `sigmas[init_time_step]` → denoise; CFG-free
+    // for distilled families, two-forward CFG for the base ones like Krea Raw `render_base_img2img`,
+    // sc-10226). Model-agnostic here — the candle router gates which ids reach this lane with a reference
+    // (`krea_2_turbo`/`krea_2_raw`, SD3.5, Z-Image, Boogu, Ideogram all wired). Disjoint from the Ideogram
+    // `edit_reference` (edit_image vs text_to_image) and Boogu's
+    // `multi_references` (guarded here so a future overlap never double-drives the single `reference` slot).
+    let img2img_reference = if edit_reference.is_none()
+        && boogu_refs.is_empty()
+        && request.mode != "edit_image"
+        && model_supports_img2img(request)
+    {
+        resolve_img2img_init_generic(request, settings, project_path)?
+    } else {
+        None
+    };
     let (width, height) = (request.width, request.height);
     // Per-payload sampler / scheduler / schedule-shift, mirroring the MLX `generate_stream` lane (the
     // 1753 front-half advanced carrier — epic 7114 P5, sc-7127). RealVisXL Lightning (sc-7176) forces the
@@ -4153,6 +4339,15 @@ async fn generate_candle_stream(
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
+    // Krea "text style" tap-reweight gain (sc-11878): set ONLY when the model's manifest (`ui`) declares
+    // the `textStyleGain` slider — Krea/Qwen-Image-family only, so this self-gates and every other family
+    // passes `None`. The user value comes from `advanced.textStyleGain` (the manifest object isn't a
+    // scalar, so the helper's `1.0` default applies when absent), clamped to the GPU-validated [0.25, 1.75].
+    let text_style_gain = request
+        .model_manifest_entry
+        .get("textStyleGain")
+        .is_some()
+        .then(|| advanced::f32_clamped(&request.advanced, "textStyleGain", 1.0, 0.25..=1.75));
     // VRAM fit-gate (epic 10765, sc-10766 Phase 0 + sc-10821 Phase 1b + sc-10856): when the selected
     // tier's predicted resident peak won't fit the card, either RUN SEQUENTIALLY (a provider that
     // supports sequential component residency — the candle FLUX lane, sc-10769 — drops the text encoders
@@ -4298,7 +4493,10 @@ async fn generate_candle_stream(
                         steps,
                         guidance,
                         negative_prompt.clone(),
-                        edit_reference.as_ref(),
+                        // Ideogram edit source (edit_image) OR the Krea 2 Turbo img2img init (sc-10134) —
+                        // mutually exclusive by mode/family; whichever resolved seeds the single
+                        // `Conditioning::Reference` slot.
+                        edit_reference.as_ref().or(img2img_reference.as_ref()),
                         &boogu_refs,
                         edit_mask.as_ref(),
                         true_cfg,
@@ -4318,6 +4516,7 @@ async fn generate_candle_stream(
                         // else the native VAE. Every candle image provider reads `spec.pid` (sc-7853), so
                         // the whole off-Mac catalog honors the toggle in lockstep with `spec.pid` above.
                         use_pid,
+                        text_style_gain,
                         &enhance,
                         &cancel,
                         on_progress,

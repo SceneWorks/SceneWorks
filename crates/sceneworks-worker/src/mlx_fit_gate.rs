@@ -35,33 +35,35 @@ use gen_core::{LoadSpec, OffloadPolicy, WeightsSource};
 
 use crate::{WorkerError, WorkerResult};
 
-/// The MLX engine ids whose provider honors [`OffloadPolicy::Sequential`] — the sc-10839 Phase 1
-/// providers (SDXL + Z-Image-turbo), the sc-11000 T2I `qwen_image`, the sc-11006 fan-out completion of
-/// the qwen family (`qwen_image_edit` drops the Qwen2.5-VL vision-language encoder after the vision+LM
-/// pass; `qwen_image_control` keeps its VACE control branch on the heavy side of the split), and the
-/// sc-11030 `lens` + `lens_turbo` (one crate/arch — drops the gpt-oss text encoder before the DiT +
-/// denoise activations materialize; needs mlx-gen-lens's consuming encoder loader so the encoder LOAD
-/// spike isn't the peak). The gate only SELECTS sequential residency for these; for any other engine
-/// `Sequential` would be a no-op (the advisory contract treats it as `Resident`), so predicting "it
-/// fits staged" and then holding everything resident would SIGKILL — hence the allowlist, which moves
-/// in LOCKSTEP with the provider wiring. Extended per family as the fan-out (sc-10840) wires each engine.
-const SEQUENTIAL_CAPABLE_ENGINES: &[&str] = &[
-    "sdxl",
-    "z_image_turbo",
-    "qwen_image",
-    "qwen_image_edit",
-    "qwen_image_control",
-    "lens",
-    "lens_turbo",
-    "krea_2_turbo",
-    "krea_2_raw",
-    "krea_2_edit",
-    "krea_2_turbo_control",
-];
-
-/// Whether `engine_id`'s provider drops components in phase order under [`OffloadPolicy::Sequential`].
+/// Whether `engine_id`'s provider drops components in phase order under [`OffloadPolicy::Sequential`]
+/// — derived at query time from the engine's REGISTERED descriptor
+/// [`Capabilities`](gen_core::Capabilities)`::supports_sequential_offload` bit, not a hand-maintained
+/// allowlist (sc-10840, epic 10834).
+///
+/// Why the descriptor bit is the right source of truth: [`OffloadPolicy::Sequential`] is *advisory* —
+/// a provider that has NOT wired the load→use→drop residency lifecycle silently treats it as
+/// `Resident` (never an error), so predicting "it fits staged" and then holding everything resident
+/// would SIGKILL. `supports_sequential_offload` is precisely the provider's own machine-readable
+/// attestation that it wired that lifecycle (the gen-core discovery signal, sc-11126). Reading it
+/// per-engine makes the gate self-maintaining: every family the mlx-gen Phase-1 fan-out wires
+/// (sc-10840 — sd3/sana/flux/flux2/chroma/ideogram/kolors/anima/boogu/bernini alongside the earlier
+/// sdxl/z-image/qwen/lens/krea families) is covered the moment its descriptor advertises the bit, with
+/// no lockstep edit here. An engine that does not separate a text encoder (e.g. sensenova's fused MoT,
+/// `footprint` te=0) leaves the bit `false` and is correctly never offered `Sequential` — a no-op that
+/// would OOM.
+///
+/// This is a pre-load, weights-free registry lookup (`(descriptor)()` allocates no tensors), the same
+/// query shape the worker already uses for family/guidance/quant capability advertisement and the
+/// analogous `ProviderRegistry::footprint` size seam (sc-10894). An id with no registered generator — or a
+/// registered one that does not advertise the bit — yields `false` (the safe default: never select a
+/// residency policy the provider won't honor). Sees exactly the providers the binary force-links (the
+/// sc-4482 dead-strip rule): on macOS every `mlx_gen_*` provider is anchored in `image_jobs`, so the
+/// live worker resolves them; off-Mac the MLX gate no-ops anyway (no `sysctl` budget).
 pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
-    SEQUENTIAL_CAPABLE_ENGINES.contains(&engine_id)
+    crate::inference_runtime::media()
+        .generators()
+        .find(|reg| (reg.descriptor)().id == engine_id)
+        .is_some_and(|reg| (reg.descriptor)().capabilities.supports_sequential_offload)
 }
 
 /// Emulate a smaller Mac: force the total-unified-memory budget (GB). Set e.g.
@@ -70,16 +72,56 @@ pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
 /// as on real small hardware. Unset / non-positive ⇒ use the real `sysctl hw.memsize` total.
 pub(crate) const MLX_MEMORY_CAP_ENV: &str = "SCENEWORKS_MLX_MEMORY_CAP_GB";
 
-/// Headroom (GB) added on top of the summed on-disk component weights to cover MLX Metal activation
-/// spikes during denoise/decode plus the OS + other apps drawing from the same unified pool.
+/// Headroom (GiB) added on top of the summed on-disk component weights to cover the MLX Metal
+/// activation transient during denoise/decode plus the OS + other apps drawing from the same unified
+/// pool (the gate budgets against TOTAL physical RAM, so the OS share must come out of this headroom).
 ///
-/// PROVISIONAL — calibrate against `get_peak_memory` telemetry per the sc-10835 measurement
-/// sub-task. Anchor: the candle FLUX A/B (sc-10769) measured ~11 GB of transient over ~33 GB of
-/// resident weights at 1024²; a Mac additionally shares the pool with the OS + app. 10 GB is a
-/// deliberately conservative floor that keeps the gate from over-rejecting borderline models while
-/// still catching the genuinely-too-big ones; the real activation term scales with resolution and is
-/// refined once measured.
-const HEADROOM_GB: f64 = 10.0;
+/// CALIBRATED (sc-10863) from real `get_peak_memory` footprints measured through
+/// `footprint_measure.rs` (one tier per process; peak = load + one 1024² generation, RESIDENT
+/// hold-all path, no memory cap). Measured `transient = peak − resident` and `headroom = peak − disk`:
+///
+/// | model            | disk GiB | resident | peak  | transient | headroom(peak−disk) |
+/// |------------------|---------:|---------:|------:|----------:|--------------------:|
+/// | illustrious q8   |     5.01 |     4.74 | 18.78 |     14.04 |               13.77 |
+/// | lens q4          |    17.67 |    16.46 | 30.50 |     14.04 |               12.83 |
+/// | qwen-image q8    |    35.90 |    33.45 | 41.11 |      7.66 |                5.20 |
+/// | lens-turbo bf16  |    28.43 |    45.67 | 75.55 |     29.88 |               47.12 |
+///
+/// FINDING — the transient is NOT a function of on-disk weight bytes: qwen-image q8 has the LARGEST
+/// weights (35.9 GiB) but the SMALLEST transient (7.66 — its VAE decode is tiled, sc-11747), while
+/// illustrious q8 has the smallest weights but a 14 GiB transient. It is architecture- and
+/// resolution-bound (dominated by the VAE decode + attention at the output resolution), so a
+/// disk-SCALED predictor (`Σweights · k`) would over-reject the large-but-efficient models and
+/// under-predict the small ones — the wrong shape. And the load-time gate cannot see the request
+/// resolution (the generator is cached across resolutions), so a per-request `f(resolution)` term is
+/// not threadable at this seam. A conservative CONSTANT is therefore the right structure.
+///
+/// 18 GiB = the max COMMON-CASE transient at 1024² (14.04, illustrious q8 & lens q4 — the three
+/// resident≈disk tiers; lens-turbo's larger 29.88 transient is a separate architecture outlier, below)
+/// plus a ~4 GiB macOS/app reserve. This replaces the provisional 10.0, which UNDER-predicted 3 of the
+/// 4 measured tiers (illustrious 15.0<18.8, lens 27.7<30.5, lens-turbo 38.4<75.6) — i.e. was a latent
+/// SIGKILL risk on Macs sized between the predicted and the real peak. All three resident≈disk tiers
+/// are now covered with margin without over-rejecting a model that fits (illustrious q8: 5.01+18=23.0
+/// still fits a 24 GiB Mac, where its real 18.8 GiB peak + OS does too).
+///
+/// NOT covered by this constant (surfaced sc-10863, tracked follow-ups — see the story): (1) the
+/// lens-turbo bf16 OUTLIER, whose 47.12 GiB headroom (peak 75.55 − disk 28.43) is NOT one effect but
+/// TWO that must be modeled together. It DECOMPOSES as (a) 17.24 GiB IN-MEMORY WEIGHT EXPANSION
+/// (resident 45.67 − disk 28.43) — its mxfp4-on-disk gpt-oss text encoder expands loading to bf16
+/// (45.67 = 1.61× disk 28.43), so `sum_safetensors_bytes` under-counts the in-memory weights — PLUS
+/// (b) a 29.88 GiB ACTIVATION TRANSIENT (peak 75.55 − resident 45.67), which is architecture-bound (the
+/// large gpt-oss encoder's activations) and ~2× the ~14 GiB the other three tiers show at the same
+/// 1024². HEADROOM=18 covers the common-case transient (~14) + ~4 GiB OS/app reserve, but UNDER-predicts
+/// this class by ~29 GiB even AFTER a weight-byte correction — because the 29.88 transient ALONE exceeds
+/// 18 (75.55 − (28.43 + 18) = 29.12; the old provisional 10 under-predicted it by ~37: 75.55 −
+/// (28.43 + 10) = 37.12). So correcting only the weight bytes is INSUFFICIENT: both the in-memory weight
+/// size AND the outsized transient must be modeled for these tiers. (A blanket bf16 expansion factor
+/// also can't fix the weight half — a bf16 tier whose encoder is bf16-on-disk would then be
+/// over-rejected ~1.6× — so that fix needs per-family in-memory weight sizing plus a per-architecture
+/// transient term, backed by bf16 measurements across models.) Tracked in sc-11924. (2) Output
+/// RESOLUTION > 1024² grows the VAE-decode transient past 14 GiB — all four points are 1024², so 18 is
+/// a 1024²-worst-case; a higher-res campaign is a follow-up.
+const HEADROOM_GB: f64 = 18.0;
 
 /// Bytes per binary gigabyte (GiB) — matches `gpu::total_unified_memory_gb`, which divides
 /// `hw.memsize` by 1024³, and the epic's measured on-disk table.
@@ -246,13 +288,32 @@ fn weights_source_bytes(src: &WeightsSource) -> u64 {
     }
 }
 
+/// Resolve the TEXT-ENCODER on-disk bytes for the staged split (sc-10894), preferring the provider-owned
+/// per-component footprint over the `text_encoder*` subdir scan.
+///
+/// The subdir scan ([`sum_text_encoder_bytes`]) only recognizes the *diffusers* `text_encoder*` naming;
+/// it returns **zero** for a family whose encoder lives elsewhere — boogu's `mllm/`, bernini's flat
+/// `t5_encoder.safetensors`, anima's `text_encoders/` under a `split_files/` root — or that has no
+/// separable encoder at all (sensenova's flat unified MoT). A zero text-encoder collapses the staged
+/// (`max(te, rest)`) peak back to the resident peak, so no `Sequential` saving is ever selected. The
+/// provider's `ProviderRegistry::footprint` computes the split from the exact subdirs *its own* loader resolves,
+/// so it is authoritative per family. `footprint_te` is `Some` when the provider declared a footprint,
+/// `None` otherwise (or the query errored) — in which case this falls back to the subdir scan, the
+/// historical behavior. The whole-model `total` stays the recursive [`sum_safetensors_bytes`] sum, so
+/// `rest = total − te` accounts for the DiT + VAE + anything else regardless of the footprint's own
+/// dit/vae split (and keeps the sc-11006 control-branch folding intact).
+pub(crate) fn resolve_text_encoder_bytes(footprint_te: Option<u64>, dir: &Path) -> u64 {
+    footprint_te.unwrap_or_else(|| sum_text_encoder_bytes(dir))
+}
+
 /// Sum the on-disk `.safetensors` bytes of the model's TEXT-ENCODER component(s) — the phase-A
 /// component the `Sequential` residency drops before the DiT loads (sc-10839). Matches the diffusers
 /// snapshot's top-level `text_encoder` / `text_encoder_2` / `text_encoder_*` subdirs (SDXL has both
 /// CLIP encoders; Z-Image the single Qwen encoder), reusing [`sum_safetensors_bytes`] per subdir so
 /// the HF-cache symlink + AppleDouble handling is shared. `0` if the dir is missing or has no
 /// recognizable text-encoder subdir — which makes the staged estimate fall back to the resident sum
-/// (no claimed saving), the safe direction.
+/// (no claimed saving), the safe direction. Superseded, when a provider declares a footprint, by
+/// [`resolve_text_encoder_bytes`] (sc-10894); still the fallback for providers that do not.
 pub(crate) fn sum_text_encoder_bytes(dir: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -379,10 +440,27 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
         return Ok(spec);
     }
     let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
+    // Prefer the provider-owned per-component footprint for the text-encoder split (sc-10894): it is
+    // authoritative per family, unlike the `text_encoder*` subdir guess which reads ZERO for boogu
+    // (`mllm/`), bernini (flat `t5_encoder.safetensors`), anima (`text_encoders/` under `split_files/`),
+    // etc. `Ok(None)` (provider declares no footprint) or an `Err` (unknown id / single-file source)
+    // fall open to the subdir scan. Query BEFORE the match so both `Dir`/`File` arms see it.
+    let footprint_te = crate::inference_runtime::media()
+        .footprint(engine_id, &spec)
+        .ok()
+        .flatten()
+        .map(|fp| fp.text_encoder);
     let (mut total_bytes, te_bytes) = match &spec.weights {
-        WeightsSource::Dir(dir) => (sum_safetensors_bytes(dir), sum_text_encoder_bytes(dir)),
-        // A single-file source has no component split to stage — resident-or-reject only.
-        WeightsSource::File(file) => (std::fs::metadata(file).map_or(0, |meta| meta.len()), 0),
+        WeightsSource::Dir(dir) => (
+            sum_safetensors_bytes(dir),
+            resolve_text_encoder_bytes(footprint_te, dir),
+        ),
+        // A single-file source has no diffusers component tree; honor a footprint TE if the provider
+        // somehow computed one, else 0 (resident-or-reject only).
+        WeightsSource::File(file) => (
+            std::fs::metadata(file).map_or(0, |meta| meta.len()),
+            footprint_te.unwrap_or(0),
+        ),
     };
     // A ControlNet/overlay checkpoint (`spec.control`, e.g. qwen_image_control's VACE branch) lives in
     // a SEPARATE weights source, not under `spec.weights`, so it is missing from the sums above. It is
@@ -494,17 +572,20 @@ mod tests {
     #[test]
     fn fit_decision_rejects_only_a_genuine_overflow() {
         let budget = MemoryBudget { total_gb: 16.0 };
-        // qwen-image q8: ~36 GiB weights + 10 headroom = 46 ⇒ too big for a 16 GB Mac.
+        // qwen-image q8: ~36 GiB weights + 18 headroom (sc-10863) = 54 ⇒ too big for a 16 GB Mac.
         assert_eq!(
             fit_decision(predicted_peak_gb(36 * 1024 * 1024 * 1024_u64), Some(budget)),
             FitDecision::TooBig {
-                needed_gb: 46.0,
+                needed_gb: 36.0 + HEADROOM_GB,
                 available_gb: 16.0,
             }
         );
-        // A ~3 GiB model fits.
+        // A ~3 GiB model fits a roomy budget (3 + 18 headroom = 21 < 32).
         assert_eq!(
-            fit_decision(predicted_peak_gb(3 * 1024 * 1024 * 1024_u64), Some(budget)),
+            fit_decision(
+                predicted_peak_gb(3 * 1024 * 1024 * 1024_u64),
+                Some(MemoryBudget { total_gb: 32.0 })
+            ),
             FitDecision::Fits
         );
         // Exactly-fits is not a rejection: budget 46, need 46.
@@ -572,29 +653,90 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// The gate derives sequential-capability from each engine's REGISTERED descriptor bit
+    /// (`Capabilities::supports_sequential_offload`) rather than a hand-maintained allowlist (sc-10840,
+    /// epic 10834). This exercises the LIVE registry, so it must see the force-linked `mlx_gen_*`
+    /// providers — anchored (`use mlx_gen_* as _;` in `image_jobs`) only on macOS, the sole platform the
+    /// MLX gate runs on. Off-Mac the image registry is empty, so this is macOS-gated exactly like the
+    /// `engines.rs` descriptor sweeps. At the pinned mlx-gen `45428fa` every image engine advertises the
+    /// bit, so every wired id resolves true through the shared registry query.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn engine_supports_sequential_is_the_wired_provider_allowlist() {
-        assert!(engine_supports_sequential("sdxl"));
-        assert!(engine_supports_sequential("z_image_turbo"));
-        assert!(engine_supports_sequential("qwen_image"));
-        // The sc-11006 fan-out wired the qwen edit + control siblings (separate engine ids).
-        assert!(engine_supports_sequential("qwen_image_edit"));
-        assert!(engine_supports_sequential("qwen_image_control"));
-        // lens + lens_turbo share one crate/arch (sc-11030): both engine ids are wired. The Q8/Q4 win
-        // (Resident 34.5 → Sequential 22.3 GiB at 768², fits a 32 GB Mac) needs the consuming encoder
-        // loader — see mlx-gen-lens `with_selected_layers`.
-        assert!(engine_supports_sequential("lens"));
-        assert!(engine_supports_sequential("lens_turbo"));
-        // The sc-11101 fan-out wired the WHOLE krea_2 family (one crate, TE < DiT — the qwen pattern):
-        // turbo/raw/edit (Q8, 22→18 / 26→20 GiB at 768²) + turbo_control (bf16, 43→35 GiB). The control
-        // branch's `spec.control` bytes are already counted by the fit-gate (sc-11006).
-        assert!(engine_supports_sequential("krea_2_turbo"));
-        assert!(engine_supports_sequential("krea_2_raw"));
-        assert!(engine_supports_sequential("krea_2_edit"));
-        assert!(engine_supports_sequential("krea_2_turbo_control"));
-        // Not-yet-wired providers must NOT be offered sequential (they'd ignore it and SIGKILL).
-        assert!(!engine_supports_sequential("z_image_turbo_control"));
-        assert!(!engine_supports_sequential("flux"));
+    fn engine_supports_sequential_is_derived_from_the_registered_capability() {
+        // The earlier-wired families (sdxl / z-image / qwen / lens / krea) still resolve true — proving
+        // dropping the hardcoded allowlist introduced no regression for the already-covered engines.
+        for id in [
+            "sdxl",
+            "z_image",
+            "z_image_control",
+            "z_image_turbo",
+            "z_image_turbo_control",
+            "qwen_image",
+            "qwen_image_edit",
+            "qwen_image_control",
+            "lens",
+            "lens_turbo",
+            "krea_2_turbo",
+            "krea_2_raw",
+            "krea_2_edit",
+            "krea_2_turbo_edit",
+            "krea_2_turbo_control",
+        ] {
+            assert!(
+                engine_supports_sequential(id),
+                "{id}: earlier-wired family must stay sequential-capable"
+            );
+        }
+        // The sc-10840 Phase-1 fan-out families are AUTO-covered by the capability query with no
+        // allowlist edit here — the whole point of deriving from the descriptor bit. A newly-wired
+        // engine (e.g. `sd3_5_large`) is sequential-capable the moment its provider advertises the bit.
+        for id in [
+            "sd3_5_large",
+            "sd3_5_large_turbo",
+            "sd3_5_medium",
+            "sana_1600m",
+            "sana_sprint_1600m",
+            "flux1_schnell",
+            "flux1_dev",
+            "flux1_dev_control",
+            "flux2_klein_9b",
+            "flux2_klein_9b_edit",
+            "flux2_klein_9b_kv_edit",
+            "flux2_dev",
+            "flux2_dev_control",
+            "flux2_dev_edit",
+            "chroma1_base",
+            "chroma1_flash",
+            "chroma1_hd",
+            "ideogram_4",
+            "ideogram_4_turbo",
+            "kolors",
+            "anima_base",
+            "anima_aesthetic",
+            "anima_turbo",
+            "boogu_image",
+            "boogu_image_turbo",
+            "boogu_image_edit",
+            "bernini",
+        ] {
+            assert!(
+                engine_supports_sequential(id),
+                "{id}: sc-10840 fan-out engine must be sequential-capable at mlx-gen 45428fa"
+            );
+        }
+        // A REGISTERED engine that does NOT advertise the bit stays false: sensenova's encoder is fused
+        // into a unified MoT (`footprint` te=0) — no separable text encoder to drop, so residency buys
+        // nothing and Sequential would be a no-op that OOMs. This proves the query reads the descriptor
+        // BIT, not mere registry membership.
+        assert!(!engine_supports_sequential("sensenova_u1_8b"));
+    }
+
+    /// An id with no registered generator is never sequential-capable (the safe default: never select a
+    /// residency policy the provider won't honor) — a cross-platform invariant that holds even off-Mac
+    /// where the image registry is empty.
+    #[test]
+    fn engine_supports_sequential_is_false_for_an_unregistered_id() {
+        assert!(!engine_supports_sequential("no_such_engine_xyz"));
     }
 
     #[test]
@@ -698,8 +840,8 @@ mod tests {
     #[test]
     fn decide_residency_picks_resident_sequential_or_reject_by_budget() {
         let gib = 1024 * 1024 * 1024_u64;
-        // illustrious q8-class: total ~5 GiB (TE ~1, DiT+VAE ~4). Resident peak = 5+10 = 15;
-        // staged peak = max(1, 4)+10 = 14.
+        // illustrious q8-class: total ~5 GiB (TE ~1, DiT+VAE ~4). With HEADROOM_GB=18 (sc-10863):
+        // resident peak = 5+18 = 23; staged peak = max(1, 4)+18 = 22.
         let total = 5 * gib;
         let te = gib;
 
@@ -708,23 +850,23 @@ mod tests {
             decide_residency(total, te, Some(MemoryBudget { total_gb: 128.0 }), true),
             ResidencyOutcome::Resident
         );
-        // Budget between staged (14) and resident (15): resident won't fit, staged will, provider
+        // Budget between staged (22) and resident (23): resident won't fit, staged will, provider
         // stages ⇒ Sequential. This is the fit-gate SELECTING sequential residency.
         assert_eq!(
-            decide_residency(total, te, Some(MemoryBudget { total_gb: 14.5 }), true),
+            decide_residency(total, te, Some(MemoryBudget { total_gb: 22.5 }), true),
             ResidencyOutcome::Sequential
         );
         // Same budget but a provider that can't stage ⇒ reject (never a silent Resident that OOMs).
         assert!(matches!(
-            decide_residency(total, te, Some(MemoryBudget { total_gb: 14.5 }), false),
+            decide_residency(total, te, Some(MemoryBudget { total_gb: 22.5 }), false),
             ResidencyOutcome::Reject {
                 staged_gb: None,
                 ..
             }
         ));
-        // Budget below even the staged peak ⇒ reject, naming the staged requirement.
+        // Budget below even the staged peak (22) ⇒ reject, naming the staged requirement.
         assert!(matches!(
-            decide_residency(total, te, Some(MemoryBudget { total_gb: 12.0 }), true),
+            decide_residency(total, te, Some(MemoryBudget { total_gb: 20.0 }), true),
             ResidencyOutcome::Reject {
                 staged_gb: Some(_),
                 ..
@@ -799,5 +941,64 @@ mod tests {
         assert_eq!(sum_safetensors_bytes(&root.join("snapshots/hash")), 4096);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// sc-10894: on a boogu-style snapshot (text encoder under `mllm/`, not `text_encoder*`), the
+    /// subdir scan reads ZERO, but `resolve_text_encoder_bytes` PREFERS a provider footprint value when
+    /// present and only falls back to the scan when it is `None`.
+    #[test]
+    fn resolve_text_encoder_prefers_footprint_over_subdir_scan() {
+        let root = std::env::temp_dir().join(format!(
+            "mlx_fit_gate_resolve_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        // Encoder under `mllm/`, DiT `transformer/`, VAE `vae/` — NO `text_encoder*` subdir.
+        for (sub, bytes) in [("mllm", 1500usize), ("transformer", 9000), ("vae", 400)] {
+            let dir = root.join(sub);
+            std::fs::create_dir_all(&dir).expect("mk subdir");
+            std::fs::write(dir.join("model.safetensors"), vec![0u8; bytes]).expect("weights");
+        }
+        // The historical subdir scan finds no `text_encoder*` → 0 (the bug this seam fixes).
+        assert_eq!(sum_text_encoder_bytes(&root), 0);
+        // The whole-model sum still sees every component.
+        assert_eq!(sum_safetensors_bytes(&root), 10900);
+        // No footprint declared ⇒ fall back to the (zero) subdir scan.
+        assert_eq!(resolve_text_encoder_bytes(None, &root), 0);
+        // A provider footprint (the `mllm/` bytes) is preferred, even though the scan reads zero.
+        assert_eq!(resolve_text_encoder_bytes(Some(1500), &root), 1500);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// sc-10894 end-to-end: a non-zero footprint text encoder flips the residency decision from Reject to
+    /// Sequential where the zero-reading subdir scan (the fallback) would reject. This is the whole point
+    /// of the seam — the staged peak is only real when the text-encoder split is measured.
+    #[test]
+    fn footprint_text_encoder_flips_reject_to_sequential() {
+        let gib = 1024 * 1024 * 1024_u64;
+        // boogu-class: whole model 22 GiB (mllm 13 + transformer 8 + vae 1). No `text_encoder*` subdir,
+        // so the subdir scan reads 0.
+        let total = 22 * gib;
+        // Budget between the staged (31) and resident (40) peaks under HEADROOM_GB=18 (sc-10863).
+        let budget = Some(MemoryBudget { total_gb: 34.0 });
+
+        // Fallback path (footprint None on a dir with no `text_encoder*`) → te = 0 → staged == resident
+        // peak (22 + 18 = 40) > 34 → Reject, even though one-component-at-a-time WOULD fit.
+        let te_fallback = resolve_text_encoder_bytes(None, std::path::Path::new("/nonexistent"));
+        assert_eq!(te_fallback, 0);
+        assert!(matches!(
+            decide_residency(total, te_fallback, budget, true),
+            ResidencyOutcome::Reject { .. }
+        ));
+
+        // Provider footprint (te = 13 GiB) → staged = max(13, 22 − 13 = 9) + 18 = 31 ≤ 34 → Sequential.
+        let te_footprint =
+            resolve_text_encoder_bytes(Some(13 * gib), std::path::Path::new("/ignored"));
+        assert_eq!(te_footprint, 13 * gib);
+        assert_eq!(
+            decide_residency(total, te_footprint, budget, true),
+            ResidencyOutcome::Sequential
+        );
     }
 }

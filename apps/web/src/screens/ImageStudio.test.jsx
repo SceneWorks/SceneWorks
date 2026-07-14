@@ -649,6 +649,10 @@ describe("ImageStudio Krea image edit LoRA (epic 10871)", () => {
     const editEntry = payload.loras.find((l) => l.id === "krea2_identity_edit");
     expect(editEntry).toBeTruthy();
     expect(editEntry.conditioningRole).toBe("image_edit");
+    // Identity strength (sc-11798): with no slider interaction the payload carries the manifest
+    // default weight, and the Identity strength control renders for the managed edit LoRA.
+    expect(editEntry.weight).toBe(1);
+    expect(container.textContent).toContain("Identity strength");
     // Deduped — auto-applied exactly once.
     expect(payload.loras.filter((l) => l.id === "krea2_identity_edit")).toHaveLength(1);
   });
@@ -1896,7 +1900,7 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
     [...document.body.querySelectorAll(".control-mode-tab")].find((b) => b.textContent.trim() === label);
   // The structure-control panel is collapsed by default; expand it so the gated inner content
   // (mode tabs, control-image upload, slider) mounts before the assertions below.
-  const expandControlPanel = async () => click(document.body.querySelector(".control-panel-head"));
+  const expandControlPanel = async () => click(document.body.querySelector(".control-panel-toggle"));
   const generate = async () =>
     click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
 

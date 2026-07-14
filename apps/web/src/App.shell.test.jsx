@@ -234,6 +234,10 @@ describe("SceneWorks app shell", () => {
 
     expect(props.onCreateProject).toHaveBeenCalledWith("Doomed Project");
     expect(props.onComplete).not.toHaveBeenCalled();
+    // issue #1435 / sc-11855: the wizard overlays the whole app (incl. Settings),
+    // so a failed create must surface in-wizard recovery guidance rather than
+    // silently leaving the user stuck on the model screen.
+    expect(container.textContent).toContain("different workspace folder");
   });
 
   it("renders the app navigation against mocked API calls", async () => {

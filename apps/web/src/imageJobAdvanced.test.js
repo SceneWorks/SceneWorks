@@ -50,6 +50,8 @@ function offState(overrides = {}) {
     supportsImg2img: false,
     img2imgReferenceAssetId: null,
     img2imgStrength: 0.5,
+    supportsTextStyle: false,
+    textStyleGain: 1.0,
     ...overrides,
   };
 }
@@ -88,6 +90,21 @@ describe("buildImageJobAdvanced", () => {
         offState({ supportsImg2img: true, img2imgReferenceAssetId: "ref-1", img2imgStrength: 0.4 }),
       ).strength,
     ).toBe(0.4);
+  });
+
+  it("emits advanced.textStyleGain only for a Krea model off the 1.0 default (sc-11878)", () => {
+    // No text-style support → omitted even off-default.
+    expect(
+      buildImageJobAdvanced(offState({ textStyleGain: 1.5 })),
+    ).not.toHaveProperty("textStyleGain");
+    // Supported but at the 1.0 no-op default → omitted (recipes stay byte-identical).
+    expect(
+      buildImageJobAdvanced(offState({ supportsTextStyle: true, textStyleGain: 1.0 })),
+    ).not.toHaveProperty("textStyleGain");
+    // Supported + off-default → rides advanced.
+    expect(
+      buildImageJobAdvanced(offState({ supportsTextStyle: true, textStyleGain: 1.5 })).textStyleGain,
+    ).toBe(1.5);
   });
 
   it("omits guidanceMethod for the engine no-op 'cfg' and rides a non-default method", () => {

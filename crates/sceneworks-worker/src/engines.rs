@@ -1474,6 +1474,7 @@ mod tests {
     const STUB_MLX: gen_core::ModelRegistration = gen_core::ModelRegistration {
         descriptor: stub_mlx_descriptor,
         load: stub_mlx_load,
+        footprint: None,
     };
 
     // A candle-backed stub whose id is also in MODEL_TABLE (`sdxl`): proves a Windows/candle
@@ -1496,6 +1497,7 @@ mod tests {
     const STUB_CANDLE: gen_core::ModelRegistration = gen_core::ModelRegistration {
         descriptor: stub_candle_descriptor,
         load: stub_candle_load,
+        footprint: None,
     };
 
     // An MLX-backed stub whose id is NOT in MODEL_TABLE / VIDEO_ENGINE_IDS: proves an unknown
@@ -1517,6 +1519,7 @@ mod tests {
     const STUB_UNKNOWN: gen_core::ModelRegistration = gen_core::ModelRegistration {
         descriptor: stub_unknown_descriptor,
         load: stub_unknown_load,
+        footprint: None,
     };
 
     // A candle-backed core-llm `TextLlm` stub (backend "candle", non-vision): proves the prompt-refine
