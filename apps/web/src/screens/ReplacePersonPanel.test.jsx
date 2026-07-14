@@ -2,7 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
-import { changeField, field } from "../main.testSupport.jsx";
+import { buttonInside, changeField, field, settle } from "../main.testSupport.jsx";
 
 // sc-11966 — S7: a background track refresh (SSE / track-job update) must not
 // clobber the user's unsaved in-progress per-frame drafts. The inner
@@ -33,7 +33,7 @@ describe("ReplacePersonPanel track corrections drafts (sc-11966)", () => {
 
   // Only the props PersonTrackCorrections needs to mount and re-render; the rest
   // of ReplacePersonPanel's surface is inert with these safe defaults.
-  const renderPanel = (selectedTrack) =>
+  const renderPanel = (selectedTrack, saveTrackCorrections = vi.fn()) =>
     act(() => {
       root.render(
         <ReplacePersonPanel
@@ -42,7 +42,7 @@ describe("ReplacePersonPanel track corrections drafts (sc-11966)", () => {
           personReadiness={{}}
           personTrackId={selectedTrack.id}
           replacementMode="face_only"
-          saveTrackCorrections={vi.fn()}
+          saveTrackCorrections={saveTrackCorrections}
           selectedDetection={null}
           selectedTrack={selectedTrack}
           setPersonTrackId={() => {}}
@@ -123,5 +123,53 @@ describe("ReplacePersonPanel track corrections drafts (sc-11966)", () => {
 
     expect(field(container, "Box x").value).toBe("0.8");
     expect(container.textContent).toContain("1 saved");
+  });
+
+  it("after a save lands, a later external correction on another frame is reflected, not clobbered", async () => {
+    // saveTrackCorrections resolves with the updated track (mirrors the hook), so
+    // a successful save re-baselines the drafts to the just-saved clean state.
+    const saveTrackCorrections = vi.fn(() => Promise.resolve(track("track-1", [])));
+
+    await renderPanel(track("track-1", []), saveTrackCorrections);
+
+    // User edits frame 0's box -> a dirty, unsaved draft, then saves it.
+    await changeField(field(container, "Box x"), "0.55");
+    expect(container.textContent).toContain("1 unsaved");
+    await act(async () => {
+      buttonInside(container, "Save corrections").click();
+    });
+    await settle();
+    expect(saveTrackCorrections).toHaveBeenCalledWith("track-1", [
+      { frameIndex: 0, box: { x: 0.55, y: 0.2, width: 0.3, height: 0.4 }, rejected: false, author: "ui", source: "manual" },
+    ]);
+
+    // The save LANDS: the parent refetch replaces the track, so the persisted
+    // corrections now equal the user's draft on frame 0 (same track id -> no
+    // remount). Drafts must read clean against the just-saved corrections.
+    await renderPanel(
+      track("track-1", [{ frameIndex: 0, box: { x: 0.55, y: 0.2, width: 0.3, height: 0.4 }, rejected: false }]),
+      saveTrackCorrections,
+    );
+    expect(field(container, "Box x").value).toBe("0.55");
+    expect(container.textContent).toContain("1 saved");
+
+    // Now an externally-landed correction arrives on a DIFFERENT frame (frame 1)
+    // while drafts are clean post-save. Before the post-save fix this reseed was
+    // skipped (drafts still measured "dirty" vs the pre-edit seed): frame 1 was
+    // hidden AND the still-enabled Save would have dropped it (data loss).
+    await renderPanel(
+      track("track-1", [
+        { frameIndex: 0, box: { x: 0.55, y: 0.2, width: 0.3, height: 0.4 }, rejected: false },
+        { frameIndex: 1, box: { x: 0.7, y: 0.7, width: 0.2, height: 0.2 }, rejected: false },
+      ]),
+      saveTrackCorrections,
+    );
+
+    // The panel converged to both corrections: clean ("2 saved"), so the next Save
+    // would NOT drop the external frame-1 correction.
+    expect(container.textContent).toContain("2 saved");
+    // And the externally-added frame-1 box is visible when scrubbed to.
+    await changeField(field(container, "Scrub tracking frames"), "1");
+    expect(field(container, "Box x").value).toBe("0.7");
   });
 });

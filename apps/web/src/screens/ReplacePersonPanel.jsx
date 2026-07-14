@@ -83,7 +83,10 @@ function PersonTrackCorrections({ track, sourceClip, saveTrackCorrections }) {
 
   const correctionsSignature = JSON.stringify(track?.corrections ?? []);
   // Seed working drafts from the persisted corrections so reopening a track
-  // shows its saved adjustments, and re-seed after a save converges the UI.
+  // shows its saved adjustments. A successful save re-baselines `seededSignatureRef`
+  // (see save()), so the post-save corrections refetch — and any later external
+  // correction on the same track — converge cleanly instead of being mistaken for
+  // a dirty conflict against the pre-edit seed.
   //
   // sc-11966: a background track refresh (SSE / track-job update) can bump the
   // corrections signature on the SAME track while the user has unsaved
@@ -221,7 +224,17 @@ function PersonTrackCorrections({ track, sourceClip, saveTrackCorrections }) {
     }
     setSaving(true);
     try {
-      await saveTrackCorrections(track.id, pendingCorrections);
+      const result = await saveTrackCorrections(track.id, pendingCorrections);
+      // sc-11966: a successful save makes the just-saved working set the new clean
+      // baseline. The save returns the updated track, so the parent refetch bumps
+      // correctionsSignature to the persisted value. Without re-baselining here,
+      // the seed effect keeps measuring "dirty" against the stale pre-edit seed, so
+      // the post-save refetch (and any later external correction on the same track)
+      // is treated as a dirty conflict and skipped — hiding the external change and
+      // letting the next Save silently drop it.
+      if (result) {
+        seededSignatureRef.current = JSON.stringify(draftsRef.current ?? {});
+      }
     } finally {
       setSaving(false);
     }
