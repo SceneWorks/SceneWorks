@@ -49,7 +49,7 @@ import {
 } from "./assetVariants.js";
 import { buildWorkersById } from "./workers.js";
 import { createEditorScratchRegistry } from "./editorScratch.js";
-import { ConfirmHost } from "./appConfirm.jsx";
+import { appConfirm, ConfirmHost } from "./appConfirm.jsx";
 import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
 import {
   buildLocalJobStack,
@@ -1959,10 +1959,16 @@ export function App() {
       try {
         let result = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/purge`, token, { method: "DELETE" });
         // The purge first tries the OS trash (recoverable). If that fails nothing was
-        // removed; confirm before falling back to a permanent delete.
+        // removed; confirm before falling back to a permanent delete. Routed through the
+        // desktop-safe appConfirm (sc-12068) — window.confirm no-ops in the Tauri WebView.
         if (result?.status === "trash_unavailable") {
-          const proceed = typeof window.confirm !== "function" ||
-            window.confirm("Cannot move to trash. Continue to permanently delete.");
+          const proceed = await appConfirm({
+            title: "Move to trash failed",
+            message: "Cannot move to trash. Continue to permanently delete.",
+            confirmLabel: "Delete permanently",
+            cancelLabel: "Cancel",
+            tone: "danger",
+          });
           if (!proceed) {
             setError("");
             return;

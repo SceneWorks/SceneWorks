@@ -7,6 +7,18 @@ import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { CharacterAssets, CharacterDatasets } from "./screens/characterPanels.jsx";
 import { withAppContext, FakeEventSource, response, errorResponse, settle, field, changeField } from "./main.testSupport.jsx";
 
+// sc-12068: destructive/confirm actions (Character Studio archive, the asset Trashcan
+// "Empty Trash") now route through the shared desktop-safe appConfirm dialog rather than
+// the raw window.confirm, which silently no-ops inside the Tauri WebView. Mock it so
+// tests control the user's choice and assert the guard fired. The full-App shell tests in
+// this file never trigger a confirm, so the no-op ConfirmHost is harmless there.
+const { appConfirmMock } = vi.hoisted(() => ({ appConfirmMock: vi.fn(async () => true) }));
+vi.mock("./appConfirm.jsx", () => ({
+  appConfirm: appConfirmMock,
+  useConfirm: () => appConfirmMock,
+  ConfirmHost: () => null,
+}));
+
 describe("SceneWorks app shell", () => {
   let container;
   let root;
@@ -442,19 +454,24 @@ describe("SceneWorks app shell", () => {
     const archiveButton = () =>
       [...document.body.querySelectorAll("#character-panel-character button")].find((button) => button.textContent === "Archive");
 
-    // Declining the confirm leaves the character untouched.
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    // sc-12068: archiving now confirms via the desktop-safe appConfirm dialog. Declining
+    // the confirm leaves the character untouched.
+    appConfirmMock.mockClear();
+    appConfirmMock.mockResolvedValue(false);
     await act(async () => {
       archiveButton().click();
     });
-    expect(confirmSpy).toHaveBeenCalled();
+    await settle();
+    expect(appConfirmMock).toHaveBeenCalled();
+    expect(appConfirmMock.mock.calls[0][0]).toMatchObject({ title: "Archive character?" });
     expect(archiveCharacter).not.toHaveBeenCalled();
 
     // Confirming archives it.
-    confirmSpy.mockReturnValue(true);
+    appConfirmMock.mockResolvedValue(true);
     await act(async () => {
       archiveButton().click();
     });
+    await settle();
     expect(archiveCharacter).toHaveBeenCalledWith("char-1");
 
     // The archived view is hidden until opened, then lazily fetches archived characters.
@@ -473,8 +490,6 @@ describe("SceneWorks app shell", () => {
     await settle();
     expect(unarchiveCharacter).toHaveBeenCalledWith("char-archived");
     expect(document.body.querySelector(".archived-character-list")).toBeNull();
-
-    confirmSpy.mockRestore();
   });
 
   it("surfaces character videos alongside images in the Assets tab (sc-2296)", async () => {
@@ -1770,7 +1785,9 @@ describe("SceneWorks app shell", () => {
   });
 
   it("Empty Trash purges all discarded images for the character and only in the Trashcan view", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    // sc-12068: Empty Trash confirms via the desktop-safe appConfirm dialog before purging.
+    appConfirmMock.mockClear();
+    appConfirmMock.mockResolvedValue(true);
     const purgeAsset = vi.fn();
     const assets = [
       { id: "img-active", type: "image", displayName: "keep", recipe: { normalizedSettings: { characterId: "char-1" } } },
@@ -1842,11 +1859,12 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       emptyButton.click();
     });
+    await settle();
+    expect(appConfirmMock).toHaveBeenCalledWith(expect.objectContaining({ tone: "danger" }));
     expect(purgeAsset).toHaveBeenCalledTimes(2);
     expect(purgeAsset).toHaveBeenCalledWith(expect.objectContaining({ id: "img-trash-1" }));
     expect(purgeAsset).toHaveBeenCalledWith(expect.objectContaining({ id: "img-trash-2" }));
     expect(purgeAsset).not.toHaveBeenCalledWith(expect.objectContaining({ id: "img-other" }));
-    confirm.mockRestore();
   });
 
   it("launches reference-based generation from an approved character reference", async () => {

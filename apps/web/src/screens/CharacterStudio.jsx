@@ -10,6 +10,7 @@ import {
   CharacterTest,
   editableLora,
 } from "./characterPanels.jsx";
+import { appConfirm } from "../appConfirm.jsx";
 import { CompactSelector } from "../components/CompactSelector.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { assetMatchesCharacter } from "../characterMembership.js";
@@ -458,18 +459,21 @@ export function CharacterStudio() {
   }, [archivedOpen, loadArchived]);
 
   // sc-6066: archiving is destructive-feeling (the character vanishes from the list),
-  // so confirm first — a single misclick shouldn't silently hide a character.
+  // so confirm first — a single misclick shouldn't silently hide a character. Routed
+  // through the desktop-safe appConfirm (sc-12068); window.confirm silently no-ops in
+  // the Tauri WebView. Archiving is reversible ("Show archived characters"), so this
+  // uses the default (non-danger) tone.
   async function handleArchiveSelected() {
     if (!selectedCharacter) {
       return;
     }
-    if (
-      typeof window !== "undefined" &&
-      typeof window.confirm === "function" &&
-      !window.confirm(
-        `Archive "${selectedCharacter.name || "this character"}"? It will be hidden from the active list. You can restore it later from "Show archived characters".`,
-      )
-    ) {
+    const proceed = await appConfirm({
+      title: "Archive character?",
+      message: `Archive "${selectedCharacter.name || "this character"}"? It will be hidden from the active list. You can restore it later from "Show archived characters".`,
+      confirmLabel: "Archive",
+      cancelLabel: "Cancel",
+    });
+    if (!proceed) {
       return;
     }
     await archiveCharacter(selectedCharacter.id);

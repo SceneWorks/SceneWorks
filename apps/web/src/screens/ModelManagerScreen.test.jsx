@@ -3,6 +3,27 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click } from "../testUtils/dom.js";
 
+// sc-12068: model / LoRA / tier deletes confirm through the shared desktop-safe appConfirm
+// dialog rather than the raw window.confirm, which silently no-ops inside the Tauri WebView.
+// Mock it so tests control the user's choice and assert the guard fired. resetModules in the
+// per-describe beforeEach re-imports the screen fresh; this static mock still intercepts it.
+const { appConfirmMock } = vi.hoisted(() => ({ appConfirmMock: vi.fn(async () => true) }));
+vi.mock("../appConfirm.jsx", () => ({
+  appConfirm: appConfirmMock,
+  useConfirm: () => appConfirmMock,
+  ConfirmHost: () => null,
+}));
+
+// The delete handlers await appConfirm (a Promise) before calling the delete action, so the
+// action runs a microtask after the click. Flush those microtasks before asserting.
+async function flushConfirm() {
+  await act(async () => {
+    for (let i = 0; i < 4; i += 1) {
+      await Promise.resolve();
+    }
+  });
+}
+
 // The screen is a tabbed interface (epic 10309): Image / Video / Utility / LoRAs tabs,
 // each showing only its own models, plus a transient Search Results tab. A model card
 // or the LoRA import form is only in the DOM while its tab is active, so tests select
@@ -1106,7 +1127,8 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
   // not-installed tier has none. Clicking it (after the confirm) calls deleteModelVariant with the
   // tier key, so the backend removes just that tier's files/blobs and leaves the rest installed.
   it("shows a per-tier delete on installed tiers only, and deletes that tier", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    appConfirmMock.mockReset();
+    appConfirmMock.mockResolvedValue(true);
     await render([matrixModel({ installed: ["q8"] })]);
     const rowFor = (label) =>
       tierRows().find((row) => row.querySelector(".model-tier-label").textContent.includes(label));
@@ -1115,18 +1137,21 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     expect(rowFor("Q4").querySelector(".model-tier-delete")).toBeNull();
     expect(rowFor("bf16").querySelector(".model-tier-delete")).toBeNull();
     await click(rowFor("Q8").querySelector(".model-tier-delete"));
+    await flushConfirm();
+    // sc-12068: the per-tier delete confirms through the desktop-safe appConfirm dialog.
+    expect(appConfirmMock).toHaveBeenCalledWith(expect.objectContaining({ tone: "danger" }));
     expect(deleteModelVariant).toHaveBeenCalledTimes(1);
     expect(deleteModelVariant).toHaveBeenCalledWith(
       expect.objectContaining({ id: "z_image_turbo" }),
       "q8",
     );
-    confirmSpy.mockRestore();
   });
 
   // sc-12025: convert-at-install models (mlxTiers, e.g. Anima) render no download panel, so they get
   // a compact installed-tiers list with per-tier delete instead — reusing the same deleteModelVariant.
   it("shows an installed-tiers delete list for a convert-at-install (mlxTiers) model", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    appConfirmMock.mockReset();
+    appConfirmMock.mockResolvedValue(true);
     const convertModel = {
       id: "anima_base",
       name: "Anima",
@@ -1150,11 +1175,12 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     expect(labels[2]).toContain("Q4");
     const q4Row = rows.find((row) => row.querySelector(".model-tier-label").textContent.includes("Q4"));
     await click(q4Row.querySelector(".model-tier-delete"));
+    await flushConfirm();
+    expect(appConfirmMock).toHaveBeenCalledWith(expect.objectContaining({ tone: "danger" }));
     expect(deleteModelVariant).toHaveBeenCalledWith(
       expect.objectContaining({ id: "anima_base" }),
       "q4",
     );
-    confirmSpy.mockRestore();
   });
 
   it("leaves a single-variant model's download UX unchanged (no tier panel)", async () => {
@@ -1265,5 +1291,130 @@ describe("ModelManagerScreen convert-at-install Update button", () => {
     expect(mlxButtons().some((button) => button.textContent === "Update")).toBe(false);
     expect(mlxButtons().some((button) => button.textContent === "MLX ready")).toBe(true);
     expect(createModelDownloadJob).not.toHaveBeenCalled();
+  });
+});
+
+// sc-12068: the whole-model and whole-LoRA delete buttons confirm through the desktop-safe
+// appConfirm dialog (danger tone) before invoking the delete action, so a misclick can't
+// silently remove installed weights and the guard actually renders on the Tauri desktop.
+describe("ModelManagerScreen model & LoRA delete confirms (sc-12068)", () => {
+  let container;
+  let root;
+  let deleteModel;
+  let deleteLora;
+  let ModelManagerScreen;
+  let AppContext;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.__TAURI__ = { core: { invoke: vi.fn(async () => null) } };
+    deleteModel = vi.fn(async () => ({ removedManifestEntry: true }));
+    deleteLora = vi.fn(async () => ({ removedManifestEntry: true }));
+    vi.resetModules();
+    ({ AppContext } = await import("../context/AppContext.js"));
+    ({ ModelManagerScreen } = await import("./ModelManagerScreen.jsx"));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete window.__TAURI__;
+    vi.restoreAllMocks();
+  });
+
+  async function render({ models = [], loras = [] } = {}) {
+    const value = {
+      activeProject: null,
+      jobs: [],
+      loras,
+      models,
+      presets: [],
+      workersById: new Map(),
+      visibleWorkers: [],
+      jobAction: () => {},
+      setActiveView: () => {},
+      deleteLora,
+      deleteModel,
+      createModelDownloadJob: () => {},
+      createLoraDownloadJob: () => {},
+      createModelConvertJob: () => {},
+      createLoraImportJob: () => {},
+      createModelImportJob: () => {},
+    };
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={value}>
+          <ModelManagerScreen />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const installedModel = {
+    id: "z_image_turbo",
+    name: "Z-Image-Turbo",
+    type: "image",
+    family: "z-image",
+    capabilities: ["text_to_image"],
+    installState: "installed",
+    removable: true,
+  };
+
+  const modelDeleteButton = () =>
+    [...container.querySelectorAll(".model-card .danger-action")].find((button) => button.textContent === "Delete");
+
+  it("confirms a model delete via appConfirm (danger) and removes it when accepted", async () => {
+    appConfirmMock.mockReset();
+    appConfirmMock.mockResolvedValue(true);
+    await render({ models: [installedModel] });
+
+    const button = modelDeleteButton();
+    expect(button).toBeTruthy();
+    await click(button);
+    await flushConfirm();
+
+    expect(appConfirmMock).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Delete model?", tone: "danger" }),
+    );
+    expect(deleteModel).toHaveBeenCalledWith(expect.objectContaining({ id: "z_image_turbo" }));
+  });
+
+  it("does not delete a model when the confirm is declined", async () => {
+    appConfirmMock.mockReset();
+    appConfirmMock.mockResolvedValue(false);
+    await render({ models: [installedModel] });
+
+    await click(modelDeleteButton());
+    await flushConfirm();
+
+    expect(appConfirmMock).toHaveBeenCalledTimes(1);
+    expect(deleteModel).not.toHaveBeenCalled();
+  });
+
+  it("confirms a LoRA delete via appConfirm (danger) and removes it when accepted", async () => {
+    appConfirmMock.mockReset();
+    appConfirmMock.mockResolvedValue(true);
+    await render({
+      loras: [{ id: "my_lora", name: "My LoRA", scope: "global", family: "flux", removable: true }],
+    });
+    await selectTab(container, "LoRAs");
+
+    const button = [...container.querySelectorAll(".lora-row-actions .danger-action")].find(
+      (candidate) => candidate.textContent === "Delete",
+    );
+    expect(button).toBeTruthy();
+    await click(button);
+    await flushConfirm();
+
+    expect(appConfirmMock).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Delete LoRA?", tone: "danger" }),
+    );
+    expect(deleteLora).toHaveBeenCalledWith(expect.objectContaining({ id: "my_lora" }));
   });
 });

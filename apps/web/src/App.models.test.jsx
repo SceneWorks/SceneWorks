@@ -5,6 +5,17 @@ import { App, eventUrl } from "./main.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
 import { withModelManagerContext, FakeEventSource, response, settle, field, loraPanel, modelImportPanel, buttonInside, changeField, changeFile, selectModelTab, familyFilter } from "./main.testSupport.jsx";
 
+// sc-12068: model / LoRA deletes confirm through the shared desktop-safe appConfirm dialog
+// rather than the raw window.confirm, which silently no-ops inside the Tauri WebView. Mock it
+// so the delete test controls the choice and asserts the guard fired with the right message.
+// The full-App tests in this file never trigger a confirm, so the no-op ConfirmHost is safe.
+const { appConfirmMock } = vi.hoisted(() => ({ appConfirmMock: vi.fn(async () => true) }));
+vi.mock("./appConfirm.jsx", () => ({
+  appConfirm: appConfirmMock,
+  useConfirm: () => appConfirmMock,
+  ConfirmHost: () => null,
+}));
+
 describe("SceneWorks app shell", () => {
   let container;
   let root;
@@ -973,7 +984,8 @@ describe("SceneWorks app shell", () => {
   it("confirms and deletes models and LoRAs from the Models page", async () => {
     const onDeleteModel = vi.fn(async () => ({ removedManifestEntry: true, warnings: ["Recipe presets reference this model: Moody"] }));
     const onDeleteLora = vi.fn(async () => ({ removedManifestEntry: true, warnings: ["Recipe presets reference this lora: Moody"] }));
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    appConfirmMock.mockClear();
+    appConfirmMock.mockResolvedValue(true);
     root = createRoot(container);
     await act(async () => {
       root.render(
@@ -995,9 +1007,14 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       document.body.querySelector(".model-card .danger-action").click();
     });
+    await settle();
 
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Delete model "Z-Image Turbo"?'));
-    expect(confirm.mock.calls[0][0]).toContain("Referenced by presets: Moody.");
+    // sc-12068: the delete confirms through appConfirm (danger tone), carrying the same
+    // "Delete model …? Referenced by presets" message the raw confirm used to show.
+    expect(appConfirmMock).toHaveBeenCalledWith(
+      expect.objectContaining({ tone: "danger", message: expect.stringContaining('Delete model "Z-Image Turbo"?') }),
+    );
+    expect(appConfirmMock.mock.calls[0][0].message).toContain("Referenced by presets: Moody.");
     expect(onDeleteModel).toHaveBeenCalledWith(expect.objectContaining({ id: "z_image_turbo" }));
     expect(container.textContent).toContain("Removed the registry entry for Z-Image Turbo.");
 
@@ -1005,8 +1022,11 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       document.body.querySelector(".lora-row .danger-action").click();
     });
+    await settle();
 
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Delete lora "Ready Style"?'));
+    expect(appConfirmMock).toHaveBeenCalledWith(
+      expect.objectContaining({ tone: "danger", message: expect.stringContaining('Delete lora "Ready Style"?') }),
+    );
     expect(onDeleteLora).toHaveBeenCalledWith(expect.objectContaining({ id: "ready_style" }));
     expect(container.textContent).toContain("Removed the registry entry for Ready Style.");
   });

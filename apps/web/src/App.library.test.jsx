@@ -8,6 +8,16 @@ import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { ReplacePersonPanel } from "./screens/ReplacePersonPanel.jsx";
 import { withAppContext, FakeEventSource, response, settle, changeField } from "./main.testSupport.jsx";
 
+// sc-12068: the Library Trashcan "Empty Trash" purge confirms through the shared desktop-safe
+// appConfirm dialog rather than the raw window.confirm, which silently no-ops inside the Tauri
+// WebView. Mock it so the test controls the choice and asserts the guard fired.
+const { appConfirmMock } = vi.hoisted(() => ({ appConfirmMock: vi.fn(async () => true) }));
+vi.mock("./appConfirm.jsx", () => ({
+  appConfirm: appConfirmMock,
+  useConfirm: () => appConfirmMock,
+  ConfirmHost: () => null,
+}));
+
 describe("SceneWorks app shell", () => {
   let container;
   let root;
@@ -989,7 +999,8 @@ describe("SceneWorks app shell", () => {
   });
 
   it("Empty Trash purges every discarded asset in the Library Trashcan view only", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    appConfirmMock.mockClear();
+    appConfirmMock.mockResolvedValue(true);
     const purgeAsset = vi.fn();
     const active = {
       id: "asset-active",
@@ -1052,12 +1063,12 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       emptyButton.click();
     });
-    expect(confirm).toHaveBeenCalled();
+    await settle();
+    expect(appConfirmMock).toHaveBeenCalledWith(expect.objectContaining({ tone: "danger" }));
     expect(purgeAsset).toHaveBeenCalledTimes(2);
     expect(purgeAsset).toHaveBeenCalledWith(trashedA);
     expect(purgeAsset).toHaveBeenCalledWith(trashedB);
     expect(purgeAsset).not.toHaveBeenCalledWith(active);
-    confirm.mockRestore();
   });
 
   it("gates Document Studio behind a model download when no interleave model is present", async () => {

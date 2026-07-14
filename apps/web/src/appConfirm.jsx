@@ -16,10 +16,13 @@
 // handlers, or a leave-guard callback), and `useConfirm()` is a thin React accessor that
 // returns it. Both resolve to `true` (proceed) or `false` (cancel).
 //
-// Adopters: the Image Editor Close/Discard + its leave-guard use this today. The other
-// window.confirm call sites (PresetManager, Training, Pose Library, the video EditorScreen
-// timeline-switch guard, App's trash-unavailable confirm) should migrate to it too so the
-// whole app is desktop-safe — tracked as follow-ups on sc-11968's siblings (S10–S12).
+// Adopters: every in-app confirm now routes through this helper so the whole app is
+// desktop-safe — the Image Editor Close/Discard + leave-guard, PresetManager, Training,
+// Pose Library, the video EditorScreen timeline-switch guard, ModelManager model/LoRA/
+// tier deletes, Character Studio archive, the asset Trashcan empty/purge, and both
+// trash-unavailable permanent-delete fallbacks (App.purgeAsset, useModelsAndLoras). No
+// raw window.confirm call sites remain (migrations: sc-11968's siblings S10–S12, then
+// sc-12018 and sc-12068).
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Modal } from "./components/Modal.jsx";
 
