@@ -13,6 +13,7 @@ import {
   transitionOptions,
 } from "../timeline.js";
 import { useAppStatic } from "../context/AppContext.js";
+import { useScreenActive } from "../context/ScreenActiveContext.js";
 
 export function EditorScreen() {
   const {
@@ -51,6 +52,11 @@ export function EditorScreen() {
   const [extensionDuration, setExtensionDuration] = useState(4);
   const [timelineNotice, setTimelineNotice] = useState("");
   const previewVideoRef = useRef(null);
+  // sc-11961 (S2): under keep-alive this editor stays mounted while backgrounded, so it
+  // can no longer rely on unmount to stop preview playback. `screenActive` is false when
+  // another view is foregrounded; the playback effect below gates on it so a hidden
+  // editor does no continuous video decode/audio work.
+  const screenActive = useScreenActive();
 
   const selectedItem = useMemo(() => {
     if (!activeTimeline) {
@@ -84,12 +90,16 @@ export function EditorScreen() {
       setIsPlaying(false);
       return;
     }
-    if (isPlaying) {
+    // Only drive playback while this is the foreground view (sc-11961). When the editor
+    // is backgrounded under keep-alive, pause instead — the <video>'s pause event flips
+    // isPlaying off (onPause), so re-showing the editor lands paused rather than silently
+    // resuming audio/decode work that ran while hidden.
+    if (isPlaying && screenActive) {
       video.play().catch(() => setIsPlaying(false));
       return;
     }
     video.pause();
-  }, [isPlaying, selectedAsset?.id]);
+  }, [isPlaying, selectedAsset?.id, screenActive]);
 
   // Keep the global keydown listener mounted once and read live editor state
   // through a ref, so undo/redo/delete don't re-bind window on every history
