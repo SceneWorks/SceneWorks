@@ -125,6 +125,218 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Steps").value).toBe("41");
   });
 
+  // sc-11964 (S5): the user's asset / reference / character / person-track selections are part of
+  // the persisted studio snapshot, so a full app restart (a fresh mount with the snapshot restored)
+  // brings them back — not just the model-default fields. Keep-alive (S1) held them in-session; this
+  // covers the restart path they were lost on.
+  it("restores source-image + character selections from the snapshot on a restart mount", async () => {
+    const createVideoJob = vi.fn();
+    // A snapshot as it would be persisted before the restart: an image-conditioned run with a
+    // source image and a chosen character + look.
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project-1",
+      JSON.stringify({
+        mode: "image_to_video",
+        model: "wan_i2v",
+        sourceAssetId: "image-1",
+        characterId: "char-1",
+        characterLookId: "look-1",
+      }),
+    );
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [{ id: "image-1", type: "image", displayName: "Frame One" }],
+            characters: [{ id: "char-1", name: "Hero", looks: [{ id: "look-1", name: "Look A" }] }],
+            createPersonDetectionJob: () => {},
+            createPersonTrackJob: () => {},
+            createVideoJob,
+            deleteAsset: () => {},
+            gpuOptions: ["auto"],
+            latestVideoAssets: [],
+            loras: [],
+            setPreviewAsset: () => {},
+            rememberLocalGenerationJob: () => {},
+            personTracks: [],
+            purgeAsset: () => {},
+            presets: [],
+            requestedGpu: "auto",
+            setRequestedGpu: () => {},
+            updateAssetStatus: () => {},
+            videoModels: [
+              {
+                id: "wan_i2v",
+                name: "Wan I2V",
+                type: "video",
+                capabilities: ["image_to_video", "text_to_video"],
+                defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+                limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
+              },
+            ],
+          },
+          <VideoStudio />,
+        ),
+      );
+    });
+    await settle();
+
+    // The restored source image shows in the picker (not the empty placeholder) and the restored
+    // mode is active.
+    expect(container.textContent).toContain("Frame One");
+    expect(container.textContent).not.toContain("No first frame selected");
+
+    // A round-trip through generation proves the restored selections are the authoritative state,
+    // not just cosmetics: they ride the submitted job.
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip").click();
+    });
+    expect(createVideoJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "image_to_video",
+        sourceAssetId: "image-1",
+        characterId: "char-1",
+        characterLookId: "look-1",
+      }),
+    );
+  });
+
+  // sc-11964 (S5): restore validation. A restored id that still resolves is kept; one that points
+  // at a since-deleted asset is dropped — for both a scalar id and inside a reference array — so the
+  // studio never carries or re-persists a dangling reference.
+  it("keeps resolvable restored asset ids and drops the ones whose asset was deleted", async () => {
+    const createVideoJob = vi.fn();
+    // clip-1 + ref-1 still exist; ref-gone was deleted while the app was closed.
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project-1",
+      JSON.stringify({
+        mode: "reference_video_to_video",
+        model: "bernini",
+        sourceClipAssetId: "clip-1",
+        referenceAssetIds: ["ref-1", "ref-gone"],
+      }),
+    );
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [
+              { id: "clip-1", type: "video", displayName: "Clip One" },
+              { id: "ref-1", type: "image", displayName: "Ref One" },
+            ],
+            characters: [],
+            createPersonDetectionJob: () => {},
+            createPersonTrackJob: () => {},
+            createVideoJob,
+            deleteAsset: () => {},
+            gpuOptions: ["auto"],
+            latestVideoAssets: [],
+            loras: [],
+            setPreviewAsset: () => {},
+            rememberLocalGenerationJob: () => {},
+            personTracks: [],
+            purgeAsset: () => {},
+            presets: [],
+            requestedGpu: "auto",
+            setRequestedGpu: () => {},
+            updateAssetStatus: () => {},
+            videoModels: [
+              {
+                id: "bernini",
+                name: "Bernini",
+                type: "video",
+                capabilities: ["reference_video_to_video", "text_to_video"],
+                defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+                limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
+              },
+            ],
+          },
+          <VideoStudio />,
+        ),
+      );
+    });
+    await settle();
+
+    // Submit proves the pruned state at the payload level: the source clip survived and the
+    // reference array kept only the still-resolvable id — the deleted one is gone, not passed as a
+    // dangling reference.
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip").click();
+    });
+    expect(createVideoJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "reference_video_to_video",
+        sourceClipAssetId: "clip-1",
+        referenceAssetIds: ["ref-1"],
+      }),
+    );
+  });
+
+  // sc-11964 (S5): a dropped selection is dropped in the persisted STATE, not merely hidden by the
+  // picker (which filters unresolved ids at render). Re-reading the snapshot the live writer emits
+  // proves the dangling id is gone and won't survive the next restart.
+  it("re-persists the snapshot with a deleted source id dropped, not left dangling", async () => {
+    // The saved source image was deleted while the app was closed; only an unrelated asset remains.
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project-1",
+      JSON.stringify({ mode: "image_to_video", model: "wan_i2v", sourceAssetId: "deleted-image" }),
+    );
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [{ id: "other-image", type: "image", displayName: "Other Frame" }],
+            characters: [],
+            createPersonDetectionJob: () => {},
+            createPersonTrackJob: () => {},
+            createVideoJob: () => {},
+            deleteAsset: () => {},
+            gpuOptions: ["auto"],
+            latestVideoAssets: [],
+            loras: [],
+            setPreviewAsset: () => {},
+            rememberLocalGenerationJob: () => {},
+            personTracks: [],
+            purgeAsset: () => {},
+            presets: [],
+            requestedGpu: "auto",
+            setRequestedGpu: () => {},
+            updateAssetStatus: () => {},
+            videoModels: [
+              {
+                id: "wan_i2v",
+                name: "Wan I2V",
+                type: "video",
+                capabilities: ["image_to_video", "text_to_video"],
+                defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+                limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
+              },
+            ],
+          },
+          <VideoStudio />,
+        ),
+      );
+    });
+    await settle();
+
+    // The live writer (ungated once the video catalog is present) re-persists the settled state.
+    const persisted = JSON.parse(window.localStorage.getItem("sceneworks-studio-video-project-1"));
+    expect(persisted.sourceAssetId).toBe("");
+    // The picker shows the empty placeholder, and no input remains, so Generate is gated.
+    expect(container.textContent).toContain("No first frame selected");
+    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
+    expect(generate.disabled).toBe(true);
+  });
+
   // epic 11949 Phase 3: a general (model-agnostic) preset appears in its own chip group on
   // any model and toggles into a stack, independently of the single-select model preset,
   // without changing the model. (Composition into the prompt lands in Phase 4.)

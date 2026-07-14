@@ -152,8 +152,14 @@ export function useGenerationStudio({
     }
   }, [models, model, setModel, fallbackModelId]);
 
-  // Drop a character selection that's no longer in the catalog.
+  // Drop a character selection that's no longer in the catalog. Guard on a loaded catalog
+  // (sc-11964, mirrors the model guard above): after a restart `characters` is still resolving
+  // (empty), and validating a restored characterId against an empty catalog would drop it before
+  // it could ever match. Only prune once there is a real catalog to validate against.
   useEffect(() => {
+    if (!characters.length) {
+      return;
+    }
     if (characterId && !characters.some((character) => character.id === characterId)) {
       setCharacterId("");
       setCharacterLookId("");

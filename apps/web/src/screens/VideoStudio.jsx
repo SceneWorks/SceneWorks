@@ -234,28 +234,41 @@ export function VideoStudio() {
   const [bridgeRightVideoConditioningStrength, setBridgeRightVideoConditioningStrength] = useState(
     saved.bridgeRightVideoConditioningStrength ?? "",
   );
-  const [sourceAssetId, setSourceAssetId] = useState(["image", "frame"].includes(selectedAsset?.type) ? selectedAsset.id : "");
+  // Asset / reference / character / person-track selections are USER selections, restored from the
+  // persisted snapshot on mount (sc-11964) — S1 keep-alive preserves them in-session, but they were
+  // lost on a full restart. A live selectedAsset (the browser's current pick) still wins over the
+  // restored value; only when nothing is actively selected do we fall back to the saved id. Ids that
+  // reference a now-deleted asset are dropped once the catalog loads (restore-validation effect below).
+  const [sourceAssetId, setSourceAssetId] = useState(
+    ["image", "frame"].includes(selectedAsset?.type) ? selectedAsset.id : saved.sourceAssetId ?? "",
+  );
   // How the starting image is fitted to the output resolution for the image-conditioned
   // modes (sc-6139), mirroring Image Studio Edit. Crop/Pad only — video has no inpaint
   // mask, so Outpaint is hidden (`inpaintCapable={false}`). Default crop = fill, not stretch.
   const [fitMode, setFitMode] = useState(saved.fitMode ?? "crop");
-  const [lastFrameAssetId, setLastFrameAssetId] = useState("");
-  const [sourceClipAssetId, setSourceClipAssetId] = useState(selectedAsset?.type === "video" ? selectedAsset.id : "");
-  const [bridgeRightClipAssetId, setBridgeRightClipAssetId] = useState("");
+  const [lastFrameAssetId, setLastFrameAssetId] = useState(saved.lastFrameAssetId ?? "");
+  const [sourceClipAssetId, setSourceClipAssetId] = useState(
+    selectedAsset?.type === "video" ? selectedAsset.id : saved.sourceClipAssetId ?? "",
+  );
+  const [bridgeRightClipAssetId, setBridgeRightClipAssetId] = useState(saved.bridgeRightClipAssetId ?? "");
   // Subject reference images for Bernini's reference-driven video modes
   // (reference_to_video / reference_video_to_video / ads2v, sc-4703 / sc-5425). 1–N images.
-  const [referenceAssetIds, setReferenceAssetIds] = useState([]);
+  const [referenceAssetIds, setReferenceAssetIds] = useState(
+    Array.isArray(saved.referenceAssetIds) ? saved.referenceAssetIds : [],
+  );
   // Multiple source clips for Bernini's multi-source-video edit (multi_video_to_video, sc-5425).
-  const [sourceClipAssetIds, setSourceClipAssetIds] = useState([]);
+  const [sourceClipAssetIds, setSourceClipAssetIds] = useState(
+    Array.isArray(saved.sourceClipAssetIds) ? saved.sourceClipAssetIds : [],
+  );
   // Reference video for Bernini's ads2v mode (sc-5425): a second source clip distinct from the
   // edited source clip (sourceClipAssetId).
-  const [referenceClipAssetId, setReferenceClipAssetId] = useState("");
-  const [characterId, setCharacterId] = useState("");
-  const [characterLookId, setCharacterLookId] = useState("");
-  const [personTrackId, setPersonTrackId] = useState("");
-  const [replacementMode, setReplacementMode] = useState("face_only");
-  const [selectedDetectionId, setSelectedDetectionId] = useState("");
-  const [trackName, setTrackName] = useState("Selected person");
+  const [referenceClipAssetId, setReferenceClipAssetId] = useState(saved.referenceClipAssetId ?? "");
+  const [characterId, setCharacterId] = useState(saved.characterId ?? "");
+  const [characterLookId, setCharacterLookId] = useState(saved.characterLookId ?? "");
+  const [personTrackId, setPersonTrackId] = useState(saved.personTrackId ?? "");
+  const [replacementMode, setReplacementMode] = useState(saved.replacementMode ?? "face_only");
+  const [selectedDetectionId, setSelectedDetectionId] = useState(saved.selectedDetectionId ?? "");
+  const [trackName, setTrackName] = useState(saved.trackName ?? "Selected person");
   const [comparisonMode, setComparisonMode] = useState("side_by_side");
   const [abSide, setAbSide] = useState("replacement");
   const [submitting, setSubmitting] = useState(false);
@@ -389,6 +402,29 @@ export function VideoStudio() {
       setSourceClipAssetId(selectedAsset.id);
     }
   }, [selectedAsset?.id, selectedAsset?.type]);
+
+  // Restart-restore validation (sc-11964). The asset ids restored from the persisted snapshot may
+  // point at an asset that has since been deleted; drop any that no longer resolve so the studio
+  // never carries — or re-persists — a dangling reference. Gated on a loaded catalog: after a
+  // restart `assets` is still resolving (empty) and validating then would wrongly drop every
+  // restored id, so wait for the first non-empty catalog (mirrors the model / character
+  // loaded-catalog guards, sc-11962). One-shot: only the initial restored snapshot is validated —
+  // every selection the user makes afterward is live and owned by S1 keep-alive.
+  const restoreValidatedRef = useRef(false);
+  useEffect(() => {
+    if (restoreValidatedRef.current || assets.length === 0) {
+      return;
+    }
+    restoreValidatedRef.current = true;
+    const assetExists = (id) => Boolean(id) && assets.some((asset) => asset.id === id);
+    setSourceAssetId((current) => (current && !assetExists(current) ? "" : current));
+    setLastFrameAssetId((current) => (current && !assetExists(current) ? "" : current));
+    setSourceClipAssetId((current) => (current && !assetExists(current) ? "" : current));
+    setBridgeRightClipAssetId((current) => (current && !assetExists(current) ? "" : current));
+    setReferenceClipAssetId((current) => (current && !assetExists(current) ? "" : current));
+    setReferenceAssetIds((current) => current.filter(assetExists));
+    setSourceClipAssetIds((current) => current.filter(assetExists));
+  }, [assets]);
 
   useEffect(() => {
     if (launchRequest?.view !== "Video") {
@@ -597,6 +633,23 @@ export function VideoStudio() {
     videoConditioningStrength,
     bridgeRightVideoConditioningStrength,
     fitMode,
+    // User asset / reference / character / person-track selections (sc-11964). These are the
+    // reproducible subset of the studio's selections — the ids + character/look/mode + track — so a
+    // full restart restores what the user was composing. Dangling ids are dropped on restore by the
+    // validation effect above, so what persists here is always resolvable (or empty).
+    sourceAssetId,
+    lastFrameAssetId,
+    sourceClipAssetId,
+    bridgeRightClipAssetId,
+    referenceAssetIds,
+    sourceClipAssetIds,
+    referenceClipAssetId,
+    characterId,
+    characterLookId,
+    personTrackId,
+    replacementMode,
+    selectedDetectionId,
+    trackName,
   },
   // Suppress the live writer until the video catalog has loaded (sc-11962), so a transient
   // defaults-reset during the restart-restore/settle window can't overwrite the restored
