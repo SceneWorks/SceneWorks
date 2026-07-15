@@ -39,6 +39,7 @@ export function buildImageJobAdvanced(state) {
     bf16Precision,
     showTierPicker,
     quantTier,
+    tierExplicit,
     // PiD decoder (epic 7840).
     showPidToggle,
     usePid,
@@ -141,7 +142,15 @@ export function buildImageJobAdvanced(state) {
     // non-matrix model keeps `quantTier` empty (`tierQuantize("") === null`), so this stays
     // disjoint from the Boogu precisionToggle above — no `showTierPicker` guard needed.
     ...(tierQuantize(quantTier) !== null
-      ? { mlxQuantize: tierQuantize(quantTier) }
+      ? {
+          mlxQuantize: tierQuantize(quantTier),
+          // sc-10733: mark a DELIBERATE per-(screen, model) tier pick (`tierExplicit` — a persisted
+          // sticky or a this-session pick) so the worker's capability clamp HONORS it: it runs if it
+          // fits, rejects+warns if it can't, but never silently downtiers it. The pure global/base
+          // default (no sticky) omits this, so the worker may downtier it to the best installed tier
+          // that fits. Additive + only-when-explicit ⇒ default recipes stay byte-identical.
+          ...(tierExplicit ? { mlxQuantizeExplicit: true } : {}),
+        }
       : {}),
     // Krea 2 INT8-ConvRot tier (sc-9300, epic 9083): the online-rotation int8 DiT is NOT a bits-based
     // quant, so it can't ride `mlxQuantize` (its `tierQuantize` is null, so the spread above omits it).

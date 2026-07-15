@@ -372,13 +372,13 @@ mod tests {
 
     /// sc-12090 numeric regression: `krea_2_turbo` Q4-only on a ~30 GB card. Budgeting the tier the
     /// disk-probing resolver returns (`q4`) ADMITS (26.4 + 2 = 28.4 ≤ 30), where the old manifest
-    /// re-derivation budgeted `q8` (31.0 + 2 = 33.0) and false-rejected. This pins the fit math the
+    /// re-derivation budgeted `q8` (35.9 + 2 = 37.9) and false-rejected. This pins the fit math the
     /// gate now feeds the ON-DISK tier (`tier_key_from_resolved_dir`), not the manifest's q8 default.
     #[test]
     fn resolved_q4_admits_where_manifest_q8_would_reject() {
-        // Krea 2 Turbo candle tiers (builtin.models.jsonc, sc-12126).
+        // Krea 2 Turbo candle tiers (builtin.models.jsonc, measured — sc-12126).
         let manifest = obj(json!({
-            "candle": { "vramGbByTier": { "q4": 26.4, "q8": 31.0 } }
+            "candle": { "vramGbByTier": { "q4": 26.4, "q8": 35.9 } }
         }));
         let budget = VramBudget {
             free_gb: 30.0,

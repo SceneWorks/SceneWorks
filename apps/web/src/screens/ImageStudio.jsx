@@ -1997,6 +1997,11 @@ export function ImageStudio() {
       bf16Precision,
       showTierPicker,
       quantTier,
+      // sc-10733: the tier is a DELIBERATE pick (not the pure global/base default) when it equals this
+      // (screen, model)'s persisted sticky — a prior explicit pick, which `handleTierChange` writes and
+      // the seed effect reads back into `quantTier`. The worker honors an explicit pick (never silently
+      // downtiers it); only a non-explicit default is capability-clamped.
+      tierExplicit: quantTier !== "" && readLastTier(TIER_SCREEN, model) === quantTier,
       showPidToggle,
       usePid,
       pidTarget,

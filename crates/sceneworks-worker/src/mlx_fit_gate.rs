@@ -439,14 +439,34 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
     if spec.offload_policy == OffloadPolicy::Sequential {
         return Ok(spec);
     }
-    let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
-    // Prefer the provider-owned per-component footprint for the text-encoder split (sc-10894): it is
-    // authoritative per family, unlike the `text_encoder*` subdir guess which reads ZERO for boogu
-    // (`mllm/`), bernini (flat `t5_encoder.safetensors`), anima (`text_encoders/` under `split_files/`),
-    // etc. `Ok(None)` (provider declares no footprint) or an `Err` (unknown id / single-file source)
-    // fall open to the subdir scan. Query BEFORE the match so both `Dir`/`File` arms see it.
+    match decide_residency_for_spec(engine_id, &spec) {
+        ResidencyOutcome::Resident => Ok(spec),
+        ResidencyOutcome::Sequential => {
+            let (total_bytes, te_bytes) = spec_component_bytes(engine_id, &spec);
+            tracing::info!(
+                event = "mlx_sequential_residency_selected",
+                engine = %engine_id,
+                total_gb = (total_bytes as f64 / BYTES_PER_GIB).round() as i64,
+                text_encoder_gb = (te_bytes as f64 / BYTES_PER_GIB).round() as i64,
+            );
+            Ok(spec.with_offload_policy(OffloadPolicy::Sequential))
+        }
+        ResidencyOutcome::Reject {
+            needed_gb,
+            available_gb,
+            staged_gb,
+        } => Err(too_big_error(engine_id, needed_gb, available_gb, staged_gb)),
+    }
+}
+
+/// The `(total, text-encoder)` on-disk component bytes a `spec` loads (sc-10894 seam). The whole-model
+/// sum plus the staged text-encoder split, preferring the provider-owned per-component footprint over
+/// the `text_encoder*` subdir scan (which reads ZERO for boogu `mllm/`, bernini flat `t5_encoder`,
+/// anima `text_encoders/`, etc.), and folding a separate `spec.control` (qwen_image_control's VACE
+/// branch) into the HEAVY side so the staged split `rest = total − te` counts it on the DiT side.
+fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64) {
     let footprint_te = crate::inference_runtime::media()
-        .footprint(engine_id, &spec)
+        .footprint(engine_id, spec)
         .ok()
         .flatten()
         .map(|fp| fp.text_encoder);
@@ -462,38 +482,39 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
             footprint_te.unwrap_or(0),
         ),
     };
-    // A ControlNet/overlay checkpoint (`spec.control`, e.g. qwen_image_control's VACE branch) lives in
-    // a SEPARATE weights source, not under `spec.weights`, so it is missing from the sums above. It is
-    // a HEAVY-side component (loaded + quantized with the base DiT, never dropped with the text
-    // encoder), so fold its bytes into `total_bytes` only — leaving `te_bytes` alone keeps the staged
-    // split `rest = total − te` counting it on the DiT side. Without this the staged-peak prediction
-    // under-counts and could select Sequential when even the staged working set won't fit (→ SIGKILL).
     if let Some(control) = &spec.control {
         total_bytes += weights_source_bytes(control);
     }
-    match decide_residency(
+    (total_bytes, te_bytes)
+}
+
+/// The residency outcome (Resident / Sequential / Reject) a `spec` would take against this machine's
+/// unified-memory budget — the pure decision behind [`apply_residency_policy`], factored out so the
+/// capability downtier (sc-10733) can evaluate a candidate tier's fit at the base.rs seam WITHOUT
+/// building the final spec twice. Same budget + component-byte + sequential-capability inputs the live
+/// gate uses, so the seam's downtier choice and the cache's admission never disagree.
+pub(crate) fn decide_residency_for_spec(engine_id: &str, spec: &LoadSpec) -> ResidencyOutcome {
+    let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
+    let (total_bytes, te_bytes) = spec_component_bytes(engine_id, spec);
+    decide_residency(
         total_bytes,
         te_bytes,
         budget,
         engine_supports_sequential(engine_id),
-    ) {
-        ResidencyOutcome::Resident => Ok(spec),
-        ResidencyOutcome::Sequential => {
-            tracing::info!(
-                event = "mlx_sequential_residency_selected",
-                engine = %engine_id,
-                total_gb = (total_bytes as f64 / BYTES_PER_GIB).round() as i64,
-                text_encoder_gb = (te_bytes as f64 / BYTES_PER_GIB).round() as i64,
-                budget_gb = budget.map(|b| b.total_gb.round() as i64),
-            );
-            Ok(spec.with_offload_policy(OffloadPolicy::Sequential))
-        }
-        ResidencyOutcome::Reject {
-            needed_gb,
-            available_gb,
-            staged_gb,
-        } => Err(too_big_error(engine_id, needed_gb, available_gb, staged_gb)),
-    }
+    )
+}
+
+/// The residency outcome for a candidate tier's WEIGHTS DIR (sc-10733 capability downtier) — the
+/// Dir-only sibling of [`decide_residency_for_spec`] the base.rs MLX seam calls per candidate tier to
+/// pick the highest installed tier that fits. A bare `Dir` spec matches the generic image lane (no
+/// control branch; PiD/IP are activation-time, not weight-fit terms), so this agrees with the
+/// `apply_residency_policy` admission the cache runs on the chosen tier.
+pub(crate) fn residency_for_dir(
+    engine_id: &str,
+    weights_dir: &std::path::Path,
+) -> ResidencyOutcome {
+    let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
+    decide_residency_for_spec(engine_id, &spec)
 }
 
 /// Build the actionable over-budget rejection. `staged_gb` is `Some` when sequential residency was
