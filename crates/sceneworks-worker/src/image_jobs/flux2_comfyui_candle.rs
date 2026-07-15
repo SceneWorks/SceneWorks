@@ -120,25 +120,32 @@ fn flux2_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool 
         && matches!(resolve_flux2_comfyui_paths(request, settings), Ok(Some(_)))
 }
 
-/// The compute quant the DiT + snapshot TE fold onto the GPU at: the explicit NVFP4 tier
-/// (`advanced.quantTier: "nvfp4"` on a Blackwell host), else `advanced.quant` (`q4`/`q8`), else the
+/// The compute quant the DiT + snapshot TE fold onto the GPU at: `advanced.quant` (`q4`/`q8`), else the
 /// [`FLUX2_COMFYUI_DEFAULT_QUANT`]. The 32B dev needs a quant to fit; there is no dense option.
 ///
-/// **NVFP4 (sc-11042, epic 11037 SC#5).** sc-12006 established `quantTier: "nvfp4"` as the tier's
-/// identity but only ever WROTE it (asset telemetry); this reads it, making the label a real selection
-/// input and NVFP4 an actually-reachable tier on this lane. It rides `quantTier` rather than
-/// `advanced.quant` / `advanced.mlxQuantize` for the reason spelled out in
-/// [`flux2_comfyui_raw_settings`]: `mlxQuantize` is bits-valued and no integer is honest for NVFP4.
+/// **This lane does NOT offer the NVFP4 tier (sc-11042, epic 11037), on ANY host — including Blackwell.**
+/// It is structurally incapable of serving it, for two independent reasons:
 ///
-/// The pick needs BOTH halves — an explicit label ([`nvfp4_requested`]) and a Blackwell host
-/// ([`nvfp4_host_eligible`]): NVFP4 is never auto-selected for a `q4` request on sm_120 (that is
-/// precisely the Option-B behavior sc-11042 rejected), and a `quantTier: "nvfp4"` request on a
-/// non-Blackwell host falls through to the UNCHANGED `q4`/`q8`/default arms below rather than erroring
-/// — the clean off-Blackwell fallback the story requires.
+/// 1. **No packed tier dir to serve from.** NVFP4 is served by `Nvfp4Linear` reading an OFFLINE-PACKED
+///    `Nvfp4Tensor` out of an `nvfp4/` tier subdir. This lane never calls `standard_tier_subdir`: the
+///    DiT is the user's OWN in-place ComfyUI fp8 single-file, and [`FLUX2_COMFYUI_SNAPSHOT_TIERS`] probes
+///    only for the TE/VAE/tokenizer snapshot. An arbitrary user single-file can never carry packed
+///    NVFP4 weights, so there is nothing to point `Nvfp4Linear` at.
+/// 2. **The fold path cannot express it.** This lane's `quant` is the ON-THE-FLY GGUF fold target:
+///    `load_from_comfyui_dit(.., Some(quant))` → `QLinear::quantize_onto` → `fold(..)` → `ggml_dtype(quant)`,
+///    which BAILS for `Quant::Nvfp4` by design ("no GGUF block type; NVFP4 is served by `Nvfp4Linear`
+///    from a packed `Nvfp4Tensor`, not the in-place GGUF fold" — candle-gen pins this with
+///    `fold_rejects_nvfp4_strategy`). Returning `Quant::Nvfp4` here therefore did not select a tier; it
+///    aborted the load with `WorkerError::Engine("ComfyUI FLUX.2-dev load failed: …")` — killing the job
+///    on EXACTLY the Blackwell hardware the tier targets, while off-Blackwell hosts fell back fine.
+///
+/// So a `quantTier: "nvfp4"` request on this lane falls through to the UNCHANGED `q4`/`q8`/default arms
+/// below on every host. That fall-through IS the clean fallback: the label is still recorded as asset
+/// telemetry (sc-12006), but selection is a normal tier. `quantTier` is the tier's identity precisely
+/// because `mlxQuantize` is bits-valued and no integer is honest for NVFP4 (see
+/// [`flux2_comfyui_raw_settings`]); that identity simply has no servable target on this lane. Pinned by
+/// `flux2_comfyui_never_selects_nvfp4`.
 fn flux2_comfyui_quant(request: &ImageRequest) -> Quant {
-    if nvfp4_requested(request) && nvfp4_host_eligible() {
-        return Quant::Nvfp4;
-    }
     match request
         .advanced
         .get("quant")
@@ -221,11 +228,16 @@ fn flux2_comfyui_raw_settings(
     // The `else` REMOVE is load-bearing (sc-11042), and is the symmetric twin of the unconditional
     // `mlxQuantize` insert above: `raw` starts as a clone of `request.advanced`, so on the Q4/Q8 path a
     // caller-supplied stale `advanced.quantTier` would otherwise survive into the asset record and
-    // mislabel a q4/q8 render as `nvfp4`. That matters more now than when sc-12006 wrote this key as
-    // pure telemetry: as of this story `quantTier` is a SELECTION input (`nvfp4_requested` in
-    // image_jobs/base.rs), so a request carrying `quantTier: "nvfp4"` that resolved to Q4/Q8 anyway —
-    // an off-Blackwell host, or a tier that isn't converted yet — is exactly the case that must not
-    // record the tier it did not run. Removing (not skipping) keeps the record honest in both
+    // mislabel a q4/q8 render as `nvfp4`.
+    //
+    // On THIS lane the `else` is the only reachable branch, which makes it the whole point rather than a
+    // guard: [`flux2_comfyui_quant`] never returns `Quant::Nvfp4` (this lane cannot serve the tier — no
+    // packed tier dir, and the GGUF fold rejects it), so EVERY request here renders Q4/Q8 — including one
+    // that explicitly asked for `quantTier: "nvfp4"` on a Blackwell host. That request is exactly the case
+    // that must not record the tier it did not run, so the stale label is stripped and the record names
+    // the tier that actually rendered. The `Nvfp4` arm is retained only to keep this function total over
+    // `Quant` (it is shared shape with the tier-serving lanes, and an exhaustive match is what stops a
+    // future variant from silently defaulting). Removing (not skipping) keeps the record honest in both
     // directions, and the q4/q8 record shape byte-identical to sc-12006's.
     if matches!(quant, Quant::Nvfp4) {
         raw.insert("quantTier".to_owned(), Value::String("nvfp4".to_owned()));

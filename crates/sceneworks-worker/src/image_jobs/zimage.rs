@@ -505,7 +505,7 @@ async fn generate_zimage_base_control_stream(
             strict_control_default_repo(ZIMAGE_BASE_CONTROL_ENGINE_ID)
         ))
     })?;
-    let (quant, quant_bits) = resolve_quant(request);
+    let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
     let steps = resolve_steps(request, &zimage);
     let guidance = resolve_guidance(request, &zimage).unwrap_or(zimage.default_guidance());
     let negative_prompt = resolve_negative_prompt(request, &zimage);

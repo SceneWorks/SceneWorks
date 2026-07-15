@@ -702,7 +702,7 @@ async fn generate_qwen_edit_stream(
     let weights_dir = resolve_weights_dir(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("Qwen-Image-Edit weights not found".to_owned())
     })?;
-    let (quant, quant_bits) = resolve_quant(request);
+    let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
     let steps = resolve_steps(request, &model);
     let guidance = resolve_qwen_edit_guidance(request, &model);
     let negative_prompt = resolve_negative_prompt(request, &model);

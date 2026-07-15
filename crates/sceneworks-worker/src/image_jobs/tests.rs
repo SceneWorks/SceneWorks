@@ -937,6 +937,69 @@ fn bernini_image_task_and_quant_mapping() {
     ));
 }
 
+/// sc-11042 (epic 11037 SC#5): the ComfyUI FLUX.2-dev lane NEVER selects `Quant::Nvfp4` — not even for
+/// an explicit `quantTier: "nvfp4"` pick, and not on a Blackwell host.
+///
+/// This lane is structurally incapable of serving the tier: its `quant` is the ON-THE-FLY GGUF fold
+/// target (`load_from_comfyui_dit` → `QLinear::quantize_onto` → `fold` → `ggml_dtype`), and
+/// `ggml_dtype` BAILS for `Nvfp4` by design — NVFP4 is served by `Nvfp4Linear` from an offline-packed
+/// `Nvfp4Tensor`, which this lane has no tier dir to load (the DiT is the user's own in-place ComfyUI
+/// fp8 single-file; `FLUX2_COMFYUI_SNAPSHOT_TIERS` probes only for the TE/VAE snapshot). An earlier
+/// revision returned `Quant::Nvfp4` here, which did not select a tier — it aborted the load with
+/// `WorkerError::Engine("ComfyUI FLUX.2-dev load failed: …")`, killing the job on EXACTLY the hardware
+/// the tier targets. Falling through to the normal q4/q8/default arms IS the clean fallback.
+///
+/// The host gate is NOT injected here on purpose: the arm is gone, so the answer must be a normal tier
+/// on EVERY host — which is precisely what this pins. (`nvfp4_host_eligible()` is a real compute-cap
+/// probe; this test must not depend on the rig's GPU.)
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn flux2_comfyui_never_selects_nvfp4() {
+    let req = |advanced: Value| {
+        request(json!({
+            "projectId": "p", "model": "external_base_flux2", "prompt": "p", "advanced": advanced,
+        }))
+    };
+    // Guard the guard: `nvfp4_requested` must actually SEE this label, so the assertions below are
+    // about the deleted arm and not about a mis-built request that never carried the key.
+    assert!(
+        nvfp4_requested(&req(json!({ "quantTier": "nvfp4" }))),
+        "test scaffolding is wrong — the label never reached `advanced`, so the rest is vacuous"
+    );
+
+    // The explicit pick the web can emit — on this lane it must resolve the lane default, never Nvfp4.
+    assert!(matches!(
+        flux2_comfyui_quant(&req(json!({ "quantTier": "nvfp4" }))),
+        FLUX2_COMFYUI_DEFAULT_QUANT
+    ));
+    // …and the label must not disturb an explicit q4/q8 pick either (the fall-through is UNCHANGED).
+    assert!(matches!(
+        flux2_comfyui_quant(&req(json!({ "quantTier": "nvfp4", "quant": "q4" }))),
+        Quant::Q4
+    ));
+    assert!(matches!(
+        flux2_comfyui_quant(&req(json!({ "quantTier": "nvfp4", "quant": "q8" }))),
+        Quant::Q8
+    ));
+    // No request shape on this lane may ever produce Nvfp4 — including the `mlxQuantize: null` an NVFP4
+    // request actually carries (sc-12006), and a stale bits knob alongside the label.
+    for advanced in [
+        json!({ "quantTier": "nvfp4" }),
+        json!({ "quantTier": "nvfp4", "mlxQuantize": null }),
+        json!({ "quantTier": "nvfp4", "mlxQuantize": 4 }),
+        json!({ "quantTier": "nvfp4", "quant": "q4" }),
+        json!({ "quantTier": "nvfp4", "quant": "q8" }),
+        json!({ "quantTier": "nvfp4", "quant": "bogus" }),
+        json!({}),
+    ] {
+        assert!(
+            !matches!(flux2_comfyui_quant(&req(advanced.clone())), Quant::Nvfp4),
+            "the comfyui lane cannot serve NVFP4 — the GGUF fold rejects it, so selecting it \
+             hard-fails the job (advanced={advanced})"
+        );
+    }
+}
+
 /// Candle Bernini tier-subdir selection (sc-11003): the published `SceneWorks/bernini` layout nests
 /// `bf16/`|`q8/`|`q4/` component trees, so the candle lane descends into the requested quant tier and
 /// pairs it with the matching load quant. Asserts the pure selection helpers: bf16-dense DEFAULT

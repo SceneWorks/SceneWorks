@@ -1011,8 +1011,16 @@ fn nvfp4_host_eligible() -> bool {
 
 /// The tier subdir name a request prefers, given its explicit `advanced.mlxQuantize` `bits`, the
 /// model's per-model quality `floor` (`mlx.minQualityTier`, sc-10731 — `None` = no floor), and whether
-/// the request selected the distinct NVFP4 tier (`nvfp4`, sc-11042 — an explicit
+/// the request is a CANDIDATE for the distinct NVFP4 tier (`nvfp4`, sc-11042 — an explicit
 /// [`nvfp4_requested`] label AND an [`nvfp4_host_eligible`] host).
+///
+/// `nvfp4` here is deliberately the TWO-part gate, NOT the fully-resolved [`nvfp4_selected`]: this
+/// function is what CHOOSES the tier dir, so it necessarily runs before any dir exists to probe (asking
+/// for `nvfp4_selected` would be circular). The third half of the gate — the `nvfp4/` tier dir actually
+/// being installed — is the caller's own `present()` fallback chain, which is exactly what
+/// [`nvfp4_selected`] reads back afterwards to confirm what this resolver landed on. So a host-eligible
+/// NVFP4 pick with no converted tier on disk falls through this function's chain to an installed tier,
+/// and `nvfp4_selected` then reports `false` for it — the two agree by construction.
 ///
 /// An explicit, host-eligible **NVFP4** pick (`nvfp4 == true`) resolves the distinct [`NVFP4_TIER`] and
 /// short-circuits the bits map below — NVFP4 has no honest `mlxQuantize` integer, so it cannot be
@@ -7836,6 +7844,44 @@ mod capability_downtier_tests {
         // No installed candidate in range (defensive — the default itself is normally present) → Keep,
         // deferring to the plain gate.
         assert_eq!(choose_downtier("q8", &[]), DowntierPick::Keep);
+    }
+
+    /// sc-11042 (epic 11037 SC#5) × sc-10733: the capability clamp NEVER downtiers a selected NVFP4
+    /// tier. Downtiering it to q4/q8 would silently swap the numerics of an explicitly-picked tier —
+    /// the exact creative-choice violation SC#5 forbids.
+    ///
+    /// This is load-bearing BECAUSE nvfp4 does not escape the clamp via `mlxQuantizeExplicit`: the web
+    /// emits that flag only inside the `tierQuantize(quantTier) !== null` bits branch, and nvfp4 has no
+    /// honest `mlxQuantize` integer, so an nvfp4 job reaches the clamp with `explicit_pick == false`.
+    /// What saves it is that nvfp4 is UNRANKABLE on purpose (`tier_quality_rank` ⇒ 0): it is a distinct
+    /// numeric regime, not a rung on the bf16/q8/q4 ladder, so no tier is ever in `[floor, nvfp4]` and
+    /// the chooser keeps it. These two facts are a silent pair — pin them together, since making nvfp4
+    /// rankable would quietly arm the downtier.
+    #[test]
+    fn nvfp4_tier_is_never_downtiered_by_the_capability_clamp() {
+        // Unrankable by construction — the fact the whole guard rests on.
+        assert_eq!(tier_quality_rank(NVFP4_TIER), 0);
+        assert!(tier_quality_rank(NVFP4_TIER) < tier_quality_rank("q4"));
+
+        // The `downtier_candidate_tiers` range math (installed-filtering aside) admits NOTHING when the
+        // default is nvfp4: `rank <= 0 && rank >= floor_rank(>= 1)` is unsatisfiable for every tier.
+        let in_range = |tier: &str, default: &str, floor: Option<&str>| {
+            let default_rank = tier_quality_rank(default);
+            let floor_rank = floor.map_or(1, tier_quality_rank).max(1);
+            let rank = tier_quality_rank(tier);
+            rank <= default_rank && rank >= floor_rank
+        };
+        for floor in [None, Some("q4"), Some("q8"), Some("bf16")] {
+            for tier in ["bf16", "q8", "q4", NVFP4_TIER] {
+                assert!(
+                    !in_range(tier, NVFP4_TIER, floor),
+                    "nvfp4 must admit NO downtier candidate (tier={tier} floor={floor:?})"
+                );
+            }
+        }
+
+        // …so the chooser is handed an empty candidate list and KEEPS nvfp4, deferring to the plain gate.
+        assert_eq!(choose_downtier(NVFP4_TIER, &[]), DowntierPick::Keep);
     }
 
     #[test]
