@@ -171,7 +171,11 @@ fn generator_cache_idle_timeout(raw: Option<&str>) -> Option<Duration> {
 ///   working set genuinely needs more will thrash/swap or hit a Metal OOM — already contained by the
 ///   `catch_unwind` guard above).
 /// - `set_wired_limit` — caps pinned (non-pageable) residency so the OS can reclaim the rest of
-///   unified memory for other apps. macOS 15+.
+///   unified memory for other apps. macOS 15+. **Clamped to the device wired ceiling** — MLX throws
+///   if asked for more than the device `recommendedMaxWorkingSetSize`, and its default error handler
+///   answers that throw with `exit(-1)`, killing the worker at startup (sc-12178, GitHub #1544: an
+///   8 GB Mac's ceiling is ~5.3 GB, so a 6–7 GB user cap crashed the worker). See
+///   [`clamp_wired_limit`].
 ///
 /// We deliberately leave `set_cache_limit` at its default: forcing it low causes reallocation storms
 /// between steps (the fork's own doc warns about this).
@@ -187,16 +191,57 @@ fn generator_cache_idle_timeout(raw: Option<&str>) -> Option<Duration> {
 static APPLIED_GPU_MEMORY_LIMIT: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(u64::MAX);
 
+/// Clamp a requested wired-residency cap (bytes) to the device's wired ceiling (sc-12178).
+///
+/// MLX's `set_wired_limit` THROWS when asked for more than the device `recommendedMaxWorkingSetSize`,
+/// and MLX's *default* error handler answers that throw with `exit(-1)` — an uncatchable libc exit
+/// (not a Rust panic the worker's `catch_unwind` guard could contain) that hard-kills the worker at
+/// startup, before it ever claims a job. That is the GitHub #1544 crash: on an 8 GB Mac the ceiling
+/// is ~5.3 GB, so a 6–7 GB user cap (the natural "leave RAM for the OS" choice) killed the worker.
+///
+/// A cap at or below the ceiling never throws — and a cap ABOVE it is meaningless anyway, since the
+/// device already bounds wired residency there. `device_ceiling == 0` (ceiling unknown) yields `0`,
+/// which MLX reads as "no wired cap" (its default): the safe fall-back.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn clamp_wired_limit(requested: usize, device_ceiling: usize) -> usize {
+    if device_ceiling == 0 {
+        return 0;
+    }
+    requested.min(device_ceiling)
+}
+
+/// The device's wired-residency ceiling in bytes (`recommendedMaxWorkingSetSize`), derived once.
+///
+/// MLX documents its default memory limit as 1.5× the device recommended working set
+/// (`get_memory_limit`), so reading that default and dividing by 1.5 recovers the true hardware
+/// ceiling with no new binding or Metal query. The read MUST happen before the first
+/// `set_memory_limit` (after which `get_memory_limit` returns our value, not the default); the
+/// `OnceLock` both caches the constant hardware property and pins the read to the first application,
+/// while the limit is still MLX's untouched default. `/ 3 * 2` (rather than `* 2 / 3`) makes any
+/// integer rounding go DOWNward, staying at or below the ceiling — which never throws.
+#[cfg(all(target_os = "macos", not(test)))]
+fn device_wired_ceiling_bytes() -> usize {
+    static CEILING: OnceLock<usize> = OnceLock::new();
+    *CEILING.get_or_init(|| mlx_rs::memory::get_memory_limit() / 3 * 2)
+}
+
 #[cfg(all(target_os = "macos", not(test)))]
 fn set_gpu_memory_limit_inner(bytes: u64) {
     use std::sync::atomic::Ordering;
     let limit = bytes as usize;
+    // Capture the device wired ceiling BEFORE mutating the memory limit — the derivation reads MLX's
+    // default `get_memory_limit`, which is only the hardware default until the first `set_memory_limit`.
+    let wired_ceiling = device_wired_ceiling_bytes();
     let previous_limit = mlx_rs::memory::set_memory_limit(limit);
-    let previous_wired = mlx_rs::memory::set_wired_limit(limit);
+    // Clamp so `set_wired_limit` can never throw and `exit(-1)` the worker (sc-12178, GitHub #1544).
+    let wired_limit = clamp_wired_limit(limit, wired_ceiling);
+    let previous_wired = mlx_rs::memory::set_wired_limit(wired_limit);
     APPLIED_GPU_MEMORY_LIMIT.store(bytes, Ordering::SeqCst);
     tracing::info!(
         event = "gpu_memory_limit_applied",
         limitBytes = limit,
+        wiredLimitBytes = wired_limit,
+        deviceWiredCeilingBytes = wired_ceiling,
         previousLimitBytes = previous_limit,
         previousWiredLimitBytes = previous_wired,
         "applied user-configured GPU memory ceiling to the MLX runtime"
@@ -396,6 +441,71 @@ where
 mod tests {
     use super::*;
     use crate::WorkerError;
+
+    // sc-12178 (GitHub #1544): the requested GPU cap is clamped to the device wired ceiling so
+    // `set_wired_limit` can never throw and `exit(-1)` the worker. An 8 GB Mac's ceiling is ~5.3 GB,
+    // so a 7 GB cap must come back as the ceiling, not 7 GB.
+    #[test]
+    fn clamp_wired_limit_never_exceeds_the_device_ceiling() {
+        let gib = 1024 * 1024 * 1024_usize;
+        let ceiling = 5 * gib + gib / 3; // ~5.3 GiB, a realistic 8 GB-Mac working set.
+
+        // A cap ABOVE the ceiling (the #1544 crash trigger) is pulled down to the ceiling.
+        assert_eq!(clamp_wired_limit(7 * gib, ceiling), ceiling);
+        // A cap BELOW the ceiling is honored unchanged.
+        assert_eq!(clamp_wired_limit(4 * gib, ceiling), 4 * gib);
+        // Exactly at the ceiling is allowed (set_wired_limit throws only on STRICTLY greater).
+        assert_eq!(clamp_wired_limit(ceiling, ceiling), ceiling);
+        // Clearing the cap (0) stays 0 regardless of ceiling.
+        assert_eq!(clamp_wired_limit(0, ceiling), 0);
+        // Unknown ceiling (0) ⇒ 0 ⇒ MLX default "no wired cap" (never a spurious clamp-to-something).
+        assert_eq!(clamp_wired_limit(7 * gib, 0), 0);
+    }
+
+    // sc-12178 on-device probe: the clamp derives the device wired ceiling as
+    // `get_memory_limit() / 1.5` (MLX documents its default limit as 1.5× the recommended working
+    // set). Pure unit tests can't validate that assumption against real hardware, so this ignored
+    // test does: it confirms the derived ceiling is a plausible fraction of unified memory AND that
+    // `set_wired_limit(ceiling)` does NOT throw (a throw would `exit(-1)` this test process — the
+    // exact #1544 crash — so a clean return IS the assertion). Run explicitly:
+    //   cargo test -p sceneworks-worker --lib -- --ignored --nocapture device_wired_ceiling
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs a Metal device; run explicitly on a real Mac"]
+    fn device_wired_ceiling_is_a_plausible_fraction_and_never_throws() {
+        let default_limit = mlx_rs::memory::get_memory_limit();
+        assert!(
+            default_limit > 0,
+            "MLX default memory limit should be positive"
+        );
+        let ceiling = default_limit / 3 * 2;
+
+        let total: u64 = String::from_utf8_lossy(
+            &std::process::Command::new("sysctl")
+                .args(["-n", "hw.memsize"])
+                .output()
+                .expect("sysctl hw.memsize")
+                .stdout,
+        )
+        .trim()
+        .parse()
+        .expect("hw.memsize parses");
+
+        eprintln!(
+            "get_memory_limit()={default_limit} derived_ceiling={ceiling} hw.memsize={total} \
+             (ceiling = {:.0}% of RAM)",
+            ceiling as f64 / total as f64 * 100.0
+        );
+        // recommendedMaxWorkingSetSize is ~50–80% of unified memory on Apple Silicon; the derived
+        // ceiling must land in that band (guards against the 1.5× assumption silently breaking).
+        assert!(
+            (ceiling as f64) > 0.4 * total as f64 && (ceiling as f64) < 0.95 * total as f64,
+            "derived ceiling {ceiling} is not a plausible fraction of {total}"
+        );
+        // The clamp target must not throw (would exit(-1) this process). Restore the prior value after.
+        let prev = mlx_rs::memory::set_wired_limit(clamp_wired_limit(usize::MAX, ceiling));
+        mlx_rs::memory::set_wired_limit(prev);
+    }
 
     #[test]
     fn cache_key_includes_adapter_fingerprint() {
