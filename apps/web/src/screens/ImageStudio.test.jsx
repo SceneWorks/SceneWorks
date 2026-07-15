@@ -1063,7 +1063,7 @@ describe("ImageStudio model picker capability gating", () => {
     expect(pid().disabled).toBe(true);
   });
 
-  it("omits advanced.mlxQuantize on Generate when only one tier is installed (sc-8515)", async () => {
+  it("still sends the resolved tier's mlxQuantize when only one tier is installed — picker hidden (sc-12090)", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(
       baseContext({
@@ -1074,10 +1074,14 @@ describe("ImageStudio model picker capability gating", () => {
     );
     await openAdvanced(container);
     await act(async () => {});
-    // Picker is hidden (single tier), so the pick must never leak into the payload.
+    // The picker stays hidden with a single installed tier…
     expect(tierPicker(container)).toBeFalsy();
     await click(generateButton());
-    expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("mlxQuantize");
+    // …but the resolved tier (q4) now rides the payload regardless, so the worker budgets/loads THAT
+    // tier instead of defaulting to q8 against a tier the user never downloaded (#1516). It is NOT a
+    // deliberate pick (no sticky), so the explicit marker is absent — the worker may capability-downtier.
+    expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
+    expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("mlxQuantizeExplicit");
   });
 
   it("omits advanced.mlxQuantize on Generate for a model with no variant matrix (sc-8515)", async () => {
