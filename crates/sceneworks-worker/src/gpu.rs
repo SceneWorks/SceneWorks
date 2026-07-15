@@ -29,11 +29,17 @@ pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
             .find(|gpu| gpu.id == requested_gpu_id)
             .unwrap_or_else(|| fallback_gpu(requested_gpu_id))
     };
-    // Compute-capability probe for the INT8-ConvRot sm_89 gate (sc-9300). Probed here (the async
-    // discovery) and threaded into the sync `with_candle_capabilities` — the worker has no nvml, so
-    // this is a bounded `nvidia-smi --query-gpu=compute_cap` subprocess like the utilization query.
+    // Compute-capability probe for the INT8-ConvRot sm_89 gate (sc-9300) and the NVFP4 sm_120 gate
+    // (sc-11042). Probed here (the async discovery) and threaded into the sync
+    // `with_candle_capabilities` — the worker has no nvml, so this is a bounded
+    // `nvidia-smi --query-gpu=compute_cap` subprocess like the utilization query.
     // Only meaningful on the candle lane; a cheap no-op probe on CPU / non-NVIDIA (returns `None`).
     let compute_cap = nvidia_max_compute_cap().await;
+    // Publish the probed cap for the SYNC tier-select path (sc-11042). `discover_gpu` runs once at
+    // startup (`lib.rs`) BEFORE the job-claim loop, so every generation resolves against a populated
+    // value; a worker that somehow never probed reads `None` and is treated as NVFP4-INELIGIBLE
+    // (fail-safe: the tier falls back rather than routing an FP4 load at hardware that can't run it).
+    cache_compute_cap(compute_cap);
     with_candle_capabilities(gpu, settings, compute_cap)
 }
 
@@ -188,6 +194,20 @@ fn with_candle_capabilities(
                     INT8_CONVROT_CAPABILITY.to_owned(),
                 ));
             }
+            // NVFP4 tier eligibility marker (sc-11042, epic 11037). Advertised ONLY when this candle
+            // worker's GPU clears the sm_120 consumer-Blackwell floor (the FP4 tensor cores the
+            // cuBLASLt NVFP4 GEMM needs). Exactly the `int8_convrot` shape above: bundling the candle
+            // lane with the compute-cap check into one advertised capability lets the api/web picker
+            // HIDE the `nvfp4` tier on an ineligible card (macOS/MLX never reaches here; a pre-Blackwell
+            // NVIDIA GPU probes < 12.0) rather than only erroring at generate time.
+            //
+            // NVFP4 is an OPT-IN tier (epic 11037 SC#5): advertising the capability only says the host
+            // COULD serve NVFP4 if the user picks it — it never selects NVFP4 for anyone, and never
+            // alters what `q4`/`q8`/`bf16` resolve to on this worker.
+            if compute_cap_meets_nvfp4(compute_cap) {
+                gpu.capabilities
+                    .push(WorkerCapability::Unknown(NVFP4_CAPABILITY.to_owned()));
+            }
         }
     }
     gpu
@@ -291,6 +311,58 @@ pub(crate) fn parse_max_compute_cap(output: &str) -> Option<f32> {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) fn compute_cap_meets_int8_convrot(cap: Option<f32>) -> bool {
     cap.is_some_and(|c| c >= INT8_CONVROT_MIN_COMPUTE_CAP)
+}
+
+/// The advertised marker capability meaning "this candle worker can run the NVFP4 tier" (sc-11042,
+/// epic 11037). Mirrors [`INT8_CONVROT_CAPABILITY`]: it bundles the candle lane (only pushed under
+/// `backend_candle_enabled` in [`with_candle_capabilities`]) AND a GPU compute capability >= 12.0
+/// (consumer Blackwell sm_120 — the FP4 tensor cores the cuBLASLt NVFP4 GEMM dispatches on). The api
+/// surfaces it on the worker snapshot and the web picker (`quantTier.js`) shows the `nvfp4` tier only
+/// when a registered worker advertises it, so an ineligible host hides the tier gracefully.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const NVFP4_CAPABILITY: &str = "nvfp4";
+
+/// The minimum NVIDIA compute capability the NVFP4 tier requires: **12.0** (consumer Blackwell
+/// sm_120 — RTX PRO 6000 / RTX 50-series), the hardware epic 11037 targets and validates on.
+///
+/// A FLOOR, matching [`INT8_CONVROT_MIN_COMPUTE_CAP`]'s shape. Note this deliberately excludes
+/// **datacenter Blackwell sm_100** (B100/B200, which probes `10.0`): sm_100 *has* FP4 tensor cores,
+/// but it is explicitly out of scope for epic 11037 and the lane is neither built for it
+/// (`CUDA_COMPUTE_CAP=120` emits sm_120 SASS + compute_120 PTX, not sm_100) nor validated on it — so
+/// `10.0 < 12.0` keeps it off the tier by construction rather than by accident.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const NVFP4_MIN_COMPUTE_CAP: f32 = 12.0;
+
+/// Whether a probed compute cap clears the NVFP4 sm_120 floor. `None` (no probe — CPU / non-NVIDIA /
+/// nvidia-smi absent) ⇒ ineligible, so an unprobed host never routes an FP4 load at hardware that
+/// can't run it.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn compute_cap_meets_nvfp4(cap: Option<f32>) -> bool {
+    cap.is_some_and(|c| c >= NVFP4_MIN_COMPUTE_CAP)
+}
+
+/// Process-wide cache of the startup compute-cap probe, published by [`discover_gpu`].
+///
+/// The NVFP4 tier gate (sc-11042) is consulted from the SYNC tier-select path (`image_jobs/base.rs`),
+/// which has no async context to re-probe `nvidia-smi` from and must not spawn a subprocess per job.
+/// `discover_gpu` already probes the cap once at startup, before the job-claim loop, so caching that
+/// value here gives the resolver a free, always-populated read. The outer `OnceLock` distinguishes
+/// "never probed" (⇒ `None` ⇒ ineligible, fail-safe) from "probed, no NVIDIA GPU" (also `None`).
+static COMPUTE_CAP: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+
+/// Publish the startup compute-cap probe. First call wins; later calls are ignored (the cap of a
+/// running worker's GPU cannot change mid-process, and tests set it explicitly).
+pub(crate) fn cache_compute_cap(cap: Option<f32>) {
+    let _ = COMPUTE_CAP.set(cap);
+}
+
+/// The cached startup compute-cap probe, or `None` when never probed. See [`COMPUTE_CAP`].
+///
+/// Consumed only by the candle-lane NVFP4 tier gate, so gate it to the candle build to avoid a
+/// dead-code warning on the macOS / neither builds.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn cached_compute_cap() -> Option<f32> {
+    COMPUTE_CAP.get().copied().flatten()
 }
 
 pub(crate) fn parse_nvidia_smi_gpus(output: &str) -> Vec<DiscoveredGpu> {

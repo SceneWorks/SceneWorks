@@ -120,9 +120,25 @@ fn flux2_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool 
         && matches!(resolve_flux2_comfyui_paths(request, settings), Ok(Some(_)))
 }
 
-/// The compute quant the DiT + snapshot TE fold onto the GPU at: `advanced.quant` (`q4`/`q8`), else the
+/// The compute quant the DiT + snapshot TE fold onto the GPU at: the explicit NVFP4 tier
+/// (`advanced.quantTier: "nvfp4"` on a Blackwell host), else `advanced.quant` (`q4`/`q8`), else the
 /// [`FLUX2_COMFYUI_DEFAULT_QUANT`]. The 32B dev needs a quant to fit; there is no dense option.
+///
+/// **NVFP4 (sc-11042, epic 11037 SC#5).** sc-12006 established `quantTier: "nvfp4"` as the tier's
+/// identity but only ever WROTE it (asset telemetry); this reads it, making the label a real selection
+/// input and NVFP4 an actually-reachable tier on this lane. It rides `quantTier` rather than
+/// `advanced.quant` / `advanced.mlxQuantize` for the reason spelled out in
+/// [`flux2_comfyui_raw_settings`]: `mlxQuantize` is bits-valued and no integer is honest for NVFP4.
+///
+/// The pick needs BOTH halves — an explicit label ([`nvfp4_requested`]) and a Blackwell host
+/// ([`nvfp4_host_eligible`]): NVFP4 is never auto-selected for a `q4` request on sm_120 (that is
+/// precisely the Option-B behavior sc-11042 rejected), and a `quantTier: "nvfp4"` request on a
+/// non-Blackwell host falls through to the UNCHANGED `q4`/`q8`/default arms below rather than erroring
+/// — the clean off-Blackwell fallback the story requires.
 fn flux2_comfyui_quant(request: &ImageRequest) -> Quant {
+    if nvfp4_requested(request) && nvfp4_host_eligible() {
+        return Quant::Nvfp4;
+    }
     match request
         .advanced
         .get("quant")
@@ -201,8 +217,20 @@ fn flux2_comfyui_raw_settings(
     );
     // The explicit tier label. Emitted only for the tier `mlxQuantize` cannot express, so existing
     // q4/q8 asset telemetry keeps its exact shape (the sc-9300 `convRot` pattern).
+    //
+    // The `else` REMOVE is load-bearing (sc-11042), and is the symmetric twin of the unconditional
+    // `mlxQuantize` insert above: `raw` starts as a clone of `request.advanced`, so on the Q4/Q8 path a
+    // caller-supplied stale `advanced.quantTier` would otherwise survive into the asset record and
+    // mislabel a q4/q8 render as `nvfp4`. That matters more now than when sc-12006 wrote this key as
+    // pure telemetry: as of this story `quantTier` is a SELECTION input (`nvfp4_requested` in
+    // image_jobs/base.rs), so a request carrying `quantTier: "nvfp4"` that resolved to Q4/Q8 anyway —
+    // an off-Blackwell host, or a tier that isn't converted yet — is exactly the case that must not
+    // record the tier it did not run. Removing (not skipping) keeps the record honest in both
+    // directions, and the q4/q8 record shape byte-identical to sc-12006's.
     if matches!(quant, Quant::Nvfp4) {
         raw.insert("quantTier".to_owned(), Value::String("nvfp4".to_owned()));
+    } else {
+        raw.remove("quantTier");
     }
     if let Some(scale) = guidance {
         raw.insert("guidanceScale".to_owned(), json!(scale));
