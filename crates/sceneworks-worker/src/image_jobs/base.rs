@@ -5223,11 +5223,34 @@ fn image_settings_metrics(
 /// The effective quant label + bit count for a request (epic 10402): the Krea
 /// INT8-ConvRot tier, then dense-TE turnkey tiers (which `resolve_quant` reports
 /// as bf16 to keep the dense TE full-precision), else `resolve_quant`.
+///
+/// **The NVFP4 arm matches the VARIANT, not the bit count (sc-11042, epic 11037 SC#5)** — the image
+/// lane's instance of the same footgun `video_quant_label` carries, and it fails in the opposite
+/// direction. This maps [`resolve_quant`]'s *bits* onto a label, and NVFP4's bits are deliberately
+/// `None` (~4.5 EFFECTIVE bits/weight — `Some(4)` would alias it onto q4), so a bits-only match would
+/// drop NVFP4 into the `_ => bf16` arm and stamp an NVFP4 render as **`"bf16"`**: a full-precision
+/// label on a 4-bit render, the inverse mislabel but the same SC#5 violation. Matching the variant is
+/// what makes both directions impossible. The tier's own arm is placed alongside int8-convrot's — both
+/// are tiers with no honest integer width, and both report `None` bits for that reason.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn effective_quant_label(request: &ImageRequest) -> (Option<String>, Option<i64>) {
+    effective_quant_label_gated(request, nvfp4_host_eligible())
+}
+
+/// [`effective_quant_label`] with the NVFP4 **host** gate passed in rather than probed (sc-11042).
+/// Split out for testability, exactly like [`resolve_quant_gated`], which it delegates to. Production
+/// has one caller.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn effective_quant_label_gated(
+    request: &ImageRequest,
+    nvfp4_host: bool,
+) -> (Option<String>, Option<i64>) {
     if request
         .advanced
         .get("convRot")
@@ -5244,9 +5267,12 @@ fn effective_quant_label(request: &ImageRequest) -> (Option<String>, Option<i64>
             _ => (Some("bf16".to_owned()), None),
         };
     }
-    match resolve_quant(request).1 {
-        Some(8) => (Some("q8".to_owned()), Some(8)),
-        Some(4) => (Some("q4".to_owned()), Some(4)),
+    match resolve_quant_gated(request, nvfp4_host) {
+        // The distinct NVFP4 tier, matched on the VARIANT (see the note above): its bit count is
+        // `None`, so a bits-only match would silently label it "bf16".
+        (Some(Quant::Nvfp4), _) => (Some(NVFP4_TIER.to_owned()), None),
+        (_, Some(8)) => (Some("q8".to_owned()), Some(8)),
+        (_, Some(4)) => (Some("q4".to_owned()), Some(4)),
         _ => (Some("bf16".to_owned()), None),
     }
 }
@@ -6393,6 +6419,56 @@ mod standard_tier_tests {
             assert_eq!(
                 resolve_quant_gated(&request(json!({ "mlxQuantize": 0 })), nvfp4_host),
                 (None, None)
+            );
+        }
+    }
+
+    /// sc-11042 / epic 11037 SC#5 — **the image lane's aliasing guard**, the sibling of
+    /// `video_quant_label_never_aliases_nvfp4_to_q4`.
+    ///
+    /// [`effective_quant_label`] maps [`resolve_quant`]'s BIT COUNT onto a label, and NVFP4's bits are
+    /// deliberately `None`, so a bits-only match drops it into the `_ => bf16` arm — stamping a 4-bit
+    /// NVFP4 render as full-precision `"bf16"`. The inverse of the video lane's `q4` mislabel, the same
+    /// violation. Matching the variant is what pins it.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn effective_quant_label_never_aliases_nvfp4_to_bf16_or_q4() {
+        let picked = request(json!({ "quantTier": "nvfp4" }));
+        let (label, bits) = effective_quant_label_gated(&picked, true);
+        assert_eq!(label, Some("nvfp4".to_owned()));
+        // Neither mislabel is possible: not the "bf16" a bits-only match produced…
+        assert_ne!(label, Some("bf16".to_owned()));
+        // …nor the "q4" the video lane's bits-derived form produced.
+        assert_ne!(label, Some("q4".to_owned()));
+        // No honest integer width — same reason the tier reports None everywhere else.
+        assert_eq!(bits, None);
+
+        // Off Blackwell the label reports what actually ran (the q8 fallback), not the tier asked for.
+        assert_eq!(
+            effective_quant_label_gated(&picked, false),
+            (Some("q8".to_owned()), Some(8))
+        );
+        // SC#5: the existing labels are unchanged on both host classes.
+        for nvfp4_host in [false, true] {
+            assert_eq!(
+                effective_quant_label_gated(&request(json!({ "mlxQuantize": 4 })), nvfp4_host),
+                (Some("q4".to_owned()), Some(4))
+            );
+            assert_eq!(
+                effective_quant_label_gated(&request(json!({ "mlxQuantize": 8 })), nvfp4_host),
+                (Some("q8".to_owned()), Some(8))
+            );
+            assert_eq!(
+                effective_quant_label_gated(&request(json!({ "mlxQuantize": 0 })), nvfp4_host),
+                (Some("bf16".to_owned()), None)
+            );
+            // The int8-convrot tier still wins its early return.
+            assert_eq!(
+                effective_quant_label_gated(&request(json!({ "convRot": true })), nvfp4_host),
+                (Some("int8-convrot".to_owned()), None)
             );
         }
     }
