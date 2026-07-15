@@ -441,7 +441,7 @@ async fn generate_krea_control_stream(
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     // The base runs at the `mlxQuantize`-selected tier (sc-11730); the pose overlay rides it bf16. User
     // LoRA/LoKr adapters (resolved above) install additively on the base DiT (mlx-gen sc-11720).
-    let (quant, _quant_bits) = resolve_quant(request);
+    let (quant, _quant_bits) = resolve_quant(request, Some(&weights_dir));
     let spec = krea_control_spec(weights_dir, control_weights, quant, adapters);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),

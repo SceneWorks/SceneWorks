@@ -323,7 +323,7 @@ async fn generate_candle_flux2_control_stream(
 
     // dev (32B) loads Q4 (manifest `mlx.quantize: 4` → `resolve_quant`); the control overlay quantizes
     // in place. The control context is clean + constant across the denoise (encoded once).
-    let (quant, quant_bits) = resolve_quant(request);
+    let (quant, quant_bits) = resolve_quant(request, Some(&base));
     let steps = flux2_control_candle_steps(request);
     let guidance = flux2_control_candle_guidance(request);
     let control_scale = advanced::f32_clamped(

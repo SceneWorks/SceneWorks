@@ -1,5 +1,5 @@
 import { buildStructuredPromptRecipe } from "./ideogramCaption.js";
-import { tierQuantize, isConvRotTier } from "./quantTier.js";
+import { tierQuantize, isConvRotTier, isNvfp4Tier, NVFP4_TIER } from "./quantTier.js";
 
 // sc-8854 (F-052): pure builder for the Image Studio job's `advanced` payload. Extracted
 // verbatim from ImageStudio.submit() — the ~110-line object literal that assembled the
@@ -158,6 +158,18 @@ export function buildImageJobAdvanced(state) {
     // (weights = Dir(bf16 snapshot) + text_encoder = File(convrot DiT)). Emitted only when the picker
     // is shown AND the picked tier is int8-convrot — disjoint from the mlxQuantize spread above.
     ...(showTierPicker && isConvRotTier(quantTier) ? { convRot: true } : {}),
+    // NVFP4 tier (sc-11042, epic 11037): like int8-convrot, NVFP4 is NOT a bits-based quant — E2M1
+    // elements + FP8-E4M3 block scales, ~4.5 effective bits/weight — so it can't ride `mlxQuantize`
+    // (its `tierQuantize` is null, so the spread above omits it and mlxQuantize stays out of the
+    // payload entirely). Instead send the distinct `quantTier: "nvfp4"` label the worker's tier-select
+    // reads (`nvfp4_requested` → the `nvfp4/` tier subdir + `Quant::Nvfp4`). sc-12006 already
+    // established this exact key/value as the tier's identity on the asset record, so the signal the
+    // studio sends and the telemetry the worker stores are the same string.
+    //
+    // Emitted ONLY when the picker is shown AND the user explicitly picked nvfp4 — disjoint from both
+    // spreads above. This is the SC#5 opt-in at the payload layer: absent this deliberate pick no
+    // request ever carries the label, so no q4 render can be silently upgraded to NVFP4 on Blackwell.
+    ...(showTierPicker && isNvfp4Tier(quantTier) ? { quantTier: NVFP4_TIER } : {}),
     // PiD decoder (epic 7840, sc-7851): emit usePid:true only when the toggle is shown
     // (model PiD-eligible AND checkpoint installed) AND on. The worker swaps the native
     // VAE for the PiD decode + 2K/4K super-resolve pass; it rides `advanced` (opaque

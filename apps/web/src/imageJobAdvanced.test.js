@@ -223,6 +223,35 @@ describe("buildImageJobAdvanced", () => {
     expect(buildImageJobAdvanced(offState({ showTierPicker: true, quantTier: "q4" }))).not.toHaveProperty("convRot");
   });
 
+  it("emits quantTier (not mlxQuantize) for the NVFP4 tier (sc-11042)", () => {
+    const advanced = buildImageJobAdvanced(offState({ showTierPicker: true, quantTier: "nvfp4" }));
+    expect(advanced.quantTier).toBe("nvfp4");
+    // NVFP4 is not a bits-based quant (~4.5 effective bits/weight), so it must NOT leak an
+    // mlxQuantize — `4` there would select the int4-affine q4 tier (epic 11037 SC#5 aliasing).
+    expect(advanced).not.toHaveProperty("mlxQuantize");
+    // …and it is a different tier from int8-convrot, so it never sends that signal either.
+    expect(advanced).not.toHaveProperty("convRot");
+    // quantTier is only emitted when the tier picker is shown AND nvfp4 is picked.
+    expect(
+      buildImageJobAdvanced(offState({ showTierPicker: false, quantTier: "nvfp4" })),
+    ).not.toHaveProperty("quantTier");
+  });
+
+  // epic 11037 SC#5: no existing tier's payload changes. A q4/q8/bf16 pick never carries the NVFP4
+  // label, so it can never be silently re-routed to the FP4 tier — on Blackwell or anywhere else.
+  it("never emits quantTier for a bits-based tier (sc-11042)", () => {
+    for (const [tier, bits] of [
+      ["q4", 4],
+      ["q8", 8],
+      ["bf16", 0],
+    ]) {
+      const advanced = buildImageJobAdvanced(offState({ showTierPicker: true, quantTier: tier }));
+      expect(advanced).not.toHaveProperty("quantTier");
+      // …and the tier's own mlxQuantize value is untouched.
+      expect(advanced.mlxQuantize).toBe(bits);
+    }
+  });
+
   it("emits usePid only when the PiD toggle is shown and on", () => {
     expect(buildImageJobAdvanced(offState({ showPidToggle: false, usePid: true }))).not.toHaveProperty("usePid");
     expect(buildImageJobAdvanced(offState({ showPidToggle: true, usePid: true })).usePid).toBe(true);

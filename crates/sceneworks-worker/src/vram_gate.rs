@@ -142,15 +142,33 @@ pub(crate) fn reclaimable_pool_gb(gpu_id: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// The tier key (`bf16`/`q8`/`q4`) the request selected — derived the SAME way the tier-subdir
+/// The tier key (`nvfp4`/`bf16`/`q8`/`q4`) the request selected — derived the SAME way the tier-subdir
 /// resolvers pick their folder (`advanced.mlxQuantize` → manifest `mlx.quantize` → `q8` default;
 /// `<= 0` ⇒ `bf16`; `<= 4` ⇒ `q4`; else `q8`). Deliberately NOT derived from the resolved `Quant`,
 /// which is `None` on packed-tier candle families whose tier is the resolved subdir, not a load-time
 /// quantize (see `resolve_quant`'s candle-lane note).
+///
+/// **`nvfp4` (sc-11042) is passed IN, not parsed here.** NVFP4 carries no `mlxQuantize` by design (no
+/// integer is honest for a ~4.5-effective-bit tier), so a bits-derived key can only ever return `q8`
+/// for it — which sized an NVFP4 render against `candle.vramGbByTier["q8"]`, roughly 2× its real
+/// footprint. That failed CONSERVATIVE (a spurious `TooBig`/`Offload`, never an OOM), but it was the
+/// fourth bits-derived site of the same aliasing and is now keyed off the tier IDENTITY like the other
+/// three. The caller passes `image_jobs::base::nvfp4_selected` — the same predicate behind the load
+/// quant and the recorded label, so all four agree on what ran by construction. This module stays pure
+/// (no GPU probe, no filesystem) precisely because the flag arrives resolved.
+///
+/// Mirrors [`preferred_tier`](crate::image_jobs::base)'s `(bits, floor, nvfp4)` shape: `nvfp4 == false`
+/// leaves every existing mapping byte-identical.
 pub(crate) fn requested_tier_key(
     advanced: &JsonObject,
     manifest_entry: &JsonObject,
+    nvfp4: bool,
 ) -> &'static str {
+    // The distinct NVFP4 tier short-circuits the bits map: it is a tier identity, not a point on the
+    // bits ladder, and it has no honest `mlxQuantize` integer to be derived from.
+    if nvfp4 {
+        return NVFP4_TIER;
+    }
     let raw = advanced.get("mlxQuantize").and_then(quant_int).or_else(|| {
         manifest_entry
             .get("mlx")
@@ -169,14 +187,34 @@ pub(crate) fn requested_tier_key(
 /// `candle.vramGbByTier[tier_key]` (measured peak) + [`HEADROOM_GB`], else `candle.minMemoryGb`
 /// (already padded), else `None` — an unmeasured model (no `candle` block, e.g. the dense sc-3675
 /// families) skips the gate entirely.
+///
+/// **An `nvfp4` tier with no measured row degrades to the `q8` row, NOT to `minMemoryGb` (sc-11042).**
+/// sc-11043 owns the convert-at-install loop and **must add an `nvfp4` row to `vramGbByTier` when it
+/// converts a tier** — this is the documented behavior until it does. `minMemoryGb` is the WRONG floor
+/// to land on here: per the manifest schema it is "the measured overall-peak of the DEFAULT (lightest,
+/// typically q4) hosted tier", which heavier tiers are explicitly allowed to exceed — so falling
+/// through to it would size an FP4 render against the lightest tier's number and fail PERMISSIVELY
+/// (an under-prediction admits a load that can OOM). The `q8` row instead OVER-predicts (q8's weights
+/// are ~2× NVFP4's ~4.5 effective bits), which is both safe and exactly the number this gate already
+/// used for an NVFP4 request before the tier had its own key — the bits-derived
+/// [`requested_tier_key`] returned `"q8"` for it. So the sizing is no less conservative than the
+/// status quo, and a missing row can only ever cost a spurious `TooBig`/`Offload`, never an OOM.
 pub(crate) fn predicted_peak_gb(manifest_entry: &JsonObject, tier_key: &str) -> Option<f64> {
     let candle = manifest_entry.get("candle")?;
-    if let Some(gb) = candle
-        .get("vramGbByTier")
-        .and_then(|tiers| tiers.get(tier_key))
-        .and_then(json_f64)
-    {
+    let measured = |key: &str| {
+        candle
+            .get("vramGbByTier")
+            .and_then(|tiers| tiers.get(key))
+            .and_then(json_f64)
+    };
+    if let Some(gb) = measured(tier_key) {
         return Some(gb + HEADROOM_GB);
+    }
+    // NVFP4 with no measured row → the q8 row (a deliberate over-prediction; see the note above).
+    if tier_key == NVFP4_TIER {
+        if let Some(gb) = measured("q8") {
+            return Some(gb + HEADROOM_GB);
+        }
     }
     candle.get("minMemoryGb").and_then(json_f64)
 }
@@ -186,15 +224,18 @@ pub(crate) fn predicted_peak_gb(manifest_entry: &JsonObject, tier_key: &str) -> 
 /// [`predicted_peak_gb`]'s headroom. `None` when unmeasured (no `sequentialPeakGb`, or no entry for this
 /// tier) — then the [`FitDecision::Offload`] path keeps today's best-effort behavior: run sequentially
 /// and lean on the reactive Metal/CUDA-OOM containment backstop rather than reject.
+///
+/// An `nvfp4` tier with no measured row falls back to the `q8` row, mirroring [`predicted_peak_gb`]'s
+/// NVFP4 note (q8's sequential working set is an over-prediction of NVFP4's, so the second-stage gate
+/// degrades conservatively rather than best-effort). sc-11043 must add the real `nvfp4` rows.
 pub(crate) fn predicted_sequential_peak_gb(
     manifest_entry: &JsonObject,
     tier_key: &str,
 ) -> Option<f64> {
-    manifest_entry
-        .get("candle")?
-        .get("sequentialPeakGb")
-        .and_then(|tiers| tiers.get(tier_key))
-        .and_then(json_f64)
+    let sequential = manifest_entry.get("candle")?.get("sequentialPeakGb")?;
+    let measured = |key: &str| sequential.get(key).and_then(json_f64);
+    measured(tier_key)
+        .or_else(|| (tier_key == NVFP4_TIER).then(|| measured("q8")).flatten())
         .map(|gb| gb + HEADROOM_GB)
 }
 
@@ -328,29 +369,130 @@ mod tests {
     fn requested_tier_key_mirrors_the_subdir_resolvers() {
         let empty = obj(json!({}));
         // No pick anywhere ⇒ q8 default (sc-10726).
-        assert_eq!(requested_tier_key(&empty, &empty), "q8");
+        assert_eq!(requested_tier_key(&empty, &empty, false), "q8");
         // advanced.mlxQuantize wins, number or numeric string.
         assert_eq!(
-            requested_tier_key(&obj(json!({"mlxQuantize": 0})), &empty),
+            requested_tier_key(&obj(json!({"mlxQuantize": 0})), &empty, false),
             "bf16"
         );
         assert_eq!(
-            requested_tier_key(&obj(json!({"mlxQuantize": 4})), &empty),
+            requested_tier_key(&obj(json!({"mlxQuantize": 4})), &empty, false),
             "q4"
         );
         assert_eq!(
-            requested_tier_key(&obj(json!({"mlxQuantize": 8})), &empty),
+            requested_tier_key(&obj(json!({"mlxQuantize": 8})), &empty, false),
             "q8"
         );
         assert_eq!(
-            requested_tier_key(&obj(json!({"mlxQuantize": "4"})), &empty),
+            requested_tier_key(&obj(json!({"mlxQuantize": "4"})), &empty, false),
             "q4"
         );
         // Falls back to the manifest mlx.quantize when advanced is silent.
         assert_eq!(
-            requested_tier_key(&empty, &obj(json!({"mlx": {"quantize": 4}}))),
+            requested_tier_key(&empty, &obj(json!({"mlx": {"quantize": 4}})), false),
             "q4"
         );
+    }
+
+    /// sc-11042 (epic 11037 SC#5): the fit gate keys off the tier IDENTITY, never bits.
+    ///
+    /// The FOURTH bits-derived site of the same aliasing. NVFP4 carries no `mlxQuantize` by design (no
+    /// integer is honest for a ~4.5-effective-bit tier), so a bits-derived key returned `"q8"` for it
+    /// and sized an NVFP4 render against `vramGbByTier["q8"]` — ~2× its real footprint. Conservative
+    /// (spurious TooBig/Offload, never an OOM), but wrong, and it made this the one selection site that
+    /// disagreed with the load quant + the recorded label about which tier was running.
+    #[test]
+    fn requested_tier_key_honors_the_nvfp4_tier_identity() {
+        let empty = obj(json!({}));
+        // The selected NVFP4 tier short-circuits the bits map — including the `mlxQuantize: null` an
+        // NVFP4 request actually carries (sc-12006), which `quant_int` reads as "no pick" ⇒ `q8`.
+        assert_eq!(requested_tier_key(&empty, &empty, true), NVFP4_TIER);
+        assert_eq!(
+            requested_tier_key(&obj(json!({"mlxQuantize": null})), &empty, true),
+            NVFP4_TIER
+        );
+        // …and it is NOT the q4 whose numerics it must never be confused with, nor the q8 the
+        // bits-derived key produced.
+        assert_ne!(requested_tier_key(&empty, &empty, true), "q4");
+        assert_ne!(requested_tier_key(&empty, &empty, true), "q8");
+
+        // `nvfp4 = false` ⇒ every existing mapping is byte-identical (the caller's `nvfp4_selected` is
+        // false for every request that didn't explicitly pick the tier on eligible hardware with the
+        // tier installed — i.e. all of them today).
+        for (advanced, manifest, expected) in [
+            (json!({}), json!({}), "q8"),
+            (json!({"mlxQuantize": 0}), json!({}), "bf16"),
+            (json!({"mlxQuantize": 4}), json!({}), "q4"),
+            (json!({"mlxQuantize": 8}), json!({}), "q8"),
+            (json!({}), json!({"mlx": {"quantize": 4}}), "q4"),
+            // A `quantTier: "nvfp4"` label with the gate closed (not Blackwell, or the tier isn't
+            // installed) sizes the tier that will actually load — never nvfp4.
+            (json!({"quantTier": "nvfp4"}), json!({}), "q8"),
+        ] {
+            assert_eq!(
+                requested_tier_key(&obj(advanced.clone()), &obj(manifest.clone()), false),
+                expected,
+                "advanced={advanced} manifest={manifest}"
+            );
+        }
+    }
+
+    /// sc-11042: an `nvfp4` tier with no measured `vramGbByTier` row degrades CONSERVATIVELY — to the
+    /// `q8` row, not to `minMemoryGb`.
+    ///
+    /// `minMemoryGb` is the manifest's DEFAULT (lightest, typically q4) tier peak, which heavier tiers
+    /// are explicitly allowed to exceed — landing there would UNDER-predict and admit a load that can
+    /// OOM. The q8 row over-predicts (q8's weights are ~2× NVFP4's), which is exactly the number this
+    /// gate already used for an NVFP4 request when the bits-derived key returned `"q8"`. sc-11043 must
+    /// add the real `nvfp4` rows when it converts a tier; until then this is the documented behavior.
+    #[test]
+    fn nvfp4_without_a_measured_row_degrades_to_q8_not_min_memory() {
+        let manifest = obj(json!({
+            "candle": {
+                "minMemoryGb": 40,
+                "vramGbByTier": { "q4": 47.2, "q8": 58, "bf16": 72 },
+                "sequentialPeakGb": { "q4": 20.0, "q8": 26.0 }
+            }
+        }));
+        // No `nvfp4` row ⇒ the q8 row + headroom, NOT the lighter (permissive) minMemoryGb…
+        assert_eq!(
+            predicted_peak_gb(&manifest, NVFP4_TIER),
+            Some(58.0 + HEADROOM_GB)
+        );
+        assert_ne!(predicted_peak_gb(&manifest, NVFP4_TIER), Some(40.0));
+        // …and the same for the second-stage sequential gate.
+        assert_eq!(
+            predicted_sequential_peak_gb(&manifest, NVFP4_TIER),
+            Some(26.0 + HEADROOM_GB)
+        );
+
+        // Once sc-11043 measures the tier, its own row wins outright.
+        let measured = obj(json!({
+            "candle": {
+                "minMemoryGb": 40,
+                "vramGbByTier": { "q8": 58, "nvfp4": 31.5 },
+                "sequentialPeakGb": { "q8": 26.0, "nvfp4": 14.0 }
+            }
+        }));
+        assert_eq!(
+            predicted_peak_gb(&measured, NVFP4_TIER),
+            Some(31.5 + HEADROOM_GB)
+        );
+        assert_eq!(
+            predicted_sequential_peak_gb(&measured, NVFP4_TIER),
+            Some(14.0 + HEADROOM_GB)
+        );
+
+        // The q8 back-stop is NVFP4-only: every other tier keeps the unchanged
+        // measured-row → minMemoryGb chain.
+        let sparse = obj(json!({ "candle": { "minMemoryGb": 40, "vramGbByTier": { "q8": 58 } } }));
+        assert_eq!(predicted_peak_gb(&sparse, "q4"), Some(40.0));
+        assert_eq!(predicted_peak_gb(&sparse, "bf16"), Some(40.0));
+        assert_eq!(predicted_sequential_peak_gb(&sparse, "q4"), None);
+        // No q8 row either ⇒ nvfp4 falls all the way through to minMemoryGb rather than panicking.
+        let no_q8 = obj(json!({ "candle": { "minMemoryGb": 40, "vramGbByTier": {} } }));
+        assert_eq!(predicted_peak_gb(&no_q8, NVFP4_TIER), Some(40.0));
+        assert_eq!(predicted_sequential_peak_gb(&no_q8, NVFP4_TIER), None);
     }
 
     #[test]

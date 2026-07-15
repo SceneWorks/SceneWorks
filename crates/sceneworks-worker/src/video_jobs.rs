@@ -4105,19 +4105,33 @@ impl VideoSettingsSnapshot {
 }
 
 /// Normalized quant label + bit-width for a resolved video [`Quant`] (epic 10402,
-/// sc-10418): `Q8` → ("q8", 8), `Q4` → ("q4", 4), `None` (dense/bf16) → ("bf16", None).
-/// Mirrors the image lane's `effective_quant_label` mapping so the Stats charts group
-/// video and image runs on the same tier labels.
+/// sc-10418): `Q8` → ("q8", 8), `Q4` → ("q4", 4), `Nvfp4` → ("nvfp4", None), `None`
+/// (dense/bf16) → ("bf16", None). Mirrors the image lane's `effective_quant_label` mapping
+/// so the Stats charts group video and image runs on the same tier labels.
+///
+/// **MATCH THE VARIANT — never derive a tier label from [`Quant::bits`] (sc-11042, epic 11037 SC#5).**
+/// This function used to `format!("q{bits}")` from `q.bits()`, which was correct only while `Quant` was
+/// `{Q4, Q8}`. `Quant::Nvfp4::bits()` returns **4** (its E2M1 elements are 4-bit), so the bits-derived
+/// form stamped an NVFP4 video render as `"q4"` + bits 4 in Stats telemetry — falsely reporting one
+/// creative choice as another, exactly the tier aliasing this epic forbids. **The compiler could not
+/// catch it**: reading `.bits()` raises no E0004 when a variant is added, so it compiled silently on the
+/// `backend-candle` lane. The explicit arms below make any future `Quant` variant a hard compile error
+/// here instead of a silent mislabel — do not collapse them back into a catch-all or a `bits()` map.
+///
+/// NVFP4 reports **no** bit count: it is ~4.5 EFFECTIVE bits/weight (E2M1 elements + FP8-E4M3 block
+/// scales + an FP32 per-tensor scale), so `Some(4)` would re-introduce the same `q4` aliasing in the
+/// `quant_bits` column that the label fix removes. `None` is the honest "no integer width applies" —
+/// the same signal the dense/bf16 arm uses, and the same reason `flux2_comfyui_raw_settings` writes
+/// `mlxQuantize: null` for this tier.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn video_quant_label(quant: Option<Quant>) -> (Option<String>, Option<u32>) {
     match quant {
-        Some(q) => {
-            let bits = q.bits() as u32;
-            (Some(format!("q{bits}")), Some(bits))
-        }
+        Some(Quant::Q4) => (Some("q4".to_owned()), Some(4)),
+        Some(Quant::Q8) => (Some("q8".to_owned()), Some(8)),
+        Some(Quant::Nvfp4) => (Some("nvfp4".to_owned()), None),
         None => (Some("bf16".to_owned()), None),
     }
 }
@@ -9905,6 +9919,44 @@ mod tests {
             (Some("q4".to_owned()), Some(4))
         );
         assert_eq!(video_quant_label(None), (Some("bf16".to_owned()), None));
+    }
+
+    /// sc-11042 / epic 11037 SC#5 — **the NVFP4 aliasing guard**.
+    ///
+    /// `Quant::Nvfp4::bits()` returns **4** (E2M1 elements are 4-bit), so the previous
+    /// `format!("q{bits}")` implementation stamped an NVFP4 video render as `"q4"` + bits 4 — reporting
+    /// the int4-affine tier the user did NOT pick. The compiler cannot catch that class of bug (reading
+    /// `.bits()` raises no E0004 on a new variant), so it is pinned here instead.
+    ///
+    /// The `bits()`-is-4 assertion is deliberate: it documents WHY the label must be matched from the
+    /// variant, and fails loudly if a future contract change makes the old bits-derived form look safe
+    /// again.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn video_quant_label_never_aliases_nvfp4_to_q4() {
+        let (label, bits) = video_quant_label(Some(Quant::Nvfp4));
+        // The label names the tier the user actually picked — NOT "q4".
+        assert_eq!(label, Some("nvfp4".to_owned()));
+        assert_ne!(
+            label,
+            Some("q4".to_owned()),
+            "NVFP4 must never be stamped as the q4 tier (epic 11037 SC#5)"
+        );
+        // No integer bit-width is honest for NVFP4 (~4.5 EFFECTIVE bits/weight), so `quant_bits` stays
+        // empty rather than repeating the q4 aliasing in the numeric column.
+        assert_eq!(bits, None);
+        // The trap this guards: the element width really is 4, which is exactly why a bits-derived
+        // label silently aliased onto q4.
+        assert_eq!(Quant::Nvfp4.bits(), 4);
+        assert_eq!(Quant::Q4.bits(), 4);
+        // And the q4 tier still reports itself truthfully — NVFP4 took nothing away from it.
+        assert_eq!(
+            video_quant_label(Some(Quant::Q4)),
+            (Some("q4".to_owned()), Some(4))
+        );
     }
 
     /// sc-10418 (mirrors the S4 image `image_settings_metrics` tests): the video

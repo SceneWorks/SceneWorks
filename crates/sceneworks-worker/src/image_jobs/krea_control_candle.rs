@@ -444,8 +444,14 @@ async fn generate_candle_krea_control_stream(
     // sc-11745) slot in ahead of branch-quant here once their candle-gen mechanism lands. NB: this lane uses
     // the UNcached `start_gen_stream` (it doesn't evict the single-slot generator cache), so budget against
     // raw live free VRAM — the cache's pages are NOT reclaimable by this load, unlike the base.rs gate.
-    let tier =
-        crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
+    // sc-11042: `base` is the tier dir this lane resolved (`krea_model_subdir`'s output when the user has
+    // the packed MLX turnkey; a dense diffusers snapshot root otherwise, which is never an `nvfp4/` dir),
+    // so the NVFP4 tier is sized only when it is the tier that actually resolved.
+    let tier = crate::vram_gate::requested_tier_key(
+        &request.advanced,
+        &request.model_manifest_entry,
+        nvfp4_selected(request, nvfp4_host_eligible(), Some(&base)),
+    );
     let budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),

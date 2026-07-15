@@ -383,7 +383,7 @@ async fn generate_flux2_edit_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("not a FLUX.2 edit model".to_owned()))?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("FLUX.2 weights not found".to_owned()))?;
-    let (quant, quant_bits) = resolve_quant(request);
+    let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
     // Identity strength (sc-8278): map the UI `referenceStrength` slider onto the engine's
@@ -847,7 +847,7 @@ async fn generate_flux2_dev_control_stream(
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("FLUX.2-dev weights not found".to_owned()))?;
     let control_weights = ensure_flux2_control_weights(api, settings, job, request).await?;
-    let (quant, quant_bits) = resolve_quant(request);
+    let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
     let model = mlx_model("flux2_dev")
         .ok_or_else(|| WorkerError::InvalidPayload("flux2_dev model row missing".to_owned()))?;
     let steps = resolve_steps(request, &model);

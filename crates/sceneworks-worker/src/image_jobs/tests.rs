@@ -175,15 +175,21 @@ fn quant_mapping_defaults_to_q8_and_maps_bits() {
     use gen_core::Quant;
     let default = request(json!({ "projectId": "p" }));
     assert!(matches!(
-        resolve_quant(&default),
+        resolve_quant(&default, None),
         (Some(Quant::Q8), Some(8))
     ));
     let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
-    assert!(matches!(resolve_quant(&q4), (Some(Quant::Q4), Some(4))));
+    assert!(matches!(
+        resolve_quant(&q4, None),
+        (Some(Quant::Q4), Some(4))
+    ));
     let dense = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
-    assert!(matches!(resolve_quant(&dense), (None, None)));
+    assert!(matches!(resolve_quant(&dense, None), (None, None)));
     let six = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 6 } }));
-    assert!(matches!(resolve_quant(&six), (Some(Quant::Q8), Some(8))));
+    assert!(matches!(
+        resolve_quant(&six, None),
+        (Some(Quant::Q8), Some(8))
+    ));
 }
 
 #[cfg(target_os = "macos")]
@@ -929,6 +935,69 @@ fn bernini_image_task_and_quant_mapping() {
         &request(json!({ "projectId": "p", "model": "z_image_turbo", "prompt": "p" })),
         &Settings::from_env()
     ));
+}
+
+/// sc-11042 (epic 11037 SC#5): the ComfyUI FLUX.2-dev lane NEVER selects `Quant::Nvfp4` — not even for
+/// an explicit `quantTier: "nvfp4"` pick, and not on a Blackwell host.
+///
+/// This lane is structurally incapable of serving the tier: its `quant` is the ON-THE-FLY GGUF fold
+/// target (`load_from_comfyui_dit` → `QLinear::quantize_onto` → `fold` → `ggml_dtype`), and
+/// `ggml_dtype` BAILS for `Nvfp4` by design — NVFP4 is served by `Nvfp4Linear` from an offline-packed
+/// `Nvfp4Tensor`, which this lane has no tier dir to load (the DiT is the user's own in-place ComfyUI
+/// fp8 single-file; `FLUX2_COMFYUI_SNAPSHOT_TIERS` probes only for the TE/VAE snapshot). An earlier
+/// revision returned `Quant::Nvfp4` here, which did not select a tier — it aborted the load with
+/// `WorkerError::Engine("ComfyUI FLUX.2-dev load failed: …")`, killing the job on EXACTLY the hardware
+/// the tier targets. Falling through to the normal q4/q8/default arms IS the clean fallback.
+///
+/// The host gate is NOT injected here on purpose: the arm is gone, so the answer must be a normal tier
+/// on EVERY host — which is precisely what this pins. (`nvfp4_host_eligible()` is a real compute-cap
+/// probe; this test must not depend on the rig's GPU.)
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn flux2_comfyui_never_selects_nvfp4() {
+    let req = |advanced: Value| {
+        request(json!({
+            "projectId": "p", "model": "external_base_flux2", "prompt": "p", "advanced": advanced,
+        }))
+    };
+    // Guard the guard: `nvfp4_requested` must actually SEE this label, so the assertions below are
+    // about the deleted arm and not about a mis-built request that never carried the key.
+    assert!(
+        nvfp4_requested(&req(json!({ "quantTier": "nvfp4" }))),
+        "test scaffolding is wrong — the label never reached `advanced`, so the rest is vacuous"
+    );
+
+    // The explicit pick the web can emit — on this lane it must resolve the lane default, never Nvfp4.
+    assert!(matches!(
+        flux2_comfyui_quant(&req(json!({ "quantTier": "nvfp4" }))),
+        FLUX2_COMFYUI_DEFAULT_QUANT
+    ));
+    // …and the label must not disturb an explicit q4/q8 pick either (the fall-through is UNCHANGED).
+    assert!(matches!(
+        flux2_comfyui_quant(&req(json!({ "quantTier": "nvfp4", "quant": "q4" }))),
+        Quant::Q4
+    ));
+    assert!(matches!(
+        flux2_comfyui_quant(&req(json!({ "quantTier": "nvfp4", "quant": "q8" }))),
+        Quant::Q8
+    ));
+    // No request shape on this lane may ever produce Nvfp4 — including the `mlxQuantize: null` an NVFP4
+    // request actually carries (sc-12006), and a stale bits knob alongside the label.
+    for advanced in [
+        json!({ "quantTier": "nvfp4" }),
+        json!({ "quantTier": "nvfp4", "mlxQuantize": null }),
+        json!({ "quantTier": "nvfp4", "mlxQuantize": 4 }),
+        json!({ "quantTier": "nvfp4", "quant": "q4" }),
+        json!({ "quantTier": "nvfp4", "quant": "q8" }),
+        json!({ "quantTier": "nvfp4", "quant": "bogus" }),
+        json!({}),
+    ] {
+        assert!(
+            !matches!(flux2_comfyui_quant(&req(advanced.clone())), Quant::Nvfp4),
+            "the comfyui lane cannot serve NVFP4 — the GGUF fold rejects it, so selecting it \
+             hard-fails the job (advanced={advanced})"
+        );
+    }
 }
 
 /// Candle Bernini tier-subdir selection (sc-11003): the published `SceneWorks/bernini` layout nests
@@ -3281,7 +3350,7 @@ fn sc3031_ab_dump_txt2img() {
     let steps = resolve_steps(&req, &model);
     let guidance = resolve_guidance(&req, &model);
     let negative = resolve_negative_prompt(&req, &model);
-    let (quant, _bits) = resolve_quant(&req);
+    let (quant, _bits) = resolve_quant(&req, None);
     let weights = resolve_weights_dir(&req, &settings)
         .expect("weights resolve")
         .expect("weights in HF cache");
@@ -3348,7 +3417,7 @@ fn sc3031_ab_dump_pose() {
     let control_weights = resolve_control_weights(&req, &settings)
         .expect("control-weights filename resolves")
         .expect("Fun-Controlnet-Union weights");
-    let (quant, _bits) = resolve_quant(&req);
+    let (quant, _bits) = resolve_quant(&req, None);
     let zimage = mlx_model("z_image_turbo").expect("z-image model row");
     let steps = resolve_steps(&req, &zimage);
     let control_scale = resolve_control_scale(&req);
@@ -6397,19 +6466,19 @@ fn ideogram_engine_defaults_and_quant_resolution() {
     assert_eq!(resolve_guidance(&req(json!({})), &model), Some(7.0));
     // Default → Q4 (manifest packed default); advanced.mlxQuantize overrides to Q8 / bf16-dense.
     assert!(matches!(
-        resolve_quant(&req(json!({}))),
+        resolve_quant(&req(json!({})), None),
         (Some(Quant::Q4), Some(4))
     ));
     assert!(matches!(
-        resolve_quant(&req(json!({ "mlxQuantize": 8 }))),
+        resolve_quant(&req(json!({ "mlxQuantize": 8 })), None),
         (Some(Quant::Q8), Some(8))
     ));
     assert!(matches!(
-        resolve_quant(&req(json!({ "mlxQuantize": 4 }))),
+        resolve_quant(&req(json!({ "mlxQuantize": 4 })), None),
         (Some(Quant::Q4), Some(4))
     ));
     assert!(matches!(
-        resolve_quant(&req(json!({ "mlxQuantize": 0 }))),
+        resolve_quant(&req(json!({ "mlxQuantize": 0 })), None),
         (None, None)
     ));
 }
@@ -6521,15 +6590,15 @@ fn boogu_engine_defaults_and_quant_resolution() {
     );
     // Default → Q8 (the shipped pre-packed turnkey); advanced.mlxQuantize overrides to Q4 / bf16-dense.
     assert!(matches!(
-        resolve_quant(&req("boogu_image", json!({}))),
+        resolve_quant(&req("boogu_image", json!({})), None),
         (Some(Quant::Q8), Some(8))
     ));
     assert!(matches!(
-        resolve_quant(&req("boogu_image", json!({ "mlxQuantize": 4 }))),
+        resolve_quant(&req("boogu_image", json!({ "mlxQuantize": 4 })), None),
         (Some(Quant::Q4), Some(4))
     ));
     assert!(matches!(
-        resolve_quant(&req("boogu_image", json!({ "mlxQuantize": 0 }))),
+        resolve_quant(&req("boogu_image", json!({ "mlxQuantize": 0 })), None),
         (None, None)
     ));
 }
@@ -6634,7 +6703,7 @@ fn ideogram_raw_settings_records_recipe_and_structured_prompt() {
         "modelManifestEntry": { "mlx": { "quantize": 4 } },
     }));
     // Resolve the quant the real path would (manifest packed default → Q4, sc-6237), then record it.
-    let (_quant, quant_bits) = resolve_quant(&req);
+    let (_quant, quant_bits) = resolve_quant(&req, None);
     let raw = mlx_raw_settings(&req, "SceneWorks/ideogram-4-mlx", 48, quant_bits, Some(7.0));
     assert_eq!(raw.get("realModelInference"), Some(&json!(true)));
     assert_eq!(raw.get("repo"), Some(&json!("SceneWorks/ideogram-4-mlx")));
@@ -6706,7 +6775,7 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
         "modelManifestEntry": { "mlx": { "quantize": 4 } },
     }));
     // Q4 spec matching the packed q4 weights — the exact production path (sc-6237).
-    let (quant, _bits) = resolve_quant(&req);
+    let (quant, _bits) = resolve_quant(&req, None);
     let guidance = resolve_guidance(&req, &model); // 7.0
 
     let generator = load_engine("ideogram_4", dir, quant, Vec::new(), None).unwrap();
@@ -6905,7 +6974,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
         "projectId": "p", "model": "ideogram_4", "prompt": "p", "advanced": {},
         "modelManifestEntry": { "mlx": { "quantize": 4 } },
     }));
-    let (quant, _bits) = resolve_quant(&req);
+    let (quant, _bits) = resolve_quant(&req, None);
     let guidance = resolve_guidance(&req, &model);
     let generator = load_engine("ideogram_4", ideogram, quant, Vec::new(), None).unwrap();
     let cancel = CancelFlag::new();
@@ -7016,7 +7085,7 @@ fn ideogram_4_real_weights_edit_img2img_and_inpaint() {
         "projectId": "p", "model": "ideogram_4", "prompt": "p", "advanced": {},
         "modelManifestEntry": { "mlx": { "quantize": 4 } },
     }));
-    let (quant, _bits) = resolve_quant(&req);
+    let (quant, _bits) = resolve_quant(&req, None);
     let guidance = resolve_guidance(&req, &model);
     let generator = load_engine("ideogram_4", dir, quant, Vec::new(), None).unwrap();
     let cancel = gen_core::CancelFlag::new();
@@ -7242,7 +7311,7 @@ fn boogu_real_weights_generates_base_turbo_edit() {
         // The exact production spec: Q8 over the packed `<variant>/` weights, with the resolved
         // guidance (4.0 Base/Edit, None Turbo) + true_cfg (None for all boogu — Base/Edit forward
         // CFG via the `guidance` scalar; Turbo is CFG-free).
-        let (quant, _bits) = resolve_quant(&req);
+        let (quant, _bits) = resolve_quant(&req, None);
         let guidance = resolve_guidance(&req, &model);
         let true_cfg = resolve_true_cfg(&req, &model);
 
@@ -9580,7 +9649,7 @@ fn krea_control_lora_end_to_end_mlx_smoke() {
     );
     println!("[smoke] Bug 2 OK — resolved {} adapter(s)", adapters.len());
 
-    let (quant, _) = resolve_quant(&req);
+    let (quant, _) = resolve_quant(&req, None);
     let load = |adapters: Vec<AdapterSpec>| {
         let spec = krea_control_spec(base.clone(), overlay.clone(), quant, adapters);
         load_control_engine(KREA_CONTROL_ENGINE_ID, &spec)

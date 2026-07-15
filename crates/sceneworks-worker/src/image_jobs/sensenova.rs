@@ -163,7 +163,7 @@ async fn generate_sensenova_edit_stream(
     let engine_id = model.engine_id();
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
-    let (quant, quant_bits) = resolve_quant(request);
+    let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
     let steps = resolve_steps(request, &model);
     // Dual CFG: the text CFG flows through `guidance` (Some — SenseNova `supports_guidance`); the
     // image-conditioning guidance through `true_cfg`.

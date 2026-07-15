@@ -58,6 +58,31 @@ fn compute_cap_parse_takes_the_highest_and_tolerates_junk() {
     assert_eq!(parse_max_compute_cap("\n[N/A]\n"), None);
 }
 
+/// sc-11042 (epic 11037): the NVFP4 tier's Blackwell gate floors at compute cap **12.0** (consumer
+/// Blackwell sm_120 — the FP4 tensor cores the cuBLASLt NVFP4 GEMM dispatches on).
+///
+/// This is the ONLY place hardware maps onto NVFP4 eligibility, so the boundary is pinned here: the
+/// tier-select tests inject the resulting bool rather than probing a live GPU.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn nvfp4_gate_floors_at_blackwell_sm_120() {
+    use crate::gpu::compute_cap_meets_nvfp4;
+    // Consumer Blackwell (RTX PRO 6000 / RTX 50-series = 12.0) — the epic's target, and eligible.
+    assert!(compute_cap_meets_nvfp4(Some(12.0)));
+    // A hypothetical future cap above the floor stays eligible (a floor, matching the ConvRot shape).
+    assert!(compute_cap_meets_nvfp4(Some(12.8)));
+    // Ada (8.9) and Ampere (8.6) have no FP4 tensor cores → ineligible, and fall back cleanly.
+    assert!(!compute_cap_meets_nvfp4(Some(8.9)));
+    assert!(!compute_cap_meets_nvfp4(Some(8.6)));
+    // DATACENTER Blackwell sm_100 (B100/B200) probes 10.0. It HAS FP4 hardware but is explicitly out of
+    // scope for epic 11037 — the lane is neither built for it (`CUDA_COMPUTE_CAP=120` emits sm_120 SASS
+    // + compute_120 PTX) nor validated on it — so the 12.0 floor keeps it off the tier BY CONSTRUCTION.
+    assert!(!compute_cap_meets_nvfp4(Some(10.0)));
+    // No probe (nvidia-smi absent / CPU / non-NVIDIA) ⇒ ineligible. Fail-safe: an unprobed host must
+    // never route an FP4 load at hardware that may not have FP4 tensor cores.
+    assert!(!compute_cap_meets_nvfp4(None));
+}
+
 #[test]
 fn auto_worker_ids_and_child_environment_match_python_supervisor() {
     assert_eq!(gpu_worker_id("worker-gpu-auto-0", "0"), "worker-gpu-auto-0");
