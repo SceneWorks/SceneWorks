@@ -7342,7 +7342,7 @@
       "id": "pid_qwenimage",
       "autoDownload": false,
       "nonCommercial": true,
-      "name": "PiD Decoder (Qwen-Image)",
+      "name": "PiD 1.5 Decoder (Qwen-Image)",
       "family": "pid",
       "type": "utility",
       "adapter": "pid",
@@ -7355,7 +7355,7 @@
           "provider": "huggingface",
           "repo": "SceneWorks/pid-qwenimage",
           "files": [],
-          "estimatedSizeBytes": 2724745532
+          "estimatedSizeBytes": 5525193754
         },
         {
           // PiD caption encoder (Gemma-2-2B-IT). Non-gated `SceneWorks/gemma-2-2b-it` mirror (sc-8025) —
@@ -7424,7 +7424,7 @@
       "id": "pid_flux",
       "autoDownload": false,
       "nonCommercial": true,
-      "name": "PiD Decoder (FLUX.1 / Boogu / Chroma / Z-Image)",
+      "name": "PiD 1.5 Decoder (FLUX.1 / Boogu / Chroma / Z-Image)",
       "family": "pid",
       "type": "utility",
       "adapter": "pid",
@@ -7437,7 +7437,7 @@
           // 2K-tuned `res2k` student (`pid_flux_2k.safetensors`, sc-10056) the 2K output tier prefers.
           // Size ≈ 2× the single 2.72 GB student.
           "files": [],
-          "estimatedSizeBytes": 5449491064
+          "estimatedSizeBytes": 8249939286
         },
         {
           "provider": "huggingface",
@@ -7501,7 +7501,7 @@
       "id": "pid_flux2",
       "autoDownload": false,
       "nonCommercial": true,
-      "name": "PiD Decoder (FLUX.2 / Lens / Ideogram 4)",
+      "name": "PiD 1.5 Decoder (FLUX.2 / Lens / Ideogram 4)",
       "family": "pid",
       "type": "utility",
       "adapter": "pid",
@@ -7514,7 +7514,7 @@
           // 2K-tuned `res2k` student (`pid_flux2_2k.safetensors`, sc-10056) the 2K output tier prefers.
           // Size ≈ 2× the single 2.73 GB student.
           "files": [],
-          "estimatedSizeBytes": 5451555464
+          "estimatedSizeBytes": 8252298598
         },
         {
           "provider": "huggingface",
