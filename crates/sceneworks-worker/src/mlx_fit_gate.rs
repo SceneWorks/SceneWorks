@@ -123,6 +123,20 @@ pub(crate) const MLX_MEMORY_CAP_ENV: &str = "SCENEWORKS_MLX_MEMORY_CAP_GB";
 /// a 1024²-worst-case; a higher-res campaign is a follow-up.
 const HEADROOM_GB: f64 = 18.0;
 
+/// Reserve (GiB) kept free for macOS + the SceneWorks app + other apps when the WEIGHTS-FIT FLOOR
+/// (sc-12179, GitHub #1544) admits a model whose predicted PEAK exceeds the budget. Deliberately
+/// small: it guards the OS from outright starvation (which would destabilize the whole machine), NOT
+/// the pageable activation transient (which degrades to swap, not a wired SIGKILL). A FLAT constant
+/// (not a fraction of RAM) on purpose — the OS floor is roughly absolute, so it must not scale up to
+/// tens of GiB on a large machine and lock a big Mac out of its own memory.
+///
+/// 2 GiB is anchored on the 0.7.3 baseline: z-image-turbo q4 (5.49 GiB on disk, largest single
+/// component 3.38 GiB) ran on an 8 GB Mac with roughly this much left for the OS + paged transient.
+/// It leaves ~6 GiB of weight budget on an 8 GB Mac — comfortably admitting that baseline and the
+/// other small tiers — while still rejecting a model whose weights alone can't be held resident.
+/// See [`weights_fit_floor`] and the `z_image_turbo_q4_admits_on_an_8gb_mac` baseline test.
+const OS_RESERVE_GB: f64 = 2.0;
+
 /// Bytes per binary gigabyte (GiB) — matches `gpu::total_unified_memory_gb`, which divides
 /// `hw.memsize` by 1024³, and the epic's measured on-disk table.
 const BYTES_PER_GIB: f64 = 1_073_741_824.0;
@@ -393,6 +407,30 @@ pub(crate) fn decide_residency(
     budget: Option<MemoryBudget>,
     sequential_capable: bool,
 ) -> ResidencyOutcome {
+    let base = decide_residency_by_peak(total_bytes, te_bytes, budget, sequential_capable);
+    // Weights-fit floor (sc-12179): a would-be reject is downgraded to a (best-effort) load when the
+    // resident weights actually fit — the peak predictor's pageable transient must not categorically
+    // exclude a small Mac. Any non-reject outcome stands as-is.
+    match base {
+        ResidencyOutcome::Reject { .. } => {
+            weights_fit_floor(total_bytes, te_bytes, budget, sequential_capable).unwrap_or(base)
+        }
+        resident_or_sequential => resident_or_sequential,
+    }
+}
+
+/// The PEAK-based residency decision (the pre-sc-12179 logic): compare the predicted whole-model peak
+/// (`Σweights + HEADROOM_GB`) — and, for a sequential-capable provider, the staged max-component peak
+/// — against the budget. This is the right signal for SELECTING Resident vs Sequential and for the
+/// rejection message's `needed`/`staged` numbers, but it rejects too aggressively on small Macs
+/// because the flat headroom bundles a pageable 1024² activation transient (sc-12179); the caller
+/// folds in [`weights_fit_floor`] before honoring a reject.
+fn decide_residency_by_peak(
+    total_bytes: u64,
+    te_bytes: u64,
+    budget: Option<MemoryBudget>,
+    sequential_capable: bool,
+) -> ResidencyOutcome {
     let resident = fit_decision(predicted_peak_gb(total_bytes), budget);
     match resolve_offload(resident, sequential_capable) {
         FitDecision::Fits | FitDecision::Unknown => ResidencyOutcome::Resident,
@@ -420,6 +458,49 @@ pub(crate) fn decide_residency(
             staged_gb: None,
         },
     }
+}
+
+/// Weights-fit floor (sc-12179, GitHub #1544): a machine that can hold the model's RESIDENT WEIGHTS
+/// can still run it — paging the activation transient if needed — exactly as it did before this
+/// fit-gate existed. [`predicted_peak_gb`] adds a flat [`HEADROOM_GB`] that bundles a worst-case
+/// 1024² activation transient (~14 GiB); that transient is PAGEABLE (degrades to swap, not a wired
+/// SIGKILL) and resolution-bound, so on small Macs `Σweights + 18` exceeds total RAM for EVERY model
+/// and [`decide_residency_by_peak`] categorically rejects — even a tiny model that generated fine on
+/// 0.7.3. This floor converts that reject into a load whenever the wired weights fit
+/// `budget − OS_RESERVE_GB`: [`ResidencyOutcome::Sequential`] (wired bounded to the largest single
+/// component) when the provider stages, else [`ResidencyOutcome::Resident`] (best-effort). Returns
+/// `None` when the weights themselves won't fit — a genuine reject-before-SIGKILL that stands, and
+/// when there is no budget signal (the gate never blocks without one).
+///
+/// TRADE-OFF (see sc-12179 / sc-11924): this makes the gate strictly more permissive, so a
+/// transient-heavy bf16 tier on a mid-size Mac can now reach a Metal-OOM/SIGKILL where it previously
+/// pre-rejected. That is the pre-fit-gate behavior and the correct default — a machine that ran a
+/// model must not be newly wall-rejected. The honest fix for those tiers is in-memory (materialized)
+/// component sizing (sc-11924), not a blanket over-reservation that excludes every 8/16 GB Mac.
+fn weights_fit_floor(
+    total_bytes: u64,
+    te_bytes: u64,
+    budget: Option<MemoryBudget>,
+    sequential_capable: bool,
+) -> Option<ResidencyOutcome> {
+    let ceiling_gb = budget?.total_gb - OS_RESERVE_GB;
+    if sequential_capable {
+        // Staged: peak wired residency is the largest single component (text encoders dropped first).
+        (staged_weights_gb(total_bytes, te_bytes) <= ceiling_gb)
+            .then_some(ResidencyOutcome::Sequential)
+    } else {
+        // Can't stage: the whole model is held resident; admit if the weights fit best-effort.
+        (total_bytes as f64 / BYTES_PER_GIB <= ceiling_gb).then_some(ResidencyOutcome::Resident)
+    }
+}
+
+/// The largest single component's on-disk weight bytes (GiB) — the wired residency the `Sequential`
+/// schedule holds at peak (text encoder(s) dropped before the DiT loads). WEIGHTS ONLY, no activation
+/// headroom — contrast [`predicted_sequential_peak_gb`], which adds [`HEADROOM_GB`] for the peak
+/// estimate. `rest = total − te` (the DiT + VAE + any folded control branch).
+fn staged_weights_gb(total_bytes: u64, te_bytes: u64) -> f64 {
+    let rest_bytes = total_bytes.saturating_sub(te_bytes);
+    te_bytes.max(rest_bytes) as f64 / BYTES_PER_GIB
 }
 
 /// Pre-load admission + residency-selection gate (sc-10835 Phase 0, sc-10839 Phase 1). Called on the
@@ -858,8 +939,11 @@ mod tests {
         );
     }
 
+    // The PEAK layer (`decide_residency_by_peak`) still selects Resident / Sequential / Reject exactly
+    // as the pre-sc-12179 gate did — the weights-fit floor is layered on TOP of this in
+    // `decide_residency` (exercised separately below), so this proves the peak selection is intact.
     #[test]
-    fn decide_residency_picks_resident_sequential_or_reject_by_budget() {
+    fn decide_residency_by_peak_picks_resident_sequential_or_reject_by_budget() {
         let gib = 1024 * 1024 * 1024_u64;
         // illustrious q8-class: total ~5 GiB (TE ~1, DiT+VAE ~4). With HEADROOM_GB=18 (sc-10863):
         // resident peak = 5+18 = 23; staged peak = max(1, 4)+18 = 22.
@@ -868,18 +952,18 @@ mod tests {
 
         // Roomy budget (128 GB Mac) ⇒ Resident (keep the warm path).
         assert_eq!(
-            decide_residency(total, te, Some(MemoryBudget { total_gb: 128.0 }), true),
+            decide_residency_by_peak(total, te, Some(MemoryBudget { total_gb: 128.0 }), true),
             ResidencyOutcome::Resident
         );
         // Budget between staged (22) and resident (23): resident won't fit, staged will, provider
         // stages ⇒ Sequential. This is the fit-gate SELECTING sequential residency.
         assert_eq!(
-            decide_residency(total, te, Some(MemoryBudget { total_gb: 22.5 }), true),
+            decide_residency_by_peak(total, te, Some(MemoryBudget { total_gb: 22.5 }), true),
             ResidencyOutcome::Sequential
         );
         // Same budget but a provider that can't stage ⇒ reject (never a silent Resident that OOMs).
         assert!(matches!(
-            decide_residency(total, te, Some(MemoryBudget { total_gb: 22.5 }), false),
+            decide_residency_by_peak(total, te, Some(MemoryBudget { total_gb: 22.5 }), false),
             ResidencyOutcome::Reject {
                 staged_gb: None,
                 ..
@@ -887,7 +971,7 @@ mod tests {
         ));
         // Budget below even the staged peak (22) ⇒ reject, naming the staged requirement.
         assert!(matches!(
-            decide_residency(total, te, Some(MemoryBudget { total_gb: 20.0 }), true),
+            decide_residency_by_peak(total, te, Some(MemoryBudget { total_gb: 20.0 }), true),
             ResidencyOutcome::Reject {
                 staged_gb: Some(_),
                 ..
@@ -895,13 +979,82 @@ mod tests {
         ));
         // No budget signal ⇒ Resident (never block).
         assert_eq!(
-            decide_residency(total, te, None, true),
+            decide_residency_by_peak(total, te, None, true),
             ResidencyOutcome::Resident
         );
         // Unmeasured weights ⇒ Resident (no signal).
         assert_eq!(
-            decide_residency(0, 0, Some(MemoryBudget { total_gb: 8.0 }), true),
+            decide_residency_by_peak(0, 0, Some(MemoryBudget { total_gb: 8.0 }), true),
             ResidencyOutcome::Resident
+        );
+    }
+
+    /// The weights-fit floor (sc-12179, GitHub #1544): a would-be peak-layer REJECT becomes a
+    /// best-effort load whenever the resident weights fit `budget − OS_RESERVE_GB` (2 GiB). This is the
+    /// regression fix — an 8 GB Mac categorically rejected EVERY model because `Σweights + 18 > 8`.
+    #[test]
+    fn weights_fit_floor_admits_small_model_on_a_small_mac() {
+        let gib = 1024 * 1024 * 1024_u64;
+
+        // SANA-class small model on an 8 GB Mac: total 2 GiB (TE 1, rest 1). Peak = 2+18 = 20 ≫ 8 and
+        // staged peak = 1+18 = 19 ≫ 8, so the PEAK layer rejects outright...
+        let (total, te) = (2 * gib, gib);
+        let budget = Some(MemoryBudget { total_gb: 8.0 });
+        assert!(matches!(
+            decide_residency_by_peak(total, te, budget, true),
+            ResidencyOutcome::Reject { .. }
+        ));
+        // ...but the staged weights (1 GiB) fit 8 − 2 = 6, so the floor runs it Sequential instead of
+        // walling off the machine. This is exactly the model that generated fine on 0.7.3.
+        assert_eq!(
+            decide_residency(total, te, budget, true),
+            ResidencyOutcome::Sequential
+        );
+        // A non-staging provider whose whole 2 GiB weights fit 6 loads Resident best-effort (not reject).
+        assert_eq!(
+            decide_residency(total, te, budget, false),
+            ResidencyOutcome::Resident
+        );
+
+        // A genuinely-too-big model on 8 GB still rejects: 40 GiB weights (staged max-component 30) can
+        // NOT be held resident under any policy ⇒ the floor returns None and the reject stands.
+        let (big_total, big_te) = (40 * gib, 10 * gib);
+        assert!(matches!(
+            decide_residency(big_total, big_te, budget, true),
+            ResidencyOutcome::Reject { .. }
+        ));
+
+        // The floor never fabricates a decision without a budget signal.
+        assert_eq!(
+            decide_residency(total, te, None, true),
+            ResidencyOutcome::Resident
+        );
+    }
+
+    /// The 0.7.3 baseline, from REAL on-disk bytes (GitHub #1544): z-image-turbo q4 — the model the
+    /// reporter confirmed generated fine on an 8 GB Mac — must be admitted, not rejected. Measured
+    /// tier layout: total 5.49 GiB (text_encoder 2.11, transformer 3.23, vae 0.15), so the largest
+    /// single component the Sequential schedule ever holds wired is ~3.38 GiB. Against an 8 GB budget
+    /// (OS_RESERVE 2 ⇒ 6 GiB weight budget) that admits with ~2.6 GiB of margin. If this ever flips to
+    /// Reject, the gate has regressed the exact case #1544 was filed about.
+    #[test]
+    fn z_image_turbo_q4_admits_on_an_8gb_mac() {
+        // Bytes rounded from the measured tier (…/z-image-turbo-mlx/…/q4), following HF-cache symlinks.
+        let mib = 1024 * 1024_u64;
+        let total = 5624 * mib; // ~5.49 GiB whole model
+        let te = 2161 * mib; //    ~2.11 GiB Qwen text encoder (dropped first under Sequential)
+        let budget = Some(MemoryBudget { total_gb: 8.0 });
+
+        // The flat-headroom peak layer would reject it (5.49 + 18 = 23.49 ≫ 8)...
+        assert!(matches!(
+            decide_residency_by_peak(total, te, budget, true),
+            ResidencyOutcome::Reject { .. }
+        ));
+        // ...but z-image-turbo stages components, and its largest (transformer ≈ 3.38 GiB) fits the
+        // 6 GiB weight budget ⇒ Sequential. This is the #1544 baseline that must keep working.
+        assert_eq!(
+            decide_residency(total, te, budget, true),
+            ResidencyOutcome::Sequential
         );
     }
 
@@ -992,20 +1145,69 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// #1544 baseline through the LIVE gate path on REAL weights (ignored — needs the model on disk +
+    /// the force-linked registry). Drives `residency_for_dir` — the exact seam the worker's cold load
+    /// uses — against the real z-image-turbo q4 tier under an emulated 8 GB Mac
+    /// (`SCENEWORKS_MLX_MEMORY_CAP_GB=8`), so it exercises the real on-disk `.safetensors` scan, the
+    /// provider footprint TE split, the registered `supports_sequential_offload` capability, AND the
+    /// budget resolution together. Must come back Sequential, not Reject. Run explicitly (alone, since
+    /// it sets a process env var):
+    ///   cargo test -p sceneworks-worker --lib -- --ignored --nocapture z_image_turbo_q4_live_gate
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs z-image-turbo q4 weights on disk + the force-linked mlx-gen registry"]
+    fn z_image_turbo_q4_live_gate_admits_under_an_emulated_8gb_cap() {
+        // Resolve the q4 snapshot dir from the HF cache (HF_HOME or ~/.cache/huggingface).
+        let hf_home = std::env::var("HF_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(std::env::var("HOME").expect("HOME"))
+                    .join(".cache/huggingface")
+            });
+        let snapshots = hf_home.join("hub/models--SceneWorks--z-image-turbo-mlx/snapshots");
+        let Some(q4) = std::fs::read_dir(&snapshots).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path().join("q4"))
+                .find(|p| p.is_dir())
+        }) else {
+            eprintln!(
+                "SKIP: z-image-turbo q4 not found under {}",
+                snapshots.display()
+            );
+            return;
+        };
+
+        // Emulate an 8 GB Mac through the same env the epic added for exactly this (sc-10835).
+        std::env::set_var(MLX_MEMORY_CAP_ENV, "8");
+        let outcome = residency_for_dir("z_image_turbo", &q4);
+        std::env::remove_var(MLX_MEMORY_CAP_ENV);
+
+        eprintln!("live gate on {} @ 8 GB → {outcome:?}", q4.display());
+        assert_eq!(
+            outcome,
+            ResidencyOutcome::Sequential,
+            "z-image-turbo q4 (the #1544 0.7.3 baseline) must run on an 8 GB Mac, not be rejected"
+        );
+    }
+
     /// sc-10894 end-to-end: a non-zero footprint text encoder flips the residency decision from Reject to
     /// Sequential where the zero-reading subdir scan (the fallback) would reject. This is the whole point
-    /// of the seam — the staged peak is only real when the text-encoder split is measured.
+    /// of the seam — the staged working set is only real when the text-encoder split is measured. Post
+    /// sc-12179 the flip runs through the weights-fit floor: the measured TE lowers the staged WEIGHTS
+    /// (the wired residency), which is what the floor admits against `budget − OS_RESERVE_GB`.
     #[test]
     fn footprint_text_encoder_flips_reject_to_sequential() {
         let gib = 1024 * 1024 * 1024_u64;
         // boogu-class: whole model 22 GiB (mllm 13 + transformer 8 + vae 1). No `text_encoder*` subdir,
         // so the subdir scan reads 0.
         let total = 22 * gib;
-        // Budget between the staged (31) and resident (40) peaks under HEADROOM_GB=18 (sc-10863).
-        let budget = Some(MemoryBudget { total_gb: 34.0 });
+        // Budget where the staged WEIGHTS decide it: floor ceiling = 22 − 2 = 20 GiB. te=0 ⇒ staged
+        // weights = 22 > 20 (reject); te=13 ⇒ staged weights = max(13, 9) = 13 ≤ 20 (Sequential).
+        let budget = Some(MemoryBudget { total_gb: 22.0 });
 
-        // Fallback path (footprint None on a dir with no `text_encoder*`) → te = 0 → staged == resident
-        // peak (22 + 18 = 40) > 34 → Reject, even though one-component-at-a-time WOULD fit.
+        // Fallback path (footprint None on a dir with no `text_encoder*`) → te = 0 → staged weights ==
+        // whole model (22 GiB) > 20 → Reject even under the floor: one component IS the whole model.
         let te_fallback = resolve_text_encoder_bytes(None, std::path::Path::new("/nonexistent"));
         assert_eq!(te_fallback, 0);
         assert!(matches!(
@@ -1013,7 +1215,7 @@ mod tests {
             ResidencyOutcome::Reject { .. }
         ));
 
-        // Provider footprint (te = 13 GiB) → staged = max(13, 22 − 13 = 9) + 18 = 31 ≤ 34 → Sequential.
+        // Provider footprint (te = 13 GiB) → staged weights = max(13, 22 − 13 = 9) = 13 ≤ 20 → Sequential.
         let te_footprint =
             resolve_text_encoder_bytes(Some(13 * gib), std::path::Path::new("/ignored"));
         assert_eq!(te_footprint, 13 * gib);
