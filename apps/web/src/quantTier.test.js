@@ -129,6 +129,25 @@ describe("shouldShowTierPicker", () => {
   });
 });
 
+describe("quantTier — video model reuse (sc-12165)", () => {
+  const videoModel = (installed) => ({
+    id: "bernini",
+    type: "video",
+    hasVariantMatrix: true,
+    variants: ["q4", "q8", "bf16"].map((variant) => ({
+      variant,
+      installState: installed.includes(variant) ? "installed" : "missing",
+    })),
+  });
+
+  it("derives installed MLX video tiers through the model-agnostic helpers", () => {
+    const model = videoModel(["q4", "q8"]);
+    expect(installedTiers(model)).toEqual(["q4", "q8"]);
+    expect(shouldShowTierPicker(model)).toBe(true);
+    expect(defaultTierSelection(model, null, { defaultQuality: "q4" })).toBe("q4");
+  });
+});
+
 describe("defaultTierSelection", () => {
   it("prefers the last-used tier when it is still installed", () => {
     const model = matrixModel({ installed: ["q4", "q8", "bf16"] });

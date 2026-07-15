@@ -64,6 +64,14 @@ import {
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { qualityChoices } from "../jobTypes.js";
 import {
+  defaultTierSelection,
+  installedTiers,
+  shouldShowTierPicker,
+  tierLabel,
+  tierQuantize,
+} from "../quantTier.js";
+import { readLastTier, writeLastTier } from "../lastTierStore.js";
+import {
   SAMPLER_LABELS,
   SCHEDULER_LABELS,
   guidanceDefaultFromModel,
@@ -76,6 +84,10 @@ import {
 
 const ltxVideoModelId = "ltx_2_3";
 const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge"]);
+// Keep Video Studio's MLX lane q4-first (sc-10859). Unlike Image Studio, it deliberately does not
+// inherit the app-wide generation-quality setting: video activation peaks need a larger safety margin.
+const TIER_SCREEN = "video";
+const VIDEO_DEFAULT_TIER = "q4";
 
 // Video sub-modes that map onto a recipe workflow. extend_clip / replace_person
 // aren't recipe workflows, so "Save as Preset" is gated to these.
@@ -159,6 +171,10 @@ export function VideoStudio() {
   const [distilledVariant, setDistilledVariant] = useState(saved.distilledVariant ?? "1.1");
   const [precision, setPrecision] = useState(saved.precision ?? "fp8");
   const [quantization, setQuantization] = useState(saved.quantization ?? "auto");
+  // MLX generation tier (sc-12165), separate from the torch/GGUF `quantization` state above.
+  // The explicit pick is persisted per (video, model), outside the workspace settings snapshot.
+  const [quantTier, setQuantTier] = useState("");
+  const [tierSwitching, setTierSwitching] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? videoModels[0]?.id ?? ltxVideoModelId);
   const [guideOpen, setGuideOpen] = useState(false);
@@ -361,6 +377,58 @@ export function VideoStudio() {
   // `macGating` is the worker `mlx_required` master switch, so the menu reflects the
   // manifest's `mlx.limits` override on Mac/MLX and `candle.limits` on the candle build.
   const activeBackend = macGating ? "mlx" : "candle";
+  // MLX tier installs and the torch/GGUF quantization variants can coexist on one catalog model,
+  // but they target different worker lanes. Only derive an MLX tier while the MLX lane is active;
+  // the existing quantization picker owns the non-MLX lane. `convRotEligible: false` keeps the
+  // candle-only INT8-ConvRot image tier out of this MLX video control.
+  const mlxTierLane = activeBackend === "mlx";
+  const tierOptions = useMemo(
+    () => ({ convRotEligible: false, defaultQuality: VIDEO_DEFAULT_TIER }),
+    [],
+  );
+  const availableTiers = useMemo(
+    () => (mlxTierLane ? installedTiers(selectedModel, tierOptions) : []),
+    [mlxTierLane, selectedModel, tierOptions],
+  );
+  const showTierPicker = useMemo(
+    () => mlxTierLane && shouldShowTierPicker(selectedModel, tierOptions),
+    [mlxTierLane, selectedModel, tierOptions],
+  );
+  const showTorchQuantization = !mlxTierLane && supportsQuantization;
+  const selectedMlxQuantize =
+    mlxTierLane && availableTiers.includes(quantTier) ? tierQuantize(quantTier) : null;
+  const tierHasMemoryRisk = showTierPicker && ["q8", "bf16"].includes(quantTier);
+
+  // Seed from the per-(video, model) sticky, then the video-specific q4 base, clamped to installed.
+  // A model transition always re-seeds even when both models happen to expose the same tier list.
+  const availableTiersKey = availableTiers.join(",");
+  const quantTierModelRef = useRef(null);
+  useEffect(() => {
+    const modelChanged = quantTierModelRef.current !== model;
+    quantTierModelRef.current = model;
+    if (!modelChanged && availableTiers.includes(quantTier)) {
+      return;
+    }
+    setQuantTier(
+      defaultTierSelection(selectedModel, readLastTier(TIER_SCREEN, model), tierOptions) ?? "",
+    );
+    // `availableTiersKey` is the stable install-state dependency; the remaining values are read from
+    // the render that produced it, matching Image Studio's catalog-refresh seed behavior.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model, availableTiersKey]);
+
+  const tierSwitchTimer = useRef(null);
+  useEffect(() => () => clearTimeout(tierSwitchTimer.current), []);
+  const handleTierChange = (nextTier) => {
+    if (nextTier === quantTier) {
+      return;
+    }
+    setQuantTier(nextTier);
+    writeLastTier(TIER_SCREEN, model, nextTier);
+    setTierSwitching(nextTier);
+    clearTimeout(tierSwitchTimer.current);
+    tierSwitchTimer.current = setTimeout(() => setTierSwitching(""), 1500);
+  };
   const samplerOptions = useMemo(
     () => samplerOptionsFromModel(selectedModel, activeBackend),
     [selectedModel, activeBackend],
@@ -928,7 +996,8 @@ export function VideoStudio() {
           selectedPersonTrack: selectedTrack ?? null,
           replacementModeLabel: replacementModeLabels[replacementMode],
           ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, precision } : {}),
-          ...(supportsQuantization && quantization !== "auto" ? { quantization } : {}),
+          ...(showTorchQuantization && quantization !== "auto" ? { quantization } : {}),
+          ...(selectedMlxQuantize !== null ? { mlxQuantize: selectedMlxQuantize } : {}),
           // Configurable sampler / scheduler (epic 1753). Sealed adapters
           // (LTX native, MLX) silently fall back to default; only the Wan
           // diffusers (torch) path actually applies these.
@@ -1490,7 +1559,33 @@ export function VideoStudio() {
                   ) : null}
                 </>
               ) : null}
-              {supportsQuantization ? (
+              {showTierPicker ? (
+                <label
+                  className="quant-tier-picker"
+                  title="Switch which installed MLX quant tier generates. Higher precision uses more memory; switching a heavy tier reloads it before the next generation."
+                >
+                  Quant tier
+                  <select onChange={(event) => handleTierChange(event.target.value)} value={quantTier}>
+                    {availableTiers.map((tier) => (
+                      <option key={tier} value={tier}>
+                        {tierLabel(tier)}
+                      </option>
+                    ))}
+                  </select>
+                  {tierSwitching ? (
+                    <span className="field-hint" role="status">
+                      Loading {tierLabel(tierSwitching)}…
+                    </span>
+                  ) : null}
+                  {tierHasMemoryRisk ? (
+                    <span className="field-hint quant-tier-memory-note">
+                      Higher MLX video tiers may run out of memory on long or high-resolution clips.
+                      Your pick is honored.
+                    </span>
+                  ) : null}
+                </label>
+              ) : null}
+              {showTorchQuantization ? (
                 <label>
                   Quantization
                   <select onChange={(event) => setQuantization(event.target.value)} value={quantization}>

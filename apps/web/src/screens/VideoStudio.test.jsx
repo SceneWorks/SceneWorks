@@ -1,6 +1,6 @@
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { click, mountRoot, setInput, unmountRoot } from "../testUtils/dom.js";
+import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
 
 vi.mock("../api.js", async (importOriginal) => {
   const actual = await importOriginal();
@@ -851,6 +851,154 @@ describe("VideoStudio Mac mode gating (sc-5716)", () => {
     expect([...modelSelect().options].map((o) => o.value)).toEqual(
       expect.arrayContaining(["wan_2_2", "scail2_14b"]),
     );
+  });
+});
+
+describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
+  let container;
+  let root;
+
+  const MAC_CAPS = {
+    macGatingActive: true,
+    platform: "darwin",
+    notAvailableLabel: "Not available on Mac (MLX only)",
+    features: {},
+    training: { supportedKernels: [], lokrOnWanSupported: false },
+  };
+
+  const tieredVideoModel = (installed, quantization = {}) => ({
+    id: "bernini",
+    name: "Bernini",
+    type: "video",
+    family: "bernini",
+    adapter: "bernini",
+    capabilities: ["text_to_video"],
+    defaults: { duration: 5, resolution: "832x480", fps: 16 },
+    limits: { durations: [5], fps: [16], resolutions: ["832x480"] },
+    quantization,
+    loraCompatibility: {},
+    ui: {},
+    hasVariantMatrix: true,
+    variants: ["q4", "q8", "bf16"].map((tier) => ({
+      variant: tier,
+      installState: installed.includes(tier) ? "installed" : "missing",
+    })),
+    macSupport: {
+      supported: true,
+      features: { videoModes: { text_to_video: true } },
+    },
+  });
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const openAdvanced = async () => {
+    const toggle = container.querySelector(".advanced-section-toggle");
+    if (toggle?.getAttribute("aria-expanded") !== "true") {
+      await click(toggle);
+    }
+  };
+  const tierPicker = () => container.querySelector("label.quant-tier-picker select");
+  const quantizationPicker = () =>
+    [...container.querySelectorAll("label")]
+      .find((label) => label.textContent.trim().startsWith("Quantization"))
+      ?.querySelector("select") ?? null;
+
+  it("shows installed tiers on MLX, stays q4-first, and hides with one installed tier", async () => {
+    await render(
+      baseContext({
+        videoModels: [tieredVideoModel(["q4", "q8"])],
+        macCapabilities: MAC_CAPS,
+      }),
+    );
+    await openAdvanced();
+
+    expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8"]);
+    expect(tierPicker().value).toBe("q4");
+
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    const context = baseContext({
+      videoModels: [tieredVideoModel(["q4"])],
+      macCapabilities: MAC_CAPS,
+    });
+    await render(context);
+    await openAdvanced();
+
+    expect(tierPicker()).toBeNull();
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
+  });
+
+  it("emits a selected high tier, warns about memory, and restores the video/model sticky", async () => {
+    const model = tieredVideoModel(["q4", "q8", "bf16"]);
+    const context = baseContext({ videoModels: [model], macCapabilities: MAC_CAPS });
+    await render(context);
+    await openAdvanced();
+
+    setSelect(tierPicker(), "q8");
+    await act(async () => {});
+    expect(container.querySelector(".quant-tier-memory-note")?.textContent).toContain(
+      "may run out of memory",
+    );
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced.mlxQuantize).toBe(8);
+
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    await render(baseContext({ videoModels: [model], macCapabilities: MAC_CAPS }));
+    await openAdvanced();
+    expect(tierPicker().value).toBe("q8");
+  });
+
+  it("keeps MLX tiers disjoint from the torch/GGUF quantization control and payload", async () => {
+    const both = tieredVideoModel(["q4", "q8"], {
+      variants: { q4_k_m: { label: "Q4_K_M" } },
+    });
+    const mlxContext = baseContext({ videoModels: [both], macCapabilities: MAC_CAPS });
+    await render(mlxContext);
+    await openAdvanced();
+
+    expect(tierPicker()).toBeTruthy();
+    expect(quantizationPicker()).toBeNull();
+    setSelect(tierPicker(), "q8");
+    await act(async () => {});
+    await click(buttonWithText(container, "Render clip"));
+    expect(mlxContext.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 8 });
+    expect(mlxContext.createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("quantization");
+
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    const torchContext = baseContext({ videoModels: [both] });
+    await render(torchContext);
+    await openAdvanced();
+
+    expect(tierPicker()).toBeNull();
+    expect(quantizationPicker()).toBeTruthy();
+    setSelect(quantizationPicker(), "q4_k_m");
+    await act(async () => {});
+    await click(buttonWithText(container, "Render clip"));
+    expect(torchContext.createVideoJob.mock.calls[0][0].advanced.quantization).toBe("q4_k_m");
+    expect(torchContext.createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("mlxQuantize");
   });
 });
 
