@@ -988,10 +988,12 @@ export function ModelManagerScreen() {
     }
     const tierName = tierLabel(tier);
     const sizeClause =
-      sizeBytes != null ? `This reclaims about ${formatTierSize(sizeBytes)} and removes` : "This removes";
+      sizeBytes != null
+        ? `This permanently frees about ${formatTierSize(sizeBytes)} and removes`
+        : "This permanently removes";
     const message = [
       `Delete the ${tierName} tier of "${model.name ?? model.id}"?`,
-      `${sizeClause} only this tier — the model and its other tiers stay installed.`,
+      `${sizeClause} only this tier — your other tiers stay installed. It skips the Trash and can't be undone.`,
     ].join("\n\n");
     // Desktop-safe confirm (sc-12068) — window.confirm no-ops in the Tauri WebView.
     if (
