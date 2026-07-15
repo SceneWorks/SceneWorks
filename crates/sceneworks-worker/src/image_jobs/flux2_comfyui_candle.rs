@@ -171,13 +171,39 @@ fn flux2_comfyui_raw_settings(
         "externalComfyuiBase".to_owned(),
         Value::String(request.model.clone()),
     );
+    // The tier this render actually used, recorded truthfully (sc-12006, epic 11037 SC#5).
+    //
+    // `mlxQuantize` is a BITS-VALUED key: every consumer parses it as an integer (`vram_gate::
+    // quant_int` = `as_i64` or numeric-string), and those bits NAME A TIER — `<= 0` ⇒ `bf16`,
+    // `<= 4` ⇒ `q4`, else `q8` (`vram_gate::requested_tier_key`). NVFP4 is a *distinct* tier, not
+    // int4-affine `q4`: E2M1 4-bit elements + FP8-E4M3 block scales in a W4A4 regime (~4.5 effective
+    // bits/weight), served by candle-gen's packed `Nvfp4Linear`. So there is NO honest integer for it
+    // — `4` would stamp an NVFP4 render as the `q4` tier in the stored settings, falsifying the user's
+    // creative choice (exactly the aliasing epic 11037 SC#5 forbids), and every other integer names
+    // `bf16`/`q8` instead. A string ("nvfp4") is no better: it is not an integer, so `quant_int`
+    // returns None and the key silently degrades to the `q8` default — a different false label.
+    //
+    // So NVFP4 gets `null` here — the same "no bits value applies" signal `mlx_raw_settings`
+    // (image_jobs/base.rs) already writes for this key — and its identity rides a distinct
+    // `quantTier` label below. This mirrors the sc-9300 INT8-ConvRot precedent: a tier that can't be
+    // expressed as `mlxQuantize` bits carries a distinct signal (`convRot`) instead of a lying number.
+    //
+    // NOTE the insert is unconditional on purpose: `raw` starts as a clone of `request.advanced`, so
+    // merely SKIPPING the insert would leave the caller's own stale `advanced.mlxQuantize` (e.g. a `4`
+    // from the tier picker) sitting in the record — the very mislabel this avoids. Overwrite, never omit.
     raw.insert(
         "mlxQuantize".to_owned(),
-        json!(match quant {
-            Quant::Q4 => 4,
-            Quant::Q8 => 8,
-        }),
+        match quant {
+            Quant::Q4 => json!(4),
+            Quant::Q8 => json!(8),
+            Quant::Nvfp4 => Value::Null,
+        },
     );
+    // The explicit tier label. Emitted only for the tier `mlxQuantize` cannot express, so existing
+    // q4/q8 asset telemetry keeps its exact shape (the sc-9300 `convRot` pattern).
+    if matches!(quant, Quant::Nvfp4) {
+        raw.insert("quantTier".to_owned(), Value::String("nvfp4".to_owned()));
+    }
     if let Some(scale) = guidance {
         raw.insert("guidanceScale".to_owned(), json!(scale));
     }
