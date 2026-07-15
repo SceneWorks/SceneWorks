@@ -36,6 +36,15 @@ const PID_SDXL_FILE: &str = "pid_sdxl_2kto4k.safetensors";
 // real 2K output). Live alongside the 2kto4k files in the SAME re-host repos (whole-repo download).
 const PID_FLUX_FILE_2K: &str = "pid_flux_2k.safetensors";
 const PID_FLUX2_FILE_2K: &str = "pid_flux2_2k.safetensors";
+// PiD v1.5 `2kto4k` students (sc-12144, epic 7840 PiD-1.5) — flux / flux2 / qwenimage ONLY. NVIDIA
+// shipped no v1.5 for the sdxl latent space and no v1.5 `res2k`, so sdxl stays on its v1.0 2kto4k student
+// and the 2K output tier stays on the v1.0 `res2k` student (which NVIDIA notes is sharper at 2048px than
+// the v1.5 2kto4k). Re-hosted ALONGSIDE the v1.0 files in the SAME repos, so `pid_2kto4k_file` prefers
+// v1.5 when cached and falls back to the on-disk v1.0 for installs that predate it. The engine sniffs the
+// topology (v1.0 vs v1.5) from the weights (sc-12142), so these are just alternative filenames.
+const PID_FLUX_FILE_V1PT5: &str = "pid_flux_2kto4k_v1pt5.safetensors";
+const PID_FLUX2_FILE_V1PT5: &str = "pid_flux2_2kto4k_v1pt5.safetensors";
+const PID_QWENIMAGE_FILE_V1PT5: &str = "pid_qwenimage_2kto4k_v1pt5.safetensors";
 // gemma-2-2b-it is the PiD caption encoder (shared by every backbone). sc-8025 re-hosts the stock
 // weights (no conversion) at the non-gated `SceneWorks/gemma-2-2b-it` mirror so the in-app download
 // needs no Gemma-gated HF token; the catalog `downloads[]` + `pidDecoders.<bb>.gemmaRepo` point here
@@ -192,12 +201,39 @@ fn pid_res2k_file(backbone: &str) -> Option<&'static str> {
     }
 }
 
+/// The PiD **v1.5** `2kto4k` student filename for a backbone that ships one — flux / flux2 / qwenimage
+/// (sc-12144). sdxl has NO v1.5 (NVIDIA shipped none) → `None`, so it stays on its v1.0 2kto4k student.
+fn pid_v1pt5_file(backbone: &str) -> Option<&'static str> {
+    match backbone {
+        "flux" => Some(PID_FLUX_FILE_V1PT5),
+        "flux2" => Some(PID_FLUX2_FILE_V1PT5),
+        "qwenimage" => Some(PID_QWENIMAGE_FILE_V1PT5),
+        _ => None, // sdxl: no v1.5
+    }
+}
+
+/// Resolve the effective `2kto4k` student filename with the **v1.5 → v1.0** fallback (sc-12145): prefer
+/// the re-hosted v1.5 student when this backbone ships one AND it is cached on disk; otherwise the v1.0
+/// `2kto4k` file. The engine sniffs the actual topology from the weights (sc-12142), so the worker only
+/// resolves a path — an install that predates the v1.5 file keeps decoding on its cached v1.0 student
+/// (turning PiD on never breaks after an app update). Same on-disk-check discipline as the res2k swap.
+fn pid_2kto4k_file(backbone: &str, snapshot: &Path, file_v1: &'static str) -> &'static str {
+    if let Some(v1pt5) = pid_v1pt5_file(backbone) {
+        if snapshot.join(v1pt5).exists() {
+            return v1pt5;
+        }
+    }
+    file_v1
+}
+
 /// The effective default PiD checkpoint filename for `backbone` at `tier`, given the resolved `snapshot`
-/// dir (sc-10057). The 2K tier prefers the 2K-tuned res2k student when this backbone ships one AND it is
-/// actually present on disk; otherwise (4K tier, no res2k student, or res2k not yet cached) the multi-res
-/// `2kto4k` student. The on-disk check is the graceful fallback: an install that predates the res2k file
-/// keeps working on 2kto4k rather than resolving a missing path. A per-request `advanced.pidCheckpoint`
-/// override still wins over this (applied by the caller).
+/// dir (sc-10057, sc-12145). Resolution, all on-disk-gated so a partial install degrades gracefully:
+/// - **2K tier**: the 2K-tuned `res2k` student when this backbone ships one AND it's cached — it stays on
+///   **v1.0** (NVIDIA notes v1.5 2kto4k is *less sharp at 2048px*, and there is no v1.5 res2k).
+/// - otherwise (4K tier, or 2K tier with no res2k cached): the `2kto4k` student with the **v1.5 → v1.0**
+///   fallback ([`pid_2kto4k_file`]) — prefer the cached v1.5 student, else the v1.0 file.
+///
+/// A per-request `advanced.pidCheckpoint` override still wins over this (applied by the caller).
 fn pid_default_file(
     backbone: &str,
     tier: PidOutputTier,
@@ -211,7 +247,7 @@ fn pid_default_file(
             }
         }
     }
-    file_2kto4k
+    pid_2kto4k_file(backbone, snapshot, file_2kto4k)
 }
 
 /// Resolve the per-generation PiD decoder weights for `model`, or `None` to keep the native VAE decode.
@@ -471,6 +507,88 @@ mod pid_tests {
         assert_eq!(pid_res2k_file("flux2"), Some(PID_FLUX2_FILE_2K));
         assert_eq!(pid_res2k_file("qwenimage"), None);
         assert_eq!(pid_res2k_file("sdxl"), None);
+    }
+
+    #[test]
+    fn pid_v1pt5_file_flux_flux2_qwen_only() {
+        // sc-12144: v1.5 ships for flux / flux2 / qwenimage. sdxl has no v1.5.
+        assert_eq!(pid_v1pt5_file("flux"), Some(PID_FLUX_FILE_V1PT5));
+        assert_eq!(pid_v1pt5_file("flux2"), Some(PID_FLUX2_FILE_V1PT5));
+        assert_eq!(pid_v1pt5_file("qwenimage"), Some(PID_QWENIMAGE_FILE_V1PT5));
+        assert_eq!(pid_v1pt5_file("sdxl"), None);
+    }
+
+    #[test]
+    fn pid_2kto4k_file_prefers_v1pt5_when_cached_else_v1() {
+        // sc-12145 fallback: v1.5 on disk → v1.5; only v1.0 on disk → v1.0.
+        let dir = tempfile::tempdir().unwrap();
+        let snap = dir.path();
+        // Neither cached → v1.0 file (the passed fallback).
+        assert_eq!(
+            pid_2kto4k_file("flux", snap, PID_FLUX_FILE),
+            PID_FLUX_FILE,
+            "no v1.5 on disk → v1.0"
+        );
+        // v1.5 cached → v1.5.
+        std::fs::write(snap.join(PID_FLUX_FILE_V1PT5), b"x").unwrap();
+        assert_eq!(
+            pid_2kto4k_file("flux", snap, PID_FLUX_FILE),
+            PID_FLUX_FILE_V1PT5,
+            "v1.5 cached → v1.5"
+        );
+        // qwenimage too.
+        let qdir = tempfile::tempdir().unwrap();
+        std::fs::write(qdir.path().join(PID_QWENIMAGE_FILE_V1PT5), b"x").unwrap();
+        assert_eq!(
+            pid_2kto4k_file("qwenimage", qdir.path(), PID_QWENIMAGE_FILE),
+            PID_QWENIMAGE_FILE_V1PT5
+        );
+        // sdxl has no v1.5 → always the v1.0 2kto4k, even with a stray v1.5-named file present.
+        let sdir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            pid_2kto4k_file("sdxl", sdir.path(), PID_SDXL_FILE),
+            PID_SDXL_FILE
+        );
+    }
+
+    #[test]
+    fn pid_default_file_4k_tier_prefers_v1pt5() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = dir.path();
+        // 4K tier, only v1.0 cached → v1.0.
+        assert_eq!(
+            pid_default_file("flux", PidOutputTier::Res4k, snap, PID_FLUX_FILE),
+            PID_FLUX_FILE
+        );
+        // 4K tier, v1.5 cached → v1.5.
+        std::fs::write(snap.join(PID_FLUX_FILE_V1PT5), b"x").unwrap();
+        assert_eq!(
+            pid_default_file("flux", PidOutputTier::Res4k, snap, PID_FLUX_FILE),
+            PID_FLUX_FILE_V1PT5
+        );
+    }
+
+    #[test]
+    fn pid_default_file_2k_tier_res2k_beats_v1pt5_2kto4k() {
+        // sc-12145: at the 2K output tier the v1.0 res2k student wins over the v1.5 2kto4k (sharper at
+        // 2048px), even when both are cached. Only when res2k is absent does the 2K tier fall to the
+        // v1.5-preferred 2kto4k.
+        let dir = tempfile::tempdir().unwrap();
+        let snap = dir.path();
+        std::fs::write(snap.join(PID_FLUX_FILE_2K), b"x").unwrap(); // res2k (v1.0)
+        std::fs::write(snap.join(PID_FLUX_FILE_V1PT5), b"x").unwrap(); // v1.5 2kto4k
+        assert_eq!(
+            pid_default_file("flux", PidOutputTier::Res2k, snap, PID_FLUX_FILE),
+            PID_FLUX_FILE_2K,
+            "2K tier prefers the v1.0 res2k student over the v1.5 2kto4k"
+        );
+        // res2k absent but v1.5 present → 2K tier falls to the v1.5 2kto4k.
+        let d2 = tempfile::tempdir().unwrap();
+        std::fs::write(d2.path().join(PID_FLUX_FILE_V1PT5), b"x").unwrap();
+        assert_eq!(
+            pid_default_file("flux", PidOutputTier::Res2k, d2.path(), PID_FLUX_FILE),
+            PID_FLUX_FILE_V1PT5
+        );
     }
 
     #[test]
