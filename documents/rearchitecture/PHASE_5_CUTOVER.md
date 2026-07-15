@@ -1,9 +1,12 @@
 # Phase 5 Inference Consumer Cutover
 
-> **Status:** Immutable inference release published; both product cutovers pass local validation.
-> Hosted SceneWorks validation uses the configured scoped private-repository read secret below.
-> **Cutover release:** `SceneWorks/inference` tag `runtime-2026.07.0`
-> **Release commit:** `48cc2d87e14de0189ac4f7763fddc0a8581c2e68`
+> **Status:** Final canonical release published and release-qualified. SceneWorks cutover PR
+> [#1512](https://github.com/SceneWorks/SceneWorks/pull/1512) is merged with its hosted and
+> self-hosted product gates green. ChatWorks cutover PR
+> [#31](https://github.com/SceneWorks/ChatWorks/pull/31) is clean, mergeable, and green pending
+> product-owner review.
+> **Cutover release:** `SceneWorks/inference` tag `runtime-2026.07.2`
+> **Release commit:** `27d7908de401ce9b270d7e53e87f717fee151b23`
 
 ## Decision
 
@@ -90,8 +93,8 @@ Every migrated dependency resolves from:
 
 ```text
 git = https://github.com/SceneWorks/inference
-tag = runtime-2026.07.0
-commit = 48cc2d87e14de0189ac4f7763fddc0a8581c2e68
+tag = runtime-2026.07.2
+commit = 27d7908de401ce9b270d7e53e87f717fee151b23
 ```
 
 The inference release contains one workspace lockfile, 74 path-owned packages, explicit media/LLM
@@ -127,17 +130,25 @@ Public product workflows use the configured least-privilege `SCENEWORKS_INFERENC
 secret before a hosted Cargo job fetches the private release. Local validation uses the
 authenticated system Git client and does not weaken that boundary.
 
-Release evidence for exact commit `48cc2d87e14de0189ac4f7763fddc0a8581c2e68` is:
+Release evidence for exact commit `27d7908de401ce9b270d7e53e87f717fee151b23` is:
 
-- manual CI run [`29284987010`](https://github.com/SceneWorks/inference/actions/runs/29284987010):
-  hosted Linux/macOS, self-hosted NAX, and self-hosted CUDA suites passed;
-- real-weight run [`29285222380`](https://github.com/SceneWorks/inference/actions/runs/29285222380):
-  MLX and Candle LLM/media jobs passed against pinned SmolLM2, Qwen3, and Z-Image snapshots;
-- tag CI run [`29293208430`](https://github.com/SceneWorks/inference/actions/runs/29293208430):
-  the hosted matrix, tagged archive, checksums, SPDX SBOM, and external consumer passed; and
+- full CI run [`29334925741`](https://github.com/SceneWorks/inference/actions/runs/29334925741):
+  contracts, workspace policy, documentation, supply chain, tagged archive/external consumer,
+  hosted Metal and Candle CPU, self-hosted NAX, and Windows CUDA jobs passed;
+- media real-weight run
+  [`29335496926`](https://github.com/SceneWorks/inference/actions/runs/29335496926): MLX and Candle
+  CUDA media jobs passed against the immutable model snapshots;
+- LLM real-weight run
+  [`29335819216`](https://github.com/SceneWorks/inference/actions/runs/29335819216): MLX and Candle
+  CUDA LLM jobs passed against the immutable model snapshots; and
 - GitHub Release
-  [`runtime-2026.07.0`](https://github.com/SceneWorks/inference/releases/tag/runtime-2026.07.0):
-  the four exact CI-produced release inputs are attached to the immutable tag.
+  [`runtime-2026.07.2`](https://github.com/SceneWorks/inference/releases/tag/runtime-2026.07.2):
+  source archive, SPDX SBOM, runtime manifest, and checksums are attached to the immutable tag.
+
+The final release also reconciles the post-cutover epic-10834 sequential-residency work through
+the exact halted legacy heads. Its source-to-destination mapping and real-weight Resident↔Sequential
+A/B evidence are recorded in the canonical
+[`runtime-2026.07.2` checkpoint](https://github.com/SceneWorks/inference/blob/runtime-2026.07.2/docs/migration/RUNTIME_2026_07_2_CHECKPOINT.md).
 
 ## Compatibility evidence
 
@@ -145,29 +156,68 @@ Release evidence for exact commit `48cc2d87e14de0189ac4f7763fddc0a8581c2e68` is:
   [`baseline/catalog-baseline.json`](baseline/catalog-baseline.json).
 - Runtime bundle tests pin complete ordered MLX and Candle provider surfaces without loading model
   weights.
-- SceneWorks passes scaffold/compose/NC-weight/skew guards, strict Clippy, the complete Rust suite,
-  the Rust build, 1,658 web tests, 12 non-e2e Python contract tests, 4 CI-equivalent end-to-end tests
-  with the documented FFmpeg case skipped, and 12 parity snapshots. The web lint and production
-  build also pass; its existing warning-only lint baseline remains unchanged.
-- ChatWorks passes strict Clippy, 79 Rust unit tests, the Rust build, the canonical-source pin gate,
-  migration-touched Rust formatting, npm lint, and the production web build. Full-workspace
+- SceneWorks cutover PR
+  [#1512](https://github.com/SceneWorks/SceneWorks/pull/1512) passed web, parity, hosted Windows,
+  Windows/CUDA worker, and macOS/NAX worker checks. At merge commit
+  `8ad8c00178670b4d08c1171561c420aeb3fb5166`, the four push workflows passed, including the
+  self-hosted Windows packaging smoke that built both NSIS and MSI installers.
+- SceneWorks also passes scaffold/compose/NC-weight/skew guards, strict Clippy, the complete Rust
+  suite/build, 1,658 web tests, 12 non-e2e Python contract tests, 4 CI-equivalent end-to-end tests,
+  12 parity snapshots, web lint, and the production web build. Its existing warning-only lint
+  baseline remains unchanged.
+- The manual Linux/NVIDIA server gate
+  [`29338546768`](https://github.com/SceneWorks/SceneWorks/actions/runs/29338546768) passed on current
+  `main`: it fetched the private `runtime-2026.07.2` source, installed CUDA 12.9, passed the Candle
+  skew guard and strict Clippy, built embedded web assets and the release Candle server, and uploaded
+  the server artifact.
+- ChatWorks cutover PR
+  [#31](https://github.com/SceneWorks/ChatWorks/pull/31) at
+  `bdcca7d443fdb59aa99511210a7399ac95d5d5b3` passes strict Clippy, 79 Rust unit tests, a locked
+  Rust build, the canonical-source pin gate, npm lint, and the production web build. Full-workspace
   `cargo fmt --check` still reports unrelated pre-existing formatting drift and was not mass-applied
-  as part of this cutover.
-- The final clean `runtime-2026.07.0` release build produced a 364,600,050-byte source archive, a
-  455-package SPDX document, verified checksums, and a passing external consumer build against the
-  extracted neutral contracts. Its manifest records 74 workspace packages, `dirty: false`, and the
-  exact release commit above.
+  as part of this pin-only finalization.
+- Resolved-metadata audits find exactly one `core-llm`, one `sceneworks-gen-core`, one canonical
+  `SceneWorks/inference` source identity, and no legacy inference source in either product graph.
+  The canonical workspace contains 74 path-owned packages, one lockfile, no active internal Git
+  dependency, and no active `inventory`/force-link composition.
+- A remote-head audit confirms the five legacy repositories remain exactly at their reconciled
+  cutoffs: `core-llm` `54cbac8`, `mlx-llm` `af5d0e8`, `candle-llm` `482ba5e`, `mlx-gen`
+  `45428fa`, and `candle-gen` `ef84441`. No unrecorded legacy delta remains. The canonical remote
+  retains the annotated `migration-baseline/*` tags, the Candle tracking tag, the MLX/Candle product
+  cutoff and post-cutover history branches, and every published runtime tag.
+- The final clean `runtime-2026.07.2` release build produced a 365,512,487-byte source archive, a
+  455-package SPDX document, verified checksums, and a passing offline external-consumer build
+  against the extracted neutral contracts. Its manifest records 74 workspace packages,
+  `dirty: false`, and the exact release commit above.
 - CUDA, NAX, and all four real-weight executions passed as platform-owned release evidence; no
   queued or unexecuted platform gate is counted as a pass.
+
+## Rollback verification
+
+Rollback was exercised on 2026-07-14 in disposable worktrees rather than inferred from Git
+history:
+
+- reverting SceneWorks merge `8ad8c00178670b4d08c1171561c420aeb3fb5166` with mainline parent 1
+  applied without conflicts on current `main`; its restored legacy graph fetched successfully and
+  the skew guard resolved exactly one `sceneworks-gen-core` at final legacy cutoff
+  `45428fa9727c569f3f3723c7343c96b0944f9007`;
+- reversing ChatWorks final-pin commit `bdcca7d443fdb59aa99511210a7399ac95d5d5b3` and cutover commit
+  `7f27f13fe2bb14b58578969b0126beb435ea93db` reproduced pre-cutover `main` exactly; the restored
+  three-source pin gate passed and `cargo check --workspace --locked` built successfully.
+
+These checks prove that the recorded old SHAs remain fetchable and buildable. They do not publish
+or prefer the rollback graph; the canonical release remains the forward development line.
 
 ## Rollback
 
 Rollback is a product change, not a mutation of the inference release:
 
-1. Revert the SceneWorks and/or ChatWorks cutover commit.
+1. Revert the SceneWorks and/or ChatWorks cutover commits in a dedicated product PR. Preserve this
+   checkpoint and the baseline evidence in that rollback PR even if a wholesale merge revert would
+   otherwise remove documentation added beside the SceneWorks cutover.
 2. Restore that product's exact pre-cutover dependency identities above and regenerate its lockfile.
 3. Run the baseline catalog/skew checks before publishing the rollback build.
-4. Leave `runtime-2026.07.0` and all migration checkpoint tags immutable for auditability.
+4. Leave `runtime-2026.07.2` and all migration checkpoint tags immutable for auditability.
 5. Fix forward in `SceneWorks/inference` and issue a new runtime tag before attempting another
    product cutover.
 

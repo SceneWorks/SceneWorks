@@ -338,7 +338,26 @@ export function ImageStudio() {
       ),
     [visibleWorkers],
   );
-  const tierOptions = useMemo(() => ({ convRotEligible }), [convRotEligible]);
+  // NVFP4 eligibility (sc-11042, epic 11037): identical shape to the ConvRot gate above — the
+  // candle-only FP4 tier is offered ONLY when a live worker advertises the `nvfp4` capability, which
+  // the worker emits solely on the candle lane AND when its GPU clears the sm_120 consumer-Blackwell
+  // compute-cap floor (gpu.rs). macOS/MLX (no FP4 hardware) and pre-Blackwell NVIDIA hosts HIDE the
+  // tier rather than only failing at submit. Hiding is the picker-side gate; the worker independently
+  // re-checks the cap at tier-select, so this is UX, not the security boundary.
+  const nvfp4Eligible = useMemo(
+    () =>
+      visibleWorkers.some(
+        (worker) =>
+          worker?.status !== "offline" &&
+          Array.isArray(worker?.capabilities) &&
+          worker.capabilities.includes("nvfp4"),
+      ),
+    [visibleWorkers],
+  );
+  const tierOptions = useMemo(
+    () => ({ convRotEligible, nvfp4Eligible }),
+    [convRotEligible, nvfp4Eligible],
+  );
   // Prompt-refinement model catalog entry (sc-5605) — drives the "download the
   // refinement model" affordance in RefinePromptControl when Refine fails because the
   // model isn't provisioned on the native worker.
@@ -1997,6 +2016,11 @@ export function ImageStudio() {
       bf16Precision,
       showTierPicker,
       quantTier,
+      // sc-10733: the tier is a DELIBERATE pick (not the pure global/base default) when it equals this
+      // (screen, model)'s persisted sticky — a prior explicit pick, which `handleTierChange` writes and
+      // the seed effect reads back into `quantTier`. The worker honors an explicit pick (never silently
+      // downtiers it); only a non-explicit default is capability-clamped.
+      tierExplicit: quantTier !== "" && readLastTier(TIER_SCREEN, model) === quantTier,
       showPidToggle,
       usePid,
       pidTarget,

@@ -6,12 +6,14 @@ import {
   installedTiers,
   isBelowFloor,
   isConvRotTier,
+  isNvfp4Tier,
   isSelectableTier,
   modelQualityFloor,
   shouldShowTierPicker,
   tierLabel,
   tierQuantize,
   INT8_CONVROT_TIER,
+  NVFP4_TIER,
 } from "./quantTier.js";
 
 // Build a /models-shaped model with a variant matrix. `installed` is the set of tier keys whose
@@ -93,6 +95,89 @@ describe("INT8-ConvRot tier (sc-9300)", () => {
   });
 });
 
+describe("NVFP4 tier (sc-11042, epic 11037)", () => {
+  it("is a selectable tier but has no mlxQuantize value", () => {
+    expect(isNvfp4Tier(NVFP4_TIER)).toBe(true);
+    expect(isNvfp4Tier("q4")).toBe(false);
+    expect(isSelectableTier(NVFP4_TIER)).toBe(true);
+    // It rides a distinct advanced.quantTier signal, not mlxQuantize — so tierQuantize is null.
+    // Critically NOT 4: `mlxQuantize: 4` names the int4-affine q4 tier, so sending it for NVFP4 would
+    // alias one creative choice onto another (epic 11037 SC#5).
+    expect(tierQuantize(NVFP4_TIER)).toBe(null);
+    expect(tierLabel(NVFP4_TIER)).toBe("NVFP4 (candle, Blackwell sm_120+)");
+  });
+
+  it("is offered only when nvfp4Eligible (candle + sm_120 Blackwell worker present)", () => {
+    const model = matrixModel({
+      tiers: ["q4", NVFP4_TIER, "bf16"],
+      installed: ["q4", NVFP4_TIER, "bf16"],
+    });
+    // Eligible host (default): the tier appears, ordered just above q4.
+    expect(installedTiers(model)).toEqual(["q4", NVFP4_TIER, "bf16"]);
+    // Ineligible host (macOS/MLX or pre-Blackwell NVIDIA — no nvfp4 worker): the tier is hidden even
+    // though its files are installed.
+    expect(installedTiers(model, { nvfp4Eligible: false })).toEqual(["q4", "bf16"]);
+  });
+
+  it("gates independently of the convrot tier", () => {
+    const model = matrixModel({
+      tiers: ["q4", NVFP4_TIER, INT8_CONVROT_TIER],
+      installed: ["q4", NVFP4_TIER, INT8_CONVROT_TIER],
+    });
+    // An sm_89 Ada host clears ConvRot but NOT NVFP4 — the real hardware split this gate exists for.
+    expect(installedTiers(model, { nvfp4Eligible: false })).toEqual(["q4", INT8_CONVROT_TIER]);
+    // Both hidden (macOS/MLX).
+    expect(installedTiers(model, { convRotEligible: false, nvfp4Eligible: false })).toEqual(["q4"]);
+    // Both offered (an sm_120 candle host).
+    expect(installedTiers(model)).toEqual(["q4", NVFP4_TIER, INT8_CONVROT_TIER]);
+  });
+
+  it("does not count a hidden nvfp4 tier toward the picker's >1 threshold", () => {
+    const model = matrixModel({
+      tiers: ["bf16", NVFP4_TIER],
+      installed: ["bf16", NVFP4_TIER],
+    });
+    expect(shouldShowTierPicker(model)).toBe(true);
+    // On an ineligible host only bf16 remains → single tier → no picker.
+    expect(shouldShowTierPicker(model, { nvfp4Eligible: false })).toBe(false);
+  });
+
+  // epic 11037 SC#5 at the UI layer: NVFP4 is an explicit choice, never a default anyone lands on.
+  it("is never the app-wide default quality vocabulary", () => {
+    expect(GENERATION_QUALITY_TIERS).not.toContain(NVFP4_TIER);
+    // …so even asking for it as the global default falls back to the q8 base rather than selecting it.
+    const model = matrixModel({
+      tiers: ["q4", NVFP4_TIER, "q8"],
+      installed: ["q4", NVFP4_TIER, "q8"],
+      defaultTier: null,
+    });
+    expect(defaultTierSelection(model, null, { defaultQuality: NVFP4_TIER })).toBe("q8");
+  });
+
+  it("is never seeded as the default over an installed q4/q8 (SC#5: no auto-swap of q4)", () => {
+    const model = matrixModel({
+      tiers: ["q4", NVFP4_TIER, "q8"],
+      installed: ["q4", NVFP4_TIER, "q8"],
+      defaultTier: null,
+    });
+    // On a fully NVFP4-eligible Blackwell host with the tier installed, the default is still q8 — the
+    // presence of FP4 hardware never re-points an existing tier's default.
+    expect(defaultTierSelection(model, null)).toBe("q8");
+    // A q4 sticky stays q4 — it is NOT silently upgraded to NVFP4 on Blackwell (the Option B this
+    // story rejected). This is the web-side twin of the worker's SC#5 regression guard.
+    expect(defaultTierSelection(model, "q4")).toBe("q4");
+    // NVFP4 is reachable as a sticky — i.e. only because the user explicitly picked it before.
+    expect(defaultTierSelection(model, NVFP4_TIER)).toBe(NVFP4_TIER);
+  });
+
+  it("never participates in a quality-floor comparison", () => {
+    // NVFP4 is a distinct numeric regime, not a rung on the bf16/q8/q4 ladder — ranking it against a
+    // floor would be a category error, so it is never flagged as "below floor".
+    expect(isBelowFloor(NVFP4_TIER, { minQualityTier: "q8" })).toBe(false);
+    expect(isBelowFloor(NVFP4_TIER, { minQualityTier: "bf16" })).toBe(false);
+  });
+});
+
 describe("installedTiers", () => {
   it("returns only installed quant tiers, in smallest→largest order", () => {
     const model = matrixModel({ installed: ["bf16", "q4"] });
@@ -126,6 +211,25 @@ describe("shouldShowTierPicker", () => {
     expect(shouldShowTierPicker(matrixModel({ installed: ["q4"] }))).toBe(false);
     expect(shouldShowTierPicker(matrixModel({ installed: [] }))).toBe(false);
     expect(shouldShowTierPicker({ id: "x", hasVariantMatrix: false })).toBe(false);
+  });
+});
+
+describe("quantTier — video model reuse (sc-12165)", () => {
+  const videoModel = (installed) => ({
+    id: "bernini",
+    type: "video",
+    hasVariantMatrix: true,
+    variants: ["q4", "q8", "bf16"].map((variant) => ({
+      variant,
+      installState: installed.includes(variant) ? "installed" : "missing",
+    })),
+  });
+
+  it("derives installed MLX video tiers through the model-agnostic helpers", () => {
+    const model = videoModel(["q4", "q8"]);
+    expect(installedTiers(model)).toEqual(["q4", "q8"]);
+    expect(shouldShowTierPicker(model)).toBe(true);
+    expect(defaultTierSelection(model, null, { defaultQuality: "q4" })).toBe("q4");
   });
 });
 

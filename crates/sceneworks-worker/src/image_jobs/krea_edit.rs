@@ -172,7 +172,7 @@ async fn generate_krea_edit_stream(
         ));
     }
 
-    let (quant, quant_bits) = resolve_quant(request);
+    let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
     let negative_prompt = resolve_negative_prompt(request, &model);

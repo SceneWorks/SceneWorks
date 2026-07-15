@@ -361,8 +361,15 @@ async fn generate_candle_qwen_edit_stream(
             crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
             crate::vram_gate::cuda_vram_cap_gb(),
         );
-        let tier =
-            crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
+        // sc-11042: `nvfp4 = false` — the Qwen-Image-Edit lane resolves no standard tier subdir (it
+        // loads the edit repo snapshot directly), so no `nvfp4/` tier can be what runs here and the
+        // bits-derived key is the honest one. Wire `nvfp4_selected` with the resolved dir if this lane
+        // ever grows a tier layout.
+        let tier = crate::vram_gate::requested_tier_key(
+            &request.advanced,
+            &request.model_manifest_entry,
+            /* nvfp4 */ false,
+        );
         let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
         match crate::vram_gate::resolve_offload(
             crate::vram_gate::fit_decision(needed, budget),

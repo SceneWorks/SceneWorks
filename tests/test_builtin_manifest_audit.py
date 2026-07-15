@@ -252,6 +252,21 @@ def test_z_image_turbo_manifest_has_mlx_block():
     )
 
 
+def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
+    """sc-12126: never regress the measured q8/bf16 peaks to estimates."""
+    manifest = _load_builtin_models_manifest()
+    krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
+    measured_tiers = {
+        tier: krea["candle"]["vramGbByTier"][tier] for tier in ("q4", "q8", "bf16")
+    }
+
+    assert measured_tiers == {
+        "q4": 26.4,
+        "q8": 35.9,
+        "bf16": 55.6,
+    }
+
+
 def test_sdxl_manifest_has_mlx_block():
     # sdxl carries an mlx block (no `limits` override here — the MLX SDXL schedule
     # matches the torch EulerDiscrete default, and there's no per-model sampler menu

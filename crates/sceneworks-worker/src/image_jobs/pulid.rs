@@ -315,7 +315,7 @@ async fn generate_pulid_flux_stream(
     // harmless no-op; the bf16 tier resolves to `None`. The PuLID conditioning (EVA/IDFormer/CA) stays f32
     // in every case — `load_flux1` quantizes only the backbone linears (sc-3076).
     let (quant, recipe_bits) = reconcile_resolved_tier_quant(
-        resolve_quant(request),
+        resolve_quant(request, Some(&flux_base)),
         &flux_base,
         true,
         &request.model,

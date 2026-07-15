@@ -122,6 +122,31 @@ fn flux2_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool 
 
 /// The compute quant the DiT + snapshot TE fold onto the GPU at: `advanced.quant` (`q4`/`q8`), else the
 /// [`FLUX2_COMFYUI_DEFAULT_QUANT`]. The 32B dev needs a quant to fit; there is no dense option.
+///
+/// **This lane does NOT offer the NVFP4 tier (sc-11042, epic 11037), on ANY host — including Blackwell.**
+/// It is structurally incapable of serving it, for two independent reasons:
+///
+/// 1. **No packed tier dir to serve from.** NVFP4 is served by `Nvfp4Linear` reading an OFFLINE-PACKED
+///    `Nvfp4Tensor` out of an `nvfp4/` tier subdir. This lane never calls `standard_tier_subdir`: the
+///    DiT is the user's OWN in-place ComfyUI fp8 single-file, and [`FLUX2_COMFYUI_SNAPSHOT_TIERS`] probes
+///    only for the TE/VAE/tokenizer snapshot. An arbitrary user single-file can never carry packed
+///    NVFP4 weights, so there is nothing to point `Nvfp4Linear` at.
+/// 2. **The fold path cannot express it.** This lane's `quant` is the ON-THE-FLY GGUF fold target:
+///    `load_from_comfyui_dit(.., Some(quant))` → `QLinear::quantize_onto` → `fold(..)` → `ggml_dtype(quant)`,
+///    which BAILS for `Quant::Nvfp4` by design ("no GGUF block type; NVFP4 is served by `Nvfp4Linear`
+///    from a packed `Nvfp4Tensor`, not the in-place GGUF fold" — candle-gen pins this with
+///    `fold_rejects_nvfp4_strategy`). Returning `Quant::Nvfp4` here therefore did not select a tier; it
+///    aborted the load with `WorkerError::Engine("ComfyUI FLUX.2-dev load failed: …")` — killing the job
+///    on EXACTLY the Blackwell hardware the tier targets, while off-Blackwell hosts fell back fine.
+///
+/// So a `quantTier: "nvfp4"` request on this lane falls through to the UNCHANGED `q4`/`q8`/default arms
+/// below on every host. That fall-through IS the clean fallback the story requires. The asset record
+/// stays honest about it: [`flux2_comfyui_raw_settings`] STRIPS the stale `quantTier` label on the
+/// q4/q8 path (its `else` branch — the only reachable one here), so the record names the tier that
+/// actually rendered rather than the one that was asked for. `quantTier` is the tier's identity
+/// precisely because `mlxQuantize` is bits-valued and no integer is honest for NVFP4 (see
+/// [`flux2_comfyui_raw_settings`]); that identity simply has no servable target on this lane. Pinned by
+/// `flux2_comfyui_never_selects_nvfp4`.
 fn flux2_comfyui_quant(request: &ImageRequest) -> Quant {
     match request
         .advanced
@@ -171,13 +196,56 @@ fn flux2_comfyui_raw_settings(
         "externalComfyuiBase".to_owned(),
         Value::String(request.model.clone()),
     );
+    // The tier this render actually used, recorded truthfully (sc-12006, epic 11037 SC#5).
+    //
+    // `mlxQuantize` is a BITS-VALUED key: every consumer parses it as an integer (`vram_gate::
+    // quant_int` = `as_i64` or numeric-string), and those bits NAME A TIER — `<= 0` ⇒ `bf16`,
+    // `<= 4` ⇒ `q4`, else `q8` (`vram_gate::requested_tier_key`). NVFP4 is a *distinct* tier, not
+    // int4-affine `q4`: E2M1 4-bit elements + FP8-E4M3 block scales in a W4A4 regime (~4.5 effective
+    // bits/weight), served by candle-gen's packed `Nvfp4Linear`. So there is NO honest integer for it
+    // — `4` would stamp an NVFP4 render as the `q4` tier in the stored settings, falsifying the user's
+    // creative choice (exactly the aliasing epic 11037 SC#5 forbids), and every other integer names
+    // `bf16`/`q8` instead. A string ("nvfp4") is no better: it is not an integer, so `quant_int`
+    // returns None and the key silently degrades to the `q8` default — a different false label.
+    //
+    // So NVFP4 gets `null` here — the same "no bits value applies" signal `mlx_raw_settings`
+    // (image_jobs/base.rs) already writes for this key — and its identity rides a distinct
+    // `quantTier` label below. This mirrors the sc-9300 INT8-ConvRot precedent: a tier that can't be
+    // expressed as `mlxQuantize` bits carries a distinct signal (`convRot`) instead of a lying number.
+    //
+    // NOTE the insert is unconditional on purpose: `raw` starts as a clone of `request.advanced`, so
+    // merely SKIPPING the insert would leave the caller's own stale `advanced.mlxQuantize` (e.g. a `4`
+    // from the tier picker) sitting in the record — the very mislabel this avoids. Overwrite, never omit.
     raw.insert(
         "mlxQuantize".to_owned(),
-        json!(match quant {
-            Quant::Q4 => 4,
-            Quant::Q8 => 8,
-        }),
+        match quant {
+            Quant::Q4 => json!(4),
+            Quant::Q8 => json!(8),
+            Quant::Nvfp4 => Value::Null,
+        },
     );
+    // The explicit tier label. Emitted only for the tier `mlxQuantize` cannot express, so existing
+    // q4/q8 asset telemetry keeps its exact shape (the sc-9300 `convRot` pattern).
+    //
+    // The `else` REMOVE is load-bearing (sc-11042), and is the symmetric twin of the unconditional
+    // `mlxQuantize` insert above: `raw` starts as a clone of `request.advanced`, so on the Q4/Q8 path a
+    // caller-supplied stale `advanced.quantTier` would otherwise survive into the asset record and
+    // mislabel a q4/q8 render as `nvfp4`.
+    //
+    // On THIS lane the `else` is the only reachable branch, which makes it the whole point rather than a
+    // guard: [`flux2_comfyui_quant`] never returns `Quant::Nvfp4` (this lane cannot serve the tier — no
+    // packed tier dir, and the GGUF fold rejects it), so EVERY request here renders Q4/Q8 — including one
+    // that explicitly asked for `quantTier: "nvfp4"` on a Blackwell host. That request is exactly the case
+    // that must not record the tier it did not run, so the stale label is stripped and the record names
+    // the tier that actually rendered. The `Nvfp4` arm is retained only to keep this function total over
+    // `Quant` (it is shared shape with the tier-serving lanes, and an exhaustive match is what stops a
+    // future variant from silently defaulting). Removing (not skipping) keeps the record honest in both
+    // directions, and the q4/q8 record shape byte-identical to sc-12006's.
+    if matches!(quant, Quant::Nvfp4) {
+        raw.insert("quantTier".to_owned(), Value::String("nvfp4".to_owned()));
+    } else {
+        raw.remove("quantTier");
+    }
     if let Some(scale) = guidance {
         raw.insert("guidanceScale".to_owned(), json!(scale));
     }

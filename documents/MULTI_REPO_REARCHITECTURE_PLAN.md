@@ -1,9 +1,9 @@
 # SceneWorks Multi-Repository Rearchitecture Plan
 
-> **Status:** Inference Phases 0–5 are implemented, released, and locally validated at
-> `runtime-2026.07.0`. Hosted SceneWorks validation uses its configured scoped private-repository
-> read secret. Product-repository consolidation and legacy-repository archival remain separate
-> decisions.
+> **Status:** Inference Phases 0–4 and the SceneWorks Phase 5 cutover are complete at
+> `runtime-2026.07.2`. ChatWorks cutover PR #31 is release-pinned, validated, and pending
+> product-owner review. Product-repository consolidation and legacy-repository archival remain
+> separate decisions.
 >
 > **Date:** 2026-07-12
 >
@@ -948,6 +948,7 @@ Initially use one immutable inference tag containing a compatible set of package
 ```text
 runtime-2026.07.0
 runtime-2026.07.1
+runtime-2026.07.2
 ```
 
 The release manifest records:

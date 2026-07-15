@@ -14,6 +14,11 @@
 // Tier key → `advanced.mlxQuantize` value. bf16 → 0 (the worker's `<= 0` ⇒ dense/bf16 sentinel),
 // q8 → 8, q4 → 4. A dense-TE model keeps its TE bf16 internally regardless (the worker forces
 // that); the UI just sends the tier's nominal quant value and lets the worker handle the nuance.
+//
+// NOTE this map is BITS-VALUED, and that is why neither int8-convrot NOR nvfp4 appears in it: the
+// worker parses `mlxQuantize` as an integer that NAMES a tier (`<= 0` ⇒ bf16, `<= 4` ⇒ q4, else q8),
+// so a tier with no honest integer must not ride this key. `nvfp4` sending `4` here would select the
+// int4-affine q4 tier — the exact aliasing epic 11037 SC#5 forbids. See NVFP4_TIER below.
 const TIER_QUANTIZE = {
   bf16: 0,
   q8: 8,
@@ -21,8 +26,10 @@ const TIER_QUANTIZE = {
 };
 
 // The three user-facing generation-quality tiers, in fidelity order — the vocabulary the global
-// "default generation quality" setting (epic 10721 / sc-10728) ranges over. int8-convrot is
-// intentionally excluded: it's a candle-only niche tier, not a sensible app-wide default.
+// "default generation quality" setting (epic 10721 / sc-10728) ranges over. int8-convrot and nvfp4 are
+// intentionally excluded: both are candle-only niche tiers, not sensible app-wide defaults. Excluding
+// nvfp4 is also an epic 11037 SC#5 requirement — a tier reachable only by an explicit, per-generation
+// pick can never become the silent default for anyone.
 export const GENERATION_QUALITY_TIERS = ["bf16", "q8", "q4"];
 
 // The app-wide base default generation tier used when no global setting, sticky, or manifest default
@@ -43,6 +50,26 @@ export function isConvRotTier(tier) {
   return tier === INT8_CONVROT_TIER;
 }
 
+// The candle-only NVFP4 tier key (sc-11042, epic 11037). NVFP4 = E2M1 4-bit elements over 16-element
+// blocks + FP8-E4M3 micro-scales + an FP32 per-tensor scale (~4.5 effective bits/weight), served by the
+// cuBLASLt FP4 GEMM on consumer Blackwell (sm_120).
+//
+// A DISTINCT, user-selectable tier — the sc-11042 "Option A" packaging decision. It is deliberately NOT
+// a Blackwell execution backend auto-substituted for q4: NVFP4's numerics differ from int4-affine q4, so
+// auto-selecting it on a Blackwell host would silently change what a picked q4 tier renders — the
+// creative-choice violation epic 11037 SC#5 forbids. Picking NVFP4 is always an explicit user action.
+//
+// Like INT8_CONVROT_TIER, it is NOT a bits-based quant, so it is DELIBERATELY absent from TIER_QUANTIZE
+// (`tierQuantize` returns null for it, so `mlxQuantize` stays out of the payload) and instead sends a
+// distinct `advanced.quantTier: "nvfp4"` signal (see imageJobAdvanced.js) that the worker's tier-select
+// reads.
+export const NVFP4_TIER = "nvfp4";
+
+// Whether a tier key names the candle NVFP4 tier.
+export function isNvfp4Tier(tier) {
+  return tier === NVFP4_TIER;
+}
+
 // Human labels for the picker, keyed by tier. Unknown/"default" tiers fall back to the raw key.
 // "training" is NOT a quant tier: it's the flat-diffusers LoRA-training base some tiered models
 // (lens, sc-8797) additionally host on macOS. It's absent from TIER_QUANTIZE, so the generation
@@ -54,11 +81,17 @@ const TIER_LABELS = {
   training: "LoRA training base (bf16 diffusers)",
   // Candle-only (Windows/Linux, sm_89+). Online-rotation int8 DiT — closer to bf16 than Q4 (sc-9300).
   [INT8_CONVROT_TIER]: "INT8-ConvRot (candle, sm_89+)",
+  // Candle-only (Windows/Linux, Blackwell sm_120+). FP4 tensor-core tier (sc-11042). Named distinctly
+  // from Q4 on purpose — it is a different numeric regime, not a faster q4.
+  [NVFP4_TIER]: "NVFP4 (candle, Blackwell sm_120+)",
 };
 
 // Display order (smallest → largest); tiers not in this list sort after, alphabetically. int8-convrot
 // sits between q4 and q8 by footprint/fidelity (int8 DiT, PSNR 34.4 dB — better than Q4's 22.7 dB).
-const TIER_ORDER = ["q4", INT8_CONVROT_TIER, "q8", "bf16"];
+// nvfp4 sits just above q4: ~4.5 effective bits/weight vs q4's 4, with weight accuracy measured at
+// roughly the int4 tier's (spike sc-11038: rel-RMS ~0.094) — so it is the nearest neighbour above q4
+// and below the int8 tier by footprint.
+const TIER_ORDER = ["q4", NVFP4_TIER, INT8_CONVROT_TIER, "q8", "bf16"];
 
 // Map a tier key to its `advanced.mlxQuantize` value, or null when the key isn't a known quant
 // tier (e.g. "default" on a single-variant model — such models never render the picker).
@@ -72,24 +105,31 @@ export function tierLabel(tier) {
   return TIER_LABELS[tier] ?? tier;
 }
 
-// Whether a tier key is a user-selectable generation tier: a known bits-based quant (bf16/q8/q4) OR
-// the candle INT8-ConvRot tier. Excludes the "default" pseudo-variant of a single-variant model and
-// non-generation pseudo-tiers like "training". Distinct from `tierQuantize` (which returns null for
-// int8-convrot because it has no mlxQuantize value — the tier still selects, via `advanced.convRot`).
+// Whether a tier key is a user-selectable generation tier: a known bits-based quant (bf16/q8/q4) OR one
+// of the candle-only non-bits tiers (INT8-ConvRot, NVFP4). Excludes the "default" pseudo-variant of a
+// single-variant model and non-generation pseudo-tiers like "training". Distinct from `tierQuantize`
+// (which returns null for both non-bits tiers because they have no mlxQuantize value — they still
+// select, via `advanced.convRot` / `advanced.quantTier`).
 export function isSelectableTier(tier) {
-  return tierQuantize(tier) !== null || isConvRotTier(tier);
+  return tierQuantize(tier) !== null || isConvRotTier(tier) || isNvfp4Tier(tier);
 }
 
 // The installed, selectable quant tiers of a model, in display order. A tier is selectable when it is
-// a known quant tier (bf16/q8/q4) OR the candle INT8-ConvRot tier (`isSelectableTier` — the "default"
-// pseudo-variant of a single-variant model is excluded) AND its files are installed. Returns [] when
-// the model has no variant matrix.
+// a known quant tier (bf16/q8/q4) OR one of the candle-only tiers (INT8-ConvRot, NVFP4)
+// (`isSelectableTier` — the "default" pseudo-variant of a single-variant model is excluded) AND its
+// files are installed. Returns [] when the model has no variant matrix.
 //
 // `options.convRotEligible` (sc-9300, default true) gates the candle-only INT8-ConvRot tier: the
 // caller passes `false` when NO live worker advertises the `int8_convrot` capability (macOS/MLX, or a
 // pre-Ada NVIDIA GPU that fails the sm_89 compute-cap probe), so the tier is HIDDEN on an ineligible
 // host even when its files happen to be present in the cache. Every other tier is unaffected. Default
 // true keeps existing single-lane call sites (and tests) unchanged.
+//
+// `options.nvfp4Eligible` (sc-11042, default true) gates the candle-only NVFP4 tier identically: the
+// caller passes `false` when NO live worker advertises the `nvfp4` capability (macOS/MLX, or an NVIDIA
+// GPU below the sm_120 Blackwell compute-cap floor). Hiding an unservable tier is the FIRST of the two
+// Blackwell gates; the worker re-checks the cap at tier-select (`nvfp4_host_eligible` in
+// image_jobs/base.rs) so a hand-crafted API call that bypasses this picker still falls back cleanly.
 // Sort tier keys by display order (smallest → largest); unknown keys sort after, alphabetically.
 function sortByTierOrder(a, b) {
   const ai = TIER_ORDER.indexOf(a);
@@ -107,7 +147,11 @@ function sortByTierOrder(a, b) {
 }
 
 export function installedTiers(model, options = {}) {
-  const { convRotEligible = true } = options;
+  const { convRotEligible = true, nvfp4Eligible = true } = options;
+  // Whether a tier survives the per-host capability gates: the candle-only tiers are hidden when no live
+  // worker can serve them; every bits-based tier is unaffected.
+  const hostEligible = (tier) =>
+    (convRotEligible || !isConvRotTier(tier)) && (nvfp4Eligible || !isNvfp4Tier(tier));
   // Download-matrix models (sc-8508): per-tier DOWNLOAD entries, install-tracked individually.
   if (model?.hasVariantMatrix && Array.isArray(model.variants)) {
     return model.variants
@@ -115,7 +159,7 @@ export function installedTiers(model, options = {}) {
         (variant) =>
           variant &&
           isSelectableTier(variant.variant) &&
-          (convRotEligible || !isConvRotTier(variant.variant)) &&
+          hostEligible(variant.variant) &&
           variant.installState === "installed",
       )
       .map((variant) => variant.variant)
@@ -126,17 +170,17 @@ export function installedTiers(model, options = {}) {
   // Models download panel (`hasVariantMatrix`) is untouched. Anima (and other convert-at-install models)
   // get a Studio generation-time tier picker this way.
   if (Array.isArray(model?.mlxTiers) && model.mlxTiers.length > 0) {
-    return model.mlxTiers
-      .filter((tier) => isSelectableTier(tier) && (convRotEligible || !isConvRotTier(tier)))
-      .sort(sortByTierOrder);
+    return model.mlxTiers.filter((tier) => isSelectableTier(tier) && hostEligible(tier)).sort(sortByTierOrder);
   }
   return [];
 }
 
 // Quality rank of a generation quant tier: higher = more faithful (bf16 > q8 > q4). Derived from
 // GENERATION_QUALITY_TIERS (highest-fidelity first), so it stays in lockstep with that vocabulary.
-// Unknown / non-quality tiers (e.g. int8-convrot, "training") rank 0 so they never take part in a floor
-// comparison — a below-floor advisory or default clamp only ever fires between two known quality tiers.
+// Unknown / non-quality tiers (e.g. int8-convrot, nvfp4, "training") rank 0 so they never take part in a
+// floor comparison — a below-floor advisory or default clamp only ever fires between two known quality
+// tiers. For nvfp4 that is deliberate as well as incidental: it is a distinct numeric regime, not a rung
+// on the bf16/q8/q4 fidelity ladder, so ranking it against a floor would be a category error.
 function tierQualityRank(tier) {
   const i = GENERATION_QUALITY_TIERS.indexOf(tier);
   return i === -1 ? 0 : GENERATION_QUALITY_TIERS.length - i;
@@ -168,8 +212,8 @@ export function isBelowFloor(tier, model) {
 
 // Whether the studio should render the tier picker: only when MORE THAN ONE quant tier is
 // installed (a single installed tier — the common case — shows no toggle, per acceptance).
-// `options` (sc-9300) forwards the `convRotEligible` gate so an ineligible host doesn't count the
-// hidden INT8-ConvRot tier toward the >1 threshold.
+// `options` forwards the `convRotEligible` (sc-9300) / `nvfp4Eligible` (sc-11042) gates so an
+// ineligible host doesn't count a hidden candle-only tier toward the >1 threshold.
 export function shouldShowTierPicker(model, options = {}) {
   return installedTiers(model, options).length > 1;
 }
@@ -202,8 +246,16 @@ function defaultInstalledTier(model, tiers) {
 // prior explicit pick, honored as-is. The clamp is capped by clamp-to-installed (a floor tier not on
 // disk resolves to the nearest installed clean tier).
 // Returns null when nothing is installed (no picker will render anyway). `options` also forwards the
-// `convRotEligible` gate (sc-9300) so a hidden INT8-ConvRot tier is never seeded as the selection —
-// and because `defaultQuality` can only ever be bf16|q8|q4, it never re-introduces a filtered tier.
+// `convRotEligible` (sc-9300) / `nvfp4Eligible` (sc-11042) gates so a hidden candle-only tier is never
+// seeded as the selection — and because `defaultQuality` can only ever be bf16|q8|q4, it never
+// re-introduces a filtered tier.
+//
+// NVFP4 can only ever be reached here by rung 1 (the sticky — i.e. a PRIOR EXPLICIT pick by this user
+// on this model), never by rungs 2–4: `variant.default` is dead against the real catalog, `base` is
+// drawn from GENERATION_QUALITY_TIERS (which excludes nvfp4), and `cleanFallback` lists only q8/bf16/q4.
+// Rung 4 (`tiers[0]`) cannot reach it either — TIER_ORDER puts q4 first, and nvfp4 is only present when
+// an nvfp4 tier is installed, which by itself implies the user chose to install it. That is epic 11037
+// SC#5 holding at the UI layer: NVFP4 never becomes anyone's default by accident.
 export function defaultTierSelection(model, lastUsed, options = {}) {
   const tiers = installedTiers(model, options);
   if (tiers.length === 0) {
