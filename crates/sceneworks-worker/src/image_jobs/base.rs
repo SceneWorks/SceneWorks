@@ -1654,37 +1654,188 @@ fn dense_te_requested_tier_bits(request: &ImageRequest) -> Option<i64> {
     }
 }
 
-/// The `(engine Quant, recipe bit count)` a resolved turnkey tier subdir ACTUALLY loads at, parsed
-/// from the tier dir's basename (sc-8820). The tier resolvers ([`standard_tier_subdir`],
+/// The generation tier (`bf16`/`q8`/`q4`) a resolved turnkey tier subdir ACTUALLY loads at, parsed
+/// from its basename (sc-8820 / sc-12090). The tier resolvers ([`standard_tier_subdir`],
 /// [`ideogram_model_subdir`], [`boogu_model_subdir`], [`krea_model_subdir`]) fall through q4→q8→bf16
 /// (or the Boogu `<variant>`-shaped names) when the requested tier isn't downloaded, so the resolved
 /// path can be a DIFFERENT precision than the request asked for. This maps the resolved basename back
-/// to its precision so the caller can record the tier that ran, not the one requested:
-///   - `bf16` / `<variant>-bf16` → dense (`None`, `None`)
-///   - `q4`   / `<variant>-q4`   → Q4 (`4`)
-///   - `q8`   / `<variant>-q8`   → Q8 (`8`)
+/// to its tier:
+///   - `bf16` / `<variant>-bf16` → `bf16`
+///   - `q4`   / `<variant>-q4`   → `q4`
+///   - `q8`   / `<variant>-q8`   → `q8`
 ///   - a bare Boogu `<variant>/` (no `-q4`/`-q8`/`-bf16` suffix) → the shipped **Q8** default
 ///
 /// `None` when the basename is not a recognizable tier name — e.g. the resolver fell all the way back
 /// to the repo `root` (a partial/absent turnkey the engine will error on), or the dir is a `modelPath`
-/// override. In that case the caller keeps the request-derived quant rather than inventing one.
+/// override. In that case the caller keeps its request-derived tier rather than inventing one.
 ///
-/// macOS-only: its sole caller is [`reconcile_resolved_tier_quant`] on the MLX `generate_stream` path.
-/// The candle lane has no quant-tier layout to reconcile, so this would be dead code there.
+/// Available on the candle lane too (sc-12090): the candle VRAM fit-gate reads the tier the
+/// disk-probing resolver landed on here — instead of re-deriving from the manifest — so it names and
+/// budgets against the tier that would actually load, never an uninstalled one.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn tier_key_from_resolved_dir(dir: &Path) -> Option<&'static str> {
+    let name = dir.file_name()?.to_str()?;
+    // Match the trailing tier token: the whole basename (standard/ideogram/krea) or the suffix of a
+    // Boogu `<variant>-<tier>` folder; a bare Boogu `<variant>` IS the packed Q8 default.
+    match name.rsplit('-').next().unwrap_or(name) {
+        "bf16" => Some("bf16"),
+        "q4" => Some("q4"),
+        "q8" | "base" | "turbo" | "edit" => Some("q8"),
+        _ => None,
+    }
+}
+
+/// The `(engine Quant, recipe bit count)` a resolved turnkey tier subdir ACTUALLY loads at (sc-8820) —
+/// the `Quant`-typed view of [`tier_key_from_resolved_dir`], consumed by
+/// [`reconcile_resolved_tier_quant`] on the MLX `generate_stream` path. `None` for an unrecognizable
+/// basename (kept identical to the pre-sc-12090 behavior: the caller keeps the request-derived quant).
+///
+/// macOS-only: the candle lane has no quant-tier layout to reconcile, so this would be dead code there.
 #[cfg(target_os = "macos")]
 fn tier_quant_from_resolved_dir(dir: &Path) -> Option<(Option<Quant>, Option<i64>)> {
-    let name = dir.file_name()?.to_str()?;
-    // Match the trailing tier token: `q4` / `q8` / `bf16`, whether the whole basename (standard/
-    // ideogram/krea) or the suffix of a Boogu `<variant>-<tier>` folder.
-    let tier = name.rsplit('-').next().unwrap_or(name);
-    match tier {
+    match tier_key_from_resolved_dir(dir)? {
         "bf16" => Some((None, None)),
         "q4" => Some((Some(Quant::Q4), Some(4))),
         "q8" => Some((Some(Quant::Q8), Some(8))),
-        // A bare Boogu `base`/`turbo`/`edit` folder (no tier suffix) IS the packed Q8 default.
-        "base" | "turbo" | "edit" => Some((Some(Quant::Q8), Some(8))),
         _ => None,
     }
+}
+
+/// Resolve the on-disk weights dir for `request` FORCED to a specific generation `tier`
+/// (`bf16`/`q8`/`q4`), reusing the SAME family disk-probing resolver the default path uses
+/// ([`resolve_weights_dir`]). `Some(dir)` only when that tier is actually INSTALLED — the resolver
+/// lands on that exact tier; `None` when it isn't (the resolver falls through to a different/absent
+/// tier) or the model has no quant-tier layout. This lets the capability downtier (sc-10733) and the
+/// reject-message tier suggestions (sc-12090) enumerate installed tiers WITHOUT duplicating each
+/// family's bespoke `present()` logic — a forced-bits probe is byte-for-byte what the loader would do.
+///
+/// The forced `mlxQuantize` is an explicit tier probe, so it bypasses the per-model quality floor
+/// (explicit picks are always honored) — the caller filters candidates to `>= floor` before probing.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn resolve_tier_dir(request: &ImageRequest, settings: &Settings, tier: &str) -> Option<PathBuf> {
+    let bits: i64 = match tier {
+        "bf16" => 0,
+        "q4" => 4,
+        _ => 8, // q8
+    };
+    let mut probe = request.clone();
+    probe
+        .advanced
+        .insert("mlxQuantize".to_owned(), Value::from(bits));
+    let dir = resolve_weights_dir(&probe, settings).ok().flatten()?;
+    (tier_key_from_resolved_dir(&dir) == Some(tier_static_name(tier))).then_some(dir)
+}
+
+/// The generation tiers (`bf16`/`q8`/`q4`) currently INSTALLED for `request`'s model, in DESCENDING
+/// fidelity (bf16 → q8 → q4). Each is confirmed by [`resolve_tier_dir`] (a forced-bits probe of the
+/// real family resolver), so the list is exactly what the loader could load. Empty for a model with no
+/// quant-tier layout (a flat / `modelPath` snapshot).
+///
+/// Candle-only: the sc-12090 reject-message enumeration. The MLX downtier reject names the single
+/// smallest evaluated tier from `choose_downtier`, so it needs no separate installed-list scan.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn installed_tier_keys(request: &ImageRequest, settings: &Settings) -> Vec<&'static str> {
+    ["bf16", "q8", "q4"]
+        .into_iter()
+        .filter(|tier| resolve_tier_dir(request, settings, tier).is_some())
+        .collect()
+}
+
+/// A per-tier capability-fit result for the downtier chooser (sc-10733) — the lane-agnostic reduction
+/// of each lane's richer fit decision (candle's resident/offload/reject, MLX's resident/sequential/
+/// reject) to "does this tier run at all on this machine."
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TierFit {
+    /// Runs — resident or (where the provider stages components) sequentially.
+    Fits,
+    /// Won't run even sequentially. `needed_gb`/`available_gb` are for the reject message.
+    TooBig { needed_gb: f64, available_gb: f64 },
+}
+
+/// The capability-downtier decision (sc-10733).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DowntierPick {
+    /// The resolved default tier fits — load it unchanged.
+    Keep,
+    /// A LOWER installed tier is the highest-fidelity one that fits — load it instead.
+    Downtier(&'static str),
+    /// Nothing in `[floor, default]` fits — reject, naming the SMALLEST (least-demanding) tier
+    /// evaluated and what it needed.
+    Reject {
+        tier: &'static str,
+        needed_gb: f64,
+        available_gb: f64,
+    },
+}
+
+/// The pure capability-downtier chooser (sc-10733), shared by the candle and MLX gates. `candidates`
+/// are the INSTALLED tiers in `[floor, default]` with their per-lane [`TierFit`], in DESCENDING fidelity
+/// (so the default tier is first). Returns the highest-fidelity tier that fits: [`DowntierPick::Keep`]
+/// when that is the default itself, [`DowntierPick::Downtier`] when a lower tier is the best that fits,
+/// or [`DowntierPick::Reject`] (naming the smallest — least-demanding — tier evaluated) when nothing in
+/// range fits.
+///
+/// The floor + installed clamping live in the CANDIDATE list (the caller filters to `rank >= floor` and
+/// `installed`), so the quality floor always wins over the downtier — a floor-q8 model's candidates
+/// never include q4, so it rejects rather than silently rendering q4 (acceptance #5). An explicit user
+/// pick never reaches here (the caller skips the downtier for it, honoring the pick — acceptance #7).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn choose_downtier(default_tier: &str, candidates: &[(&'static str, TierFit)]) -> DowntierPick {
+    let mut smallest_reject: Option<(&'static str, f64, f64)> = None;
+    for &(tier, fit) in candidates {
+        match fit {
+            // DESCENDING fidelity ⇒ the first that fits is the highest-fidelity fitting tier.
+            TierFit::Fits => {
+                return if tier == default_tier {
+                    DowntierPick::Keep
+                } else {
+                    DowntierPick::Downtier(tier)
+                };
+            }
+            TierFit::TooBig {
+                needed_gb,
+                available_gb,
+            } => smallest_reject = Some((tier, needed_gb, available_gb)),
+        }
+    }
+    // Nothing fit — reject, naming the LAST (smallest / least-demanding) tier we tried. `None` only when
+    // the candidate list was empty (no installed tier in range — defensive; the default itself is always
+    // installed & in range), in which case Keep lets the plain gate handle it.
+    match smallest_reject {
+        Some((tier, needed_gb, available_gb)) => DowntierPick::Reject {
+            tier,
+            needed_gb,
+            available_gb,
+        },
+        None => DowntierPick::Keep,
+    }
+}
+
+/// The installed tiers in `[floor, default]` for `request`'s model, in DESCENDING fidelity, ready for
+/// [`choose_downtier`] once each is paired with its per-lane [`TierFit`] (sc-10733). `default_tier` is
+/// the disk-clamped resolved tier (the downtier ceiling — the clamp only ever lowers fidelity); `floor`
+/// is the per-model quality floor ([`min_quality_floor`], defaulting to `q4`). Excludes tiers not on
+/// disk so the downtier never lands on an uninstalled tier.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn downtier_candidate_tiers(
+    request: &ImageRequest,
+    settings: &Settings,
+    default_tier: &str,
+    floor: Option<&str>,
+) -> Vec<&'static str> {
+    let default_rank = tier_quality_rank(default_tier);
+    // Floor at least q4 (rank 1) — a downtier must never fall below the lowest real tier.
+    let floor_rank = floor.map_or(1, tier_quality_rank).max(1);
+    ["bf16", "q8", "q4"]
+        .into_iter()
+        .filter(|tier| {
+            let rank = tier_quality_rank(tier);
+            rank <= default_rank && rank >= floor_rank
+        })
+        .filter(|tier| resolve_tier_dir(request, settings, tier).is_some())
+        .collect()
 }
 
 /// Reconcile the request-derived `(quant, quant_bits)` against the tier subdir the resolver ACTUALLY
@@ -3574,6 +3725,27 @@ fn resolve_generic_lane_conditioning(
     }
 }
 
+/// MLX per-tier capability fit for the downtier chooser (sc-10733): fold the MLX residency decision
+/// (resident-fits / staged-fits / won't-fit-even-staged) for a candidate tier's weights dir down to
+/// [`TierFit`]. `Resident`/`Sequential` ⇒ `Fits`; `Reject` ⇒ `TooBig` (carrying the resident need + the
+/// machine budget for the message). Uses the SAME `mlx_fit_gate` budget + footprint math the cold-load
+/// `apply_residency_policy` runs, so the seam's downtier and the cache's admission never disagree.
+#[cfg(target_os = "macos")]
+fn mlx_tier_fit(engine_id: &str, weights_dir: &Path) -> TierFit {
+    match crate::mlx_fit_gate::residency_for_dir(engine_id, weights_dir) {
+        crate::mlx_fit_gate::ResidencyOutcome::Resident
+        | crate::mlx_fit_gate::ResidencyOutcome::Sequential => TierFit::Fits,
+        crate::mlx_fit_gate::ResidencyOutcome::Reject {
+            needed_gb,
+            available_gb,
+            ..
+        } => TierFit::TooBig {
+            needed_gb,
+            available_gb,
+        },
+    }
+}
+
 /// Real MLX generation: load once on a blocking thread, generate each image, and
 /// stream step/decode/image events back to the async worker (which saves PNGs, emits
 /// `assetWrites`, and polls cancel). MLX runs entirely on the blocking thread (the
@@ -3592,14 +3764,74 @@ async fn generate_stream(
     let request = &plan.request;
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
+    // Hoisted (also used at the load-spec seam below): the registered engine id, the sc-10733
+    // capability-downtier fit key + `apply_residency_policy` sequential-capability key.
+    let engine_id = model.engine_id();
     // sc-6568: a bf16 opt-in for Boogu fetches the full-precision `<variant>-bf16/` subfolder on
     // demand (the catalog ships only the Q8 default) before snapshot resolution. No-op for every
     // other model / the default Q8 path. sc-9607: the same on-demand pattern for Ideogram's `q8/`
     // tier (the catalog ships only q4) — was a documented follow-up, now wired on both lanes.
     ensure_boogu_tier_present(api, settings, job, request).await?;
     ensure_ideogram_tier_present(api, settings, job, request).await?;
-    let weights_dir = resolve_weights_dir(request, settings)?
+    // `mut` for the sc-10733 capability downtier below: a DEFAULT job whose resolved tier won't fit this
+    // machine's unified memory is re-pointed at the highest installed tier that does, BEFORE the quant
+    // reconcile + spec build (so both the recorded precision and the load follow the downtiered tier).
+    let mut weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;
+    // sc-10733 capability downtier (MLX): for a DEFAULT job (no explicit per-(screen,model) pick), if the
+    // resolved tier won't fit this machine's unified memory even under sequential residency, step DOWN to
+    // the highest installed tier that does — floored at the per-model quality floor — rejecting only when
+    // nothing >= floor fits. An explicit pick (`mlxQuantizeExplicit`) is HONORED: it skips the downtier
+    // (the cold-load `apply_residency_policy` still reject-before-OOMs an unfittable explicit pick). The
+    // `reconcile_resolved_tier_quant` below then corrects the recorded quant to the (possibly downtiered)
+    // `weights_dir`, so telemetry never lies about the tier that actually ran.
+    let explicit_pick = request
+        .advanced
+        .get("mlxQuantizeExplicit")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !explicit_pick {
+        if let Some(default_tier) = tier_key_from_resolved_dir(&weights_dir) {
+            let floor = min_quality_floor(request);
+            let candidates: Vec<(&'static str, TierFit)> =
+                downtier_candidate_tiers(request, settings, default_tier, floor)
+                    .into_iter()
+                    .filter_map(|cand| {
+                        resolve_tier_dir(request, settings, cand)
+                            .map(|dir| (cand, mlx_tier_fit(engine_id, &dir)))
+                    })
+                    .collect();
+            match choose_downtier(default_tier, &candidates) {
+                DowntierPick::Keep => {}
+                DowntierPick::Downtier(chosen) => {
+                    if let Some(dir) = resolve_tier_dir(request, settings, chosen) {
+                        tracing::warn!(
+                            model = %request.model,
+                            from = %default_tier,
+                            to = %chosen,
+                            "MLX fit-gate: default tier won't fit unified memory — downtiering to the \
+                             highest installed tier that does (capability clamp, sc-10733)"
+                        );
+                        weights_dir = dir;
+                    }
+                }
+                DowntierPick::Reject {
+                    tier,
+                    needed_gb,
+                    available_gb,
+                } => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "{model} needs ~{needed} GB of unified memory even at the smallest installed \
+                         tier it can run ({tier}) but this machine has ~{available} GB. Lower the output \
+                         resolution or run on a Mac with more memory.",
+                        model = request.model,
+                        needed = needed_gb.round() as i64,
+                        available = available_gb.round() as i64,
+                    )));
+                }
+            }
+        }
+    }
     // sc-3723: surface the descriptor-derived backend ("mlx" for every linked family today; a
     // future candle row would self-describe) over the gpu-id-derived label. Falls back to the
     // passed-in label only if a descriptor ever advertised an empty backend (never today).
@@ -3713,7 +3945,6 @@ async fn generate_stream(
         quant_bits,
         guidance.or(model_true_cfg),
     );
-    let engine_id = model.engine_id();
     let adapter_label = model.adapter_label();
     let count = request.count as usize;
     let seeds: Vec<i64> = (0..count)
@@ -4076,6 +4307,86 @@ fn candle_adapter_label(model: &str) -> &'static str {
     }
 }
 
+/// The actionable tail for a candle VRAM-fit reject (sc-12090). Suggests only the tiers that are
+/// actually INSTALLED and smaller than the rejected one (`installed_smaller`, descending fidelity),
+/// else states that none is installed. Never names the rejected tier itself, and never points at the
+/// quant picker — which is hidden by design when ≤1 tier is installed, exactly the case that produced
+/// the misleading "Pick a lower tier (Q4/Q8)" text on a single-tier install.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn vram_reject_tail(installed_smaller: &[&str]) -> String {
+    if installed_smaller.is_empty() {
+        return "No smaller tier is installed — lower the output resolution or run on a GPU with more \
+                VRAM."
+            .to_owned();
+    }
+    format!(
+        "Select a smaller installed tier ({}), lower the output resolution, or run on a GPU with more \
+         VRAM.",
+        installed_smaller
+            .iter()
+            .map(|tier| tier.to_uppercase())
+            .collect::<Vec<_>>()
+            .join(" / "),
+    )
+}
+
+/// Candle per-tier capability fit for the downtier chooser (sc-10733): fold the full candle fit decision
+/// (predicted resident peak vs the live budget, plus the sequential-residency second stage where the
+/// provider stages components) down to [`TierFit`]. `Fits` = runs resident OR sequentially; `TooBig` =
+/// won't run even one-component-at-a-time. `Unknown` (no budget / unmeasured tier) counts as `Fits` — the
+/// gate never blocks without a signal.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_tier_fit(
+    manifest_entry: &JsonObject,
+    tier: &'static str,
+    budget: Option<crate::vram_gate::VramBudget>,
+    sequential_capable: bool,
+) -> TierFit {
+    let needed = crate::vram_gate::predicted_peak_gb(manifest_entry, tier);
+    match crate::vram_gate::resolve_offload(
+        crate::vram_gate::fit_decision(needed, budget),
+        sequential_capable,
+    ) {
+        crate::vram_gate::FitDecision::Fits | crate::vram_gate::FitDecision::Unknown => TierFit::Fits,
+        crate::vram_gate::FitDecision::Offload {
+            available_gb, ..
+        } => {
+            // Resident won't fit but the provider stages — fits only if the MEASURED sequential peak
+            // fits (unmeasured ⇒ best-effort run, so `sequential_overflow_gb` yields None ⇒ Fits).
+            let seq_needed =
+                crate::vram_gate::predicted_sequential_peak_gb(manifest_entry, tier);
+            match crate::vram_gate::sequential_overflow_gb(seq_needed, budget) {
+                Some(seq_gb) => TierFit::TooBig {
+                    needed_gb: seq_gb,
+                    available_gb,
+                },
+                None => TierFit::Fits,
+            }
+        }
+        crate::vram_gate::FitDecision::TooBig {
+            needed_gb,
+            available_gb,
+        } => TierFit::TooBig {
+            needed_gb,
+            available_gb,
+        },
+    }
+}
+
+/// The `(load Quant, recipe bit count)` a resolved generation `tier` loads at (sc-10733) — used to
+/// correct the recorded quant + telemetry after a capability downtier rewrites the tier, so a
+/// downtiered job records the precision it ACTUALLY ran (parity with the MLX
+/// [`reconcile_resolved_tier_quant`]), not the requested one. On candle the load quant is advisory (the
+/// packed tier is auto-detected on disk), so this is safe to set to the downtiered tier.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn tier_to_quant(tier: &str) -> (Option<Quant>, Option<i64>) {
+    match tier {
+        "bf16" => (None, None),
+        "q4" => (Some(Quant::Q4), Some(4)),
+        _ => (Some(Quant::Q8), Some(8)),
+    }
+}
+
 /// Windows/CUDA candle execution path (sc-3675 SDXL, generalized in sc-5096). The macOS dispatch is
 /// MLX-bound; candle is a narrow **txt2img-only** lane, so this is a trimmed sibling of
 /// [`generate_stream`] that drives the SAME neutral streaming harness (`start_cached_gen_stream` →
@@ -4151,7 +4462,9 @@ async fn generate_candle_stream(
     // ConvRot DiT `File` — the exact shape the candle-gen krea engine's `convrot_selector` expects.
     ensure_krea_convrot_base_present(api, settings, job, request).await?;
     let convrot = resolve_krea_convrot(request, settings);
-    let weights_dir = if let Some((base_dir, _)) = convrot.as_ref() {
+    // `mut` for the sc-10733 capability downtier below: a DEFAULT job whose resolved tier won't fit the
+    // live VRAM budget is re-pointed at the highest installed tier that does, before the spec is built.
+    let mut weights_dir = if let Some((base_dir, _)) = convrot.as_ref() {
         base_dir.clone()
     } else {
         resolve_weights_dir(request, settings)?.ok_or_else(|| {
@@ -4195,7 +4508,8 @@ async fn generate_candle_stream(
     // it resolves them like the MLX path; the sc-3675/sc-5096 families advertise neither and skip both
     // (dense bf16/fp16, no adapters) — preserving their shipped behavior. The router only lets a quant
     // request / LoRA reach this worker for a family that supports it (`image_request_candle_eligible`).
-    let (quant, quant_bits) = if convrot.is_some() {
+    // `mut` so the sc-10733 downtier can correct the recorded precision to the tier it lands on.
+    let (mut quant, mut quant_bits) = if convrot.is_some() {
         // INT8-ConvRot (sc-9300): the int8 DiT replaces the dense transformer wholesale — a bits-based
         // load-time `Quant` is meaningless (and the candle-gen krea engine rejects a quant overlay on
         // the ConvRot path). Force dense-None; the recipe records no `mlxQuantize` bits for this tier.
@@ -4336,7 +4650,8 @@ async fn generate_candle_stream(
     // recorded repo is the resolved model repo (the MLX turnkey the candle lane now packed-loads from,
     // sc-9092) — the same `model_repo` the MLX path records.
     let repo = model_repo(request, &model);
-    let raw_settings = mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
+    // `mut`: rebuilt with the corrected `quant_bits` if the sc-10733 downtier lands on a lower tier.
+    let mut raw_settings = mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
     // Per-generation PiD decode (epic 7840): resolve the PiD checkpoint + Gemma for this model's latent
     // space when `advanced.usePid` is set and the snapshots are cached; otherwise keep the native VAE.
     // `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch). Every candle image
@@ -4382,22 +4697,110 @@ async fn generate_candle_stream(
             crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id),
         )
     });
-    let tier =
-        crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
+    // sc-12090: budget + name the tier the disk-probing resolver ACTUALLY landed on (`weights_dir`),
+    // not a manifest re-derivation that ignores what's installed. `requested_tier_key` re-derived from
+    // `mlx.quantize` with no disk check, so a q4-only install was budgeted (and rejected) against a q8
+    // the user never downloaded. Read the resolved on-disk tier instead — one value, both named and
+    // budgeted. ConvRot loads an int8 DiT over the bf16 base surface (its footprint is neither the bf16
+    // nor the q8 tier), and a `modelPath`/flat root has no recognizable tier basename — fall back to the
+    // manifest key there, preserving today's behavior.
+    let mut tier = match convrot {
+        Some(_) => crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry),
+        None => tier_key_from_resolved_dir(&weights_dir).unwrap_or_else(|| {
+            crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry)
+        }),
+    };
+    // The candle FLUX.1 (sc-10769), FLUX.2 txt2img (sc-10868), and Qwen-Image txt2img (sc-10867) lanes
+    // have wired sequential residency (load→encode→drop the text encoder before the DiT); other families
+    // reject-before-OOM. FLUX.2 is the biggest win off-Mac — the 32B `flux2_dev`'s decoder-LM Mistral TE
+    // is multiple GB freed before the DiT loads; Qwen-Image drops the ~8 GB Qwen2.5-VL encoder before the
+    // 20B DiT. The flux2 edit/control and Qwen edit/pose-control/ComfyUI lanes are NOT wired (resident
+    // path) and are diverted before this gate by `resolve_candle_image_route`, so only the plain-txt2img
+    // engine ids appear here. Hoisted so BOTH the capability downtier and the resident/sequential decision
+    // read one capability signal.
+    let sequential_capable = matches!(
+        engine_id,
+        "flux1_dev" | "flux1_schnell" | "flux2_dev" | "flux2_klein_9b" | "qwen_image"
+    );
+    // sc-10733 capability downtier: for a DEFAULT job (no explicit per-(screen,model) pick, and not the
+    // bespoke ConvRot tier), if the resolved tier won't fit the live budget, step DOWN to the highest
+    // installed tier that does — floored at the per-model quality floor — rejecting only when nothing
+    // >= floor fits. An explicit pick (`mlxQuantizeExplicit`) is HONORED: it skips the downtier and runs
+    // the plain gate below (fits → run; too big → reject-before-OOM), never silently downtiered (#7).
+    let explicit_pick = request
+        .advanced
+        .get("mlxQuantizeExplicit")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if convrot.is_none() && !explicit_pick {
+        let floor = min_quality_floor(request);
+        let candidates: Vec<(&'static str, TierFit)> =
+            downtier_candidate_tiers(request, settings, tier, floor)
+                .into_iter()
+                .map(|candidate| {
+                    (
+                        candidate,
+                        candle_tier_fit(
+                            &request.model_manifest_entry,
+                            candidate,
+                            budget,
+                            sequential_capable,
+                        ),
+                    )
+                })
+                .collect();
+        match choose_downtier(tier, &candidates) {
+            DowntierPick::Keep => {}
+            DowntierPick::Downtier(chosen) => {
+                // The chosen tier came from `downtier_candidate_tiers`, so re-resolving its dir yields
+                // Some; fall through defensively rather than unwrap-panic if it somehow doesn't.
+                if let Some(dir) = resolve_tier_dir(request, settings, chosen) {
+                    tracing::warn!(
+                        model = %request.model,
+                        from = %tier,
+                        to = %chosen,
+                        "candle VRAM fit-gate: default tier won't fit — downtiering to the highest \
+                         installed tier that does (capability clamp, sc-10733)"
+                    );
+                    weights_dir = dir;
+                    tier = chosen;
+                    // Record the precision that ACTUALLY runs (parity with the MLX reconcile) so a
+                    // downtiered job's sidecar/telemetry never lies. Candle load quant is advisory (the
+                    // packed tier is auto-detected on disk), so this rewrite is safe.
+                    let (downtiered_quant, downtiered_bits) = tier_to_quant(chosen);
+                    quant = downtiered_quant;
+                    quant_bits = downtiered_bits;
+                    raw_settings =
+                        mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
+                }
+            }
+            DowntierPick::Reject {
+                tier: smallest,
+                needed_gb,
+                available_gb,
+            } => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{model} needs ~{needed} GB of VRAM even at the smallest installed tier it can run \
+                     ({smallest}) but GPU {gpu} has ~{available} GB available. Lower the output \
+                     resolution or run on a card with more VRAM.",
+                    model = request.model,
+                    needed = needed_gb.round() as i64,
+                    available = available_gb.round() as i64,
+                    gpu = settings.gpu_id,
+                )));
+            }
+        }
+    }
     let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+    // sc-12090 AC#4/#5: the reject suggestions name only tiers actually INSTALLED and lower-fidelity than
+    // the one being rejected — never the rejected tier, never the picker (hidden when ≤1 tier installed).
+    // Reached only on the explicit-pick / ConvRot reject below (the downtier path already rejected above
+    // when nothing smaller fits), where suggesting a smaller installed tier the user could pick is apt.
+    let installed_smaller: Vec<&'static str> = installed_tier_keys(request, settings)
+        .into_iter()
+        .filter(|candidate| tier_quality_rank(candidate) < tier_quality_rank(tier))
+        .collect();
     let use_sequential = {
-        // The candle FLUX.1 (sc-10769), FLUX.2 txt2img (sc-10868), and Qwen-Image txt2img (sc-10867)
-        // lanes have wired sequential residency (load→encode→drop the text encoder before the DiT);
-        // other families reject-before-OOM. FLUX.2 is the biggest win off-Mac — the 32B `flux2_dev`'s
-        // decoder-LM Mistral TE is multiple GB freed before the DiT loads; Qwen-Image drops the ~8 GB
-        // Qwen2.5-VL encoder before the 20B DiT. The flux2 edit/control and the Qwen edit/pose-control/
-        // ComfyUI lanes are NOT wired (they keep the resident path) and are diverted before this gate by
-        // `resolve_candle_image_route`, so only the plain-txt2img engine ids appear here (and the qwen
-        // provider additionally guards the in-place ComfyUI DiT → falls back to resident).
-        let sequential_capable = matches!(
-            engine_id,
-            "flux1_dev" | "flux1_schnell" | "flux2_dev" | "flux2_klein_9b" | "qwen_image"
-        );
         match crate::vram_gate::resolve_offload(
             crate::vram_gate::fit_decision(needed, budget),
             sequential_capable,
@@ -4420,12 +4823,12 @@ async fn generate_candle_stream(
                     return Err(WorkerError::InvalidPayload(format!(
                         "{model} at the {tier} tier needs ~{seq} GB of VRAM even with sequential \
                          component residency (loading one component at a time), but GPU {gpu} has \
-                         ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
-                         resolution, or run on a card with more VRAM.",
+                         ~{available} GB available. {tail}",
                         model = request.model,
                         seq = seq_gb.round() as i64,
                         available = available_gb.round() as i64,
                         gpu = settings.gpu_id,
+                        tail = vram_reject_tail(&installed_smaller),
                     )));
                 }
                 tracing::info!(
@@ -4443,12 +4846,12 @@ async fn generate_candle_stream(
             } => {
                 return Err(WorkerError::InvalidPayload(format!(
                     "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU \
-                     {gpu} has ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
-                     resolution, or run on a card with more VRAM.",
+                     {gpu} has ~{available} GB available. {tail}",
                     model = request.model,
                     needed = needed_gb.round() as i64,
                     available = available_gb.round() as i64,
                     gpu = settings.gpu_id,
+                    tail = vram_reject_tail(&installed_smaller),
                 )));
             }
             _ => false,
@@ -5158,6 +5561,23 @@ mod candle_label_tests {
         ] {
             assert!(!is_candle_engine(model), "{model} must not be a candle engine");
         }
+    }
+
+    /// sc-12090: the reject tail suggests only INSTALLED, smaller tiers — never the rejected tier, and
+    /// never the picker (hidden when ≤1 tier is installed, the case that produced the misleading
+    /// "Pick a lower tier (Q4/Q8)" on the #1516 q4-only install).
+    #[test]
+    fn vram_reject_tail_names_only_installed_smaller_tiers() {
+        // Two smaller tiers installed → both offered, uppercased, highest-fidelity first.
+        let tail = vram_reject_tail(&["q8", "q4"]);
+        assert!(tail.contains("Q8 / Q4"), "lists installed smaller tiers: {tail}");
+        assert!(!tail.contains("picker"), "never points at the picker: {tail}");
+        // One smaller tier installed.
+        assert!(vram_reject_tail(&["q4"]).contains("(Q4)"));
+        // None smaller installed (the single-tier / q4-only case) → says so, no tier list, no picker.
+        let none = vram_reject_tail(&[]);
+        assert!(none.contains("No smaller tier is installed"), "{none}");
+        assert!(!none.contains("Select a smaller"), "{none}");
     }
 }
 
@@ -6369,6 +6789,26 @@ mod quant_tier_reconcile_tests {
         assert_eq!(tier_quant_from_resolved_dir(root), None);
     }
 
+    /// sc-12090: the tier-NAME reader the candle VRAM gate uses to budget/name the on-disk tier. Same
+    /// basename mapping as [`tier_quant_from_resolved_dir`] (which now delegates to it), so a q4-only
+    /// install is gated at `q4`, never the manifest's `q8` default.
+    #[test]
+    fn tier_key_from_resolved_dir_reads_the_on_disk_tier() {
+        let root = std::path::Path::new("/models/krea-2-turbo-mlx");
+        assert_eq!(tier_key_from_resolved_dir(&root.join("q4")), Some("q4"));
+        assert_eq!(tier_key_from_resolved_dir(&root.join("q8")), Some("q8"));
+        assert_eq!(tier_key_from_resolved_dir(&root.join("bf16")), Some("bf16"));
+        // Boogu `<variant>-<tier>` suffix + the bare `<variant>` packed Q8 default.
+        assert_eq!(tier_key_from_resolved_dir(&root.join("base-q4")), Some("q4"));
+        assert_eq!(
+            tier_key_from_resolved_dir(&root.join("turbo-bf16")),
+            Some("bf16")
+        );
+        assert_eq!(tier_key_from_resolved_dir(&root.join("edit")), Some("q8"));
+        // Unrecognized basename (repo root / modelPath) → None; the gate keeps its manifest key.
+        assert_eq!(tier_key_from_resolved_dir(root), None);
+    }
+
     /// The end-to-end reconcile is macOS-only (the MLX generate path). When the resolved tier matches
     /// the request it's a pass-through; when it differs it records the tier that ran, and the
     /// dense-TE guard keeps the load quant `None` while still correcting the recorded bits.
@@ -6551,6 +6991,206 @@ mod quant_tier_reconcile_tests {
             (None, Some(4)),
             "genuine q8→q4 fallback records the resolved q4 tier, load quant stays None"
         );
+    }
+}
+
+/// sc-10733: the shared capability-downtier chooser — walk installed tiers from the resolved default
+/// down to the quality floor, pick the highest that fits, reject only when nothing fits. Pure decision,
+/// compiled on both lanes (the candle vram gate + the MLX fit gate both feed it their own [`TierFit`]).
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+mod capability_downtier_tests {
+    use super::*;
+
+    fn too_big(needed: f64, avail: f64) -> TierFit {
+        TierFit::TooBig {
+            needed_gb: needed,
+            available_gb: avail,
+        }
+    }
+
+    #[test]
+    fn keeps_the_default_when_it_fits() {
+        // Q8 default fits → Keep, even though a smaller q4 is also installed and would fit.
+        let candidates = [("q8", TierFit::Fits), ("q4", TierFit::Fits)];
+        assert_eq!(choose_downtier("q8", &candidates), DowntierPick::Keep);
+    }
+
+    #[test]
+    fn downtiers_to_the_highest_installed_tier_that_fits() {
+        // Q8 default won't fit, q4 does → downtier to q4 (acceptance #2).
+        let candidates = [("q8", too_big(33.0, 30.0)), ("q4", TierFit::Fits)];
+        assert_eq!(
+            choose_downtier("q8", &candidates),
+            DowntierPick::Downtier("q4")
+        );
+        // bf16 default won't fit, q8 is the highest that does (q4 also fits but is lower fidelity).
+        let three = [
+            ("bf16", too_big(72.0, 40.0)),
+            ("q8", TierFit::Fits),
+            ("q4", TierFit::Fits),
+        ];
+        assert_eq!(
+            choose_downtier("bf16", &three),
+            DowntierPick::Downtier("q8")
+        );
+    }
+
+    #[test]
+    fn rejects_naming_the_smallest_evaluated_tier_when_nothing_fits() {
+        // Neither q8 nor q4 fits → reject, naming q4 (the smallest / least-demanding tried) + its need.
+        let candidates = [("q8", too_big(33.0, 10.0)), ("q4", too_big(28.0, 10.0))];
+        assert_eq!(
+            choose_downtier("q8", &candidates),
+            DowntierPick::Reject {
+                tier: "q4",
+                needed_gb: 28.0,
+                available_gb: 10.0,
+            }
+        );
+    }
+
+    #[test]
+    fn floor_wins_over_downtier_via_the_candidate_list() {
+        // A floor-q8 model: the caller filters q4 OUT of the candidate list (rank < floor), so even when
+        // only q8 is offered and it won't fit, we REJECT rather than silently rendering q4 (acceptance #5).
+        let floored = [("q8", too_big(33.0, 20.0))];
+        assert_eq!(
+            choose_downtier("q8", &floored),
+            DowntierPick::Reject {
+                tier: "q8",
+                needed_gb: 33.0,
+                available_gb: 20.0,
+            }
+        );
+    }
+
+    #[test]
+    fn empty_candidates_keep_the_default() {
+        // No installed candidate in range (defensive — the default itself is normally present) → Keep,
+        // deferring to the plain gate.
+        assert_eq!(choose_downtier("q8", &[]), DowntierPick::Keep);
+    }
+
+    #[test]
+    fn downtier_candidate_range_is_floor_to_default_descending() {
+        // The pure range math behind `downtier_candidate_tiers` (installed-filtering aside): candidates
+        // run from the default DOWN to the floor, highest-fidelity first, never above the default.
+        let in_range = |tier: &str, default: &str, floor: Option<&str>| {
+            let default_rank = tier_quality_rank(default);
+            let floor_rank = floor.map_or(1, tier_quality_rank).max(1);
+            let rank = tier_quality_rank(tier);
+            rank <= default_rank && rank >= floor_rank
+        };
+        // Default q8, no floor (→ q4): q8 and q4 in range; bf16 (above default) excluded.
+        assert!(in_range("q8", "q8", None));
+        assert!(in_range("q4", "q8", None));
+        assert!(!in_range("bf16", "q8", None));
+        // Floor q8: q4 excluded (below floor), q8 in range.
+        assert!(!in_range("q4", "q8", Some("q8")));
+        assert!(in_range("q8", "q8", Some("q8")));
+    }
+}
+
+/// sc-10733 acceptance #6 (MLX lane): drive the capability downtier END-TO-END through the real
+/// `SCENEWORKS_MLX_MEMORY_CAP_GB` emulation knob — env → `mlx_memory_cap_gb` → `resolve_budget` → real
+/// `sum_safetensors_bytes` → `decide_residency` → [`mlx_tier_fit`] → [`choose_downtier`] — not just the
+/// isolated pure chooser. Ignored: it reads the ambient knob, so run it with the cap set between the q4
+/// and q8 predicted peaks (weights + the 18 GiB headroom):
+///
+/// ```text
+/// SCENEWORKS_MLX_MEMORY_CAP_GB=21 cargo test -p sceneworks-worker --lib -- --ignored --nocapture \
+///   mlx_downtier_via_emulation_knob
+/// ```
+#[cfg(all(test, target_os = "macos"))]
+mod mlx_downtier_emulation_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "sc-10733 AC#6 e2e; run with SCENEWORKS_MLX_MEMORY_CAP_GB=21"]
+    fn mlx_downtier_via_emulation_knob() {
+        let cap = crate::mlx_fit_gate::mlx_memory_cap_gb().expect(
+            "set SCENEWORKS_MLX_MEMORY_CAP_GB (e.g. 21) — between the q4 (~19) and q8 (~23) peaks",
+        );
+        // Sparse tier dirs: q8 ~5 GiB, q4 ~1 GiB LOGICAL (set_len ⇒ no real disk on APFS). The gate sums
+        // `metadata.len()`, so these read as 5/1 GiB → predicted peaks 23/19 GiB (+18 headroom).
+        let root = std::env::temp_dir().join(format!(
+            "mlx_downtier_emu_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let make_tier = |tier: &str, gib: u64| -> PathBuf {
+            let dir = root.join(tier).join("transformer");
+            std::fs::create_dir_all(&dir).expect("mk tier dir");
+            let file = std::fs::File::create(dir.join("model.safetensors")).expect("mk weights");
+            file.set_len(gib * 1024 * 1024 * 1024).expect("sparse weights");
+            root.join(tier)
+        };
+        let q8_dir = make_tier("q8", 5);
+        let q4_dir = make_tier("q4", 1);
+        // Unregistered engine ⇒ no footprint / not sequential-capable ⇒ resident-or-reject (te=0).
+        let engine = "unregistered_downtier_probe";
+        let q8_fit = mlx_tier_fit(engine, &q8_dir);
+        let q4_fit = mlx_tier_fit(engine, &q4_dir);
+        assert!(
+            matches!(q8_fit, TierFit::TooBig { .. }),
+            "q8 (~23 GiB) must exceed the {cap} GB emulated budget: {q8_fit:?}"
+        );
+        assert_eq!(q4_fit, TierFit::Fits, "q4 (~19 GiB) must fit {cap} GB");
+        // The full decision: a q8 DEFAULT downtiers to the installed q4 that fits (acceptance #2).
+        let candidates = [("q8", q8_fit), ("q4", q4_fit)];
+        assert_eq!(
+            choose_downtier("q8", &candidates),
+            DowntierPick::Downtier("q4"),
+            "q8 default must capability-downtier to q4 under the {cap} GB emulated cap"
+        );
+        eprintln!("emulation knob cap={cap} GB → q8 default DOWNTIERED to q4 (sc-10733 ✓)");
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// sc-10733 acceptance #6 (candle lane): drive the capability downtier END-TO-END through the real
+/// `SCENEWORKS_CUDA_VRAM_CAP_GB` emulation knob — env → `cuda_vram_cap_gb` → `apply_vram_cap` →
+/// `predicted_peak_gb`/`fit_decision` → [`candle_tier_fit`] → [`choose_downtier`]. The synthetic-cap
+/// budget (`apply_vram_cap(None, Some(cap))`) needs no real GPU, so this runs in the candle build under
+/// the knob. Ignored (reads the ambient knob); run with the cap between the q4 and q8 peaks:
+///
+/// ```text
+/// SCENEWORKS_CUDA_VRAM_CAP_GB=30 cargo test -p sceneworks-worker --lib --features backend-candle -- \
+///   --ignored --nocapture candle_downtier_via_emulation_knob
+/// ```
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod candle_downtier_emulation_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    #[ignore = "sc-10733 AC#6 e2e; run with SCENEWORKS_CUDA_VRAM_CAP_GB=30"]
+    fn candle_downtier_via_emulation_knob() {
+        let cap = crate::vram_gate::cuda_vram_cap_gb()
+            .expect("set SCENEWORKS_CUDA_VRAM_CAP_GB (e.g. 30) — between the q4 (~28) and q8 (~38) peaks");
+        // The knob-emulated budget: no real reading + the cap ⇒ a synthetic `free = total = cap` budget,
+        // so this exercises the whole chain without a CUDA card.
+        let budget = crate::vram_gate::apply_vram_cap(None, crate::vram_gate::cuda_vram_cap_gb());
+        // Krea 2 Turbo candle tiers (builtin.models.jsonc, measured — sc-12126): q4 26.4, q8 35.9 (+2
+        // headroom ⇒ peaks 28.4 / 37.9).
+        let manifest = json!({ "candle": { "vramGbByTier": { "q4": 26.4, "q8": 35.9 } } })
+            .as_object()
+            .cloned()
+            .unwrap();
+        // Not sequential-capable (krea keeps the resident path) ⇒ resident-or-reject.
+        let q8_fit = candle_tier_fit(&manifest, "q8", budget, false);
+        let q4_fit = candle_tier_fit(&manifest, "q4", budget, false);
+        assert!(
+            matches!(q8_fit, TierFit::TooBig { .. }),
+            "q8 (~38 GB) must exceed the {cap} GB emulated card: {q8_fit:?}"
+        );
+        assert_eq!(q4_fit, TierFit::Fits, "q4 (~28 GB) must fit {cap} GB");
+        assert_eq!(
+            choose_downtier("q8", &[("q8", q8_fit), ("q4", q4_fit)]),
+            DowntierPick::Downtier("q4"),
+            "q8 default must capability-downtier to q4 under the {cap} GB emulated cap"
+        );
+        eprintln!("emulation knob cap={cap} GB → q8 default DOWNTIERED to q4 (sc-10733 ✓)");
     }
 }
 

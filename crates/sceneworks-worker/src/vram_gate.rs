@@ -370,6 +370,32 @@ mod tests {
         assert_eq!(predicted_peak_gb(&obj(json!({})), "q4"), None);
     }
 
+    /// sc-12090 numeric regression: `krea_2_turbo` Q4-only on a ~30 GB card. Budgeting the tier the
+    /// disk-probing resolver returns (`q4`) ADMITS (26.4 + 2 = 28.4 ≤ 30), where the old manifest
+    /// re-derivation budgeted `q8` (35.9 + 2 = 37.9) and false-rejected. This pins the fit math the
+    /// gate now feeds the ON-DISK tier (`tier_key_from_resolved_dir`), not the manifest's q8 default.
+    #[test]
+    fn resolved_q4_admits_where_manifest_q8_would_reject() {
+        // Krea 2 Turbo candle tiers (builtin.models.jsonc, measured — sc-12126).
+        let manifest = obj(json!({
+            "candle": { "vramGbByTier": { "q4": 26.4, "q8": 35.9 } }
+        }));
+        let budget = VramBudget {
+            free_gb: 30.0,
+            total_gb: 32.0,
+        };
+        // The resolved on-disk tier is q4 (only q4 installed) → admits.
+        assert_eq!(
+            fit_decision(predicted_peak_gb(&manifest, "q4"), Some(budget)),
+            FitDecision::Fits
+        );
+        // The old manifest-derived q8 (never installed) would have false-rejected the SAME job.
+        assert!(matches!(
+            fit_decision(predicted_peak_gb(&manifest, "q8"), Some(budget)),
+            FitDecision::TooBig { .. }
+        ));
+    }
+
     #[test]
     fn fit_decision_rejects_only_a_genuine_overflow() {
         let budget = VramBudget {

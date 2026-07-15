@@ -181,6 +181,34 @@ describe("buildImageJobAdvanced", () => {
     );
   });
 
+  it("marks mlxQuantizeExplicit only for a deliberate pick, so the worker downtiers only the default (sc-10733)", () => {
+    // A deliberate/sticky pick → the worker HONORS it (no silent downtier).
+    const explicit = buildImageJobAdvanced(offState({ quantTier: "q8", tierExplicit: true }));
+    expect(explicit.mlxQuantize).toBe(8);
+    expect(explicit.mlxQuantizeExplicit).toBe(true);
+    // The pure default (no sticky) omits the flag → the worker may capability-downtier it. Additive, so
+    // default recipes stay byte-identical (no new key).
+    const dflt = buildImageJobAdvanced(offState({ quantTier: "q8", tierExplicit: false }));
+    expect(dflt.mlxQuantize).toBe(8);
+    expect(dflt).not.toHaveProperty("mlxQuantizeExplicit");
+    // Never emitted without a tier (non-matrix / "default" pseudo-tier).
+    expect(
+      buildImageJobAdvanced(offState({ quantTier: "default", tierExplicit: true })),
+    ).not.toHaveProperty("mlxQuantizeExplicit");
+  });
+
+  it("carries the resolved tier even when the picker is hidden — single-tier install (sc-12090)", () => {
+    // The #1516 leak: only one tier installed → picker hidden (`showTierPicker: false`) → the tier
+    // state (e.g. q4) was dropped, so the worker defaulted to q8 against a tier the user never
+    // downloaded. Now the resolved tier rides the payload regardless of the picker's visibility.
+    expect(buildImageJobAdvanced(offState({ showTierPicker: false, quantTier: "q4" })).mlxQuantize).toBe(4);
+    expect(buildImageJobAdvanced(offState({ showTierPicker: false, quantTier: "q8" })).mlxQuantize).toBe(8);
+    // A non-matrix model keeps `quantTier` empty/"default" → still omitted (disjoint from Boogu).
+    expect(buildImageJobAdvanced(offState({ showTierPicker: false, quantTier: "default" }))).not.toHaveProperty(
+      "mlxQuantize",
+    );
+  });
+
   it("emits convRot (not mlxQuantize) for the INT8-ConvRot tier (sc-9300)", () => {
     const advanced = buildImageJobAdvanced(
       offState({ showTierPicker: true, quantTier: "int8-convrot" }),
