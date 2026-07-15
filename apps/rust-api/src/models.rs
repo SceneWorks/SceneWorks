@@ -526,14 +526,15 @@ pub(crate) async fn delete_model(
 /// the whole model. Unlike `delete_model` — which removes the whole repo dir AND the registry
 /// entry — this is scoped to the tier's `files` and never touches the manifest, so the model
 /// stays catalogued and re-downloadable; deleting the last remaining tier simply flips it back
-/// to not-installed. Mirrors `delete_model`'s trash-first → `trashUnavailable` → `?permanent`
-/// retry contract and the same ownership guard (`<data>/models` + the HF hub cache).
+/// to not-installed. Unlike `delete_model` this deletes PERMANENTLY (never the OS trash): a tier is
+/// many loose HF-cache blobs + snapshot symlinks, and trashing them one-by-one drove a macOS
+/// per-file permission-prompt loop ("you don't have permission to access some of the items") — and a
+/// tier isn't restorable from loose trashed blobs anyway (sc-12088). Same ownership guard as
+/// `delete_model` (`<data>/models` + the HF hub cache).
 pub(crate) async fn delete_model_variant(
     State(state): State<AppState>,
     Path((model_id, variant)): Path<(String, String)>,
-    Query(query): Query<CatalogDeleteQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let permanent = query.permanent.unwrap_or(false);
     let variant = variant.trim().to_ascii_lowercase();
     let catalog = model_catalog(&state).await?;
     let model = catalog
@@ -566,7 +567,8 @@ pub(crate) async fn delete_model_variant(
         }
         let repo_cache = huggingface_repo_cache_path(data_dir, &repo);
         let managed_dir = Some(data_dir.join("models").join(safe_download_dir(&repo)));
-        remove_tier_artifacts(repo_cache, managed_dir, &files, &allowed_roots, permanent).await?
+        // Always permanent (skip the OS trash) — see the fn doc (sc-12088).
+        remove_tier_artifacts(repo_cache, managed_dir, &files, &allowed_roots, true).await?
     } else if model_has_convert_tier(&model, &variant) {
         // Convert-at-install: the tier is a real dir under the converted MLX tree. Prefer the
         // catalog's resolved `mlxConvertedPath`; fall back to the canonical convert output dir.
@@ -575,27 +577,13 @@ pub(crate) async fn delete_model_variant(
             .and_then(Value::as_str)
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("models").join("mlx").join(&model_id));
-        remove_converted_tier(converted.join(&variant), &allowed_roots, permanent).await?
+        // Always permanent (skip the OS trash) — see the fn doc (sc-12088).
+        remove_converted_tier(converted.join(&variant), &allowed_roots, true).await?
     } else {
         return Err(ApiError::bad_request(format!(
             "Model does not advertise a '{variant}' quant tier"
         )));
     };
-    // Some owned files could not reach the OS trash and nothing was permanently deleted — ask
-    // the client to confirm a permanent delete (same contract as `delete_model`).
-    if !permanent && !removal.trash_failed_paths.is_empty() {
-        return Ok(Json(json!({
-            "id": model_id,
-            "variant": variant,
-            "kind": "model-variant",
-            "trashUnavailable": true,
-            "trashFailedPaths": removal.trash_failed_paths,
-            "removedLocalArtifacts": !removal.removed_paths.is_empty(),
-            "reclaimedBytes": removal.reclaimed_bytes,
-            "removedPaths": removal.removed_paths,
-            "retainedPaths": removal.retained_paths,
-        })));
-    }
     if removal.removed_paths.is_empty() {
         return Err(ApiError::bad_request(format!(
             "Tier '{variant}' is not installed"
@@ -605,7 +593,8 @@ pub(crate) async fn delete_model_variant(
         "id": model_id,
         "variant": variant,
         "kind": "model-variant",
-        "trashed": !permanent,
+        // Permanent delete: no OS trash, no undo (sc-12088).
+        "trashed": false,
         // A tier delete NEVER removes the registry entry: the model stays in the catalog so the
         // tier can be re-downloaded. Emitted false so the web keeps the model card in place.
         "removedManifestEntry": false,

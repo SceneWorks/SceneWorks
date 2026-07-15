@@ -103,20 +103,17 @@ export function useModelsAndLoras({
   // Delete ONE installed quant tier of a model and reclaim its disk (sc-12024). Counterpart to
   // createModelDownloadJob's per-tier install: hits DELETE …/variants/:variant, which removes only
   // that tier's files/blobs and NEVER the registry entry. So — unlike deleteModel — the model card
-  // stays put; the catalog refetch flips the tier from "installed" to "not installed". Mirrors the
-  // trash-first → trashUnavailable → permanent retry contract.
+  // stays put; the catalog refetch flips the tier from "installed" to "not installed". Unlike
+  // deleteModel this deletes PERMANENTLY (the backend never uses the OS trash for a tier): a tier is
+  // many loose HF-cache blobs, so trashing them one-by-one drove a macOS per-file permission-prompt
+  // loop (sc-12088). One DELETE; the confirm dialog makes the permanence explicit.
   const deleteModelVariant = useCallback(
     async (model, variant) => {
-      const base = `/api/v1/models/${encodeURIComponent(model.id)}/variants/${encodeURIComponent(
-        variant,
-      )}`;
-      let result = await apiFetch(base, token, { method: "DELETE" });
-      if (result?.trashUnavailable) {
-        if (!(await confirmPermanentDelete())) {
-          return { cancelled: true };
-        }
-        result = await apiFetch(`${base}?permanent=true`, token, { method: "DELETE" });
-      }
+      const result = await apiFetch(
+        `/api/v1/models/${encodeURIComponent(model.id)}/variants/${encodeURIComponent(variant)}`,
+        token,
+        { method: "DELETE" },
+      );
       setError("");
       await refreshData();
       return result;
