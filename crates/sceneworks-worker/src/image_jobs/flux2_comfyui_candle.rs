@@ -140,9 +140,11 @@ fn flux2_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool 
 ///    on EXACTLY the Blackwell hardware the tier targets, while off-Blackwell hosts fell back fine.
 ///
 /// So a `quantTier: "nvfp4"` request on this lane falls through to the UNCHANGED `q4`/`q8`/default arms
-/// below on every host. That fall-through IS the clean fallback: the label is still recorded as asset
-/// telemetry (sc-12006), but selection is a normal tier. `quantTier` is the tier's identity precisely
-/// because `mlxQuantize` is bits-valued and no integer is honest for NVFP4 (see
+/// below on every host. That fall-through IS the clean fallback the story requires. The asset record
+/// stays honest about it: [`flux2_comfyui_raw_settings`] STRIPS the stale `quantTier` label on the
+/// q4/q8 path (its `else` branch — the only reachable one here), so the record names the tier that
+/// actually rendered rather than the one that was asked for. `quantTier` is the tier's identity
+/// precisely because `mlxQuantize` is bits-valued and no integer is honest for NVFP4 (see
 /// [`flux2_comfyui_raw_settings`]); that identity simply has no servable target on this lane. Pinned by
 /// `flux2_comfyui_never_selects_nvfp4`.
 fn flux2_comfyui_quant(request: &ImageRequest) -> Quant {
