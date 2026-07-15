@@ -1654,37 +1654,94 @@ fn dense_te_requested_tier_bits(request: &ImageRequest) -> Option<i64> {
     }
 }
 
-/// The `(engine Quant, recipe bit count)` a resolved turnkey tier subdir ACTUALLY loads at, parsed
-/// from the tier dir's basename (sc-8820). The tier resolvers ([`standard_tier_subdir`],
+/// The generation tier (`bf16`/`q8`/`q4`) a resolved turnkey tier subdir ACTUALLY loads at, parsed
+/// from its basename (sc-8820 / sc-12090). The tier resolvers ([`standard_tier_subdir`],
 /// [`ideogram_model_subdir`], [`boogu_model_subdir`], [`krea_model_subdir`]) fall through q4→q8→bf16
 /// (or the Boogu `<variant>`-shaped names) when the requested tier isn't downloaded, so the resolved
 /// path can be a DIFFERENT precision than the request asked for. This maps the resolved basename back
-/// to its precision so the caller can record the tier that ran, not the one requested:
-///   - `bf16` / `<variant>-bf16` → dense (`None`, `None`)
-///   - `q4`   / `<variant>-q4`   → Q4 (`4`)
-///   - `q8`   / `<variant>-q8`   → Q8 (`8`)
+/// to its tier:
+///   - `bf16` / `<variant>-bf16` → `bf16`
+///   - `q4`   / `<variant>-q4`   → `q4`
+///   - `q8`   / `<variant>-q8`   → `q8`
 ///   - a bare Boogu `<variant>/` (no `-q4`/`-q8`/`-bf16` suffix) → the shipped **Q8** default
 ///
 /// `None` when the basename is not a recognizable tier name — e.g. the resolver fell all the way back
 /// to the repo `root` (a partial/absent turnkey the engine will error on), or the dir is a `modelPath`
-/// override. In that case the caller keeps the request-derived quant rather than inventing one.
+/// override. In that case the caller keeps its request-derived tier rather than inventing one.
 ///
-/// macOS-only: its sole caller is [`reconcile_resolved_tier_quant`] on the MLX `generate_stream` path.
-/// The candle lane has no quant-tier layout to reconcile, so this would be dead code there.
+/// Available on the candle lane too (sc-12090): the candle VRAM fit-gate reads the tier the
+/// disk-probing resolver landed on here — instead of re-deriving from the manifest — so it names and
+/// budgets against the tier that would actually load, never an uninstalled one.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn tier_key_from_resolved_dir(dir: &Path) -> Option<&'static str> {
+    let name = dir.file_name()?.to_str()?;
+    // Match the trailing tier token: the whole basename (standard/ideogram/krea) or the suffix of a
+    // Boogu `<variant>-<tier>` folder; a bare Boogu `<variant>` IS the packed Q8 default.
+    match name.rsplit('-').next().unwrap_or(name) {
+        "bf16" => Some("bf16"),
+        "q4" => Some("q4"),
+        "q8" | "base" | "turbo" | "edit" => Some("q8"),
+        _ => None,
+    }
+}
+
+/// The `(engine Quant, recipe bit count)` a resolved turnkey tier subdir ACTUALLY loads at (sc-8820) —
+/// the `Quant`-typed view of [`tier_key_from_resolved_dir`], consumed by
+/// [`reconcile_resolved_tier_quant`] on the MLX `generate_stream` path. `None` for an unrecognizable
+/// basename (kept identical to the pre-sc-12090 behavior: the caller keeps the request-derived quant).
+///
+/// macOS-only: the candle lane has no quant-tier layout to reconcile, so this would be dead code there.
 #[cfg(target_os = "macos")]
 fn tier_quant_from_resolved_dir(dir: &Path) -> Option<(Option<Quant>, Option<i64>)> {
-    let name = dir.file_name()?.to_str()?;
-    // Match the trailing tier token: `q4` / `q8` / `bf16`, whether the whole basename (standard/
-    // ideogram/krea) or the suffix of a Boogu `<variant>-<tier>` folder.
-    let tier = name.rsplit('-').next().unwrap_or(name);
-    match tier {
+    match tier_key_from_resolved_dir(dir)? {
         "bf16" => Some((None, None)),
         "q4" => Some((Some(Quant::Q4), Some(4))),
         "q8" => Some((Some(Quant::Q8), Some(8))),
-        // A bare Boogu `base`/`turbo`/`edit` folder (no tier suffix) IS the packed Q8 default.
-        "base" | "turbo" | "edit" => Some((Some(Quant::Q8), Some(8))),
         _ => None,
     }
+}
+
+/// Resolve the on-disk weights dir for `request` FORCED to a specific generation `tier`
+/// (`bf16`/`q8`/`q4`), reusing the SAME family disk-probing resolver the default path uses
+/// ([`resolve_weights_dir`]). `Some(dir)` only when that tier is actually INSTALLED — the resolver
+/// lands on that exact tier; `None` when it isn't (the resolver falls through to a different/absent
+/// tier) or the model has no quant-tier layout. This lets the capability downtier (sc-10733) and the
+/// reject-message tier suggestions (sc-12090) enumerate installed tiers WITHOUT duplicating each
+/// family's bespoke `present()` logic — a forced-bits probe is byte-for-byte what the loader would do.
+///
+/// The forced `mlxQuantize` is an explicit tier probe, so it bypasses the per-model quality floor
+/// (explicit picks are always honored) — the caller filters candidates to `>= floor` before probing.
+///
+/// Candle-only for now (sc-12090's reject-message enumeration); sc-10733 widens it to the MLX lane
+/// when it wires the capability downtier there too.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_tier_dir(request: &ImageRequest, settings: &Settings, tier: &str) -> Option<PathBuf> {
+    let bits: i64 = match tier {
+        "bf16" => 0,
+        "q4" => 4,
+        _ => 8, // q8
+    };
+    let mut probe = request.clone();
+    probe
+        .advanced
+        .insert("mlxQuantize".to_owned(), Value::from(bits));
+    let dir = resolve_weights_dir(&probe, settings).ok().flatten()?;
+    (tier_key_from_resolved_dir(&dir) == Some(tier_static_name(tier))).then_some(dir)
+}
+
+/// The generation tiers (`bf16`/`q8`/`q4`) currently INSTALLED for `request`'s model, in DESCENDING
+/// fidelity (bf16 → q8 → q4). Each is confirmed by [`resolve_tier_dir`] (a forced-bits probe of the
+/// real family resolver), so the list is exactly what the loader could load. Empty for a model with no
+/// quant-tier layout (a flat / `modelPath` snapshot). Shared by the capability downtier + the
+/// reject-message tier suggestions.
+///
+/// Candle-only for now (sc-12090); sc-10733 widens it to the MLX lane for the capability downtier.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn installed_tier_keys(request: &ImageRequest, settings: &Settings) -> Vec<&'static str> {
+    ["bf16", "q8", "q4"]
+        .into_iter()
+        .filter(|tier| resolve_tier_dir(request, settings, tier).is_some())
+        .collect()
 }
 
 /// Reconcile the request-derived `(quant, quant_bits)` against the tier subdir the resolver ACTUALLY
@@ -4090,6 +4147,29 @@ fn candle_adapter_label(model: &str) -> &'static str {
 /// adapter-free exactly as before. No reference/img2img/control — those shapes fall back to the Python
 /// worker upstream (`image_request_candle_eligible`). Reached only when `backend_candle_enabled`
 /// (default off → production routing unchanged until parity).
+/// The actionable tail for a candle VRAM-fit reject (sc-12090). Suggests only the tiers that are
+/// actually INSTALLED and smaller than the rejected one (`installed_smaller`, descending fidelity),
+/// else states that none is installed. Never names the rejected tier itself, and never points at the
+/// quant picker — which is hidden by design when ≤1 tier is installed, exactly the case that produced
+/// the misleading "Pick a lower tier (Q4/Q8)" text on a single-tier install.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn vram_reject_tail(installed_smaller: &[&str]) -> String {
+    if installed_smaller.is_empty() {
+        return "No smaller tier is installed — lower the output resolution or run on a GPU with more \
+                VRAM."
+            .to_owned();
+    }
+    format!(
+        "Select a smaller installed tier ({}), lower the output resolution, or run on a GPU with more \
+         VRAM.",
+        installed_smaller
+            .iter()
+            .map(|tier| tier.to_uppercase())
+            .collect::<Vec<_>>()
+            .join(" / "),
+    )
+}
+
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_stream(
     api: &ApiClient,
@@ -4382,9 +4462,27 @@ async fn generate_candle_stream(
             crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id),
         )
     });
-    let tier =
-        crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
+    // sc-12090: budget + name the tier the disk-probing resolver ACTUALLY landed on (`weights_dir`),
+    // not a manifest re-derivation that ignores what's installed. `requested_tier_key` re-derived from
+    // `mlx.quantize` with no disk check, so a q4-only install was budgeted (and rejected) against a q8
+    // the user never downloaded. Read the resolved on-disk tier instead — one value, both named and
+    // budgeted. ConvRot loads an int8 DiT over the bf16 base surface (its footprint is neither the bf16
+    // nor the q8 tier), and a `modelPath`/flat root has no recognizable tier basename — fall back to the
+    // manifest key there, preserving today's behavior.
+    let tier = match convrot {
+        Some(_) => crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry),
+        None => tier_key_from_resolved_dir(&weights_dir).unwrap_or_else(|| {
+            crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry)
+        }),
+    };
     let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+    // sc-12090 AC#4/#5: the reject suggestions must name only tiers actually INSTALLED and lower-fidelity
+    // than the one being rejected — never the rejected tier, never the picker (which is hidden when ≤1
+    // tier is installed). Enumerated from disk via the same family resolver the loader uses.
+    let installed_smaller: Vec<&'static str> = installed_tier_keys(request, settings)
+        .into_iter()
+        .filter(|candidate| tier_quality_rank(candidate) < tier_quality_rank(tier))
+        .collect();
     let use_sequential = {
         // The candle FLUX.1 (sc-10769), FLUX.2 txt2img (sc-10868), and Qwen-Image txt2img (sc-10867)
         // lanes have wired sequential residency (load→encode→drop the text encoder before the DiT);
@@ -4420,12 +4518,12 @@ async fn generate_candle_stream(
                     return Err(WorkerError::InvalidPayload(format!(
                         "{model} at the {tier} tier needs ~{seq} GB of VRAM even with sequential \
                          component residency (loading one component at a time), but GPU {gpu} has \
-                         ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
-                         resolution, or run on a card with more VRAM.",
+                         ~{available} GB available. {tail}",
                         model = request.model,
                         seq = seq_gb.round() as i64,
                         available = available_gb.round() as i64,
                         gpu = settings.gpu_id,
+                        tail = vram_reject_tail(&installed_smaller),
                     )));
                 }
                 tracing::info!(
@@ -4443,12 +4541,12 @@ async fn generate_candle_stream(
             } => {
                 return Err(WorkerError::InvalidPayload(format!(
                     "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU \
-                     {gpu} has ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
-                     resolution, or run on a card with more VRAM.",
+                     {gpu} has ~{available} GB available. {tail}",
                     model = request.model,
                     needed = needed_gb.round() as i64,
                     available = available_gb.round() as i64,
                     gpu = settings.gpu_id,
+                    tail = vram_reject_tail(&installed_smaller),
                 )));
             }
             _ => false,
@@ -5158,6 +5256,23 @@ mod candle_label_tests {
         ] {
             assert!(!is_candle_engine(model), "{model} must not be a candle engine");
         }
+    }
+
+    /// sc-12090: the reject tail suggests only INSTALLED, smaller tiers — never the rejected tier, and
+    /// never the picker (hidden when ≤1 tier is installed, the case that produced the misleading
+    /// "Pick a lower tier (Q4/Q8)" on the #1516 q4-only install).
+    #[test]
+    fn vram_reject_tail_names_only_installed_smaller_tiers() {
+        // Two smaller tiers installed → both offered, uppercased, highest-fidelity first.
+        let tail = vram_reject_tail(&["q8", "q4"]);
+        assert!(tail.contains("Q8 / Q4"), "lists installed smaller tiers: {tail}");
+        assert!(!tail.contains("picker"), "never points at the picker: {tail}");
+        // One smaller tier installed.
+        assert!(vram_reject_tail(&["q4"]).contains("(Q4)"));
+        // None smaller installed (the single-tier / q4-only case) → says so, no tier list, no picker.
+        let none = vram_reject_tail(&[]);
+        assert!(none.contains("No smaller tier is installed"), "{none}");
+        assert!(!none.contains("Select a smaller"), "{none}");
     }
 }
 
@@ -6367,6 +6482,26 @@ mod quant_tier_reconcile_tests {
         // A fell-all-the-way-back-to-root (or modelPath) dir is not a recognizable tier → None, so the
         // caller keeps the request-derived quant.
         assert_eq!(tier_quant_from_resolved_dir(root), None);
+    }
+
+    /// sc-12090: the tier-NAME reader the candle VRAM gate uses to budget/name the on-disk tier. Same
+    /// basename mapping as [`tier_quant_from_resolved_dir`] (which now delegates to it), so a q4-only
+    /// install is gated at `q4`, never the manifest's `q8` default.
+    #[test]
+    fn tier_key_from_resolved_dir_reads_the_on_disk_tier() {
+        let root = std::path::Path::new("/models/krea-2-turbo-mlx");
+        assert_eq!(tier_key_from_resolved_dir(&root.join("q4")), Some("q4"));
+        assert_eq!(tier_key_from_resolved_dir(&root.join("q8")), Some("q8"));
+        assert_eq!(tier_key_from_resolved_dir(&root.join("bf16")), Some("bf16"));
+        // Boogu `<variant>-<tier>` suffix + the bare `<variant>` packed Q8 default.
+        assert_eq!(tier_key_from_resolved_dir(&root.join("base-q4")), Some("q4"));
+        assert_eq!(
+            tier_key_from_resolved_dir(&root.join("turbo-bf16")),
+            Some("bf16")
+        );
+        assert_eq!(tier_key_from_resolved_dir(&root.join("edit")), Some("q8"));
+        // Unrecognized basename (repo root / modelPath) → None; the gate keeps its manifest key.
+        assert_eq!(tier_key_from_resolved_dir(root), None);
     }
 
     /// The end-to-end reconcile is macOS-only (the MLX generate path). When the resolved tier matches

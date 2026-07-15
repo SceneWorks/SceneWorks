@@ -133,13 +133,14 @@ export function buildImageJobAdvanced(state) {
     // mlxQuantize spreads for one model (the tier picker below would win the object-spread
     // race, but we never render/emit both).
     ...(precisionToggle && bf16Precision && !showTierPicker ? { mlxQuantize: 0 } : {}),
-    // Quant-tier A/B (sc-8515): when the model has >1 tier installed and a tier is picked,
-    // send that tier's mlxQuantize (bf16→0, q8→8, q4→4). The worker's resolve_quant +
-    // generator cache route to it (reload-always). Emitted only when the picker is shown
-    // AND the picked tier maps to a known quant value, so single-tier models and the
-    // "default" pseudo-variant never leak an mlxQuantize into the payload. Disjoint from the
-    // Boogu precisionToggle above (non-matrix models), enforced by its `!showTierPicker` guard.
-    ...(showTierPicker && tierQuantize(quantTier) !== null
+    // Quant-tier A/B (sc-8515) + on-disk tier fidelity (sc-12090): send the resolved tier's
+    // mlxQuantize (bf16→0, q8→8, q4→4) whenever the tier state maps to a known quant value —
+    // NOT only when the picker is shown. A single installed tier hides the picker, but the tier
+    // the state resolved (e.g. q4-only) must still ride the payload so the worker budgets/loads
+    // that tier instead of defaulting to q8 against a tier the user never downloaded (#1516). A
+    // non-matrix model keeps `quantTier` empty (`tierQuantize("") === null`), so this stays
+    // disjoint from the Boogu precisionToggle above — no `showTierPicker` guard needed.
+    ...(tierQuantize(quantTier) !== null
       ? { mlxQuantize: tierQuantize(quantTier) }
       : {}),
     // Krea 2 INT8-ConvRot tier (sc-9300, epic 9083): the online-rotation int8 DiT is NOT a bits-based
