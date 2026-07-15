@@ -2514,7 +2514,7 @@
         // measurement. It gates the `int8-convrot` variant through the SAME per-tier memory-eligibility
         // path as q4/q8/bf16 (the third of the three ConvRot gates; the candle lane + sm_89 compute-cap
         // are the worker's `int8_convrot` capability).
-        "vramGbByTier": { "q4": 26.4, "q8": 31.0, "bf16": 44.0, "int8-convrot": 31.0 },
+        "vramGbByTier": { "q4": 26.4, "q8": 35.9, "bf16": 55.6, "int8-convrot": 31.0 },
         "measured": false,
         // Pose-ControlNet lane VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The control lane loads
         // the base at the installed tier PLUS the trained ~6.6 GB bf16 control branch, so its render peak
