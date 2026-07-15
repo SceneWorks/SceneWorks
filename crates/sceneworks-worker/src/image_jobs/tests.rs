@@ -175,15 +175,21 @@ fn quant_mapping_defaults_to_q8_and_maps_bits() {
     use gen_core::Quant;
     let default = request(json!({ "projectId": "p" }));
     assert!(matches!(
-        resolve_quant(&default),
+        resolve_quant(&default, None),
         (Some(Quant::Q8), Some(8))
     ));
     let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
-    assert!(matches!(resolve_quant(&q4), (Some(Quant::Q4), Some(4))));
+    assert!(matches!(
+        resolve_quant(&q4, None),
+        (Some(Quant::Q4), Some(4))
+    ));
     let dense = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
-    assert!(matches!(resolve_quant(&dense), (None, None)));
+    assert!(matches!(resolve_quant(&dense, None), (None, None)));
     let six = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 6 } }));
-    assert!(matches!(resolve_quant(&six), (Some(Quant::Q8), Some(8))));
+    assert!(matches!(
+        resolve_quant(&six, None),
+        (Some(Quant::Q8), Some(8))
+    ));
 }
 
 #[cfg(target_os = "macos")]
@@ -3281,7 +3287,7 @@ fn sc3031_ab_dump_txt2img() {
     let steps = resolve_steps(&req, &model);
     let guidance = resolve_guidance(&req, &model);
     let negative = resolve_negative_prompt(&req, &model);
-    let (quant, _bits) = resolve_quant(&req);
+    let (quant, _bits) = resolve_quant(&req, None);
     let weights = resolve_weights_dir(&req, &settings)
         .expect("weights resolve")
         .expect("weights in HF cache");
@@ -3348,7 +3354,7 @@ fn sc3031_ab_dump_pose() {
     let control_weights = resolve_control_weights(&req, &settings)
         .expect("control-weights filename resolves")
         .expect("Fun-Controlnet-Union weights");
-    let (quant, _bits) = resolve_quant(&req);
+    let (quant, _bits) = resolve_quant(&req, None);
     let zimage = mlx_model("z_image_turbo").expect("z-image model row");
     let steps = resolve_steps(&req, &zimage);
     let control_scale = resolve_control_scale(&req);
@@ -6397,19 +6403,19 @@ fn ideogram_engine_defaults_and_quant_resolution() {
     assert_eq!(resolve_guidance(&req(json!({})), &model), Some(7.0));
     // Default → Q4 (manifest packed default); advanced.mlxQuantize overrides to Q8 / bf16-dense.
     assert!(matches!(
-        resolve_quant(&req(json!({}))),
+        resolve_quant(&req(json!({})), None),
         (Some(Quant::Q4), Some(4))
     ));
     assert!(matches!(
-        resolve_quant(&req(json!({ "mlxQuantize": 8 }))),
+        resolve_quant(&req(json!({ "mlxQuantize": 8 })), None),
         (Some(Quant::Q8), Some(8))
     ));
     assert!(matches!(
-        resolve_quant(&req(json!({ "mlxQuantize": 4 }))),
+        resolve_quant(&req(json!({ "mlxQuantize": 4 })), None),
         (Some(Quant::Q4), Some(4))
     ));
     assert!(matches!(
-        resolve_quant(&req(json!({ "mlxQuantize": 0 }))),
+        resolve_quant(&req(json!({ "mlxQuantize": 0 })), None),
         (None, None)
     ));
 }
@@ -6521,15 +6527,15 @@ fn boogu_engine_defaults_and_quant_resolution() {
     );
     // Default → Q8 (the shipped pre-packed turnkey); advanced.mlxQuantize overrides to Q4 / bf16-dense.
     assert!(matches!(
-        resolve_quant(&req("boogu_image", json!({}))),
+        resolve_quant(&req("boogu_image", json!({})), None),
         (Some(Quant::Q8), Some(8))
     ));
     assert!(matches!(
-        resolve_quant(&req("boogu_image", json!({ "mlxQuantize": 4 }))),
+        resolve_quant(&req("boogu_image", json!({ "mlxQuantize": 4 })), None),
         (Some(Quant::Q4), Some(4))
     ));
     assert!(matches!(
-        resolve_quant(&req("boogu_image", json!({ "mlxQuantize": 0 }))),
+        resolve_quant(&req("boogu_image", json!({ "mlxQuantize": 0 })), None),
         (None, None)
     ));
 }
@@ -6634,7 +6640,7 @@ fn ideogram_raw_settings_records_recipe_and_structured_prompt() {
         "modelManifestEntry": { "mlx": { "quantize": 4 } },
     }));
     // Resolve the quant the real path would (manifest packed default → Q4, sc-6237), then record it.
-    let (_quant, quant_bits) = resolve_quant(&req);
+    let (_quant, quant_bits) = resolve_quant(&req, None);
     let raw = mlx_raw_settings(&req, "SceneWorks/ideogram-4-mlx", 48, quant_bits, Some(7.0));
     assert_eq!(raw.get("realModelInference"), Some(&json!(true)));
     assert_eq!(raw.get("repo"), Some(&json!("SceneWorks/ideogram-4-mlx")));
@@ -6706,7 +6712,7 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
         "modelManifestEntry": { "mlx": { "quantize": 4 } },
     }));
     // Q4 spec matching the packed q4 weights — the exact production path (sc-6237).
-    let (quant, _bits) = resolve_quant(&req);
+    let (quant, _bits) = resolve_quant(&req, None);
     let guidance = resolve_guidance(&req, &model); // 7.0
 
     let generator = load_engine("ideogram_4", dir, quant, Vec::new(), None).unwrap();
@@ -6905,7 +6911,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
         "projectId": "p", "model": "ideogram_4", "prompt": "p", "advanced": {},
         "modelManifestEntry": { "mlx": { "quantize": 4 } },
     }));
-    let (quant, _bits) = resolve_quant(&req);
+    let (quant, _bits) = resolve_quant(&req, None);
     let guidance = resolve_guidance(&req, &model);
     let generator = load_engine("ideogram_4", ideogram, quant, Vec::new(), None).unwrap();
     let cancel = CancelFlag::new();
@@ -7016,7 +7022,7 @@ fn ideogram_4_real_weights_edit_img2img_and_inpaint() {
         "projectId": "p", "model": "ideogram_4", "prompt": "p", "advanced": {},
         "modelManifestEntry": { "mlx": { "quantize": 4 } },
     }));
-    let (quant, _bits) = resolve_quant(&req);
+    let (quant, _bits) = resolve_quant(&req, None);
     let guidance = resolve_guidance(&req, &model);
     let generator = load_engine("ideogram_4", dir, quant, Vec::new(), None).unwrap();
     let cancel = gen_core::CancelFlag::new();
@@ -7242,7 +7248,7 @@ fn boogu_real_weights_generates_base_turbo_edit() {
         // The exact production spec: Q8 over the packed `<variant>/` weights, with the resolved
         // guidance (4.0 Base/Edit, None Turbo) + true_cfg (None for all boogu — Base/Edit forward
         // CFG via the `guidance` scalar; Turbo is CFG-free).
-        let (quant, _bits) = resolve_quant(&req);
+        let (quant, _bits) = resolve_quant(&req, None);
         let guidance = resolve_guidance(&req, &model);
         let true_cfg = resolve_true_cfg(&req, &model);
 
@@ -9580,7 +9586,7 @@ fn krea_control_lora_end_to_end_mlx_smoke() {
     );
     println!("[smoke] Bug 2 OK — resolved {} adapter(s)", adapters.len());
 
-    let (quant, _) = resolve_quant(&req);
+    let (quant, _) = resolve_quant(&req, None);
     let load = |adapters: Vec<AdapterSpec>| {
         let spec = krea_control_spec(base.clone(), overlay.clone(), quant, adapters);
         load_control_engine(KREA_CONTROL_ENGINE_ID, &spec)

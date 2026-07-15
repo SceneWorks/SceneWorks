@@ -923,13 +923,67 @@ pub(crate) const NVFP4_TIER: &str = "nvfp4";
 ///
 /// PURE + UNGATED (like [`preferred_tier`], its caller): reads only the request, so the "did the user
 /// ask for NVFP4" question is testable on every platform without a GPU. The sm_120 host gate is the
-/// separate [`nvfp4_host_eligible`]; the tier is selected only when BOTH hold.
+/// separate [`nvfp4_host_eligible`], and the on-disk gate is [`tier_dir_is_nvfp4`]; the tier is
+/// SELECTED only when all three hold — see [`nvfp4_selected`].
 fn nvfp4_requested(request: &ImageRequest) -> bool {
     request
         .advanced
         .get("quantTier")
         .and_then(Value::as_str)
         .is_some_and(|tier| tier.trim().eq_ignore_ascii_case(NVFP4_TIER))
+}
+
+/// Whether the RESOLVED tier dir is the distinct `nvfp4/` tier — i.e. whether the NVFP4 tier is
+/// actually what [`standard_tier_subdir`] landed on (sc-11042).
+///
+/// The DISK half of the NVFP4 gate. `standard_tier_subdir` only returns the `nvfp4/` dir when that dir
+/// exists with weights in it; a request for a tier that isn't converted yet (sc-11043 owns the
+/// convert-at-install loop — **no shipping model packs an `nvfp4/` dir today**) rejoins the clean
+/// q8 → bf16 → q4 fallback chain. So "the resolved basename is `nvfp4`" is exactly "the NVFP4 tier is
+/// installed AND was chosen", read off the same value the loader will read.
+///
+/// `None` (tier dir unknown — a lane that resolves no standard-tier subdir: a flat diffusers snapshot,
+/// a `modelPath` override, or a caller with no dir in scope) ⇒ **false**. A tier we cannot verify is a
+/// tier we must not claim: the conservative direction is to fall through to the request-derived
+/// q4/q8/bf16 (which is what such a lane actually loads), never to stamp NVFP4 on it.
+///
+/// Gated to the lanes that HAVE a quant resolver ([`resolve_quant`]'s cfg): the neither-MLX-nor-candle
+/// build resolves no load quant at all, so this would be dead code there (`-D warnings`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn tier_dir_is_nvfp4(tier_dir: Option<&Path>) -> bool {
+    tier_dir.and_then(Path::file_name).and_then(|name| name.to_str()) == Some(NVFP4_TIER)
+}
+
+/// Whether this job actually SELECTS the distinct NVFP4 tier (sc-11042, epic 11037 SC#5) — the single
+/// predicate behind the tier's load quant ([`resolve_quant`]), its recorded label
+/// ([`effective_quant_label`]), and its VRAM sizing (`vram_gate::requested_tier_key`), so those three
+/// can never disagree about what ran.
+///
+/// **All THREE halves are required:**
+/// 1. [`nvfp4_requested`] — the user EXPLICITLY named the tier. The SC#5 opt-in: never inferred from
+///    `bits`, a manifest default, or hardware detection. Being on Blackwell alone selects nothing.
+/// 2. [`nvfp4_host_eligible`] — this host can serve FP4 (sm_120 on the candle lane).
+/// 3. [`tier_dir_is_nvfp4`] — the `nvfp4/` tier is INSTALLED and is the dir that resolved.
+///
+/// Half 3 is why this takes the RESOLVED dir rather than trusting the request: halves 1+2 alone say
+/// only what the user WANTED on hardware that COULD serve it, and `standard_tier_subdir` independently
+/// falls back to q8 when the `nvfp4/` dir is absent — the shipping case on every model today. Deriving
+/// the label from 1+2 therefore stamped `"nvfp4"` on a render that actually ran the **q8** weights: a
+/// creative choice falsified in the asset record, precisely the SC#5 aliasing this tier exists to
+/// avoid. The label must describe what RAN, so it is read off the same dir the loader loads.
+///
+/// Gated to [`resolve_quant`]'s cfg, like [`tier_dir_is_nvfp4`]: every caller (the quant resolver, the
+/// label, and the candle fit gate) lives on the MLX or candle lane, so compiling it on the
+/// neither-backend build would be dead code under `-D warnings`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn nvfp4_selected(request: &ImageRequest, nvfp4_host: bool, tier_dir: Option<&Path>) -> bool {
+    nvfp4_requested(request) && nvfp4_host && tier_dir_is_nvfp4(tier_dir)
 }
 
 /// Whether THIS HOST can serve the NVFP4 tier: the candle lane on a GPU clearing the sm_120
@@ -1088,12 +1142,21 @@ fn standard_tier_subdir_gated(root: &Path, request: &ImageRequest, nvfp4_host: b
     // rejoins the SAME clean-tier fallback chain, so a request for a tier that isn't converted yet
     // (sc-11043 owns the convert-at-install loop; no shipping model packs an `nvfp4/` dir today) lands
     // on an installed tier exactly like an uninstalled q4/bf16 pick does — never a load error, and never
-    // an FP4 load on hardware that can't serve it (`nvfp4` is already false off Blackwell). That
-    // fallback is NOT silent: `reconcile_resolved_tier_quant` records the tier actually resolved and
-    // fires `quant_tier_downgraded` when it differs from the pick, the same honesty path every tier uses.
+    // an FP4 load on hardware that can't serve it (`nvfp4` is already false off Blackwell).
     //
-    // BOTH halves are required (the SC#5 opt-in): the user explicitly named the tier AND the host can
-    // serve it. Neither alone selects NVFP4.
+    // That NVFP4 fallback is currently NOT event-surfaced, and deliberately so — say what is true here:
+    // `reconcile_resolved_tier_quant` (which `warn!`s + fires `quant_tier_downgraded` on a tier
+    // downgrade) is `#[cfg(target_os = "macos")]`, while `nvfp4_host_eligible()` is hard-`false` on
+    // macOS — so the reconcile path and an NVFP4 pick are MUTUALLY EXCLUSIVE by construction and nothing
+    // reconciles NVFP4 on any lane. What keeps the fallback HONEST instead is [`nvfp4_selected`]: the
+    // recorded label + the load quant are gated on this resolver's OWN output (the resolved dir), so a
+    // pick that lands on q8 is recorded `"q8"` — the asset record tells the truth even with no event.
+    // Wiring a candle-lane reconcile so the downgrade is also OBSERVABLE (an event, not just an honest
+    // record) is worth doing when a tier is actually converted; sc-11043 owns that tier.
+    //
+    // BOTH halves are required HERE (the SC#5 opt-in): the user explicitly named the tier AND the host
+    // can serve it. Neither alone selects NVFP4. The third half — the tier is actually installed — is
+    // this function's own `present()` chain below, which is what [`nvfp4_selected`] reads back.
     let preferred = preferred_tier(
         bits,
         min_quality_floor(request),
@@ -1714,20 +1777,25 @@ fn quant_int(value: &Value) -> Option<i64> {
 /// `model.supports_quant()` gate), so the Q8 default applies to Lens exactly like the MLX families;
 /// the sc-3675/sc-5096 candle families advertise no quant and never reach this resolver (stay dense).
 ///
-/// **NVFP4 (sc-11042, epic 11037 SC#5)** is checked FIRST and ONLY on an explicit, host-eligible
-/// [`nvfp4_requested`] + [`nvfp4_host_eligible`] pick — never from `bits`, a manifest default, or
-/// hardware detection alone. Its recipe
+/// **NVFP4 (sc-11042, epic 11037 SC#5)** is selected ONLY on a full [`nvfp4_selected`] — an explicit
+/// pick, a Blackwell-eligible host, AND the `nvfp4/` tier actually resolved on disk — never from
+/// `bits`, a manifest default, or hardware detection alone, and never on a `tier_dir` that resolved to
+/// some other tier (that would load FP4 against q8 weights and record the wrong tier). Its recipe
 /// bit count is `None`, not `Some(4)`: `Quant::Nvfp4::bits()` returns 4 (its E2M1 elements are 4-bit),
 /// but NVFP4 is ~4.5 EFFECTIVE bits/weight and is a different tier from int4-affine `q4`, so reporting
 /// `4` here would stamp an NVFP4 render with `q4`'s bit count in the recipe — the aliasing SC#5 forbids
 /// (the same footgun `video_quant_label` carries; see its note). Every non-NVFP4 request takes the
 /// unchanged path below.
+///
+/// `tier_dir` is the RESOLVED tier subdir this job will load (`standard_tier_subdir`'s output), or
+/// `None` on a lane with no standard-tier layout in scope — see [`tier_dir_is_nvfp4`] for why `None`
+/// conservatively means "not NVFP4".
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
-    resolve_quant_gated(request, nvfp4_host_eligible())
+fn resolve_quant(request: &ImageRequest, tier_dir: Option<&Path>) -> (Option<Quant>, Option<i64>) {
+    resolve_quant_gated(request, nvfp4_host_eligible(), tier_dir)
 }
 
 /// [`resolve_quant`] with the NVFP4 **host** gate passed in rather than probed (sc-11042). Split out
@@ -1738,21 +1806,34 @@ fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn resolve_quant_gated(request: &ImageRequest, nvfp4_host: bool) -> (Option<Quant>, Option<i64>) {
-    // The distinct NVFP4 tier (sc-11042): an EXPLICIT `advanced.quantTier: "nvfp4"` pick AND a
-    // Blackwell-eligible host — both halves, the SC#5 opt-in. Checked before the dense-TE carve-out and
-    // the bits map: it is a tier identity, not a point on the bits ladder. Off Blackwell / off the
-    // candle lane `nvfp4_host` is false, so this arm is unreachable there and every request resolves
-    // exactly as it always has.
-    if nvfp4_requested(request) && nvfp4_host {
-        return (Some(Quant::Nvfp4), None);
-    }
+fn resolve_quant_gated(
+    request: &ImageRequest,
+    nvfp4_host: bool,
+    tier_dir: Option<&Path>,
+) -> (Option<Quant>, Option<i64>) {
     // Dense-TE turnkeys (FLUX.2-klein, sc-8711): the tier subdir already holds a packed transformer
     // + a DENSE bf16 text encoder, so the load Quant must be None — quantizing here would crush the
     // dense bf16 TE we deliberately kept full-precision. The packed transformer self-describes its
     // quant regardless. Tier selection (q4/q8/bf16) is driven by the resolved subdir, not this.
+    //
+    // Ordered FIRST, ahead of the NVFP4 arm (sc-11042): `flux2_klein_9b`/`_kv` are BOTH in
+    // `DENSE_TE_TIER_MODELS` and on the candle txt2img lane (whose `resolve_quant` call is gated only
+    // by `model.supports_quant()`), so an NVFP4 arm placed above this could return `Some(Nvfp4)` for a
+    // crafted `quantTier: "nvfp4"` on a dense-TE turnkey and skip the carve-out — re-quantizing the
+    // bf16 text encoder sc-8711/sc-9362 deliberately kept dense. The carve-out is the wider invariant
+    // (the TE must never be quantized by ANY tier), so it wins outright rather than being an exception
+    // the NVFP4 arm has to remember.
     if is_dense_te_tier(request) {
         return (None, None);
+    }
+    // The distinct NVFP4 tier (sc-11042): an EXPLICIT `advanced.quantTier: "nvfp4"` pick AND a
+    // Blackwell-eligible host AND the `nvfp4/` tier resolved on disk — all three halves, the SC#5
+    // opt-in (see [`nvfp4_selected`]). Checked before the bits map: it is a tier identity, not a point
+    // on the bits ladder. Off Blackwell / off the candle lane `nvfp4_host` is false, and no shipping
+    // model packs an `nvfp4/` dir today, so this arm is unreachable there and every request resolves
+    // exactly as it always has.
+    if nvfp4_selected(request, nvfp4_host, tier_dir) {
+        return (Some(Quant::Nvfp4), None);
     }
     let raw = request
         .advanced
@@ -4000,7 +4081,11 @@ async fn generate_stream(
     // other matrix model. The `else` arm stays for any future engine that genuinely advertises no
     // quant — such a model loads dense.
     let (quant, quant_bits) = if model.supports_quant() {
-        resolve_quant(request)
+        // `weights_dir` is the resolved tier subdir (sc-11042). NVFP4 is unreachable on this lane
+        // regardless (`nvfp4_host_eligible()` is hard-`false` on macOS — Metal has no FP4 hardware), so
+        // this is the same `(quant, bits)` it has always produced; passing the dir keeps the resolver's
+        // one contract — the tier is read off what resolved — uniform across both lanes.
+        resolve_quant(request, Some(&weights_dir))
     } else {
         (None, None)
     };
@@ -4678,7 +4763,10 @@ async fn generate_candle_stream(
         // router doesn't strip. A dense DiT + LoRA/LoKr still folds (Quant None ⇒ no sc-10578 reject).
         (None, None)
     } else if model.supports_quant() {
-        resolve_quant(request)
+        // `weights_dir` is the tier subdir this lane is about to load (resolved above), so the NVFP4
+        // tier is picked only when the `nvfp4/` dir is what actually resolved (sc-11042) — never FP4
+        // against a q8 fallback.
+        resolve_quant(request, Some(&weights_dir))
     } else {
         (None, None)
     };
@@ -4856,10 +4944,26 @@ async fn generate_candle_stream(
     // budgeted. ConvRot loads an int8 DiT over the bf16 base surface (its footprint is neither the bf16
     // nor the q8 tier), and a `modelPath`/flat root has no recognizable tier basename — fall back to the
     // manifest key there, preserving today's behavior.
+    //
+    // sc-11042: the NVFP4 tier composes with the sc-12090 disk probe rather than bypassing it.
+    // `tier_key_from_resolved_dir` only recognizes the bits-based basenames (bf16/q8/q4), so a resolved
+    // `nvfp4/` dir yields `None` and falls through to `requested_tier_key`, whose `nvfp4` short-circuit
+    // names the tier by IDENTITY (never by bits — `Quant::Nvfp4.bits()` is 4, which would alias q4).
+    // `nvfp4_selected` reads that same resolved `weights_dir`, so a `quantTier: "nvfp4"` label that fell
+    // back to another tier's dir is sized/named as the tier that will actually load, not as nvfp4.
+    let nvfp4_sel = nvfp4_selected(request, nvfp4_host_eligible(), Some(&weights_dir));
     let mut tier = match convrot {
-        Some(_) => crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry),
+        Some(_) => crate::vram_gate::requested_tier_key(
+            &request.advanced,
+            &request.model_manifest_entry,
+            nvfp4_sel,
+        ),
         None => tier_key_from_resolved_dir(&weights_dir).unwrap_or_else(|| {
-            crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry)
+            crate::vram_gate::requested_tier_key(
+                &request.advanced,
+                &request.model_manifest_entry,
+                nvfp4_sel,
+            )
         }),
     };
     // The candle FLUX.1 (sc-10769), FLUX.2 txt2img (sc-10868), and Qwen-Image txt2img (sc-10867) lanes
@@ -4879,6 +4983,16 @@ async fn generate_candle_stream(
     // installed tier that does — floored at the per-model quality floor — rejecting only when nothing
     // >= floor fits. An explicit pick (`mlxQuantizeExplicit`) is HONORED: it skips the downtier and runs
     // the plain gate below (fits → run; too big → reject-before-OOM), never silently downtiered (#7).
+    //
+    // sc-11042 (epic 11037 SC#5): a selected NVFP4 tier is never downtiered either, and does not rely on
+    // `mlxQuantizeExplicit` to escape — the web omits that flag for nvfp4 (it rides inside the
+    // `tierQuantize(quantTier) !== null` bits branch, and nvfp4 has no honest `mlxQuantize` integer).
+    // Instead NVFP4 is unrankable ON PURPOSE: `tier_quality_rank("nvfp4")` is 0 because nvfp4 is a
+    // distinct numeric regime, not a rung on the bf16/q8/q4 fidelity ladder, so
+    // `downtier_candidate_tiers` yields NO candidates in `[floor, nvfp4]` and `choose_downtier` returns
+    // `Keep`. Downtiering NVFP4 to q4/q8 would silently swap the numerics of an explicitly-picked tier —
+    // exactly the creative-choice violation SC#5 forbids. Pinned by
+    // `nvfp4_tier_is_never_downtiered_by_the_capability_clamp`.
     let explicit_pick = request
         .advanced
         .get("mlxQuantizeExplicit")
@@ -5232,12 +5346,24 @@ fn image_settings_metrics(
 /// label on a 4-bit render, the inverse mislabel but the same SC#5 violation. Matching the variant is
 /// what makes both directions impossible. The tier's own arm is placed alongside int8-convrot's — both
 /// are tiers with no honest integer width, and both report `None` bits for that reason.
+///
+/// **The label describes what RAN — so it is disk-aware, not just host-aware (sc-11042).** `tier_dir`
+/// is the RESOLVED tier subdir, and NVFP4 is labelled only when that dir IS the `nvfp4/` one (the
+/// [`nvfp4_selected`] third half). Host-awareness alone was NOT enough: `standard_tier_subdir`
+/// independently falls back to q8 when the `nvfp4/` dir is absent — the shipping case on every model
+/// today, since sc-11043 has not converted a tier yet — so an explicit pick on a Blackwell host
+/// recorded `"nvfp4"` on a render whose weights were **q8**. Same SC#5 creative-choice aliasing this
+/// tier exists to eliminate, merely displaced out of selection and into telemetry. Reading the label
+/// off the resolver's own output is what makes the two agree by construction.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn effective_quant_label(request: &ImageRequest) -> (Option<String>, Option<i64>) {
-    effective_quant_label_gated(request, nvfp4_host_eligible())
+fn effective_quant_label(
+    request: &ImageRequest,
+    tier_dir: Option<&Path>,
+) -> (Option<String>, Option<i64>) {
+    effective_quant_label_gated(request, nvfp4_host_eligible(), tier_dir)
 }
 
 /// [`effective_quant_label`] with the NVFP4 **host** gate passed in rather than probed (sc-11042).
@@ -5250,6 +5376,7 @@ fn effective_quant_label(request: &ImageRequest) -> (Option<String>, Option<i64>
 fn effective_quant_label_gated(
     request: &ImageRequest,
     nvfp4_host: bool,
+    tier_dir: Option<&Path>,
 ) -> (Option<String>, Option<i64>) {
     if request
         .advanced
@@ -5267,7 +5394,7 @@ fn effective_quant_label_gated(
             _ => (Some("bf16".to_owned()), None),
         };
     }
-    match resolve_quant_gated(request, nvfp4_host) {
+    match resolve_quant_gated(request, nvfp4_host, tier_dir) {
         // The distinct NVFP4 tier, matched on the VARIANT (see the note above): its bit count is
         // `None`, so a bits-only match would silently label it "bf16".
         (Some(Quant::Nvfp4), _) => (Some(NVFP4_TIER.to_owned()), None),
@@ -5288,8 +5415,9 @@ fn build_image_metrics(
     request: &ImageRequest,
     effective_steps: Option<u32>,
     image_count: u32,
+    tier_dir: Option<&Path>,
 ) -> GenerationMetrics {
-    let (quant_label, quant_bits) = effective_quant_label(request);
+    let (quant_label, quant_bits) = effective_quant_label(request, tier_dir);
     let guidance = mlx_model(&request.model).and_then(|model| resolve_guidance(request, &model));
     image_settings_metrics(
         request,
@@ -5308,6 +5436,7 @@ fn build_image_metrics(
     request: &ImageRequest,
     effective_steps: Option<u32>,
     image_count: u32,
+    _tier_dir: Option<&Path>,
 ) -> GenerationMetrics {
     image_settings_metrics(request, effective_steps, None, None, None, image_count)
 }
@@ -5584,7 +5713,19 @@ async fn consume_gen_events(
     // Post the effective-settings + per-phase timing block (epic 10402,
     // sc-10405/sc-10406). Best-effort; coalesce-merges with the S2 hardware block
     // (which owns totalMs/backend/peaks) server-side.
-    let mut metrics = build_image_metrics(&plan.request, effective_steps, total as u32);
+    // The RESOLVED tier dir, so the recorded quant label describes the tier that actually RAN rather
+    // than the one requested (sc-11042). Re-resolving here is the same pure path-join + `is_dir` probe
+    // the lane already did before loading (no fetch, no I/O beyond a stat), and it runs once per job.
+    // `.ok().flatten()` because a metrics block must never fail a completed generation: an unresolvable
+    // dir yields `None`, which conservatively reports the request-derived q4/q8/bf16 label exactly as
+    // it did before this parameter existed.
+    let tier_dir = resolve_weights_dir(&plan.request, settings).ok().flatten();
+    let mut metrics = build_image_metrics(
+        &plan.request,
+        effective_steps,
+        total as u32,
+        tier_dir.as_deref(),
+    );
     if let Some(phase) = phase_timer.into_metrics(Instant::now()) {
         metrics.load_ms = phase.load_ms;
         metrics.sample_ms = phase.sample_ms;
@@ -6395,32 +6536,113 @@ mod standard_tier_tests {
     #[test]
     fn resolve_quant_returns_the_distinct_nvfp4_tier_only_on_an_explicit_blackwell_pick() {
         let picked = request(json!({ "quantTier": "nvfp4" }));
-        // Explicit pick + Blackwell → the distinct tier, and NOT `Some(4)` bits.
-        assert_eq!(resolve_quant_gated(&picked, true), (Some(Quant::Nvfp4), None));
+        let nvfp4_dir = PathBuf::from("/models/klein").join(NVFP4_TIER);
+        let q8_dir = PathBuf::from("/models/klein").join("q8");
+        // Explicit pick + Blackwell + the nvfp4 tier RESOLVED → the distinct tier, and NOT `Some(4)` bits.
+        assert_eq!(
+            resolve_quant_gated(&picked, true, Some(&nvfp4_dir)),
+            (Some(Quant::Nvfp4), None)
+        );
         // Off Blackwell → the label is ignored; the unchanged q8 default. A clean fallback.
-        assert_eq!(resolve_quant_gated(&picked, false), (Some(Quant::Q8), Some(8)));
+        assert_eq!(
+            resolve_quant_gated(&picked, false, Some(&nvfp4_dir)),
+            (Some(Quant::Q8), Some(8))
+        );
+        // On Blackwell but the resolver landed on q8 (the `nvfp4/` dir isn't installed — the shipping
+        // case today): the LOAD quant must be q8 too. Loading FP4 against q8 weights is not a mislabel,
+        // it's a wrong load.
+        assert_eq!(
+            resolve_quant_gated(&picked, true, Some(&q8_dir)),
+            (Some(Quant::Q8), Some(8))
+        );
+        // Tier dir unknown ⇒ never claim NVFP4 (see `tier_dir_is_nvfp4`).
+        assert_eq!(
+            resolve_quant_gated(&picked, true, None),
+            (Some(Quant::Q8), Some(8))
+        );
 
-        // SC#5: every existing mapping is untouched on BOTH host classes — being on sm_120 never
-        // converts an unlabeled q4/q8/bf16 request into an NVFP4 one.
+        // SC#5: every existing mapping is untouched on BOTH host classes and on EVERY tier dir — being
+        // on sm_120, even with the `nvfp4/` tier resolved, never converts an unlabeled q4/q8/bf16
+        // request into an NVFP4 one.
         for nvfp4_host in [false, true] {
+            for dir in [None, Some(&nvfp4_dir), Some(&q8_dir)] {
+                assert_eq!(
+                    resolve_quant_gated(&request(json!({})), nvfp4_host, dir.map(PathBuf::as_path)),
+                    (Some(Quant::Q8), Some(8))
+                );
+                assert_eq!(
+                    resolve_quant_gated(
+                        &request(json!({ "mlxQuantize": 4 })),
+                        nvfp4_host,
+                        dir.map(PathBuf::as_path)
+                    ),
+                    (Some(Quant::Q4), Some(4)),
+                    "a q4 pick must stay int4-affine q4 on every host (epic 11037 SC#5)"
+                );
+                assert_eq!(
+                    resolve_quant_gated(
+                        &request(json!({ "mlxQuantize": 8 })),
+                        nvfp4_host,
+                        dir.map(PathBuf::as_path)
+                    ),
+                    (Some(Quant::Q8), Some(8))
+                );
+                assert_eq!(
+                    resolve_quant_gated(
+                        &request(json!({ "mlxQuantize": 0 })),
+                        nvfp4_host,
+                        dir.map(PathBuf::as_path)
+                    ),
+                    (None, None)
+                );
+            }
+        }
+    }
+
+    /// sc-11042 — **the dense-TE carve-out outranks the NVFP4 tier** (sc-8711 / sc-9362).
+    ///
+    /// `flux2_klein_9b`/`_kv` are in [`DENSE_TE_TIER_MODELS`] AND ride the candle txt2img lane, whose
+    /// `resolve_quant` call is gated only by `model.supports_quant()`. With the NVFP4 arm ordered ahead
+    /// of the carve-out, a crafted `quantTier: "nvfp4"` returned `Some(Nvfp4)` and skipped it — which
+    /// would re-quantize the bf16 text encoder those stories deliberately kept dense. The carve-out is
+    /// the wider invariant (the TE must never be quantized by ANY tier), so it wins outright.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn the_nvfp4_arm_never_short_circuits_the_dense_te_carve_out() {
+        let nvfp4_dir = PathBuf::from("/models/klein").join(NVFP4_TIER);
+        // Both the registry form and the manifest-flag form of a dense-TE turnkey, with EVERY gate for
+        // the NVFP4 arm satisfied: explicit pick, Blackwell host, and the `nvfp4/` tier resolved.
+        let mut by_id = request(json!({ "quantTier": "nvfp4" }));
+        by_id.model = "flux2_klein_9b".to_owned();
+        let by_manifest = ImageRequest::from_payload(
+            json!({
+                "model": "some_matrix_model",
+                "advanced": { "quantTier": "nvfp4" },
+                "modelManifestEntry": { "mlx": { "denseTextEncoderTier": true } }
+            })
+            .as_object()
+            .unwrap(),
+        );
+
+        for dense_te in [&by_id, &by_manifest] {
+            assert!(is_dense_te_tier(dense_te), "test fixture must be dense-TE");
             assert_eq!(
-                resolve_quant_gated(&request(json!({})), nvfp4_host),
-                (Some(Quant::Q8), Some(8))
-            );
-            assert_eq!(
-                resolve_quant_gated(&request(json!({ "mlxQuantize": 4 })), nvfp4_host),
-                (Some(Quant::Q4), Some(4)),
-                "a q4 pick must stay int4-affine q4 on every host (epic 11037 SC#5)"
-            );
-            assert_eq!(
-                resolve_quant_gated(&request(json!({ "mlxQuantize": 8 })), nvfp4_host),
-                (Some(Quant::Q8), Some(8))
-            );
-            assert_eq!(
-                resolve_quant_gated(&request(json!({ "mlxQuantize": 0 })), nvfp4_host),
-                (None, None)
+                resolve_quant_gated(dense_te, true, Some(&nvfp4_dir)),
+                (None, None),
+                "a dense-TE turnkey must load with quant None — the NVFP4 arm must not preempt the \
+                 sc-8711 carve-out that keeps its bf16 text encoder dense"
             );
         }
+
+        // The carve-out is not a general NVFP4 kill-switch: a NON-dense-TE model on the same terms
+        // still selects the tier, so the fix can't be masking the arm entirely.
+        assert_eq!(
+            resolve_quant_gated(&request(json!({ "quantTier": "nvfp4" })), true, Some(&nvfp4_dir)),
+            (Some(Quant::Nvfp4), None)
+        );
     }
 
     /// sc-11042 / epic 11037 SC#5 — **the image lane's aliasing guard**, the sibling of
@@ -6437,7 +6659,8 @@ mod standard_tier_tests {
     #[test]
     fn effective_quant_label_never_aliases_nvfp4_to_bf16_or_q4() {
         let picked = request(json!({ "quantTier": "nvfp4" }));
-        let (label, bits) = effective_quant_label_gated(&picked, true);
+        let nvfp4_dir = PathBuf::from("/models/klein").join(NVFP4_TIER);
+        let (label, bits) = effective_quant_label_gated(&picked, true, Some(&nvfp4_dir));
         assert_eq!(label, Some("nvfp4".to_owned()));
         // Neither mislabel is possible: not the "bf16" a bits-only match produced…
         assert_ne!(label, Some("bf16".to_owned()));
@@ -6448,28 +6671,128 @@ mod standard_tier_tests {
 
         // Off Blackwell the label reports what actually ran (the q8 fallback), not the tier asked for.
         assert_eq!(
-            effective_quant_label_gated(&picked, false),
+            effective_quant_label_gated(&picked, false, Some(&nvfp4_dir)),
             (Some("q8".to_owned()), Some(8))
         );
         // SC#5: the existing labels are unchanged on both host classes.
         for nvfp4_host in [false, true] {
             assert_eq!(
-                effective_quant_label_gated(&request(json!({ "mlxQuantize": 4 })), nvfp4_host),
+                effective_quant_label_gated(
+                    &request(json!({ "mlxQuantize": 4 })),
+                    nvfp4_host,
+                    Some(&nvfp4_dir)
+                ),
                 (Some("q4".to_owned()), Some(4))
             );
             assert_eq!(
-                effective_quant_label_gated(&request(json!({ "mlxQuantize": 8 })), nvfp4_host),
+                effective_quant_label_gated(
+                    &request(json!({ "mlxQuantize": 8 })),
+                    nvfp4_host,
+                    Some(&nvfp4_dir)
+                ),
                 (Some("q8".to_owned()), Some(8))
             );
             assert_eq!(
-                effective_quant_label_gated(&request(json!({ "mlxQuantize": 0 })), nvfp4_host),
+                effective_quant_label_gated(
+                    &request(json!({ "mlxQuantize": 0 })),
+                    nvfp4_host,
+                    Some(&nvfp4_dir)
+                ),
                 (Some("bf16".to_owned()), None)
             );
             // The int8-convrot tier still wins its early return.
             assert_eq!(
-                effective_quant_label_gated(&request(json!({ "convRot": true })), nvfp4_host),
+                effective_quant_label_gated(
+                    &request(json!({ "convRot": true })),
+                    nvfp4_host,
+                    Some(&nvfp4_dir)
+                ),
                 (Some("int8-convrot".to_owned()), None)
             );
+        }
+    }
+
+    /// sc-11042 / epic 11037 SC#5 — **the recorded label must describe the tier that RAN.**
+    ///
+    /// The regression this pins: `effective_quant_label` was host-aware but DISK-BLIND. It returned
+    /// `Nvfp4` from `nvfp4_requested && nvfp4_host` alone, while [`standard_tier_subdir`] independently
+    /// (and correctly) fell back to `q8/` when the `nvfp4/` dir was absent — **the shipping case on
+    /// every model today**, since sc-11043 has not converted a tier yet. So on a Blackwell candle host
+    /// the resolver loaded the **q8** weights and the asset record stamped them **`"nvfp4"`**: a q8
+    /// render sold as NVFP4. Exactly the SC#5 creative-choice aliasing this tier exists to eliminate,
+    /// displaced out of selection and into telemetry.
+    ///
+    /// The suite already contained both halves of the contradiction — `standard_tier_subdir_gated(bare,
+    /// picked, true) == q8` and `effective_quant_label_gated(picked, true) == "nvfp4"` — and never
+    /// connected them. This test connects them: it drives the SAME request through the resolver and the
+    /// label and asserts they agree, so the two can never drift apart again.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn effective_quant_label_reports_the_resolved_tier_not_the_requested_one() {
+        let picked = request(json!({ "quantTier": "nvfp4" }));
+
+        // A Blackwell host whose turnkey has NO `nvfp4/` dir — the shipping case today.
+        let bare = tempfile::tempdir().unwrap();
+        seed_tier(bare.path(), "q4", "diffusion_pytorch_model.safetensors");
+        seed_tier(bare.path(), "q8", "diffusion_pytorch_model.safetensors");
+
+        // The resolver falls back to q8 (this half already passed before the fix)…
+        let resolved = standard_tier_subdir_gated(bare.path(), &picked, true);
+        assert_eq!(resolved, bare.path().join("q8"));
+        // …so the label MUST say q8. Before the fix this returned `Some("nvfp4")` with bits None —
+        // a q8 render recorded as an NVFP4 one.
+        let (label, bits) = effective_quant_label_gated(&picked, true, Some(&resolved));
+        assert_ne!(
+            label,
+            Some(NVFP4_TIER.to_owned()),
+            "an NVFP4 pick that RESOLVED q8 must never be recorded as nvfp4 (epic 11037 SC#5)"
+        );
+        assert_eq!((label, bits), (Some("q8".to_owned()), Some(8)));
+
+        // Same host, same request, but the tier IS installed → the label is nvfp4. This is what proves
+        // the fix pins the label to the DISK and isn't just disabling the tier.
+        let converted = tempfile::tempdir().unwrap();
+        seed_tier(converted.path(), "q8", "diffusion_pytorch_model.safetensors");
+        seed_tier(
+            converted.path(),
+            NVFP4_TIER,
+            "diffusion_pytorch_model.safetensors",
+        );
+        let resolved = standard_tier_subdir_gated(converted.path(), &picked, true);
+        assert_eq!(resolved, converted.path().join(NVFP4_TIER));
+        assert_eq!(
+            effective_quant_label_gated(&picked, true, Some(&resolved)),
+            (Some(NVFP4_TIER.to_owned()), None)
+        );
+
+        // The resolver and the label agree on EVERY tier/host/install combination — the invariant, not
+        // just the two cases above. Each `expected` is read off the resolver's own output.
+        for install in [vec!["q4", "q8"], vec!["q4", "q8", NVFP4_TIER]] {
+            let root = tempfile::tempdir().unwrap();
+            for tier in &install {
+                seed_tier(root.path(), tier, "diffusion_pytorch_model.safetensors");
+            }
+            for nvfp4_host in [false, true] {
+                for advanced in [
+                    json!({ "quantTier": "nvfp4" }),
+                    json!({}),
+                    json!({ "mlxQuantize": 4 }),
+                ] {
+                    let req = request(advanced.clone());
+                    let resolved = standard_tier_subdir_gated(root.path(), &req, nvfp4_host);
+                    let (label, _) = effective_quant_label_gated(&req, nvfp4_host, Some(&resolved));
+                    let resolved_tier = resolved.file_name().unwrap().to_str().unwrap();
+                    assert_eq!(
+                        label.as_deref() == Some(NVFP4_TIER),
+                        resolved_tier == NVFP4_TIER,
+                        "label {label:?} disagrees with the resolved tier {resolved_tier} \
+                         (host={nvfp4_host}, advanced={advanced}, installed={install:?})"
+                    );
+                }
+            }
         }
     }
 
@@ -6608,7 +6931,7 @@ mod standard_tier_tests {
         let base_default =
             ImageRequest::from_payload(json!({ "model": "anima_base" }).as_object().unwrap());
         assert_eq!(
-            resolve_quant(&base_default),
+            resolve_quant(&base_default, None),
             (Some(Quant::Q8), Some(8)),
             "anima_base with no mlxQuantize must default to Q8 — the reason adding an adapter used to \
              fail at load on the DEFAULT tier"
@@ -6619,19 +6942,19 @@ mod standard_tier_tests {
                 .as_object()
                 .unwrap(),
         );
-        assert_eq!(resolve_quant(&aesthetic), (Some(Quant::Q4), Some(4)));
+        assert_eq!(resolve_quant(&aesthetic, None), (Some(Quant::Q4), Some(4)));
         // Only an explicit bf16 opt-out escaped the bug.
         let bf16 = ImageRequest::from_payload(
             json!({ "model": "anima_base", "advanced": { "mlxQuantize": 0 } })
                 .as_object()
                 .unwrap(),
         );
-        assert_eq!(resolve_quant(&bf16), (None, None));
+        assert_eq!(resolve_quant(&bf16, None), (None, None));
 
         // 2. The LoadSpec the worker hands the engine carries a quant AND the adapter together — the
         //    exact `quantize.is_some() && !adapters.is_empty()` shape mlx-gen-anima rejected on
         //    `6a10ae1` and accepts on `a5c1fcd`.
-        let (quant, _) = resolve_quant(&base_default);
+        let (quant, _) = resolve_quant(&base_default, None);
         let adapters = vec![AdapterSpec::new(
             PathBuf::from("/tmp/anima-style-lora.safetensors"),
             1.0,
@@ -7330,7 +7653,7 @@ mod quant_tier_reconcile_tests {
         let resolved = standard_tier_subdir(root, &req);
         assert_eq!(resolved, root.join("q4"));
         // The request would have recorded dense bf16 — reconcile corrects it to the resolved Q4 tier.
-        let requested = resolve_quant(&req);
+        let requested = resolve_quant(&req, Some(&resolved));
         assert_eq!(requested, (None, None), "bf16 request derives dense");
         let (quant, bits) =
             reconcile_resolved_tier_quant(requested, &resolved, true, "sd3_5_large", "job1", "mlx");
@@ -7389,7 +7712,7 @@ mod quant_tier_reconcile_tests {
         let resolved = standard_tier_subdir(root, &req);
         assert_eq!(resolved, root.join("q8"));
         // resolve_quant keeps dense-TE at `(None, None)` (never re-quantize the dense bf16 TE)…
-        assert_eq!(resolve_quant(&req), (None, None));
+        assert_eq!(resolve_quant(&req, Some(&resolved)), (None, None));
         // …but reconcile against the REQUESTED transformer tier (q8) records the real transformer
         // precision (Q8) with the load quant still `None`, and — since resolved == requested — with no
         // downgrade (the requested/resolved tiers match, so it's a clean pass-through).

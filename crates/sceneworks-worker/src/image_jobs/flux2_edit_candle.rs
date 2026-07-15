@@ -251,7 +251,7 @@ async fn generate_candle_flux2_edit_stream(
     // engine query-row-chunks its joint attention (sc-6217/sc-7523), so a device OOM surfaces as a load/
     // generate error rather than silently corrupting; no Mac-style unified-memory pre-guard applies here.
     let (quant, quant_bits) = if is_dev {
-        resolve_quant(request)
+        resolve_quant(request, Some(&flux2_base))
     } else {
         (None, None)
     };

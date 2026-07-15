@@ -389,12 +389,15 @@ pub(crate) async fn run_image_detail_job(
     let backend = backend_label(&settings.gpu_id);
 
     let params = resolve_detail_params(&request);
-    let (quant, _) = resolve_quant(&request);
     // Reuse the model's manifest/modelPath/cache resolution; engine_model gives the default repo.
     let weights_dir = resolve_weights_dir(&request, settings)?
         .or_else(|| huggingface_snapshot_dir(&settings.data_dir, engine_model.default_repo()));
     let weights_dir = weights_dir
         .ok_or_else(|| WorkerError::InvalidPayload("SDXL detail weights not found".to_owned()))?;
+    // Resolved AFTER `weights_dir` (sc-11042): the tier dir is an input to the quant resolution, so the
+    // NVFP4 tier can only be picked when it is the tier that actually resolved. Pure reorder — the
+    // q4/q8/bf16 mapping reads only the request and is unaffected.
+    let (quant, _) = resolve_quant(&request, Some(&weights_dir));
     let control_repo = advanced::str(
         &request.advanced,
         "tileControlNetRepo",

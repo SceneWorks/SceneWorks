@@ -252,7 +252,7 @@ async fn generate_flux1_dev_control_stream(
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("FLUX.1-dev weights not found".to_owned()))?;
     let control_weights = ensure_flux1_control_weights(api, settings, job, request).await?;
-    let (quant, quant_bits) = resolve_quant(request);
+    let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
     let model = mlx_model("flux_dev")
         .ok_or_else(|| WorkerError::InvalidPayload("flux_dev model row missing".to_owned()))?;
     let steps = resolve_steps(request, &model);

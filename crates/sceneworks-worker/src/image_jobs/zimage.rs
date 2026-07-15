@@ -255,7 +255,7 @@ async fn generate_zimage_control_stream(
             strict_control_default_repo(ZIMAGE_CONTROL_ENGINE_ID)
         ))
     })?;
-    let (quant, quant_bits) = resolve_quant(request);
+    let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
     let zimage = mlx_model("z_image_turbo")
         .ok_or_else(|| WorkerError::InvalidPayload("z-image model row missing".to_owned()))?;
     let steps = resolve_steps(request, &zimage);
