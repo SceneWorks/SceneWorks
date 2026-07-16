@@ -5168,10 +5168,95 @@ fn candle_resolve_wan_adapters(
     Ok(specs)
 }
 
+/// The candle Mochi pre-flight's gated result (sc-12306): the tier's baked-in quant marker, obtainable
+/// ONLY by passing the VRAM fit gate.
+///
+/// Bundling the marker into the gated return is deliberate, and mirrors the MLX lane's [`MochiPreflight`]
+/// — which adopted the shape after a review mutation that deleted a free-standing `mochi_fit_check(...)?`
+/// call still compiled and still rendered, silently un-gating the lane. With the marker only obtainable
+/// here, the generation arm cannot reach a quant on a path that skipped the gate.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MochiVramPreflight {
+    quant: Option<Quant>,
+}
+
+/// Live pre-flight Mochi VRAM admission check for the candle lane (sc-12306) — the seam
+/// [`generate_candle_video`] calls before the load + 64-step denoise.
+///
+/// Sums the on-disk bytes the load will hold resident via the SHARED [`crate::mlx_fit_gate::mochi_resident_bytes`]
+/// (the tier dir's AsymmDiT plus the `text_encoder/` + `vae/` siblings from its parent): despite the
+/// module name that scan describes the hosted repo layout, which is one repo serving both lanes, and
+/// summing only the tier dir would miss the ~9.7 GiB T5-XXL + VAE — over half the resident footprint.
+///
+/// `budget` arrives resolved so this stays free of the GPU probe and is unit-testable without CUDA. No
+/// budget signal ⇒ admits. `Err` is the actionable pre-denoise rejection.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn mochi_vram_preflight(
+    model_label: &str,
+    tier_dir: &Path,
+    frames: u32,
+    width: u32,
+    height: u32,
+    gpu_id: &str,
+    budget: Option<crate::vram_gate::VramBudget>,
+) -> WorkerResult<MochiVramPreflight> {
+    match crate::vram_gate::mochi_fit_error(
+        model_label,
+        crate::mlx_fit_gate::mochi_resident_bytes(tier_dir),
+        frames,
+        width,
+        height,
+        gpu_id,
+        budget,
+    ) {
+        Some(error) => Err(error),
+        None => Ok(MochiVramPreflight {
+            quant: mochi_tier_quant(tier_dir),
+        }),
+    }
+}
+
+/// The candle video lane's live VRAM budget: the real `nvidia-smi` reading, the
+/// `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card emulation folded over it, then this process's reclaimable
+/// cudarc pool added back (sc-11023).
+///
+/// The reclaimable fold IS correct here, unlike `krea_control_candle.rs` which deliberately omits it:
+/// video routes through `generator_cache::with_cached_generator` (the `comfyui` in-place MoE is the one
+/// uncached exception, and it is not Mochi), so the single exclusive cache slot evicts its occupant
+/// BEFORE the incoming load and cudarc reuses those pages in-process. Without the fold, a warm re-gate
+/// would be measured against a `free` that still counts the model it is about to replace. Matches
+/// `generate_candle_stream` (image_jobs/base.rs).
+///
+/// The reverse direction is deliberately NOT wired: an admitted Mochi job does not call
+/// [`crate::vram_gate::note_loaded_peak`], so it contributes nothing to the reclaimable high-water the
+/// image lane reads. That keeps today's behavior (the video lane has never recorded a peak) rather than
+/// guessing: Mochi's predicted peak is dominated by a TRANSIENT decode, not by resident weights, and
+/// publishing ~81 GB as "reclaimable" on the strength of a derived floor would relax later image gates
+/// on a number nothing has measured. Under-reporting the pool only ever fails conservative (a spurious
+/// reject, never an OOM). Revisit once B5/sc-11995 backfills real `footprint.peakMemoryBytes`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn candle_video_vram_budget(settings: &Settings) -> Option<crate::vram_gate::VramBudget> {
+    let budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    budget.map(|budget| {
+        crate::vram_gate::with_reclaimable(
+            budget,
+            crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id),
+        )
+    })
+}
+
 /// Windows/CUDA candle video path (sc-5097 txt2video; sc-5175 adds the Wan2.2 14B MoE T2V + I2V).
 /// Resolves the engine + weights, provisions the LTX Gemma encoder, resolves any i2v source-image
 /// conditioning, builds a `VideoGenInput`, and runs it through the shared [`generate_video`] streaming
 /// driver. Returns the decoded clip + the candle adapter label.
+///
+/// Mochi additionally passes a VRAM fit gate before the load (sc-12306); every other engine on this
+/// lane is still ungated (sc-12344 — no candle video model carries the `candle.vramGbByTier` block the
+/// generic `vram_gate` needs, so wiring it here today would admit unconditionally).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_video(
     api: &ApiClient,
@@ -5208,14 +5293,29 @@ async fn generate_candle_video(
     } else {
         candle_video_snapshot_dir(settings, &repo)?
     };
+    // Coerce the requested frame count onto the engine's temporal stride — the ONE shared ladder both
+    // lanes use (sc-11992), so the candle stride can never drift from the MLX one. Computed HERE, above
+    // the tier binding, because Mochi's fit gate (sc-12306) needs the coerced count: the decode peak is
+    // linear in frames, so gating on the raw request would size the check against a length that never
+    // renders. (The SVD arm below returns before this is read; it derives its own model-fixed burst.)
+    let frames = video_frame_count(&request.model, request.raw_frame_count());
     // Wan quant-matrix tier-select (sc-10027): a candle wan tier repo (`SceneWorks/wan2.2-*-candle`) ships
     // q4/q8/bf16 subdirs — resolve the one matching `advanced.mlxQuantize` (default q4) and load from it
     // (the packed-detect seam reads the baked-in quant). A flat/dense repo (no subdirs, e.g. the
     // `Wan-AI/*-Diffusers` fallback) stays as-is with no quant marker.
     let (model_dir, wan_quant) = if is_mochi {
-        // `resolve_mochi_model_dir` already returned the TIER dir; the quant marker is the tier's own
-        // baked-in level, read from its `split_model.json` (the candle loader asserts it matches).
-        let quant = mochi_tier_quant(&snapshot_dir);
+        // `resolve_mochi_model_dir` already returned the TIER dir. The VRAM fit gate (sc-12306) runs
+        // here, and the quant marker comes back OUT of it — see `mochi_vram_preflight` for why the
+        // marker is bundled into the gated return rather than read alongside a free-standing check.
+        let MochiVramPreflight { quant } = mochi_vram_preflight(
+            engine_id,
+            &snapshot_dir,
+            frames,
+            request.width,
+            request.height,
+            &settings.gpu_id,
+            candle_video_vram_budget(settings).await,
+        )?;
         (snapshot_dir, quant)
     } else {
         match candle_wan_tier_subdir(&snapshot_dir, engine_id, request) {
@@ -5314,9 +5414,6 @@ async fn generate_candle_video(
         let (steps, guidance) = candle_wan_sampling(engine_id, request);
         (steps, guidance, non_empty_negative_prompt(request))
     };
-    // Coerce the requested frame count onto the engine's temporal stride — the ONE shared ladder both
-    // lanes use (sc-11992), so the candle stride can never drift from the MLX one.
-    let frames = video_frame_count(&request.model, request.raw_frame_count());
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -10783,21 +10880,37 @@ mod tests {
     /// (which asserts the same total against the pure gate) — the preflight tests need them SPLIT
     /// across the A6 sibling layout so the on-disk scan has to fold the shared components to get the
     /// total right.
-    #[cfg(target_os = "macos")]
+    ///
+    /// On the SUPERSET cfg (sc-12306): both lanes ingest these same hosted tiers, so both gates budget
+    /// against these exact bytes.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     const MOCHI_Q4_DIT_BYTES: u64 = 9_670_883_602;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     const MOCHI_Q4_TE_BYTES: u64 = 9_524_669_250;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     const MOCHI_Q4_VAE_BYTES: u64 = 919_551_200;
 
     /// A Mochi A6-layout root (q4 tier + shared `text_encoder`/`vae`/`tokenizer` siblings) whose
-    /// `.safetensors` report the REAL hosted byte sizes, so `mochi_fit_check`'s on-disk scan resolves
-    /// the true ~18.73 GiB resident footprint instead of the 1-byte stubs `mochi_root` writes.
+    /// `.safetensors` report the REAL hosted byte sizes, so the on-disk scan behind either lane's fit
+    /// gate resolves the true ~18.73 GiB resident footprint instead of the 1-byte stubs `mochi_root`
+    /// writes.
     ///
-    /// The files are SPARSE: `set_len` sets the apparent size with zero allocated blocks on APFS, and
-    /// `sum_safetensors_bytes` reads `metadata().len()`. So this is instant and costs no disk —
+    /// The files are SPARSE: `set_len` sets the apparent size with zero allocated blocks on APFS/NTFS,
+    /// and `sum_safetensors_bytes` reads `metadata().len()`. So this is instant and costs no disk —
     /// materializing 18.7 GiB of real zeros per test would not be viable.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     fn mochi_root_real_sized(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "mochi_preflight_{tag}_{}_{}",
@@ -10920,6 +11033,229 @@ mod tests {
         assert_eq!(
             preflight.frames, 19,
             "19 already sits on the 6k+1 lattice, so the snap is a no-op"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Mochi 1 candle/CUDA VRAM fit gate (sc-12306). These run on the windows-candle.yml lane, which
+    // is the ONLY lane that compiles `generate_candle_video` — the macOS lane and the Linux `parity`
+    // job never see this code. `mochi_vram_preflight` takes its budget as a parameter precisely so the
+    // whole decision is exercisable here with no CUDA driver and no GPU.
+    // -----------------------------------------------------------------------------------------
+
+    /// An RTX 5090 — the biggest consumer NVIDIA card, and the machine the story names. 32 GB total,
+    /// all free (a cold card with nothing loaded).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    fn rtx_5090() -> Option<crate::vram_gate::VramBudget> {
+        crate::vram_gate::apply_vram_cap(None, Some(32.0))
+    }
+
+    /// THE story: the shipped 5 s / 151-frame default is refused BEFORE the load + 64-step denoise, with
+    /// a message naming the clip-length lever. Needs 18.73 GiB weights + 60.56 GiB untiled decode + 2 GiB
+    /// headroom ≈ 81.3 GB against 32 GB — so on consumer hardware this is the DEFAULT path, not an edge
+    /// case.
+    ///
+    /// Kills the mutations that a compile alone would not:
+    ///   * hardcoding the gate's `frames` to a small number (e.g. B2's 7-frame smoke geometry) ⇒ the gate
+    ///     sees 4.66 GiB of decode instead of 60.56, totals ~25 GB, and ADMITS ⇒ `expect_err` fails.
+    ///   * passing `request.raw_frame_count()` instead of the coerced count ⇒ 150 not 151 — caught by
+    ///     `mochi_vram_preflight_coerces_the_frame_count_on_the_candle_lane` below.
+    ///   * dropping the frames term entirely (reusing the resolution-blind `predicted_peak_gb` shape) ⇒
+    ///     admits ⇒ `expect_err` fails.
+    ///   * reusing the MLX message ⇒ the "unified memory" assert fails.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn mochi_vram_preflight_rejects_the_5s_default_on_an_rtx_5090() {
+        let root = mochi_root_real_sized("candle_reject");
+        let out = mochi_vram_preflight(
+            "mochi_1",
+            &root.join("q4"),
+            video_frame_count("mochi_1", 150),
+            848,
+            480,
+            "0",
+            rtx_5090(),
+        );
+        std::fs::remove_dir_all(&root).ok();
+
+        let message = out
+            .expect_err(
+                "the shipped 5 s default (151 frames) needs ~81 GB and NO consumer NVIDIA GPU has \
+                 that — admitting it burns a full 64-step denoise before a raw CUDA OOM",
+            )
+            .to_string();
+        assert!(message.contains("mochi_1"), "names the model: {message}");
+        assert!(
+            message.contains("151-frame"),
+            "names the clip length that was refused, so the user can act on it: {message}"
+        );
+        assert!(
+            message.contains("Shorten the clip"),
+            "leads with the only lever that moves the dominant term — Mochi has one trained bucket \
+             and the tier delta is ~11 GiB against a ~60 GiB decode: {message}"
+        );
+        assert!(
+            message.contains("VRAM") && !message.contains("unified memory"),
+            "must be CUDA-worded, not the MLX lane's Mac prose: {message}"
+        );
+        assert!(
+            !message.contains("run on a Mac"),
+            "telling a Windows/CUDA user to buy a Mac is the MLX message leaking: {message}"
+        );
+    }
+
+    /// The other half of the contract: on the SAME 32 GB card a short clip is ADMITTED. Without this,
+    /// the reject test above would pass against a gate that blanket-refuses Mochi on every consumer
+    /// card — so this pair is what proves the gate is FRAME-SENSITIVE, which is the whole point of a
+    /// decode peak that scales with clip length.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn mochi_vram_preflight_admits_a_short_clip_on_the_same_rtx_5090() {
+        let root = mochi_root_real_sized("candle_admit");
+        // 7 frames: 18.73 weights + 4.66 decode + 2 headroom ≈ 25.4 GB, which fits 32 GB.
+        let out = mochi_vram_preflight("mochi_1", &root.join("q4"), 7, 848, 480, "0", rtx_5090());
+        std::fs::remove_dir_all(&root).ok();
+
+        let preflight = out.expect(
+            "a 7-frame clip needs ~25 GB and FITS a 32 GB card — a gate that refuses this has \
+             wall-rejected hardware that works",
+        );
+        assert_eq!(
+            preflight.quant,
+            Some(Quant::Q4),
+            "the tier dir's split_model.json carries the quant the candle loader asserts — and it is \
+             reachable ONLY through the gate"
+        );
+    }
+
+    /// The gate must budget on the COERCED frame count, not the raw request: the decode peak is linear
+    /// in frames, so gating on a length that never renders sizes the check against fiction. 150 raw
+    /// snaps to 151 on Mochi's 6k+1 lattice.
+    ///
+    /// Kills the `wan_frame_count` substitution independently of the MLX lane's copy of this check:
+    /// `wan_frame_count(150) = 149`, and `149 % 6 == 5` is off the lattice the engine accepts.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn mochi_vram_preflight_coerces_the_frame_count_on_the_candle_lane() {
+        let root = mochi_root_real_sized("candle_lattice");
+        let tier = root.join("q4");
+        // A budget nothing overflows, so ONLY the frame arithmetic is under test.
+        let huge = crate::vram_gate::apply_vram_cap(None, Some(512.0));
+
+        // The seam the generation arm passes: `video_frame_count(&request.model, raw)`.
+        let frames = video_frame_count("mochi_1", 150);
+        assert_eq!(
+            frames, 151,
+            "the shipped 5 s default snaps onto the 6k+1 lattice"
+        );
+        assert_ne!(
+            frames,
+            wan_frame_count(150),
+            "routing the candle lane through the wan stride would gate on 149 — off Mochi's lattice"
+        );
+        assert!(
+            mochi_vram_preflight("mochi_1", &tier, frames, 848, 480, "0", huge).is_ok(),
+            "151 frames fits a 512 GB budget — the gate rejects by BUDGET, never by duration alone"
+        );
+
+        // Frame-sensitivity at the seam: the SAME tier + card, two lengths, two verdicts. A 48 GB card
+        // sits between the 7-frame (~25 GB) and 151-frame (~81 GB) totals.
+        let card_48 = crate::vram_gate::apply_vram_cap(None, Some(48.0));
+        assert!(
+            mochi_vram_preflight("mochi_1", &tier, 7, 848, 480, "0", card_48).is_ok(),
+            "a short clip fits 48 GB"
+        );
+        assert!(
+            mochi_vram_preflight("mochi_1", &tier, frames, 848, 480, "0", card_48).is_err(),
+            "the 5 s default does not fit the SAME 48 GB card — the gate must see the frame count"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The gate NO-OPS without a budget signal (the story's explicit AC) and without a weight signal.
+    /// A worker on a card `nvidia-smi` cannot read, or pointed at a weights dir it cannot scan, must
+    /// keep rendering exactly as it did before this gate existed — a fit gate that blocks on missing
+    /// evidence is a regression, not a safety net (sc-12179: never wall-reject a machine that worked).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn mochi_vram_preflight_no_ops_without_a_budget_or_weight_signal() {
+        let root = mochi_root_real_sized("candle_nosignal");
+
+        // No budget: `nvidia_vram_budget_gb` → None (non-NVIDIA / unreadable) and no cap set.
+        assert!(
+            mochi_vram_preflight("mochi_1", &root.join("q4"), 151, 848, 480, "0", None).is_ok(),
+            "no budget signal ⇒ admit — the 5 s default is refused ONLY against a real reading"
+        );
+        assert_eq!(
+            crate::vram_gate::apply_vram_cap(None, None),
+            None,
+            "no real reading + no cap ⇒ no budget, so the wiring above really can pass None"
+        );
+
+        // No weights: a dir with no safetensors scans to 0 bytes ⇒ unmeasurable ⇒ admit, even on a
+        // tiny card. The fixture needs its OWN root, for two reasons: `mochi_resident_bytes` folds the
+        // shared `text_encoder/` + `vae/` siblings from the tier dir's PARENT, so (a) an "empty" tier
+        // under `root` above would still scan ~9.7 GiB and be REJECTED — testing the exact opposite of
+        // the intent — and (b) hanging it directly off `temp_dir()` would make the parent scan read
+        // /tmp, so an unrelated `/tmp/text_encoder` would flake it. A private root has neither problem.
+        let bare_root = std::env::temp_dir().join(format!(
+            "mochi_candle_nosignal_bare_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let bare = bare_root.join("q4");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert_eq!(
+            crate::mlx_fit_gate::mochi_resident_bytes(&bare),
+            0,
+            "the fixture must really have no weight signal, or the assert below proves nothing"
+        );
+        let out = mochi_vram_preflight(
+            "mochi_1",
+            &bare,
+            151,
+            848,
+            480,
+            "0",
+            crate::vram_gate::apply_vram_cap(None, Some(4.0)),
+        );
+        std::fs::remove_dir_all(&bare_root).ok();
+        std::fs::remove_dir_all(&root).ok();
+        assert!(out.is_ok(), "unmeasurable weights ⇒ no signal ⇒ admit");
+    }
+
+    /// The on-disk scan must fold the SHARED `text_encoder/` + `vae/` siblings from the tier dir's
+    /// PARENT — both providers set `supports_sequential_offload: false`, so all three components are
+    /// held for the whole run. Summing only the tier dir would miss ~9.7 GiB (T5-XXL + VAE), over half
+    /// the resident footprint, and silently under-gate every candle Mochi job.
+    ///
+    /// This pins that the candle lane reuses the SHARED scan rather than growing its own tier-only one.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn mochi_vram_preflight_folds_the_shared_siblings_on_the_candle_lane() {
+        let root = mochi_root_real_sized("candle_siblings");
+        assert_eq!(
+            crate::mlx_fit_gate::mochi_resident_bytes(&root.join("q4")),
+            MOCHI_Q4_DIT_BYTES + MOCHI_Q4_TE_BYTES + MOCHI_Q4_VAE_BYTES,
+            "the candle gate must budget on DiT + T5 + VAE (~18.73 GiB), not the tier dir alone"
+        );
+
+        // Behavioral consequence: a card sized to fit the DiT alone must still refuse. DiT-only is
+        // 9.01 + 4.66 decode + 2 = ~15.7 GB; the true total is 18.73 + 4.66 + 2 = ~25.4 GB. A 20 GB
+        // card admits the former and must reject the latter.
+        let out = mochi_vram_preflight(
+            "mochi_1",
+            &root.join("q4"),
+            7,
+            848,
+            480,
+            "0",
+            crate::vram_gate::apply_vram_cap(None, Some(20.0)),
+        );
+        std::fs::remove_dir_all(&root).ok();
+        assert!(
+            out.is_err(),
+            "a tier-only scan would admit this job on a 20 GB card and then OOM on the T5 + VAE"
         );
     }
 
