@@ -1799,7 +1799,9 @@ fn mochi_manifest_ships_the_one_repo_tier_matrix() {
         Some(true),
         "mochi is Apache-2.0, not gated"
     );
-    // ~53.5 GB installed — a deliberate opt-in, like LTX.
+    // ~20.1 GB for the default q4 install, ~53.5 GB for all three tiers + shared — a deliberate
+    // opt-in. Mochi carries no `recommended: true`, so it is neither badged nor pre-checked in the
+    // wizard; `autoDownload: false` states that intent explicitly.
     assert_eq!(
         entry.get("autoDownload").and_then(Value::as_bool),
         Some(false),

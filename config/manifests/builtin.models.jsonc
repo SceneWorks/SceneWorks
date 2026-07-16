@@ -6986,8 +6986,13 @@
     {
       "id": "mochi_1",
       "name": "Mochi 1",
-      // ~53.5 GB for a full install (any one tier + the shared T5-XXL/VAE/tokenizer). Badged but
-      // unchecked in the wizard so the big download stays a deliberate opt-in, like LTX.
+      // ~53.5 GB for ALL THREE tiers + the shared T5-XXL/VAE/tokenizer; the DEFAULT q4 install is
+      // ~20.1 GB (q4 9.67 + shared 10.45). The other single-tier installs: q8 ~23.7, bf16 ~30.5 GB.
+      // Unchecked in the wizard so the big download stays a deliberate opt-in: the wizard LISTS every
+      // downloadable model but pre-checks only `recommended: true` entries (SetupWizard.jsx
+      // `defaultSelection`), and Mochi sets no `recommended` key — like wan_2_2 — so it is neither
+      // badged nor pre-checked. `autoDownload: false` is belt-and-braces: it states the opt-in intent
+      // explicitly, though the `isRecommended` clause already excludes this entry on its own.
       "autoDownload": false,
       "family": "mochi",
       "type": "video",
@@ -7107,26 +7112,37 @@
         "standardTierLayout": true,
         // DERIVED, NOT MEASURED (no on-device production-bucket run exists yet — A6's parity ran at a
         // 64x64x7 fixture geometry; B5's real e2e should confirm or correct this). Derivation for the
-        // DEFAULT q4 tier at the default 848x480 / 5 s bucket, the convention this field follows:
+        // DEFAULT q4 tier at the default 848x480 / 5 s bucket, the convention this field follows.
+        // UNITS: GiB = 1024^3, GB = 1000^3. The app's "GB" is BINARY everywhere (tierSuggestion.js
+        // `BYTES_PER_GB = 1024^3`), so `minMemoryGb: 96` really means 96 GiB and the GiB figures below
+        // — not the GB ones — are what compare against it.
         //   * weights, ALL resident (`supports_sequential_offload: false` — the engine loads T5-XXL, the
-        //     AsymmDiT and the VAE up front and holds them for the whole generation): q4 DiT 9.01 GiB +
-        //     T5-XXL bf16 8.87 GiB + VAE 0.86 GiB = ~18.7 GiB.
+        //     AsymmDiT and the VAE up front and holds them for the whole generation): q4 DiT 9.007 +
+        //     T5-XXL bf16 8.871 + VAE 0.856 = 18.73 GiB. Exact hosted bytes (HF API, repo rev 90a87786):
+        //     9670883602 + 9524669250 + 919551200 = 20115104052 B.
         //   * denoise activations are small (~1.5 GiB): 151 frames -> 44.5k visual tokens x 3072, x2 for
         //     true CFG, with fused SDPA.
         //   * the AsymmVAE decode DOMINATES and is NOT tiled — `vae.decode(latents)` materializes the
-        //     whole clip. The final decoder stage runs 128 channels at FULL resolution (T+5, 480, 848),
-        //     i.e. ~16.3 GiB per bf16 tensor, and a resnet holds residual + intermediate live at once, so
-        //     the decode peaks ~33-49 GiB before Metal conv scratch.
-        // ~18.7 + ~49 = ~68 GiB active, and the SCAIL-2 precedent (76 GB measured -> 96 declared) says the
-        // process footprint runs above the active peak. 96 is the floor that fits with headroom. NOTE the
-        // Model Manager SUPPRESSES this blanket badge for tier-matrix models (sc-10042) and drives RAM
-        // guidance off the per-tier `footprint` instead, so this is primarily documentation until those
-        // are measured. Tiling the decode (the sc-11747 / sc-10087 pattern) would cut this sharply.
+        //     whole clip. The final decoder stage runs 128 channels at FULL resolution (T+5, 480, 848):
+        //     128 x 156 x 480 x 848 x 2 B = 16255549440 B = 16.26 GB = 15.14 GiB per bf16 tensor. A
+        //     resnet holds residual + intermediate live at once (2x = 30.3 GiB), so the decode peaks
+        //     ~30-45 GiB (2-3x that tensor) before Metal conv scratch.
+        // 18.73 + ~45 = ~64 GiB active (~69 GB), and the SCAIL-2 precedent (76 GB measured -> 96
+        // declared) says the process footprint runs above the active peak. 96 is the floor that fits
+        // with headroom. NOTE the Model Manager SUPPRESSES this blanket badge for tier-matrix models
+        // (sc-10042) and drives RAM guidance off the per-tier `footprint` instead, so this is primarily
+        // documentation until those are measured. Tiling the decode (the sc-11747 / sc-10087 pattern)
+        // would cut this sharply.
         "minMemoryGb": 96
       },
       "ui": {
         "label": "Mochi 1",
-        "description": "Genmo Mochi 1 — a 10B AsymmDiT text-to-video model with a 6x-temporal AsymmVAE, native on Apple Silicon (MLX) and Windows/Linux (candle/CUDA). Renders 848x480 at 30 fps. Apache-2.0: commercial use free, ungated. Text-to-video only (no image conditioning) and no LoRA support. ~53.5 GB installed; needs ample memory — the VAE decode is untiled, so peak scales with clip length.",
+        // No install-size figure here, per the tier-matrix house style: LTX, Wan and SCAIL-2 all omit
+        // one because the Model Manager's tier panel already renders the EXACT per-tier size from
+        // `footprint.diskSizeBytes` (`formatTierSize`). A single aggregate would also be wrong for
+        // every individual user — the default q4 install is ~20.1 GB, a quarter of the all-tiers
+        // total. SCAIL-2 is the precedent for the qualitative memory caveat that replaces it.
+        "description": "Genmo Mochi 1 — a 10B AsymmDiT text-to-video model with a 6x-temporal AsymmVAE, native on Apple Silicon (MLX) and Windows/Linux (candle/CUDA). Renders 848x480 at 30 fps. Apache-2.0: commercial use free, ungated. Text-to-video only (no image conditioning) and no LoRA support. Needs ample memory — the VAE decode is untiled, so peak scales with clip length.",
         "recommendedFor": ["text_to_video"],
         "durationHint": "Native design point is ~5s at 848x480 / 30 fps. Shorter clips cut memory roughly linearly — start at 1-2s if you are memory-constrained.",
         "promptGuide": {
