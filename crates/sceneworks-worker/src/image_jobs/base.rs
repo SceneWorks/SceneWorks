@@ -4953,18 +4953,13 @@ async fn generate_candle_stream(
             )
         }),
     };
-    // The candle FLUX.1 (sc-10769), FLUX.2 txt2img (sc-10868), and Qwen-Image txt2img (sc-10867) lanes
-    // have wired sequential residency (load→encode→drop the text encoder before the DiT); other families
-    // reject-before-OOM. FLUX.2 is the biggest win off-Mac — the 32B `flux2_dev`'s decoder-LM Mistral TE
-    // is multiple GB freed before the DiT loads; Qwen-Image drops the ~8 GB Qwen2.5-VL encoder before the
-    // 20B DiT. The flux2 edit/control and Qwen edit/pose-control/ComfyUI lanes are NOT wired (resident
-    // path) and are diverted before this gate by `resolve_candle_image_route`, so only the plain-txt2img
-    // engine ids appear here. Hoisted so BOTH the capability downtier and the resident/sequential decision
-    // read one capability signal.
-    let sequential_capable = matches!(
-        engine_id,
-        "flux1_dev" | "flux1_schnell" | "flux2_dev" | "flux2_klein_9b" | "qwen_image"
-    );
+    // sc-12130: derive Candle residency support from the provider's weights-free descriptor instead of
+    // maintaining a second engine-id allowlist in the worker. The capability bit is the provider's
+    // contract that every request shape accepted by this id honors Sequential. Bespoke edit/control,
+    // ComfyUI, and strict-control routes are diverted by `resolve_candle_image_route` before this gate;
+    // generic txt2img/img2img reaches this point and uses the same registry-derived signal for both the
+    // capability downtier and the resident/sequential decision.
+    let sequential_capable = crate::mlx_fit_gate::engine_supports_sequential(engine_id);
     // sc-10733 capability downtier: for a DEFAULT job (no explicit per-(screen,model) pick, and not the
     // bespoke ConvRot tier), if the resolved tier won't fit the live budget, step DOWN to the highest
     // installed tier that does — floored at the per-model quality floor — rejecting only when nothing

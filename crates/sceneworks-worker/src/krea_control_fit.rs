@@ -14,27 +14,31 @@
 //! stopping as soon as the predicted peak ≤ budget:
 //!  1. **packed base** — default, ~free (candle-gen #480, shipped). Always on; the peak below already
 //!     reflects it.
-//!  2. **VAE-decode tiling** (sc-11744, candle-gen #492) — force the seam-free tiled VAE tail (a *speed*
-//!     cost, no quality cost) to cap the end-of-render decode spike. Engaged first, when the measured
+//!  2. **sequential residency** (sc-12176) — encode/drop Qwen3-VL before loading the heavy phase. The
+//!     cheapest adaptation and no quality cost; its measured per-tier peak enables a clean second-stage
+//!     reject when even the staged working set will not fit.
+//!  3. **VAE-decode tiling** (sc-11744, candle-gen #492) — force the seam-free tiled VAE tail (a *speed*
+//!     cost, no quality cost) to cap the end-of-render decode spike. Engaged after residency, when the measured
 //!     `decodeTileSaveGb` is enough to fit; also stays on underneath the quant rungs (it is cheaper than
 //!     quant and every bit helps).
-//!  3. **activation chunking** (sc-11745, candle-gen #496) — engage sc-6217-style query-row attention
+//!  4. **activation chunking** (sc-11745, candle-gen #496) — engage sc-6217-style query-row attention
 //!     chunking on the composable base stack + control branch when the denoise steady state is the
 //!     overflow. A *speed* cost (~+6%) with byte-identical output; slots between tiling and branch-quant.
 //!     Gated by the presence of the measured scalar `chunkAttnSaveGb`.
-//!  4. **control-branch quant** (sc-11743, candle-gen #483) — bf16 → q8 → q4. A *quality cost* (the
+//!  5. **control-branch quant** (sc-11743, candle-gen #483) — bf16 → q8 → q4. A *quality cost* (the
 //!     residual is precision-sensitive, RMS-clamped at τ), so it is the **last-resort rung**. Composes
 //!     with the cheaper rungs (all reduce the co-resident peak).
 //!
 //! `decodeTileSaveGb` / `chunkAttnSaveGb` absent (unmeasured) ⇒ that rung is skipped exactly like an
 //! unmeasured branch-quant save — the ladder walks the rungs it *can* measure and, if even
-//! (tiling + chunking + q4) won't fit, rejects-before-OOM at the honest best-case peak.
+//! (sequential residency + tiling + chunking + q4) won't fit, rejects-before-OOM at the honest
+//! best-case peak.
 //!
 //! Everything here is pure and unit-tested; the live `nvidia-smi` reading lives in [`crate::gpu`] and the
 //! wiring is in `generate_candle_krea_control_stream` (image_jobs/krea_control_candle.rs).
 
 use super::*;
-use gen_core::Quant;
+use gen_core::{OffloadPolicy, Quant};
 use serde_json::Value;
 
 /// Fixed transient/runtime headroom (GB) added on top of the MEASURED control-lane peak
@@ -49,12 +53,16 @@ pub(crate) enum KreaControlFit {
     /// No measured control peak or no live budget ⇒ don't gate; load the default bf16 branch.
     Unknown,
     /// The predicted peak fits after engaging the minimal sufficient set of rungs. The big-card fast
-    /// path is `{ tile_vae_decode: false, chunk_attention: false, branch_quant: None }` (monolithic
-    /// full-speed decode, unchunked attention, bf16 branch, zero penalty). `tile_vae_decode = true` is the
-    /// cheapest rung (sc-11744 — a *speed* cost only, seam-free); `chunk_attention = true` is the next rung
-    /// (sc-11745 — a *speed* cost only, byte-identical output); `branch_quant = Some(Q8)`/`Some(Q4)` is the
-    /// last-resort *quality* rung, engaged only after both cheaper rungs were insufficient.
+    /// path uses resident components with `{ tile_vae_decode: false, chunk_attention: false,
+    /// branch_quant: None }` (monolithic full-speed decode, unchunked attention, bf16 branch, zero
+    /// penalty). Sequential residency is the first adaptation; `tile_vae_decode = true` is the next rung
+    /// (sc-11744 — a *speed* cost only, seam-free); `chunk_attention = true` follows (sc-11745 — a
+    /// *speed* cost only, byte-identical output); `branch_quant = Some(Q8)`/`Some(Q4)` is the last-resort
+    /// *quality* rung, engaged only after the cheaper rungs were insufficient.
     Fits {
+        /// Component residency selected before any deeper rung. Sequential is the cheapest adaptation:
+        /// it drops Qwen3-VL before loading the DiT + control branch + VAE.
+        offload_policy: OffloadPolicy,
         /// Force the seam-free tiled VAE decode (sc-11744) to cap the end-of-render decode spike. The
         /// worker threads this into `Krea2ControlRequest::tile_vae_decode`.
         tile_vae_decode: bool,
@@ -64,7 +72,8 @@ pub(crate) enum KreaControlFit {
         branch_quant: Option<Quant>,
     },
     /// Won't fit even at the last rung (q4 branch). Reject-before-OOM with an actionable message rather
-    /// than a reactive CUDA OOM mid-render. `needed_gb` is the best-case (q4-branch) predicted peak.
+    /// than a reactive CUDA OOM mid-render. `needed_gb` is the best-case sequential + tiled + chunked +
+    /// q4-branch predicted peak.
     TooBig { needed_gb: f64, available_gb: f64 },
 }
 
@@ -80,6 +89,23 @@ pub(crate) fn predicted_control_peak_gb(
         .get("candle")?
         .get("control")?
         .get("peakGbByTier")
+        .and_then(|tiers| tiers.get(tier_key))
+        .and_then(json_f64)
+        .map(|gb| gb + HEADROOM_GB)
+}
+
+/// Predicted Sequential control-lane peak for `tier_key`:
+/// `candle.control.sequentialPeakGbByTier[tier_key]` + [`HEADROOM_GB`]. This is the measured largest
+/// single working set after Qwen3-VL has been encoded and dropped. `None` preserves best-effort
+/// offload behavior: the lane still stages, but cannot perform an honest second-stage reject.
+pub(crate) fn predicted_control_sequential_peak_gb(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+) -> Option<f64> {
+    manifest_entry
+        .get("candle")?
+        .get("control")?
+        .get("sequentialPeakGbByTier")
         .and_then(|tiers| tiers.get(tier_key))
         .and_then(json_f64)
         .map(|gb| gb + HEADROOM_GB)
@@ -134,14 +160,16 @@ pub(crate) fn chunk_attn_save_gb(manifest_entry: &JsonObject) -> Option<f64> {
 /// savings, engage the minimal sufficient set of rungs in increasing (Δcost) order and return the
 /// [`KreaControlFit`].
 ///
-/// Walk: if the monolithic peak fits, run untiled/unchunked at the bf16 branch (big-card fast path, no
-/// penalty); else force the seam-free tiled decode (sc-11744 — a *speed* cost only); else — keeping tiling
-/// on — engage query-row attention chunking (sc-11745 — a *speed* cost only, byte-identical); else —
-/// keeping both speed rungs on — quantize the control branch, preferring q8 (near-lossless) then q4
-/// (pose-locked, non-pose drift); else reject-before-OOM. Any unmeasured saving (`None`) skips its rung.
-/// Missing peak or budget ⇒ [`KreaControlFit::Unknown`] (never block).
+/// Walk: if the monolithic peak fits, run resident/untiled/unchunked at the bf16 branch (big-card fast
+/// path, no penalty); else stage text and heavy components sequentially. If the measured sequential peak
+/// still exceeds the budget, force the seam-free tiled decode (sc-11744 — a *speed* cost only); then,
+/// keeping tiling on, engage query-row attention chunking (sc-11745 — a *speed* cost only,
+/// byte-identical); then, keeping both speed rungs on, quantize the control branch, preferring q8
+/// (near-lossless) then q4 (pose-locked, non-pose drift); else reject-before-OOM. Any unmeasured saving
+/// (`None`) skips its rung. Missing resident peak or budget ⇒ [`KreaControlFit::Unknown`] (never block).
 pub(crate) fn fit_ladder(
     peak_bf16_branch_gb: Option<f64>,
+    sequential_peak_bf16_branch_gb: Option<f64>,
     budget: Option<crate::vram_gate::VramBudget>,
     decode_tile_save_gb: Option<f64>,
     chunk_attn_save_gb: Option<f64>,
@@ -158,16 +186,38 @@ pub(crate) fn fit_ladder(
     // so nothing engages: full-speed decode, unchunked attention, zero quality penalty.
     if fits(peak) {
         return KreaControlFit::Fits {
+            offload_policy: OffloadPolicy::Resident,
             tile_vae_decode: false,
             chunk_attention: false,
             branch_quant: None,
         };
     }
-    // Rung 2 (VAE-decode tiling, sc-11744) — cheapest: a *speed* cost, no quality loss (seam-free). An
+
+    // Rung 2 (sequential residency, sc-12176) — the cheapest adaptation. If its measured peak is
+    // absent, preserve the shared gate's best-effort contract: stage anyway and rely on the reactive
+    // CUDA-OOM backstop rather than engaging costlier/quality-affecting rungs from an unknown baseline.
+    let Some(peak) = sequential_peak_bf16_branch_gb else {
+        return KreaControlFit::Fits {
+            offload_policy: OffloadPolicy::Sequential,
+            tile_vae_decode: false,
+            chunk_attention: false,
+            branch_quant: None,
+        };
+    };
+    if fits(peak) {
+        return KreaControlFit::Fits {
+            offload_policy: OffloadPolicy::Sequential,
+            tile_vae_decode: false,
+            chunk_attention: false,
+            branch_quant: None,
+        };
+    }
+    // Rung 3 (VAE-decode tiling, sc-11744) — a *speed* cost, no quality loss (seam-free). An
     // unmeasured tier saving (None) leaves this rung unavailable, degenerating toward the quant-only walk.
     if let Some(tile_save) = decode_tile_save_gb {
         if fits(peak - tile_save) {
             return KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: true,
                 chunk_attention: false,
                 branch_quant: None,
@@ -179,12 +229,13 @@ pub(crate) fn fit_ladder(
     let tile_on = decode_tile_save_gb.is_some();
     let peak_after_tile = peak - decode_tile_save_gb.unwrap_or(0.0);
 
-    // Rung 3 (activation chunking, sc-11745, candle-gen #496) — a *speed* cost (~+6%), byte-identical output
+    // Rung 4 (activation chunking, sc-11745, candle-gen #496) — a *speed* cost (~+6%), byte-identical output
     // (the chunked forward is numerically identical). Cheaper than the quality-costing branch quant, so it is
     // engaged BEFORE it. An unmeasured saving (None) leaves this rung unavailable.
     if let Some(chunk_save) = chunk_attn_save_gb {
         if fits(peak_after_tile - chunk_save) {
             return KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: tile_on,
                 chunk_attention: true,
                 branch_quant: None,
@@ -196,11 +247,12 @@ pub(crate) fn fit_ladder(
     let chunk_on = chunk_attn_save_gb.is_some();
     let peak_after_chunk = peak_after_tile - chunk_attn_save_gb.unwrap_or(0.0);
 
-    // Rung 4 (control-branch quant, sc-11743) — last resort, a *quality* cost. Prefer q8 (effectively
+    // Rung 5 (control-branch quant, sc-11743) — last resort, a *quality* cost. Prefer q8 (effectively
     // free quality) before q4 (visible non-pose drift). Each save is measured; an unmeasured save skips.
     if let Some(save) = q8_save_gb {
         if fits(peak_after_chunk - save) {
             return KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: tile_on,
                 chunk_attention: chunk_on,
                 branch_quant: Some(Quant::Q8),
@@ -210,6 +262,7 @@ pub(crate) fn fit_ladder(
     if let Some(save) = q4_save_gb {
         if fits(peak_after_chunk - save) {
             return KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: tile_on,
                 chunk_attention: chunk_on,
                 branch_quant: Some(Quant::Q4),
@@ -250,6 +303,7 @@ mod tests {
                 "control": {
                     // q4 measured (sc-11744), bf16 measured (sc-11743), q8 estimated.
                     "peakGbByTier": { "q4": 30.9, "q8": 35.5, "bf16": 46.2 },
+                    "sequentialPeakGbByTier": { "q4": 25.0, "q8": 30.0, "bf16": 40.0 },
                     // VAE-decode tiling saving (sc-11744); measured only for the constrained q4 tier here
                     // (the decode spike is the peak there). Illustrative test value, not the shipped one.
                     "decodeTileSaveGb": { "q4": 6.9 },
@@ -308,6 +362,76 @@ mod tests {
     }
 
     #[test]
+    fn predicted_control_sequential_peak_reads_the_tier_plus_headroom() {
+        let m = krea_manifest();
+        assert_eq!(predicted_control_sequential_peak_gb(&m, "q4"), Some(27.0));
+        assert_eq!(predicted_control_sequential_peak_gb(&m, "bf16"), Some(42.0));
+        assert_eq!(predicted_control_sequential_peak_gb(&m, "nvfp4"), None);
+        assert_eq!(
+            predicted_control_sequential_peak_gb(&obj(json!({})), "q4"),
+            None
+        );
+    }
+
+    #[test]
+    fn sequential_is_the_first_rung_and_has_a_clean_second_stage_reject() {
+        let resident = Some(40.0);
+        let sequential = Some(30.0);
+
+        assert_eq!(
+            super::fit_ladder(
+                resident,
+                sequential,
+                Some(budget(35.0)),
+                None,
+                None,
+                None,
+                None,
+            ),
+            KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
+                tile_vae_decode: false,
+                chunk_attention: false,
+                branch_quant: None,
+            }
+        );
+        assert_too_big(
+            super::fit_ladder(
+                resident,
+                sequential,
+                Some(budget(29.0)),
+                None,
+                None,
+                None,
+                None,
+            ),
+            30.0,
+            29.0,
+        );
+    }
+
+    #[test]
+    fn missing_sequential_measurement_keeps_best_effort_staging() {
+        assert_eq!(
+            super::fit_ladder(
+                Some(40.0),
+                None,
+                Some(budget(20.0)),
+                Some(5.0),
+                Some(2.0),
+                Some(8.0),
+                Some(10.0),
+            ),
+            KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
+                tile_vae_decode: false,
+                chunk_attention: false,
+                branch_quant: None,
+            }
+        );
+    }
+
+    #[test]
     fn branch_quant_save_reads_the_measured_deltas() {
         let m = krea_manifest();
         assert_eq!(branch_quant_save_gb(&m, "q8"), Some(8.4));
@@ -333,9 +457,23 @@ mod tests {
         }
     }
 
+    /// Keep the pre-sc-12176 rung tests focused on tiling/chunking/branch quant by modeling a staged
+    /// peak equal to the old resident peak. Dedicated tests below cover the residency reduction itself.
+    fn fit_ladder(
+        peak: Option<f64>,
+        budget: Option<VramBudget>,
+        tile: Option<f64>,
+        chunk: Option<f64>,
+        q8: Option<f64>,
+        q4: Option<f64>,
+    ) -> KreaControlFit {
+        super::fit_ladder(peak, peak, budget, tile, chunk, q8, q4)
+    }
+
     /// The big-card fast path: untiled monolithic decode, bf16 branch, no rung engaged.
     fn fits_untiled_bf16() -> KreaControlFit {
         KreaControlFit::Fits {
+            offload_policy: OffloadPolicy::Resident,
             tile_vae_decode: false,
             chunk_attention: false,
             branch_quant: None,
@@ -365,6 +503,7 @@ mod tests {
         assert_eq!(
             fit_ladder(peak, Some(budget(26.0)), tile, chunk, q8, q4),
             KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: true,
                 chunk_attention: false,
                 branch_quant: None,
@@ -382,6 +521,7 @@ mod tests {
         assert_eq!(
             fit_ladder(peak, Some(budget(24.0)), tile, chunk, q8, q4),
             KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: true,
                 chunk_attention: false,
                 branch_quant: Some(Quant::Q8),
@@ -392,6 +532,7 @@ mod tests {
         assert_eq!(
             fit_ladder(peak, Some(budget(16.0)), tile, chunk, q8, q4),
             KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: true,
                 chunk_attention: false,
                 branch_quant: Some(Quant::Q4),
@@ -442,6 +583,7 @@ mod tests {
         assert_eq!(
             fit_ladder(peak, Some(budget(41.0)), tile, chunk, q8, q4),
             KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
                 chunk_attention: false,
                 branch_quant: Some(Quant::Q8),
@@ -451,6 +593,7 @@ mod tests {
         assert_eq!(
             fit_ladder(peak, Some(budget(39.0)), tile, chunk, q8, q4),
             KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
                 chunk_attention: false,
                 branch_quant: Some(Quant::Q4),
@@ -519,6 +662,7 @@ mod tests {
         assert_eq!(
             fit_ladder(peak, Some(budget(24.0)), tile, chunk, q8, q4),
             KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: true,
                 chunk_attention: true,
                 branch_quant: None,
@@ -530,6 +674,7 @@ mod tests {
         assert_eq!(
             fit_ladder(peak, Some(budget(16.0)), tile, chunk, q8, q4),
             KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: true,
                 chunk_attention: true,
                 branch_quant: Some(Quant::Q8),
@@ -539,6 +684,7 @@ mod tests {
         assert_eq!(
             fit_ladder(peak, Some(budget(14.0)), tile, chunk, q8, q4),
             KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: true,
                 chunk_attention: true,
                 branch_quant: Some(Quant::Q4),
@@ -567,6 +713,7 @@ mod tests {
         assert_eq!(
             fit_ladder(peak, Some(budget(46.0)), tile, chunk, q8, q4),
             KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
                 chunk_attention: true,
                 branch_quant: None,

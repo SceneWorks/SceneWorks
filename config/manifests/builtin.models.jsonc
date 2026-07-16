@@ -2501,11 +2501,12 @@
         "quantize": 8,
         "repo": "SceneWorks/krea-2-turbo-mlx"
       },
-      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
-      // 1024²/8-step via the candle-gen nvidia-smi peak monitor: q4 packed overall-peak 26.4 GB (the
-      // single-stream DiT + Qwen3-VL-4B TE + Qwen-Image VAE). minMemoryGb 32 covers it with headroom;
-      // q8/bf16 ESTIMATED (~31 / ~44 GB, consistent with the mlx Q8 ~27 GB / bf16 ~43 GB above) pending
-      // measurement.
+      // candle/CUDA VRAM gate (sc-9094/sc-12131, epic 9083 → epic 10765) — MEASURED on an RTX PRO
+      // 6000 (Blackwell sm_120) at 1024²/8-step with the rendered-device two-process probe. Resident
+      // peaks are q4 26.4, q8 35.9, bf16 55.6 GB. Sequential residency encodes/drops Qwen3-VL before
+      // loading the DiT and peaks at q4 22.7, q8 29.5, bf16 39.8 GB; every resident/sequential pair was
+      // byte-identical. minMemoryGb 32 covers the common q4 resident lane with headroom. INT8-ConvRot
+      // remains an unmeasured non-shipping estimate and defers to resident.
       "candle": {
         "minMemoryGb": 32,
         // sc-9300: the INT8-ConvRot tier's VRAM ceiling. The int8 DiT is ~half the bf16 DiT, but the
@@ -2515,7 +2516,11 @@
         // path as q4/q8/bf16 (the third of the three ConvRot gates; the candle lane + sm_89 compute-cap
         // are the worker's `int8_convrot` capability).
         "vramGbByTier": { "q4": 26.4, "q8": 35.9, "bf16": 55.6, "int8-convrot": 31.0 },
-        "measured": false,
+        // sc-12131 / sc-10856 second-stage gate: measured largest working set after the text phase has
+        // been dropped. INT8-ConvRot is intentionally absent because that lane remains unmeasured and
+        // does not advertise sequential residency.
+        "sequentialPeakGb": { "q4": 22.7, "q8": 29.5, "bf16": 39.8 },
+        "measured": true,
         // Pose-ControlNet lane VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The control lane loads
         // the base at the installed tier PLUS the trained ~6.6 GB bf16 control branch, so its render peak
         // (the end-of-render VAE-decode spike, sc-11744) EXCEEDS the txt2img `vramGbByTier` above — it needs
@@ -2523,10 +2528,14 @@
         // free VRAM and, only when constrained, engages the cheapest sufficient rung. @1024²/8-step/scale 0.6
         // on an RTX PRO 6000 (Blackwell sm_120).
         "control": {
-          // Overall render peak (GB) by BASE tier, bf16 control branch, NO rungs engaged (monolithic VAE
-          // decode). q4 MEASURED 30.9 (sc-11744 GPU timeline, the VAE-decode spike); bf16 MEASURED 46.2
-          // (sc-11743, dense base + bf16 branch); q8 ESTIMATED ~35.5 (between the two) pending measurement.
-          "peakGbByTier": { "q4": 30.9, "q8": 35.5, "bf16": 46.2 },
+          // Trusted two-process rendered-device probe (sc-12176), 1024², bf16 control branch, no deeper
+          // rungs, idle baseline 0.0 GB. Resident peaks: q4 36.2, q8 45.4, bf16 65.8 GB. Sequential
+          // encode/drops Qwen3-VL before the heavy load: q4 32.5, q8 39.6, bf16 50.0 GB. Raw RGB was
+          // byte-identical within every tier; q4/q8 used one denoise step (the working set is step-count
+          // invariant), bf16 used the production 8 steps. The fit gate tries Sequential first and uses
+          // its row for the clean second-stage reject before composing the deeper savings below.
+          "peakGbByTier": { "q4": 36.2, "q8": 45.4, "bf16": 65.8 },
+          "sequentialPeakGbByTier": { "q4": 32.5, "q8": 39.6, "bf16": 50.0 },
           // CHEAPEST rung (sc-11744, candle-gen #492): the peak reduction (GB) from forcing the seam-free
           // tiled VAE decode (`Krea2ControlRequest.tile_vae_decode`) — a SPEED cost, no quality cost. The
           // fit-gate engages it BEFORE branch-quant. GPU-MEASURED on an RTX PRO 6000 (Blackwell sm_120),
@@ -2551,7 +2560,7 @@
           // q8 −8.4 (near-lossless), q4 −10.2 (pose-locked; non-pose details drift). The gate prefers q8
           // before q4, and composes it with the two cheaper (speed-only) rungs above — tiling then chunking.
           "branchQuantSaveGb": { "q8": 8.4, "q4": 10.2 },
-          "measured": false
+          "measured": true
         }
       },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
