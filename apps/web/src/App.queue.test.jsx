@@ -421,6 +421,84 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Warm: z_image_turbo");
   });
 
+  it("clears completed queue items scoped to the active project filter (issue #1556)", async () => {
+    const clearCompletedJobs = vi.fn(() => Promise.resolve());
+    const terminalJob = (id, status) => ({
+      id,
+      type: "image_generate",
+      status,
+      stage: status,
+      progress: 1,
+      projectId: "project-1",
+      projectName: "Project 1",
+      requestedGpu: "auto",
+      payload: { prompt: id },
+      attempts: 1,
+    });
+    const baseProps = {
+      activeProject: { id: "project-1", name: "Project 1" },
+      clearCompletedJobs,
+      createPlaceholderJob: (event) => event.preventDefault(),
+      gpuOptions: ["auto", "0"],
+      jobAction: () => {},
+      jobPrompt: "",
+      projectFilter: "project-1",
+      projects: [{ id: "project-1", name: "Project 1" }],
+      requestedGpu: "auto",
+      setJobPrompt: () => {},
+      setProjectFilter: () => {},
+      setRequestedGpu: () => {},
+      visibleWorkers: [],
+    };
+    const findClearButton = () =>
+      [...document.body.querySelectorAll("button")].find((button) =>
+        button.textContent.startsWith("Clear completed"),
+      );
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            ...baseProps,
+            // Two terminal jobs (completed + failed) and one still running.
+            filteredJobs: [
+              terminalJob("job-done", "completed"),
+              terminalJob("job-failed", "failed"),
+              { ...terminalJob("job-running", "running"), progress: 0.3, stage: "generating" },
+            ],
+          },
+          <QueueScreen />,
+        ),
+      );
+    });
+
+    // The button surfaces the terminal count and is enabled.
+    let clearButton = findClearButton();
+    expect(clearButton).toBeTruthy();
+    expect(clearButton.textContent).toBe("Clear completed (2)");
+    expect(clearButton.disabled).toBe(false);
+
+    await act(async () => {
+      clearButton.click();
+    });
+    // Scoped to the active project filter, matching what the operator sees.
+    expect(clearCompletedJobs).toHaveBeenCalledWith("project-1");
+
+    // With nothing terminal in view, the action disables and drops the count.
+    await act(async () => {
+      root.render(
+        withAppContext(
+          { ...baseProps, filteredJobs: [{ ...terminalJob("job-running", "running"), progress: 0.3, stage: "generating" }] },
+          <QueueScreen />,
+        ),
+      );
+    });
+    clearButton = findClearButton();
+    expect(clearButton.textContent).toBe("Clear completed");
+    expect(clearButton.disabled).toBe(true);
+  });
+
   it("updates Queue GPU utilization when worker props change", async () => {
     const queueProps = {
       activeProject: { id: "project-1", name: "Project 1" },

@@ -394,6 +394,140 @@ async fn canceling_queued_job_finishes_without_worker_acknowledgement() {
 }
 
 #[tokio::test]
+async fn clear_jobs_soft_hides_terminal_items_from_the_queue() {
+    // sc-12231 / issue #1556: POST /api/v1/jobs/clear drops every terminal job from
+    // the queue list + counts, returns the cleared ids, and leaves active jobs alone.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // A queued job we cancel (terminal) + a queued job left active.
+    let (_, terminal) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_generate",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "done" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let terminal_id = terminal["id"].as_str().expect("job id").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{terminal_id}/cancel"),
+        Value::Null,
+    )
+    .await;
+
+    let (_, active) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_generate",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "wait" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let active_id = active["id"].as_str().expect("job id").to_owned();
+
+    // Both are listed before clearing.
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(before.as_array().expect("jobs array").len(), 2);
+
+    // Clear (empty body == all projects). Reports the one terminal job by id.
+    let (status, cleared) = request(app.clone(), "POST", "/api/v1/jobs/clear", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cleared["cleared"], 1);
+    assert_eq!(cleared["clearedIds"], json!([terminal_id]));
+
+    // The queue now lists only the still-active job.
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let ids: Vec<&str> = after
+        .as_array()
+        .expect("jobs array")
+        .iter()
+        .filter_map(|job| job["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec![active_id.as_str()]);
+
+    // Status counts drop the canceled job; the queued one remains.
+    let (_, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
+    assert_eq!(queue["counts"]["canceled"], 0);
+    assert_eq!(queue["counts"]["queued"], 1);
+}
+
+#[tokio::test]
+async fn clear_jobs_scopes_to_the_requested_project() {
+    // sc-12231: the clear honors the body's projectId so clearing one workspace's
+    // completed items never touches another's.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let mut ids = Vec::new();
+    for project in ["project-a", "project-b"] {
+        let (_, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "image_generate",
+                "projectId": project,
+                "projectName": project,
+                "payload": { "prompt": "done" },
+                "requestedGpu": "auto"
+            }),
+        )
+        .await;
+        let id = job["id"].as_str().expect("job id").to_owned();
+        request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/cancel"),
+            Value::Null,
+        )
+        .await;
+        ids.push(id);
+    }
+
+    // Clear only project-a.
+    let (status, cleared) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/clear",
+        json!({ "projectId": "project-a" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cleared["clearedIds"], json!([ids[0]]));
+
+    // project-a is empty; project-b's canceled job is untouched.
+    let (_, a_jobs) = request(
+        app.clone(),
+        "GET",
+        "/api/v1/jobs?projectId=project-a",
+        Value::Null,
+    )
+    .await;
+    assert!(a_jobs.as_array().expect("jobs array").is_empty());
+    let (_, b_jobs) = request(app, "GET", "/api/v1/jobs?projectId=project-b", Value::Null).await;
+    let b_ids: Vec<&str> = b_jobs
+        .as_array()
+        .expect("jobs array")
+        .iter()
+        .filter_map(|job| job["id"].as_str())
+        .collect();
+    assert_eq!(b_ids, vec![ids[1].as_str()]);
+}
+
+#[tokio::test]
 async fn image_job_route_threads_upscale_contract_when_enabled() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");

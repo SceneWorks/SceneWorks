@@ -1109,6 +1109,30 @@ pub struct RetryJobRequest {
     pub extra: ExtraFields,
 }
 
+/// Body for `POST /api/v1/jobs/clear` (sc-12231, issue #1556) — the "Clear
+/// completed" queue action. `project_id` scopes the clear to one workspace
+/// (matching the queue's project filter); omitted / null clears every project's
+/// terminal jobs. All fields optional so an empty `{}` body is valid.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearJobsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+/// Response for `POST /api/v1/jobs/clear` (sc-12231): how many terminal jobs were
+/// soft-hidden and their ids, so the client can prune them from its live queue.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearJobsResponse {
+    pub cleared: usize,
+    pub cleared_ids: Vec<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SidecarPatterns {

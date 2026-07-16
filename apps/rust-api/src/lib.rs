@@ -20,11 +20,11 @@ use axum::{Json, Router};
 use futures_util::future::join_all;
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
-    ClaimRequest, ClaimResponse, ContractNumber, DuplicateJobRequest, GenerationMetrics,
-    GenerationMetricsRow, ImageUpscaleRequest, JobCreateRequest, JobSnapshot, JobStatus, JobType,
-    JsonObject, ProgressRequest, QueueSummary, RetryJobRequest, WorkerCapability,
-    WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
-    WorkerTerminationRequest,
+    ClaimRequest, ClaimResponse, ClearJobsRequest, ClearJobsResponse, ContractNumber,
+    DuplicateJobRequest, GenerationMetrics, GenerationMetricsRow, ImageUpscaleRequest,
+    JobCreateRequest, JobSnapshot, JobStatus, JobType, JsonObject, ProgressRequest, QueueSummary,
+    RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
+    WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
 };
 use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
 use sceneworks_core::jobs_store::{
@@ -125,8 +125,8 @@ use generation::{validate_interleave_job, validate_vqa_job};
 mod ideogram;
 mod jobs;
 use jobs::{
-    cancel_job, claim_job, create_job, duplicate_job, get_job, get_job_metrics, list_jobs,
-    list_metrics, retry_job, update_job_progress, upsert_job_metrics,
+    cancel_job, claim_job, clear_jobs, create_job, duplicate_job, get_job, get_job_metrics,
+    list_jobs, list_metrics, retry_job, update_job_progress, upsert_job_metrics,
 };
 mod workers;
 use workers::{
@@ -1316,6 +1316,9 @@ pub(crate) fn create_app_with_state(
         )
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/jobs/claim", post(claim_job))
+        // Clear completed items from the queue (sc-12231, issue #1556). A static
+        // segment like `/claim`, so it takes priority over `/jobs/:job_id`.
+        .route("/api/v1/jobs/clear", post(clear_jobs))
         .route("/api/v1/jobs/events", get(job_events))
         .route("/api/v1/jobs/events/ticket", post(create_event_ticket))
         // Media ticket (sc-8810): auth-protected mint endpoint; the ticket is honored

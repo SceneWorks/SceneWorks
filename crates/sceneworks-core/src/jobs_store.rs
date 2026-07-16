@@ -431,6 +431,13 @@ impl JobsStore {
         // / "cpu"). First-non-null wins so the WorkerProgressCard's arch pill
         // stays stable across the run.
         ensure_column(&transaction, "jobs", "backend", "text")?;
+        // Soft-hide marker for the "Clear completed" queue action (sc-12231, issue #1556).
+        // A cleared job is dropped from the operator's queue list + counts (see
+        // `list_jobs` / `queue_summary`) but the row is deliberately kept: the
+        // Generation Stats feed (epic 10402) inner-joins `generation_metrics` to
+        // `jobs`, so deleting the row would silently wipe that run's stats and
+        // orphan its metrics. Non-null == "cleared from the queue", timestamped.
+        ensure_column(&transaction, "jobs", "cleared_at", "text")?;
         // Structured per-run generation metrics (epic 10402). A companion table
         // keyed 1:1 by job id — kept out of the hot `jobs` row so the queue
         // read path stays lean. Written by the worker on completion and read
@@ -680,7 +687,10 @@ impl JobsStore {
         // progress update. All mutating methods still hold the mutex.
         let connection = self.open_connection()?;
         let limit = limit.clamp(1, 500);
-        let mut conditions: Vec<&str> = Vec::new();
+        // A cleared job (sc-12231, issue #1556) is soft-hidden from every queue
+        // list surface — the operator asked for it gone, so it never comes back
+        // via a status filter either. The row still exists for Generation Stats.
+        let mut conditions: Vec<&str> = vec!["cleared_at is null"];
         let mut bindings: Vec<Box<dyn ToSql>> = Vec::new();
         if let Some(project_id) = project_id {
             conditions.push("project_id = ?");
@@ -978,6 +988,66 @@ impl JobsStore {
         )?;
         transaction.commit()?;
         Ok(job)
+    }
+
+    /// Soft-hide every terminal (completed / failed / canceled / interrupted) job
+    /// from the operator's queue, optionally scoped to one project (sc-12231,
+    /// issue #1556 — "clear completed items from the queue"). Stamps `cleared_at`
+    /// on the matching rows so `list_jobs` and `queue_summary` drop them, and
+    /// returns the cleared ids (newest first) so the caller can prune them from
+    /// live client state.
+    ///
+    /// The rows are deliberately KEPT, not deleted: the Generation Stats feed
+    /// (`list_generation_metrics`, epic 10402) inner-joins `generation_metrics`
+    /// to `jobs`, so a hard delete would silently wipe those runs from the stats
+    /// charts and orphan the metrics rows. Generated assets live in the project
+    /// store independently, so clearing a job never removes its outputs.
+    /// Already-cleared rows and still-active jobs are left untouched.
+    pub fn clear_terminal_jobs(&self, project_id: Option<&str>) -> JobsStoreResult<Vec<String>> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // Collect the ids first so the caller can prune exactly what was cleared
+        // (the set can exceed the client's visible cap). Scoped so the borrowed
+        // statement is dropped before the UPDATE runs on the same transaction.
+        let mut select_sql = format!(
+            "select id from jobs where status in ({terminal}) and cleared_at is null",
+            terminal = terminal_statuses_sql()
+        );
+        let mut bindings: Vec<Box<dyn ToSql>> = Vec::new();
+        if let Some(project_id) = project_id {
+            select_sql.push_str(" and project_id = ?");
+            bindings.push(Box::new(project_id.to_owned()));
+        }
+        select_sql.push_str(" order by created_at desc");
+        let cleared_ids: Vec<String> = {
+            let mut statement = transaction.prepare(&select_sql)?;
+            let rows = statement.query_map(params_from_iter(bindings.iter()), |row| {
+                row.get::<_, String>(0)
+            })?;
+            let mut ids = Vec::new();
+            for row in rows {
+                ids.push(row?);
+            }
+            ids
+        };
+
+        if !cleared_ids.is_empty() {
+            let now = utc_now();
+            let mut update_sql = format!(
+                "update jobs set cleared_at = ? where status in ({terminal}) and cleared_at is null",
+                terminal = terminal_statuses_sql()
+            );
+            let mut update_bindings: Vec<Box<dyn ToSql>> = vec![Box::new(now)];
+            if let Some(project_id) = project_id {
+                update_sql.push_str(" and project_id = ?");
+                update_bindings.push(Box::new(project_id.to_owned()));
+            }
+            transaction.execute(&update_sql, params_from_iter(update_bindings.iter()))?;
+        }
+        transaction.commit()?;
+        Ok(cleared_ids)
     }
 
     pub fn register_worker(&self, request: RegisterWorker) -> JobsStoreResult<WorkerSnapshot> {
@@ -1826,8 +1896,12 @@ impl JobsStore {
             .iter()
             .map(|status| (parse_string_enum::<JobStatus>(status), 0u32))
             .collect::<std::collections::BTreeMap<_, _>>();
-        let mut statement =
-            connection.prepare("select status, count(*) from jobs group by status")?;
+        // Cleared jobs (sc-12231, issue #1556) are excluded from the operator's
+        // status counts too, matching `list_jobs` — a cleared "completed" run must
+        // not keep inflating the completed badge after the user tidied the queue.
+        let mut statement = connection.prepare(
+            "select status, count(*) from jobs where cleared_at is null group by status",
+        )?;
         let rows = statement.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
