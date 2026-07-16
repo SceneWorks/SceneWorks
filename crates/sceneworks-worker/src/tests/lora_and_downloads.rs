@@ -1077,12 +1077,55 @@ async fn download_progress_tick_cancels_from_progress_post_snapshot() {
 /// A stub whose HF tree resolve returns an EMPTY file list, plus the job/progress/heartbeat routes a
 /// download job touches. Progress POSTs are recorded so the test can assert the job was FAILED.
 async fn spawn_empty_tree_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+    // No files at this revision under any filter — the unpublished-tier case.
+    spawn_tree_stub_with_files(Vec::new()).await
+}
+
+/// [`spawn_empty_tree_stub`], but the tree resolve serves `files` (path, size) — so a test can model a
+/// repo that satisfies SOME declared patterns and not others (sc-12283, the torn-tier case).
+async fn spawn_tree_stub_with_files(
+    files: Vec<(&'static str, u64)>,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
     use std::sync::{Arc, Mutex};
     type Posts = Arc<Mutex<Vec<Value>>>;
-    async fn tree_route() -> Response {
-        // No files at this revision under any filter — the unpublished-tier case.
-        Json(json!([])).into_response()
-    }
+    let sizes: Arc<std::collections::HashMap<String, u64>> = Arc::new(
+        files
+            .iter()
+            .map(|(path, size)| ((*path).to_owned(), *size))
+            .collect(),
+    );
+    let tree = Arc::new(Value::Array(
+        files
+            .into_iter()
+            .map(|(path, size)| json!({ "type": "file", "path": path, "size": size }))
+            .collect(),
+    ));
+    let tree_route = {
+        let tree = tree.clone();
+        move || {
+            let tree = tree.clone();
+            async move { Json((*tree).clone()).into_response() }
+        }
+    };
+    // Serve exactly the byte count the tree declared for this path, so the transfer isn't rejected as
+    // truncated (see `download_snapshot_rejects_truncated_file`).
+    let blob_route = {
+        let sizes = sizes.clone();
+        move |axum::extract::Path((_owner, _repo, _revision, path)): axum::extract::Path<(
+            String,
+            String,
+            String,
+            String,
+        )>| {
+            let sizes = sizes.clone();
+            async move {
+                match sizes.get(&path) {
+                    Some(size) => vec![b'x'; *size as usize].into_response(),
+                    None => axum::http::StatusCode::NOT_FOUND.into_response(),
+                }
+            }
+        }
+    };
     async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
         Json(job_snapshot_json(&job_id, false)).into_response()
     }
@@ -1102,6 +1145,11 @@ async fn spawn_empty_tree_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec
     let posts: Posts = Arc::new(Mutex::new(Vec::new()));
     let app = Router::new()
         .route("/api/models/:owner/:repo/tree/:revision", get(tree_route))
+        // Serve the blobs too, so a test that DISABLES the pattern check fails on its own assertions
+        // (a torn tier installed + a completion marker written) rather than on an unrelated 404 from a
+        // stub that simply can't serve the download. Without this the test would pass for the wrong
+        // reason and would not actually guard the regression.
+        .route("/:owner/:repo/resolve/:revision/*path", get(blob_route))
         .route("/api/v1/jobs/:job_id", get(job_route))
         .route("/api/v1/jobs/:job_id/progress", post(progress_route))
         .route("/api/v1/workers/:worker_id/heartbeat", post(heartbeat_route))
@@ -1160,6 +1208,68 @@ async fn model_download_fails_when_the_tier_resolves_no_files() {
                 .is_some_and(|message| message.contains("No files to download"))
     });
     assert!(failed, "expected a failed progress post, got {posts:?}");
+}
+
+#[tokio::test]
+async fn model_download_fails_when_one_declared_pattern_matches_nothing() {
+    // sc-12283: `allow_pattern_matches` ORs across the filter, so a tier whose transformer matched but
+    // whose `tokenizer/*` matched NOTHING passed the aggregate zero-file check, downloaded, completed
+    // and wrote an install marker — an "installed" tier that cannot load. This is the #850 shape.
+    let temp = tempdir().expect("tempdir creates");
+    // The repo satisfies q8/transformer/* and q8/vae/* but has NO q8/tokenizer/* at all. Sizes are
+    // token — the stub serves them verbatim, and this test is about the filter, not the transfer.
+    let (base_url, posts) = spawn_tree_stub_with_files(vec![
+        ("q8/transformer/diffusion_pytorch_model.safetensors", 8),
+        ("q8/vae/diffusion_pytorch_model.safetensors", 4),
+    ])
+    .await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url.clone();
+    settings.data_dir = temp.path().to_path_buf();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+
+    let mut job_json = job_snapshot_json("job-1", false);
+    job_json["type"] = json!("model_download");
+    job_json["payload"] = json!({
+        "modelId": "krea_2_raw",
+        "repo": "SceneWorks/krea-2-raw-mlx",
+        "files": ["q8/transformer/*", "q8/vae/*", "q8/tokenizer/*"],
+    });
+    let job: JobSnapshot = serde_json::from_value(job_json).expect("job deserializes");
+
+    super::model_jobs::run_model_download_job(&api, &settings, &client, &job)
+        .await
+        .expect("returns Ok — the failure is reported via a progress post, not an Err");
+
+    // No completion marker: a torn tier must never read as installed.
+    let marker = temp
+        .path()
+        .join("models")
+        .join(safe_download_dir("SceneWorks/krea-2-raw-mlx"))
+        .join(INSTALL_MARKER);
+    assert!(!marker.exists(), "no completion marker for a partial download");
+
+    let posts = posts.lock().expect("posts lock");
+    let failed = posts.iter().any(|post| {
+        post.get("status").and_then(Value::as_str) == Some("failed")
+            && post
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| {
+                    // The message must NAME the pattern that matched nothing — "something is missing"
+                    // is not actionable, "q8/tokenizer/* matched nothing" is.
+                    message.contains("Incomplete download") && message.contains("q8/tokenizer/*")
+                })
+    });
+    assert!(failed, "expected a failed post naming the unmatched pattern, got {posts:?}");
+    // The patterns that DID match must not be blamed.
+    let blames_matched = posts.iter().any(|post| {
+        post.get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("q8/transformer/*"))
+    });
+    assert!(!blames_matched, "only the unmatched pattern should be named");
 }
 
 /// A tree stub that paginates: page 1 (no cursor) returns bf16/q4 files plus a `Link: rel="next"`
