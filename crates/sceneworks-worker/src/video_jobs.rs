@@ -8975,13 +8975,6 @@ fn mochi_raw_settings(request: &VideoRequest, quant: Option<Quant>) -> Value {
     Value::Object(raw)
 }
 
-/// Resolve a Mochi request into a [`VideoGenInput`] and run it (epic 1788 / sc-11992) — the MLX lane.
-///
-/// Text-to-video only, true CFG (not distilled, so negative prompt + guidance are real), frames snap
-/// to `6k+1`, and the tier dir carries the quant. Progress/heartbeat bridging, cooperative cancel, the
-/// forward-progress stall watchdog and the completion metrics all come from the shared
-/// [`generate_video`] funnel — the same one Wan/LTX/SVD use — so Mochi inherits the "no background
-/// heartbeat during a job, the progress callback IS the keepalive" contract without re-implementing it.
 /// Everything a Mochi generation must settle BEFORE the load, resolved as ONE unit by
 /// [`mochi_preflight`] (sc-11992).
 ///
@@ -9045,6 +9038,16 @@ fn mochi_preflight(
     })
 }
 
+/// Resolve a Mochi request into a [`VideoGenInput`] and run it (epic 1788 / sc-11992) — the MLX lane.
+///
+/// Text-to-video only, true CFG (not distilled, so negative prompt + guidance are real), frames snap
+/// to `6k+1`, and the tier dir carries the quant. Progress/heartbeat bridging, cooperative cancel, the
+/// forward-progress stall watchdog and the completion metrics all come from the shared
+/// [`generate_video`] funnel — the same one Wan/LTX/SVD use — so Mochi inherits the "no background
+/// heartbeat during a job, the progress callback IS the keepalive" contract without re-implementing it.
+///
+/// Deliberately thin: every pre-load decision lives in [`mochi_preflight`], which is reachable from a
+/// unit test where this `async` arm is not.
 #[cfg(target_os = "macos")]
 async fn generate_mochi(
     api: &ApiClient,
