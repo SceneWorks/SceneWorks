@@ -341,6 +341,214 @@ fn sysctl_total_unified_memory_gib() -> Option<f64> {
     None
 }
 
+// ---------------------------------------------------------------------------------------------
+// Mochi 1: the FRAME-DEPENDENT decode fit gate (epic 1788 / sc-11992)
+// ---------------------------------------------------------------------------------------------
+//
+// Why Mochi needs its own gate rather than riding the generic one above:
+//
+//  1. The generic gate is deliberately RESOLUTION-BLIND. `predicted_peak_gb` = Σweights +
+//     HEADROOM_GB, where HEADROOM_GB is a 1024²-calibrated CONSTANT — the load-time seam cannot see
+//     the request geometry (the generator is cached across resolutions, see the HEADROOM_GB note).
+//     That structure is right for image models, whose transient is roughly request-independent once
+//     calibrated. It is WRONG for Mochi: its AsymmVAE decode is UNTILED (`vae.decode(latents)`
+//     materializes the whole clip — sc-12291), so the peak grows LINEARLY IN CLIP LENGTH. A 7-frame
+//     and a 151-frame request differ by ~55 GiB on the same model. A constant cannot express that.
+//
+//  2. Mochi's `supports_sequential_offload: false` ⇒ `weights_fit_floor` admits on WEIGHTS ALONE
+//     (18.73 GiB fits almost any Mac), so the generic gate would happily admit a 151-frame job that
+//     then needs ~79 GiB. The floor is correct for its own purpose (sc-12179: never wall-reject a
+//     machine that used to work) but it is precisely what makes the generic gate unable to protect
+//     Mochi.
+//
+//  3. This MUST be a pre-flight rejection, not a caught error. MLX's default error handler is
+//     `exit(-1)` — a hard process kill (sc-12178/12179, GitHub #1544). An `exit(-1)` cannot be
+//     mapped to a job error after the fact, so the only place to honor the epic's "actionable error,
+//     not a crash" AC is BEFORE the decode allocates.
+//
+// The gate is therefore a per-REQUEST admission check (it sees frames + geometry), layered beside —
+// not inside — the generic per-LOAD one, and it budgets on a DERIVED architectural formula rather
+// than a calibration constant, because nothing has been measured on-device yet (B5/sc-11995 backfills
+// `footprint.residentMemoryBytes`/`peakMemoryBytes`; sc-12291 tiles the decode and should then cut
+// the frame term sharply).
+
+/// The AsymmVAE decoder's final-stage channel count — `decoder_block_out_channels[0]` (config
+/// default `[128, 256, 512, 768]`). The last `block_out` mid-block runs THIS many channels at FULL
+/// output resolution, which is the decode's peak stage: every earlier stage is either fewer pixels
+/// (pre-upsample) or, at 256/512/768 channels, at 1/4/1/16/1/64 of the spatial extent, so their
+/// products are strictly smaller.
+const MOCHI_DECODE_CHANNELS: f64 = 128.0;
+
+/// Bytes per element in the MLX AsymmVAE decode. **f32 (4), NOT bf16 (2)** — `MochiVaeDecoder::
+/// from_weights` pins `Dtype::Float32` and `decode_denormalized` casts the latent to that dtype, so
+/// the whole decode flows f32 ("the reference decode ran bf16 — the parity residual reflects that
+/// bf16 rounding", mlx-gen-mochi/src/vae.rs).
+///
+/// ⚠️ This DELIBERATELY disagrees with the sc-12291 / B1-manifest derivation, which assumed **bf16**
+/// (`128 × 156 × 480 × 848 × 2 B`) and therefore under-predicts the real MLX peak by 2×. Surfaced as
+/// a follow-up on sc-12291 — that story's table (19→7, 61→19, 151→45 GiB) and B1's
+/// `mlx.minMemoryGb: 96` are both bf16-derived and want re-deriving against the shipped f32 decode.
+/// This gate uses the dtype the code actually runs.
+const MOCHI_DECODE_BYTES_PER_ELEM: f64 = 4.0;
+
+/// Full-resolution tensors live simultaneously at the decode peak. `MochiResnetBlock3D` is
+/// `GroupNorm → silu → CausalConv3d → GroupNorm → silu → CausalConv3d → + residual`, so the residual
+/// and the in-flight intermediate are both live across the block — the "residual + intermediate live
+/// at once" claim B1's manifest derivation makes. B1 then hedged "2–3×"; 2 is the concrete,
+/// defensible liveness (3 assumes an extra un-freed temporary, which MLX's allocator need not hold).
+/// Combined with the f32 correction above this lands at ~79 GiB for the shipped 5 s / 151-frame
+/// default — consistent with B1's declared `mlx.minMemoryGb: 96` floor.
+const MOCHI_DECODE_LIVE_TENSORS: f64 = 2.0;
+
+/// Extra leading frames the causal decode materializes before `drop_last_temporal_frames` trims them:
+/// `temporal_ratio − 1` = 5. The peak is paid on the UNTRIMMED length, so a 151-frame clip decodes
+/// 156 frames wide.
+const MOCHI_DECODE_EXTRA_FRAMES: u32 = 5;
+
+/// Predicted AsymmVAE decode peak (GiB) for a `frames` × `width` × `height` clip.
+///
+/// `live × C × (frames + 5) × H × W × 4 B`. Linear in BOTH clip length and pixel count, because the
+/// peak tensor is `[1, C, T, H, W]` and the decode is untiled. This is the term the generic gate's
+/// flat `HEADROOM_GB` structurally cannot represent.
+///
+/// DERIVED, not measured. Sanity points at the native 848×480 bucket: 7 frames ⇒ ~5.0 GiB, 19 ⇒
+/// ~10.1, 61 ⇒ ~27.5, 151 ⇒ ~60.6, 163 ⇒ ~65.2 GiB.
+pub(crate) fn mochi_decode_peak_gb(frames: u32, width: u32, height: u32) -> f64 {
+    let decoded_frames = f64::from(frames.saturating_add(MOCHI_DECODE_EXTRA_FRAMES));
+    MOCHI_DECODE_LIVE_TENSORS
+        * MOCHI_DECODE_CHANNELS
+        * decoded_frames
+        * f64::from(width)
+        * f64::from(height)
+        * MOCHI_DECODE_BYTES_PER_ELEM
+        / BYTES_PER_GIB
+}
+
+/// Predicted whole-generation peak (GiB) for a Mochi request: the ALL-RESIDENT weights
+/// (`supports_sequential_offload: false` ⇒ T5-XXL + AsymmDiT + VAE are held for the whole run, so
+/// nothing drops) + the frame-dependent decode peak + [`OS_RESERVE_GB`]. `None` when the weights are
+/// unmeasurable (`weight_bytes == 0`) ⇒ no signal ⇒ the gate never blocks, matching
+/// [`predicted_peak_gb`].
+pub(crate) fn mochi_needed_gb(
+    weight_bytes: u64,
+    frames: u32,
+    width: u32,
+    height: u32,
+) -> Option<f64> {
+    (weight_bytes > 0).then(|| {
+        weight_bytes as f64 / BYTES_PER_GIB
+            + mochi_decode_peak_gb(frames, width, height)
+            + OS_RESERVE_GB
+    })
+}
+
+/// The pure Mochi admission decision: `Some(error)` when the predicted peak overflows the budget,
+/// `None` to admit. Missing either signal (unmeasurable weights / no budget) admits — the gate never
+/// blocks without evidence, exactly like [`fit_decision`].
+pub(crate) fn mochi_fit_error(
+    model_label: &str,
+    weight_bytes: u64,
+    frames: u32,
+    width: u32,
+    height: u32,
+    budget: Option<MemoryBudget>,
+) -> Option<WorkerError> {
+    let (needed_gb, budget) = (
+        mochi_needed_gb(weight_bytes, frames, width, height)?,
+        budget?,
+    );
+    (budget.total_gb + f64::EPSILON < needed_gb).then(|| {
+        mochi_too_big_error(
+            model_label,
+            needed_gb,
+            budget.total_gb,
+            frames,
+            width,
+            height,
+            weight_bytes as f64 / BYTES_PER_GIB,
+        )
+    })
+}
+
+/// Build Mochi's actionable over-budget rejection. Follows the [`too_big_error`] convention — name
+/// the model, explain the constraint ("unified memory"), state what it needs and what the machine
+/// has — and adds the lever that is UNIQUE to Mochi: the clip length. The generic message's advice
+/// ("choose a smaller quant tier, lower the resolution") is nearly useless here — Mochi has one
+/// trained bucket (848×480) and the decode dwarfs the tier delta (q4→bf16 is ~11 GiB against a
+/// ~60 GiB decode) — so the message leads with shortening the clip, which is the only lever that
+/// moves the dominant term.
+#[allow(clippy::too_many_arguments)]
+fn mochi_too_big_error(
+    model_label: &str,
+    needed_gb: f64,
+    available_gb: f64,
+    frames: u32,
+    width: u32,
+    height: u32,
+    weights_gb: f64,
+) -> WorkerError {
+    WorkerError::InvalidPayload(format!(
+        "{model_label} needs ~{needed} GB of unified memory to render a {frames}-frame \
+         {width}x{height} clip (~{weights} GB of weights, held resident for the whole run, plus an \
+         untiled VAE decode whose peak grows with clip length) but this machine has ~{available} \
+         GB. Shorten the clip — the decode peak scales roughly linearly with duration — or run on a \
+         Mac with more memory.",
+        needed = needed_gb.round() as i64,
+        available = available_gb.round() as i64,
+        weights = weights_gb.round() as i64,
+    ))
+}
+
+/// Live pre-flight Mochi admission check (the seam the worker's Mochi generation arm calls before
+/// loading). Resolves the same budget the generic gate uses — the real `sysctl hw.memsize` total,
+/// overridable by [`MLX_MEMORY_CAP_ENV`] so a small Mac can be emulated in tests — and sums the
+/// on-disk bytes the load will actually hold resident: the TIER dir (the AsymmDiT) plus the SHARED
+/// `text_encoder/` + `vae/` siblings, which the provider resolves from the tier dir's PARENT
+/// (`resolve_component_root`, mlx-gen-mochi/src/model.rs). Summing only the tier dir would miss the
+/// ~9.7 GiB T5-XXL + VAE — over half the resident footprint.
+///
+/// `Ok(())` admits (including whenever there is no signal); `Err` is the actionable pre-crash
+/// rejection.
+pub(crate) fn mochi_fit_check(
+    model_label: &str,
+    tier_dir: &Path,
+    frames: u32,
+    width: u32,
+    height: u32,
+) -> WorkerResult<()> {
+    let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
+    match mochi_fit_error(
+        model_label,
+        mochi_resident_bytes(tier_dir),
+        frames,
+        width,
+        height,
+        budget,
+    ) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// The on-disk bytes a Mochi load holds resident: the tier dir (AsymmDiT) + the shared `text_encoder/`
+/// and `vae/` components resolved from the tier dir's parent (the A6 shared-sibling layout). A
+/// self-contained dir — the raw snapshot, where the components live under the dir itself — is summed
+/// once, never double-counted, because the parent scan only adds SIBLING dirs of `tier_dir`.
+fn mochi_resident_bytes(tier_dir: &Path) -> u64 {
+    let mut total = sum_safetensors_bytes(tier_dir);
+    if let Some(parent) = tier_dir.parent() {
+        for component in ["text_encoder", "vae"] {
+            let dir = parent.join(component);
+            // Only count a shared sibling — a self-contained tier dir already summed its own
+            // components above (`sum_safetensors_bytes` recurses).
+            if dir.is_dir() && !tier_dir.join(component).is_dir() {
+                total += sum_safetensors_bytes(&dir);
+            }
+        }
+    }
+    total
+}
+
 /// The residency-selection outcome (sc-10839) — the pure decision, split from the [`LoadSpec`]/IO so
 /// the whole three-way selection is deterministically unit-testable without the live probe or the
 /// `MLX_MEMORY_CAP_ENV` global. See [`decide_residency`].
@@ -1209,5 +1417,182 @@ mod tests {
             decide_residency(total, te_footprint, budget, true),
             ResidencyOutcome::Sequential
         );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Mochi 1 frame-aware decode gate (epic 1788 / sc-11992)
+    // -----------------------------------------------------------------------------------------
+
+    /// Mochi's q4 resident weights (GiB): DiT 9.007 + T5-XXL bf16 8.871 + VAE 0.856 = 18.73 (the
+    /// exact hosted bytes B1's manifest derivation pins). Used as the weight signal in the gate tests.
+    const MOCHI_Q4_RESIDENT_BYTES: u64 = 9_670_883_602 + 9_524_669_250 + 919_551_200;
+
+    /// The decode peak must scale with CLIP LENGTH — the whole reason Mochi cannot ride the generic
+    /// resolution-blind gate. Pins linearity in frames and in pixels, and the architectural anchor.
+    #[test]
+    fn mochi_decode_peak_scales_with_frames_and_pixels() {
+        // Strictly monotonic in frames.
+        let peaks: Vec<f64> = [7, 19, 61, 151, 163]
+            .iter()
+            .map(|f| mochi_decode_peak_gb(*f, 848, 480))
+            .collect();
+        for pair in peaks.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "decode peak must grow with clip length: {peaks:?}"
+            );
+        }
+
+        // The architectural anchor: 2 live × 128 ch × (151+5) frames × 848×480 × 4 B (f32) = 60.55 GiB.
+        // This is the number a bf16 derivation would halve — pin it so the dtype can't silently drift.
+        let at_151 = mochi_decode_peak_gb(151, 848, 480);
+        assert!(
+            (at_151 - 60.55).abs() < 0.1,
+            "151-frame 848x480 decode peak should be ~60.6 GiB (f32), got {at_151:.2}"
+        );
+
+        // The 5 s default costs ~50 GiB MORE than the engine's 19-frame default on the same machine —
+        // the spread a flat HEADROOM_GB constant cannot express.
+        let at_19 = mochi_decode_peak_gb(19, 848, 480);
+        assert!(
+            at_151 - at_19 > 45.0,
+            "151 vs 19 frames must differ by tens of GiB (got {at_19:.1} → {at_151:.2})"
+        );
+
+        // Linear in pixel count: halving the height halves the peak.
+        let half = mochi_decode_peak_gb(151, 848, 240);
+        assert!(
+            (at_151 / 2.0 - half).abs() < 0.01,
+            "decode peak must be linear in pixels: {at_151:.2} vs {half:.2}"
+        );
+
+        // The causal decode pays for `temporal_ratio − 1` extra leading frames before they're
+        // trimmed, so the 1-frame floor is not free.
+        assert!(mochi_decode_peak_gb(1, 848, 480) > 0.0);
+    }
+
+    /// THE gate behavior: on ONE fixed machine, a short Mochi clip is admitted and a long one is
+    /// rejected. A frame-blind gate (the plausible wrong implementation — reusing `predicted_peak_gb`
+    /// or dropping the frames term) cannot pass this: it would give both clips the same verdict.
+    #[test]
+    fn mochi_gate_admits_a_short_clip_and_rejects_a_long_one_on_the_same_mac() {
+        // A 64 GB Mac — the machine B1's `mlx.minMemoryGb: 96` says is under-provisioned, and the one
+        // the epic's crash report names.
+        let mac_64 = Some(MemoryBudget { total_gb: 64.0 });
+
+        // 19 frames (the engine's own DEFAULT_FRAMES, ~0.6 s): 18.73 weights + 10.1 decode + 2 OS
+        // ≈ 30.8 GiB ⇒ admitted.
+        assert!(
+            mochi_fit_error("mochi_1", MOCHI_Q4_RESIDENT_BYTES, 19, 848, 480, mac_64).is_none(),
+            "a 19-frame clip fits a 64 GB Mac and must NOT be rejected"
+        );
+
+        // 151 frames (the shipped 5 s default): 18.73 + 60.6 + 2 ≈ 81.3 GiB ⇒ rejected BEFORE the
+        // untiled decode can trip MLX's `exit(-1)`.
+        assert!(
+            mochi_fit_error("mochi_1", MOCHI_Q4_RESIDENT_BYTES, 151, 848, 480, mac_64).is_some(),
+            "a 151-frame clip needs ~81 GB and MUST be rejected on a 64 GB Mac — this is the \
+             unmappable exit(-1) the gate exists to prevent"
+        );
+
+        // The same 151-frame clip is admitted on a 128 GB Mac — the gate rejects by BUDGET, it does
+        // not blanket-ban the default duration.
+        let mac_128 = Some(MemoryBudget { total_gb: 128.0 });
+        assert!(
+            mochi_fit_error("mochi_1", MOCHI_Q4_RESIDENT_BYTES, 151, 848, 480, mac_128).is_none(),
+            "a 151-frame clip fits a 128 GB Mac"
+        );
+    }
+
+    /// The rejection message must be self-contained + actionable, following the `too_big_error`
+    /// convention (name the model, explain the constraint, state need vs budget) and additionally
+    /// naming Mochi's one real lever: clip length.
+    #[test]
+    fn mochi_too_big_error_names_model_budget_and_the_clip_length_lever() {
+        let mac_64 = Some(MemoryBudget { total_gb: 64.0 });
+        let Some(WorkerError::InvalidPayload(message)) =
+            mochi_fit_error("mochi_1", MOCHI_Q4_RESIDENT_BYTES, 151, 848, 480, mac_64)
+        else {
+            panic!("expected an InvalidPayload rejection");
+        };
+        assert!(message.contains("mochi_1"), "names the model: {message}");
+        assert!(
+            message.contains("unified memory"),
+            "explains the constraint: {message}"
+        );
+        assert!(
+            message.contains("81"),
+            "states what it needs (~81 GB): {message}"
+        );
+        assert!(message.contains("64"), "states the budget: {message}");
+        assert!(
+            message.contains("151"),
+            "names the clip length that drove it: {message}"
+        );
+        assert!(message.contains("848x480"), "names the geometry: {message}");
+        assert!(
+            message.contains("Shorten the clip"),
+            "gives the actionable lever: {message}"
+        );
+    }
+
+    /// No signal ⇒ never block, matching `fit_decision`/`predicted_peak_gb`. An unmeasurable model
+    /// dir or a machine with no probe must not wall off generation.
+    #[test]
+    fn mochi_gate_never_blocks_without_a_signal() {
+        let mac_64 = Some(MemoryBudget { total_gb: 64.0 });
+        // Weights unmeasurable (empty/missing dir ⇒ 0 bytes) ⇒ admit.
+        assert!(mochi_fit_error("mochi_1", 0, 151, 848, 480, mac_64).is_none());
+        assert!(mochi_needed_gb(0, 151, 848, 480).is_none());
+        // No budget (off-Mac / probe failed) ⇒ admit.
+        assert!(mochi_fit_error("mochi_1", MOCHI_Q4_RESIDENT_BYTES, 151, 848, 480, None).is_none());
+    }
+
+    /// `mochi_resident_bytes` must fold the SHARED `text_encoder/` + `vae/` siblings resolved from the
+    /// tier dir's PARENT — they are over half the resident footprint, and summing only the tier dir
+    /// would under-count by ~9.7 GiB and admit a job that then dies.
+    #[test]
+    fn mochi_resident_bytes_folds_the_shared_parent_siblings() {
+        let root =
+            std::env::temp_dir().join(format!("mochi_resident_{}_{}", std::process::id(), line!()));
+        // The A6 installed layout: tier dirs as siblings of the shared components.
+        for (sub, bytes) in [
+            ("q4/transformer", 400_usize),
+            ("text_encoder", 300),
+            ("vae", 200),
+            // A sibling tier that must NOT be counted into the q4 load.
+            ("q8/transformer", 999),
+        ] {
+            let dir = root.join(sub);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("model.safetensors"), vec![0u8; bytes]).unwrap();
+        }
+
+        let tier_dir = root.join("q4");
+        assert_eq!(
+            mochi_resident_bytes(&tier_dir),
+            400 + 300 + 200,
+            "tier transformer + the shared text_encoder/vae siblings, and NOT the q8 tier"
+        );
+
+        // A self-contained dir (the raw snapshot: components UNDER the dir) is summed once, not
+        // double-counted via the parent scan.
+        let flat = root.join("flat");
+        for (sub, bytes) in [
+            ("transformer", 400_usize),
+            ("text_encoder", 300),
+            ("vae", 200),
+        ] {
+            let dir = flat.join(sub);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("model.safetensors"), vec![0u8; bytes]).unwrap();
+        }
+        assert_eq!(
+            mochi_resident_bytes(&flat),
+            900,
+            "a self-contained snapshot counts its own components exactly once"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

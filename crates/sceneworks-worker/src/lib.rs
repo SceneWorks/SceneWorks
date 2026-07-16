@@ -330,6 +330,15 @@ mod pid_tier_mlx_smoke;
 // the already-packed weights (packed-detected) and bf16 loads dense (Quant::None).
 #[cfg(all(test, target_os = "macos"))]
 mod sana_mlx_smoke;
+// Real-weight MLX smoke for the Mochi 1 quant-matrix video lane (epic 1788, sc-11992). macOS-only;
+// drives `crate::inference_runtime::load("mochi_1")` with a per-tier LoadSpec against the
+// pre-quantized q4/q8 + dense bf16 tier subdirs of the SceneWorks/mochi-1-mlx turnkey. On-device
+// evidence that the worker tier path loads (`WeightsSource::Dir` = the TIER dir, with the shared
+// T5-XXL/tokenizer/AsymmVAE resolved from that dir's PARENT — the A6 sibling layout) and renders a
+// non-degenerate, MOVING clip at every downloaded tier, with monotonic progress that reaches decode
+// (the video job lane has no background heartbeat during a generation).
+#[cfg(all(test, target_os = "macos"))]
+mod mochi_mlx_smoke;
 // On-device per-tier memory-footprint measurement harness (sc-8516, epic 8506). Test-only + macOS-only;
 // #[ignore]d real-weight smokes that drive `crate::inference_runtime::load(id)` + ONE generation while sampling the MLX
 // process-global memory counters (mlx_rs::memory::{reset_peak_memory, get_active_memory, get_peak_memory})
