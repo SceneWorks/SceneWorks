@@ -16859,6 +16859,16 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn ltx_eros_auto_injects_distill_lora_per_pass() {
+        // Hold ENV_LOCK for the whole test. This fixture resolves ONLY while the HF cache-dir env
+        // overrides are unset (`huggingface_hub_cache_dir` reads them BEFORE `data_dir`), and the
+        // check below reads them once, at entry. Without the lock a concurrent `temp_env_var(s)`
+        // caller — e.g. `generate_mochi_using_refuses_before_paying_for_the_tier_download`, which
+        // pins `HF_HUB_CACHE` to its own fixture hub — can set the var AFTER that check passes and
+        // BEFORE `resolve_ltx_adapters` reads it, pointing the resolver at the wrong cache: the
+        // distill LoRA is then "not installed" and this test fails for a reason that has nothing to
+        // do with it. `set_var` is process-global; only the lock makes the read-then-use atomic.
+        // Deterministic (12/12) when the two tests are selected together (sc-12306).
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // The fake HF snapshot only resolves when the cache-dir env overrides are unset (else the real
         // cache is consulted). Skip rather than assert-false in that unusual local config.
         if std::env::var_os("HF_HUB_CACHE").is_some()
