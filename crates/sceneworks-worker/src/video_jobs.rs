@@ -11609,10 +11609,19 @@ mod tests {
     ///
     /// How it discriminates. The job asks for **q8**, and the staged cache has the shared components
     /// but no q8 tier — so `ensure_mochi_q8_present` is past its `!mochi_wants_q8` early-out and MUST
-    /// attempt a real `ensure_hf_files_cached` fetch. `api` points at a closed port, so the two orders
-    /// give different errors:
+    /// attempt a real `ensure_hf_files_cached` fetch. The two orders then give different errors:
     ///   * pre-check first (correct) ⇒ the gate's actionable "Shorten the clip", no network touched.
-    ///   * pre-check after the fetches ⇒ a `WorkerError::Http` from the download instead ⇒ RED.
+    ///   * pre-check after the fetches ⇒ a transport error from the download instead ⇒ RED.
+    ///
+    /// **`huggingface_base_url` is what makes that hermetic, and it is NOT `api_url`.** The fetch dials
+    /// `settings.huggingface_base_url` (`HuggingFaceSnapshot::resolve` → `{base_url}/api/models/…/tree/…`);
+    /// `api_url` only carries progress/heartbeat. `Settings::from_env()` defaults the former to the real
+    /// `https://huggingface.co`, so overriding only `api_url` would send this test's FAILURE path to the
+    /// live internet: it still goes red (the download's `report_download_progress` hard-`?`s on a
+    /// heartbeat to the closed `api_url`), but only after really resolving the tree — and the tier is a
+    /// public ungated repo, so that resolve succeeds and bytes can start landing before the heartbeat
+    /// trips. Pinning BOTH at a closed port keeps the whole thing offline and instant. Verified by
+    /// pointing the base at a sentinel host and reading it back out of the mutation's error.
     ///
     /// `HF_HUB_CACHE` is pinned at the fixture because `huggingface_hub_cache_dir` reads it (and
     /// `HF_HOME`) BEFORE `data_dir` — left ambient, a dev box's real cache would decide this test.
@@ -11627,6 +11636,9 @@ mod tests {
         let settings = Settings {
             data_dir: hub.join("unused-data-dir"),
             api_url: "http://127.0.0.1:0".to_owned(),
+            // The URL the tier fetch actually dials — see above. Unroutable ⇒ the failure path can
+            // never reach the real hub.
+            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
             ..Settings::from_env()
         };
         let job = mochi_job_snapshot();
