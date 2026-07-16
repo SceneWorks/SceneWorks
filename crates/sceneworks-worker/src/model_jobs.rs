@@ -147,24 +147,12 @@ pub(crate) async fn run_model_download_job(
     // load-side half of that failure is sc-12279, which now falls back to a complete sibling tier;
     // this stops the torn tier being created in the first place.)
     //
-    // Testing each pattern against the RESOLVED files is sound: `snapshot.files` is every remote file
-    // matching ANY pattern, so a pattern with no match among them matched none in the repo.
-    //
     // Safe to hard-fail: swept all 217 `downloads[].files` patterns across the 53 HF repos that
     // declare one (builtin.models.jsonc, comment-stripped through this workspace's own
     // `strip_jsonc_comments`) — every pattern matches at least one file today, so no download that
     // works now begins to fail. A future entry that trips this is a real publishing gap, and failing
     // loudly at download beats a phantom install the user only discovers at generation time.
-    let unmatched = files
-        .iter()
-        .filter(|pattern| {
-            !snapshot
-                .files
-                .iter()
-                .any(|file| pattern_matches(pattern, &file.path))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let unmatched = unmatched_patterns(&files, &snapshot);
     if !unmatched.is_empty() {
         fail_job(
             api,
@@ -246,6 +234,28 @@ pub(crate) async fn run_model_download_job(
     .await
 }
 
+/// The declared `files` patterns that matched ZERO files in `snapshot` (sc-12283).
+///
+/// Testing against the RESOLVED files is sound: `snapshot.files` is every remote file matching ANY
+/// pattern (the filter ORs — see `allow_pattern_matches`), so a pattern with no match among them
+/// matched none in the repo. That OR is exactly why this check is needed: without it a filter is
+/// satisfied as a whole while an individual component of it silently matched nothing.
+///
+/// Empty `files` (a deliberate whole-repo fetch) declares no per-pattern claim, so nothing to check —
+/// the caller's aggregate `snapshot.files.is_empty()` test covers that case.
+fn unmatched_patterns(files: &[String], snapshot: &HuggingFaceSnapshot) -> Vec<String> {
+    files
+        .iter()
+        .filter(|pattern| {
+            !snapshot
+                .files
+                .iter()
+                .any(|file| pattern_matches(pattern, &file.path))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Download a built-in catalog LoRA's Hugging Face repo/file into the shared HF cache
 /// (sc-5944). Mirrors the `run_model_download_job` cache path but skips the model-only
 /// steps (family reconciliation, tokenizer overlay, install marker): a LoRA is a single
@@ -303,6 +313,65 @@ pub(crate) async fn run_lora_download_job(
     })?;
     let snapshot =
         HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
+    // sc-12288: a LoRA download that fetched NOTHING is not a success. This path had no zero-file
+    // check at all (the sibling `run_model_download_job` got one in sc-9909; this never did), so a
+    // LoRA whose declared `source.file` is absent — renamed upstream, typo'd entry, unpublished —
+    // downloaded nothing and reported the job COMPLETED. The API's install probe
+    // (`lora_huggingface_cached_file`) then finds an empty cache and the catalog still reads "not
+    // installed", so the user got a job that claimed success and a LoRA that never appeared, with no
+    // error anywhere.
+    //
+    // An empty `files` list is NOT an omission here — it deliberately means "fetch the (small) whole
+    // repo" (apps/rust-api `create_lora_download_job`) — but that only widens the filter, so resolving
+    // zero files still means there was nothing to fetch.
+    //
+    // Safe to hard-fail: swept every entry in builtin.loras.jsonc against its repo — 7 entries, all
+    // declaring an explicit `source.file`, all 7 present, no whole-repo entries. Nothing shipping
+    // relies on this silently passing.
+    if snapshot.files.is_empty() {
+        let scope = if files.is_empty() {
+            String::new()
+        } else {
+            format!(" matching {}", files.join(", "))
+        };
+        fail_job(
+            api,
+            &job.id,
+            &format!(
+                "No files to download for LoRA {repo}{scope}. The adapter may have been renamed or \
+                 removed upstream."
+            ),
+            Some(
+                "The Hugging Face repository/revision matched zero files for the requested filter."
+                    .to_owned(),
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
+    // The same per-pattern gap as sc-12283: `create_lora_download_job` accepts an explicit `files`
+    // LIST, and the filter ORs across it, so a multi-file adapter that landed one half and not the
+    // other would pass the aggregate check above and complete as a torn install.
+    let unmatched = unmatched_patterns(&files, &snapshot);
+    if !unmatched.is_empty() {
+        fail_job(
+            api,
+            &job.id,
+            &format!(
+                "Incomplete download for LoRA {repo}: nothing matches {}. Installing it would leave \
+                 a partial adapter.",
+                unmatched.join(", ")
+            ),
+            Some(format!(
+                "{} of the {} declared file patterns matched zero files in the Hugging Face \
+                 repository/revision.",
+                unmatched.len(),
+                files.len()
+            )),
+        )
+        .await?;
+        return Ok(());
+    }
     if let Some(total_bytes) = snapshot.total_bytes() {
         update_job(
             api,
