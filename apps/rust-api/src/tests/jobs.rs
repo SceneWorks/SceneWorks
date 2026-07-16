@@ -3345,3 +3345,173 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
     assert_eq!(job["status"], "interrupted");
     assert_eq!(job["workerId"], Value::Null);
 }
+
+/// sc-12297: `limits.hardMaxDuration` is enforced at enqueue, and — the part that makes WHERE it
+/// lives load-bearing — against the POST-PRESET model's cap.
+///
+/// The fixture is built so the two plausible homes for this check disagree:
+///   * default video model — cap 15 (generous)
+///   * `preset-vid`        — cap  5 (strict)
+///
+/// The request omits `model` (so the preset's model wins, per sc-12300) and asks for 10s. Gating
+/// on the DTO's `payload.model` — i.e. inside `validate_video_job`, the intuitive home, which runs
+/// BEFORE `apply_recipe_preset_to_video_payload` — reads the DEFAULT's cap of 15, admits 10s, and
+/// enqueues a job the strict model can't render. Only a gate placed after preset expansion AND
+/// manifest resolution sees the 5 that actually applies. That is the whole reason this check is not
+/// in `validate_video_job`, and this test is what pins it there.
+#[tokio::test]
+async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let default_video_model = crate::defaults::default_video_model();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "__DEFAULT_VIDEO_MODEL__",
+              "name": "Default Vid",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/default-vid", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": { "hardMaxDuration": 15 },
+              "ui": { "label": "Default Vid" }
+            },
+            {
+              "id": "preset-vid",
+              "name": "Preset Vid",
+              "family": "mochi",
+              "type": "video",
+              "adapter": "mochi_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/preset-vid", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": { "hardMaxDuration": 5 },
+              "ui": { "label": "Preset Vid" }
+            }
+          ]
+        }
+        "#
+        .replace("__DEFAULT_VIDEO_MODEL__", &default_video_model),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [
+            {
+              "id": "preset_override",
+              "name": "Preset Override",
+              "workflow": "text_to_video",
+              "model": "preset-vid",
+              "defaults": {},
+              "prompt": { "prefix": "cinematic", "suffix": "smooth" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin recipe presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user recipe presets writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Duration Cap Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // 10s: legal for the default (15) but past the preset-resolved model's 5. `model` omitted so
+    // the preset's model wins — the sc-12300 shape.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "duration": 10,
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "10s past preset-vid's 5s cap must be refused at enqueue, not silently clamped: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("preset-vid"),
+        "names the model whose cap applied — NOT the default's: {detail}"
+    );
+    assert!(detail.contains("5s"), "states the cap: {detail}");
+    assert!(detail.contains("10s"), "states what was asked: {detail}");
+
+    // At-cap admits: 5s is exactly the cap, and the bound is `>`. This is what keeps the
+    // assertion above from passing for a gate that simply rejects everything.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "duration": 5,
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "5s is at the cap: {body}");
+    assert_eq!(body["payload"]["model"], "preset-vid");
+
+    // ...and the SAME 10s request against the default model (cap 15) is admitted, proving the
+    // rejection above came from the per-model cap rather than a blanket duration bound.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "duration": 10,
+            "model": default_video_model
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "10s is within the default model's 15s cap: {body}"
+    );
+}

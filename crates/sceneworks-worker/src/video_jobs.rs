@@ -20,7 +20,7 @@
 use std::f32::consts::PI;
 use std::path::Path;
 
-use sceneworks_core::video_request::{is_ltx_model, VideoRequest};
+use sceneworks_core::video_request::{duration_limit_error, is_ltx_model, VideoRequest};
 
 // Used only by the video generation metrics builders below, which are themselves
 // gated to the macOS / backend-candle lanes (the shared `generate_video` funnel) —
@@ -283,6 +283,41 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
     }
 }
 
+/// The payload invariants every video job must satisfy before the worker does anything expensive —
+/// the pure, synchronously testable seam [`run_video_generate_job`] delegates them to (sc-12297).
+///
+/// It exists as its own function for the reason `mochi_preflight` does: `run_video_generate_job` is
+/// `async` and needs a live `ApiClient`/`JobSnapshot`, so any decision left INSIDE it is in practice
+/// unpinned — the sc-11992 review caught exactly that, a dropped gate surviving 835 green tests.
+/// Both checks here are refusals whose absence is invisible until a render is already underway.
+///
+/// EVERY video job funnels through this: `VideoGenerate` / `VideoExtend` / `VideoBridge` /
+/// `PersonReplace` all dispatch to `run_video_generate_job` (lib.rs). That is what makes it the
+/// backstop for the API's `create_video_job` gate — which is the one that returns a caller a 400,
+/// but only covers what IT enqueues, not a job replayed from a pre-sc-12297 row or produced by any
+/// future non-HTTP path.
+fn video_preflight(request: &VideoRequest) -> WorkerResult<()> {
+    if request.project_id.trim().is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Missing payload.projectId".to_owned(),
+        ));
+    }
+    // The model's declared `limits.hardMaxDuration`. NOT redundant with `mochi_preflight`'s fit
+    // gate (sc-11992) — the closest thing that already existed: that one is macOS-only (so the
+    // candle lane has no duration ceiling but this), Mochi-only, and answers a DIFFERENT question
+    // — "does this fit THIS machine's RAM", not "is this within what the model can do". Memory is
+    // not capability: a machine with the headroom to decode a 30s Mochi clip would render 30s off
+    // a model trained for 5. Neither gate subsumes the other.
+    if let Some(message) = duration_limit_error(
+        &request.model,
+        request.duration,
+        &request.model_manifest_entry,
+    ) {
+        return Err(WorkerError::InvalidPayload(message));
+    }
+    Ok(())
+}
+
 /// Dispatch handler for `JobType::VideoGenerate`: generate, encode, and stream a
 /// single video asset through the Rust GPU worker.
 pub(crate) async fn run_video_generate_job(
@@ -291,11 +326,7 @@ pub(crate) async fn run_video_generate_job(
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     let request = VideoRequest::from_payload(&job.payload);
-    if request.project_id.trim().is_empty() {
-        return Err(WorkerError::InvalidPayload(
-            "Missing payload.projectId".to_owned(),
-        ));
-    }
+    video_preflight(&request)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -10458,6 +10489,72 @@ mod tests {
 
     fn request(value: Value) -> VideoRequest {
         VideoRequest::from_payload(&value.as_object().cloned().unwrap())
+    }
+
+    /// sc-12297: the worker's backstop refuses a clip past the model's declared
+    /// `limits.hardMaxDuration` BEFORE any weights load — pinned at the seam
+    /// `run_video_generate_job` actually calls, not just as a sceneworks-core free function.
+    ///
+    /// Kills the mutation that matters: deleting the `duration_limit_error` call from
+    /// `video_preflight`. Every core test stays green through that — the core function is still
+    /// correct, it is simply no longer CALLED — which is the precise shape of the dropped-gate bug
+    /// the sc-11992 review caught surviving 835 green tests.
+    ///
+    /// Ungated on purpose. `mochi_preflight`'s fit gate is macOS-only, so the candle lane's ONLY
+    /// duration ceiling is this one; a `#[cfg(target_os = "macos")]` here would leave the platform
+    /// that has no other protection untested.
+    #[test]
+    fn video_preflight_refuses_a_clip_past_the_models_declared_hard_max_duration() {
+        // The story's mochi_1 shape: cap 5s, asked for 30s. 30 x 30fps = 900 raw frames, which snap
+        // to 901 on Mochi's 6k+1 lattice — and `901 % 6 == 1`, so the engine's own validate_request
+        // ACCEPTS it. On the candle lane nothing else says no, which is what makes this gate the
+        // whole defense rather than a nicety.
+        let over = request(json!({
+            "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p",
+            "duration": 30, "fps": 30,
+            "modelManifestEntry": { "limits": { "hardMaxDuration": 5 } }
+        }));
+        assert_eq!(over.raw_frame_count(), 900);
+        assert_eq!(
+            over.frame_count(),
+            901,
+            "on-lattice, and the engine would accept it"
+        );
+        let Err(WorkerError::InvalidPayload(message)) = video_preflight(&over) else {
+            panic!("a 30s clip on a 5s-capped model must be refused before the load");
+        };
+        assert!(message.contains("mochi_1"), "names the model: {message}");
+        assert!(message.contains("5s"), "states the cap: {message}");
+        assert!(message.contains("30s"), "states what was asked: {message}");
+
+        // At-cap admits — the shipped 5s default must still run, or the gate has bricked the model.
+        let at_cap = request(json!({
+            "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p",
+            "duration": 5, "fps": 30,
+            "modelManifestEntry": { "limits": { "hardMaxDuration": 5 } }
+        }));
+        assert!(
+            video_preflight(&at_cap).is_ok(),
+            "5s is exactly the cap and is the model's own shipped default"
+        );
+
+        // A job carrying no manifest entry (the stub lane, an uncatalogued id whose entry resolves
+        // to {}) is UNCONSTRAINED — the gate never blocks without a declared cap.
+        let no_entry = request(json!({
+            "projectId": "p", "model": "stub-model", "mode": "text_to_video", "prompt": "p",
+            "duration": 30
+        }));
+        assert!(
+            video_preflight(&no_entry).is_ok(),
+            "no cap declared => no cap"
+        );
+
+        // The pre-existing projectId invariant still holds at this seam.
+        let no_project = request(json!({ "model": "mochi_1", "mode": "text_to_video" }));
+        assert!(matches!(
+            video_preflight(&no_project),
+            Err(WorkerError::InvalidPayload(m)) if m.contains("projectId")
+        ));
     }
 
     // -----------------------------------------------------------------------------------------
