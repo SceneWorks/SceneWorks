@@ -100,24 +100,15 @@ pub(crate) async fn run_model_download_job(
     )
     .await?;
 
-    if let Some(cache_path) =
-        download_model_with_hf_cli(api, settings, job, repo, revision, &files, &target_dir).await?
-    {
-        overlay_derived_tokenizer(api, settings, http_client, &job.id, repo, &cache_path).await?;
-        if !reconcile_downloaded_model_family(api, job, &cache_path).await? {
-            return Ok(());
-        }
-        complete_hf_cache_download(
-            api,
-            job,
-            "modelId",
-            repo,
-            &cache_path,
-            "Model download completed in the Hugging Face cache.",
-        )
-        .await?;
-        return Ok(());
-    }
+    // The model-import download always uses the native Rust downloader below — it is NOT routed
+    // through the Python `hf`/`huggingface-cli` subprocess (sc-12227 / issue #1554). The CLI path
+    // (`download_model_with_hf_cli`) reports progress exactly once (0.12) and never updates it,
+    // and it has no forward-progress watchdog, so on a host with `hf` on PATH a model download
+    // freezes the bar at 12% and a hung HF CDN edge never recovers. The native path streams with
+    // real byte-level progress AND the stall watchdog (sc-11939), resumes via HTTP Range, and
+    // drops a Python dependency from this flow (epic 3482). This mirrors `run_lora_download_job`,
+    // which already downloads natively. (The CLI helper stays for the on-demand generation-time
+    // tier fetches that still rely on it — see `resolve_convert_plan` / base-model tier fetches.)
 
     // Download into the standard Hugging Face hub cache (models--<org>--<name>),
     // not the private app store, so HF-sourced weights dedupe with other tools and
