@@ -2305,9 +2305,13 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
-    // `default-vid` uses the real default_video_model() id, because that literal is what the
-    // preset-override gate compares against. Its 32 / owner/default mirror ltx_2_3's real
-    // manifest; `preset-vid` mirrors mochi_1's 16 / distinct repo.
+    // `default-vid` is BUILT FROM default_video_model() rather than hardcoding its id. That
+    // literal is what the preset-override gate compares against, so a hardcoded fixture would
+    // quietly stop modelling *the default's* entry if the default ever changed: the pre-fix
+    // failure would degrade from "carries the DEFAULT's entry" to "carries {}" — still red,
+    // but no longer demonstrating the documented defect. Its 32 / owner/default mirror the
+    // real default video manifest; `preset-vid` mirrors mochi_1's 16 / distinct repo.
+    let default_video_model = crate::defaults::default_video_model();
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
         r#"
@@ -2315,7 +2319,7 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "ltx_2_3",
+              "id": "__DEFAULT_VIDEO_MODEL__",
               "name": "Default Vid",
               "family": "ltx-video",
               "type": "video",
@@ -2346,7 +2350,8 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
             }
           ]
         }
-        "#,
+        "#
+        .replace("__DEFAULT_VIDEO_MODEL__", &default_video_model),
     )
     .expect("builtin models writes");
     std::fs::write(
@@ -2432,7 +2437,9 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
-    // `z_image_turbo` is the real default_image_model() id the override gate compares against.
+    // Built FROM default_image_model() — the id the override gate compares against — for the
+    // same durability reason as the video fixture above.
+    let default_image_model = crate::defaults::default_image_model();
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
         r#"
@@ -2440,7 +2447,7 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "z_image_turbo",
+              "id": "__DEFAULT_IMAGE_MODEL__",
               "name": "Default Img",
               "family": "z-image",
               "type": "image",
@@ -2471,7 +2478,8 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
             }
           ]
         }
-        "#,
+        "#
+        .replace("__DEFAULT_IMAGE_MODEL__", &default_image_model),
     )
     .expect("builtin models writes");
     std::fs::write(
