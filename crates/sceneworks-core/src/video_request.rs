@@ -44,8 +44,9 @@ pub struct VideoRequest {
     pub fps: u32,
     /// Output dimensions: clamped to 256..=1920, then floored to the model's dimension
     /// granularity — `model_manifest_entry.limits.requiresDimensionsMultipleOf`, default
-    /// 32 (Python `normalized_dimensions`). Defaults 768x512. Mochi declares 16 so its
-    /// native 848x480 bucket survives the floor (sc-11993).
+    /// 32 (Python `normalized_dimensions`). Defaults 768x512. Each video model declares the
+    /// stride its engine actually needs, so the advertised buckets survive the floor: 16 for
+    /// mochi (sc-11993) and for bernini / the Wan A14B trio, 64 for ltx and svd (sc-12294).
     pub width: u32,
     pub height: u32,
     pub quality: String,
@@ -243,9 +244,23 @@ const DEFAULT_DIMENSION_MULTIPLE: u32 = 32;
 /// A blanket 32 silently rewrote Mochi's native (and only trained) 848x480 bucket to
 /// 832x480 — `848 % 32 == 16` — and the rewrite was invisible because `832 % 16 == 0`
 /// satisfies the engine's own ÷16 check (sc-11993). Models opt in by *declaring* the
-/// limit; the rest keep 32 (sc-12294 tracks the shipped 848/720 buckets that still
-/// floor, pending a decision — changing them retroactively would move the geometry of
-/// already-reproducible recipes).
+/// limit; the rest keep 32.
+///
+/// sc-12294 then swept every video model against its engine's real constraint, and the
+/// answer differed per model — the floor is not one number:
+///
+/// * **16** — bernini and the Wan A14B trio (t2v / i2v / vace-fun) ride a z16 VAE:
+///   `patch 2 × vae_stride 8`. They now declare it, so bernini's own default 848x480 and
+///   the advertised 1280x720 stop silently rendering as 832x480 / 1280x704.
+/// * **32** — the dense Wan TI2V-5B (z48 vae22, `vae_stride 16`) and scail2 (hardcoded
+///   `DIM_ALIGN`) genuinely need it. There the *advertisement* was wrong, so their 720p
+///   buckets were corrected to the 704 they always rendered; both keep this default.
+/// * **64** — ltx (`validate_request` hard-errors below it: stage-1 runs at `//2//32`) and
+///   svd (VAE 8× then the UNet's 8×). A declared 32 was too *loose* for these: it could
+///   floor onto a ÷32-but-not-÷64 size the engine then rejects.
+///
+/// So a declared value can be looser OR stricter than the default — it is the engine's
+/// truth, not a blanket policy.
 fn normalized_dimensions(
     width: Option<&Value>,
     height: Option<&Value>,
@@ -379,16 +394,15 @@ mod tests {
         assert_eq!(request.width, 992);
         assert_eq!(request.height, 512);
 
-        // A manifest entry that does NOT declare the limit keeps the 32 default — the
-        // shipped case for every video model except ltx (declares 32) and mochi (16).
-        // sc-12294 tracks bernini's own 848x480 bucket still flooring to 832x480 pending
-        // a product decision; B3 deliberately does NOT change it. Only models that
-        // *declare* `requiresDimensionsMultipleOf` opt out of the 32 floor.
-        let bernini = VideoRequest::from_payload(&payload(json!({
-            "projectId": "p", "model": "bernini", "width": 848, "height": 480,
-            "modelManifestEntry": { "family": "bernini", "limits": { "resolutions": ["848x480"] } }
+        // A manifest entry that does NOT declare the limit keeps the 32 default. This is
+        // still the shipped case for the two models whose engines genuinely need 32 —
+        // wan_2_2 (TI2V-5B) and scail2_14b — so the default path stays live and covered.
+        // Only models that *declare* `requiresDimensionsMultipleOf` move off it.
+        let undeclared = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "wan_2_2", "width": 848, "height": 480,
+            "modelManifestEntry": { "family": "wan-video", "limits": { "resolutions": ["832x480"] } }
         })));
-        assert_eq!((bernini.width, bernini.height), (832, 480));
+        assert_eq!((undeclared.width, undeclared.height), (832, 480));
     }
 
     #[test]
@@ -410,12 +424,12 @@ mod tests {
         })));
         assert_eq!((portrait.width, portrait.height), (480, 848));
 
-        // A declared 32 (ltx) is identical to the default path.
-        let ltx = VideoRequest::from_payload(&payload(json!({
-            "projectId": "p", "model": "ltx_2_3", "width": 1000, "height": 543,
+        // An explicitly declared 32 is identical to the default path.
+        let declared_32 = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "scail2_14b", "width": 1000, "height": 543,
             "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 32 } }
         })));
-        assert_eq!((ltx.width, ltx.height), (992, 512));
+        assert_eq!((declared_32.width, declared_32.height), (992, 512));
 
         // 16 is a smaller floor, not a bypass: off-lattice input still floors.
         let odd = VideoRequest::from_payload(&payload(json!({
@@ -423,6 +437,96 @@ mod tests {
             "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 16 } }
         })));
         assert_eq!((odd.width, odd.height), (848, 480));
+    }
+
+    /// sc-12294: the floor is per-engine, and a declared value can be looser OR stricter
+    /// than the 32 default. Each case below mirrors the stride derived from that engine's
+    /// own constraint, so the advertised bucket is what actually renders.
+    #[test]
+    fn declared_multiple_honors_each_engines_true_stride() {
+        // --- 16: bernini renders through a Wan2.2-T2V-A14B snapshot (patch 2 × vae_stride
+        // 8). Its OWN default bucket, 848x480, used to floor to 832x480 under the blanket
+        // 32 — silently, because 832 % 16 == 0 passed the engine's own check.
+        let bernini = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "bernini", "width": 848, "height": 480,
+            "modelManifestEntry": { "family": "bernini", "limits": { "requiresDimensionsMultipleOf": 16 } }
+        })));
+        assert_eq!((bernini.width, bernini.height), (848, 480));
+
+        // The 720p bucket is real for every ÷16 model (720 = 16·45): bernini + the Wan A14B
+        // trio all advertised 1280x720 while rendering 1280x704.
+        for model in [
+            "bernini",
+            "wan_2_2_t2v_14b",
+            "wan_2_2_i2v_14b",
+            "wan_2_2_vace_fun_14b",
+        ] {
+            let req = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "model": model, "width": 1280, "height": 720,
+                "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 16 } }
+            })));
+            assert_eq!(
+                (req.width, req.height),
+                (1280, 720),
+                "{model} must keep 1280x720"
+            );
+        }
+
+        // --- 64: ltx hard-errors below ÷64 (stage-1 runs at //2//32) and svd's UNet needs
+        // VAE 8× × 8×. A declared 32 was too LOOSE — 736 is ÷32 but the engine rejects it.
+        // 64 floors it onto the lattice the engine actually accepts.
+        for model in ["ltx_2_3", "ltx_2_3_eros", "svd"] {
+            let req = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "model": model, "width": 1280, "height": 736,
+                "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 64 } }
+            })));
+            assert_eq!(
+                (req.width, req.height),
+                (1280, 704),
+                "{model} must floor 736 -> 704"
+            );
+            assert_eq!(req.height % 64, 0, "{model} must land on the ÷64 lattice");
+        }
+
+        // Each model's advertised buckets are fixed points under its own stride — that is
+        // the whole invariant sc-12294 restores: what is advertised is what renders.
+        for (model, multiple, buckets) in [
+            (
+                "bernini",
+                16,
+                vec![(848, 480), (480, 848), (1280, 720), (720, 1280)],
+            ),
+            (
+                "wan_2_2_t2v_14b",
+                16,
+                vec![(832, 480), (480, 832), (1280, 720), (720, 1280)],
+            ),
+            (
+                "ltx_2_3",
+                64,
+                vec![(768, 512), (512, 768), (640, 640), (1280, 704), (704, 1280)],
+            ),
+            ("svd", 64, vec![(1024, 576), (576, 1024)]),
+            // Genuinely-32 engines: the advertisement was corrected to the 704 they render.
+            ("wan_2_2", 32, vec![(832, 480), (1280, 704), (704, 1280)]),
+            (
+                "scail2_14b",
+                32,
+                vec![(832, 480), (480, 832), (1280, 704), (704, 1280)],
+            ),
+        ] {
+            for (w, h) in buckets {
+                let req = VideoRequest::from_payload(&payload(json!({
+                    "projectId": "p", "model": model, "width": w, "height": h,
+                    "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": multiple } }
+                })));
+                assert_eq!(
+                    (req.width, req.height),
+                    (w, h),
+                    "{model} advertises {w}x{h}; it must render {w}x{h}"
+                );
+            }
+        }
     }
 
     #[test]
