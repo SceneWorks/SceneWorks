@@ -12,11 +12,20 @@ import { fallbackModels } from "./constants.js";
 // `apps/web/src/constants.js` (`fallbackModels`) carries a HAND-MIRRORED copy that App.jsx serves to the
 // real picker whenever the catalog hasn't loaded yet. Nothing stops that mirror from silently drifting.
 //
-// That drift is not cosmetic here. sc-12294 retired the A14B/LTX `1280x720` buckets in favour of
-// `1280x704`, because 720 is not a multiple of the models' 32-px dimension stride and the 901120 area cap
-// floors it: the engine advertised 720 and rendered 704. A stale mirror reintroduces exactly that lie —
-// the picker advertises a bucket the engine will not render. The manifest-side test added by sc-12294 is
-// manifest-only and structurally cannot see this file, so this test is the guard for the mirror.
+// That drift is not cosmetic here: a stale mirror makes the picker advertise a bucket the engine will
+// not render. The manifest-side test added by sc-12294 is manifest-only and structurally cannot see this
+// file, so this test is the guard for the mirror — and it earned its keep on sc-12308, catching this
+// file when the manifest moved.
+//
+// The A14B buckets have now moved TWICE, in opposite directions, which is why the mirror needs a guard
+// rather than a convention:
+//   - sc-12294 retired their `1280x720` for `1280x704`, believing 720 was blocked by a 32-px stride and
+//     the 901120 area cap.
+//   - sc-12308 restored `1280x720`: the A14B stride is **16** (720 = 45·16 is on-lattice — sc-12294
+//     itself corrected that), and the 901120 cap was the TI2V-5B's budget wrongly applied to the 14B
+//     family, whose real cap is 921600 (`1280*720`, upstream's own `MAX_AREA_CONFIGS`). So 704 was never
+//     an A14B geometry at all; it is the 5B's.
+// The ÷32 models — `wan_2_2` (TI2V-5B) and LTX — keep their genuine `1280x704`.
 //
 // Precedent for the drift being real, not theoretical: sc-4997 set wan_2_2's fast-path default to
 // 832x480 in constants.js ONLY and never touched the manifest, so that default never actually shipped —

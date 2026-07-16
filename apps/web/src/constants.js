@@ -676,12 +676,19 @@ export const fallbackModels = [
     name: "Wan2.2 14B (T2V)",
     type: "video",
     capabilities: ["text_to_video"],
-    defaults: { duration: 5, fps: 16, resolution: "1280x704", quality: "balanced" },
+    defaults: { duration: 5, fps: 16, resolution: "1280x720", quality: "balanced" },
     limits: {
       durations: [3, 4, 5],
       recommendedMaxDuration: 5,
       fps: [16],
-      resolutions: ["832x480", "480x832", "1280x704", "704x1280"],
+      // The A14B family rides the z16 VAE: patch 2 × vae_stride 8 = **16**, NOT 32 — so `720 = 45·16`
+      // is on-lattice and 1280x720 is real 720p. The stride travels with the buckets because it is what
+      // makes them legal (same reason as mochi's 848x480), and videoGeometryParity.test.js pins the pair
+      // against the manifest. These read 1280x704 until sc-12308: that is the TI2V-5B's geometry, which
+      // the 14B family inherited only because its area cap had borrowed the 5B's 901120 budget (its real
+      // one is 921600 = 1280*720). The ÷32 models — wan_2_2 (5B) and LTX — keep their genuine 704.
+      requiresDimensionsMultipleOf: 16,
+      resolutions: ["832x480", "480x832", "1280x720", "720x1280"],
     },
     ui: {
       description: "Wan2.2 A14B text-to-video (high/low-noise mixture-of-experts).",
@@ -694,12 +701,19 @@ export const fallbackModels = [
     name: "Wan2.2 14B (I2V)",
     type: "video",
     capabilities: ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
-    defaults: { duration: 5, fps: 16, resolution: "1280x704", quality: "balanced" },
+    defaults: { duration: 5, fps: 16, resolution: "1280x720", quality: "balanced" },
     limits: {
       durations: [3, 4, 5],
       recommendedMaxDuration: 5,
       fps: [16],
-      resolutions: ["832x480", "480x832", "1280x704", "704x1280"],
+      // The A14B family rides the z16 VAE: patch 2 × vae_stride 8 = **16**, NOT 32 — so `720 = 45·16`
+      // is on-lattice and 1280x720 is real 720p. The stride travels with the buckets because it is what
+      // makes them legal (same reason as mochi's 848x480), and videoGeometryParity.test.js pins the pair
+      // against the manifest. These read 1280x704 until sc-12308: that is the TI2V-5B's geometry, which
+      // the 14B family inherited only because its area cap had borrowed the 5B's 901120 budget (its real
+      // one is 921600 = 1280*720). The ÷32 models — wan_2_2 (5B) and LTX — keep their genuine 704.
+      requiresDimensionsMultipleOf: 16,
+      resolutions: ["832x480", "480x832", "1280x720", "720x1280"],
     },
     ui: {
       description: "Wan2.2 A14B image-to-video (high/low-noise mixture-of-experts).",
@@ -720,7 +734,14 @@ export const fallbackModels = [
       durations: [3, 4, 5],
       recommendedMaxDuration: 5,
       fps: [16],
-      resolutions: ["832x480", "480x832", "1280x704", "704x1280"],
+      // The A14B family rides the z16 VAE: patch 2 × vae_stride 8 = **16**, NOT 32 — so `720 = 45·16`
+      // is on-lattice and 1280x720 is real 720p. The stride travels with the buckets because it is what
+      // makes them legal (same reason as mochi's 848x480), and videoGeometryParity.test.js pins the pair
+      // against the manifest. These read 1280x704 until sc-12308: that is the TI2V-5B's geometry, which
+      // the 14B family inherited only because its area cap had borrowed the 5B's 901120 budget (its real
+      // one is 921600 = 1280*720). The ÷32 models — wan_2_2 (5B) and LTX — keep their genuine 704.
+      requiresDimensionsMultipleOf: 16,
+      resolutions: ["832x480", "480x832", "1280x720", "720x1280"],
     },
     ui: {
       description: "Wan2.2 A14B VACE control model (high/low-noise mixture-of-experts) for person replacement and controllable video.",
