@@ -2523,10 +2523,14 @@
         // free VRAM and, only when constrained, engages the cheapest sufficient rung. @1024²/8-step/scale 0.6
         // on an RTX PRO 6000 (Blackwell sm_120).
         "control": {
-          // Overall render peak (GB) by BASE tier, bf16 control branch, NO rungs engaged (monolithic VAE
-          // decode). q4 MEASURED 30.9 (sc-11744 GPU timeline, the VAE-decode spike); bf16 MEASURED 46.2
-          // (sc-11743, dense base + bf16 branch); q8 ESTIMATED ~35.5 (between the two) pending measurement.
-          "peakGbByTier": { "q4": 30.9, "q8": 35.5, "bf16": 46.2 },
+          // Trusted two-process rendered-device probe (sc-12176), 1024², bf16 control branch, no deeper
+          // rungs, idle baseline 0.0 GB. Resident peaks: q4 36.2, q8 45.4, bf16 65.8 GB. Sequential
+          // encode/drops Qwen3-VL before the heavy load: q4 32.5, q8 39.6, bf16 50.0 GB. Raw RGB was
+          // byte-identical within every tier; q4/q8 used one denoise step (the working set is step-count
+          // invariant), bf16 used the production 8 steps. The fit gate tries Sequential first and uses
+          // its row for the clean second-stage reject before composing the deeper savings below.
+          "peakGbByTier": { "q4": 36.2, "q8": 45.4, "bf16": 65.8 },
+          "sequentialPeakGbByTier": { "q4": 32.5, "q8": 39.6, "bf16": 50.0 },
           // CHEAPEST rung (sc-11744, candle-gen #492): the peak reduction (GB) from forcing the seam-free
           // tiled VAE decode (`Krea2ControlRequest.tile_vae_decode`) — a SPEED cost, no quality cost. The
           // fit-gate engages it BEFORE branch-quant. GPU-MEASURED on an RTX PRO 6000 (Blackwell sm_120),
@@ -2551,7 +2555,7 @@
           // q8 −8.4 (near-lossless), q4 −10.2 (pose-locked; non-pose details drift). The gate prefers q8
           // before q4, and composes it with the two cheaper (speed-only) rungs above — tiling then chunking.
           "branchQuantSaveGb": { "q8": 8.4, "q4": 10.2 },
-          "measured": false
+          "measured": true
         }
       },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
