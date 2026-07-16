@@ -81,9 +81,16 @@ use sceneworks_core::character_store::CharacterStore;
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-use sceneworks_core::video_request::{
-    is_mochi_model, ltx_frame_count, mochi_frame_count, wan_frame_count,
-};
+use sceneworks_core::video_request::{video_frame_count, wan_frame_count};
+// `ltx_frame_count` is the MLX LTX arm's own stride expression — the candle lane resolves LTX through
+// the shared `video_frame_count` ladder instead, so it is dead there outside the lattice tests; and
+// `mochi_frame_count` is only ever named BY those tests. Each is gated to exactly the configs that
+// use it: an import left dead on a single cfg fails the parity lane's `-D warnings` while a macOS
+// check stays green (sc-10404's trap).
+#[cfg(any(target_os = "macos", all(test, feature = "backend-candle")))]
+use sceneworks_core::video_request::ltx_frame_count;
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+use sceneworks_core::video_request::mochi_frame_count;
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -8814,33 +8821,6 @@ fn mochi_shared_is_complete(root: &Path) -> bool {
         .all(|component| root.join(component).is_dir())
 }
 
-/// The frame count `model` will actually render for `raw` requested frames, coerced onto that
-/// engine's temporal stride: LTX `8k+1`, **Mochi `6k+1`**, everything else (Wan and the families
-/// built on it) `4k+1`.
-///
-/// THE POINT OF THIS FUNCTION (sc-11992): the stride choice used to be an inline
-/// `if is_ltx { ltx } else { wan }` binary in each generation path, so every non-LTX model — Mochi
-/// included — silently inherited the WAN stride. That is not a benign default. Mochi's AsymmVAE is 6×
-/// temporal and its `validate_request` hard-rejects anything but `1 + 6k`; the Wan stride lands off
-/// that lattice for most inputs (the shipped 5 s @ 30 fps default → `wan_frame_count(150) = 149`,
-/// `149 % 6 == 5`), so EVERY default-duration Mochi job would die on engine validation.
-///
-/// Centralizing the ladder here — rather than repeating it per lane — is what makes the mapping
-/// unit-testable by model id and keeps the MLX and candle lanes from drifting apart. Both call it.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn video_frame_count(model: &str, raw_frames: u32) -> u32 {
-    if is_ltx_model(model) {
-        ltx_frame_count(raw_frames)
-    } else if is_mochi_model(model) {
-        mochi_frame_count(raw_frames)
-    } else {
-        wan_frame_count(raw_frames)
-    }
-}
-
 /// Parse `advanced.mlxQuantize` (int or numeric string) → the requested bit width, if present.
 /// Mirrors [`ltx_quant_bits`].
 #[cfg(any(
@@ -11114,6 +11094,139 @@ mod tests {
             }
         }
         assert!(accepted > 0, "the invariant must be exercised, not vacuous");
+    }
+
+    /// sc-12371: an asset's `frameCount` must be the frame count its arm actually handed the engine.
+    ///
+    /// The arm and its sidecar are separate code with no structural tie — the arm builds
+    /// `VideoGenInput.frames`, the dispatch separately calls a `*_raw_settings` builder — and they
+    /// DID drift. `generate_bernini` / `generate_scail2` drive Wan engines (`bernini` is a
+    /// Wan2.2-T2V-A14B renderer, `scail2_14b` a Wan2.1-14B I2V one) under model ids that
+    /// `is_wan_model` does not match, so the arm rendered `wan_frame_count(raw)` = 149 while the
+    /// builder's `request.frame_count()` fell through to its old raw arm = 150. The clip was a frame
+    /// shorter than the asset claimed and nothing failed loudly.
+    ///
+    /// WHY THIS SHAPE: each case restates the arm's LITERAL engine expression, so the two
+    /// implementations are compared rather than one being compared to itself. The existing builder
+    /// tests assert `raw["frameCount"] == req.frame_count()`, which CANNOT catch this — the builder
+    /// IS `frame_count()`, so it agrees with itself whatever the engine got.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn sidecar_frame_count_is_what_the_arm_hands_the_engine() {
+        // 6 s x 25 fps = 150 raw, deliberately OFF every lattice here: `wan_frame_count(150)` is
+        // 149 and `ltx_frame_count(150)` is 153, so a sidecar that records the raw count (the
+        // pre-sc-12371 bug) is RED. A duration already on-lattice would agree either way.
+        let req = |model: &str| {
+            request(json!({
+                "projectId": "p", "model": model, "mode": "text_to_video",
+                "duration": 6.0, "fps": 25
+            }))
+        };
+        let frame_count_of = |raw: &Value| raw["frameCount"].clone();
+        assert_eq!(req("bernini").raw_frame_count(), 150);
+        assert_ne!(wan_frame_count(150), 150, "the probe must discriminate");
+
+        // `generate_bernini`  -> `frames: wan_frame_count(request.raw_frame_count())`
+        let bernini = req("bernini");
+        assert_eq!(
+            frame_count_of(&bernini_raw_settings(&bernini)),
+            json!(wan_frame_count(bernini.raw_frame_count())),
+            "the bernini asset must record the 149 frames its arm renders, not the raw 150"
+        );
+
+        // `generate_scail2`   -> `frames: wan_frame_count(request.raw_frame_count())`
+        let scail2 = req("scail2_14b");
+        assert_eq!(
+            frame_count_of(&scail2_raw_settings(&scail2, false)),
+            json!(wan_frame_count(scail2.raw_frame_count())),
+            "the scail2 asset must record the 149 frames its arm renders, not the raw 150"
+        );
+
+        // `generate_wan`      -> `frames: wan_frame_count(request.raw_frame_count())`
+        let wan = req("wan_2_2");
+        assert_eq!(
+            frame_count_of(&wan_raw_settings(&wan, "wan2_2_ti2v_5b")),
+            json!(wan_frame_count(wan.raw_frame_count()))
+        );
+
+        // `generate_ltx`      -> `frames: ltx_frame_count(request.raw_frame_count())`
+        let ltx = req("ltx_2_3");
+        assert_eq!(
+            frame_count_of(&ltx_raw_settings(&ltx)),
+            json!(ltx_frame_count(ltx.raw_frame_count()))
+        );
+
+        // `generate_mochi`    -> `mochi_preflight`'s `video_frame_count(model, raw)`
+        let mochi = req("mochi_1");
+        assert_eq!(
+            frame_count_of(&mochi_raw_settings(&mochi, None)),
+            json!(video_frame_count(&mochi.model, mochi.raw_frame_count()))
+        );
+
+        // The Wan-VACE builders already record their arm's own `wan_frame_count` expression rather
+        // than routing through `frame_count()` — which is exactly why they never drifted. Pin that.
+        let vace = req("wan_2_2");
+        assert_eq!(
+            frame_count_of(&wan_vace_raw_settings(&vace, "wan_vace")),
+            json!(wan_frame_count(vace.raw_frame_count()))
+        );
+    }
+
+    /// The candle-lane half of [`sidecar_frame_count_is_what_the_arm_hands_the_engine`] (sc-12371).
+    /// Same bug, same shape, different `#[cfg]`: `generate_candle_bernini` /
+    /// `generate_candle_scail2` / `generate_candle_scail2_replace` all hand the engine
+    /// `wan_frame_count(raw)`, and `generate_candle_wan_comfyui` does too under an
+    /// `external_base_*` id — another Wan engine `is_wan_model` does not match.
+    #[test]
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    fn candle_sidecar_frame_count_is_what_the_arm_hands_the_engine() {
+        let req = |model: &str| {
+            request(json!({
+                "projectId": "p", "model": model, "mode": "text_to_video",
+                "duration": 6.0, "fps": 25
+            }))
+        };
+        let frame_count_of = |raw: &Value| raw["frameCount"].clone();
+        assert_ne!(wan_frame_count(150), 150, "the probe must discriminate");
+
+        // `generate_candle_scail2` / `_replace` -> `frames: wan_frame_count(raw_frame_count())`
+        let scail2 = req("scail2_14b");
+        assert_eq!(
+            frame_count_of(&candle_scail2_raw_settings(&scail2, false)),
+            json!(wan_frame_count(scail2.raw_frame_count())),
+            "the candle scail2 asset must record the 149 frames its arm renders, not the raw 150"
+        );
+
+        // `generate_candle_bernini` -> `frames: wan_frame_count(raw_frame_count())`
+        let bernini = req("bernini");
+        assert_eq!(
+            frame_count_of(&candle_bernini_raw_settings(&bernini)),
+            json!(wan_frame_count(bernini.raw_frame_count())),
+            "the candle bernini asset must record the 149 frames its arm renders, not the raw 150"
+        );
+
+        // `generate_candle_wan_comfyui` -> `frames: wan_frame_count(raw_frame_count())`, recorded
+        // through the SHARED `candle_video_raw_settings` under an `external_base_*` model id.
+        let comfyui = req("external_base_wan22_comfyui");
+        assert_eq!(
+            frame_count_of(&candle_video_raw_settings(
+                &comfyui,
+                WAN_COMFYUI_SNAPSHOT_REPO
+            )),
+            json!(wan_frame_count(comfyui.raw_frame_count())),
+            "the in-place ComfyUI Wan asset must record the 149 frames its arm renders"
+        );
+
+        // The generic candle arm -> `frames: video_frame_count(&request.model, raw_frame_count())`,
+        // the SAME ladder `candle_video_raw_settings` records. Pinned across the families it serves.
+        for model in ["wan_2_2", "ltx_2_3", "mochi_1"] {
+            let r = req(model);
+            assert_eq!(
+                frame_count_of(&candle_video_raw_settings(&r, "repo")),
+                json!(video_frame_count(&r.model, r.raw_frame_count())),
+                "{model}: the candle asset must record what the generic arm hands the engine"
+            );
+        }
     }
 
     /// Mochi's REAL hosted q4 resident footprint, split by component: AsymmDiT 9.007 GiB + T5-XXL
