@@ -1050,6 +1050,37 @@ impl JobsStore {
         Ok(cleared_ids)
     }
 
+    /// Soft-hide a single terminal job from the queue (sc-12231, issue #1556) —
+    /// the per-card "×" dismiss, the individual-item twin of
+    /// [`clear_terminal_jobs`]. Stamps `cleared_at` so the row drops out of
+    /// `list_jobs` / `queue_summary` while staying in the table for Generation
+    /// Stats, and returns the updated snapshot.
+    ///
+    /// Only a TERMINAL job can be cleared: an active job would keep emitting
+    /// progress and be re-added to the client's queue on the next SSE tick, and
+    /// "clear" means tidying finished work — cancel an in-flight job instead. A
+    /// non-terminal job is rejected with [`JobsStoreError::InvalidStatus`] (400);
+    /// an already-cleared job is idempotent (the guarded UPDATE no-ops).
+    pub fn clear_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let job = self.get_job_on_connection(&transaction, job_id)?;
+        if !is_terminal_status(job.status.as_str()) {
+            return Err(JobsStoreError::InvalidStatus(format!(
+                "job {job_id} is {} — only completed, failed, canceled, or interrupted jobs can be cleared",
+                job.status.as_str()
+            )));
+        }
+        transaction.execute(
+            "update jobs set cleared_at = ?1 where id = ?2 and cleared_at is null",
+            params![utc_now(), job_id],
+        )?;
+        let job = self.get_job_on_connection(&transaction, job_id)?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
     pub fn register_worker(&self, request: RegisterWorker) -> JobsStoreResult<WorkerSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;

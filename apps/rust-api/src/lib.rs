@@ -125,8 +125,8 @@ use generation::{validate_interleave_job, validate_vqa_job};
 mod ideogram;
 mod jobs;
 use jobs::{
-    cancel_job, claim_job, clear_jobs, create_job, duplicate_job, get_job, get_job_metrics,
-    list_jobs, list_metrics, retry_job, update_job_progress, upsert_job_metrics,
+    cancel_job, claim_job, clear_job, clear_jobs, create_job, duplicate_job, get_job,
+    get_job_metrics, list_jobs, list_metrics, retry_job, update_job_progress, upsert_job_metrics,
 };
 mod workers;
 use workers::{
@@ -1326,6 +1326,9 @@ pub(crate) fn create_app_with_state(
         .route("/api/v1/files/ticket", post(create_media_ticket))
         .route("/api/v1/jobs/:job_id", get(get_job))
         .route("/api/v1/jobs/:job_id/cancel", post(cancel_job))
+        // Per-job "clear" (sc-12231, issue #1556) — the per-card × dismiss. Distinct
+        // from the bulk `/api/v1/jobs/clear` above (2 segments vs 3, no conflict).
+        .route("/api/v1/jobs/:job_id/clear", post(clear_job))
         .route("/api/v1/jobs/:job_id/retry", post(retry_job))
         .route("/api/v1/jobs/:job_id/duplicate", post(duplicate_job))
         .route("/api/v1/jobs/:job_id/progress", post(update_job_progress))

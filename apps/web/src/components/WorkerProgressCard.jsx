@@ -400,6 +400,7 @@ function ThumbnailsRegion({ variant, finalAssets, interimAssets, thumbnailGroups
 export function WorkerProgressCard({
   job,
   onCancel,
+  onClear,
   onRetry,
   onFreshRetry,
   onDuplicate,
@@ -441,6 +442,10 @@ export function WorkerProgressCard({
   const attempts = job.attempts ?? 1;
   const isModelDownload = job.type === "model_download";
   const canCancel = onCancel && !isTerminal && !job.cancelRequested;
+  // Per-card "×" dismiss (sc-12231, issue #1556): only offered by the Queue, and
+  // only on a terminal job — clearing an in-flight job would resurrect it on the
+  // next SSE tick (cancel it instead).
+  const canClear = !!onClear && isTerminal;
   const canRetryBase = actionStatuses.has(job.status) && attempts < MAX_ATTEMPTS;
   const canRetry = onRetry && canRetryBase && !isModelDownload;
   const canResumeDownload = onRetry && canRetryBase && isModelDownload && job.status !== "completed";
@@ -461,7 +466,20 @@ export function WorkerProgressCard({
     <article className={`worker-progress-card ${job.status}${className ? ` ${className}` : ""}`}>
       <header className="worker-progress-card__header">
         <span className={`worker-progress-card__type chip-${chipModifier(job.type)}`}>{chipLabel}</span>
-        <StatusBadge status={job.status} />
+        <div className="worker-progress-card__header-right">
+          <StatusBadge status={job.status} />
+          {canClear ? (
+            <button
+              className="worker-progress-card__dismiss"
+              onClick={() => onClear(job)}
+              type="button"
+              aria-label="Clear this job from the queue"
+              title="Clear from queue"
+            >
+              ×
+            </button>
+          ) : null}
+        </div>
       </header>
       <div className="worker-progress-card__title-row">
         <h3 className="worker-progress-card__title" title={title}>{title}</h3>

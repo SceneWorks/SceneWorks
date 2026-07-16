@@ -11103,6 +11103,38 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 8px;
 }
 
+/* Status badge + the optional per-card × dismiss (issue #1556), kept together at
+   the header's trailing edge. */
+.worker-progress-card__header-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Per-card "×" that clears a completed item from the queue (issue #1556). Ghost
+   button that firms up on hover; sits in the card's top-right corner. */
+.worker-progress-card__dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.worker-progress-card__dismiss:hover {
+  border-color: var(--border);
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
 .worker-progress-card__type {
   display: inline-flex;
   align-items: center;

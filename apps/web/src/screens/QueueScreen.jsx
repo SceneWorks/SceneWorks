@@ -188,6 +188,7 @@ export function QueueScreen() {
     activeProject,
     assets = [],
     clearCompletedJobs,
+    clearJob,
     createPlaceholderJob,
     filteredJobs,
     gpuOptions,
@@ -291,6 +292,7 @@ export function QueueScreen() {
                 thumbnailAssets={thumbnails}
                 onThumbnailClick={setPreviewAsset ? (asset) => setPreviewAsset(asset, thumbnails) : undefined}
                 onCancel={(j) => jobAction(j, "cancel")}
+                onClear={clearJob ? (j) => clearJob(j) : undefined}
                 onRetry={(j, payload) => jobAction(j, "retry", { body: payload ?? {} })}
                 onFreshRetry={(j, payload) => jobAction(j, "retry", { body: payload ?? {} })}
                 onDuplicate={(j) => jobAction(j, "duplicate")}

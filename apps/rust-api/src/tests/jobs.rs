@@ -528,6 +528,98 @@ async fn clear_jobs_scopes_to_the_requested_project() {
 }
 
 #[tokio::test]
+async fn clear_single_job_soft_hides_only_that_terminal_job() {
+    // sc-12231 / issue #1556: POST /api/v1/jobs/:id/clear (the per-card ×) drops one
+    // terminal job from the queue and leaves its siblings alone.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // Two queued jobs; cancel one so it is terminal, leave the other active.
+    let mut ids = Vec::new();
+    for prompt in ["done", "wait"] {
+        let (_, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "image_generate",
+                "projectId": "project-1",
+                "projectName": "Project 1",
+                "payload": { "prompt": prompt },
+                "requestedGpu": "auto"
+            }),
+        )
+        .await;
+        ids.push(job["id"].as_str().expect("job id").to_owned());
+    }
+    let (terminal_id, active_id) = (ids[0].clone(), ids[1].clone());
+    request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{terminal_id}/cancel"),
+        Value::Null,
+    )
+    .await;
+
+    // Clear just the terminal one.
+    let (status, cleared) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{terminal_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cleared["id"], terminal_id);
+
+    // Only the still-active job remains in the queue.
+    let (_, after) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    let remaining: Vec<&str> = after
+        .as_array()
+        .expect("jobs array")
+        .iter()
+        .filter_map(|job| job["id"].as_str())
+        .collect();
+    assert_eq!(remaining, vec![active_id.as_str()]);
+}
+
+#[tokio::test]
+async fn clear_single_job_rejects_a_non_terminal_job() {
+    // sc-12231: clearing an active (queued) job is a 400 — the × only appears on
+    // terminal cards, and the server refuses to soft-hide a live job.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (_, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_generate",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "wait" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The job is untouched — still listed.
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(jobs.as_array().expect("jobs array").len(), 1);
+}
+
+#[tokio::test]
 async fn image_job_route_threads_upscale_contract_when_enabled() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");

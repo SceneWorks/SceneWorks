@@ -499,6 +499,63 @@ describe("SceneWorks app shell", () => {
     expect(clearButton.disabled).toBe(true);
   });
 
+  it("dismisses an individual completed queue item via the per-card × (issue #1556)", async () => {
+    const clearJob = vi.fn(() => Promise.resolve());
+    const completedJob = {
+      id: "job-done",
+      type: "image_generate",
+      status: "completed",
+      stage: "completed",
+      progress: 1,
+      projectId: "project-1",
+      projectName: "Project 1",
+      requestedGpu: "auto",
+      payload: { prompt: "a fox" },
+      attempts: 1,
+    };
+    const runningJob = {
+      ...completedJob,
+      id: "job-running",
+      status: "running",
+      stage: "generating",
+      progress: 0.3,
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Project 1" },
+            clearJob,
+            createPlaceholderJob: (event) => event.preventDefault(),
+            filteredJobs: [completedJob, runningJob],
+            gpuOptions: ["auto", "0"],
+            jobAction: () => {},
+            jobPrompt: "",
+            projectFilter: "all",
+            projects: [{ id: "project-1", name: "Project 1" }],
+            requestedGpu: "auto",
+            setJobPrompt: () => {},
+            setProjectFilter: () => {},
+            setRequestedGpu: () => {},
+            visibleWorkers: [],
+          },
+          <QueueScreen />,
+        ),
+      );
+    });
+
+    // Exactly one × renders — on the completed card, not the running one.
+    const dismissButtons = [...document.body.querySelectorAll(".worker-progress-card__dismiss")];
+    expect(dismissButtons.length).toBe(1);
+
+    await act(async () => {
+      dismissButtons[0].click();
+    });
+    expect(clearJob).toHaveBeenCalledWith(completedJob);
+  });
+
   it("updates Queue GPU utilization when worker props change", async () => {
     const queueProps = {
       activeProject: { id: "project-1", name: "Project 1" },

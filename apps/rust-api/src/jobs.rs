@@ -389,6 +389,23 @@ pub(crate) async fn clear_jobs(
     }))
 }
 
+/// Clear a single completed item from the queue (sc-12231, issue #1556) — the
+/// per-card "×" dismiss. Soft-hides one terminal job (see `JobsStore::clear_job`)
+/// so it drops off the queue list + counts while its row (and generated assets)
+/// stay put. Rejects a non-terminal job with 400 (cancel an in-flight job
+/// instead). Returns the updated snapshot and republishes the queue.
+pub(crate) async fn clear_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<JobSnapshot>, ApiError> {
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.clear_job(&job_id)
+    })
+    .await?;
+    publish_queue(&state).await?;
+    Ok(Json(job))
+}
+
 pub(crate) async fn update_job_progress(
     State(state): State<AppState>,
     Path(job_id): Path<String>,

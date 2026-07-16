@@ -325,6 +325,66 @@ fn clear_terminal_jobs_scopes_to_one_project() {
     assert_eq!(b_list[0].id, b.id);
 }
 
+#[test]
+fn clear_job_soft_hides_a_single_terminal_job() {
+    // sc-12231 / issue #1556: the per-card "×" clears one terminal job, leaving
+    // its siblings in the queue and (like the bulk clear) keeping the row so
+    // Generation Stats history survives.
+    let store = store("clear-one");
+
+    let canceled = store
+        .create_job(image_job(object(json!({ "prompt": "stop" }))))
+        .expect("job creates");
+    store.cancel_job(&canceled.id).expect("cancels");
+    let other_terminal = store
+        .create_job(image_job(object(json!({ "prompt": "also done" }))))
+        .expect("job creates");
+    store.cancel_job(&other_terminal.id).expect("cancels other");
+    let queued = store
+        .create_job(image_job(object(json!({ "prompt": "wait" }))))
+        .expect("job creates");
+
+    let cleared = store.clear_job(&canceled.id).expect("clears one job");
+    assert_eq!(cleared.id, canceled.id);
+
+    // Only the one job is gone; the other terminal job and the queued job remain.
+    let remaining: Vec<String> = store
+        .list_jobs(None, None, 100)
+        .expect("list")
+        .into_iter()
+        .map(|job| job.id)
+        .collect();
+    assert!(!remaining.contains(&canceled.id));
+    assert!(remaining.contains(&other_terminal.id));
+    assert!(remaining.contains(&queued.id));
+
+    // Idempotent: clearing an already-cleared job is a no-op success.
+    assert_eq!(
+        store.clear_job(&canceled.id).expect("second clear").id,
+        canceled.id
+    );
+}
+
+#[test]
+fn clear_job_rejects_a_non_terminal_job() {
+    // sc-12231: an active job can't be cleared — it would resurrect on the next
+    // SSE tick and "clear" is for finished work. Rejected with InvalidStatus (400).
+    let store = store("clear-active");
+    let queued = store
+        .create_job(image_job(object(json!({ "prompt": "wait" }))))
+        .expect("job creates");
+
+    let error = store
+        .clear_job(&queued.id)
+        .expect_err("non-terminal is rejected");
+    assert!(matches!(error, JobsStoreError::InvalidStatus(_)));
+
+    // The job is untouched — still listed in the queue.
+    let listed = store.list_jobs(None, None, 100).expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, queued.id);
+}
+
 /// An Ideogram auto-caption image job (sc-9120). Created NON-claimable in `pending_caption`.
 fn pending_caption_job(payload: Value) -> CreateJob {
     CreateJob {

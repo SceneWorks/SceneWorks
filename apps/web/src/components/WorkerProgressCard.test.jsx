@@ -298,6 +298,51 @@ describe("WorkerProgressCard layout", () => {
     expect(onFreshRetry).toHaveBeenCalledWith(resumedJob, { payloadChanges: { downloadAction: "fresh" } });
   });
 
+  it("shows the dismiss × on a terminal job and calls onClear (issue #1556)", () => {
+    const job = {
+      id: "job-done",
+      type: "image_generate",
+      status: "completed",
+      progress: 1,
+      attempts: 1,
+      payload: { prompt: "a fox" },
+    };
+    const onClear = vi.fn();
+    api = render(<WorkerProgressCard job={job} onClear={onClear} />, makeContext([]));
+    const dismiss = api.container.querySelector(".worker-progress-card__dismiss");
+    expect(dismiss).not.toBeNull();
+    act(() => {
+      dismiss.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(onClear).toHaveBeenCalledWith(job);
+  });
+
+  it("does not show the dismiss × on an active job (would resurrect on SSE)", () => {
+    const job = {
+      id: "job-running",
+      type: "image_generate",
+      status: "running",
+      progress: 0.4,
+      attempts: 1,
+      payload: { prompt: "a fox" },
+    };
+    api = render(<WorkerProgressCard job={job} onClear={vi.fn()} />, makeContext([]));
+    expect(api.container.querySelector(".worker-progress-card__dismiss")).toBeNull();
+  });
+
+  it("omits the dismiss × when no onClear handler is provided", () => {
+    const job = {
+      id: "job-done",
+      type: "image_generate",
+      status: "completed",
+      progress: 1,
+      attempts: 1,
+      payload: { prompt: "a fox" },
+    };
+    api = render(<WorkerProgressCard job={job} />, makeContext([]));
+    expect(api.container.querySelector(".worker-progress-card__dismiss")).toBeNull();
+  });
+
   it("hides View in Queue when hideOpenQueue is true", () => {
     const job = { id: "j", type: "image_generate", status: "running", progress: 0, attempts: 1, payload: {} };
     const onOpenQueue = vi.fn();
