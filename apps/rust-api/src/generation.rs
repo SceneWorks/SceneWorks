@@ -32,7 +32,16 @@ pub(crate) async fn create_image_job(
     // `queued` create) for every other model, an already-structured caption, or an image-conditioned
     // edit. The worker's format-guard + reseed net remains the fallback if the expansion is unavailable.
     let caption_request = crate::ideogram::caption_request_for_ideogram(&job_payload);
-    let model_manifest_entry = resolve_model_manifest_entry(&state, &payload.model).await?;
+    // Keyed off the POST-preset job_payload["model"], NOT the DTO's payload.model — see the
+    // matching note in create_video_job (sc-12300). apply_recipe_preset_to_image_payload above
+    // may have replaced the model with the preset's own when the caller omitted one, which
+    // leaves payload.model stale and would resolve the DEFAULT model's entry.
+    let model_id = job_payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(payload.model.as_str())
+        .to_owned();
+    let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility_with(
         &state,
@@ -490,7 +499,20 @@ pub(crate) async fn create_video_job(
     // builtin/user.models.jsonc itself — Rust owns manifest parsing/merging
     // (story 1653). An unknown model resolves to {}, matching the worker's
     // existing fallback to the model's default repo.
-    let model_manifest_entry = resolve_model_manifest_entry(&state, &payload.model).await?;
+    //
+    // Keyed off the POST-preset job_payload["model"], NOT the DTO's payload.model:
+    // apply_recipe_preset_to_video_payload above may have replaced the model with the
+    // preset's own when the caller omitted one, which leaves payload.model stale (sc-12300).
+    // Resolving from the stale id enqueued the overridden model id alongside the DEFAULT
+    // model's entry — wrong repo/paths/quant, and wrong `limits`, which normalized_dimensions
+    // honors for the dimension floor (sc-11993). Mirrors how validate_job_lora_compatibility_with
+    // below already reads the model from job_payload.
+    let model_id = job_payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(payload.model.as_str())
+        .to_owned();
+    let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility_with(
         &state,
