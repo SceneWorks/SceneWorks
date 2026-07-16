@@ -20,7 +20,7 @@
 use std::f32::consts::PI;
 use std::path::Path;
 
-use sceneworks_core::video_request::{is_ltx_model, VideoRequest};
+use sceneworks_core::video_request::{duration_limit_error, is_ltx_model, VideoRequest};
 
 // Used only by the video generation metrics builders below, which are themselves
 // gated to the macOS / backend-candle lanes (the shared `generate_video` funnel) —
@@ -283,6 +283,48 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
     }
 }
 
+/// The payload invariants every video job must satisfy before the worker does anything expensive —
+/// the pure, synchronously testable seam [`run_video_generate_job`] delegates them to (sc-12297).
+///
+/// It exists as its own function for the reason `mochi_preflight` does: a decision left inline in an
+/// `async` arm is one no test currently asserts the CALL of — the sc-11992 review caught exactly that,
+/// a dropped gate surviving 835 green tests. Both checks here are refusals whose absence is invisible
+/// until a render is already underway.
+///
+/// Note the reason is "nothing asserts the call", NOT "the arm is unreachable from a test". The latter
+/// was the standing belief and it was false (sc-12318): an `async` arm taking `ApiClient`/`JobSnapshot`
+/// is drivable — `ApiClient::new` does no I/O and `JobSnapshot` deserializes from a literal. See
+/// `generate_mochi_using`, which pins its arm's decisions directly. `run_video_generate_job` has no
+/// such harness yet, so this seam is still the only thing asserting these checks; that is a gap to
+/// close if it ever matters, not a law of the code.
+///
+/// EVERY video job funnels through this: `VideoGenerate` / `VideoExtend` / `VideoBridge` /
+/// `PersonReplace` all dispatch to `run_video_generate_job` (lib.rs). That is what makes it the
+/// backstop for the API's `create_video_job` gate — which is the one that returns a caller a 400,
+/// but only covers what IT enqueues, not a job replayed from a pre-sc-12297 row or produced by any
+/// future non-HTTP path.
+fn video_preflight(request: &VideoRequest) -> WorkerResult<()> {
+    if request.project_id.trim().is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Missing payload.projectId".to_owned(),
+        ));
+    }
+    // The model's declared `limits.hardMaxDuration`. NOT redundant with `mochi_preflight`'s fit
+    // gate (sc-11992) — the closest thing that already existed: that one is macOS-only (so the
+    // candle lane has no duration ceiling but this), Mochi-only, and answers a DIFFERENT question
+    // — "does this fit THIS machine's RAM", not "is this within what the model can do". Memory is
+    // not capability: a machine with the headroom to decode a 30s Mochi clip would render 30s off
+    // a model trained for 5. Neither gate subsumes the other.
+    if let Some(message) = duration_limit_error(
+        &request.model,
+        request.duration,
+        &request.model_manifest_entry,
+    ) {
+        return Err(WorkerError::InvalidPayload(message));
+    }
+    Ok(())
+}
+
 /// Dispatch handler for `JobType::VideoGenerate`: generate, encode, and stream a
 /// single video asset through the Rust GPU worker.
 pub(crate) async fn run_video_generate_job(
@@ -291,11 +333,7 @@ pub(crate) async fn run_video_generate_job(
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     let request = VideoRequest::from_payload(&job.payload);
-    if request.project_id.trim().is_empty() {
-        return Err(WorkerError::InvalidPayload(
-            "Missing payload.projectId".to_owned(),
-        ));
-    }
+    video_preflight(&request)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -4219,7 +4257,46 @@ async fn generate_video(
     job: &JobSnapshot,
     backend: &str,
     advanced: &JsonObject,
+    input: VideoGenInput,
+) -> WorkerResult<DecodedVideo> {
+    generate_video_using(
+        api,
+        settings,
+        job,
+        backend,
+        advanced,
+        input,
+        crate::inference_runtime::load,
+    )
+    .await
+}
+
+/// [`generate_video`] with the engine loader supplied by the caller (sc-12318).
+///
+/// The `_using` half of the same pair [`crate::generator_cache::with_cached_generator`] already splits
+/// one level down, and it exists for the same reason: with the loader threaded in, a test can drive an
+/// async per-family arm (`generate_mochi`, `generate_candle_video`) against a stub `Generator` and
+/// assert on the [`VideoGenInput`] that actually reached the engine. Without it, every decision an arm
+/// makes inline — the frame lattice, the Mochi fit gate — is reachable only as the free function it
+/// delegates to, never as the call itself.
+///
+/// SCOPE: the injected loader covers the registry **cached** path only. The in-place ComfyUI Wan MoE
+/// branch builds its generator from per-file expert weights through `with_uncached_generator`, which has
+/// no `(engine_id, spec)` key to load from, so it ignores `load_generator` and stays uncovered here.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn generate_video_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    backend: &str,
+    advanced: &JsonObject,
     mut input: VideoGenInput,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
 ) -> WorkerResult<DecodedVideo> {
     // Per-generation sampler / scheduler axis for video (epic 7114 P5, sc-7127). The handlers leave
     // `input.sampler`/`scheduler` `None`; read them from the caller's already-parsed `advanced` block
@@ -4311,10 +4388,11 @@ async fn generate_video(
                     .await
                 }
                 None => {
-                    crate::generator_cache::with_cached_generator(
+                    crate::generator_cache::with_cached_generator_using(
                         engine_id,
                         spec,
                         "video load failed",
+                        load_generator,
                         run,
                     )
                     .await
@@ -4323,10 +4401,11 @@ async fn generate_video(
             #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
             let result = {
                 let _ = comfyui_load;
-                crate::generator_cache::with_cached_generator(
+                crate::generator_cache::with_cached_generator_using(
                     engine_id,
                     spec,
                     "video load failed",
+                    load_generator,
                     run,
                 )
                 .await
@@ -5266,6 +5345,37 @@ async fn generate_candle_video(
     project_path: &Path,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
+    generate_candle_video_using(
+        api,
+        settings,
+        job,
+        request,
+        project_path,
+        backend,
+        crate::inference_runtime::load,
+    )
+    .await
+}
+
+/// [`generate_candle_video`] with the engine loader supplied by the caller (sc-12318) — the candle
+/// sibling of [`generate_mochi_using`], and for the same reason.
+///
+/// The candle lane has no fit gate, so [`video_frame_count`] IS the whole pre-load exposure here:
+/// swapping it for `wan_frame_count` puts every non-Wan family (Mochi's `6k+1`, LTX's `8k+1`) off its
+/// engine's lattice, which `validate_request` hard-rejects. `generate_candle_video_using_*` pins that
+/// call at the caller.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn generate_candle_video_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    backend: &str,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
     let engine_id = candle_video_engine_id(&request.model).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("{} is not a candle video engine", request.model))
     })?;
@@ -5373,7 +5483,16 @@ async fn generate_candle_video(
         if let Value::Object(map) = &mut raw_settings {
             map.insert("repo".to_owned(), Value::String(repo.clone()));
         }
-        let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+        let decoded = generate_video_using(
+            api,
+            settings,
+            job,
+            backend,
+            &request.advanced,
+            input,
+            load_generator,
+        )
+        .await?;
         return Ok((decoded, adapter, raw_settings));
     }
 
@@ -5439,7 +5558,16 @@ async fn generate_candle_video(
         ..VideoGenInput::default()
     };
     let raw_settings = candle_video_raw_settings(request, &repo);
-    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    let decoded = generate_video_using(
+        api,
+        settings,
+        job,
+        backend,
+        &request.advanced,
+        input,
+        load_generator,
+    )
+    .await?;
     Ok((decoded, adapter, raw_settings))
 }
 
@@ -8909,6 +9037,83 @@ fn mochi_tier_quant(tier_dir: &Path) -> Option<Quant> {
     }
 }
 
+/// The dir the PRE-DOWNLOAD fit gate measures: the REQUESTED tier's path, whether or not it has been
+/// downloaded yet. `None` when no model root is locatable at all ⇒ no signal ⇒ [`mochi_precheck`]
+/// skips (never blocks without evidence, matching the gate's own fail-open rule).
+///
+/// Deliberately NOT [`resolve_mochi_model_dir`]: that one requires a COMPLETE tier and falls back to a
+/// smaller installed one, and it hard-errors when nothing is installed — which is correct AFTER the
+/// download and wrong before it (a first-ever q8 job would be rejected as "not downloaded" instead of
+/// downloading). This returns a bare path and lets the gate's on-disk scan decide.
+///
+/// Naming the REQUESTED tier (not the fallback) is what keeps the weights term a strict lower bound on
+/// what THIS job will hold resident: the scan finds the shared co-requisites plus this tier's own bytes
+/// if present, never a different tier's.
+#[cfg(target_os = "macos")]
+fn mochi_precheck_dir(settings: &Settings, request: &VideoRequest) -> Option<PathBuf> {
+    // The preferred tier — `mochi_tier_order`'s head is the one the request actually asked for; the
+    // rest of the order is fallback, which the pre-check must not measure.
+    let requested = mochi_tier_order(request).first().copied()?;
+    let root = match std::env::var(MOCHI_DIR_ENV) {
+        Ok(override_dir) => {
+            let root = PathBuf::from(override_dir.trim());
+            // A self-contained dir that IS one tier — the components live under it, so it is already
+            // the thing to measure (and no download can change it).
+            if mochi_tier_dir_is_complete(&root) && mochi_shared_is_complete(&root) {
+                return Some(root);
+            }
+            root
+        }
+        Err(_) => huggingface_snapshot_dir(&settings.data_dir, MOCHI_REPO)?,
+    };
+    Some(root.join(requested))
+}
+
+/// PRE-DOWNLOAD Mochi admission check (sc-12322) — the same gate as [`mochi_preflight`], run BEFORE
+/// `ensure_mochi_*_present` fetches a ~13-20 GiB tier, so a job that cannot fit is refused without
+/// paying for the download first.
+///
+/// This is sound because the weights term is a conservative FLOOR here, not zero. Mochi's
+/// `text_encoder/` + `tokenizer/` + `vae/` are a `coRequisite: true` download (~9.7 GiB) that is
+/// already on disk before an on-demand `<tier>/*` fetch, and `mochi_resident_bytes` sums those shared
+/// siblings from the tier dir's PARENT even when the tier dir itself is absent. So:
+///
+/// ```text
+/// floor = shared co-requisites + (requested tier, if already downloaded)  ≤  actual resident weights
+/// ⇒ needed(floor) ≤ needed(actual) ⇒ {pre-check refuses} ⊆ {full gate refuses}
+/// ```
+///
+/// i.e. it can only refuse when refusal is CERTAIN — a config that fits is never rejected early, which
+/// is the property that makes an early gate safe at all. Anything it admits still faces the unchanged
+/// full check after the download.
+///
+/// The floor is what makes this bite on the machine the story is named for: at the shipped 151-frame
+/// default the shared components alone give 9.73 + 60.56 decode + 2 OS = 72.29 GiB > 64. A
+/// WEIGHTS-FREE pre-check (decode + OS only) would total 62.56 and ADMIT on a 64 GB Mac — downloading
+/// the tier just to refuse it, which is the whole bug.
+///
+/// Lives beside [`mochi_preflight`] and for the same reason: one seam, asserted directly across
+/// budgets and tier layouts. Its ORDER against the `ensure_mochi_*_present` fetches — the thing that
+/// makes it worth having at all — is pinned separately, at the call site, by
+/// `generate_mochi_using_refuses_before_paying_for_the_tier_download` (sc-12318).
+#[cfg(target_os = "macos")]
+fn mochi_precheck(
+    model: &str,
+    engine_id: &str,
+    tier_dir: Option<&Path>,
+    raw_frames: u32,
+    width: u32,
+    height: u32,
+) -> WorkerResult<()> {
+    let Some(tier_dir) = tier_dir else {
+        return Ok(());
+    };
+    // The COERCED count — the frames the decode will really pay for, exactly as `mochi_preflight`
+    // computes it. Pre-checking the raw request would gate on a length the engine never renders.
+    let frames = video_frame_count(model, raw_frames);
+    crate::mlx_fit_gate::mochi_fit_check(engine_id, tier_dir, frames, width, height)
+}
+
 /// Resolve the Mochi tier dir to load: the `$SCENEWORKS_MLX_MOCHI_DIR` override (accepted as either a
 /// model root carrying tier subdirs or a single self-contained tier dir), then the turnkey
 /// [`MOCHI_REPO`] snapshot's tier subdir. Only a COMPLETE tier + its shared co-requisite counts.
@@ -9093,12 +9298,18 @@ struct MochiPreflight {
 /// fit this machine, and report the tier's quant — the whole "before we load anything" decision, as a
 /// pure, synchronously testable seam (sc-11992).
 ///
-/// This exists as its own function because [`generate_mochi`] is `async` and needs a live
-/// `ApiClient`/`JobSnapshot`, which makes it unreachable from a unit test — so any decision left
-/// INSIDE it is, in practice, unpinned. Both decisions here are ones this story exists to get right,
-/// and both are invisible in the output when wrong (a mis-coerced frame count is a hard engine reject;
-/// a skipped gate is a `SIGKILL`), so they live here where `mochi_preflight_*` can assert them by
-/// model id, budget, and clip length.
+/// Both decisions here are invisible in the output when wrong — a mis-coerced frame count is a hard
+/// engine reject, a skipped gate is a `SIGKILL` — so they live in one seam where `mochi_preflight_*`
+/// can assert them directly by model id, budget, and clip length.
+///
+/// This function was originally justified by the claim that [`generate_mochi`] is "unreachable from a
+/// unit test" because it is `async` and takes a live `ApiClient`/`JobSnapshot`. **That was wrong**
+/// (sc-12318): `ApiClient::new` does no I/O, `JobSnapshot` deserializes from a literal, and
+/// `generate_mochi_using` now drives the whole arm against a stub engine. Keep the seam anyway — it
+/// gives the gate cheap, direct coverage across budgets and clip lengths, and returning
+/// `{frames, quant}` as a unit is what stops the arm obtaining either on a path that skipped the gate.
+/// But do NOT reason from that claim again: a decision put here is *additionally* covered, not
+/// *only* coverable here.
 ///
 /// `Ok(MochiPreflight)` admits; `Err` is the actionable pre-crash rejection.
 #[cfg(target_os = "macos")]
@@ -9143,8 +9354,14 @@ fn mochi_preflight(
 /// [`generate_video`] funnel — the same one Wan/LTX/SVD use — so Mochi inherits the "no background
 /// heartbeat during a job, the progress callback IS the keepalive" contract without re-implementing it.
 ///
-/// Deliberately thin: every pre-load decision lives in [`mochi_preflight`], which is reachable from a
-/// unit test where this `async` arm is not.
+/// Deliberately thin: every pre-load decision lives in [`mochi_precheck`] (before the download) or
+/// [`mochi_preflight`] (after it), each a pure seam its own tests assert directly.
+///
+/// The ORDER of those two against the `ensure_mochi_*_present` fetches is the one decision this arm
+/// itself owns — the pre-check must precede the download to be worth having (sc-12322) — and it is no
+/// longer unpinned: `generate_mochi_using`'s tests (sc-12318) drive this whole body against a stub
+/// engine, including `generate_mochi_using_refuses_before_paying_for_the_tier_download`, which fails if
+/// the pre-check is moved after the fetches.
 #[cfg(target_os = "macos")]
 async fn generate_mochi(
     api: &ApiClient,
@@ -9154,6 +9371,52 @@ async fn generate_mochi(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, Value)> {
+    generate_mochi_using(
+        api,
+        settings,
+        job,
+        request,
+        engine_id,
+        backend,
+        crate::inference_runtime::load,
+    )
+    .await
+}
+
+/// [`generate_mochi`] with the engine loader supplied by the caller (sc-12318) — the seam that makes
+/// this arm's pre-load decisions assertable.
+///
+/// Everything `generate_mochi` does lives here; `generate_mochi` is the one-line delegation that binds
+/// the real `inference_runtime::load`. That delegation carries no logic, so the only thing it can drift
+/// on is the loader itself — whereas the decisions below are invisible in the output when wrong (a
+/// mis-coerced count is a hard engine reject; a skipped gate is a `SIGKILL`; a pre-check that runs too
+/// late is a ~13-20 GiB download the answer never depended on), and are covered by
+/// `generate_mochi_using_*`.
+#[cfg(target_os = "macos")]
+async fn generate_mochi_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    engine_id: &'static str,
+    backend: &str,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<(DecodedVideo, Value)> {
+    // Refuse a job that cannot possibly fit BEFORE paying for its tier download (sc-12322). Runs on a
+    // weights FLOOR (the already-present shared co-requisites), so it only ever refuses when the full
+    // gate below would too — see `mochi_precheck`. MUST stay ahead of the fetches below: that ordering
+    // is the whole point, and `generate_mochi_using_refuses_before_paying_for_the_tier_download` is
+    // what holds it there.
+    mochi_precheck(
+        &request.model,
+        engine_id,
+        mochi_precheck_dir(settings, request).as_deref(),
+        request.raw_frame_count(),
+        request.width,
+        request.height,
+    )?;
     // A tier the job toggled but never downloaded is fetched before any compute (no-op otherwise).
     ensure_mochi_q8_present(api, settings, job, request).await?;
     ensure_mochi_bf16_present(api, settings, job, request).await?;
@@ -9193,7 +9456,16 @@ async fn generate_mochi(
         ..VideoGenInput::default()
     };
     let raw_settings = mochi_raw_settings(request, quant);
-    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    let decoded = generate_video_using(
+        api,
+        settings,
+        job,
+        backend,
+        &request.advanced,
+        input,
+        load_generator,
+    )
+    .await?;
     Ok((decoded, raw_settings))
 }
 
@@ -10557,6 +10829,72 @@ mod tests {
         VideoRequest::from_payload(&value.as_object().cloned().unwrap())
     }
 
+    /// sc-12297: the worker's backstop refuses a clip past the model's declared
+    /// `limits.hardMaxDuration` BEFORE any weights load — pinned at the seam
+    /// `run_video_generate_job` actually calls, not just as a sceneworks-core free function.
+    ///
+    /// Kills the mutation that matters: deleting the `duration_limit_error` call from
+    /// `video_preflight`. Every core test stays green through that — the core function is still
+    /// correct, it is simply no longer CALLED — which is the precise shape of the dropped-gate bug
+    /// the sc-11992 review caught surviving 835 green tests.
+    ///
+    /// Ungated on purpose. `mochi_preflight`'s fit gate is macOS-only, so the candle lane's ONLY
+    /// duration ceiling is this one; a `#[cfg(target_os = "macos")]` here would leave the platform
+    /// that has no other protection untested.
+    #[test]
+    fn video_preflight_refuses_a_clip_past_the_models_declared_hard_max_duration() {
+        // The story's mochi_1 shape: cap 5s, asked for 30s. 30 x 30fps = 900 raw frames, which snap
+        // to 901 on Mochi's 6k+1 lattice — and `901 % 6 == 1`, so the engine's own validate_request
+        // ACCEPTS it. On the candle lane nothing else says no, which is what makes this gate the
+        // whole defense rather than a nicety.
+        let over = request(json!({
+            "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p",
+            "duration": 30, "fps": 30,
+            "modelManifestEntry": { "limits": { "hardMaxDuration": 5 } }
+        }));
+        assert_eq!(over.raw_frame_count(), 900);
+        assert_eq!(
+            over.frame_count(),
+            901,
+            "on-lattice, and the engine would accept it"
+        );
+        let Err(WorkerError::InvalidPayload(message)) = video_preflight(&over) else {
+            panic!("a 30s clip on a 5s-capped model must be refused before the load");
+        };
+        assert!(message.contains("mochi_1"), "names the model: {message}");
+        assert!(message.contains("5s"), "states the cap: {message}");
+        assert!(message.contains("30s"), "states what was asked: {message}");
+
+        // At-cap admits — the shipped 5s default must still run, or the gate has bricked the model.
+        let at_cap = request(json!({
+            "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p",
+            "duration": 5, "fps": 30,
+            "modelManifestEntry": { "limits": { "hardMaxDuration": 5 } }
+        }));
+        assert!(
+            video_preflight(&at_cap).is_ok(),
+            "5s is exactly the cap and is the model's own shipped default"
+        );
+
+        // A job carrying no manifest entry (the stub lane, an uncatalogued id whose entry resolves
+        // to {}) is UNCONSTRAINED — the gate never blocks without a declared cap.
+        let no_entry = request(json!({
+            "projectId": "p", "model": "stub-model", "mode": "text_to_video", "prompt": "p",
+            "duration": 30
+        }));
+        assert!(
+            video_preflight(&no_entry).is_ok(),
+            "no cap declared => no cap"
+        );
+
+        // The pre-existing projectId invariant still holds at this seam.
+        let no_project = request(json!({ "model": "mochi_1", "mode": "text_to_video" }));
+        assert!(matches!(
+            video_preflight(&no_project),
+            Err(WorkerError::InvalidPayload(m)) if m.contains("projectId")
+        ));
+    }
+
     // -----------------------------------------------------------------------------------------
     // Mochi 1 (epic 1788 / sc-11992). These sit on the SUPERSET cfg because the tier resolver, the
     // stride and the on-demand fetches are SHARED by both lanes (one repo, both backends) — so they
@@ -10939,8 +11277,9 @@ mod tests {
     }
 
     /// sc-11992 review: pin the frame lattice AT THE SEAM THE GENERATION ARM CALLS, not just as a free
-    /// function. `generate_mochi` is `async` and needs a live `ApiClient`/`JobSnapshot`, so it is
-    /// unreachable from a unit test — `mochi_preflight` is the pure seam it delegates the decision to.
+    /// function — `mochi_preflight` is the seam `generate_mochi` delegates the decision to. The arm
+    /// ITSELF is pinned by `generate_mochi_using_*` (sc-12318); this stays the cheap, direct check of
+    /// the seam's own contract across budgets and clip lengths.
     ///
     /// Kills the review mutation `video_frame_count(...)` → `wan_frame_count(...)`, which survived
     /// 835/0 green when this logic sat inline in `generate_mochi`: the wan stride answers 149 for the
@@ -11259,6 +11598,650 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------------------------
+    // sc-12318 — driving the ASYNC generation arms.
+    //
+    // The `mochi_preflight_*` tests above pin the pure seam, but nothing asserted that
+    // `generate_mochi` CALLS it: the sc-11992 review found a bypass (destructure the preflight, then
+    // re-bind `frames = wan_frame_count(...)`) that stayed clippy-clean and green, because a unit test
+    // could reach the free function but never the caller.
+    //
+    // The arm was believed undrivable — `async`, with a live `ApiClient`/`JobSnapshot`. That premise
+    // was wrong on every count. `ApiClient::new` is pure (a reqwest client + a base URL, no I/O);
+    // `JobSnapshot` builds from `serde_json::from_value` as it already does elsewhere; and both
+    // `ensure_mochi_*_present` calls return `Ok(())` on their first line for a request that names no
+    // tier. The ONLY real obstacle was `generate_video`'s hardcoded `inference_runtime::load`, which
+    // `generate_video_using` now takes as a parameter — the same split `with_cached_generator` /
+    // `with_cached_generator_using` already had one level down.
+    //
+    // No stub HTTP server is needed: `update_job` is the one API call the progress loop `?`-propagates,
+    // and it fires only per progress event, so a silent probe generator never reaches it (`heartbeat`
+    // swallows `WorkerError::Http`; `cancel_requested_peek` swallows everything).
+    // -----------------------------------------------------------------------------------------
+
+    /// What `generate_mochi_using` actually handed the engine, captured from inside the load+run.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[derive(Clone, Default)]
+    struct ArmProbe {
+        /// The `GenerationRequest` the arm built, or `None` if generation never ran.
+        request: std::sync::Arc<std::sync::Mutex<Option<GenerationRequest>>>,
+        /// The `LoadSpec` the arm resolved — carries the tier dir + quant marker.
+        spec: std::sync::Arc<std::sync::Mutex<Option<LoadSpec>>>,
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    impl ArmProbe {
+        /// The loader to hand `generate_mochi_using`. Records the spec, then yields a generator that
+        /// records the request — so a test can assert on both the load and the generate side of the arm
+        /// without a tensor backend, weights, or a GPU.
+        fn loader(
+            &self,
+        ) -> impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static
+        {
+            let seen_spec = std::sync::Arc::clone(&self.spec);
+            let seen_request = std::sync::Arc::clone(&self.request);
+            move |engine_id, spec| {
+                *seen_spec.lock().unwrap() = Some(spec.clone());
+                Ok(Box::new(ProbeGenerator {
+                    descriptor: gen_core::ModelDescriptor {
+                        // Leaked so the descriptor's `&'static str` id reflects the engine actually
+                        // asked for; the probe outlives nothing, so the leak is bounded by the test.
+                        id: Box::leak(engine_id.to_owned().into_boxed_str()),
+                        family: "test",
+                        backend: "probe",
+                        modality: gen_core::Modality::Video,
+                        capabilities: gen_core::Capabilities::default(),
+                    },
+                    request: seen_request,
+                }))
+            }
+        }
+
+        /// The frame count that reached the engine. Panics if generation never ran.
+        fn engine_frames(&self) -> u32 {
+            self.request
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("the arm reached the engine")
+                .frames
+                .expect("a video request carries a frame count")
+        }
+
+        /// Whether the arm got as far as loading an engine at all. macOS-only: the pre-load assertion
+        /// it serves belongs to the fit gate, which is an MLX-lane concern — the candle lane has none,
+        /// so carrying this there would be dead code under `clippy --all-targets -D warnings`.
+        #[cfg(target_os = "macos")]
+        fn loaded(&self) -> bool {
+            self.spec.lock().unwrap().is_some()
+        }
+    }
+
+    /// A backend-neutral `Generator` that records the request and returns a minimal clip.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    struct ProbeGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        request: std::sync::Arc<std::sync::Mutex<Option<GenerationRequest>>>,
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    impl Generator for ProbeGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+
+        fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn generate(
+            &self,
+            req: &GenerationRequest,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<GenerationOutput> {
+            *self.request.lock().unwrap() = Some(req.clone());
+            // Deliberately silent: a `Progress` event would drive `update_job`, the only API call the
+            // progress loop hard-fails on, and this test has no server behind `api`.
+            Ok(GenerationOutput::Video {
+                frames: vec![gen_core::Image {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![0u8; 12],
+                }],
+                fps: req.fps.unwrap_or(30),
+                audio: None,
+            })
+        }
+    }
+
+    /// A `JobSnapshot` for a Mochi video job. `payload.model` is what the completion metrics read.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn mochi_job_snapshot() -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job-mochi-1",
+            "type": "video_generate",
+            "status": "running",
+            "projectId": null,
+            "projectName": null,
+            "payload": { "model": "mochi_1" },
+            "result": {},
+            "requestedGpu": "auto",
+            "assignedGpu": null,
+            "workerId": "test-worker",
+            "progress": 0.0,
+            "stage": "queued",
+            "message": "queued",
+            "error": null,
+            "etaSeconds": null,
+            "elapsedSeconds": null,
+            "attempts": 1,
+            "sourceJobId": null,
+            "duplicateOfJobId": null,
+            "cancelRequested": false,
+            "createdAt": "2026-07-16T00:00:00Z",
+            "updatedAt": "2026-07-16T00:00:00Z",
+            "startedAt": null,
+            "completedAt": null,
+            "canceledAt": null,
+            "lastHeartbeatAt": null
+        }))
+        .expect("the mochi job snapshot deserializes")
+    }
+
+    /// Drive `generate_mochi_using` against `probe` with the Mochi tier at `root` and an MLX budget of
+    /// `cap_gb`, from a plain `#[test]` — the env overrides are process-global, so the whole async run
+    /// has to sit inside the [`ENV_LOCK`] the sync `temp_env_vars` holds.
+    ///
+    /// `api` points at a closed port on purpose: reaching the network would be a bug in this test, and
+    /// an unroutable URL makes that fail loudly rather than depending on a stub's fidelity.
+    #[cfg(target_os = "macos")]
+    fn drive_mochi_arm(
+        root: &Path,
+        cap_gb: &str,
+        probe: &ArmProbe,
+        request: &VideoRequest,
+    ) -> WorkerResult<(DecodedVideo, Value)> {
+        let settings = Settings {
+            data_dir: root.join("unused-data-dir"),
+            api_url: "http://127.0.0.1:0".to_owned(),
+            ..Settings::from_env()
+        };
+        let job = mochi_job_snapshot();
+        let loader = probe.loader();
+        temp_env_vars(
+            &[
+                (MOCHI_DIR_ENV, root.to_str().expect("utf-8 fixture root")),
+                (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, cap_gb),
+            ],
+            || {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime builds")
+                    .block_on(generate_mochi_using(
+                        &ApiClient::new(&settings),
+                        &settings,
+                        &job,
+                        request,
+                        "mochi_1",
+                        "mlx",
+                        loader,
+                    ))
+            },
+        )
+    }
+
+    /// **The caller-side pin the story asked for.** Drives `generate_mochi_using` end to end and asserts
+    /// on the frame count that REACHED the engine — so it fails for any way the arm can get the lattice
+    /// wrong, not just the one the pure seam covers.
+    ///
+    /// Kills the sc-11992 review bypass that survived `mochi_preflight`: destructuring the preflight and
+    /// then re-binding `frames = wan_frame_count(request.raw_frame_count())` is clippy-clean and leaves
+    /// the gate running on the correct 151, so every existing test stays green — but the engine is handed
+    /// 149, and `149 % 6 == 5` is off Mochi's lattice, which `validate_request` hard-rejects.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn generate_mochi_using_hands_the_engine_the_mochi_lattice_frame_count() {
+        let root = mochi_root_real_sized("arm_lattice");
+        let probe = ArmProbe::default();
+        // A budget no clip can overflow, so the fit gate cannot be what fails this test.
+        let out = drive_mochi_arm(&root, "512", &probe, &mochi_request(json!({})));
+        std::fs::remove_dir_all(&root).ok();
+
+        let (decoded, raw_settings) = out.expect("a 151-frame clip fits a 512 GB budget");
+        assert_eq!(
+            probe.engine_frames(),
+            151,
+            "the ARM must hand the engine the shipped 5 s default snapped onto Mochi's 6k+1 lattice"
+        );
+        assert_ne!(
+            probe.engine_frames(),
+            wan_frame_count(150),
+            "routing the arm through the wan stride is the bug epic 1788 exists to fix — the engine \
+             hard-rejects 149 (149 % 6 == 5)"
+        );
+        assert_eq!(
+            probe
+                .spec
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("a load ran")
+                .quantize,
+            Some(Quant::Q4),
+            "the arm must carry the resolved tier's quant onto the LoadSpec"
+        );
+        assert_eq!(
+            raw_settings.get("frameCount").and_then(Value::as_u64),
+            Some(u64::from(probe.engine_frames())),
+            "the sidecar's frameCount is `sceneworks-core::frame_count()` — an INDEPENDENT mirror of \
+             the same lattice, not the arm's own `video_frame_count` — so the two must agree or the \
+             asset records a clip length it does not have"
+        );
+        assert_eq!(
+            decoded.frames.len(),
+            1,
+            "the probe returns a one-frame clip"
+        );
+    }
+
+    /// The gate half of the same pin: on a 64 GB Mac the shipped 5 s default must be REFUSED, and
+    /// refused **before the engine is loaded** — MLX's default error handler is `exit(-1)`, so an
+    /// over-budget job that reaches the load takes the worker down with it rather than failing the job.
+    ///
+    /// `probe.loaded()` is what makes this a pre-load assertion rather than just an error check: it is
+    /// only ever set from inside the loader, so it proves the arm short-circuited on the gate. Kills the
+    /// "inline the seam" bypass (`video_frame_count` + `mochi_tier_quant`, no `mochi_fit_check`), which
+    /// is green today and caught only by clippy's dead-code cascade.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn generate_mochi_using_refuses_an_over_budget_clip_before_loading_the_engine() {
+        let root = mochi_root_real_sized("arm_reject");
+        let probe = ArmProbe::default();
+        let out = drive_mochi_arm(&root, "64", &probe, &mochi_request(json!({})));
+        std::fs::remove_dir_all(&root).ok();
+
+        let message = out
+            .err()
+            .expect(
+                "the shipped 5 s default (151 frames) needs 18.73 GiB weights + 60.56 GiB untiled \
+                 decode + 2 GiB OS reserve = 81.3 GiB, which does NOT fit a 64 GB Mac",
+            )
+            .to_string();
+        assert!(
+            message.contains("Shorten the clip"),
+            "the arm must surface the gate's actionable error: {message}"
+        );
+        assert!(
+            !probe.loaded(),
+            "the fit gate must refuse BEFORE the engine load — a load that starts over-budget is the \
+             exit(-1) SIGKILL the gate exists to prevent, and cannot be mapped to a job error after \
+             the fact"
+        );
+    }
+
+    /// Stage a REAL HuggingFace hub cache holding Mochi's shared `coRequisite` components and **no
+    /// tier dir** — the disk state of a machine that has the ~9.7 GiB shared download but has not
+    /// fetched a tier. Returns the hub dir to point `HF_HUB_CACHE` at.
+    ///
+    /// Goes through `safe_repo_dir_name` rather than hand-writing `models--SceneWorks--mochi-1-mlx`, so
+    /// the fixture cannot drift from the slug the real resolver computes. Sparse, like
+    /// [`mochi_root_real_sized`].
+    #[cfg(target_os = "macos")]
+    fn mochi_hf_cache_shared_only(tag: &str) -> PathBuf {
+        let hub = std::env::temp_dir().join(format!(
+            "mochi_hf_hub_{tag}_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let repo_dir = hub.join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(MOCHI_REPO).expect("the mochi repo slug")
+        ));
+        let snapshot = repo_dir.join("snapshots").join(MOCHI_REVISION);
+        for (relative, len) in [
+            ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
+            ("vae/model.safetensors", MOCHI_Q4_VAE_BYTES),
+        ] {
+            let path = snapshot.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        }
+        std::fs::create_dir_all(snapshot.join("tokenizer")).unwrap();
+        std::fs::create_dir_all(repo_dir.join("refs")).unwrap();
+        std::fs::write(repo_dir.join("refs").join("main"), MOCHI_REVISION).unwrap();
+        hub
+    }
+
+    /// **Closes the residual sc-12322 recorded against this story.** Its own mutation table ends with
+    /// *"pre-check moved after the fetches ⇒ survives everything. Structural to the untestable async
+    /// arm; tracked by sc-12318"* — the ORDER of `mochi_precheck` against `ensure_mochi_*_present` is
+    /// the one decision `generate_mochi` itself owns, and the whole point of sc-12322: refusing after
+    /// the download is the bug, not the fix.
+    ///
+    /// How it discriminates. The job asks for **q8**, and the staged cache has the shared components
+    /// but no q8 tier — so `ensure_mochi_q8_present` is past its `!mochi_wants_q8` early-out and MUST
+    /// attempt a real `ensure_hf_files_cached` fetch. `api` points at a closed port, so the two orders
+    /// give different errors:
+    ///   * pre-check first (correct) ⇒ the gate's actionable "Shorten the clip", no network touched.
+    ///   * pre-check after the fetches ⇒ a `WorkerError::Http` from the download instead ⇒ RED.
+    ///
+    /// `HF_HUB_CACHE` is pinned at the fixture because `huggingface_hub_cache_dir` reads it (and
+    /// `HF_HOME`) BEFORE `data_dir` — left ambient, a dev box's real cache would decide this test.
+    /// `SCENEWORKS_MLX_MOCHI_DIR` is cleared for the same reason: it would bypass the HF resolution
+    /// this test is built on.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn generate_mochi_using_refuses_before_paying_for_the_tier_download() {
+        let hub = mochi_hf_cache_shared_only("arm_precheck");
+        let probe = ArmProbe::default();
+        let request = mochi_request(json!({ "mlxQuantize": 8 }));
+        let settings = Settings {
+            data_dir: hub.join("unused-data-dir"),
+            api_url: "http://127.0.0.1:0".to_owned(),
+            ..Settings::from_env()
+        };
+        let job = mochi_job_snapshot();
+        let loader = probe.loader();
+        let out = temp_env_vars(
+            &[
+                ("HF_HUB_CACHE", hub.to_str().expect("utf-8 fixture hub")),
+                (MOCHI_DIR_ENV, ""),
+                (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64"),
+            ],
+            || {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime builds")
+                    .block_on(generate_mochi_using(
+                        &ApiClient::new(&settings),
+                        &settings,
+                        &job,
+                        &request,
+                        "mochi_1",
+                        "mlx",
+                        loader,
+                    ))
+            },
+        );
+        std::fs::remove_dir_all(&hub).ok();
+
+        let message = out
+            .err()
+            .expect("a 151-frame clip cannot fit a 64 GB Mac even on the shared-components floor")
+            .to_string();
+        assert!(
+            message.contains("Shorten the clip"),
+            "the refusal must come from the PRE-DOWNLOAD gate, before `ensure_mochi_q8_present` \
+             charges ~13-20 GiB for an answer it never needed. A transport error here means the \
+             pre-check now runs after the fetches: {message}"
+        );
+        assert!(!probe.loaded(), "nothing may load on a refused job");
+    }
+
+    /// The candle half of the sc-12318 pin, and the reason the probe harness sits on the superset cfg:
+    /// `generate_candle_video`'s `video_frame_count(&request.model, request.raw_frame_count())` is the
+    /// same unpinned caller `generate_mochi` had. This lane has **no fit gate**, so the frame lattice is
+    /// the whole pre-load exposure here — swapping the call for `wan_frame_count` hands the engine 149
+    /// for the shipped 5 s Mochi default, which `validate_request` hard-rejects (`149 % 6 == 5`).
+    ///
+    /// Runs on the windows-candle lane (`cargo test -p sceneworks-worker --features backend-candle`),
+    /// which is what makes this arm genuinely covered rather than asserted — the macOS lane never
+    /// compiles it.
+    ///
+    /// 1-byte stub weights are enough: unlike the MLX arm there is no on-disk byte scan to satisfy, and
+    /// the residency policy reads them as negligible and stays `Resident`.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn generate_candle_video_using_hands_the_engine_the_mochi_lattice_frame_count() {
+        let root = mochi_root("arm_lattice_candle", &["q4"], true);
+        let probe = ArmProbe::default();
+        let request = mochi_request(json!({}));
+        let settings = Settings {
+            data_dir: root.join("unused-data-dir"),
+            api_url: "http://127.0.0.1:0".to_owned(),
+            ..Settings::from_env()
+        };
+        let job = mochi_job_snapshot();
+        let loader = probe.loader();
+        let out = temp_env_var(
+            MOCHI_DIR_ENV,
+            root.to_str().expect("utf-8 fixture root"),
+            || {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime builds")
+                    .block_on(generate_candle_video_using(
+                        &ApiClient::new(&settings),
+                        &settings,
+                        &job,
+                        &request,
+                        std::path::Path::new(""),
+                        "candle",
+                        loader,
+                    ))
+            },
+        );
+        std::fs::remove_dir_all(&root).ok();
+
+        let (_decoded, adapter, _raw_settings) =
+            out.expect("the candle mochi arm runs to completion");
+        assert_eq!(
+            probe.engine_frames(),
+            151,
+            "the candle ARM must hand the engine the 5 s default snapped onto Mochi's 6k+1 lattice"
+        );
+        assert_ne!(
+            probe.engine_frames(),
+            wan_frame_count(150),
+            "the candle lane has no fit gate, so routing this call through the wan stride is the whole \
+             exposure — the engine hard-rejects 149"
+        );
+        assert_eq!(
+            adapter, CANDLE_MOCHI_ADAPTER,
+            "a candle-rendered clip records the candle adapter, not the MLX one"
+        );
+    }
+
+    /// The PRE-DOWNLOAD disk state (sc-12322): the shared `coRequisite` components at their REAL
+    /// hosted sizes, and NO tier dir — exactly what a machine looks like when a job has toggled q8/bf16
+    /// but `ensure_mochi_*_present` has not run yet. Sparse, like [`mochi_root_real_sized`].
+    #[cfg(target_os = "macos")]
+    fn mochi_root_shared_only(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "mochi_precheck_{tag}_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        for (relative, len) in [
+            ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
+            ("vae/model.safetensors", MOCHI_Q4_VAE_BYTES),
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        }
+        std::fs::create_dir_all(root.join("tokenizer")).unwrap();
+        root
+    }
+
+    /// THE sc-12322 behavior: the 5 s default is refused on a 64 GB Mac with NO tier on disk — i.e.
+    /// before the ~13-20 GiB download the old ordering charged for the same answer.
+    ///
+    /// The fixture's premise — the decision is reached with NO tier dir on disk — is what makes this a
+    /// PRE-download test rather than a second copy of the `mochi_preflight` pair.
+    ///
+    /// The three mutations, MEASURED not assumed:
+    ///   * pre-check unconditionally admits ⇒ **RED here** (this test + the floor test). This is the
+    ///     story's required mutation-check.
+    ///   * `mochi_precheck(...)?` deleted from `generate_mochi` ⇒ **RED** at
+    ///     `generate_mochi_using_refuses_before_paying_for_the_tier_download` (sc-12318), which drives
+    ///     the arm itself. Previously this was green-but-for-clippy's dead-code cascade.
+    ///   * pre-check MOVED to after `ensure_mochi_*_present` ⇒ **RED**, same test: the refusal comes
+    ///     back as a transport error from the download instead of the gate's message. This was recorded
+    ///     here as "survives everything — structural to the untestable async arm"; that premise was
+    ///     wrong (the arm IS drivable) and the residual is now closed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_precheck_refuses_the_5s_default_before_any_tier_is_downloaded() {
+        let root = mochi_root_shared_only("reject");
+        // The requested tier does NOT exist yet — the pre-check must still decide.
+        let tier_dir = root.join("bf16");
+        assert!(
+            !tier_dir.exists(),
+            "the fixture must model the pre-download state"
+        );
+        let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
+            mochi_precheck("mochi_1", "mochi_1", Some(&tier_dir), 150, 848, 480)
+        });
+        std::fs::remove_dir_all(&root).ok();
+
+        let message = out
+            .expect_err(
+                "the shipped 5 s default (151 frames) needs 9.73 GiB of already-present shared \
+                 components + 60.56 GiB untiled decode + 2 GiB OS reserve = 72.29 GiB, which does NOT \
+                 fit a 64 GB Mac — so the answer is knowable BEFORE the ~20 GiB bf16 download",
+            )
+            .to_string();
+        assert!(message.contains("mochi_1"), "names the model: {message}");
+        assert!(
+            message.contains("Shorten the clip"),
+            "the early refusal must carry the same actionable lever as the full gate: {message}"
+        );
+    }
+
+    /// Why the pre-check measures the WEIGHTS FLOOR and not just the decode term (sc-12322's own
+    /// description proposed decode-only). On a 64 GB Mac the decode + OS reserve for the shipped
+    /// default is 62.56 GiB — it FITS, by 1.44 GiB. So a weights-free pre-check admits exactly the job
+    /// in this story's title, downloads ~20 GiB, and only then refuses: the bug, unfixed.
+    ///
+    /// The already-present shared co-requisites are what push the floor over the line. This test fails
+    /// the moment someone "simplifies" the pre-check to decode-only.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_precheck_needs_the_shared_weights_floor_to_catch_the_64gb_default() {
+        // Decode + OS alone does NOT bust a 64 GB budget at the shipped default …
+        // (`mochi_decode_peak_gb` moved to the backend-neutral `fit_gate` in sc-12306, when the candle
+        // video lane grew the same frame-dependent gate; the arithmetic is unchanged.)
+        let decode_only = crate::fit_gate::mochi_decode_peak_gb(151, 848, 480) + 2.0;
+        assert!(
+            decode_only < 64.0,
+            "a weights-free pre-check would ADMIT the titled case ({decode_only:.2} < 64) — which is \
+             precisely why the floor is load-bearing"
+        );
+
+        // … but the floor the shared components already put on disk does.
+        let root = mochi_root_shared_only("floor");
+        let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
+            mochi_precheck(
+                "mochi_1",
+                "mochi_1",
+                Some(&root.join("bf16")),
+                150,
+                848,
+                480,
+            )
+        });
+        std::fs::remove_dir_all(&root).ok();
+        assert!(
+            out.is_err(),
+            "the shared co-requisites (~9.73 GiB) are already on disk before any tier fetch, and \
+             {decode_only:.2} + 9.73 > 64 — the pre-check must use them"
+        );
+    }
+
+    /// The other direction, and the property that makes an early gate SAFE: a clip that fits is NOT
+    /// refused early. Without this the pre-check could blanket-reject and still pass the test above —
+    /// and a pre-check that refuses a fitting config is strictly worse than the late refusal it
+    /// replaces, because no download can ever redeem it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_precheck_admits_a_short_clip_on_the_same_64gb_mac() {
+        let root = mochi_root_shared_only("admit");
+        let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
+            mochi_precheck("mochi_1", "mochi_1", Some(&root.join("bf16")), 19, 848, 480)
+        });
+        std::fs::remove_dir_all(&root).ok();
+
+        out.expect(
+            "19 frames needs 9.73 floor + 9.32 decode + 2 OS = 21.1 GiB — it fits, so the pre-check \
+             must let the download proceed",
+        );
+    }
+
+    /// Fail-open, twice over: no locatable root (`None`) and a root with nothing measurable on disk
+    /// both ADMIT. The pre-check never blocks without evidence — same rule as the gate it calls
+    /// (`weight_bytes == 0` ⇒ no signal). A first-ever Mochi job must reach the download, not be
+    /// refused for not having downloaded yet.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_precheck_admits_without_a_signal() {
+        // No root at all ⇒ nothing to measure.
+        temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
+            mochi_precheck("mochi_1", "mochi_1", None, 150, 848, 480)
+        })
+        .expect("no locatable model root ⇒ no signal ⇒ admit, never a phantom refusal");
+
+        // An empty root ⇒ the scan sums 0 bytes ⇒ still no signal, even though the clip is huge.
+        let root =
+            std::env::temp_dir().join(format!("mochi_precheck_empty_{}", std::process::id()));
+        std::fs::create_dir_all(root.join("bf16")).unwrap();
+        let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
+            mochi_precheck(
+                "mochi_1",
+                "mochi_1",
+                Some(&root.join("bf16")),
+                150,
+                848,
+                480,
+            )
+        });
+        std::fs::remove_dir_all(&root).ok();
+        out.expect("unmeasurable weights ⇒ no signal ⇒ admit and let the full gate decide later");
+    }
+
+    /// The pre-check must measure the tier the job ASKED for, not the smaller one already installed.
+    /// `resolve_mochi_model_dir` deliberately falls back to a smaller complete tier — reusing it here
+    /// would measure q4's bytes for a bf16 job and, worse, hard-error when nothing is installed at all.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_precheck_dir_names_the_requested_tier_not_the_installed_fallback() {
+        let root = mochi_root("precheck_dir", &["q4"], true);
+        let settings = Settings {
+            data_dir: root.join("unused-data-dir"),
+            ..Settings::from_env()
+        };
+        let dir = temp_env_var(MOCHI_DIR_ENV, root.to_str().unwrap(), || {
+            // bf16 requested; only q4 is on disk.
+            mochi_precheck_dir(&settings, &mochi_request(json!({ "mlxQuantize": 16 })))
+        });
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(
+            dir.as_deref(),
+            Some(root.join("bf16").as_path()),
+            "the requested tier's path, existence NOT required — measuring the q4 fallback would \
+             under-count a bf16 job's weights against a budget it must clear"
+        );
+    }
+
     /// Mochi is text-to-video ONLY (`conditioning: []` on both descriptors). `VideoRequest`'s mode
     /// DEFAULTS to `image_to_video` when the payload omits one, so the mode gate is what keeps a
     /// conditioning-shaped job out of the Mochi route — without it an unmoded payload would route to
@@ -11431,19 +12414,46 @@ mod tests {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     fn temp_env_var<T>(key: &str, value: &str, body: impl FnOnce() -> T) -> T {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        temp_env_vars(&[(key, value)], body)
+    }
+
+    /// The single lock every env-scoped test serializes on. Shared by [`temp_env_var`] and
+    /// [`temp_env_vars`] so a one-var and a multi-var test can never interleave their mutations of the
+    /// process-global environment.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// [`temp_env_var`] for several vars set together, under ONE acquisition of the shared
+    /// [`ENV_LOCK`]. Nesting the single-var helper to get a second var would self-deadlock — the lock
+    /// is not reentrant — so a test needing e.g. both the Mochi dir override and the MLX memory cap
+    /// must come through here.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn temp_env_vars<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = std::env::var(key).ok();
-        if value.is_empty() {
-            std::env::remove_var(key);
-        } else {
-            std::env::set_var(key, value);
-        }
+        let restore: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(key, value)| {
+                let previous = std::env::var(key).ok();
+                if value.is_empty() {
+                    std::env::remove_var(key);
+                } else {
+                    std::env::set_var(key, value);
+                }
+                ((*key).to_owned(), previous)
+            })
+            .collect();
         let out = body();
-        match previous {
-            Some(prior) => std::env::set_var(key, prior),
-            None => std::env::remove_var(key),
+        for (key, previous) in restore {
+            match previous {
+                Some(prior) => std::env::set_var(&key, prior),
+                None => std::env::remove_var(&key),
+            }
         }
         out
     }

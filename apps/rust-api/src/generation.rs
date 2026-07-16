@@ -513,6 +513,28 @@ pub(crate) async fn create_video_job(
         .unwrap_or(payload.model.as_str())
         .to_owned();
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    // The model's declared `limits.hardMaxDuration`, enforced at enqueue (sc-12297). It had ten
+    // declarations and zero readers, so `validate_video_job`'s blanket `1..=30` was the ONLY
+    // ceiling: a raw API/MCP/preset-replay caller could ask mochi_1 (cap 5) for 30s @ 30fps, and
+    // the resulting 901 frames clear the engine's own `frames % 6 == 1` check — nothing downstream
+    // says no. Rejected, never clamped: silently rendering 5s of a 30s request is the same
+    // silent-coercion class as the 848→832 rewrite (sc-11993/sc-12294).
+    //
+    // It lives HERE, not in `validate_video_job`, because this is the first point that holds BOTH
+    // halves of the decision: the resolved manifest entry (the cap) and the post-preset `model_id`
+    // (whose cap). Reading either from the DTO is precisely sc-12300 — a preset may have replaced
+    // the model, leaving `payload.model` stale, which would gate against the DEFAULT model's cap.
+    // Duration comes off `job_payload` for the same reason: gate the value actually enqueued.
+    // (Presets deliberately do not patch duration today — see `apply_recipe_preset_to_video_payload`
+    // — so this reads the DTO's value; it just stops being a latent bug if that ever changes.)
+    if let Some(message) = model_manifest_entry.as_object().and_then(|entry| {
+        job_payload
+            .get("duration")
+            .and_then(Value::as_f64)
+            .and_then(|duration| duration_limit_error(&model_id, duration as f32, entry))
+    }) {
+        return Err(ApiError::bad_request(message));
+    }
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility_with(
         &state,
@@ -532,4 +554,41 @@ pub(crate) async fn create_video_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// The typed route that owns `job_type`, or `None` for every job type the generic
+/// `POST /api/v1/jobs` legitimately serves (`image_upscale`, `image_detail`,
+/// `model_download`, …). The guard list for `create_job` (sc-12305).
+///
+/// This is exactly the set of job types produced by [`create_image_job`] /
+/// [`create_video_job`] — the only two routes in the tree that resolve a model's merged
+/// manifest entry and inject it as `modelManifestEntry`. Enqueued raw through the generic
+/// route, such a job carries no entry at all: the worker falls back to the model's default
+/// repo/knobs, and on the video lane `VideoRequest::from_payload` misses
+/// `limits.requiresDimensionsMultipleOf` and falls back to ÷32 — silently rendering
+/// Mochi's native (and only trained) 848x480 as 832x480, a rewrite the engine's own ÷16
+/// check cannot catch because `832 % 16 == 0`. The video geometry is the *silent* failure
+/// (see `mochi_without_manifest_entry_silently_loses_its_native_bucket`); the image lane
+/// reads the same entry for its family/repo knobs, where a miss surfaces sooner.
+///
+/// Rejecting is deliberate over resolving the entry here. The manifest entry is one of
+/// several things these routes do: they also validate the request (`validate_video_job` —
+/// projectId, model id, prompt bounds, mode allowlist), expand recipe presets (which can
+/// *replace* the model — sc-12300), check LoRA compatibility, and map `mode` to the job
+/// type. Filling in only the entry would leave a path that renders at the right geometry
+/// while skipping every one of those, which is a subtler trap than the one being closed.
+/// One door per generation job type.
+///
+/// Keep in step with [`create_image_job`] / [`create_video_job`]: a new generation route
+/// that injects a `modelManifestEntry` belongs here too. (`image_vqa` / `image_interleave`
+/// have typed routes but resolve no manifest entry, so they are deliberately absent.)
+pub(crate) fn typed_generation_route(job_type: &JobType) -> Option<&'static str> {
+    match job_type {
+        JobType::ImageGenerate | JobType::ImageEdit => Some("/api/v1/image/jobs"),
+        JobType::VideoGenerate
+        | JobType::VideoExtend
+        | JobType::VideoBridge
+        | JobType::PersonReplace => Some("/api/v1/video/jobs"),
+        _ => None,
+    }
 }
