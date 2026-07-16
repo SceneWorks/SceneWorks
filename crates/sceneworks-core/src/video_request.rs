@@ -42,8 +42,10 @@ pub struct VideoRequest {
     pub duration: f32,
     /// Frames per second, clamped to 1..=60 (Python `safe_int`).
     pub fps: u32,
-    /// Output dimensions: clamped to 256..=1920, then floored to a multiple of 32
-    /// (Python `normalized_dimensions`). Defaults 768x512.
+    /// Output dimensions: clamped to 256..=1920, then floored to the model's dimension
+    /// granularity — `model_manifest_entry.limits.requiresDimensionsMultipleOf`, default
+    /// 32 (Python `normalized_dimensions`). Defaults 768x512. Mochi declares 16 so its
+    /// native 848x480 bucket survives the floor (sc-11993).
     pub width: u32,
     pub height: u32,
     pub quality: String,
@@ -93,7 +95,12 @@ impl VideoRequest {
     /// missing fields fall back to the Python defaults and `project_id` may be empty
     /// — the caller validates it is present (the worker rejects an empty project id).
     pub fn from_payload(payload: &JsonObject) -> Self {
-        let (width, height) = normalized_dimensions(payload.get("width"), payload.get("height"));
+        let model_manifest_entry = object_or_empty(payload, "modelManifestEntry");
+        let (width, height) = normalized_dimensions(
+            payload.get("width"),
+            payload.get("height"),
+            &model_manifest_entry,
+        );
         Self {
             project_id: nonempty_string_or(payload, "projectId", ""),
             mode: nonempty_string_or(payload, "mode", DEFAULT_MODE),
@@ -126,7 +133,7 @@ impl VideoRequest {
             reference_asset_ids: string_list(payload, "referenceAssetIds"),
             reference_clip_asset_id: optional_id(payload, "referenceClipAssetId"),
             advanced: object_or_empty(payload, "advanced"),
-            model_manifest_entry: object_or_empty(payload, "modelManifestEntry"),
+            model_manifest_entry,
         }
     }
 
@@ -138,16 +145,19 @@ impl VideoRequest {
     }
 
     /// The frame count the model will actually produce: the raw `duration * fps`
-    /// snapped to the model's temporal constraint (LTX `8k + 1`, Wan `4n + 1`).
-    /// Unknown / stub models keep the raw count. The engine's `validate()` is
-    /// authoritative for the real models (sc-3034 / sc-3035); this mirrors the
-    /// Python worker's pre-snap so the stub clip length and the UI estimate agree.
+    /// snapped to the model's temporal constraint (LTX `8k + 1`, Wan `4n + 1`,
+    /// Mochi `6k + 1`). Unknown / stub models keep the raw count. The engine's
+    /// `validate()` is authoritative for the real models (sc-3034 / sc-3035); this
+    /// mirrors the Python worker's pre-snap so the stub clip length and the UI
+    /// estimate agree.
     pub fn frame_count(&self) -> u32 {
         let raw = self.raw_frame_count();
         if is_ltx_model(&self.model) {
             ltx_frame_count(raw)
         } else if is_wan_model(&self.model) {
             wan_frame_count(raw)
+        } else if is_mochi_model(&self.model) {
+            mochi_frame_count(raw)
         } else {
             raw
         }
@@ -181,6 +191,30 @@ pub fn wan_frame_count(raw_frames: u32) -> u32 {
     (raw - ((raw - 1) % 4)).max(5)
 }
 
+/// Mochi's 7-frame floor: `6·1 + 1`, the smallest on-lattice count that yields more than
+/// one latent frame (`lf = 1 + (frames − 1) / 6`). Mirrors LTX's 9 (`8·1 + 1`) and Wan's
+/// 5 (`4·1 + 1`) — one temporal stride above a single still frame.
+const MOCHI_MIN_FRAMES: u32 = 7;
+
+/// Mochi 1 temporal stride: the AsymmVAE's 6× temporal ratio makes `t_lat` equal to
+/// `1 + (frames − 1) / 6`, so the engine's `validate_request` hard-rejects anything but
+/// `frames ≡ 1 (mod 6)`. Frames snap to the NEAREST `6k + 1` (ties → lower), minimum
+/// [`MOCHI_MIN_FRAMES`] — the LTX rule, deliberately NOT Wan's floor: flooring the shipped
+/// 5s @ 30fps default (150) would give 145, which the runtime happily accepts
+/// (`145 % 6 == 1`) while silently rendering 4.83s instead of the requested 5s. Nearest
+/// gives 151 (`1 + 6·25`), the frame count the manifest documents for the 5s default.
+pub fn mochi_frame_count(raw_frames: u32) -> u32 {
+    let frame_count = raw_frames.max(MOCHI_MIN_FRAMES);
+    // `frame_count >= 7` ⇒ `lower >= 7`, so the floor needs no second guard.
+    let lower = frame_count - ((frame_count - 1) % 6);
+    let upper = lower + 6;
+    if frame_count - lower <= upper - frame_count {
+        lower
+    } else {
+        upper
+    }
+}
+
 /// Whether `model` is an LTX-2.3 family id (`ltx_2_3`, `ltx_2_3_eros`, …).
 pub fn is_ltx_model(model: &str) -> bool {
     model.starts_with("ltx")
@@ -191,16 +225,56 @@ pub fn is_wan_model(model: &str) -> bool {
     model.starts_with("wan")
 }
 
-/// Clamp + floor dimensions exactly like the Python `normalized_dimensions`: parse
-/// (default 768x512), clamp to 256..=1920, floor to a multiple of 32, floor of 256.
-fn normalized_dimensions(width: Option<&Value>, height: Option<&Value>) -> (u32, u32) {
-    let w = floor_to_32(clamped_u32(width, 768, 256, 1920));
-    let h = floor_to_32(clamped_u32(height, 512, 256, 1920));
+/// Whether `model` is a Mochi 1 family id (`mochi_1`, …). Epic 1788 / sc-11993.
+pub fn is_mochi_model(model: &str) -> bool {
+    model.starts_with("mochi")
+}
+
+/// The dimension granularity applied when a model's manifest entry does not declare
+/// `limits.requiresDimensionsMultipleOf` — the historical blanket floor, kept as the
+/// default so every already-shipped model's geometry is byte-for-byte unchanged.
+const DEFAULT_DIMENSION_MULTIPLE: u32 = 32;
+
+/// Clamp + floor dimensions like the Python `normalized_dimensions`: parse (default
+/// 768x512), clamp to 256..=1920, floor to the model's dimension multiple, floor of 256.
+///
+/// The multiple comes from the resolved manifest entry's
+/// `limits.requiresDimensionsMultipleOf`, defaulting to [`DEFAULT_DIMENSION_MULTIPLE`].
+/// A blanket 32 silently rewrote Mochi's native (and only trained) 848x480 bucket to
+/// 832x480 — `848 % 32 == 16` — and the rewrite was invisible because `832 % 16 == 0`
+/// satisfies the engine's own ÷16 check (sc-11993). Models opt in by *declaring* the
+/// limit; the rest keep 32 (sc-12294 tracks the shipped 848/720 buckets that still
+/// floor, pending a decision — changing them retroactively would move the geometry of
+/// already-reproducible recipes).
+fn normalized_dimensions(
+    width: Option<&Value>,
+    height: Option<&Value>,
+    model_manifest_entry: &JsonObject,
+) -> (u32, u32) {
+    let multiple = dimension_multiple_of(model_manifest_entry);
+    let w = floor_to_multiple(clamped_u32(width, 768, 256, 1920), multiple);
+    let h = floor_to_multiple(clamped_u32(height, 512, 256, 1920), multiple);
     (w, h)
 }
 
-fn floor_to_32(value: u32) -> u32 {
-    (value - (value % 32)).max(256)
+/// `limits.requiresDimensionsMultipleOf` from a resolved manifest entry, else
+/// [`DEFAULT_DIMENSION_MULTIPLE`]. Read as a plain `u64` (the manifest is machine-authored
+/// — same reader as the `engines.rs` manifest checks). A zero / negative / non-integer
+/// declaration falls back rather than panicking on `% 0`: `from_payload` is infallible and
+/// must survive a typo'd manifest entry.
+fn dimension_multiple_of(model_manifest_entry: &JsonObject) -> u32 {
+    model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object)
+        .and_then(|limits| limits.get("requiresDimensionsMultipleOf"))
+        .and_then(Value::as_u64)
+        .and_then(|multiple| u32::try_from(multiple).ok())
+        .filter(|multiple| *multiple > 0)
+        .unwrap_or(DEFAULT_DIMENSION_MULTIPLE)
+}
+
+fn floor_to_multiple(value: u32, multiple: u32) -> u32 {
+    (value - (value % multiple)).max(256)
 }
 
 /// Parse a float (JSON number or numeric string), clamp to `[min, max]`, default
@@ -287,13 +361,85 @@ mod tests {
     }
 
     #[test]
-    fn floors_dimensions_to_multiple_of_32() {
+    fn floors_dimensions_to_multiple_of_32_by_default() {
         let request = VideoRequest::from_payload(&payload(json!({
             "projectId": "p", "width": 1000, "height": 543
         })));
         // 1000 -> 992 (31*32), 543 -> 512 (16*32).
         assert_eq!(request.width, 992);
         assert_eq!(request.height, 512);
+
+        // A manifest entry that does NOT declare the limit keeps the 32 default — the
+        // shipped case for every video model except ltx (declares 32) and mochi (16).
+        // sc-12294 tracks bernini's own 848x480 bucket still flooring to 832x480 pending
+        // a product decision; B3 deliberately does NOT change it. Only models that
+        // *declare* `requiresDimensionsMultipleOf` opt out of the 32 floor.
+        let bernini = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "bernini", "width": 848, "height": 480,
+            "modelManifestEntry": { "family": "bernini", "limits": { "resolutions": ["848x480"] } }
+        })));
+        assert_eq!((bernini.width, bernini.height), (832, 480));
+    }
+
+    #[test]
+    fn honors_manifest_dimension_multiple_so_mochi_keeps_848() {
+        // 848 % 32 == 16, so the blanket 32 floor silently rewrote Mochi's ONLY trained
+        // bucket to 832x480 — and 832 % 16 == 0, so the engine's ÷16 check passed and the
+        // off-bucket render went unnoticed. The manifest's `requiresDimensionsMultipleOf: 16`
+        // now preserves it.
+        let mochi = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "mochi_1", "width": 848, "height": 480,
+            "modelManifestEntry": { "family": "mochi", "limits": { "requiresDimensionsMultipleOf": 16 } }
+        })));
+        assert_eq!((mochi.width, mochi.height), (848, 480));
+
+        // The portrait bucket too.
+        let portrait = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "mochi_1", "width": 480, "height": 848,
+            "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 16 } }
+        })));
+        assert_eq!((portrait.width, portrait.height), (480, 848));
+
+        // A declared 32 (ltx) is identical to the default path.
+        let ltx = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "ltx_2_3", "width": 1000, "height": 543,
+            "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 32 } }
+        })));
+        assert_eq!((ltx.width, ltx.height), (992, 512));
+
+        // 16 is a smaller floor, not a bypass: off-lattice input still floors.
+        let odd = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "mochi_1", "width": 855, "height": 489,
+            "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 16 } }
+        })));
+        assert_eq!((odd.width, odd.height), (848, 480));
+    }
+
+    #[test]
+    fn malformed_dimension_multiple_falls_back_to_32_without_panicking() {
+        // `value % 0` panics; `from_payload` is infallible and must never crash on a
+        // typo'd/hostile manifest entry. Non-`u64` shapes fall back to the 32 default
+        // (the manifest is machine-authored — `as_u64`, matching the engines.rs reader).
+        for bogus in [
+            json!(0),
+            json!(-16),
+            json!("16"),
+            json!(null),
+            json!({}),
+            json!(1.5),
+        ] {
+            let request = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "width": 1000, "height": 543,
+                "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": bogus } }
+            })));
+            assert_eq!((request.width, request.height), (992, 512), "bogus={bogus}");
+        }
+
+        // `limits` present but not an object → default.
+        let odd = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "width": 1000, "modelManifestEntry": { "limits": 7 }
+        })));
+        assert_eq!(odd.width, 992);
     }
 
     #[test]
@@ -410,6 +556,36 @@ mod tests {
     }
 
     #[test]
+    fn mochi_frame_count_snaps_to_6k_plus_1_min_7() {
+        // Exact 6k+1 values >= 7 are unchanged.
+        assert_eq!(mochi_frame_count(7), 7);
+        assert_eq!(mochi_frame_count(19), 19);
+        assert_eq!(mochi_frame_count(151), 151);
+        // Below the floor snaps up to 7 (6·1+1 — the smallest on-lattice count with more
+        // than one latent frame, mirroring LTX's 9 = 8·1+1 and Wan's 5 = 4·1+1).
+        assert_eq!(mochi_frame_count(1), 7);
+        assert_eq!(mochi_frame_count(6), 7);
+        // Nearest wins; ties go to the lower 6k+1 (the LTX rule).
+        assert_eq!(mochi_frame_count(10), 7); // |10-7|=3 == |13-10|=3 -> lower
+        assert_eq!(mochi_frame_count(11), 13); // closer to 13
+                                               // The shipped default: 5s * 30fps = 150 -> 151 (1 + 6·25). Wan's FLOOR rule would
+                                               // give 145 — accepted by the runtime (145 % 6 == 1) but silently 4.83s, not 5s.
+        assert_eq!(mochi_frame_count(150), 151);
+        assert_ne!(mochi_frame_count(150), wan_frame_count(150));
+        // Every output lands on the runtime's lattice (`validate_request`: frames % 6 == 1)
+        // and never rounds down below the 7-frame floor.
+        for raw in 1..=400 {
+            let frames = mochi_frame_count(raw);
+            assert_eq!(
+                frames % 6,
+                1,
+                "raw={raw} -> {frames} is off the 6k+1 lattice"
+            );
+            assert!(frames >= 7, "raw={raw} -> {frames} below the floor");
+        }
+    }
+
+    #[test]
     fn frame_count_dispatches_by_model_family() {
         let ltx = VideoRequest::from_payload(&payload(json!({
             "projectId": "p", "model": "ltx_2_3", "duration": 6.0, "fps": 25
@@ -421,8 +597,21 @@ mod tests {
         })));
         assert_eq!(wan.frame_count(), wan_frame_count(48));
 
+        // Mochi's shipped default (5s @ 30fps, the manifest's only fps): 150 -> 151.
+        let mochi = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "mochi_1", "duration": 5.0, "fps": 30
+        })));
+        assert_eq!(mochi.raw_frame_count(), 150);
+        assert_eq!(mochi.frame_count(), 151);
+        assert_eq!(mochi.frame_count(), mochi_frame_count(150));
+
         assert!(is_ltx_model("ltx_2_3_eros"));
         assert!(is_wan_model("wan_2_2"));
         assert!(!is_ltx_model("wan_2_2"));
+        // Mochi is its own family — it must not fall through to the Wan floor.
+        assert!(is_mochi_model("mochi_1"));
+        assert!(!is_mochi_model("wan_2_2"));
+        assert!(!is_wan_model("mochi_1"));
+        assert!(!is_ltx_model("mochi_1"));
     }
 }
