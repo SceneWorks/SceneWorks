@@ -1567,8 +1567,7 @@
         "stage": "preparing",
         "startedAt": "<timestamp>",
         "status": "preparing",
-        "title": "Generate Image \u2014 (no prompt)",
-        "type": "image_generate",
+        "type": "image_detail",
         "updatedAt": "<timestamp>",
         "workerId": "claim-worker-fixture"
       }
