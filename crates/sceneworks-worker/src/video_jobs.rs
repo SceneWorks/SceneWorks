@@ -69,13 +69,21 @@ use gen_core::{Image, ReplacementMode};
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use sceneworks_core::character_store::CharacterStore;
-// Frame-count stride coercion (Wan needs frames ≡ 1 mod 4; LTX snaps to 8k+1) — used by the MLX path
-// and the candle entry (sc-5097).
+// Frame-count stride coercion (Wan needs frames ≡ 1 mod 4; LTX snaps to 8k+1; Mochi snaps to 6k+1)
+// — used by the MLX path and the candle entry (sc-5097).
+//
+// Mochi's stride is NOT interchangeable with Wan's (sc-11992, epic 1788): `wan_frame_count(150)` is
+// 149, `149 % 6 == 5`, and the Mochi runtime's `validate_request` hard-rejects anything but `1 + 6k`
+// — so the shipped 5 s @ 30 fps default (150 raw) fails outright on the Wan stride. `mochi_frame_count`
+// (B3/sc-11993) snaps to the NEAREST 6k+1 (151), the count the manifest documents for that default.
+// See `frames_are_the_mochi_lattice_not_wans` for the exact failure mode.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-use sceneworks_core::video_request::{ltx_frame_count, wan_frame_count};
+use sceneworks_core::video_request::{
+    is_mochi_model, ltx_frame_count, mochi_frame_count, wan_frame_count,
+};
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -144,6 +152,9 @@ enum VideoRoute {
     Bernini(&'static str),
     /// SCAIL-2 standalone character animation (epic 5439). Carries the resolved engine id.
     Scail2(&'static str),
+    /// Mochi 1 text-to-video (epic 1788 / sc-11992). Carries the resolved engine id. t2v ONLY —
+    /// [`mochi_available`] gates the mode, since `conditioning: []` means there is no other shape.
+    Mochi(&'static str),
     /// No native engine matched (or weights unresolved) → the procedural stub, after
     /// `ensure_video_engine_weights` fails a known-but-unprovisioned engine loudly (sc-4176).
     Stub,
@@ -189,6 +200,13 @@ fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRout
         scail2_engine_id(&request.model).filter(|_| scail2_available(request, settings))
     {
         VideoRoute::Scail2(engine_id)
+    } else if let Some(engine_id) =
+        mochi_engine_id(&request.model).filter(|_| mochi_available(request, settings))
+    {
+        // Mochi 1 (epic 1788 / sc-11992). Appended at the TAIL of the ladder: `mochi_engine_id`
+        // matches only `mochi_1`, and no earlier predicate can match that id, so routing for every
+        // pre-existing model stays byte-identical. `mochi_available` folds in the t2v-only mode gate.
+        VideoRoute::Mochi(engine_id)
     } else {
         VideoRoute::Stub
     }
@@ -529,6 +547,17 @@ pub(crate) async fn run_video_generate_job(
                     scail2_raw_settings(&request, lightning),
                     None,
                 )
+            }
+            VideoRoute::Mochi(engine_id) => {
+                // Mochi 1 (epic 1788 / sc-11992): 10B AsymmDiT text-to-video, true CFG, pre-quantized
+                // tier dirs. `generate_mochi` fetches an opted-into tier on demand, resolves the tier
+                // dir + its shared T5/VAE co-requisite, runs the pre-flight memory fit gate (the
+                // untiled AsymmVAE decode scales with clip length and MLX's OOM handler is an
+                // unmappable `exit(-1)`), then drives the shared `generate_video` funnel. It returns
+                // its own `rawSettings` so the record names the tier that was actually loaded.
+                let (decoded, raw_settings) =
+                    generate_mochi(api, settings, job, &request, engine_id, backend).await?;
+                (decoded, MOCHI_ADAPTER, raw_settings, None)
             }
             VideoRoute::Stub => {
                 // An MLX-routed video model whose snapshot didn't resolve must fail
@@ -2757,6 +2786,13 @@ pub(crate) fn ensure_video_engine_weights(
     if scail2_engine_id(&request.model).is_some() {
         resolve_scail2_model_dir(settings)?;
     }
+    // Mochi 1 (epic 1788 / sc-11992). Without this arm a Mochi job whose weights don't resolve falls
+    // to `VideoRoute::Stub` and the user is handed a PROCEDURAL FAKE VIDEO instead of the resolver's
+    // precise "download the tier" / "the shared components are missing" error — exactly the silent
+    // degradation sc-4176 added this gate to prevent.
+    if mochi_engine_id(&request.model).is_some() {
+        resolve_mochi_model_dir(settings, request)?;
+    }
     Ok(())
 }
 
@@ -4540,6 +4576,11 @@ const CANDLE_WAN_ADAPTER: &str = "candle_wan";
 const CANDLE_LTX_ADAPTER: &str = "candle_ltx";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_SVD_ADAPTER: &str = "candle_svd";
+/// Adapter id recorded on a candle Mochi 1 asset (epic 1788 / sc-11992). Distinct from the MLX
+/// [`MOCHI_ADAPTER`] so the sidecar records which backend rendered the clip, matching the
+/// `candle_wan`/`mlx_wan` and `candle_ltx`/`mlx_ltx` pairs.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_MOCHI_ADAPTER: &str = "candle_mochi";
 
 /// Default HuggingFace repos the candle video providers load (overridable via the manifest `repo`).
 /// The candle wan providers read a Wan2.2 diffusers snapshot — the TI2V-5B, or the T2V-A14B /
@@ -4590,6 +4631,16 @@ fn candle_video_engine_id(model: &str) -> Option<&'static str> {
         "ltx_2_3" | "ltx_2_3_eros" => Some("ltx_2_3_distilled"),
         // SVD-XT image→video (sc-5493 / epic 5481): the candle-gen-svd provider's `svd_xt` engine.
         "svd" => Some("svd_xt"),
+        // Mochi 1 (epic 1788 / sc-11992). The sceneworks id IS the engine id: `candle-gen-mochi`
+        // registers the SAME `MODEL_ID = "mochi_1"` as `mlx-gen-mochi` (no `_distilled`-style split),
+        // and its descriptor is `mac_only: false` — the off-Mac lane is real and CUDA-validated on
+        // Blackwell (sc-11990), ingesting the same hosted mlx-affine tiers.
+        //
+        // Load-bearing: without this arm `is_candle_video_engine` is false, `resolve_candle_video_route`
+        // never reaches the generic arm, and a Windows Mochi job falls to `CandleVideoRoute::Stub` —
+        // handing the user a PROCEDURAL FAKE VIDEO instead of an error. B1 already routed Windows
+        // (`candle_video_routed = true`), so that promise must be served here.
+        "mochi_1" => Some("mochi_1"),
         _ => None,
     }
 }
@@ -4600,17 +4651,24 @@ fn is_candle_video_engine(model: &str) -> bool {
     candle_video_engine_id(model).is_some()
 }
 
+/// The adapter id recorded on a candle video asset. Every engine that is NOT wan MUST have an
+/// explicit arm: the `_` fall-through is the Wan default, so a missing arm silently stamps a
+/// different model's provenance onto the asset sidecar + telemetry (sc-11992 — `mochi_1` landed in
+/// `_` and was labelled a Wan adapter).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_video_adapter_label(engine_id: &str) -> &'static str {
     match engine_id {
         "ltx_2_3_distilled" => CANDLE_LTX_ADAPTER,
         "svd_xt" => CANDLE_SVD_ADAPTER,
+        "mochi_1" => CANDLE_MOCHI_ADAPTER,
         _ => CANDLE_WAN_ADAPTER,
     }
 }
 
 /// The candle default weights repo for a video engine id (the per-variant Wan2.2 diffusers snapshot,
-/// or the LTX-2.3 checkpoint). Used when the manifest entry omits `repo`.
+/// or the LTX-2.3 checkpoint). Used when the manifest entry omits `repo`. Like
+/// [`candle_video_adapter_label`], the `_` arm is the Wan default — a non-wan engine without an
+/// explicit arm inherits Wan's repo (sc-11992).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_video_default_repo(engine_id: &str) -> &'static str {
     match engine_id {
@@ -4618,6 +4676,11 @@ fn candle_video_default_repo(engine_id: &str) -> &'static str {
         "svd_xt" => SVD_REPO,
         "wan2_2_t2v_14b" => CANDLE_WAN_T2V_14B_REPO,
         "wan2_2_i2v_14b" => CANDLE_WAN_I2V_14B_REPO,
+        // Mochi 1 (epic 1788 / sc-11992): ONE repo serves BOTH backends — candle ingests the same
+        // mlx-affine tiers via A6's `.scales`-detect seam, and `SceneWorks/mochi-1-candle` was never
+        // published. No manifest entry carries a top-level `repo`, so this default is what the candle
+        // lane actually resolves.
+        "mochi_1" => MOCHI_REPO,
         // `wan2_2_ti2v_5b` (and any other wan id) → the 5B TI2V snapshot.
         _ => CANDLE_WAN_5B_REPO,
     }
@@ -5123,14 +5186,42 @@ async fn generate_candle_video(
     })?;
     let adapter = candle_video_adapter_label(engine_id);
     let repo = candle_video_repo(request, engine_id);
-    let snapshot_dir = candle_video_snapshot_dir(settings, &repo)?;
+    // Mochi (epic 1788 / sc-11992) resolves its tier dir through the SHARED resolver both lanes use —
+    // `SceneWorks/mochi-1-mlx` serves candle too (A6's `.scales`-detect seam ingests the mlx-affine
+    // tiers 1:1), so the tier-dir semantics, the on-demand q8/bf16 fetch and the shared-parent
+    // co-requisite are identical off-Mac. It must NOT fall through to the wan tier-select below: the
+    // Mochi tier layout is `<root>/{q4|q8|bf16}/transformer/` with the T5/VAE/tokenizer as siblings of
+    // the tier dir, which `candle_wan_tier_subdir` does not understand.
+    //
+    // Keyed off the RESOLVED engine id, mirroring the `is_ltx` binding below — the id is already
+    // resolved through `candle_video_engine_id`, so re-deriving the family from the model string here
+    // would be a second, drift-prone source of truth.
+    let is_mochi = engine_id == "mochi_1";
+    if is_mochi {
+        ensure_mochi_q8_present(api, settings, job, request).await?;
+        ensure_mochi_bf16_present(api, settings, job, request).await?;
+    }
+    let snapshot_dir = if is_mochi {
+        // Resolve-or-error; never a stub (the candle generic arm has no stub fallback once
+        // `candle_video_engine_id` resolves the id).
+        resolve_mochi_model_dir(settings, request)?
+    } else {
+        candle_video_snapshot_dir(settings, &repo)?
+    };
     // Wan quant-matrix tier-select (sc-10027): a candle wan tier repo (`SceneWorks/wan2.2-*-candle`) ships
     // q4/q8/bf16 subdirs — resolve the one matching `advanced.mlxQuantize` (default q4) and load from it
     // (the packed-detect seam reads the baked-in quant). A flat/dense repo (no subdirs, e.g. the
     // `Wan-AI/*-Diffusers` fallback) stays as-is with no quant marker.
-    let (model_dir, wan_quant) = match candle_wan_tier_subdir(&snapshot_dir, engine_id, request) {
-        Some((tier_dir, quant)) => (tier_dir, quant),
-        None => (snapshot_dir, None),
+    let (model_dir, wan_quant) = if is_mochi {
+        // `resolve_mochi_model_dir` already returned the TIER dir; the quant marker is the tier's own
+        // baked-in level, read from its `split_model.json` (the candle loader asserts it matches).
+        let quant = mochi_tier_quant(&snapshot_dir);
+        (snapshot_dir, quant)
+    } else {
+        match candle_wan_tier_subdir(&snapshot_dir, engine_id, request) {
+            Some((tier_dir, quant)) => (tier_dir, quant),
+            None => (snapshot_dir, None),
+        }
     };
     // ltx needs the separate Gemma-3-12B encoder (its only conditioning input). Resolve its snapshot
     // dir here and thread it onto the LoadSpec below (sc-8827) instead of mutating `$LTX_GEMMA_DIR`.
@@ -5205,18 +5296,27 @@ async fn generate_candle_video(
     // distilled ltx takes neither (single-stage, no CFG). Wan uses the Lightning-aware recipe
     // ([`candle_wan_sampling`]: 4-step/CFG-off when the toggle is on, else native multi-step + CFG);
     // ltx keeps its own step default and no CFG.
+    //
+    // Mochi needs its OWN arm (sc-11992) — it is not distilled, so it takes true CFG (negative prompt
+    // + guidance), but it is also not a Wan model: falling through to `candle_wan_sampling` would hit
+    // that function's dense-5B tail and force `CANDLE_WAN5B_INTERIM_STEPS` (20) on it, silently
+    // overriding the AsymmDiT's own 64-step default with a Wan tuning constant. `None` ⇒ the engine's
+    // DEFAULT_STEPS (64) / DEFAULT_GUIDANCE (4.5) stand.
     let (steps, guidance, negative_prompt) = if is_ltx {
         (advanced_opt_u32(request, "steps"), None, None)
+    } else if is_mochi {
+        (
+            advanced_opt_u32(request, "steps"),
+            advanced_opt_f32(request, "guidanceScale"),
+            non_empty_negative_prompt(request),
+        )
     } else {
         let (steps, guidance) = candle_wan_sampling(engine_id, request);
         (steps, guidance, non_empty_negative_prompt(request))
     };
-    // Coerce the requested frame count onto each engine's temporal stride (wan: ≡1 mod 4; ltx: 8k+1).
-    let frames = if is_ltx {
-        ltx_frame_count(request.raw_frame_count())
-    } else {
-        wan_frame_count(request.raw_frame_count())
-    };
+    // Coerce the requested frame count onto the engine's temporal stride — the ONE shared ladder both
+    // lanes use (sc-11992), so the candle stride can never drift from the MLX one.
+    let frames = video_frame_count(&request.model, request.raw_frame_count());
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -8485,6 +8585,522 @@ async fn generate_ltx(
 }
 
 // ---------------------------------------------------------------------------
+// Mochi 1 (epic 1788 / sc-11992): a 10B AsymmDiT text-to-video model with a 6×-temporal AsymmVAE,
+// served natively on BOTH backends — `mlx-gen-mochi` (macOS) and `candle-gen-mochi` (Windows/Linux
+// CUDA). Two facts shape this whole block, and both DEVIATE from the LTX template it otherwise
+// mirrors:
+//
+//  1. ONE engine id, TWO backends. Both providers register `MODEL_ID = "mochi_1"` (unlike LTX's
+//     `ltx_2_3` + `ltx_2_3_distilled` split), so `mochi_engine_id` is lane-agnostic.
+//  2. ONE repo, TWO backends. Every tier lives in `SceneWorks/mochi-1-mlx` with no `platforms` tag,
+//     because A6's `.scales`-detect seam lets candle ingest the mlx-affine tiers 1:1 (CUDA-validated
+//     on Blackwell, sc-11990). So the tier resolver + the on-demand fetches below are compiled for
+//     the SUPERSET of both lanes and serve candle exactly as they serve MLX.
+//
+// A tier IS a directory, not a requant toggle: both descriptors advertise `supported_quants: &[]`, so
+// `advanced.mlxQuantize` selects WHICH DIR to load and the provider only ASSERTS the tier's baked-in
+// level from its `split_model.json` (a mismatch is a hard load error, never a silent bf16 run).
+// Installed layout — the tier dirs are SIBLINGS of the shared components, which the provider resolves
+// from the tier dir's PARENT (`resolve_component_root`):
+//
+//     <model_dir>/{q4,q8,bf16}/{split_model.json, transformer/}
+//     <model_dir>/{text_encoder,tokenizer,vae}/          <- the shared coRequisite (~10.4 GB)
+//
+// Text-to-video ONLY (`conditioning: []` on both descriptors), no LoRA/LoKr, no sampler/scheduler
+// axis (one fixed flow-match Euler integrator), `max_count: 1`.
+// ---------------------------------------------------------------------------
+
+/// Adapter id recorded on a real MLX Mochi asset (the candle sibling is [`CANDLE_MOCHI_ADAPTER`]).
+#[cfg(target_os = "macos")]
+const MOCHI_ADAPTER: &str = "mlx_mochi";
+
+/// The ONE turnkey repo serving BOTH backends (epic 1788 / A6 sc-11990). Deliberately NOT the LTX
+/// shape (MLX rehost for macOS + upstream torch repo off-Mac): candle ingests these mlx-affine tiers
+/// directly, `SceneWorks/mochi-1-candle` was never published, and pointing every platform here also
+/// sidesteps sc-12113 (upstream `genmo/mochi-1-preview` ships both a bf16 and an fp32 `vae/` and the
+/// loader's dir-glob picks fp32 non-deterministically — this rehost ships bf16 only).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const MOCHI_REPO: &str = "SceneWorks/mochi-1-mlx";
+
+/// Pinned revision for the fixed [`MOCHI_REPO`]. The repo is a hard-coded const (no manifest/payload
+/// override reaches the on-demand `q8/*` + `bf16/*` fetches below), so pulling the mutable `main`
+/// branch would let an upstream re-push silently swap a checkpoint we load. Pin the exact commit for
+/// defense-in-depth, mirroring [`LTX_BUNDLE_REVISION`] / the SeedVR2 + Real-ESRGAN pins. This is the
+/// same revision B1's manifest sizes were read from (HF API rev `90a87786`); the native downloader
+/// still verifies each file's own hash on download.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const MOCHI_REVISION: &str = "90a87786d9b5b592c3b3c083e5fcdf130007b1de";
+
+/// Operator override for the Mochi model root (or a single tier dir) — the smoke's seam and the
+/// escape hatch for a hand-staged conversion, mirroring `$SCENEWORKS_MLX_LTX_DIR`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const MOCHI_DIR_ENV: &str = "SCENEWORKS_MLX_MOCHI_DIR";
+
+/// SceneWorks Mochi model id → the gen-core registry id, or `None` if not a Mochi family id.
+///
+/// ONE id covers BOTH backends (both providers register `MODEL_ID = "mochi_1"`) — contrast
+/// [`ltx_engine_id`], which folds two sceneworks ids onto one engine, and the candle LTX arm, which
+/// maps to a DIFFERENT `ltx_2_3_distilled` id. Despite that, this is the **MLX lane's** resolver: it
+/// is the `resolve_video_route` / `mochi_available` / `ensure_video_engine_weights` key. The candle
+/// lane resolves the same id through its own [`candle_video_engine_id`] table and then keys off the
+/// resolved `engine_id` (mirroring its local `is_ltx`), so it never calls this — hence the macOS gate
+/// rather than the superset one the shared tier helpers below carry.
+#[cfg(target_os = "macos")]
+fn mochi_engine_id(model: &str) -> Option<&'static str> {
+    (model == "mochi_1").then_some("mochi_1")
+}
+
+/// Whether `dir` is a loadable Mochi TIER dir: the `split_model.json` the provider reads to resolve
+/// the tier's baked-in quant, plus the AsymmDiT weights themselves. A tier dir mid-download (manifest
+/// written, `transformer/` absent, or vice versa) fails this, so it never half-loads.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn mochi_tier_dir_is_complete(dir: &Path) -> bool {
+    dir.join("split_model.json").is_file()
+        && dir.join("transformer").join("model.safetensors").is_file()
+}
+
+/// Whether `root` carries the SHARED T5-XXL text encoder + tokenizer + AsymmVAE the provider resolves
+/// from the tier dir's PARENT. These ship as a `coRequisite` (sc-9696) — a separate ~10.4 GB download
+/// tracked once and excluded from the tier matrix — so a user can genuinely have a complete `q4/` and
+/// no `text_encoder/`. Checking the tier dir alone would then resolve "successfully" and dead-end
+/// inside the provider on a missing-file error.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn mochi_shared_is_complete(root: &Path) -> bool {
+    ["text_encoder", "tokenizer", "vae"]
+        .iter()
+        .all(|component| root.join(component).is_dir())
+}
+
+/// The frame count `model` will actually render for `raw` requested frames, coerced onto that
+/// engine's temporal stride: LTX `8k+1`, **Mochi `6k+1`**, everything else (Wan and the families
+/// built on it) `4k+1`.
+///
+/// THE POINT OF THIS FUNCTION (sc-11992): the stride choice used to be an inline
+/// `if is_ltx { ltx } else { wan }` binary in each generation path, so every non-LTX model — Mochi
+/// included — silently inherited the WAN stride. That is not a benign default. Mochi's AsymmVAE is 6×
+/// temporal and its `validate_request` hard-rejects anything but `1 + 6k`; the Wan stride lands off
+/// that lattice for most inputs (the shipped 5 s @ 30 fps default → `wan_frame_count(150) = 149`,
+/// `149 % 6 == 5`), so EVERY default-duration Mochi job would die on engine validation.
+///
+/// Centralizing the ladder here — rather than repeating it per lane — is what makes the mapping
+/// unit-testable by model id and keeps the MLX and candle lanes from drifting apart. Both call it.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn video_frame_count(model: &str, raw_frames: u32) -> u32 {
+    if is_ltx_model(model) {
+        ltx_frame_count(raw_frames)
+    } else if is_mochi_model(model) {
+        mochi_frame_count(raw_frames)
+    } else {
+        wan_frame_count(raw_frames)
+    }
+}
+
+/// Parse `advanced.mlxQuantize` (int or numeric string) → the requested bit width, if present.
+/// Mirrors [`ltx_quant_bits`].
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn mochi_quant_bits(request: &VideoRequest) -> Option<i64> {
+    request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+}
+
+/// Whether the request opts into the Q8 tier (`advanced.mlxQuantize >= 8`, int or string).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn mochi_wants_q8(request: &VideoRequest) -> bool {
+    mochi_quant_bits(request).is_some_and(|bits| (8..=15).contains(&bits))
+}
+
+/// Whether the request opts into the dense **bf16** tier (`advanced.mlxQuantize <= 0`, or an explicit
+/// `>= 16`). Never the default: absent ⇒ q4, so the ~20 GB dense tier is a deliberate opt-in
+/// (mirrors [`ltx_wants_bf16`] / [`resolve_mlx_dense_quant`]'s `<= 0` rule, and additionally accepts
+/// a literal `16` since bf16 IS 16-bit and a caller may say so).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn mochi_wants_bf16(request: &VideoRequest) -> bool {
+    mochi_quant_bits(request).is_some_and(|bits| bits <= 0 || bits >= 16)
+}
+
+/// The Mochi tier search order — preferred tier first, then the always-SMALLER fallback tiers so a
+/// partially-installed model still loads: `mlxQuantize <= 0`/`>= 16` ⇒ bf16, `8..=15` ⇒ q8, and — with
+/// an explicit `1..=4` OR no explicit pick — the **q4** default (q4-first).
+///
+/// bf16 stays OUT of the default order so a default job never loads the dense tier by accident, and
+/// the video lane keeps the pre-sc-10726 q4-first default (sc-10859) rather than epic 10721's app-wide
+/// Q8 — see [`wan_tier_order`] / [`ltx_bundle_tier_order`] for that carve-out's rationale. For Mochi
+/// the argument is sharper still: the untiled decode already dominates the footprint, so a silent Q8
+/// buys quality the machine may not have the memory to spend.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn mochi_tier_order(request: &VideoRequest) -> &'static [&'static str] {
+    if mochi_wants_bf16(request) {
+        &["bf16", "q8", "q4"]
+    } else if mochi_wants_q8(request) {
+        &["q8", "q4"]
+    } else {
+        &["q4", "q8"]
+    }
+}
+
+/// Pick the first COMPLETE tier subdir of a Mochi model `root`, trying `order` (preferred first).
+/// Requires the shared co-requisite at `root` too — a tier dir without the T5/VAE siblings is not
+/// loadable, so it must not resolve.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn mochi_tier_subdir(root: &Path, order: &[&str]) -> Option<PathBuf> {
+    if !mochi_shared_is_complete(root) {
+        return None;
+    }
+    order
+        .iter()
+        .map(|tier| root.join(tier))
+        .find(|dir| mochi_tier_dir_is_complete(dir))
+}
+
+/// The tier's baked-in quant level, read from the resolved tier dir's `split_model.json` — the same
+/// manifest the provider reads. `Some(Q4)`/`Some(Q8)` for a packed tier, `None` for dense bf16.
+///
+/// Threaded onto the `LoadSpec` so (a) the asset record + metrics report the tier that was actually
+/// loaded rather than the tier that was asked for, and (b) the provider's assert becomes a real
+/// cross-check that our tier selection and its manifest read agree. Deriving this from the RESOLVED
+/// dir rather than from `advanced.mlxQuantize` is what keeps a fallback (requested q8, only q4
+/// installed) from turning into the provider's hard "spec.quantize disagrees with the tier" error.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn mochi_tier_quant(tier_dir: &Path) -> Option<Quant> {
+    let raw = std::fs::read_to_string(tier_dir.join("split_model.json")).ok()?;
+    let manifest: Value = serde_json::from_str(&raw).ok()?;
+    if !manifest.get("quantized").and_then(Value::as_bool)? {
+        return None;
+    }
+    match manifest.get("quantization_bits").and_then(Value::as_i64)? {
+        4 => Some(Quant::Q4),
+        8 => Some(Quant::Q8),
+        _ => None,
+    }
+}
+
+/// Resolve the Mochi tier dir to load: the `$SCENEWORKS_MLX_MOCHI_DIR` override (accepted as either a
+/// model root carrying tier subdirs or a single self-contained tier dir), then the turnkey
+/// [`MOCHI_REPO`] snapshot's tier subdir. Only a COMPLETE tier + its shared co-requisite counts.
+///
+/// Shared by BOTH lanes (one repo, both backends), so the candle generation arm calls this instead of
+/// `candle_video_snapshot_dir` — the flat-snapshot resolver has no notion of the tier layout.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_mochi_model_dir(settings: &Settings, request: &VideoRequest) -> WorkerResult<PathBuf> {
+    let order = mochi_tier_order(request);
+    if let Ok(override_dir) = std::env::var(MOCHI_DIR_ENV) {
+        let root = PathBuf::from(override_dir.trim());
+        // A model root with `q4/`/`q8/`/`bf16/` subdirs …
+        if let Some(dir) = mochi_tier_subdir(&root, order) {
+            return Ok(dir);
+        }
+        // … or a self-contained dir that IS one tier (components under it, the provider's
+        // `resolve_component_root` self-resolution case).
+        if mochi_tier_dir_is_complete(&root) && mochi_shared_is_complete(&root) {
+            return Ok(root);
+        }
+    }
+    if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, MOCHI_REPO) {
+        if let Some(dir) = mochi_tier_subdir(&root, order) {
+            return Ok(dir);
+        }
+        // The snapshot exists but nothing loadable resolved — say WHICH half is missing rather than a
+        // blanket "not found", since the tiers and the shared components are separate downloads.
+        if !mochi_shared_is_complete(&root) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{}: the shared Mochi text encoder / tokenizer / VAE are not installed (expected \
+                 text_encoder/, tokenizer/ and vae/ beside the tier dirs under {}). Re-download \
+                 Mochi 1 in the Model Manager — the shared components install alongside whichever \
+                 tier you pick.",
+                request.model,
+                root.display()
+            )));
+        }
+        return Err(WorkerError::InvalidPayload(format!(
+            "{}: no complete Mochi tier found under {} (looked for {order:?}). Download the tier you \
+             selected in the Model Manager, or set ${MOCHI_DIR_ENV} to a model dir.",
+            request.model,
+            root.display()
+        )));
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "{}: Mochi 1 is not downloaded (no {MOCHI_REPO} snapshot under {}). Install it from the \
+         Model Manager, or set ${MOCHI_DIR_ENV} to a model dir.",
+        request.model,
+        settings.data_dir.display()
+    )))
+}
+
+/// Whether the linked Mochi engine can serve this request now: a Mochi model id, in the ONE mode it
+/// supports, with resolvable weights.
+///
+/// **text_to_video only** — both descriptors declare `conditioning: []`, so there is no i2v /
+/// first-last / extend / bridge / replace surface. This gate matters because `VideoRequest`'s mode
+/// DEFAULTS to `image_to_video` when the payload omits one, so a mode check is what keeps a
+/// conditioning-shaped Mochi job out of the route rather than letting it reach the engine's
+/// `validate_request` (or, worse, an unrelated arm of the ladder).
+#[cfg(target_os = "macos")]
+fn mochi_available(request: &VideoRequest, settings: &Settings) -> bool {
+    mochi_engine_id(&request.model).is_some()
+        && request.mode == "text_to_video"
+        && resolve_mochi_model_dir(settings, request).is_ok()
+}
+
+/// Fetch the `q8/` tier on demand (mirrors [`ensure_ltx_q8_present`]). The default install is the lean
+/// q4 tier + the shared co-requisite; a job that toggles `advanced.mlxQuantize: 8` without a
+/// pre-installed q8 pulls just `q8/*` from the FIXED [`MOCHI_REVISION`] before any compute. No-op when
+/// q8 isn't requested, when the snapshot isn't downloaded at all (resolve surfaces the clear
+/// "not downloaded" error), or when `q8/` is already complete. Fails loud on a real download error.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn ensure_mochi_q8_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    if !mochi_wants_q8(request) {
+        return Ok(());
+    }
+    ensure_mochi_tier_present(api, settings, job, "q8").await
+}
+
+/// Fetch the dense `bf16/` tier on demand (~20 GB) — the [`ensure_mochi_q8_present`] sibling for the
+/// power-user tier ([`mochi_wants_bf16`]).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn ensure_mochi_bf16_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    if !mochi_wants_bf16(request) {
+        return Ok(());
+    }
+    ensure_mochi_tier_present(api, settings, job, "bf16").await
+}
+
+/// The shared body behind the two on-demand tier fetches: pull `<tier>/*` from the pinned
+/// [`MOCHI_REVISION`] when the snapshot exists but that tier doesn't.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn ensure_mochi_tier_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    tier: &str,
+) -> WorkerResult<()> {
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, MOCHI_REPO) else {
+        return Ok(());
+    };
+    if mochi_tier_dir_is_complete(&root.join(tier)) {
+        return Ok(());
+    }
+    crate::model_jobs::ensure_hf_files_cached(
+        api,
+        settings,
+        job,
+        MOCHI_REPO,
+        MOCHI_REVISION,
+        &[format!("{tier}/*")],
+    )
+    .await
+    .map(|_| ())
+}
+
+/// The `rawSettings` recorded on a Mochi asset. `mochiTier` names the tier that was actually LOADED
+/// (from the resolved dir's `split_model.json`), not the one the request asked for — those differ
+/// when a requested tier isn't installed and the order falls back.
+#[cfg(target_os = "macos")]
+fn mochi_raw_settings(request: &VideoRequest, quant: Option<Quant>) -> Value {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("model".to_owned(), Value::String(request.model.clone()));
+    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
+    raw.insert("fps".to_owned(), json!(request.fps));
+    raw.insert(
+        "mochiTier".to_owned(),
+        Value::String(
+            match quant {
+                Some(Quant::Q4) => "q4",
+                Some(Quant::Q8) => "q8",
+                _ => "bf16",
+            }
+            .to_owned(),
+        ),
+    );
+    Value::Object(raw)
+}
+
+/// Everything a Mochi generation must settle BEFORE the load, resolved as ONE unit by
+/// [`mochi_preflight`] (sc-11992).
+///
+/// These travel together on purpose. Both fields are things [`generate_mochi`] cannot build its
+/// [`VideoGenInput`] without, and [`mochi_preflight`] is the only thing that produces them — so the
+/// generation arm cannot obtain a frame count or a quant marker on a path that skipped the fit gate.
+/// Splitting them back into free-standing calls in the caller is what let the gate be silently dropped
+/// (the mutation that survived the first round of this story's review).
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MochiPreflight {
+    /// The requested frame count coerced onto Mochi's `6k+1` lattice.
+    frames: u32,
+    /// The tier dir's quant marker (`None` = the dense bf16 tier).
+    quant: Option<Quant>,
+}
+
+/// The Mochi pre-flight: coerce the clip length onto the engine's lattice, refuse a job that cannot
+/// fit this machine, and report the tier's quant — the whole "before we load anything" decision, as a
+/// pure, synchronously testable seam (sc-11992).
+///
+/// This exists as its own function because [`generate_mochi`] is `async` and needs a live
+/// `ApiClient`/`JobSnapshot`, which makes it unreachable from a unit test — so any decision left
+/// INSIDE it is, in practice, unpinned. Both decisions here are ones this story exists to get right,
+/// and both are invisible in the output when wrong (a mis-coerced frame count is a hard engine reject;
+/// a skipped gate is a `SIGKILL`), so they live here where `mochi_preflight_*` can assert them by
+/// model id, budget, and clip length.
+///
+/// `Ok(MochiPreflight)` admits; `Err` is the actionable pre-crash rejection.
+#[cfg(target_os = "macos")]
+fn mochi_preflight(
+    model: &str,
+    engine_id: &str,
+    tier_dir: &Path,
+    raw_frames: u32,
+    width: u32,
+    height: u32,
+) -> WorkerResult<MochiPreflight> {
+    // The shared stride ladder, dispatched BY MODEL — so Mochi lands on `mochi_frame_count`'s 6k+1
+    // lattice and never on Wan's 4k+1 stride. NOT `wan_frame_count` (see `video_frame_count`): the
+    // shipped 5 s @ 30 fps default takes `wan_frame_count(150) = 149`, and `149 % 6 == 5` is OFF the
+    // lattice, which the engine's `validate_request` hard-rejects.
+    let frames = video_frame_count(model, raw_frames);
+
+    // PRE-FLIGHT FIT GATE (epic AC: "an unsupported environment shows an actionable error, not a
+    // crash"). This MUST run before the load: Mochi holds ~18.7 GiB of weights resident for the whole
+    // run (`supports_sequential_offload: false`) and its AsymmVAE decode is UNTILED, so the peak grows
+    // linearly with clip length (sc-12291) — ~60 GiB of decode alone at the shipped 5 s default. MLX's
+    // default error handler is `exit(-1)`, a hard process kill that CANNOT be mapped to a job error
+    // after the fact, so an over-budget job has to be refused here or it takes the worker down with
+    // it. The generic `mlx_fit_gate` cannot cover this: it is resolution-blind by construction and its
+    // weights-fit floor would admit on the 18.7 GiB weights alone.
+    //
+    // It takes the COERCED `frames` — the count the decode will actually pay for — not the raw
+    // request, and not a constant.
+    crate::mlx_fit_gate::mochi_fit_check(engine_id, tier_dir, frames, width, height)?;
+
+    Ok(MochiPreflight {
+        frames,
+        quant: mochi_tier_quant(tier_dir),
+    })
+}
+
+/// Resolve a Mochi request into a [`VideoGenInput`] and run it (epic 1788 / sc-11992) — the MLX lane.
+///
+/// Text-to-video only, true CFG (not distilled, so negative prompt + guidance are real), frames snap
+/// to `6k+1`, and the tier dir carries the quant. Progress/heartbeat bridging, cooperative cancel, the
+/// forward-progress stall watchdog and the completion metrics all come from the shared
+/// [`generate_video`] funnel — the same one Wan/LTX/SVD use — so Mochi inherits the "no background
+/// heartbeat during a job, the progress callback IS the keepalive" contract without re-implementing it.
+///
+/// Deliberately thin: every pre-load decision lives in [`mochi_preflight`], which is reachable from a
+/// unit test where this `async` arm is not.
+#[cfg(target_os = "macos")]
+async fn generate_mochi(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    engine_id: &'static str,
+    backend: &str,
+) -> WorkerResult<(DecodedVideo, Value)> {
+    // A tier the job toggled but never downloaded is fetched before any compute (no-op otherwise).
+    ensure_mochi_q8_present(api, settings, job, request).await?;
+    ensure_mochi_bf16_present(api, settings, job, request).await?;
+    let model_dir = resolve_mochi_model_dir(settings, request)?;
+    // Frame lattice + fit gate + tier quant, as one gated unit — see `mochi_preflight`.
+    let MochiPreflight { frames, quant } = mochi_preflight(
+        &request.model,
+        engine_id,
+        &model_dir,
+        request.raw_frame_count(),
+        request.width,
+        request.height,
+    )?;
+
+    let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
+        engine_id,
+        model_dir,
+        quant,
+        // No adapter path on either backend (`supports_lora`/`supports_lokr` = false).
+        adapters: Vec::new(),
+        // t2v only — `conditioning: []` on the descriptor.
+        conditioning: Vec::new(),
+        prompt: request.prompt.clone(),
+        // Not distilled ⇒ true CFG, so a negative prompt is real conditioning here (contrast the
+        // distilled LTX path, which passes `None`).
+        negative_prompt: non_empty_negative_prompt(request),
+        width: request.width,
+        height: request.height,
+        frames,
+        fps: request.fps,
+        // `None` ⇒ the engine's own DEFAULT_STEPS (64) / DEFAULT_GUIDANCE (4.5).
+        steps: advanced_opt_u32(request, "steps"),
+        guidance: advanced_opt_f32(request, "guidanceScale"),
+        seed: resolve_video_seed(request) as u64,
+        ..VideoGenInput::default()
+    };
+    let raw_settings = mochi_raw_settings(request, quant);
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    Ok((decoded, raw_settings))
+}
+
+// ---------------------------------------------------------------------------
 // Real MLX Stable Video Diffusion (SVD-XT) generation (macOS, via mlx-gen-svd, sc-3523):
 // image→video ONLY — animates one source image into a fixed ~25-frame burst (no text prompt,
 // no audio) via the `motion_bucket_id` / `noise_aug_strength` / conditioning-fps
@@ -9842,6 +10458,658 @@ mod tests {
 
     fn request(value: Value) -> VideoRequest {
         VideoRequest::from_payload(&value.as_object().cloned().unwrap())
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Mochi 1 (epic 1788 / sc-11992). These sit on the SUPERSET cfg because the tier resolver, the
+    // stride and the on-demand fetches are SHARED by both lanes (one repo, both backends) — so they
+    // run on the macOS lane AND on the windows-candle lane, which is what makes the candle half
+    // genuinely covered rather than asserted.
+    // -----------------------------------------------------------------------------------------
+
+    /// Build a Mochi model root in the A6 installed layout: tier dirs as SIBLINGS of the shared
+    /// T5/tokenizer/VAE co-requisite. `tiers` lists the tier dirs to materialize.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn mochi_root(tag: &str, tiers: &[&str], shared: bool) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "mochi_root_{tag}_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        for tier in tiers {
+            let transformer = root.join(tier).join("transformer");
+            std::fs::create_dir_all(&transformer).unwrap();
+            std::fs::write(transformer.join("model.safetensors"), b"w").unwrap();
+            let (quantized, bits) = match *tier {
+                "q4" => (true, 4),
+                "q8" => (true, 8),
+                _ => (false, 0),
+            };
+            let manifest = if quantized {
+                json!({ "quantized": true, "quantization_bits": bits, "quantization_group_size": 64 })
+            } else {
+                json!({ "quantized": false })
+            };
+            std::fs::write(
+                root.join(tier).join("split_model.json"),
+                serde_json::to_string(&manifest).unwrap(),
+            )
+            .unwrap();
+        }
+        if shared {
+            for component in ["text_encoder", "tokenizer", "vae"] {
+                std::fs::create_dir_all(root.join(component)).unwrap();
+            }
+        }
+        root
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn mochi_request(advanced: Value) -> VideoRequest {
+        request(json!({
+            "projectId": "p",
+            "model": "mochi_1",
+            "mode": "text_to_video",
+            "prompt": "a calico kitten",
+            "advanced": advanced,
+        }))
+    }
+
+    /// `advanced.mlxQuantize` selects WHICH TIER DIR to load — the story's "selecting q4/q8/bf16
+    /// loads the right tier" AC. A tier is a DIRECTORY, not a requant toggle (`supported_quants: &[]`
+    /// on both descriptors), so this mapping is the entire quant mechanism.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn mochi_tier_order_maps_mlx_quantize_to_a_tier_dir() {
+        // No explicit pick ⇒ q4-first (the video lane's sc-10859 carve-out; bf16 never a default).
+        assert_eq!(mochi_tier_order(&mochi_request(json!({}))), &["q4", "q8"]);
+        assert!(!mochi_tier_order(&mochi_request(json!({}))).contains(&"bf16"));
+        // Explicit small ⇒ still q4-first.
+        assert_eq!(
+            mochi_tier_order(&mochi_request(json!({ "mlxQuantize": 4 }))),
+            &["q4", "q8"]
+        );
+        // q8 ⇒ q8-first. Accepted as int OR string (the manifest/UI can send either).
+        assert_eq!(
+            mochi_tier_order(&mochi_request(json!({ "mlxQuantize": 8 }))),
+            &["q8", "q4"]
+        );
+        assert_eq!(
+            mochi_tier_order(&mochi_request(json!({ "mlxQuantize": "8" }))),
+            &["q8", "q4"]
+        );
+        // Dense bf16 ⇒ the `<= 0` opt-in rule, and a literal 16 (bf16 IS 16-bit).
+        for dense in [json!({ "mlxQuantize": 0 }), json!({ "mlxQuantize": -1 })] {
+            assert_eq!(
+                mochi_tier_order(&mochi_request(dense)),
+                &["bf16", "q8", "q4"]
+            );
+        }
+        assert_eq!(
+            mochi_tier_order(&mochi_request(json!({ "mlxQuantize": 16 }))),
+            &["bf16", "q8", "q4"]
+        );
+    }
+
+    /// The resolver returns the TIER DIR (not the model root), honors the requested tier, and folds
+    /// in the shared co-requisite gate. Pins the `WeightsSource::Dir` = tier-dir contract the
+    /// provider's parent-resolution (`resolve_component_root`) depends on.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn resolve_mochi_model_dir_picks_the_requested_tier_dir() {
+        let root = mochi_root("resolve", &["q4", "q8", "bf16"], true);
+        let settings = Settings {
+            data_dir: root.join("unused-data-dir"),
+            ..Settings::from_env()
+        };
+        // Route the resolver at the fixture via the operator override.
+        temp_env_var(MOCHI_DIR_ENV, root.to_str().unwrap(), || {
+            for (advanced, want) in [
+                (json!({}), "q4"),
+                (json!({ "mlxQuantize": 4 }), "q4"),
+                (json!({ "mlxQuantize": 8 }), "q8"),
+                (json!({ "mlxQuantize": 0 }), "bf16"),
+            ] {
+                let dir = resolve_mochi_model_dir(&settings, &mochi_request(advanced.clone()))
+                    .unwrap_or_else(|e| panic!("resolve {advanced} failed: {e:?}"));
+                assert_eq!(
+                    dir,
+                    root.join(want),
+                    "advanced {advanced} must resolve the {want} TIER dir"
+                );
+                // The tier dir's parent is the model root — where the provider finds the shared
+                // T5/VAE. If the resolver ever returned the root itself this breaks.
+                assert_eq!(dir.parent().unwrap(), root);
+            }
+        });
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A complete tier with NO shared co-requisite must NOT resolve. The T5/tokenizer/VAE are a
+    /// SEPARATE download (`coRequisite`, sc-9696), so "q4 present, text_encoder absent" is a real
+    /// user state — and resolving it would dead-end inside the provider on a missing-file error
+    /// instead of telling the user what to re-download.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn resolve_mochi_model_dir_requires_the_shared_corequisite() {
+        let root = mochi_root("noshared", &["q4"], false);
+        let settings = Settings {
+            data_dir: root.join("unused-data-dir"),
+            ..Settings::from_env()
+        };
+        temp_env_var(MOCHI_DIR_ENV, root.to_str().unwrap(), || {
+            assert!(
+                mochi_tier_subdir(&root, &["q4"]).is_none(),
+                "a tier without the shared T5/VAE siblings is not loadable"
+            );
+            assert!(
+                resolve_mochi_model_dir(&settings, &mochi_request(json!({}))).is_err(),
+                "must error rather than resolve an unloadable tier"
+            );
+        });
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A half-downloaded tier (manifest without weights, or weights without the manifest) must fall
+    /// THROUGH to the next tier in the order rather than half-loading.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn mochi_tier_subdir_skips_an_incomplete_tier() {
+        let root = mochi_root("partial", &["q4"], true);
+        // A `q8/` that carries only the manifest — the shape a mid-flight download leaves on disk.
+        std::fs::create_dir_all(root.join("q8")).unwrap();
+        std::fs::write(root.join("q8").join("split_model.json"), b"{}").unwrap();
+
+        assert!(!mochi_tier_dir_is_complete(&root.join("q8")));
+        assert_eq!(
+            mochi_tier_subdir(&root, &["q8", "q4"]),
+            Some(root.join("q4")),
+            "a torn q8 must fall through to the complete q4, never half-load"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The quant marker rides the RESOLVED tier's own `split_model.json` — the same manifest the
+    /// provider asserts against — so the spec can never disagree with the dir we picked (which would
+    /// be a hard load error), and the asset record names the tier actually loaded.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn mochi_tier_quant_reads_the_tier_manifest() {
+        let root = mochi_root("quant", &["q4", "q8", "bf16"], true);
+        assert_eq!(mochi_tier_quant(&root.join("q4")), Some(Quant::Q4));
+        assert_eq!(mochi_tier_quant(&root.join("q8")), Some(Quant::Q8));
+        // Dense tier ⇒ no quant assertion (the provider loads it dense).
+        assert_eq!(mochi_tier_quant(&root.join("bf16")), None);
+        // A manifest-less dir is dense-by-absence, never a guess.
+        assert_eq!(mochi_tier_quant(&root.join("nope")), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `mochi_1` is the engine id on BOTH backends — no `_distilled`-style split, unlike LTX. (The
+    /// candle lane's equivalent is pinned by `candle_mochi_resolves_the_engine_and_never_falls_to_the_stub`.)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_engine_id_is_the_model_id_and_matches_nothing_else() {
+        assert_eq!(mochi_engine_id("mochi_1"), Some("mochi_1"));
+        for other in [
+            "wan_2_2",
+            "ltx_2_3",
+            "svd",
+            "scail2_14b",
+            "bernini",
+            "mochi",
+        ] {
+            assert!(mochi_engine_id(other).is_none(), "{other} is not mochi_1");
+        }
+    }
+
+    /// **The frame-stride seam** (sc-11992): Mochi must use its own `6k+1` snap, not the
+    /// `wan_frame_count` else-arm every non-LTX model used to fall into.
+    ///
+    /// The failure mode is worth stating precisely, because the story brief mis-stated it. It claimed
+    /// `wan_frame_count(150) = 145`, that `145 % 6 == 1` makes the runtime ACCEPT it, and that a 5 s
+    /// request would therefore silently render 4.83 s. The arithmetic does not hold:
+    /// `wan_frame_count(150)` is **149** (`150 − ((150−1) % 4)` = 150 − 1), and `149 % 6 == 5`, so the
+    /// engine's `validate_request` **hard-rejects** it. The real bug is a LOUD failure — every
+    /// default-duration Mochi job dies on "num_frames must be 1 + 6·k (got 149)" — not a silent
+    /// wrong-length clip.
+    ///
+    /// Stronger still, a silent wrong length is IMPOSSIBLE on this pairing, and the test pins that:
+    /// whenever the Wan stride's answer happens to land on Mochi's lattice it is provably EQUAL to
+    /// Mochi's snap, so the substitution either agrees or errors — it never lies. (Why: if
+    /// `wan(raw) = W` is `≡ 1 mod 6` then `raw − W ∈ 0..=3`, so `W` is Mochi's `lower` and
+    /// `raw − W ≤ 3 ≤ 6 − (raw − W)` makes Mochi's nearest-with-ties-low pick `W` too.)
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn frames_are_the_mochi_lattice_not_wans() {
+        // THE WIRING (not just the functions): the shared ladder BOTH generation lanes call must map
+        // the mochi_1 MODEL ID onto the 6k+1 stride. This is what fails if a lane is (re-)pointed at
+        // `wan_frame_count` — asserting `mochi_frame_count` vs `wan_frame_count` in isolation would
+        // NOT, since both functions stay correct while the caller picks the wrong one.
+        assert_eq!(
+            video_frame_count("mochi_1", 150),
+            151,
+            "mochi_1 must resolve the 6k+1 stride through the shared ladder"
+        );
+        assert_eq!(
+            video_frame_count("mochi_1", 150),
+            mochi_frame_count(150),
+            "the mochi arm must BE mochi_frame_count"
+        );
+        assert_ne!(
+            video_frame_count("mochi_1", 150),
+            wan_frame_count(150),
+            "routing mochi through the wan stride is the bug this pins"
+        );
+        // The other families keep their own strides — adding Mochi must not perturb them.
+        assert_eq!(video_frame_count("ltx_2_3", 150), ltx_frame_count(150));
+        assert_eq!(video_frame_count("ltx_2_3_eros", 150), ltx_frame_count(150));
+        assert_eq!(video_frame_count("wan_2_2", 150), wan_frame_count(150));
+        assert_eq!(video_frame_count("scail2_14b", 150), wan_frame_count(150));
+        assert_eq!(video_frame_count("bernini", 150), wan_frame_count(150));
+
+        // The shipped default: 5 s x 30 fps = 150 raw frames.
+        assert_eq!(
+            mochi_frame_count(150),
+            151,
+            "the manifest's documented 5 s count"
+        );
+        assert_eq!(
+            wan_frame_count(150),
+            149,
+            "NOT 145 — the brief's arithmetic was wrong"
+        );
+        assert_ne!(mochi_frame_count(150), wan_frame_count(150));
+        // The default job's real failure on the wan arm: OFF-lattice ⇒ the engine rejects.
+        assert_eq!(
+            wan_frame_count(150) % 6,
+            5,
+            "149 is off Mochi's 6k+1 lattice, so validate_request hard-rejects the 5 s default"
+        );
+
+        // Mochi's own snap is always ON-lattice — the engine accepts every value we can produce.
+        for raw in [1_u32, 6, 7, 30, 90, 150, 151, 163, 900] {
+            assert_eq!(
+                mochi_frame_count(raw) % 6,
+                1,
+                "mochi_frame_count({raw}) must sit on the 6k+1 lattice"
+            );
+        }
+
+        // The invariant: the wan stride can never SILENTLY render a wrong length — over the whole
+        // supported duration range it either equals mochi's snap or is rejected by the engine.
+        let mut accepted = 0;
+        for raw in 1_u32..=1_800 {
+            let wan = wan_frame_count(raw);
+            if wan % 6 == 1 {
+                accepted += 1;
+                assert_eq!(
+                    wan,
+                    mochi_frame_count(raw),
+                    "raw {raw}: a wan value the mochi runtime ACCEPTS must equal mochi's own snap, \
+                     or the substitution would silently change clip length"
+                );
+            }
+        }
+        assert!(accepted > 0, "the invariant must be exercised, not vacuous");
+    }
+
+    /// Mochi's REAL hosted q4 resident footprint, split by component: AsymmDiT 9.007 GiB + T5-XXL
+    /// bf16 8.871 + AsymmVAE 0.856 = 18.73 GiB. Mirrors `mlx_fit_gate`'s `MOCHI_Q4_RESIDENT_BYTES`
+    /// (which asserts the same total against the pure gate) — the preflight tests need them SPLIT
+    /// across the A6 sibling layout so the on-disk scan has to fold the shared components to get the
+    /// total right.
+    #[cfg(target_os = "macos")]
+    const MOCHI_Q4_DIT_BYTES: u64 = 9_670_883_602;
+    #[cfg(target_os = "macos")]
+    const MOCHI_Q4_TE_BYTES: u64 = 9_524_669_250;
+    #[cfg(target_os = "macos")]
+    const MOCHI_Q4_VAE_BYTES: u64 = 919_551_200;
+
+    /// A Mochi A6-layout root (q4 tier + shared `text_encoder`/`vae`/`tokenizer` siblings) whose
+    /// `.safetensors` report the REAL hosted byte sizes, so `mochi_fit_check`'s on-disk scan resolves
+    /// the true ~18.73 GiB resident footprint instead of the 1-byte stubs `mochi_root` writes.
+    ///
+    /// The files are SPARSE: `set_len` sets the apparent size with zero allocated blocks on APFS, and
+    /// `sum_safetensors_bytes` reads `metadata().len()`. So this is instant and costs no disk —
+    /// materializing 18.7 GiB of real zeros per test would not be viable.
+    #[cfg(target_os = "macos")]
+    fn mochi_root_real_sized(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "mochi_preflight_{tag}_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        for (relative, len) in [
+            ("q4/transformer/model.safetensors", MOCHI_Q4_DIT_BYTES),
+            ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
+            ("vae/model.safetensors", MOCHI_Q4_VAE_BYTES),
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        }
+        std::fs::create_dir_all(root.join("tokenizer")).unwrap();
+        std::fs::write(
+            root.join("q4").join("split_model.json"),
+            serde_json::to_string(
+                &json!({ "quantized": true, "quantization_bits": 4, "quantization_group_size": 64 }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        root
+    }
+
+    /// sc-11992 review: pin the frame lattice AT THE SEAM THE GENERATION ARM CALLS, not just as a free
+    /// function. `generate_mochi` is `async` and needs a live `ApiClient`/`JobSnapshot`, so it is
+    /// unreachable from a unit test — `mochi_preflight` is the pure seam it delegates the decision to.
+    ///
+    /// Kills the review mutation `video_frame_count(...)` → `wan_frame_count(...)`, which survived
+    /// 835/0 green when this logic sat inline in `generate_mochi`: the wan stride answers 149 for the
+    /// shipped 5 s default, and `149 % 6 == 5` is off the lattice the engine accepts.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_preflight_coerces_the_frame_count_on_mochis_lattice_by_model_id() {
+        let root = mochi_root_real_sized("lattice");
+        // A budget no clip can overflow, so ONLY the lattice is under test here.
+        let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "512", || {
+            mochi_preflight("mochi_1", "mochi_1", &root.join("q4"), 150, 848, 480)
+        });
+        std::fs::remove_dir_all(&root).ok();
+
+        let preflight = out.expect("a 151-frame clip fits a 512 GB budget");
+        assert_eq!(
+            preflight.frames, 151,
+            "the seam must snap the shipped 5 s default onto the 6k+1 lattice"
+        );
+        assert_eq!(
+            preflight.frames,
+            mochi_frame_count(150),
+            "the seam's mochi arm must BE mochi_frame_count"
+        );
+        assert_ne!(
+            preflight.frames,
+            wan_frame_count(150),
+            "routing the seam through the wan stride is the bug this story exists to fix"
+        );
+        assert_eq!(
+            preflight.quant,
+            Some(Quant::Q4),
+            "the tier dir's split_model.json carries the quant the load asserts"
+        );
+    }
+
+    /// sc-11992 review / epic AC "a missing-weights or unsupported environment shows an ACTIONABLE
+    /// ERROR, not a crash": the fit gate must run on the generation seam, with the REAL coerced frame
+    /// count. MLX's default error handler is `exit(-1)` — a hard process kill that cannot be mapped to
+    /// a job error after the fact — so an over-budget job must be refused here or it takes the worker
+    /// down with it.
+    ///
+    /// Kills BOTH remaining review mutations, each of which survived 835/0 green:
+    ///   * hardcoding the gate's `frames` argument to `7` ⇒ the gate sees 4.66 GiB of decode instead
+    ///     of 60.56, totals ~25 GiB, and ADMITS this job ⇒ `expect_err` fails.
+    ///   * deleting the `mochi_fit_check(...)?` call ⇒ nothing rejects ⇒ `expect_err` fails.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_preflight_rejects_the_5s_default_on_a_64gb_mac() {
+        let root = mochi_root_real_sized("reject");
+        // A 64 GB Mac — the machine the epic's crash report names.
+        let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
+            mochi_preflight("mochi_1", "mochi_1", &root.join("q4"), 150, 848, 480)
+        });
+        std::fs::remove_dir_all(&root).ok();
+
+        let message = out
+            .expect_err(
+                "the shipped 5 s default (151 frames) needs 18.73 GiB weights + 60.56 GiB untiled \
+                 decode + 2 GiB OS reserve = 81.3 GiB, which does NOT fit a 64 GB Mac — admitting it \
+                 is exactly the SIGKILL this gate exists to prevent",
+            )
+            .to_string();
+        assert!(message.contains("mochi_1"), "names the model: {message}");
+        assert!(
+            message.contains("Shorten the clip"),
+            "leads with the only lever that moves the dominant term: {message}"
+        );
+    }
+
+    /// The other half of the gate's contract: on the SAME 64 GB Mac a short clip is ADMITTED. Without
+    /// this, `mochi_preflight_rejects_the_5s_default_on_a_64gb_mac` would still pass against a gate
+    /// that blanket-refuses everything — so this is what makes the pair prove the gate is
+    /// FRAME-SENSITIVE, which is the whole point of a decode peak that scales with clip length.
+    ///
+    /// Also independently kills the `wan_frame_count` substitution: `wan_frame_count(19) = 17`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_preflight_admits_a_short_clip_on_the_same_64gb_mac() {
+        let root = mochi_root_real_sized("admit");
+        let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
+            mochi_preflight("mochi_1", "mochi_1", &root.join("q4"), 19, 848, 480)
+        });
+        std::fs::remove_dir_all(&root).ok();
+
+        let preflight = out.expect(
+            "19 frames (the engine's own DEFAULT_FRAMES) needs 18.73 + 9.32 + 2 = 30.1 GiB, which \
+             fits a 64 GB Mac and must NOT be rejected",
+        );
+        assert_eq!(
+            preflight.frames, 19,
+            "19 already sits on the 6k+1 lattice, so the snap is a no-op"
+        );
+    }
+
+    /// Mochi is text-to-video ONLY (`conditioning: []` on both descriptors). `VideoRequest`'s mode
+    /// DEFAULTS to `image_to_video` when the payload omits one, so the mode gate is what keeps a
+    /// conditioning-shaped job out of the Mochi route — without it an unmoded payload would route to
+    /// Mochi and fail deep in the engine.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_available_is_text_to_video_only() {
+        let root = mochi_root("mode", &["q4"], true);
+        let settings = Settings {
+            data_dir: root.join("unused-data-dir"),
+            ..Settings::from_env()
+        };
+        temp_env_var(MOCHI_DIR_ENV, root.to_str().unwrap(), || {
+            let t2v = request(json!({
+                "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p"
+            }));
+            assert!(
+                mochi_available(&t2v, &settings),
+                "a t2v mochi job with resolvable weights must route to the Mochi engine"
+            );
+            // Every non-t2v mode — including the DEFAULT the DTO applies when `mode` is absent.
+            for mode in [
+                "image_to_video",
+                "first_last_frame",
+                "extend_clip",
+                "video_bridge",
+                "replace_person",
+                "animate_character",
+            ] {
+                let req = request(json!({
+                    "projectId": "p", "model": "mochi_1", "mode": mode, "prompt": "p"
+                }));
+                assert!(
+                    !mochi_available(&req, &settings),
+                    "mochi has no {mode} surface (conditioning: [])"
+                );
+            }
+            let unmoded = request(json!({ "projectId": "p", "model": "mochi_1", "prompt": "p" }));
+            assert_eq!(unmoded.mode, "image_to_video", "the DTO's default mode");
+            assert!(
+                !mochi_available(&unmoded, &settings),
+                "a payload with no mode defaults to i2v and must NOT reach the t2v-only engine"
+            );
+        });
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A Mochi t2v job with resolvable weights routes to `VideoRoute::Mochi` — and, critically, a
+    /// Mochi job whose weights DON'T resolve must NOT silently become `VideoRoute::Stub` output:
+    /// `ensure_video_engine_weights` (the sc-4176 fail-loud gate the Stub arm calls) must error.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_routes_to_the_mochi_engine_and_never_degrades_to_a_fake_video() {
+        let root = mochi_root("route", &["q4"], true);
+        let settings = Settings {
+            data_dir: root.join("unused-data-dir"),
+            ..Settings::from_env()
+        };
+        let req = request(json!({
+            "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p"
+        }));
+        temp_env_var(MOCHI_DIR_ENV, root.to_str().unwrap(), || {
+            assert_eq!(
+                resolve_video_route(&req, &settings),
+                VideoRoute::Mochi("mochi_1")
+            );
+            // Adding Mochi must not perturb any pre-existing route.
+            let wan = request(json!({
+                "projectId": "p", "model": "wan_2_2", "mode": "text_to_video", "prompt": "p"
+            }));
+            assert!(!matches!(
+                resolve_video_route(&wan, &settings),
+                VideoRoute::Mochi(_)
+            ));
+        });
+
+        // Weights absent (no override, empty data dir) ⇒ the route falls to Stub, BUT the Stub arm's
+        // fail-loud gate must refuse rather than hand back a procedural fake video.
+        let empty = std::env::temp_dir().join(format!("mochi_empty_{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let bare = Settings {
+            data_dir: empty.clone(),
+            ..Settings::from_env()
+        };
+        temp_env_var(MOCHI_DIR_ENV, "", || {
+            assert_eq!(resolve_video_route(&req, &bare), VideoRoute::Stub);
+            let err = ensure_video_engine_weights(&req, &bare)
+                .expect_err("an unprovisioned mochi MUST fail loudly, never render a fake video");
+            let WorkerError::InvalidPayload(message) = err else {
+                panic!("expected an actionable InvalidPayload");
+            };
+            assert!(
+                message.contains("mochi_1") && message.contains("Model Manager"),
+                "the error must name the model and tell the user what to do: {message}"
+            );
+        });
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&empty).ok();
+    }
+
+    /// The on-demand tier fetches are gated on the request's tier toggle — the "fetched on demand if
+    /// toggled but not downloaded" AC. Pins that a default (q4) job asks for NEITHER extra tier, so
+    /// no job accidentally pulls the ~13 GB q8 / ~20 GB bf16.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn mochi_on_demand_tier_fetch_is_gated_on_the_toggle() {
+        // Default ⇒ neither on-demand tier is wanted.
+        assert!(!mochi_wants_q8(&mochi_request(json!({}))));
+        assert!(!mochi_wants_bf16(&mochi_request(json!({}))));
+        // q8 toggle ⇒ q8 only.
+        assert!(mochi_wants_q8(&mochi_request(json!({ "mlxQuantize": 8 }))));
+        assert!(!mochi_wants_bf16(&mochi_request(
+            json!({ "mlxQuantize": 8 })
+        )));
+        // bf16 toggle ⇒ bf16 only (the two must be mutually exclusive, or a bf16 job would also drag
+        // the q8 tier down).
+        assert!(mochi_wants_bf16(&mochi_request(
+            json!({ "mlxQuantize": 0 })
+        )));
+        assert!(!mochi_wants_q8(&mochi_request(json!({ "mlxQuantize": 0 }))));
+        // An explicit q4 pick pulls nothing extra.
+        assert!(!mochi_wants_q8(&mochi_request(json!({ "mlxQuantize": 4 }))));
+        assert!(!mochi_wants_bf16(&mochi_request(
+            json!({ "mlxQuantize": 4 })
+        )));
+    }
+
+    /// The pinned revision must be a full 40-char commit, not a mutable branch: the repo is a
+    /// hard-coded const, so `main` would let an upstream re-push swap a checkpoint we load.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn mochi_repo_revision_is_pinned_to_a_commit() {
+        assert_eq!(MOCHI_REPO, "SceneWorks/mochi-1-mlx");
+        assert_eq!(MOCHI_REVISION.len(), 40, "a full commit sha, not a branch");
+        assert!(MOCHI_REVISION.chars().all(|c| c.is_ascii_hexdigit()));
+        // The revision B1's manifest sizes were read from.
+        assert!(MOCHI_REVISION.starts_with("90a87786"));
+    }
+
+    /// The MLX asset record names the tier that was actually LOADED, so provenance can't drift from
+    /// the tier the resolver picked when a requested tier isn't installed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_raw_settings_record_the_loaded_tier() {
+        let req = mochi_request(json!({ "mlxQuantize": 8 }));
+        // Requested q8 but q4 was what resolved ⇒ the record says q4, not q8.
+        let raw = mochi_raw_settings(&req, Some(Quant::Q4));
+        assert_eq!(raw["mochiTier"], json!("q4"));
+        assert_eq!(raw["realModelInference"], json!(true));
+        assert_eq!(raw["model"], json!("mochi_1"));
+        assert_eq!(raw["frameCount"], json!(req.frame_count()));
+        assert_eq!(
+            mochi_raw_settings(&req, Some(Quant::Q8))["mochiTier"],
+            json!("q8")
+        );
+        assert_eq!(mochi_raw_settings(&req, None)["mochiTier"], json!("bf16"));
+    }
+
+    /// Set `key` to `value` (empty ⇒ removed) for the duration of `body`, then restore. The Mochi
+    /// resolver reads an operator override from the environment, and `std::env::set_var` is
+    /// process-global, so the tests that use it are serialized behind one mutex.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn temp_env_var<T>(key: &str, value: &str, body: impl FnOnce() -> T) -> T {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var(key).ok();
+        if value.is_empty() {
+            std::env::remove_var(key);
+        } else {
+            std::env::set_var(key, value);
+        }
+        let out = body();
+        match previous {
+            Some(prior) => std::env::set_var(key, prior),
+            None => std::env::remove_var(key),
+        }
+        out
     }
 
     /// sc-10418: the resolved video quant maps to the same normalized tier labels the
@@ -14882,6 +16150,74 @@ mod candle_video_label_tests {
             "candle_ltx"
         );
         assert_eq!(candle_video_adapter_label("svd_xt"), "candle_svd");
+        // Mochi (sc-11992) must have its OWN arm. The `_` fall-through is the Wan default, so a
+        // missing arm silently stamps `candle_wan` onto a Mochi asset's sidecar + telemetry — wrong
+        // provenance with no error anywhere.
+        assert_eq!(candle_video_adapter_label("mochi_1"), "candle_mochi");
+        assert_ne!(
+            candle_video_adapter_label("mochi_1"),
+            CANDLE_WAN_ADAPTER,
+            "mochi_1 must not fall through to the Wan adapter label"
+        );
+    }
+
+    /// **The candle-lane routing trap** (sc-11992). B1 declared Windows served
+    /// (`VideoModelCaps::new("mochi_1", true, true, false, false)` ⇒ `candle_video_routed`), and A6
+    /// validated the lane on Blackwell against the very same hosted tiers. If `candle_video_engine_id`
+    /// does not resolve `mochi_1`, `is_candle_video_engine` is false, `resolve_candle_video_route`
+    /// never reaches its generic arm, and the job lands on `CandleVideoRoute::Stub` — handing the user
+    /// a PROCEDURAL FAKE VIDEO rather than an error. That is a silent wrong-output bug, so it is
+    /// pinned here rather than left to the descriptor.
+    #[test]
+    fn candle_mochi_resolves_the_engine_and_never_falls_to_the_stub() {
+        // ONE engine id on BOTH backends — no `_distilled`-style split (contrast ltx above).
+        assert_eq!(candle_video_engine_id("mochi_1"), Some("mochi_1"));
+        assert!(
+            is_candle_video_engine("mochi_1"),
+            "mochi_1 MUST be a candle video engine or Windows silently renders a procedural stub"
+        );
+
+        // The generic candle arm is reached for a t2v mochi job (the shape B1's router allows
+        // through: text_to_video, no source asset, no LoRA).
+        let settings = Settings {
+            backend_candle_enabled: true,
+            ..Settings::from_env()
+        };
+        let payload = json!({
+            "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p"
+        });
+        let req = VideoRequest::from_payload(payload.as_object().expect("object"));
+        assert_eq!(
+            resolve_candle_video_route(&req, &settings),
+            CandleVideoRoute::CandleVideo,
+            "a t2v mochi job must route to the candle video engine, NOT the stub"
+        );
+    }
+
+    /// The candle default repo must be Mochi's own. No Mochi manifest entry carries a top-level
+    /// `repo`, so `candle_video_repo` falls through to this default — and the `_` arm is Wan's, which
+    /// would send the loader at a Wan diffusers snapshot.
+    #[test]
+    fn candle_mochi_default_repo_is_the_shared_mochi_turnkey() {
+        assert_eq!(
+            candle_video_default_repo("mochi_1"),
+            "SceneWorks/mochi-1-mlx"
+        );
+        assert_ne!(
+            candle_video_default_repo("mochi_1"),
+            CANDLE_WAN_5B_REPO,
+            "mochi_1 must not inherit Wan's default repo"
+        );
+        // ONE repo serves BOTH backends — the candle default IS the MLX repo (A6's `.scales`-detect
+        // seam ingests the mlx-affine tiers 1:1; `SceneWorks/mochi-1-candle` was never published).
+        assert_eq!(candle_video_default_repo("mochi_1"), MOCHI_REPO);
+
+        // With no manifest `repo` (the shipped Mochi entry), the resolved repo is that default.
+        let payload = json!({
+            "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p"
+        });
+        let req = VideoRequest::from_payload(payload.as_object().expect("object"));
+        assert_eq!(candle_video_repo(&req, "mochi_1"), "SceneWorks/mochi-1-mlx");
     }
 
     #[test]
