@@ -28,8 +28,12 @@
 // gated the worker change: at the time of writing, all 217 patterns across all 53
 // repos matched, which is what made hard-failing safe to ship.
 //
+// Covers builtin.models.jsonc `downloads[].files` AND builtin.loras.jsonc
+// `source.file` / `source.files` — the LoRA download path gained the same hard-fail in
+// sc-12288, so it needs the same pre-flight.
+//
 // USAGE
-//   node scripts/check-download-patterns.mjs            # all HF download entries
+//   node scripts/check-download-patterns.mjs            # all HF model + LoRA entries
 //   node scripts/check-download-patterns.mjs --model krea_2_raw
 //
 // Exits non-zero if any declared pattern matches zero files. Public repos need no
@@ -42,7 +46,8 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const MANIFEST = "config/manifests/builtin.models.jsonc";
+const MODEL_MANIFEST = "config/manifests/builtin.models.jsonc";
+const LORA_MANIFEST = "config/manifests/builtin.loras.jsonc";
 
 // -- JSONC parsing (manifests carry // comments). Mirrors scripts/check-no-nc-weights.mjs. --
 function stripJsoncComments(body) {
@@ -141,32 +146,62 @@ async function main() {
     ? process.argv[process.argv.indexOf("--model") + 1]
     : null;
 
-  const manifest = JSON.parse(stripJsoncComments(await readFile(path.join(root, MANIFEST), "utf8")));
   const failures = [];
   const unreachable = [];
   let repos = 0;
   let patterns = 0;
 
-  for (const model of manifest.models ?? []) {
-    if (only && model.id !== only) continue;
+  // Flatten both manifests to a common shape: { label, repo, declared[] }. A model declares
+  // `downloads[].files`; a LoRA declares `source.file` (one) or `source.files` (a list).
+  const claims = [];
+  const models = JSON.parse(
+    stripJsoncComments(await readFile(path.join(root, MODEL_MANIFEST), "utf8")),
+  );
+  for (const model of models.models ?? []) {
     for (const download of model.downloads ?? []) {
       if (download.provider !== "huggingface") continue;
-      const declared = download.files ?? [];
-      // An empty `files` list is a deliberate whole-repo download, not an omission —
-      // there is no per-pattern claim to verify.
-      if (declared.length === 0) continue;
-      const { files, error } = await repoFiles(download.repo);
-      if (error) {
-        unreachable.push(`${model.id}/${download.variant ?? "-"}  ${download.repo}  (${error})`);
-        continue;
-      }
-      repos += 1;
-      for (const pattern of declared) {
-        patterns += 1;
-        const regexp = patternToRegExp(pattern);
-        if (!files.some((file) => regexp.test(file))) {
-          failures.push(`${model.id}/${download.variant ?? "-"}  ${download.repo}  ${pattern}`);
-        }
+      claims.push({
+        id: model.id,
+        label: `${model.id}/${download.variant ?? "-"}`,
+        repo: download.repo,
+        declared: download.files ?? [],
+      });
+    }
+  }
+  const loras = JSON.parse(
+    stripJsoncComments(await readFile(path.join(root, LORA_MANIFEST), "utf8")),
+  );
+  for (const lora of loras.loras ?? []) {
+    const source = lora.source ?? {};
+    const provider = source.provider ?? lora.provider;
+    const repo = source.repo ?? lora.repo;
+    if (provider !== "huggingface" || !repo) continue;
+    const single = source.file ?? lora.file;
+    claims.push({
+      id: lora.id,
+      label: `lora:${lora.id}`,
+      repo,
+      declared: single ? [single] : (source.files ?? lora.files ?? []),
+    });
+  }
+
+  for (const claim of claims) {
+    if (only && claim.id !== only) continue;
+    // An empty declaration is a deliberate whole-repo fetch, not an omission — there is no
+    // per-pattern claim to verify. (The worker's aggregate zero-file check still covers an
+    // empty repo at download time.)
+    if (claim.declared.length === 0) continue;
+    const { files, error } = await repoFiles(claim.repo);
+    if (error) {
+      unreachable.push(`${claim.label}  ${claim.repo}  (${error})`);
+      continue;
+    }
+    repos += 1;
+    for (const pattern of claim.declared) {
+      patterns += 1;
+      const regexp = patternToRegExp(pattern);
+      if (!files.some((file) => regexp.test(file))) {
+        failures.push(`${claim.label}  ${claim.repo}  ${pattern}`);
       }
     }
   }
