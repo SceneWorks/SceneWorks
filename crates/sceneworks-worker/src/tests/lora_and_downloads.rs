@@ -1272,6 +1272,98 @@ async fn model_download_fails_when_one_declared_pattern_matches_nothing() {
     assert!(!blames_matched, "only the unmatched pattern should be named");
 }
 
+#[tokio::test]
+async fn lora_download_fails_when_the_declared_adapter_is_absent() {
+    // sc-12288: this path had NO zero-file check. A LoRA whose declared `source.file` is gone from
+    // the repo (renamed upstream / typo'd entry / unpublished) resolved zero files, downloaded
+    // nothing, and reported the job COMPLETED — while the catalog still read "not installed", because
+    // the install probe finds an empty cache. A success post for a fetch of nothing is the bug.
+    let temp = tempdir().expect("tempdir creates");
+    // The repo exists but holds a DIFFERENT adapter than the one declared.
+    let (base_url, posts) =
+        spawn_tree_stub_with_files(vec![("some-other-adapter.safetensors", 8)]).await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url.clone();
+    settings.data_dir = temp.path().to_path_buf();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+
+    let mut job_json = job_snapshot_json("job-1", false);
+    job_json["type"] = json!("lora_download");
+    job_json["payload"] = json!({
+        "loraId": "ltx_2_3_ic_union_control",
+        "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+        "files": ["ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"],
+    });
+    let job: JobSnapshot = serde_json::from_value(job_json).expect("job deserializes");
+
+    super::model_jobs::run_lora_download_job(&api, &settings, &client, &job)
+        .await
+        .expect("returns Ok — the failure is reported via a progress post, not an Err");
+
+    let posts = posts.lock().expect("posts lock");
+    let failed = posts.iter().any(|post| {
+        post.get("status").and_then(Value::as_str) == Some("failed")
+            && post
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("No files to download for LoRA"))
+    });
+    assert!(failed, "expected a failed progress post, got {posts:?}");
+    // The job must NOT also report success — that is the whole defect.
+    let completed = posts
+        .iter()
+        .any(|post| post.get("status").and_then(Value::as_str) == Some("completed"));
+    assert!(!completed, "a fetch of nothing must never report completed");
+}
+
+#[tokio::test]
+async fn lora_download_fails_when_one_of_several_declared_files_is_absent() {
+    // sc-12288: `create_lora_download_job` accepts an explicit `files` LIST and the filter ORs across
+    // it, so a multi-file adapter that landed one half and not the other passes the aggregate
+    // zero-file check and completes as a torn install. Same gap as sc-12283, LoRA side.
+    let temp = tempdir().expect("tempdir creates");
+    let (base_url, posts) = spawn_tree_stub_with_files(vec![("high_noise.safetensors", 8)]).await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url.clone();
+    settings.data_dir = temp.path().to_path_buf();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+
+    let mut job_json = job_snapshot_json("job-1", false);
+    job_json["type"] = json!("lora_download");
+    job_json["payload"] = json!({
+        "loraId": "pair",
+        "repo": "owner/pair",
+        "files": ["high_noise.safetensors", "low_noise.safetensors"],
+    });
+    let job: JobSnapshot = serde_json::from_value(job_json).expect("job deserializes");
+
+    super::model_jobs::run_lora_download_job(&api, &settings, &client, &job)
+        .await
+        .expect("returns Ok — the failure is reported via a progress post, not an Err");
+
+    let posts = posts.lock().expect("posts lock");
+    let failed = posts.iter().any(|post| {
+        post.get("status").and_then(Value::as_str) == Some("failed")
+            && post
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| {
+                    message.contains("Incomplete download for LoRA")
+                        && message.contains("low_noise.safetensors")
+                })
+    });
+    assert!(failed, "expected a failed post naming the absent half, got {posts:?}");
+    // The half that DID resolve must not be blamed.
+    let blames_present = posts.iter().any(|post| {
+        post.get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("nothing matches") && message.contains("high_noise"))
+    });
+    assert!(!blames_present, "only the absent file should be named");
+}
+
 /// A tree stub that paginates: page 1 (no cursor) returns bf16/q4 files plus a `Link: rel="next"`
 /// header pointing at page 2; page 2 (cursor=next) returns the q8 file and no further link.
 async fn spawn_paginated_tree_stub() -> String {
