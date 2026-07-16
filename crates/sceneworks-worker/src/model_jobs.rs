@@ -140,6 +140,50 @@ pub(crate) async fn run_model_download_job(
         .await?;
         return Ok(());
     }
+    // sc-12283: the same must hold PER PATTERN, not just in aggregate. `allow_pattern_matches` ORs
+    // across the filter, so a tier whose `q8/transformer/*` matched but whose `q8/tokenizer/*`
+    // matched NOTHING passed the check above, downloaded, completed, and wrote an install marker —
+    // leaving a tier that is "installed" by every marker we keep and unloadable in practice. (The
+    // load-side half of that failure is sc-12279, which now falls back to a complete sibling tier;
+    // this stops the torn tier being created in the first place.)
+    //
+    // Testing each pattern against the RESOLVED files is sound: `snapshot.files` is every remote file
+    // matching ANY pattern, so a pattern with no match among them matched none in the repo.
+    //
+    // Safe to hard-fail: swept all 217 `downloads[].files` patterns across the 53 HF repos that
+    // declare one (builtin.models.jsonc, comment-stripped through this workspace's own
+    // `strip_jsonc_comments`) — every pattern matches at least one file today, so no download that
+    // works now begins to fail. A future entry that trips this is a real publishing gap, and failing
+    // loudly at download beats a phantom install the user only discovers at generation time.
+    let unmatched = files
+        .iter()
+        .filter(|pattern| {
+            !snapshot
+                .files
+                .iter()
+                .any(|file| pattern_matches(pattern, &file.path))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unmatched.is_empty() {
+        fail_job(
+            api,
+            &job.id,
+            &format!(
+                "Incomplete download for {repo}: nothing matches {}. Installing it would leave a \
+                 partial model that fails to load.",
+                unmatched.join(", ")
+            ),
+            Some(format!(
+                "{} of the {} declared file patterns matched zero files in the Hugging Face \
+                 repository/revision.",
+                unmatched.len(),
+                files.len()
+            )),
+        )
+        .await?;
+        return Ok(());
+    }
     if let Some(total_bytes) = snapshot.total_bytes() {
         update_job(
             api,
