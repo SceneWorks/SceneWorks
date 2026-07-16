@@ -6984,6 +6984,162 @@
       }
     },
     {
+      "id": "mochi_1",
+      "name": "Mochi 1",
+      // ~53.5 GB for a full install (any one tier + the shared T5-XXL/VAE/tokenizer). Badged but
+      // unchecked in the wizard so the big download stays a deliberate opt-in, like LTX.
+      "autoDownload": false,
+      "family": "mochi",
+      "type": "video",
+      "adapter": "mochi_video",
+      // Text-to-video ONLY. Both descriptors declare `conditioning: []` (no image/reference/clip
+      // conditioning kinds), so there is no i2v / first-last-frame / extend / bridge / replace surface.
+      "capabilities": ["text_to_video"],
+      "licenseUrl": "https://huggingface.co/genmo/mochi-1-preview/blob/main/LICENSE",
+      // ONE repo serves BOTH backends (epic 1788 / A6, sc-11990). This deliberately DEVIATES from the
+      // LTX template, where macOS pulls the MLX rehost and Windows/Linux pull the upstream torch repo:
+      // A6 gave the candle backend a `.scales`-detect seam that ingests the mlx-affine tiers directly
+      // (keys 1:1, no remap), validated end-to-end on Windows/Blackwell by downloading THIS repo
+      // byte-exact. `SceneWorks/mochi-1-candle` was planned but never published. Pointing every
+      // platform here also sidesteps sc-12113: upstream `genmo/mochi-1-preview` ships BOTH a bf16 and
+      // an fp32 `vae/`, and the loader's dir-glob picks fp32 non-deterministically — the rehost ships
+      // bf16 only, so the app stays on the blessed regime by construction.
+      //
+      // No entry carries `platforms`, i.e. every entry is platform-agnostic and always kept
+      // (`retain_downloads_for_os` is a no-op when nothing is tagged) — that IS the "one repo, both
+      // backends" statement.
+      "downloads": [
+        // Shared T5-XXL text encoder + tokenizer + AsymmVAE (~10.4 GB), a `coRequisite` (sc-9696):
+        // fetched alongside whichever tier(s) the user picks, tracked once, excluded from the tier
+        // matrix, and NOT double-counted in the per-tier footprint. The tier dirs hold ONLY the
+        // transformer; the loader reads the tier's `split_model.json` and resolves these shared
+        // components from the tier dir's PARENT, so they must install as siblings of `q4/`/`q8/`/`bf16/`.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/mochi-1-mlx",
+          "coRequisite": true,
+          "files": ["text_encoder/*", "tokenizer/*", "vae/*"],
+          "estimatedSizeBytes": 10445037860
+        },
+        // Quant matrix (epic 8506 convention): each tier is a SEPARATE user-selectable artifact tagged
+        // with a `variant`; `q4` (default) installs when no tier is chosen. Tiers ship PRE-QUANTIZED —
+        // both descriptors set `supported_quants: &[]`, so `advanced.mlxQuantize` selects a tier DIR and
+        // the loader only ASSERTS the tier's baked-in level (hard-errors on mismatch). There is no
+        // on-the-fly requant. Sizes are the exact hosted subdir bytes (HF API, repo rev 90a87786).
+        // footprint memory is null = NOT yet measured on-device; B5's real e2e run should backfill it.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/mochi-1-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 9670883602,
+          "footprint": { "diskSizeBytes": 9670883602, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/mochi-1-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 13282967046,
+          "footprint": { "diskSizeBytes": 13282967046, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/mochi-1-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 20055485000,
+          "footprint": { "diskSizeBytes": 20055485000, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/mochi-1-mlx"
+      },
+      "defaults": {
+        // 5 s x 30 fps = 150 raw frames, which `mochi_frame_count` (B3, sc-11993) snaps to 151 — see
+        // the frame-lattice note under `limits`.
+        "duration": 5,
+        "fps": 30,
+        "resolution": "848x480",
+        "quality": "balanced",
+        // The AsymmDiT's own default (mlx-gen-mochi DEFAULT_STEPS). Guidance is NOT declared here: no
+        // manifest entry carries a `defaults.guidance` and nothing reads one — the engine's
+        // DEFAULT_GUIDANCE (4.5) applies when the request omits it.
+        "steps": 64
+      },
+      "limits": {
+        // Durations stay INTEGER SECONDS like every other video model; the worker snaps the frame count
+        // onto the engine's temporal stride. Mochi's AsymmVAE is 6x temporal, so the engine hard-rejects
+        // any count that is not `1 + 6k` (mlx-gen-mochi `validate_request`). `mochi_frame_count` (B3,
+        // sc-11993) is the snap, the sibling of the existing `ltx_frame_count` (8k+1) / `wan_frame_count`
+        // (4k+1) — the lattice lives in CODE, matching those two, not in a manifest field. At 30 fps every
+        // integer second sits exactly 1 frame below a lattice point (30d is always divisible by 6), so the
+        // snap costs +1 frame (~0.03 s): the 5 s default renders 151 frames.
+        "durations": [1, 2, 3, 4, 5],
+        // Mochi's native design point is 163 frames @ 30 fps (~5.4 s); 5 s is the closest integer second
+        // and the practical ceiling. Longer is both out-of-distribution and memory-infeasible — the
+        // AsymmVAE decode is NOT tiled, so its peak grows linearly in frames (see mlx.minMemoryGb).
+        "recommendedMaxDuration": 5,
+        "hardMaxDuration": 5,
+        // 30 fps only. `frames = duration x fps`, so fps multiplies into the generated LENGTH here — a
+        // second value would silently change clip length AND play a 30 fps motion prior off-speed.
+        // (Wan TI2V-5B is the precedent for a single-fps video model.)
+        "fps": [30],
+        // 848x480 is Mochi's native — and only — trained bucket; it is a 480p model. Both axes divide by
+        // 16, as the engine requires.
+        "resolutions": ["848x480", "480x848"],
+        "requiresDimensionsMultipleOf": 16
+        // NO sampler/scheduler axis: both descriptors advertise `samplers: []` + `schedulers: []` — one
+        // fixed flow-match Euler integrator. Advertising a sampler menu would be a false capability, and
+        // `manifest_menu_is_subset_of_descriptor` enforces that.
+      },
+      "loraCompatibility": {
+        // Both descriptors set supports_lora/supports_lokr = false — there is no Mochi adapter path on
+        // either backend. Declare the family anyway so the picker never offers cross-architecture LoRAs
+        // (per sc-1927), exactly like SVD.
+        "families": ["mochi"],
+        "types": []
+      },
+      "mlx": {
+        // Turnkey pre-converted MLX repo (no requiresConversion); the same repo feeds the candle lane.
+        "repo": "SceneWorks/mochi-1-mlx",
+        "standardTierLayout": true,
+        // DERIVED, NOT MEASURED (no on-device production-bucket run exists yet — A6's parity ran at a
+        // 64x64x7 fixture geometry; B5's real e2e should confirm or correct this). Derivation for the
+        // DEFAULT q4 tier at the default 848x480 / 5 s bucket, the convention this field follows:
+        //   * weights, ALL resident (`supports_sequential_offload: false` — the engine loads T5-XXL, the
+        //     AsymmDiT and the VAE up front and holds them for the whole generation): q4 DiT 9.01 GiB +
+        //     T5-XXL bf16 8.87 GiB + VAE 0.86 GiB = ~18.7 GiB.
+        //   * denoise activations are small (~1.5 GiB): 151 frames -> 44.5k visual tokens x 3072, x2 for
+        //     true CFG, with fused SDPA.
+        //   * the AsymmVAE decode DOMINATES and is NOT tiled — `vae.decode(latents)` materializes the
+        //     whole clip. The final decoder stage runs 128 channels at FULL resolution (T+5, 480, 848),
+        //     i.e. ~16.3 GiB per bf16 tensor, and a resnet holds residual + intermediate live at once, so
+        //     the decode peaks ~33-49 GiB before Metal conv scratch.
+        // ~18.7 + ~49 = ~68 GiB active, and the SCAIL-2 precedent (76 GB measured -> 96 declared) says the
+        // process footprint runs above the active peak. 96 is the floor that fits with headroom. NOTE the
+        // Model Manager SUPPRESSES this blanket badge for tier-matrix models (sc-10042) and drives RAM
+        // guidance off the per-tier `footprint` instead, so this is primarily documentation until those
+        // are measured. Tiling the decode (the sc-11747 / sc-10087 pattern) would cut this sharply.
+        "minMemoryGb": 96
+      },
+      "ui": {
+        "label": "Mochi 1",
+        "description": "Genmo Mochi 1 — a 10B AsymmDiT text-to-video model with a 6x-temporal AsymmVAE, native on Apple Silicon (MLX) and Windows/Linux (candle/CUDA). Renders 848x480 at 30 fps. Apache-2.0: commercial use free, ungated. Text-to-video only (no image conditioning) and no LoRA support. ~53.5 GB installed; needs ample memory — the VAE decode is untiled, so peak scales with clip length.",
+        "recommendedFor": ["text_to_video"],
+        "durationHint": "Native design point is ~5s at 848x480 / 30 fps. Shorter clips cut memory roughly linearly — start at 1-2s if you are memory-constrained.",
+        "promptGuide": {
+          "title": "Mochi 1 Prompt Guide",
+          "path": "/prompt-guides/mochi-1.md",
+          "sources": [
+            { "label": "Mochi 1 model card", "url": "https://huggingface.co/genmo/mochi-1-preview" },
+            { "label": "Genmo Mochi 1 GitHub repo", "url": "https://github.com/genmoai/mochi" }
+          ]
+        }
+      }
+    },
+    {
       "id": "real_esrgan",
       "recommended": true,
       "name": "Real-ESRGAN Upscaler",

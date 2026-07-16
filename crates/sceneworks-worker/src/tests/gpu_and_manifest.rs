@@ -1752,3 +1752,288 @@ fn bernini_manifest_ships_the_quant_matrix() {
         assert_eq!(defaults, vec!["q4"], "{id} macOS default tier is q4");
     }
 }
+
+/// sc-11991 (epic 1788): the Mochi 1 builtin entry. Mochi deliberately DIVERGES from every
+/// quant-matrix sibling above in ways a well-meaning "make it consistent with LTX" edit would undo,
+/// so each divergence is pinned here:
+///
+///  * **One repo, BOTH backends.** Every download points at `SceneWorks/mochi-1-mlx` and NO entry
+///    carries `platforms`. A6 (sc-11990) gave candle a `.scales`-detect seam that ingests the
+///    mlx-affine tiers directly, CUDA-validated on Blackwell by downloading this repo byte-exact;
+///    `SceneWorks/mochi-1-candle` was never published. Re-adding an LTX-style
+///    `genmo/mochi-1-preview` Windows entry would also reintroduce sc-12113 (upstream ships bf16 AND
+///    fp32 `vae/`; the loader's dir-glob picks fp32).
+///  * **Tiers hold ONLY the transformer.** T5-XXL / VAE / tokenizer are a shared `coRequisite`
+///    (sc-9696) resolved from the tier dir's PARENT, so they must stay OUT of the tier matrix and out
+///    of the per-tier footprint.
+///  * **No sampler/scheduler axis.** Both descriptors advertise `samplers: []` + `schedulers: []`
+///    (one fixed flow-match Euler integrator) — advertising a menu would be a false capability.
+///  * **t2v only, no LoRA.** `conditioning: []` and `supports_lora`/`supports_lokr` = false.
+#[test]
+fn mochi_manifest_ships_the_one_repo_tier_matrix() {
+    let entry = builtin_model_entry("mochi_1");
+    assert_eq!(
+        entry.get("family").and_then(Value::as_str),
+        Some("mochi"),
+        "mochi family"
+    );
+    assert_eq!(
+        entry.get("type").and_then(Value::as_str),
+        Some("video"),
+        "mochi is a video model"
+    );
+    // t2v ONLY — both descriptors declare `conditioning: []`, so there is no i2v/FLF/extend surface.
+    let capabilities: Vec<&str> = entry
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .map(|c| c.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        capabilities,
+        vec!["text_to_video"],
+        "mochi advertises text_to_video and nothing else"
+    );
+    // Apache-2.0 => ungated, no credential host.
+    assert_ne!(
+        entry.get("gated").and_then(Value::as_bool),
+        Some(true),
+        "mochi is Apache-2.0, not gated"
+    );
+    // ~53.5 GB installed — a deliberate opt-in, like LTX.
+    assert_eq!(
+        entry.get("autoDownload").and_then(Value::as_bool),
+        Some(false),
+        "mochi is not auto-downloaded"
+    );
+
+    let downloads = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .expect("mochi downloads");
+    // ONE repo, BOTH backends: every entry is the rehost and NONE is platform-tagged, so
+    // `retain_downloads_for_os` keeps them all on macOS, Windows and Linux alike.
+    for download in downloads {
+        assert_eq!(
+            download.get("repo").and_then(Value::as_str),
+            Some("SceneWorks/mochi-1-mlx"),
+            "every mochi download comes from the one rehost repo (candle ingests the mlx tiers)"
+        );
+        assert!(
+            download.get("platforms").is_none(),
+            "mochi downloads stay platform-agnostic — one repo serves both backends"
+        );
+    }
+
+    // The shared T5-XXL / tokenizer / VAE co-requisite: fetched with any tier, excluded from the
+    // tier matrix, and NOT a selectable variant.
+    let corequisites: Vec<&Value> = downloads
+        .iter()
+        .filter(|d| d.get("coRequisite").and_then(Value::as_bool) == Some(true))
+        .collect();
+    assert_eq!(
+        corequisites.len(),
+        1,
+        "exactly one mochi co-requisite (the shared text_encoder/tokenizer/vae)"
+    );
+    let shared_files: Vec<&str> = corequisites[0]
+        .get("files")
+        .and_then(Value::as_array)
+        .map(|f| f.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        shared_files,
+        vec!["text_encoder/*", "tokenizer/*", "vae/*"],
+        "the co-requisite carries the shared components the tier dirs resolve from their parent"
+    );
+    assert!(
+        corequisites[0].get("variant").is_none(),
+        "the shared co-requisite is not a selectable quant tier"
+    );
+
+    // The tier matrix: q4 (default) / q8 / bf16, each installing only its own transformer subdir,
+    // with the EXACT hosted subdir byte sizes (HF API, repo rev 90a87786).
+    let tiers: Vec<&Value> = downloads
+        .iter()
+        .filter(|d| d.get("coRequisite").and_then(Value::as_bool) != Some(true))
+        .collect();
+    let variants: Vec<&str> = tiers
+        .iter()
+        .filter_map(|d| d.get("variant").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        variants,
+        vec!["q4", "q8", "bf16"],
+        "mochi ships the q4/q8/bf16 tier matrix"
+    );
+    let expected_sizes = [
+        ("q4", 9_670_883_602_u64),
+        ("q8", 13_282_967_046),
+        ("bf16", 20_055_485_000),
+    ];
+    for (tier, expected) in expected_sizes {
+        let entry = tiers
+            .iter()
+            .find(|d| d.get("variant").and_then(Value::as_str) == Some(tier))
+            .unwrap_or_else(|| panic!("mochi {tier} tier"));
+        let files: Vec<String> = entry
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|f| f.iter().filter_map(Value::as_str).map(String::from).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            files,
+            vec![format!("{tier}/*")],
+            "{tier} tier installs only its own subdir (the shared components ride the co-requisite)"
+        );
+        assert_eq!(
+            entry.get("estimatedSizeBytes").and_then(Value::as_u64),
+            Some(expected),
+            "{tier} tier declares the exact hosted subdir size"
+        );
+        assert_eq!(
+            entry
+                .get("footprint")
+                .and_then(|f| f.get("diskSizeBytes"))
+                .and_then(Value::as_u64),
+            Some(expected),
+            "{tier} tier footprint.diskSizeBytes matches its download size"
+        );
+    }
+    let defaults: Vec<&str> = tiers
+        .iter()
+        .filter(|d| d.get("default").and_then(Value::as_bool) == Some(true))
+        .filter_map(|d| d.get("variant").and_then(Value::as_str))
+        .collect();
+    assert_eq!(defaults, vec!["q4"], "the default mochi tier is q4");
+
+    // limits: the engine hard-rejects width/height not divisible by 16, so every advertised bucket
+    // must satisfy it. NO sampler/scheduler axis (both descriptors advertise neither).
+    let limits = entry
+        .get("limits")
+        .and_then(Value::as_object)
+        .expect("mochi limits");
+    assert!(
+        limits.get("samplers").is_none() && limits.get("schedulers").is_none(),
+        "mochi advertises NO sampler/scheduler axis — one fixed flow-match Euler integrator"
+    );
+    assert_eq!(
+        limits.get("requiresDimensionsMultipleOf").and_then(Value::as_u64),
+        Some(16),
+        "mochi requires dimensions divisible by 16"
+    );
+    let resolutions: Vec<&str> = limits
+        .get("resolutions")
+        .and_then(Value::as_array)
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        resolutions,
+        vec!["848x480", "480x848"],
+        "mochi advertises only its native 480p bucket"
+    );
+    for resolution in &resolutions {
+        let (w, h) = resolution.split_once('x').expect("WxH resolution");
+        for axis in [w, h] {
+            let value: u32 = axis.parse().expect("numeric axis");
+            assert_eq!(value % 16, 0, "{resolution} axis {axis} divides by 16");
+        }
+    }
+    // 30 fps only: `frames = duration * fps`, so a second value would silently change clip length.
+    let fps: Vec<u64> = limits
+        .get("fps")
+        .and_then(Value::as_array)
+        .map(|f| f.iter().filter_map(Value::as_u64).collect())
+        .unwrap_or_default();
+    assert_eq!(fps, vec![30], "mochi is a 30 fps model");
+
+    // defaults must be drawn from the advertised menus, or the studio opens on an invalid request.
+    let defaults_block = entry
+        .get("defaults")
+        .and_then(Value::as_object)
+        .expect("mochi defaults");
+    assert_eq!(
+        defaults_block.get("resolution").and_then(Value::as_str),
+        Some("848x480"),
+        "mochi defaults to its native bucket"
+    );
+    assert_eq!(
+        defaults_block.get("fps").and_then(Value::as_u64),
+        Some(30),
+        "mochi defaults to 30 fps"
+    );
+    assert_eq!(
+        defaults_block.get("steps").and_then(Value::as_u64),
+        Some(64),
+        "mochi defaults to the engine's DEFAULT_STEPS"
+    );
+    let durations: Vec<u64> = limits
+        .get("durations")
+        .and_then(Value::as_array)
+        .map(|d| d.iter().filter_map(Value::as_u64).collect())
+        .unwrap_or_default();
+    let default_duration = defaults_block
+        .get("duration")
+        .and_then(Value::as_u64)
+        .expect("mochi default duration");
+    assert!(
+        durations.contains(&default_duration),
+        "the default duration {default_duration} is one of the advertised {durations:?}"
+    );
+
+    // No Mochi adapter path on either backend, but the family is declared so the picker never offers
+    // cross-architecture LoRAs (sc-1927) — the SVD posture.
+    let lora = entry
+        .get("loraCompatibility")
+        .and_then(Value::as_object)
+        .expect("mochi loraCompatibility");
+    assert_eq!(
+        lora.get("families")
+            .and_then(Value::as_array)
+            .map(|f| f.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
+        Some(vec!["mochi"]),
+        "mochi declares its own LoRA family"
+    );
+    assert_eq!(
+        lora.get("types")
+            .and_then(Value::as_array)
+            .map(|t| t.len()),
+        Some(0),
+        "mochi supports no LoRA types (supports_lora/supports_lokr are false on both backends)"
+    );
+
+    let mlx = entry
+        .get("mlx")
+        .and_then(Value::as_object)
+        .expect("mochi mlx block");
+    assert_eq!(
+        mlx.get("repo").and_then(Value::as_str),
+        Some("SceneWorks/mochi-1-mlx"),
+        "mochi mlx repo"
+    );
+    assert_eq!(
+        mlx.get("standardTierLayout").and_then(Value::as_bool),
+        Some(true),
+        "mochi ships the standard q4/q8/bf16 turnkey tier layout"
+    );
+    assert!(
+        mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
+        "mochi declares mlx.minMemoryGb"
+    );
+
+    // The prompt guide is served as a static file from apps/web/public; a typo'd path is a silent
+    // 404 in the studio (nothing else in the repo reads `promptGuide`), so pin THIS entry's path.
+    let guide = entry
+        .get("ui")
+        .and_then(|ui| ui.get("promptGuide"))
+        .and_then(|g| g.get("path"))
+        .and_then(Value::as_str)
+        .expect("mochi ui.promptGuide.path");
+    let guide_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/web/public")
+        .join(guide.trim_start_matches('/'));
+    assert!(
+        guide_file.is_file(),
+        "mochi prompt guide {guide} resolves to a real file ({})",
+        guide_file.display()
+    );
+}

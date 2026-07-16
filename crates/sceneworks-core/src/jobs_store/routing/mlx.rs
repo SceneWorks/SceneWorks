@@ -629,6 +629,13 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     if model == "scail2_14b" {
         return matches!(mode, "animate_character" | "replace_person");
     }
+    // Mochi 1 (epic 1788 / sc-11991) is TEXT-conditioned only: both descriptors declare
+    // `conditioning: []`, so the engine has no image/keyframe/clip path at all — not even the classic
+    // still-image-to-video the generic arm below would otherwise grant it. Anything but
+    // `text_to_video` is a gap, so it needs its own arm rather than the `svd`-style inversion.
+    if model == "mochi_1" {
+        return mode == "text_to_video";
+    }
     match mode {
         "text_to_video" | "image_to_video" => true,
         "first_last_frame" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),

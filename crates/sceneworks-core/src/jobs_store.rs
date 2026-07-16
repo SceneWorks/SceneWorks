@@ -4899,8 +4899,11 @@ mod candle_routing_tests {
 
     #[test]
     fn candle_routed_video_models_are_eligible_in_their_native_shape() {
-        // txt2video lane: the 5B, ltx, and the 14B T2V (text-only) are eligible for text_to_video.
-        for model in ["wan_2_2", "ltx_2_3", "wan_2_2_t2v_14b"] {
+        // txt2video lane: the 5B, ltx, the 14B T2V (text-only), and Mochi are eligible for
+        // text_to_video. Mochi (sc-11991) is on the candle lane because its CANDLE descriptor is
+        // `mac_only: false` — the off-Mac engine ingests the same hosted mlx-affine tiers, so Mochi
+        // must NOT be hard mac-gated even though its MLX descriptor is `mac_only: true`.
+        for model in ["wan_2_2", "ltx_2_3", "wan_2_2_t2v_14b", "mochi_1"] {
             assert!(
                 video_request_candle_eligible(
                     model,
@@ -4999,6 +5002,22 @@ mod candle_routing_tests {
             ),
             "svd (no candle LoRA slot) must fall back to torch on an i2v+LoRA shape"
         );
+        // Mochi 1 (sc-11991) is txt2video-only with NO candle LoRA slot (both descriptors set
+        // `supports_lora`/`supports_lokr` = false), so every conditioned or LoRA-carrying shape is
+        // refused — there is no torch fallback for it (epic 8283), it simply is not candle-claimed.
+        for case in [
+            json!({ "prompt": "p" }), // no mode → defaults to i2v
+            json!({ "mode": "image_to_video", "sourceAssetId": "a" }),
+            json!({ "mode": "first_last_frame" }),
+            json!({ "mode": "text_to_video", "sourceAssetId": "a" }),
+            json!({ "mode": "text_to_video", "referenceAssetId": "a" }),
+            json!({ "mode": "text_to_video", "loras": [{ "name": "x" }] }),
+        ] {
+            assert!(
+                !video_request_candle_eligible("mochi_1", &object(case.clone())),
+                "mochi_1 non-t2v/conditioned shape must not be candle-claimed: {case}"
+            );
+        }
     }
 
     #[test]
@@ -6843,13 +6862,14 @@ mod mlx_routing_tests {
     #[test]
     fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
         // image_to_video is MLX on every routed model EXCEPT Bernini (text_to_video only — its
-        // renderer is Wan2.2-T2V, no still-image-to-video) and SCAIL-2 (animate_character only);
+        // renderer is Wan2.2-T2V, no still-image-to-video), SCAIL-2 (animate_character only) and
+        // Mochi (text_to_video only — `conditioning: []` on both descriptors, sc-11991);
         // text_to_video on every routed model EXCEPT SVD (image-conditioned only, sc-3523) and
         // SCAIL-2 (animate_character only — sc-5448).
         for model in VIDEO_MLX_ROUTED_MODELS {
             assert_eq!(
                 video_mode_is_mlx_eligible(model, "image_to_video"),
-                *model != "bernini" && *model != "scail2_14b",
+                *model != "bernini" && *model != "scail2_14b" && *model != "mochi_1",
                 "image_to_video eligibility for {model}"
             );
             assert_eq!(
@@ -6948,6 +6968,28 @@ mod mlx_routing_tests {
             assert!(
                 !video_mode_is_mlx_eligible(model, "animate_character"),
                 "animate_character should be SCAIL-2-only, not eligible on {model}"
+            );
+        }
+        // Mochi 1 (sc-11991) serves text_to_video and NOTHING else: both descriptors declare
+        // `conditioning: []`, so the engine has no image/keyframe/clip path — it must not fall
+        // through to the generic `text_to_video | image_to_video => true` arm.
+        assert!(
+            video_mode_is_mlx_eligible("mochi_1", "text_to_video"),
+            "mochi should serve text_to_video"
+        );
+        for mode in [
+            "image_to_video",
+            "first_last_frame",
+            "extend_clip",
+            "video_bridge",
+            "replace_person",
+            "animate_character",
+            "video_to_video",
+            "nonsense",
+        ] {
+            assert!(
+                !video_mode_is_mlx_eligible("mochi_1", mode),
+                "mochi is text_to_video only and should not serve {mode}"
             );
         }
         // first_last_frame: MLX on LTX (base + eros) + Wan TI2V-5B (sc-3055 cutover).
