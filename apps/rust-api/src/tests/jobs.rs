@@ -38,6 +38,78 @@ async fn image_and_video_jobs_reject_path_unsafe_model_id() {
     }
 }
 
+/// sc-12305: the generic `POST /api/v1/jobs` enqueues `type` + payload verbatim — no
+/// manifest resolution — so a generation job through that door carries no
+/// `modelManifestEntry` and silently renders off-bucket (see the
+/// `mochi_without_manifest_entry_*` test in `video_request.rs` for the exact geometry).
+/// Every job type whose typed route injects an entry must be rejected here, pointed at
+/// that route. Covers image as well as video: `image_request.rs` reads the entry the same way.
+#[tokio::test]
+async fn generic_jobs_route_rejects_generation_types_with_their_typed_route() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    for (job_type, typed_route) in [
+        ("image_generate", "/api/v1/image/jobs"),
+        ("image_edit", "/api/v1/image/jobs"),
+        ("video_generate", "/api/v1/video/jobs"),
+        ("video_extend", "/api/v1/video/jobs"),
+        ("video_bridge", "/api/v1/video/jobs"),
+        ("person_replace", "/api/v1/video/jobs"),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": job_type,
+                "projectId": "project-1",
+                "requestedGpu": "auto",
+                "payload": { "model": "mochi_1", "prompt": "a fox", "width": 848, "height": 480 },
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{job_type} must be rejected"
+        );
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains(typed_route),
+            "{job_type}: error must name {typed_route}, got {body}"
+        );
+    }
+}
+
+/// The other half of the guard: the job types the generic route legitimately serves keep
+/// working. `image_upscale` / `image_detail` are the real web callers (batch ops), and
+/// neither has a typed door — so the sc-12305 rejection must not touch them.
+#[tokio::test]
+async fn generic_jobs_route_still_serves_non_generation_types() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    for job_type in ["image_upscale", "image_detail"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": job_type,
+                "requestedGpu": "auto",
+                "payload": { "sourceAssetId": "asset-1" },
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{job_type} must still enqueue: {body}"
+        );
+    }
+}
+
 #[test]
 fn serialize_job_lora_carries_network_type_to_payload() {
     // A trained LoKr adapter records networkType (epic 2193); the generation
@@ -167,6 +239,13 @@ async fn create_video_job_rejects_over_length_negative_prompt() {
         .is_some_and(|detail| detail.contains("negativePrompt")));
 }
 
+// The queue-lifecycle tests below drive `POST /api/v1/jobs` — claim, cancel, retry,
+// progress, clear, stale sweep. They need *a* GPU-routed claimable job and do not care
+// which; they use `image_detail` (a real caller of this route — the web batch ops post it)
+// rather than `image_generate`, which sc-12305 moved behind its typed route so the model's
+// manifest entry is always resolved. The worker `capabilities` match by job type
+// (`required_capability`), so the two move together.
+
 #[tokio::test]
 async fn worker_can_register_claim_and_complete_job_through_http() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -180,7 +259,7 @@ async fn worker_can_register_claim_and_complete_job_through_http() {
             "workerId": "worker-1",
             "gpuId": "gpu-0",
             "gpuName": "GPU 0",
-            "capabilities": ["image_generate"],
+            "capabilities": ["image_detail"],
             "loadedModels": []
         }),
     )
@@ -192,7 +271,7 @@ async fn worker_can_register_claim_and_complete_job_through_http() {
         "POST",
         "/api/v1/jobs",
         json!({
-            "type": "image_generate",
+            "type": "image_detail",
             "projectId": "project-1",
             "projectName": "Project 1",
             "payload": { "prompt": "mist over hills" },
@@ -253,7 +332,7 @@ async fn progress_ticks_only_republish_queue_on_status_change() {
             "workerId": "worker-1",
             "gpuId": "gpu-0",
             "gpuName": "GPU 0",
-            "capabilities": ["image_generate"],
+            "capabilities": ["image_detail"],
             "loadedModels": []
         }),
     )
@@ -263,7 +342,7 @@ async fn progress_ticks_only_republish_queue_on_status_change() {
         "POST",
         "/api/v1/jobs",
         json!({
-            "type": "image_generate",
+            "type": "image_detail",
             "projectId": "project-1",
             "projectName": "Project 1",
             "payload": { "prompt": "mist" },
@@ -334,7 +413,7 @@ async fn canceling_queued_job_finishes_without_worker_acknowledgement() {
         "POST",
         "/api/v1/jobs",
         json!({
-            "type": "image_generate",
+            "type": "image_detail",
             "projectId": "project-1",
             "projectName": "Project 1",
             "payload": { "prompt": "mist over hills" },
@@ -375,7 +454,7 @@ async fn canceling_queued_job_finishes_without_worker_acknowledgement() {
             "workerId": "worker-1",
             "gpuId": "gpu-0",
             "gpuName": "GPU 0",
-            "capabilities": ["image_generate"],
+            "capabilities": ["image_detail"],
             "loadedModels": []
         }),
     )
@@ -406,7 +485,7 @@ async fn clear_jobs_soft_hides_terminal_items_from_the_queue() {
         "POST",
         "/api/v1/jobs",
         json!({
-            "type": "image_generate",
+            "type": "image_detail",
             "projectId": "project-1",
             "projectName": "Project 1",
             "payload": { "prompt": "done" },
@@ -428,7 +507,7 @@ async fn clear_jobs_soft_hides_terminal_items_from_the_queue() {
         "POST",
         "/api/v1/jobs",
         json!({
-            "type": "image_generate",
+            "type": "image_detail",
             "projectId": "project-1",
             "projectName": "Project 1",
             "payload": { "prompt": "wait" },
@@ -478,7 +557,7 @@ async fn clear_jobs_scopes_to_the_requested_project() {
             "POST",
             "/api/v1/jobs",
             json!({
-                "type": "image_generate",
+                "type": "image_detail",
                 "projectId": project,
                 "projectName": project,
                 "payload": { "prompt": "done" },
@@ -542,7 +621,7 @@ async fn clear_single_job_soft_hides_only_that_terminal_job() {
             "POST",
             "/api/v1/jobs",
             json!({
-                "type": "image_generate",
+                "type": "image_detail",
                 "projectId": "project-1",
                 "projectName": "Project 1",
                 "payload": { "prompt": prompt },
@@ -595,7 +674,7 @@ async fn clear_single_job_rejects_a_non_terminal_job() {
         "POST",
         "/api/v1/jobs",
         json!({
-            "type": "image_generate",
+            "type": "image_detail",
             "projectId": "project-1",
             "projectName": "Project 1",
             "payload": { "prompt": "wait" },
@@ -3132,7 +3211,7 @@ async fn worker_heartbeat_interrupts_previous_active_job_through_http() {
             "workerId": "worker-1",
             "gpuId": "gpu-0",
             "gpuName": null,
-            "capabilities": ["image_generate"],
+            "capabilities": ["image_detail"],
             "loadedModels": []
         }),
     )
@@ -3141,7 +3220,7 @@ async fn worker_heartbeat_interrupts_previous_active_job_through_http() {
         app.clone(),
         "POST",
         "/api/v1/jobs",
-        json!({ "type": "image_generate", "payload": {}, "requestedGpu": "auto" }),
+        json!({ "type": "image_detail", "payload": {}, "requestedGpu": "auto" }),
     )
     .await;
     request(
@@ -3200,7 +3279,7 @@ async fn stale_sweep_broadcasts_job_updated_for_interrupted_jobs() {
             "workerId": "worker-1",
             "gpuId": "gpu-0",
             "gpuName": null,
-            "capabilities": ["image_generate"],
+            "capabilities": ["image_detail"],
             "loadedModels": []
         }),
     )
@@ -3209,7 +3288,7 @@ async fn stale_sweep_broadcasts_job_updated_for_interrupted_jobs() {
         app.clone(),
         "POST",
         "/api/v1/jobs",
-        json!({ "type": "image_generate", "payload": {}, "requestedGpu": "auto" }),
+        json!({ "type": "image_detail", "payload": {}, "requestedGpu": "auto" }),
     )
     .await;
     let job_id = created["id"].as_str().expect("job id is string").to_owned();
@@ -3264,7 +3343,7 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
             "workerId": "worker-1",
             "gpuId": "gpu-0",
             "gpuName": null,
-            "capabilities": ["image_generate"],
+            "capabilities": ["image_detail"],
             "loadedModels": []
         }),
     )
@@ -3273,7 +3352,7 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
         app.clone(),
         "POST",
         "/api/v1/jobs",
-        json!({ "type": "image_generate", "payload": {}, "requestedGpu": "auto" }),
+        json!({ "type": "image_detail", "payload": {}, "requestedGpu": "auto" }),
     )
     .await;
     let stale_job_id = created["id"].as_str().expect("job id is string").to_owned();
@@ -3296,7 +3375,7 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
             "workerId": "worker-2",
             "gpuId": "gpu-1",
             "gpuName": null,
-            "capabilities": ["image_generate"],
+            "capabilities": ["image_detail"],
             "loadedModels": []
         }),
     )
@@ -3305,7 +3384,7 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
         app.clone(),
         "POST",
         "/api/v1/jobs",
-        json!({ "type": "image_generate", "payload": {}, "requestedGpu": "auto" }),
+        json!({ "type": "image_detail", "payload": {}, "requestedGpu": "auto" }),
     )
     .await;
     tokio::time::sleep(Duration::from_millis(2_100)).await;

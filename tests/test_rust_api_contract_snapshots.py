@@ -1497,17 +1497,22 @@ def test_job_state_transition_contracts(contract_runtimes):
 
 
 def concurrent_claim_result(runtime: ContractRuntime) -> list[Any]:
+    # `image_detail` (not `image_generate`) is the claim-race fixture: this test needs *a*
+    # GPU-routed claimable job, and sc-12305 made the generic POST /api/v1/jobs reject the
+    # generation job types, whose typed routes resolve a model manifest entry the generic
+    # route cannot. image_detail is a real caller of this route (the web batch ops post it)
+    # and is GPU-routed, so the two-workers-one-gpu race below is unchanged.
     runtime.request(
         "POST",
         "/api/v1/workers/register",
-        json_payload={"workerId": "claim-worker-a", "gpuId": "gpu-0", "capabilities": ["image_generate"], "loadedModels": []},
+        json_payload={"workerId": "claim-worker-a", "gpuId": "gpu-0", "capabilities": ["image_detail"], "loadedModels": []},
     )
     runtime.request(
         "POST",
         "/api/v1/workers/register",
-        json_payload={"workerId": "claim-worker-b", "gpuId": "gpu-0", "capabilities": ["image_generate"], "loadedModels": []},
+        json_payload={"workerId": "claim-worker-b", "gpuId": "gpu-0", "capabilities": ["image_detail"], "loadedModels": []},
     )
-    runtime.request("POST", "/api/v1/jobs", json_payload={"type": "image_generate", "payload": {}, "requestedGpu": "auto"})
+    runtime.request("POST", "/api/v1/jobs", json_payload={"type": "image_detail", "payload": {}, "requestedGpu": "auto"})
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
             executor.submit(runtime.request, "POST", "/api/v1/jobs/claim", json_payload={"workerId": worker_id})

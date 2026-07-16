@@ -504,6 +504,42 @@ mod tests {
         assert_eq!((undeclared.width, undeclared.height), (832, 480));
     }
 
+    /// sc-12305 — the silent failure that justifies rejecting a generation job on the
+    /// generic `POST /api/v1/jobs`.
+    ///
+    /// That route enqueues `type` + payload verbatim, resolving no manifest entry (only the
+    /// typed `/api/v1/video/jobs` and `/api/v1/image/jobs` do). With the entry absent,
+    /// `dimension_multiple_of` misses `requiresDimensionsMultipleOf` and falls back to 32,
+    /// so Mochi's native — and only trained — 848x480 bucket renders as 832x480. The engine
+    /// never catches it: `832 % 16 == 0` satisfies its own ÷16 check, so there is no error,
+    /// just off-bucket inference.
+    ///
+    /// This pins the *reason* the API guard exists. It is deliberately asserted here, at the
+    /// geometry, rather than only at the route: if a future change ever makes an absent entry
+    /// safe (a distinguishable absent-vs-unknown signal — sc-12304), this test goes RED and
+    /// the guard can be revisited on evidence instead of belief.
+    #[test]
+    fn mochi_without_manifest_entry_silently_loses_its_native_bucket() {
+        let no_entry = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "mochi_1", "width": 848, "height": 480,
+        })));
+        assert_eq!(
+            (no_entry.width, no_entry.height),
+            (832, 480),
+            "an absent modelManifestEntry must still be the ÷32 fallback — if this changed, \
+             the sc-12305 API guard's premise changed with it"
+        );
+        // Silent, not loud: the engine's own divisibility check passes on the rewritten size.
+        assert_eq!(no_entry.width % 16, 0);
+
+        // The same payload through a typed route — which resolves the entry — keeps 848.
+        let with_entry = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "mochi_1", "width": 848, "height": 480,
+            "modelManifestEntry": { "family": "mochi", "limits": { "requiresDimensionsMultipleOf": 16 } }
+        })));
+        assert_eq!((with_entry.width, with_entry.height), (848, 480));
+    }
+
     #[test]
     fn honors_manifest_dimension_multiple_so_mochi_keeps_848() {
         // 848 % 32 == 16, so the blanket 32 floor silently rewrote Mochi's ONLY trained

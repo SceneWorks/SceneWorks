@@ -118,7 +118,7 @@ use training::{
 mod generation;
 use generation::{
     create_image_job, create_interleave_job, create_video_job, create_vqa_job,
-    parse_recipe_preset_resolution, JobCatalogSnapshot,
+    parse_recipe_preset_resolution, typed_generation_route, JobCatalogSnapshot,
 };
 #[cfg(test)]
 use generation::{validate_interleave_job, validate_vqa_job};
