@@ -62,27 +62,8 @@ fn flux1_no_metadata_safetensors_keys() -> Vec<String> {
 }
 
 #[test]
-fn hf_cli_windows_encoding_failures_are_detected() {
-    let stderr = "Fetching 28 files: 100%|##########| 28/28 [00:00<00:00, 14016.05it/s]\n\
-                  Error: Invalid value. 'charmap' codec can't encode character '\\u2713' \
-                  in position 5: character maps to <undefined>";
-
-    assert!(hf_cli_encoding_failure(stderr));
-    assert!(!hf_cli_encoding_failure("Error: Repository not found."));
-}
-
-#[test]
-fn hf_cli_environment_forces_python_utf8_output() {
-    let env: HashMap<_, _> = HF_CLI_UTF8_ENV.into_iter().collect();
-
-    assert_eq!(env.get("PYTHONUTF8"), Some(&"1"));
-    assert_eq!(env.get("PYTHONIOENCODING"), Some(&"utf-8"));
-    assert_eq!(env.get("HF_HUB_DISABLE_PROGRESS_BARS"), Some(&"1"));
-}
-
-#[test]
-fn hf_cli_download_inputs_accept_catalog_values() {
-    validate_hf_cli_download_inputs(
+fn hf_download_inputs_accept_catalog_values() {
+    validate_hf_download_inputs(
         "black-forest-labs/FLUX.1-dev",
         "refs/pr/12",
         &[
@@ -95,14 +76,14 @@ fn hf_cli_download_inputs_accept_catalog_values() {
 }
 
 #[test]
-fn hf_cli_download_inputs_reject_option_injection() {
+fn hf_download_inputs_reject_option_injection() {
     for repo in ["--local-dir=/Users/me/.ssh", "owner/--local-dir=/tmp/out"] {
-        let error = validate_hf_cli_download_inputs(repo, "main", &["*.safetensors".to_owned()])
+        let error = validate_hf_download_inputs(repo, "main", &["*.safetensors".to_owned()])
             .expect_err("malicious repo rejected");
         assert!(matches!(error, WorkerError::InvalidPayload(_)));
     }
 
-    let error = validate_hf_cli_download_inputs(
+    let error = validate_hf_download_inputs(
         "owner/model",
         "--local-dir=/tmp/out",
         &["*.safetensors".to_owned()],
@@ -110,7 +91,7 @@ fn hf_cli_download_inputs_reject_option_injection() {
     .expect_err("malicious revision rejected");
     assert!(matches!(error, WorkerError::InvalidPayload(_)));
 
-    let error = validate_hf_cli_download_inputs(
+    let error = validate_hf_download_inputs(
         "owner/model",
         "main",
         &["--local-dir=/tmp/out".to_owned()],
@@ -120,20 +101,20 @@ fn hf_cli_download_inputs_reject_option_injection() {
 }
 
 #[test]
-fn hf_cli_download_inputs_reject_traversal_and_absolute_patterns() {
+fn hf_download_inputs_reject_traversal_and_absolute_patterns() {
     for pattern in [
         "../model.safetensors",
         "nested/../../model.safetensors",
         "/tmp/model.bin",
     ] {
-        let error = validate_hf_cli_download_inputs("owner/model", "main", &[pattern.to_owned()])
+        let error = validate_hf_download_inputs("owner/model", "main", &[pattern.to_owned()])
             .expect_err("unsafe include pattern rejected");
         assert!(matches!(error, WorkerError::InvalidPayload(_)));
     }
 
     for revision in ["../main", "refs/heads/../main", "/refs/main"] {
         let error =
-            validate_hf_cli_download_inputs("owner/model", revision, &["*.safetensors".to_owned()])
+            validate_hf_download_inputs("owner/model", revision, &["*.safetensors".to_owned()])
                 .expect_err("unsafe revision rejected");
         assert!(matches!(error, WorkerError::InvalidPayload(_)));
     }
