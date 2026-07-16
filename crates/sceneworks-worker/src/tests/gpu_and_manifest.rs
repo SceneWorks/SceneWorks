@@ -567,6 +567,60 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
     );
 }
 
+/// sc-12130/sc-12131: the shipped Krea base block feeds both stages of the generic Candle gate. This
+/// pins the provider-derived capability handoff and the measured `sequentialPeakGb` values that turn a
+/// small-card staged attempt into a clean reject instead of relying on reactive OOM containment.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn krea_candle_block_drives_the_registry_and_second_stage_gate() {
+    use crate::vram_gate::{
+        apply_vram_cap, fit_decision, predicted_peak_gb, predicted_sequential_peak_gb,
+        resolve_offload, sequential_overflow_gb, FitDecision,
+    };
+
+    let krea = builtin_model_entry("krea_2_turbo");
+    let entry = krea.as_object().expect("krea_2_turbo entry object");
+    assert_eq!(
+        entry
+            .get("candle")
+            .and_then(Value::as_object)
+            .and_then(|candle| candle.get("measured"))
+            .and_then(Value::as_bool),
+        Some(true),
+        "the published Krea base resident + sequential rows are measured"
+    );
+    assert!(
+        crate::mlx_fit_gate::engine_supports_sequential("krea_2_turbo"),
+        "the generic Candle gate must derive Krea support from the registered descriptor"
+    );
+
+    // Manifest values plus the generic gate's fixed 2 GB runtime headroom.
+    let q4_resident = predicted_peak_gb(entry, "q4").expect("q4 resident peak");
+    let q4_sequential =
+        predicted_sequential_peak_gb(entry, "q4").expect("q4 sequential peak");
+    assert!((q4_resident - 28.4).abs() < 1e-6);
+    assert!((q4_sequential - 24.7).abs() < 1e-6);
+    assert!((predicted_sequential_peak_gb(entry, "q8").unwrap() - 31.5).abs() < 1e-6);
+    assert!((predicted_sequential_peak_gb(entry, "bf16").unwrap() - 41.8).abs() < 1e-6);
+    assert_eq!(predicted_sequential_peak_gb(entry, "int8-convrot"), None);
+
+    // A 27 GB card cannot hold resident q4 but can run staged, so the registry bit selects Offload.
+    let card27 = apply_vram_cap(None, Some(27.0));
+    assert!(matches!(
+        resolve_offload(fit_decision(Some(q4_resident), card27), true),
+        FitDecision::Offload { .. }
+    ));
+    assert_eq!(sequential_overflow_gb(Some(q4_sequential), card27), None);
+
+    // A 12 GB card cannot hold even the measured staged working set: carry the honest number into the
+    // worker's second-stage reject-before-load path instead of attempting a process-killing allocation.
+    let card12 = apply_vram_cap(None, Some(12.0));
+    assert_eq!(
+        sequential_overflow_gb(Some(q4_sequential), card12),
+        Some(24.7)
+    );
+}
+
 /// sc-11754 + sc-11744 (epic 8459 → epic 10765): the Krea 2 Turbo `candle.control` block drives the
 /// pose-ControlNet VRAM fit LADDER end-to-end against the SHIPPED manifest bytes. The control-lane sibling
 /// of `flux2_candle_blocks_drive_the_fit_gate_and_reject`: guards the DATA half — dropping the `control`

@@ -2501,11 +2501,12 @@
         "quantize": 8,
         "repo": "SceneWorks/krea-2-turbo-mlx"
       },
-      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
-      // 1024²/8-step via the candle-gen nvidia-smi peak monitor: q4 packed overall-peak 26.4 GB (the
-      // single-stream DiT + Qwen3-VL-4B TE + Qwen-Image VAE). minMemoryGb 32 covers it with headroom;
-      // q8/bf16 ESTIMATED (~31 / ~44 GB, consistent with the mlx Q8 ~27 GB / bf16 ~43 GB above) pending
-      // measurement.
+      // candle/CUDA VRAM gate (sc-9094/sc-12131, epic 9083 → epic 10765) — MEASURED on an RTX PRO
+      // 6000 (Blackwell sm_120) at 1024²/8-step with the rendered-device two-process probe. Resident
+      // peaks are q4 26.4, q8 35.9, bf16 55.6 GB. Sequential residency encodes/drops Qwen3-VL before
+      // loading the DiT and peaks at q4 22.7, q8 29.5, bf16 39.8 GB; every resident/sequential pair was
+      // byte-identical. minMemoryGb 32 covers the common q4 resident lane with headroom. INT8-ConvRot
+      // remains an unmeasured non-shipping estimate and defers to resident.
       "candle": {
         "minMemoryGb": 32,
         // sc-9300: the INT8-ConvRot tier's VRAM ceiling. The int8 DiT is ~half the bf16 DiT, but the
@@ -2515,7 +2516,11 @@
         // path as q4/q8/bf16 (the third of the three ConvRot gates; the candle lane + sm_89 compute-cap
         // are the worker's `int8_convrot` capability).
         "vramGbByTier": { "q4": 26.4, "q8": 35.9, "bf16": 55.6, "int8-convrot": 31.0 },
-        "measured": false,
+        // sc-12131 / sc-10856 second-stage gate: measured largest working set after the text phase has
+        // been dropped. INT8-ConvRot is intentionally absent because that lane remains unmeasured and
+        // does not advertise sequential residency.
+        "sequentialPeakGb": { "q4": 22.7, "q8": 29.5, "bf16": 39.8 },
+        "measured": true,
         // Pose-ControlNet lane VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The control lane loads
         // the base at the installed tier PLUS the trained ~6.6 GB bf16 control branch, so its render peak
         // (the end-of-render VAE-decode spike, sc-11744) EXCEEDS the txt2img `vramGbByTier` above — it needs
