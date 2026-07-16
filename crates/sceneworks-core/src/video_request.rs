@@ -259,9 +259,19 @@ fn normalized_dimensions(
 
 /// `limits.requiresDimensionsMultipleOf` from a resolved manifest entry, else
 /// [`DEFAULT_DIMENSION_MULTIPLE`]. Read as a plain `u64` (the manifest is machine-authored
-/// — same reader as the `engines.rs` manifest checks). A zero / negative / non-integer
-/// declaration falls back rather than panicking on `% 0`: `from_payload` is infallible and
-/// must survive a typo'd manifest entry.
+/// — same reader as the `engines.rs` manifest checks). `from_payload` is infallible and
+/// must survive a typo'd manifest entry, so anything the geometry can't honor falls back
+/// to the 32 default rather than panicking or silently emitting an off-lattice dimension.
+///
+/// Accepted: a positive power of two that divides 256 (1/2/4/8/16/32/64/128/256 — Mochi's
+/// declared 16 and every shipped model's 32 are both in the set). Everything else falls
+/// back: zero / negative / non-integer (which would panic on `% 0` or fail `as_u64`), and
+/// — less obviously — any multiple that does not divide 256. [`floor_to_multiple`] clamps
+/// its result up to a hard floor of 256, and that `.max(256)` rescue is only on-lattice
+/// when the multiple divides 256. A typo'd `1024` would otherwise yield 256x256 with
+/// `256 % 1024 == 256 != 0`, breaking the multiple invariant with no fallback firing; so
+/// would an in-range-looking `96` (`256 % 96 == 64`). Divisibility is the real constraint
+/// here, not magnitude — a bare upper bound would let `96` through.
 fn dimension_multiple_of(model_manifest_entry: &JsonObject) -> u32 {
     model_manifest_entry
         .get("limits")
@@ -269,7 +279,7 @@ fn dimension_multiple_of(model_manifest_entry: &JsonObject) -> u32 {
         .and_then(|limits| limits.get("requiresDimensionsMultipleOf"))
         .and_then(Value::as_u64)
         .and_then(|multiple| u32::try_from(multiple).ok())
-        .filter(|multiple| *multiple > 0)
+        .filter(|multiple| *multiple > 0 && 256 % *multiple == 0)
         .unwrap_or(DEFAULT_DIMENSION_MULTIPLE)
 }
 
@@ -443,6 +453,44 @@ mod tests {
     }
 
     #[test]
+    fn dimension_multiple_that_cannot_divide_256_falls_back_to_32() {
+        // `floor_to_multiple` clamps up to a hard floor of 256, so a multiple that does
+        // not divide 256 breaks the very invariant it declares: without this guard,
+        // `1024` yielded 256x256 (`256 % 1024 == 256`) and nothing fell back. Magnitude
+        // is not the tell — `96` is small and still off-lattice (`256 % 96 == 64`).
+        for bogus in [
+            json!(1024),
+            json!(4096),
+            json!(100_000),
+            json!(96),
+            json!(48),
+        ] {
+            let request = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "width": 1000, "height": 543,
+                "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": bogus } }
+            })));
+            assert_eq!(
+                (request.width, request.height),
+                (992, 512),
+                "bogus={bogus} must fall back to the 32 default"
+            );
+        }
+
+        // The accepted set — every power of two dividing 256 — is honored, and the
+        // resulting geometry is always on-lattice.
+        for good in [1u32, 2, 4, 8, 16, 32, 64, 128, 256] {
+            let request = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "width": 1000, "height": 543,
+                "modelManifestEntry": {
+                    "limits": { "requiresDimensionsMultipleOf": good }
+                }
+            })));
+            assert_eq!(request.width % good, 0, "width off-lattice for {good}");
+            assert_eq!(request.height % good, 0, "height off-lattice for {good}");
+        }
+    }
+
+    #[test]
     fn reads_numeric_strings_and_carries_advanced_fields() {
         let request = VideoRequest::from_payload(&payload(json!({
             "projectId": "p",
@@ -610,6 +658,11 @@ mod tests {
         assert!(!is_ltx_model("wan_2_2"));
         // Mochi is its own family — it must not fall through to the Wan floor.
         assert!(is_mochi_model("mochi_1"));
+        // Prefix, not an exact id: a future `mochi_1_preview`/`mochi_2` must keep hitting
+        // the 6k+1 lattice. Exact-matching `mochi_1` would drop it into `frame_count`'s
+        // `else { raw }` arm -> off-lattice frames -> engine hard-reject.
+        assert!(is_mochi_model("mochi_1_preview"));
+        assert!(is_mochi_model("mochi_2"));
         assert!(!is_mochi_model("wan_2_2"));
         assert!(!is_wan_model("mochi_1"));
         assert!(!is_ltx_model("mochi_1"));
