@@ -18,7 +18,7 @@ const KOLORS_IPADAPTER_REPO: &str = "Kwai-Kolors/Kolors-IP-Adapter-Plus";
 /// candle can't read); PR-4 adds `ip_adapter_plus_general.safetensors` + `image_encoder/model.safetensors`.
 /// Pinned to the exact commit at the tip of `refs/pr/4` rather than the mutable `refs/pr/4` ref itself
 /// (sc-11168 / F-007 — completes the sc-9879 rollout): a force-push to the PR could otherwise swap the
-/// adapter/encoder weights we load. The `hf` CLI still verifies each file's own hash on download.
+/// adapter/encoder weights we load. The native downloader still verifies each file's own hash on download.
 const KOLORS_IPADAPTER_REVISION: &str = "5c72aa86cd8d9d23ff406d293c5473820e09e1d9";
 /// The IP-Adapter-Plus bundle file (root of the snapshot).
 const KOLORS_IPADAPTER_BUNDLE: &str = "ip_adapter_plus_general.safetensors";

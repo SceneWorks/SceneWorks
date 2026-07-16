@@ -1544,7 +1544,7 @@ const KREA_MLX_TURNKEY_REPO: &str = "SceneWorks/krea-2-turbo-mlx";
 /// hard-coded const (no manifest/payload override reaches this on-demand ConvRot-base fetch), so pulling
 /// the mutable `main` branch would let an upstream re-push silently swap the bf16 DiT / Qwen3-VL TE /
 /// Qwen-Image VAE we load. Pin the exact commit for defense-in-depth (mirrors the SeedVR2/Real-ESRGAN
-/// pins, sc-8879/sc-9682). The `hf` CLI still verifies each file's own hash on download.
+/// pins, sc-8879/sc-9682). The native downloader still verifies each file's own hash on download.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const KREA_MLX_TURNKEY_REVISION: &str = "d009674080cc1bccf2b629d834c34bf5eccdb723";
 
@@ -1553,8 +1553,8 @@ const KREA_MLX_TURNKEY_REVISION: &str = "d009674080cc1bccf2b629d834c34bf5eccdb72
 /// single-file; the bf16 `bf16/` subdir of the `krea-2-turbo-mlx` turnkey (tokenizer / Qwen3-VL TE /
 /// Qwen-Image VAE / config) is fetched here when the ConvRot tier is selected and it isn't present —
 /// so q4/q8 users are never forced to download the 35 GB bf16 base (it isn't a global co-requisite).
-/// No-op when the request isn't a ConvRot job, the bf16 base is already complete, or the `hf` CLI is
-/// absent (then `resolve_krea_convrot` returns `None` and the job falls back / surfaces a load error).
+/// No-op when the request isn't a ConvRot job or the bf16 base is already complete; a real download
+/// error fails loud (otherwise `resolve_krea_convrot` loads the freshly fetched base).
 /// Fails loud on a real download error — fast, before any compute.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn ensure_krea_convrot_base_present(
@@ -1590,11 +1590,6 @@ async fn fetch_krea_convrot_base(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
-    let scratch = settings
-        .data_dir
-        .join("cache")
-        .join(format!(".krea-convrot-base-fetch-{}", job.id));
-    tokio::fs::create_dir_all(&scratch).await?;
     let files = vec![
         "bf16/transformer/*".to_owned(),
         "bf16/text_encoder/*".to_owned(),
@@ -1603,18 +1598,16 @@ async fn fetch_krea_convrot_base(
         "bf16/scheduler/*".to_owned(),
         "bf16/model_index.json".to_owned(),
     ];
-    let result = crate::model_jobs::download_model_with_hf_cli(
+    crate::model_jobs::ensure_hf_files_cached(
         api,
         settings,
         job,
         KREA_MLX_TURNKEY_REPO,
         KREA_MLX_TURNKEY_REVISION,
         &files,
-        &scratch,
     )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    result.map(|_| ())
+    .await
+    .map(|_| ())
 }
 
 /// On-demand fetch of a non-default Boogu tier subfolder (sc-6568 / sc-8513). The catalog download
@@ -1624,7 +1617,7 @@ async fn fetch_krea_convrot_base(
 /// resolves it. No-op when the Q8 default is requested, the model isn't Boogu, the turnkey snapshot
 /// isn't downloaded yet (`boogu_model_subdir` then falls back to Q8 / surfaces the load error), or the
 /// tier subfolder is already complete. Fails loud on a real download error — fast, before any compute;
-/// a missing `hf` CLI leaves the subfolder absent so the request gracefully falls back to Q8. Mirrors
+/// a tier that isn't published yet stays absent so the request falls back to Q8. Mirrors
 /// [`crate::video_jobs::ensure_ltx_q8_present`].
 ///
 /// sc-9607 (epic 9083): also runs on the candle lane (off-Mac) — `generate_candle_stream` calls it
@@ -1671,29 +1664,22 @@ async fn ensure_boogu_tier_present(
     {
         return Ok(());
     }
-    let scratch = settings
-        .data_dir
-        .join("cache")
-        .join(format!(".boogu-tier-fetch-{}", job.id));
-    tokio::fs::create_dir_all(&scratch).await?;
     // The tier subfolder nests transformer/mllm/vae (leaf-dir globs, like the catalog Q8 entry).
     let files = vec![
         format!("{tier}/transformer/*"),
         format!("{tier}/mllm/*"),
         format!("{tier}/vae/*"),
     ];
-    let result = crate::model_jobs::download_model_with_hf_cli(
+    crate::model_jobs::ensure_hf_files_cached(
         api,
         settings,
         job,
         &model_repo(request, &model),
         "main",
         &files,
-        &scratch,
     )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    result.map(|_| ())
+    .await
+    .map(|_| ())
 }
 
 /// On-demand fetch of Ideogram 4's non-default `q8/` tier (sc-9607, epic 9083). The catalog download
@@ -1708,7 +1694,7 @@ async fn ensure_boogu_tier_present(
 /// (and is macOS-only). This is the on-demand `q8/` download the [`ideogram_model_subdir`] docstring
 /// flagged as a follow-up; it runs on BOTH the MLX (`generate_stream`) and candle
 /// (`generate_candle_stream`) lanes, so off-Mac gets the same q4/q8 picker as macOS. Fails loud on a
-/// real download error; a missing `hf` CLI leaves `q8/` absent so the request gracefully falls back to q4.
+/// real download error; a `q8/` tier that isn't published yet stays absent so the request falls back to q4.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1743,24 +1729,17 @@ async fn ensure_ideogram_tier_present(
     {
         return Ok(());
     }
-    let scratch = settings
-        .data_dir
-        .join("cache")
-        .join(format!(".ideogram-tier-fetch-{}", job.id));
-    tokio::fs::create_dir_all(&scratch).await?;
     let files = vec![format!("{tier}/*")];
-    let result = crate::model_jobs::download_model_with_hf_cli(
+    crate::model_jobs::ensure_hf_files_cached(
         api,
         settings,
         job,
         &model_repo(request, &model),
         "main",
         &files,
-        &scratch,
     )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    result.map(|_| ())
+    .await
+    .map(|_| ())
 }
 
 #[cfg(any(

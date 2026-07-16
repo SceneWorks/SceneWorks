@@ -640,11 +640,11 @@ async fn run_blocking_with_heartbeat_none_cancel_returns_single_shot_value() {
     );
 }
 
-/// sc-8804 (F-003) — the child-process leg: `run_ffmpeg` (media_jobs) and the `hf` CLI download
-/// (model_jobs) build their `tokio::process::Command` with `kill_on_drop(true)` so a
-/// heartbeat/cancel `?` early return reaps the child instead of leaving ffmpeg/`hf` writing partial
-/// files. A tokio child is NOT reaped on drop by default; this test locks the mechanism the fix
-/// relies on — a `kill_on_drop(true)` child is torn down when its handle is dropped.
+/// sc-8804 (F-003) — the child-process leg: `run_ffmpeg` (media_jobs) builds its
+/// `tokio::process::Command` with `kill_on_drop(true)` so a heartbeat/cancel `?` early return reaps
+/// the child instead of leaving ffmpeg writing partial files. A tokio child is NOT reaped on drop by
+/// default; this test locks the mechanism the fix relies on — a `kill_on_drop(true)` child is torn
+/// down when its handle is dropped.
 #[cfg(unix)]
 #[tokio::test]
 async fn kill_on_drop_reaps_a_dropped_child() {

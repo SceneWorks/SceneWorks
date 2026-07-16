@@ -2854,7 +2854,7 @@ const WAN_T2V_14B_REPO: &str = "SceneWorks/wan2.2-t2v-a14b-mlx";
 /// hard-coded const — no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches —
 /// so pulling the mutable `main` branch would let an upstream re-push silently swap a checkpoint we
 /// load. Pin the exact commit that adds the `q4/`/`q8/`/`bf16/` tier subdirs for defense-in-depth
-/// (the `hf` CLI still verifies each file's own hash on download). This is the commit that added the
+/// (the native downloader still verifies each file's own hash on download). This is the commit that added the
 /// `q4/`/`q8/`/`bf16/` tier subdirs (sc-9942).
 #[cfg(target_os = "macos")]
 const WAN_T2V_14B_REVISION: &str = "991eb255c544bbb2e1f1e07da4355c2f0a5337b7";
@@ -2871,7 +2871,7 @@ const WAN_I2V_14B_REPO: &str = "SceneWorks/wan2.2-i2v-a14b-mlx";
 /// Pinned revision for [`WAN_I2V_14B_REPO`] (mirrors [`WAN_T2V_14B_REVISION`]). The commit that adds
 /// the `q4/`/`q8/`/`bf16/` tier subdirs to the I2V-A14B repo (sc-9943); pinning the exact commit (not
 /// the mutable `main`) stops an upstream re-push from silently swapping a checkpoint the on-demand
-/// `q8/*` + `bf16/*` fetch loads (the `hf` CLI still verifies each file's own hash on download).
+/// `q8/*` + `bf16/*` fetch loads (the native downloader still verifies each file's own hash on download).
 #[cfg(target_os = "macos")]
 const WAN_I2V_14B_REVISION: &str = "c6c786170031eccc3a1fac0f98f1ad4ff988271e";
 
@@ -2887,7 +2887,7 @@ const WAN_TI2V_5B_REPO: &str = "SceneWorks/wan2.2-ti2v-5b-mlx";
 /// Pinned revision for [`WAN_TI2V_5B_REPO`] (mirrors [`WAN_T2V_14B_REVISION`]). The commit that adds
 /// the `q4/`/`q8/`/`bf16/` tier subdirs to the TI2V-5B repo (sc-9941); pinning the exact commit (not
 /// the mutable `main`) stops an upstream re-push from silently swapping a checkpoint the on-demand
-/// `q8/*` + `bf16/*` fetch loads (the `hf` CLI still verifies each file's own hash on download).
+/// `q8/*` + `bf16/*` fetch loads (the native downloader still verifies each file's own hash on download).
 #[cfg(target_os = "macos")]
 const WAN_TI2V_5B_REVISION: &str = "bb1b055249614cf9d7cf4373fbdbc184b77dee88";
 
@@ -2895,7 +2895,7 @@ const WAN_TI2V_5B_REVISION: &str = "bb1b055249614cf9d7cf4373fbdbc184b77dee88";
 /// F-007 — completes the sc-9879 rollout). Both the MLX (`ensure_wan_lightning_present`) and candle
 /// (`candle_ensure_wan_lightning_present`) self-heal fetches were pulling the mutable `main` branch, so an
 /// upstream re-push (or a compromised token) could silently swap the high/low distill weights we load.
-/// Pin the exact commit for defense-in-depth (the `hf` CLI still verifies each file's own hash on
+/// Pin the exact commit for defense-in-depth (the native downloader still verifies each file's own hash on
 /// download). Shared by BOTH lanes so the twins agree. Gated to the lanes that actually fetch it (macOS
 /// MLX or the candle build) so a Linux-non-candle build doesn't flag it dead.
 #[cfg(any(
@@ -3039,7 +3039,7 @@ fn resolve_wan_tier_dir_and_quant(
 /// matrix, a `q4` (default)
 /// job, when the repo snapshot isn't downloaded yet (resolve surfaces the clear error), or when the
 /// tier is already complete. Fails loud on a real download error — fast, before any compute; a
-/// missing `hf` CLI leaves the tier absent so resolve gracefully falls back to a smaller complete
+/// tier that isn't published yet stays absent so resolve falls back to a smaller complete
 /// tier.
 #[cfg(target_os = "macos")]
 async fn ensure_wan_tier_present(
@@ -3063,18 +3063,10 @@ async fn ensure_wan_tier_present(
     if wan_tier_is_complete(&root.join(tier), wan_tier_files(&request.model)) {
         return Ok(());
     }
-    let scratch = settings
-        .data_dir
-        .join("cache")
-        .join(format!(".wan-tier-{tier}-fetch-{}", job.id));
-    tokio::fs::create_dir_all(&scratch).await?;
     let files = vec![format!("{tier}/*")];
-    let result = crate::model_jobs::download_model_with_hf_cli(
-        api, settings, job, repo, revision, &files, &scratch,
-    )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    result.map(|_| ())
+    crate::model_jobs::ensure_hf_files_cached(api, settings, job, repo, revision, &files)
+        .await
+        .map(|_| ())
 }
 
 /// On-demand fetch of the 4-step Lightning distill LoRA pair (`lightx2v/Wan2.2-Lightning`) for the
@@ -3084,8 +3076,8 @@ async fn ensure_wan_tier_present(
 /// self-heals that case: it pulls just the per-architecture high/low pair the first time a gen needs
 /// it (twin of [`ensure_wan_tier_present`] / the candle `ensure_qwen_lightning_lora_cached`). No-op
 /// when the Lightning toggle is off (sc-10047 — the native multi-step recipe needs no LoRA), for a
-/// non-A14B engine, when the pair is already cached, or when the `hf` CLI is absent (resolve then
-/// surfaces the clear "fetch it via the model manager" error). Fails loud on a real download error —
+/// non-A14B engine, or when the pair is already cached. A pair still missing after the fetch makes
+/// resolve surface the clear "fetch it via the model manager" error. Fails loud on a real download error —
 /// fast, before any compute.
 #[cfg(target_os = "macos")]
 async fn ensure_wan_lightning_present(
@@ -3118,27 +3110,20 @@ async fn ensure_wan_lightning_present(
             return Ok(());
         }
     }
-    let scratch = settings
-        .data_dir
-        .join("cache")
-        .join(format!(".wan-lightning-fetch-{}", job.id));
-    tokio::fs::create_dir_all(&scratch).await?;
     let files = vec![
         format!("{subdir}/high_noise_model.safetensors"),
         format!("{subdir}/low_noise_model.safetensors"),
     ];
-    let result = crate::model_jobs::download_model_with_hf_cli(
+    crate::model_jobs::ensure_hf_files_cached(
         api,
         settings,
         job,
         REPO,
         WAN_LIGHTNING_REVISION,
         &files,
-        &scratch,
     )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    result.map(|_| ())
+    .await
+    .map(|_| ())
 }
 
 /// The 4-step Lightning distill LoRA pair (high/low) for an A14B MoE model
@@ -4877,7 +4862,7 @@ fn resolve_candle_video_conditioning(
 // distill through the Lightning toggle and user LoRAs apply on the candle Wan video path. These are
 // candle-lane copies (the macOS lane keeps its own), reusing the backend-neutral helpers `lora_scale` /
 // `resolve_lora_file` / `crate::image_jobs::{lora_path, classify_adapter}` / `MAX_JOB_LORAS` /
-// `advanced_opt_*` / `huggingface_snapshot_dir` / `download_model_with_hf_cli`.
+// `advanced_opt_*` / `huggingface_snapshot_dir` / `ensure_hf_files_cached`.
 // ---------------------------------------------------------------------------
 
 /// (sc-10138) The interim step default for the dense candle TI2V-5B (no distill LoRA exists yet) — the
@@ -4980,8 +4965,8 @@ fn candle_resolve_lightning_loras(
 
 /// (sc-10138) On-demand fetch of the A14B Lightning distill pair for the candle lane — the analog of
 /// `ensure_wan_lightning_present`. Self-heals a worker that installed the tiers before the Lightning
-/// `coRequisite`. No-op when the toggle is off, for a non-A14B engine, when the pair is cached, or when
-/// `hf` is absent (resolve then surfaces the clear "fetch it via the model manager" error).
+/// `coRequisite`. No-op when the toggle is off, for a non-A14B engine, or when the pair is cached. A
+/// pair still missing after the fetch makes resolve surface the clear "fetch it via the model manager" error.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn candle_ensure_wan_lightning_present(
     api: &ApiClient,
@@ -5007,27 +4992,20 @@ async fn candle_ensure_wan_lightning_present(
             return Ok(());
         }
     }
-    let scratch = settings
-        .data_dir
-        .join("cache")
-        .join(format!(".wan-lightning-fetch-{}", job.id));
-    tokio::fs::create_dir_all(&scratch).await?;
     let files = vec![
         format!("{subdir}/high_noise_model.safetensors"),
         format!("{subdir}/low_noise_model.safetensors"),
     ];
-    let result = crate::model_jobs::download_model_with_hf_cli(
+    crate::model_jobs::ensure_hf_files_cached(
         api,
         settings,
         job,
         REPO,
         WAN_LIGHTNING_REVISION,
         &files,
-        &scratch,
     )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    result.map(|_| ())
+    .await
+    .map(|_| ())
 }
 
 /// (sc-10138) Tag an A14B MoE Lightning/user LoRA to a specific expert — the candle analog of
@@ -6298,7 +6276,7 @@ const BERNINI_REPO: &str = "SceneWorks/bernini-mlx";
 
 /// Pinned revision for [`BERNINI_REPO`] — the commit that adds the `q4/`/`q8/`/`bf16/` tier subdirs
 /// (sc-9945). Pinning the exact commit (not the mutable `main`) stops an upstream re-push from silently
-/// swapping a checkpoint the on-demand `q8/*` + `bf16/*` fetch loads (the `hf` CLI still verifies each
+/// swapping a checkpoint the on-demand `q8/*` + `bf16/*` fetch loads (the native downloader still verifies each
 /// file's own hash on download). This is the commit that added the `q4/`/`q8/`/`bf16/` tier subdirs
 /// (sc-9945), with the exact hosted sizes: q4 37,815,703,819 / q8 55,129,270,617 / bf16 87,591,990,679.
 #[cfg(target_os = "macos")]
@@ -6429,7 +6407,7 @@ fn bernini_quant_bits(request: &VideoRequest) -> Option<i64> {
 /// [`BERNINI_REVISION`] the first time it is requested so [`bernini_tier_subdir`] can resolve it. No-op
 /// for a `q4` (default) job, when the repo snapshot isn't downloaded yet (resolve surfaces the clear
 /// error), or when the tier is already complete. Fails loud on a real download error — fast, before any
-/// compute; a missing `hf` CLI leaves the tier absent so resolve falls back to a smaller complete tier.
+/// compute; a tier that isn't published yet stays absent so resolve falls back to a smaller complete tier.
 #[cfg(target_os = "macos")]
 pub(crate) async fn ensure_bernini_tier_present(
     api: &ApiClient,
@@ -6449,24 +6427,17 @@ pub(crate) async fn ensure_bernini_tier_present(
     if bernini_tier_is_complete(&root.join(tier)) {
         return Ok(());
     }
-    let scratch = settings
-        .data_dir
-        .join("cache")
-        .join(format!(".bernini-tier-{tier}-fetch-{}", job.id));
-    tokio::fs::create_dir_all(&scratch).await?;
     let files = vec![format!("{tier}/*")];
-    let result = crate::model_jobs::download_model_with_hf_cli(
+    crate::model_jobs::ensure_hf_files_cached(
         api,
         settings,
         job,
         BERNINI_REPO,
         BERNINI_REVISION,
         &files,
-        &scratch,
     )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    result.map(|_| ())
+    .await
+    .map(|_| ())
 }
 
 /// Raw-settings recorded on a real MLX Bernini asset (mirrors `wan_raw_settings`).
@@ -6948,7 +6919,7 @@ const SCAIL2_REPO: &str = "SceneWorks/scail2-mlx";
 /// Pinned revision for [`SCAIL2_REPO`] (mirrors [`WAN_T2V_14B_REVISION`]). The repo is a hard-coded
 /// const — no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches — so pulling
 /// the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load. This is
-/// the commit that added the `q4/`/`q8/`/`bf16/` tier subdirs (sc-9944); the `hf` CLI still verifies
+/// the commit that added the `q4/`/`q8/`/`bf16/` tier subdirs (sc-9944); the native downloader still verifies
 /// each file's own hash on download.
 #[cfg(target_os = "macos")]
 const SCAIL2_REVISION: &str = "ce88cfdb1008f395e9c820e525e6db7b6695f7b3";
@@ -7044,8 +7015,8 @@ fn resolve_scail2_tier_dir_and_quant(
 /// FIXED [`scail2_tier_repo`] revision the first time it is requested so [`scail2_tier_subdir`] can
 /// resolve it. No-op for a non-SCAIL-2 model, a `q4` (default) job, when the repo snapshot isn't
 /// downloaded yet (resolve surfaces the clear error), or when the tier is already complete. Fails loud
-/// on a real download error — fast, before any compute; a missing `hf` CLI leaves the tier absent so
-/// resolve gracefully falls back to a smaller complete tier.
+/// on a real download error — fast, before any compute; a tier that isn't published yet stays absent so
+/// resolve falls back to a smaller complete tier.
 #[cfg(target_os = "macos")]
 async fn ensure_scail2_tier_present(
     api: &ApiClient,
@@ -7068,18 +7039,10 @@ async fn ensure_scail2_tier_present(
     if scail2_tier_is_complete(&root.join(tier)) {
         return Ok(());
     }
-    let scratch = settings
-        .data_dir
-        .join("cache")
-        .join(format!(".scail2-tier-{tier}-fetch-{}", job.id));
-    tokio::fs::create_dir_all(&scratch).await?;
     let files = vec![format!("{tier}/*")];
-    let result = crate::model_jobs::download_model_with_hf_cli(
-        api, settings, job, repo, revision, &files, &scratch,
-    )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    result.map(|_| ())
+    crate::model_jobs::ensure_hf_files_cached(api, settings, job, repo, revision, &files)
+        .await
+        .map(|_| ())
 }
 
 /// Raw-settings recorded on a real MLX SCAIL-2 asset (mirrors `bernini_raw_settings`). When the
@@ -7509,7 +7472,7 @@ const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
 /// hard-coded const (no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches), so
 /// pulling the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load.
 /// Pin the exact commit for defense-in-depth (mirrors the SeedVR2/Real-ESRGAN pins, sc-8879/sc-9682).
-/// The `hf` CLI still verifies each file's own hash on download. Bumped to the commit that added the
+/// The native downloader still verifies each file's own hash on download. Bumped to the commit that added the
 /// dense `bf16/` tier (sc-8513) — a superset of the prior commit, so the q8 fetch is unaffected.
 #[cfg(target_os = "macos")]
 const LTX_BUNDLE_REVISION: &str = "01df27d308466533aa09d251e3aebdcc627d07eb";
@@ -7737,7 +7700,7 @@ fn resolve_ltx_eros_gemma_dir(settings: &Settings, model_dir: &Path) -> Option<P
 /// can load it. Base model only (eros has its own single-dir conversion). No-op when Q8 isn't
 /// requested, the bundle snapshot isn't downloaded yet (resolve surfaces the clear "download the
 /// bundle" error), or `q8/` is already present. Fails loud on a real download error — fast, before
-/// any compute; a missing `hf` CLI leaves `q8/` absent so resolve gracefully falls back to Q4.
+/// any compute; a `q8/` tier that isn't published yet stays absent so resolve falls back to Q4.
 /// Mirrors the eros [`ensure_ltx_upscaler_cached`] on-demand fetch.
 #[cfg(target_os = "macos")]
 async fn ensure_ltx_q8_present(
@@ -7755,24 +7718,17 @@ async fn ensure_ltx_q8_present(
     if ltx_dir_is_complete(&root.join("q8")) {
         return Ok(());
     }
-    let scratch = settings
-        .data_dir
-        .join("cache")
-        .join(format!(".ltx-q8-fetch-{}", job.id));
-    tokio::fs::create_dir_all(&scratch).await?;
     let files = vec!["q8/*".to_owned()];
-    let result = crate::model_jobs::download_model_with_hf_cli(
+    crate::model_jobs::ensure_hf_files_cached(
         api,
         settings,
         job,
         LTX_BUNDLE_REPO,
         LTX_BUNDLE_REVISION,
         &files,
-        &scratch,
     )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    result.map(|_| ())
+    .await
+    .map(|_| ())
 }
 
 /// Fetch the SceneWorks LTX bundle's dense `bf16/` subdir on demand (sc-8513, epic 8506). The macOS
@@ -7795,24 +7751,17 @@ async fn ensure_ltx_bf16_present(
     if ltx_dir_is_complete(&root.join("bf16")) {
         return Ok(());
     }
-    let scratch = settings
-        .data_dir
-        .join("cache")
-        .join(format!(".ltx-bf16-fetch-{}", job.id));
-    tokio::fs::create_dir_all(&scratch).await?;
     let files = vec!["bf16/*".to_owned()];
-    let result = crate::model_jobs::download_model_with_hf_cli(
+    crate::model_jobs::ensure_hf_files_cached(
         api,
         settings,
         job,
         LTX_BUNDLE_REPO,
         LTX_BUNDLE_REVISION,
         &files,
-        &scratch,
     )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    result.map(|_| ())
+    .await
+    .map(|_| ())
 }
 
 /// Ensure the Gemma-3 text encoder an **eros** generation needs is on disk (the eros gate over
@@ -7862,24 +7811,17 @@ pub(crate) async fn ensure_ltx_bundle_gemma_present(
             return Ok(());
         }
     }
-    let scratch = settings
-        .data_dir
-        .join("cache")
-        .join(format!(".ltx-gemma-fetch-{}", job.id));
-    tokio::fs::create_dir_all(&scratch).await?;
     let files = vec!["gemma/*".to_owned()];
-    let result = crate::model_jobs::download_model_with_hf_cli(
+    crate::model_jobs::ensure_hf_files_cached(
         api,
         settings,
         job,
         LTX_BUNDLE_REPO,
         LTX_BUNDLE_REVISION,
         &files,
-        &scratch,
     )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    result.map(|_| ())
+    .await
+    .map(|_| ())
 }
 
 /// LoRAs for an LTX generation: the manifest-declared auto distill LoRA (when present) followed by

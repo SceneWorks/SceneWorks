@@ -100,24 +100,13 @@ pub(crate) async fn run_model_download_job(
     )
     .await?;
 
-    if let Some(cache_path) =
-        download_model_with_hf_cli(api, settings, job, repo, revision, &files, &target_dir).await?
-    {
-        overlay_derived_tokenizer(api, settings, http_client, &job.id, repo, &cache_path).await?;
-        if !reconcile_downloaded_model_family(api, job, &cache_path).await? {
-            return Ok(());
-        }
-        complete_hf_cache_download(
-            api,
-            job,
-            "modelId",
-            repo,
-            &cache_path,
-            "Model download completed in the Hugging Face cache.",
-        )
-        .await?;
-        return Ok(());
-    }
+    // The model-import download uses the native Rust downloader below. The Python
+    // `hf`/`huggingface-cli` subprocess it used to prefer reported progress exactly once (0.12) and
+    // never updated it, and had no forward-progress watchdog, so on a host with `hf` on PATH a model
+    // download froze the bar at 12% and a hung HF CDN edge never recovered (sc-12227 / sc-12232,
+    // issue #1554). The native path streams with real byte-level progress AND the stall watchdog
+    // (sc-11939), resumes via HTTP Range, and keeps a Python dependency out of this flow (epic 3482).
+    // Mirrors `run_lora_download_job`; the on-demand tier fetches share `ensure_hf_files_cached`.
 
     // Download into the standard Hugging Face hub cache (models--<org>--<name>),
     // not the private app store, so HF-sourced weights dedupe with other tools and
@@ -837,22 +826,8 @@ async fn ensure_ltx_upscaler_cached(
             return Ok(Some(snapshot));
         }
     }
-    let scratch = settings
-        .data_dir
-        .join("cache")
-        .join(format!(".ltx-upscaler-fetch-{}", job.id));
-    tokio::fs::create_dir_all(&scratch).await?;
     let files = vec![file.to_owned()];
-    // Bind-then-remove: the fetch's `?` must not leak the scratch dir under data/cache on the error
-    // path (F-118). Clean the scratch dir whether the download succeeded or failed, then propagate.
-    let fetched =
-        download_model_with_hf_cli(api, settings, job, repo, "main", &files, &scratch).await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    let fetched = fetched?;
-    let snapshot = match fetched {
-        Some(dir) => Some(dir),
-        None => huggingface_snapshot_dir(&settings.data_dir, repo),
-    };
+    let snapshot = ensure_hf_files_cached(api, settings, job, repo, "main", &files).await?;
     Ok(snapshot.filter(|dir| dir.join(file).exists()))
 }
 
@@ -1630,136 +1605,69 @@ fn converted_dir_backup_path(final_dir: &Path) -> PathBuf {
     }
 }
 
-pub(crate) async fn download_model_with_hf_cli(
+/// Fetch the `files` glob patterns from `repo`@`revision` into the shared Hugging Face hub cache
+/// using the NATIVE downloader — real byte-level progress, the sc-11939 forward-progress stall
+/// watchdog, HTTP-Range resume, and Windows blob hardlinks — and return the repo's snapshot dir.
+/// This is the on-demand generation/convert-time counterpart to `run_model_download_job`'s cache
+/// download; it writes NO install marker (these are cache warm-ups, not user-visible installs).
+///
+/// Replaces the retired Python `hf`/`huggingface-cli` path (sc-12227 / sc-12232, issue #1554): that
+/// subprocess pinned job progress at 12% for the whole transfer, had no stall watchdog, and only ran
+/// when `hf` was on PATH (so a host without it silently couldn't pull these tiers). The native path
+/// also honors a custom `huggingface_base_url`, which the CLI could not. Returns the snapshot dir, or
+/// `None` only when the repo still has no snapshot after the fetch (e.g. the filter matched zero
+/// files) so callers keep their existing "resolve the tier subdir, else fall back" presence checks.
+pub(crate) async fn ensure_hf_files_cached(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
     repo: &str,
     revision: &str,
     files: &[String],
-    marker_dir: &Path,
 ) -> WorkerResult<Option<PathBuf>> {
-    let Some(program) = hf_cli_program().await else {
-        return Ok(None);
-    };
-    if settings.huggingface_base_url.trim_end_matches('/') != DEFAULT_HUGGINGFACE_BASE_URL {
-        return Ok(None);
-    }
-    validate_hf_cli_download_inputs(repo, revision, files)?;
-    let cache_dir = huggingface_hub_cache_dir(&settings.data_dir);
-    tokio::fs::create_dir_all(&cache_dir).await?;
-    update_job(
-        api,
-        &job.id,
-        progress_payload(
-            JobStatus::Downloading,
-            ProgressStage::Downloading,
-            0.12,
-            &format!("Downloading {repo} into the Hugging Face cache."),
-            None,
-            None,
-            None,
-        ),
-    )
-    .await?;
-
-    let mut command = Command::new(program);
-    command
-        .arg("download")
-        .arg(repo)
-        .arg("--repo-type")
-        .arg("model")
-        .arg("--revision")
-        .arg(revision)
-        .arg("--cache-dir")
-        .arg(&cache_dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    configure_hf_cli_environment(&mut command);
-    // Resolve the HF token lazily (env, or a one-time pull of the recorded
-    // `huggingface.co` keychain credential from the desktop socket on macOS) so the
-    // keychain is read only when a download actually needs it (sc-5891).
-    if let Some(token) = crate::credentials_ipc::resolve_hf_token(settings).await {
-        command.env("HF_TOKEN", token);
-    }
-    for pattern in files {
-        command.arg("--include").arg(pattern);
-    }
-    let fresh_download = optional_payload_string(&job.payload, "downloadAction") == Some("fresh");
-    if fresh_download {
-        command.arg("--force-download");
-    }
-
-    // sc-8804 (F-003): if the heartbeat/cancel `?` in the wait loop below returns early (a transient
-    // POST failure or a 409 stale-sweep reclaim), `child` is dropped without an explicit kill. A
-    // tokio child is not reaped on drop by default, so the `hf` transfer would keep running and
-    // writing partial files into the HF cache. `kill_on_drop` tears it down on any early return.
-    command.kill_on_drop(true);
-    let mut child = command.spawn().map_err(|error| {
-        WorkerError::Engine(format!(
-            "Failed to start Hugging Face CLI. Falling back to direct downloads is only possible when the CLI is absent, not when it fails to launch: {error}"
+    validate_hf_download_inputs(repo, revision, files)?;
+    let repo_dir = huggingface_repo_cache_path(&settings.data_dir, repo).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Unable to resolve Hugging Face cache path for {repo}."
         ))
     })?;
-    let mut stderr = child.stderr.take();
-    let stderr_task = tokio::spawn(async move {
-        let mut bytes = Vec::new();
-        if let Some(stderr) = stderr.as_mut() {
-            let _ = stderr.read_to_end(&mut bytes).await;
-        }
-        bytes
-    });
-    let mut interval = tokio::time::interval(progress_report_interval(settings));
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let status = loop {
-        tokio::select! {
-            status = child.wait() => break status?,
-            _ = interval.tick() => {
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                if let Err(error) = check_cancel(api, &job.id, "Model download canceled by user.").await {
-                    let _ = child.kill().await;
-                    return Err(error);
-                }
-            }
-        }
-    };
-    let stderr = stderr_task
-        .await
-        .map_err(|error| task_join_error("Hugging Face CLI stderr reader task", error))?;
-    let repo_cache_path =
-        huggingface_repo_cache_path(&settings.data_dir, repo).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "Unable to resolve Hugging Face cache path for {repo}."
-            ))
-        })?;
-    if !status.success() {
-        let stderr = String::from_utf8_lossy(&stderr);
-        // Some Windows installs run the Python-based HF CLI with a legacy stdio
-        // codepage. The download can complete, then the process exits non-zero
-        // while printing a Unicode checkmark/progress footer. If the cache now has
-        // a snapshot, keep the completed transfer instead of failing the job.
-        if hf_cli_encoding_failure(&stderr)
-            && huggingface_snapshot_dir(&settings.data_dir, repo).is_some()
-        {
-            let cache_path =
-                huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_cache_path);
-            write_model_install_marker(marker_dir, &job.payload, repo, &job.id).await?;
-            return Ok(Some(cache_path));
-        }
-        let detail = bounded_tail(&stderr, 10, 2000);
-        let message = if detail.trim().is_empty() {
-            "Hugging Face CLI download failed without stderr output.".to_owned()
-        } else {
-            format!("Hugging Face CLI download failed:\n{detail}")
-        };
-        return Err(WorkerError::Engine(message));
+    let client = streaming_download_client();
+    let snapshot = HuggingFaceSnapshot::resolve(&client, settings, repo, revision, files).await?;
+    // A filter that matches zero files is a no-op (same net effect as the old `hf download --include`
+    // with no match): don't create an empty transfer, and leave the caller's presence check to fall
+    // back to a smaller complete tier.
+    if !snapshot.files.is_empty() {
+        let mut progress = DownloadProgress::new(
+            repo,
+            directory_size(&repo_dir.join("blobs")).await,
+            snapshot.total_bytes(),
+            progress_report_interval(settings),
+        );
+        download_snapshot_into_cache(
+            &DownloadContext {
+                api,
+                client: &client,
+                settings,
+                job_id: &job.id,
+                cancel_message: "Model download canceled by user.",
+                fresh_download: false,
+            },
+            &repo_dir,
+            revision,
+            &snapshot,
+            &mut progress,
+        )
+        .await?;
     }
-
-    let cache_path = huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_cache_path);
-    write_model_install_marker(marker_dir, &job.payload, repo, &job.id).await?;
-    Ok(Some(cache_path))
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
 }
 
-pub(crate) fn validate_hf_cli_download_inputs(
+/// Reject repo / revision / include-pattern inputs that could escape the intended Hugging Face path
+/// before they reach the native downloader's URL builder (`downloads::quote_path`): leading slashes,
+/// `..` traversal, backslashes, control characters, and unsupported characters. Applied by
+/// `ensure_hf_files_cached` to the on-demand tier fetches (the user-facing model/LoRA download jobs
+/// build their URLs the same way).
+pub(crate) fn validate_hf_download_inputs(
     repo: &str,
     revision: &str,
     files: &[String],
@@ -1881,41 +1789,6 @@ fn safe_hf_path_parts<'a>(value: &'a str, label: &str) -> WorkerResult<Vec<&'a s
         )));
     }
     Ok(parts)
-}
-
-pub(crate) const HF_CLI_UTF8_ENV: [(&str, &str); 3] = [
-    ("PYTHONUTF8", "1"),
-    ("PYTHONIOENCODING", "utf-8"),
-    ("HF_HUB_DISABLE_PROGRESS_BARS", "1"),
-];
-
-pub(crate) fn configure_hf_cli_environment(command: &mut Command) {
-    for (key, value) in HF_CLI_UTF8_ENV {
-        command.env(key, value);
-    }
-}
-
-pub(crate) fn hf_cli_encoding_failure(stderr: &str) -> bool {
-    let normalized = stderr.to_ascii_lowercase();
-    normalized.contains("charmap")
-        && (normalized.contains("codec can't encode")
-            || normalized.contains("unicodeencodeerror")
-            || normalized.contains("character maps to <undefined>"))
-}
-
-pub(crate) async fn hf_cli_program() -> Option<&'static str> {
-    for program in ["hf", "huggingface-cli"] {
-        let status = Command::new(program)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
-        if status.is_ok_and(|status| status.success()) {
-            return Some(program);
-        }
-    }
-    None
 }
 
 /// Locates the first `.safetensors` under `dir`, reads its header, and
