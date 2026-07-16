@@ -23,6 +23,8 @@ const MOTIONS = [
   "tilt down",
   "handheld",
 ];
+// Named so the initial state and the recipe replay's "absent → default" reset can't drift apart.
+const DEFAULT_MOTION = "slow push-in";
 
 // Resolve a video job's result assets against the live catalog so the
 // WorkerProgressCard video-player variant can play the finished clip (sc-2089).
@@ -53,7 +55,7 @@ import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { videoGenerateValidation } from "../videoStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
-import { downloadOffersFor, videoModelUsable } from "../modelEligibility.js";
+import { VIDEO_MODES, downloadOffersFor, videoModelUsable } from "../modelEligibility.js";
 import { PROMPT_REFINE_MODEL_ID, WAN_A14B_LIGHTNING_MODEL_IDS } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
@@ -66,10 +68,16 @@ import { qualityChoices } from "../jobTypes.js";
 import {
   defaultTierSelection,
   installedTiers,
+  quantizeTier,
   shouldShowTierPicker,
   tierLabel,
   tierQuantize,
 } from "../quantTier.js";
+import {
+  finiteRecipeNumber,
+  recipeLoraSelection,
+  recipeRequestedResolution,
+} from "../recipeFields.js";
 import { readLastTier, writeLastTier } from "../lastTierStore.js";
 import {
   SAMPLER_LABELS,
@@ -152,7 +160,7 @@ export function VideoStudio() {
   // Last-used settings for this workspace, restored on mount. The component is keyed
   // by workspace in App.jsx, so this reads the right snapshot per workspace.
   const saved = useMemo(() => loadStudioSettings("video", activeProject?.id ?? null), [activeProject?.id]);
-  const [motion, setMotion] = useState(saved.motion ?? "slow push-in");
+  const [motion, setMotion] = useState(saved.motion ?? DEFAULT_MOTION);
   // Memoize the per-type catalog splits (sc-8939): both feed a dozen pickers/trays and
   // re-filtering the full catalog on every render (including unrelated state churn) is
   // needless. Recompute only when the catalog changes; stable identities also keep the
@@ -175,6 +183,10 @@ export function VideoStudio() {
   // The explicit pick is persisted per (video, model), outside the workspace settings snapshot.
   const [quantTier, setQuantTier] = useState("");
   const [tierSwitching, setTierSwitching] = useState("");
+  // The model a replayed recipe asked for, when it isn't installed (sc-12324). Its settings still
+  // restore; the mode-snap effect moves the picker to a model that serves the mode. Named rather
+  // than silent so the swap doesn't read as the recipe's own choice.
+  const [recipeModelNotice, setRecipeModelNotice] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? videoModels[0]?.id ?? ltxVideoModelId);
   const [guideOpen, setGuideOpen] = useState(false);
@@ -336,7 +348,10 @@ export function VideoStudio() {
     presetValidationResult,
     localJobs,
     selectedLoraIds,
+    // Recipe replay seeds the picker wholesale rather than toggling one LoRA at a time (sc-12324).
+    setSelectedLoraIds,
     loraWeights,
+    setLoraWeights,
     showIncompatibleLoras,
     setShowIncompatibleLoras,
     compatibleLoras,
@@ -403,9 +418,23 @@ export function VideoStudio() {
   // A model transition always re-seeds even when both models happen to expose the same tier list.
   const availableTiersKey = availableTiers.join(",");
   const quantTierModelRef = useRef(null);
+  // sc-12324: a recipe replay pins the tier its clip was generated at and usually sets the model
+  // too, which would otherwise re-seed the tier back to the default below. The tier is an
+  // aesthetic choice, so re-seeding would silently replay a different look. Armed only when the
+  // recipe actually changes the model — the one case where this effect is guaranteed to fire —
+  // so the one-shot is always consumed on the next commit and can never go stale.
+  const skipQuantTierReseed = useRef(false);
   useEffect(() => {
     const modelChanged = quantTierModelRef.current !== model;
     quantTierModelRef.current = model;
+    if (skipQuantTierReseed.current) {
+      skipQuantTierReseed.current = false;
+      // Honor the recipe's tier only while the new model can actually serve it; otherwise fall
+      // through and re-seed rather than pinning a tier that isn't installed.
+      if (availableTiers.includes(quantTier)) {
+        return;
+      }
+    }
     if (!modelChanged && availableTiers.includes(quantTier)) {
       return;
     }
@@ -516,6 +545,12 @@ export function VideoStudio() {
     if (launchRequest?.view !== "Video") {
       return;
     }
+    // A recipe launch is owned by the recipe effect below. It carries an `assetId` for selection
+    // context but no `mode`, so without this it would fall through to the asset path and both
+    // setMode(undefined) and adopt the replayed clip as its own source clip (sc-12324).
+    if (launchRequest.recipe) {
+      return;
+    }
     // sc-10516: a preset launch. `availablePresets` filters on mode + model, so the
     // preset only resolves once both match — set them alongside the id, then let
     // useSavePreset's hydrate effect apply its `defaults`. Returns before the asset
@@ -622,6 +657,123 @@ export function VideoStudio() {
     const match = pickClosestResolution(width, height, selectedModel?.limits?.resolutions);
     if (match) setResolution(match);
   }, [i2vSourceAssetId, mode, selectedModel?.id, assets]);
+
+  // sc-12324: replay a recorded recipe — the viewer's "Use this recipe" on a video asset. Restores
+  // the form field-for-field so a clip can be re-run with or without its original seed.
+  //
+  // Its OWN effect, keyed on the launch id ALONE, mirroring ImageStudio. The launch effect above
+  // also depends on the selected asset, so folding this into it would re-apply the recipe on every
+  // selection change and silently overwrite whatever the user had since edited.
+  //
+  // Absent values reset to their defaults rather than keeping the current form's — a replay must
+  // reproduce the recipe, not a hybrid of the recipe and whatever was on screen.
+  useEffect(() => {
+    if (launchRequest?.view !== "Video" || !launchRequest.recipe) {
+      return;
+    }
+    const recipe = launchRequest.recipe;
+    const settings = recipe.normalizedSettings ?? {};
+    const rawSettings = recipe.rawAdapterSettings ?? {};
+    const { loraIds, loraWeights: recipeWeights } = recipeLoraSelection(recipe);
+    // Fold a mode the tabs no longer expose back to text_to_video, so a replay never lands on a
+    // missing tab (the image lane's normalizeImageMode does the same).
+    const nextMode = VIDEO_MODES.includes(recipe.mode) ? recipe.mode : "text_to_video";
+    const sourceAssetIdFromRecipe = settings.sourceAssetId ?? "";
+    const lastFrameAssetIdFromRecipe = settings.lastFrameAssetId ?? "";
+
+    // A recipe and a preset are mutually exclusive: the recipe already IS the settings, and a
+    // lingering preset's hydrate pass would layer its defaults back over them.
+    setSelectedPresetId(noPresetId);
+    setMode(nextMode);
+    // An uninstalled model is filtered out of the catalog upstream, so setting it would leave the
+    // picker on a phantom id; the mode-snap effect then moves to a model that serves the mode. Say
+    // so rather than letting the swap look like the recipe's own choice.
+    const recipeModelAvailable =
+      !recipe.model || baseVideoModels.some((item) => item.id === recipe.model);
+    if (recipe.model && recipeModelAvailable) {
+      setModel(recipe.model);
+    }
+    setRecipeModelNotice(recipeModelAvailable ? "" : (recipe.model ?? ""));
+
+    setPrompt(String(recipe.prompt ?? ""));
+    setNegativePrompt(String(recipe.negativePrompt ?? ""));
+    // Seed stays random by default, so "Use this recipe" makes a close variation; the viewer's
+    // "Keep seed" resolves replaySeed to THIS clip's own seed for an exact rerun. Guard with
+    // `!= null` so a legitimate seed of 0 replays instead of reading as absent.
+    const replaySeed = launchRequest.replaySeed;
+    setSeed(replaySeed != null && replaySeed !== "" ? String(replaySeed) : "");
+
+    // The resolution the user PICKED, not the resolved dims — see recipeRequestedResolution. The
+    // model-limits snap re-checks it against the model's options, so a stale one still snaps.
+    const resolutionFromRecipe = recipeRequestedResolution(recipe);
+    if (resolutionFromRecipe) {
+      setResolution(resolutionFromRecipe);
+    }
+    const durationValue = finiteRecipeNumber(settings.duration);
+    if (durationValue) {
+      setDuration(durationValue);
+    }
+    const fpsValue = finiteRecipeNumber(settings.fps);
+    if (fpsValue) {
+      setFps(fpsValue);
+    }
+    if (settings.quality) {
+      setQuality(settings.quality);
+    }
+    setSelectedLoraIds(loraIds);
+    setLoraWeights(recipeWeights);
+
+    // `advanced` passthrough: every real *_raw_settings builder clones it, so these are the knobs
+    // exactly as the client sent them. Steps/guidance record the OVERRIDE — blank means "no
+    // override", which correctly replays as blank and lets the engine re-derive its own default.
+    setStepsOverride(rawSettings.steps ?? "");
+    setGuidanceOverride(rawSettings.guidanceScale ?? "");
+    setSampler(rawSettings.sampler ?? "default");
+    setScheduler(rawSettings.scheduler ?? "default");
+    setSchedulerShift(rawSettings.schedulerShift ?? 3.0);
+    setMotion(rawSettings.motion ?? DEFAULT_MOTION);
+    setLtxPipeline(rawSettings.ltxPipeline ?? "auto");
+    setDistilledVariant(rawSettings.distilledVariant ?? "1.1");
+    setPrecision(rawSettings.precision ?? "fp8");
+    setQuantization(rawSettings.quantization ?? "auto");
+    setLightning(rawSettings.lightning ?? true);
+    setLtxVideoCfg(rawSettings.videoCfgGuidanceScale ?? "");
+    setLtxVideoStg(rawSettings.videoStgGuidanceScale ?? "");
+    setLtxVideoRescale(rawSettings.videoRescaleScale ?? "");
+    setVideoConditioningStrength(rawSettings.videoConditioningStrength ?? "");
+    setBridgeRightVideoConditioningStrength(rawSettings.bridgeRightVideoConditioningStrength ?? "");
+
+    // The MLX tier the clip was generated at. Arm the reseed skip only when the model is actually
+    // changing — that's exactly when the tier effect fires and would overwrite this.
+    const recipeTier = quantizeTier(rawSettings.mlxQuantize);
+    if (recipeTier) {
+      if (recipe.model && recipeModelAvailable && recipe.model !== model) {
+        skipQuantTierReseed.current = true;
+      }
+      setQuantTier(recipeTier);
+    }
+
+    // Sources. A deleted asset is left to the existing `hasInputs` + validation machinery to
+    // surface — the same path a user hits by clearing a picker, rather than a bespoke gate.
+    setSourceAssetId(sourceAssetIdFromRecipe);
+    setLastFrameAssetId(lastFrameAssetIdFromRecipe);
+    setSourceClipAssetId(settings.sourceClipAssetId ?? "");
+    setBridgeRightClipAssetId(settings.bridgeRightClipAssetId ?? "");
+    setSourceClipAssetIds(Array.isArray(settings.sourceClipAssetIds) ? settings.sourceClipAssetIds : []);
+    setReferenceAssetIds(Array.isArray(settings.referenceAssetIds) ? settings.referenceAssetIds : []);
+    setReferenceClipAssetId(settings.referenceClipAssetId ?? "");
+    setFitMode(settings.fitMode ?? "crop");
+    setCharacterId(settings.characterId ?? "");
+    setCharacterLookId(settings.characterLookId ?? "");
+    setPersonTrackId(settings.personTrackId ?? "");
+    setReplacementMode(settings.replacementMode ?? "face_only");
+
+    // The recipe's resolution is authoritative, but seeding a source image would otherwise trip the
+    // I2V aspect snap above and overwrite it. Point that snap's ref at the restored id so it reads
+    // as "no change" — the same mechanism that preserves a restored snapshot's resolution.
+    lastI2vAssetIdRef.current = sourceAssetIdFromRecipe || lastFrameAssetIdFromRecipe;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [launchRequest?.id]);
 
   // Models are gated on the selected tab (sc-5716): when the active mode isn't served by the current
   // model, snap to the first model that serves it so the user can always leave a mode. Generalizes
@@ -1325,7 +1477,14 @@ export function VideoStudio() {
             <div className="settings-bar-row">
               <label className="settings-field settings-field-model">
                 Model
-                <select onChange={(event) => setModel(event.target.value)} value={model}>
+                <select
+                  onChange={(event) => {
+                    // Picking a model answers the recipe notice, so retire it.
+                    setRecipeModelNotice("");
+                    setModel(event.target.value);
+                  }}
+                  value={model}
+                >
                   {/* Models gated on the selected tab (sc-5716): show only models that serve the
                       active mode, falling back to the full available list if none do (a reduced
                       catalog) so the picker is never empty. */}
@@ -1335,6 +1494,12 @@ export function VideoStudio() {
                     </option>
                   ))}
                 </select>
+                {recipeModelNotice ? (
+                  <span className="field-hint" role="status">
+                    This clip was made with “{recipeModelNotice}”, which isn’t installed. Its
+                    settings were restored — pick a model to re-run it.
+                  </span>
+                ) : null}
               </label>
               <label className="settings-field settings-field-aspect">
                 Resolution

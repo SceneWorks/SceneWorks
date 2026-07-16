@@ -11,6 +11,7 @@ import {
   modelQualityFloor,
   shouldShowTierPicker,
   tierLabel,
+  quantizeTier,
   tierQuantize,
   INT8_CONVROT_TIER,
   NVFP4_TIER,
@@ -41,6 +42,22 @@ describe("quantTier mapping", () => {
     expect(tierQuantize("default")).toBe(null);
     expect(tierQuantize("q2")).toBe(null);
     expect(tierQuantize(undefined)).toBe(null);
+  });
+
+  it("maps an mlxQuantize value back to its tier, round-tripping tierQuantize", () => {
+    for (const tier of ["bf16", "q8", "q4"]) {
+      expect(quantizeTier(tierQuantize(tier))).toBe(tier);
+    }
+    // bf16 is 0 — the falsy value a truthiness check would drop.
+    expect(quantizeTier(0)).toBe("bf16");
+  });
+
+  it("returns null when no tier produced the value", () => {
+    expect(quantizeTier(2)).toBe(null);
+    expect(quantizeTier(undefined)).toBe(null);
+    expect(quantizeTier(null)).toBe(null);
+    // A recipe that never recorded a tier must not resolve to one.
+    expect(quantizeTier("q4")).toBe(null);
   });
 
   it("labels known tiers and falls back to the raw key", () => {
