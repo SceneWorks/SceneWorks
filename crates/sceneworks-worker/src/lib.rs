@@ -102,6 +102,7 @@ use api_client::*;
 mod engines;
 mod gpu;
 use gpu::*;
+mod fit_gate;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired

@@ -21,6 +21,8 @@
 use super::*;
 use serde_json::Value;
 
+pub(crate) use crate::fit_gate::{resolve_offload, FitDecision};
+
 /// Emulate a smaller card: cap usable VRAM (GB). Set e.g. `SCENEWORKS_CUDA_VRAM_CAP_GB=10` to make the
 /// fit-gate treat this GPU as a 10 GB card, so a too-big model is rejected (and, once Phase 1 lands,
 /// offloaded) exactly as it would be on real small hardware. Unset / non-positive ⇒ use the real
@@ -37,28 +39,6 @@ const HEADROOM_GB: f64 = 2.0;
 pub(crate) struct VramBudget {
     pub free_gb: f64,
     pub total_gb: f64,
-}
-
-/// The gate outcome. `Unknown` = no signal (unmeasured model or non-NVIDIA host) ⇒ never block, exactly
-/// like the flux2 edit guard's `available_gb == None` short-circuit.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum FitDecision {
-    Unknown,
-    Fits,
-    /// The predicted resident peak won't fit, but the model's provider supports sequential component
-    /// residency (the candle FLUX lane, sc-10769) — run with `OffloadPolicy::Sequential` instead of
-    /// rejecting. Sequential peak is always ≤ resident, so this is the best option before a reject.
-    /// When the tier's sequential peak is MEASURED (`candle.sequentialPeakGb`, sc-10856) the caller runs
-    /// a second [`sequential_overflow_gb`] check and rejects if even sequential won't fit; absent that
-    /// number it's best-effort (the reactive Metal/CUDA-OOM containment is the backstop).
-    Offload {
-        needed_gb: f64,
-        available_gb: f64,
-    },
-    TooBig {
-        needed_gb: f64,
-        available_gb: f64,
-    },
 }
 
 /// Read the small-card cap from the environment. `Some(gb)` only for a positive number.
@@ -253,24 +233,6 @@ pub(crate) fn fit_decision(needed_gb: Option<f64>, budget: Option<VramBudget>) -
         }
     } else {
         FitDecision::Fits
-    }
-}
-
-/// Fold sequential-residency capability into a fit decision (epic 10765 Phase 1b, sc-10821): a
-/// [`FitDecision::TooBig`] on a provider that supports sequential offload (the candle FLUX lane) becomes
-/// [`FitDecision::Offload`] — load→use→drop each component so peak VRAM is the largest single working
-/// set (≤ resident) rather than reject. Every other outcome (Fits / Unknown / TooBig on a non-capable
-/// provider) is unchanged.
-pub(crate) fn resolve_offload(decision: FitDecision, sequential_capable: bool) -> FitDecision {
-    match decision {
-        FitDecision::TooBig {
-            needed_gb,
-            available_gb,
-        } if sequential_capable => FitDecision::Offload {
-            needed_gb,
-            available_gb,
-        },
-        other => other,
     }
 }
 

@@ -33,6 +33,7 @@ use std::sync::OnceLock;
 
 use gen_core::{LoadSpec, OffloadPolicy, WeightsSource};
 
+pub(crate) use crate::fit_gate::{resolve_offload, FitDecision};
 use crate::{WorkerError, WorkerResult};
 
 /// Whether `engine_id`'s provider drops components in phase order under [`OffloadPolicy::Sequential`]
@@ -149,27 +150,6 @@ pub(crate) struct MemoryBudget {
     pub total_gb: f64,
 }
 
-/// The gate outcome. `Unknown` = no signal (the RAM probe failed, or the weights dir had no
-/// measurable `.safetensors`) ⇒ never block, mirroring the flux2 guard's `available_gb == None`
-/// short-circuit and the candle gate's `Unknown`.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum FitDecision {
-    Unknown,
-    Fits,
-    /// The predicted RESIDENT peak won't fit, but the provider supports sequential component residency
-    /// (sc-10839) — run with [`OffloadPolicy::Sequential`] instead of rejecting. Sequential peak is
-    /// always ≤ resident. The caller then runs the second-stage [`sequential_overflow_gb`] check and
-    /// rejects only if even the staged max-single-component peak won't fit.
-    Offload {
-        needed_gb: f64,
-        available_gb: f64,
-    },
-    TooBig {
-        needed_gb: f64,
-        available_gb: f64,
-    },
-}
-
 /// Read the small-Mac cap from the environment. `Some(gb)` only for a positive number.
 pub(crate) fn mlx_memory_cap_gb() -> Option<f64> {
     parse_memory_cap(std::env::var(MLX_MEMORY_CAP_ENV).ok().as_deref())
@@ -224,24 +204,6 @@ pub(crate) fn predicted_sequential_peak_gb(total_bytes: u64, te_bytes: u64) -> O
     let rest_bytes = total_bytes.saturating_sub(te_bytes);
     let staged_max = te_bytes.max(rest_bytes);
     Some(staged_max as f64 / BYTES_PER_GIB + HEADROOM_GB)
-}
-
-/// Fold sequential-residency capability into a fit decision (sc-10839, mirroring the candle
-/// `vram_gate::resolve_offload`): a [`FitDecision::TooBig`] on a provider that drops components in
-/// phase order becomes [`FitDecision::Offload`] — load→use→drop so peak is the largest single
-/// component (≤ resident) rather than a reject. Every other outcome (Fits / Unknown / TooBig on a
-/// non-capable provider) is unchanged.
-pub(crate) fn resolve_offload(decision: FitDecision, sequential_capable: bool) -> FitDecision {
-    match decision {
-        FitDecision::TooBig {
-            needed_gb,
-            available_gb,
-        } if sequential_capable => FitDecision::Offload {
-            needed_gb,
-            available_gb,
-        },
-        other => other,
-    }
 }
 
 /// Second-stage gate for a [`FitDecision::Offload`] (sc-10839): sequential residency was selected
