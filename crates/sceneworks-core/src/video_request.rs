@@ -250,8 +250,10 @@ const DEFAULT_DIMENSION_MULTIPLE: u32 = 32;
 /// answer differed per model — the floor is not one number:
 ///
 /// * **16** — bernini and the Wan A14B trio (t2v / i2v / vace-fun) ride a z16 VAE:
-///   `patch 2 × vae_stride 8`. They now declare it, so bernini's own default 848x480 and
-///   the advertised 1280x720 stop silently rendering as 832x480 / 1280x704.
+///   `patch 2 × vae_stride 8`. They now declare it, so bernini's own default 848x480 stops
+///   silently rendering as 832x480. Their 720p buckets still move to 704, but for a
+///   different reason: the A14B **area** cap (704×1280 = 901,120 px), which candle
+///   hard-errors on and mlx i2v silently rescales for — not the stride.
 /// * **32** — the dense Wan TI2V-5B (z48 vae22, `vae_stride 16`) and scail2 (hardcoded
 ///   `DIM_ALIGN`) genuinely need it. There the *advertisement* was wrong, so their 720p
 ///   buckets were corrected to the 704 they always rendered; both keep this default.
@@ -453,8 +455,11 @@ mod tests {
         })));
         assert_eq!((bernini.width, bernini.height), (848, 480));
 
-        // The 720p bucket is real for every ÷16 model (720 = 16·45): bernini + the Wan A14B
-        // trio all advertised 1280x720 while rendering 1280x704.
+        // A finer floor is NOT a licence to advertise 720p. The A14B family (bernini + the
+        // Wan trio) is capped by AREA, not stride: candle hard-errors above MAX_AREA_14B
+        // (704×1280 = 901,120 px) and mlx i2v silently rescales 1280×720 → 1264×704. So
+        // 1280x704 — exactly AT the cap — is the real 1280-wide bucket, and it must survive
+        // the ÷16 floor untouched.
         for model in [
             "bernini",
             "wan_2_2_t2v_14b",
@@ -462,13 +467,31 @@ mod tests {
             "wan_2_2_vace_fun_14b",
         ] {
             let req = VideoRequest::from_payload(&payload(json!({
-                "projectId": "p", "model": model, "width": 1280, "height": 720,
+                "projectId": "p", "model": model, "width": 1280, "height": 704,
                 "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 16 } }
             })));
             assert_eq!(
                 (req.width, req.height),
-                (1280, 720),
-                "{model} must keep 1280x720"
+                (1280, 704),
+                "{model} must keep its at-cap 1280x704 bucket"
+            );
+            assert!(
+                (req.width as usize) * (req.height as usize) <= 704 * 1280,
+                "{model} bucket must fit MAX_AREA_14B"
+            );
+
+            // Every A14B advertised bucket is ÷32, so the at-cap check above holds under
+            // either floor. What the declared 16 actually buys is a CUSTOM dim below the
+            // cap: 848 survives at ÷16 and would be cut to 832 at ÷32. This is the
+            // assertion that makes the declaration load-bearing for the Wan trio.
+            let custom = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "model": model, "width": 848, "height": 480,
+                "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 16 } }
+            })));
+            assert_eq!(
+                (custom.width, custom.height),
+                (848, 480),
+                "{model} declares 16, so a custom 848x480 must not be cut to 832"
             );
         }
 
@@ -494,12 +517,22 @@ mod tests {
             (
                 "bernini",
                 16,
-                vec![(848, 480), (480, 848), (1280, 720), (720, 1280)],
+                vec![(848, 480), (480, 848), (1280, 704), (704, 1280)],
             ),
             (
                 "wan_2_2_t2v_14b",
                 16,
-                vec![(832, 480), (480, 832), (1280, 720), (720, 1280)],
+                vec![(832, 480), (480, 832), (1280, 704), (704, 1280)],
+            ),
+            (
+                "wan_2_2_i2v_14b",
+                16,
+                vec![(832, 480), (480, 832), (1280, 704), (704, 1280)],
+            ),
+            (
+                "wan_2_2_vace_fun_14b",
+                16,
+                vec![(832, 480), (480, 832), (1280, 704), (704, 1280)],
             ),
             (
                 "ltx_2_3",

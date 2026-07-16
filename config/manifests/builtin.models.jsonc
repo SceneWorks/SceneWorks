@@ -6204,7 +6204,7 @@
       "defaults": {
         "duration": 5,
         "fps": 16,
-        "resolution": "1280x720",
+        "resolution": "1280x704",
         "quality": "balanced",
         "sampler": "default",
         "scheduler": "default"
@@ -6217,11 +6217,15 @@
         // A14B rides the z16 Wan2.1 VAE: `patch (1,2,2)` × `vae_stride (4,8,8)` = **16**
         // (mlx-gen-wan/src/config.rs:169 + align_dim at pipeline.rs:36; descriptor min_size
         // 16 at model.rs:601; candle-gen-wan/src/wan14b.rs:717 agrees). Only the dense
-        // TI2V-5B needs 32 (its z48 VAE has vae_stride 16). Declaring 16 stops core's
-        // default-32 floor from silently rendering the advertised 1280x720 at 1280x704
-        // (sc-12294).
+        // TI2V-5B needs 32 (its z48 VAE has vae_stride 16). Declaring 16 is the engine's
+        // truth and keeps custom dims honest (sc-12294).
+        //
+        // The 720p buckets are 704 for a SEPARATE reason — the A14B **area** cap, not the
+        // stride: candle-gen-wan/src/wan14b.rs:645 hard-errors above MAX_AREA_14B
+        // (704×1280 = 901,120 px) and 1280×720 = 921,600 exceeds it. 1280x704 is exactly
+        // AT the cap (`>` check) so it passes; mlx T2V has max_area 0 and never caps.
         "requiresDimensionsMultipleOf": 16,
-        "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
+        "resolutions": ["832x480", "480x832", "1280x704", "704x1280"],
         // Epic 7114 curated menu (sc-7296). Base = the candle (Windows) A14B engine's curated
         // set (native `uni_pc`/`euler`); the macOS mlx override below exposes the full curated
         // fold-in. No scheduler axis (flow shift = `scheduler_shift`).
@@ -6404,7 +6408,7 @@
       "defaults": {
         "duration": 5,
         "fps": 16,
-        "resolution": "1280x720",
+        "resolution": "1280x704",
         "quality": "balanced",
         "sampler": "default",
         "scheduler": "default"
@@ -6414,11 +6418,16 @@
         "recommendedMaxDuration": 5,
         "hardMaxDuration": 5,
         "fps": [16],
-        "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
         // Same z16 A14B geometry as the T2V entry above: patch 2 × vae_stride 8 = **16**
-        // (mlx-gen-wan/src/config.rs:169; candle-gen-wan/src/wan14b.rs:717). Keeps the
-        // advertised 1280x720 from silently rendering at 1280x704 (sc-12294).
+        // (mlx-gen-wan/src/config.rs:169; candle-gen-wan/src/wan14b.rs:717) (sc-12294).
+        //
+        // I2V is the strictest of the trio on area: BOTH backends enforce the 704×1280 =
+        // 901,120 px cap, and they disagree on how — candle hard-errors (wan14b.rs:645)
+        // while mlx silently RESCALES via `best_output_size` (model.rs:1074), which its own
+        // test pins at 1280×720 → 1264×704 (pipeline.rs:1510). So 1280x720 is unreachable
+        // here either way; 1280x704 is exactly AT the cap and renders as advertised on both.
         "requiresDimensionsMultipleOf": 16,
+        "resolutions": ["832x480", "480x832", "1280x704", "704x1280"],
         // Epic 7114 curated menu (sc-7296). Base = the candle (Windows) A14B engine's curated
         // set (native `uni_pc`/`euler`); the macOS mlx override below exposes the full curated
         // fold-in. No scheduler axis (flow shift = `scheduler_shift`).
@@ -6558,13 +6567,18 @@
         //
         // VACE-Fun is A14B/z16: `VAE_S = 8` × patch 2 = **16** (mlx-gen-wan/src/model_vace.rs:56
         // + align at :108; descriptor min_size 16 at :243; candle-gen-wan/src/model_vace.rs:380
-        // agrees). Declaring it keeps the advertised 1280x720 real (sc-12294).
+        // agrees) (sc-12294).
+        //
+        // The 720p buckets are 704 on the **area** cap, not the stride: mlx VACE is uncapped
+        // (model_vace.rs:107 — "no max-area cap"), but candle VACE hard-errors above
+        // MAX_AREA_14B = 901,120 px (model_vace.rs:298) and 1280×720 = 921,600 exceeds it.
+        // 1280x704 is exactly AT the cap, so it renders as advertised on both backends.
         "durations": [3, 4, 5],
         "recommendedMaxDuration": 5,
         "hardMaxDuration": 5,
         "fps": [16],
         "requiresDimensionsMultipleOf": 16,
-        "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
+        "resolutions": ["832x480", "480x832", "1280x704", "704x1280"],
         // Epic 7114 curated menu (sc-7296). mlx-only model (no candle/Torch backend) — the native
         // dual-expert VACE-Fun engine over Wan's flow σ schedule exposes the native curated set.
         // No scheduler axis (flow shift = `scheduler_shift`).
@@ -6714,9 +6728,15 @@
         // vae_stride.2 = 8)` = 16 (mlx-gen-bernini/src/bernini.rs:646, descriptor
         // min_size 16 at :541; candle-gen-bernini agrees at pipeline.rs:96). Declaring
         // it stops core's default-32 floor from silently rewriting THIS model's own
-        // default 848x480 → 832x480 and 1280x720 → 1280x704 (sc-12294).
+        // default 848x480 → 832x480 (sc-12294).
+        //
+        // Separately, the 720p buckets are 704 — NOT a stride effect but the A14B
+        // **area** cap: candle-gen-bernini/src/config.rs:164 hard-errors above
+        // MAX_AREA_14B (704×1280 = 901,120 px), and 1280×720 = 921,600 exceeds it.
+        // 1280x704 sits exactly AT the cap (the check is `>`), so it passes on candle
+        // and is uncapped on mlx. 848x480 (407,040) is far under the cap.
         "requiresDimensionsMultipleOf": 16,
-        "resolutions": ["848x480", "480x848", "1280x720", "720x1280"],
+        "resolutions": ["848x480", "480x848", "1280x704", "704x1280"],
         // MLX path is default-only (UniPC flow). Sampler/scheduler menus are
         // pinned on mlx.limits to mirror the other native-MLX video models.
         "samplers": ["default"],
