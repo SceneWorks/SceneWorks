@@ -57,9 +57,10 @@ use crate::{WorkerError, WorkerResult};
 /// query shape the worker already uses for family/guidance/quant capability advertisement and the
 /// analogous `ProviderRegistry::footprint` size seam (sc-10894). An id with no registered generator — or a
 /// registered one that does not advertise the bit — yields `false` (the safe default: never select a
-/// residency policy the provider won't honor). Sees exactly the providers the binary force-links (the
-/// sc-4482 dead-strip rule): on macOS every `mlx_gen_*` provider is anchored in `image_jobs`, so the
-/// live worker resolves them; off-Mac the MLX gate no-ops anyway (no `sysctl` budget).
+/// residency policy the provider won't honor). Sees exactly the providers the selected runtime bundle
+/// carries: MLX providers are explicitly anchored on macOS, while the CUDA bundle exposes its explicit
+/// Candle catalog. The same query is shared by the MLX fit gate (sc-10840) and Candle fit gate
+/// (sc-12130), so adding a truthful provider capability needs no worker allowlist edit.
 pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
     crate::inference_runtime::media()
         .generators()
@@ -796,11 +797,34 @@ mod tests {
     }
 
     /// An id with no registered generator is never sequential-capable (the safe default: never select a
-    /// residency policy the provider won't honor) — a cross-platform invariant that holds even off-Mac
-    /// where the image registry is empty.
+    /// residency policy the provider won't honor) — a cross-platform invariant.
     #[test]
     fn engine_supports_sequential_is_false_for_an_unregistered_id() {
         assert!(!engine_supports_sequential("no_such_engine_xyz"));
+    }
+
+    /// Candle's sc-12130 twin of the macOS registry sweep above. These are the generic generator ids that
+    /// reach the Candle fit gate after route diversion. Krea edit is now true because sc-12129 landed;
+    /// the bespoke pose-control provider is not a registered generator and remains outside this gate.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn candle_sequential_capability_is_derived_from_the_registered_descriptor() {
+        for id in [
+            "flux1_dev",
+            "flux1_schnell",
+            "flux2_dev",
+            "flux2_klein_9b",
+            "qwen_image",
+            "krea_2_turbo",
+            "krea_2_raw",
+            "krea_2_edit",
+        ] {
+            assert!(
+                engine_supports_sequential(id),
+                "{id}: wired Candle provider must advertise sequential residency"
+            );
+        }
+        assert!(!engine_supports_sequential("krea_2_turbo_control"));
     }
 
     #[test]
