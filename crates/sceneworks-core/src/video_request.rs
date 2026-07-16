@@ -332,8 +332,19 @@ fn max_pixels_of(model_manifest_entry: &JsonObject) -> Option<u64> {
 /// cap that the candle backend hard-errors on. One geometry, both backends (sc-12294).
 ///
 /// The `.max(d)` clamps mirror the engine's own F-030 guard against a degenerate area flooring a
-/// dimension to 0 (and a subsequent `area / 0` → NaN ratio). They cannot fire here — a cap below
-/// 256×256 is rejected by [`max_pixels_of`] — but the port is kept faithful rather than trimmed.
+/// dimension to 0 (and a subsequent `area / 0` → NaN ratio). They cannot fire for any *shipped*
+/// cap, and the port is kept faithful rather than trimmed.
+///
+/// The bound comes from the shipped caps, NOT from [`max_pixels_of`]'s filter — that distinction
+/// matters if a future cap is added. [`MIN_HONORABLE_MAX_PIXELS`] only guarantees a *square*
+/// 256×256 fits; it says nothing about a non-square fit, which drives the minor dimension well
+/// below 256 (a cap of exactly 65,536 — which passes the filter — fits 1920×256 to `(688, 80)` at
+/// stride 16, violating [`normalized_dimensions`]'s own 256 floor and every engine's `min_size`).
+/// What actually rules the clamps out is the reachable minimum: [`normalized_dimensions`] clamps
+/// both inputs to `[256, 1920]`, so the aspect ratio cannot exceed `1920/256 = 7.5`, and at the
+/// only cap the manifest declares (901,120) the smaller ideal dimension is `√(901120/7.5) ≈ 346`
+/// — comfortably above every stride, so nothing floors to 0. A cap below ~491,520 would put an
+/// extreme-ratio request back into clamp territory; the manifest's caps are test-pinned.
 fn fit_to_max_pixels(width: u32, height: u32, multiple: u32, max_pixels: u64) -> (u32, u32) {
     let (w, h, d) = (width as f64, height as f64, multiple as f64);
     let area = max_pixels as f64;
@@ -670,7 +681,17 @@ mod tests {
     ///   (`config.rs:293`); candle's 5B `validate` (`lib.rs:328`) has NO area check.
     /// * `wan_2_2_i2v_14b` — the only agreement, and even there candle errors while mlx
     ///   rescales.
-    /// * `ltx_2_3` / `ltx_2_3_eros` / `svd` / `mochi_1` — zero area checks in either backend.
+    /// * `ltx_2_3` / `ltx_2_3_eros` / `svd` / `mochi_1` — no `maxPixels`-expressible area cap in
+    ///   either backend, so no cap is declared. Not literally "no checks": candle-LTX caps
+    ///   **latent tokens** (`candle-gen-ltx/src/lib.rs:454`: `t_lat·h_lat·w_lat > 131_072`), which
+    ///   is proportional to `frames × w × h`. That is a frames×area constraint and therefore
+    ///   outside `maxPixels`' scope — `maxPixels` is a pure per-frame area budget with no frame
+    ///   term, so no value of it could express this cap without either under- or over-constraining
+    ///   at some duration. It is also unreachable within the advertised duration/fps limits (the
+    ///   worst advertised case, 15s at 30fps and 1280×704, is ~25k of the 131,072 tokens), and
+    ///   candle-LTX registers `ltx_2_3_distilled` — a different id from these entries. Frame-count
+    ///   shaping is the sibling lever (cf. mochi's 6k+1 rule, sc-11993); if an LTX request ever
+    ///   needs to honor this cap it belongs there, not in `maxPixels`.
     const ENGINE_GEOMETRY: &[(&str, Option<u32>, Option<u64>)] = &[
         ("ltx_2_3", Some(64), None),
         ("ltx_2_3_eros", Some(64), None),

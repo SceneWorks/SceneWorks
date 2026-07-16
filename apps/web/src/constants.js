@@ -602,7 +602,7 @@ export const fallbackModels = [
       durations: [4, 6, 8, 10, 12, 15],
       recommendedMaxDuration: 10,
       fps: [24, 25, 30],
-      resolutions: ["768x512", "512x768", "640x640", "1280x720", "720x1280"],
+      resolutions: ["768x512", "512x768", "640x640", "1280x704", "704x1280"],
     },
     ui: {
       description: "First-class short-shot video target.",
@@ -620,7 +620,7 @@ export const fallbackModels = [
       durations: [4, 6, 8, 10, 12, 15],
       recommendedMaxDuration: 10,
       fps: [24, 25, 30],
-      resolutions: ["768x512", "512x768", "640x640", "1280x720", "720x1280"],
+      resolutions: ["768x512", "512x768", "640x640", "1280x704", "704x1280"],
     },
     ui: {
       description: "Community LTX-2.3 merge tuned for image-to-video; uses LTX-video LoRAs.",
@@ -653,15 +653,19 @@ export const fallbackModels = [
     name: "Wan2.2",
     type: "video",
     capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
-    // Default to 832x480 for a sane out-of-the-box time on the Mac MLX path (sc-4997): measured
-    // 5B @ 832x480/121f/20-step/CFG = ~5 min vs ~20 min at 1280x720 (the z48 VAE decode dominates
-    // at high res). 1280x720 stays user-selectable via `limits.resolutions` for those who accept it.
-    defaults: { duration: 5, fps: 24, resolution: "832x480", quality: "balanced" },
+    // Mirrors the manifest's 720p default (see videoGeometryParity.test.js). NOTE: sc-4997 set this
+    // mirror to 832x480 for a sane out-of-the-box Mac MLX time (measured 5B @ 832x480/121f/20-step/CFG
+    // = ~5 min vs ~20 min at 720p — the z48 VAE decode dominates at high res), but it only ever changed
+    // this file, never `builtin.models.jsonc`. The live catalog is authoritative once loaded, so that
+    // fast-path default never actually shipped; this mirror was advertising a default the app does not
+    // use. Realigning to the manifest makes the mirror truthful. Whether the manifest itself should
+    // adopt sc-4997's 832x480 fast path is a separate product call, tracked in sc-12319.
+    defaults: { duration: 5, fps: 24, resolution: "1280x704", quality: "balanced" },
     limits: {
       durations: [4, 5, 6, 7, 8],
       recommendedMaxDuration: 7,
       fps: [16, 24],
-      resolutions: ["832x480", "1280x720", "720x1280"],
+      resolutions: ["832x480", "1280x704", "704x1280"],
     },
     ui: {
       description: "Fallback video family.",
@@ -674,12 +678,12 @@ export const fallbackModels = [
     name: "Wan2.2 14B (T2V)",
     type: "video",
     capabilities: ["text_to_video"],
-    defaults: { duration: 5, fps: 16, resolution: "1280x720", quality: "balanced" },
+    defaults: { duration: 5, fps: 16, resolution: "1280x704", quality: "balanced" },
     limits: {
       durations: [3, 4, 5],
       recommendedMaxDuration: 5,
       fps: [16],
-      resolutions: ["832x480", "480x832", "1280x720", "720x1280"],
+      resolutions: ["832x480", "480x832", "1280x704", "704x1280"],
     },
     ui: {
       description: "Wan2.2 A14B text-to-video (high/low-noise mixture-of-experts).",
@@ -692,12 +696,12 @@ export const fallbackModels = [
     name: "Wan2.2 14B (I2V)",
     type: "video",
     capabilities: ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
-    defaults: { duration: 5, fps: 16, resolution: "1280x720", quality: "balanced" },
+    defaults: { duration: 5, fps: 16, resolution: "1280x704", quality: "balanced" },
     limits: {
       durations: [3, 4, 5],
       recommendedMaxDuration: 5,
       fps: [16],
-      resolutions: ["832x480", "480x832", "1280x720", "720x1280"],
+      resolutions: ["832x480", "480x832", "1280x704", "704x1280"],
     },
     ui: {
       description: "Wan2.2 A14B image-to-video (high/low-noise mixture-of-experts).",
@@ -718,7 +722,7 @@ export const fallbackModels = [
       durations: [3, 4, 5],
       recommendedMaxDuration: 5,
       fps: [16],
-      resolutions: ["832x480", "480x832", "1280x720", "720x1280"],
+      resolutions: ["832x480", "480x832", "1280x704", "704x1280"],
     },
     ui: {
       description: "Wan2.2 A14B VACE control model (high/low-noise mixture-of-experts) for person replacement and controllable video.",
