@@ -6003,7 +6003,23 @@
       "defaults": {
         "duration": 5,
         "fps": 24,
-        "resolution": "1280x704",
+        // 832x480, not the 1280x704 this model can also render (sc-12319, adopting sc-4997's
+        // never-landed fast path — it changed only the constants.js mirror, so the catalog kept
+        // serving 720p and every 5B render took the slow path). Measured on real weights at the
+        // dispatched 20-step + CFG recipe (sc-4997, M5 Max, 121f): 1280x720 = 19.7 min (DiT 11.0
+        // + z48 VAE 8.3) vs 832x480 = 5.1 min (DiT 3.5 + VAE 1.5). The bar is <10 min.
+        //
+        // 720p is not reachable by tuning the worker: the z48 vae22 decode alone is ~8.3 min and
+        // is independent of steps/CFG, and the VAE stays dense bf16 in EVERY quant tier (see the
+        // downloads[] note above), so no tier shrinks it. The high-res decode is also mostly
+        // tiling overhead, not compute — `auto_tiling_budgeted` still takes the largest tile under
+        // 0.85 × get_memory_limit() (~99 GB on a 128 GB Mac). That is sc-5089, still OPEN: if it
+        // lands, 720p gets materially cheaper and this default is worth revisiting.
+        //
+        // 832x480 is an advertised bucket, exact on the 32-px stride (26×15), and well under
+        // maxPixels — 720p stays one click away in the picker. Matches scail2_14b/vace_fun_14b,
+        // which already default to 480p despite being the heavier models.
+        "resolution": "832x480",
         "quality": "balanced",
         "sampler": "default",
         "scheduler": "default"

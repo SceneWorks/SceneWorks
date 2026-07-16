@@ -20,8 +20,9 @@ import { fallbackModels } from "./constants.js";
 //
 // Precedent for the drift being real, not theoretical: sc-4997 set wan_2_2's fast-path default to
 // 832x480 in constants.js ONLY and never touched the manifest, so that default never actually shipped —
-// the catalog kept serving 720p. This test would have caught it. (Whether the manifest should adopt
-// sc-4997's 832x480 fast path is a separate product call, tracked in sc-12319.)
+// the catalog kept serving 720p for a year. This test would have caught it. sc-12319 settled the
+// product question the other way round (the manifest adopted 832x480), so both files now say 480p —
+// but the guard is what keeps them saying it together.
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_PATH = resolve(HERE, "../../../config/manifests/builtin.models.jsonc");
 
