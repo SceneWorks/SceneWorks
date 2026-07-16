@@ -34,7 +34,8 @@ use std::path::{Path, PathBuf};
 use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Progress, Quant, WeightsSource};
 
 use super::smoke_support::{
-    env_or, image_mean, image_std, is_all_zero, save_png, DEGENERATE_STD_FLOOR_DEFAULT,
+    env_or, image_mean, image_std, is_all_zero, mean_abs_frame_delta, save_png,
+    DEGENERATE_STD_FLOOR_DEFAULT,
 };
 
 /// The engine id BOTH backends register (no `_distilled`-style split).
@@ -52,6 +53,31 @@ const TIERS: &[(&str, Option<Quant>)] = &[
 
 /// The shared components the provider resolves from the tier dir's PARENT (the A6 sibling layout).
 const SHARED_COMPONENTS: &[&str] = &["text_encoder", "tokenizer", "vae"];
+
+/// Motion floor: the minimum [`mean_abs_frame_delta`] (0–255 scale) every CONSECUTIVE frame pair of a
+/// live Mochi clip must clear (sc-11992 review).
+///
+/// Why this exists: a FROZEN clip — the 6× temporal path collapsed to N copies of one still — scores
+/// exactly 0.0 here yet passes every other assertion this smoke makes (frame count, dimensions,
+/// non-all-zero, per-pixel std), because each individual frame is a perfectly good image. The temporal
+/// path IS Mochi's distinguishing feature, so a smoke that cannot tell a moving clip from a frozen one
+/// is not evidence the lane works.
+///
+/// Why the per-PAIR minimum and not just `first` vs `last`: the pair minimum is strictly stronger. A
+/// clip that moves once and then freezes for the rest of the run still shows a large first→last span,
+/// but its frozen stretch drives a consecutive pair to ~0. Requiring EVERY adjacent pair to clear the
+/// floor asserts the temporal path stayed alive for the whole clip, not just at its ends.
+///
+/// Calibration — the observed 848×480 × 7f @ 4-step run on this Mac (seed 42), per-pair deltas:
+///   q4   [7.58, 5.58, 3.60, 3.41, 2.60, 5.21]  → min 2.597 (first→last span 14.65)
+///   q8   [30.04, 6.11, 2.57, 7.23, 14.93, 11.89] → min 2.573 (span 20.41)
+///   bf16 [30.87, 6.47, 2.75, 7.19, 16.24, 12.67] → min 2.752 (span 19.90)
+/// The tightest real observation across all three tiers is 2.573. 1.0 sits ~2.6× below it — enough
+/// margin that a different prompt/step count/seed (all env-overridable here) will not flake — while a
+/// frozen or near-frozen pair (0.0, or a sub-1/255 average pixel change) cannot reach it. This is a
+/// structural liveness floor, deliberately NOT a motion-quality bar: the saved-PNG eyeball remains the
+/// quality call, exactly like `DEGENERATE_STD_FLOOR_DEFAULT`.
+const MOTION_MIN_PAIR_DELTA_FLOOR: f64 = 1.0;
 
 /// Whether `root` is a Mochi model root: the shared co-requisite plus at least one complete tier.
 fn is_model_root(root: &Path) -> bool {
@@ -218,15 +244,38 @@ fn mochi_mlx_gpu_smoke() {
                  all-black / flat decode"
             );
         }
-        let first = image_mean(&rendered[0]);
-        let last = image_mean(&rendered[rendered.len() - 1]);
+        // The clip must actually MOVE. Every per-frame check above is structurally blind to a frozen
+        // clip (N copies of one good still), and the 6× temporal path is the thing this lane exists to
+        // prove — so assert a real motion floor on EVERY consecutive pair, not just the ends. A frozen
+        // pair scores exactly 0.0. See `MOTION_MIN_PAIR_DELTA_FLOOR` for the calibration.
+        let pair_deltas: Vec<f64> = rendered
+            .windows(2)
+            .map(|pair| mean_abs_frame_delta(&pair[0], &pair[1]))
+            .collect();
+        let span = mean_abs_frame_delta(&rendered[0], &rendered[rendered.len() - 1]);
         println!(
             "[smoke] mochi_1 {tier} {w}x{h} x{} frames, mean {:.2} -> {:.2}, std {:.2}",
             rendered.len(),
-            first,
-            last,
+            image_mean(&rendered[0]),
+            image_mean(&rendered[rendered.len() - 1]),
             image_std(&rendered[0])
         );
+        println!(
+            "[smoke-motion] mochi_1 {tier} pair_deltas={:?} span={span:.3}",
+            pair_deltas
+                .iter()
+                .map(|d| format!("{d:.3}"))
+                .collect::<Vec<_>>()
+        );
+        for (index, delta) in pair_deltas.iter().enumerate() {
+            assert!(
+                *delta > MOTION_MIN_PAIR_DELTA_FLOOR,
+                "mochi_1 {tier} frames {index}->{} are FROZEN (mean abs delta {delta:.3} <= floor \
+                 {MOTION_MIN_PAIR_DELTA_FLOOR}) — the temporal path is broken; per-pair deltas \
+                 {pair_deltas:?}",
+                index + 1
+            );
+        }
 
         for (index, frame) in rendered.iter().enumerate() {
             save_png(

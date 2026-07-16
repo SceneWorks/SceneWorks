@@ -8982,6 +8982,69 @@ fn mochi_raw_settings(request: &VideoRequest, quant: Option<Quant>) -> Value {
 /// forward-progress stall watchdog and the completion metrics all come from the shared
 /// [`generate_video`] funnel — the same one Wan/LTX/SVD use — so Mochi inherits the "no background
 /// heartbeat during a job, the progress callback IS the keepalive" contract without re-implementing it.
+/// Everything a Mochi generation must settle BEFORE the load, resolved as ONE unit by
+/// [`mochi_preflight`] (sc-11992).
+///
+/// These travel together on purpose. Both fields are things [`generate_mochi`] cannot build its
+/// [`VideoGenInput`] without, and [`mochi_preflight`] is the only thing that produces them — so the
+/// generation arm cannot obtain a frame count or a quant marker on a path that skipped the fit gate.
+/// Splitting them back into free-standing calls in the caller is what let the gate be silently dropped
+/// (the mutation that survived the first round of this story's review).
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MochiPreflight {
+    /// The requested frame count coerced onto Mochi's `6k+1` lattice.
+    frames: u32,
+    /// The tier dir's quant marker (`None` = the dense bf16 tier).
+    quant: Option<Quant>,
+}
+
+/// The Mochi pre-flight: coerce the clip length onto the engine's lattice, refuse a job that cannot
+/// fit this machine, and report the tier's quant — the whole "before we load anything" decision, as a
+/// pure, synchronously testable seam (sc-11992).
+///
+/// This exists as its own function because [`generate_mochi`] is `async` and needs a live
+/// `ApiClient`/`JobSnapshot`, which makes it unreachable from a unit test — so any decision left
+/// INSIDE it is, in practice, unpinned. Both decisions here are ones this story exists to get right,
+/// and both are invisible in the output when wrong (a mis-coerced frame count is a hard engine reject;
+/// a skipped gate is a `SIGKILL`), so they live here where `mochi_preflight_*` can assert them by
+/// model id, budget, and clip length.
+///
+/// `Ok(MochiPreflight)` admits; `Err` is the actionable pre-crash rejection.
+#[cfg(target_os = "macos")]
+fn mochi_preflight(
+    model: &str,
+    engine_id: &str,
+    tier_dir: &Path,
+    raw_frames: u32,
+    width: u32,
+    height: u32,
+) -> WorkerResult<MochiPreflight> {
+    // The shared stride ladder, dispatched BY MODEL — so Mochi lands on `mochi_frame_count`'s 6k+1
+    // lattice and never on Wan's 4k+1 stride. NOT `wan_frame_count` (see `video_frame_count`): the
+    // shipped 5 s @ 30 fps default takes `wan_frame_count(150) = 149`, and `149 % 6 == 5` is OFF the
+    // lattice, which the engine's `validate_request` hard-rejects.
+    let frames = video_frame_count(model, raw_frames);
+
+    // PRE-FLIGHT FIT GATE (epic AC: "an unsupported environment shows an actionable error, not a
+    // crash"). This MUST run before the load: Mochi holds ~18.7 GiB of weights resident for the whole
+    // run (`supports_sequential_offload: false`) and its AsymmVAE decode is UNTILED, so the peak grows
+    // linearly with clip length (sc-12291) — ~60 GiB of decode alone at the shipped 5 s default. MLX's
+    // default error handler is `exit(-1)`, a hard process kill that CANNOT be mapped to a job error
+    // after the fact, so an over-budget job has to be refused here or it takes the worker down with
+    // it. The generic `mlx_fit_gate` cannot cover this: it is resolution-blind by construction and its
+    // weights-fit floor would admit on the 18.7 GiB weights alone.
+    //
+    // It takes the COERCED `frames` — the count the decode will actually pay for — not the raw
+    // request, and not a constant.
+    crate::mlx_fit_gate::mochi_fit_check(engine_id, tier_dir, frames, width, height)?;
+
+    Ok(MochiPreflight {
+        frames,
+        quant: mochi_tier_quant(tier_dir),
+    })
+}
+
 #[cfg(target_os = "macos")]
 async fn generate_mochi(
     api: &ApiClient,
@@ -8995,22 +9058,12 @@ async fn generate_mochi(
     ensure_mochi_q8_present(api, settings, job, request).await?;
     ensure_mochi_bf16_present(api, settings, job, request).await?;
     let model_dir = resolve_mochi_model_dir(settings, request)?;
-    let quant = mochi_tier_quant(&model_dir);
-    // The shared stride ladder — NOT `wan_frame_count` (see `video_frame_count`).
-    let frames = video_frame_count(&request.model, request.raw_frame_count());
-
-    // PRE-FLIGHT FIT GATE (epic AC: "an unsupported environment shows an actionable error, not a
-    // crash"). This MUST run before the load: Mochi holds ~18.7 GiB of weights resident for the whole
-    // run (`supports_sequential_offload: false`) and its AsymmVAE decode is UNTILED, so the peak grows
-    // linearly with clip length (sc-12291) — ~60 GiB of decode alone at the shipped 5 s default. MLX's
-    // default error handler is `exit(-1)`, a hard process kill that CANNOT be mapped to a job error
-    // after the fact, so an over-budget job has to be refused here or it takes the worker down with
-    // it. The generic `mlx_fit_gate` cannot cover this: it is resolution-blind by construction and its
-    // weights-fit floor would admit on the 18.7 GiB weights alone.
-    crate::mlx_fit_gate::mochi_fit_check(
+    // Frame lattice + fit gate + tier quant, as one gated unit — see `mochi_preflight`.
+    let MochiPreflight { frames, quant } = mochi_preflight(
+        &request.model,
         engine_id,
         &model_dir,
-        frames,
+        request.raw_frame_count(),
         request.width,
         request.height,
     )?;
@@ -10720,6 +10773,151 @@ mod tests {
             }
         }
         assert!(accepted > 0, "the invariant must be exercised, not vacuous");
+    }
+
+    /// Mochi's REAL hosted q4 resident footprint, split by component: AsymmDiT 9.007 GiB + T5-XXL
+    /// bf16 8.871 + AsymmVAE 0.856 = 18.73 GiB. Mirrors `mlx_fit_gate`'s `MOCHI_Q4_RESIDENT_BYTES`
+    /// (which asserts the same total against the pure gate) — the preflight tests need them SPLIT
+    /// across the A6 sibling layout so the on-disk scan has to fold the shared components to get the
+    /// total right.
+    #[cfg(target_os = "macos")]
+    const MOCHI_Q4_DIT_BYTES: u64 = 9_670_883_602;
+    #[cfg(target_os = "macos")]
+    const MOCHI_Q4_TE_BYTES: u64 = 9_524_669_250;
+    #[cfg(target_os = "macos")]
+    const MOCHI_Q4_VAE_BYTES: u64 = 919_551_200;
+
+    /// A Mochi A6-layout root (q4 tier + shared `text_encoder`/`vae`/`tokenizer` siblings) whose
+    /// `.safetensors` report the REAL hosted byte sizes, so `mochi_fit_check`'s on-disk scan resolves
+    /// the true ~18.73 GiB resident footprint instead of the 1-byte stubs `mochi_root` writes.
+    ///
+    /// The files are SPARSE: `set_len` sets the apparent size with zero allocated blocks on APFS, and
+    /// `sum_safetensors_bytes` reads `metadata().len()`. So this is instant and costs no disk —
+    /// materializing 18.7 GiB of real zeros per test would not be viable.
+    #[cfg(target_os = "macos")]
+    fn mochi_root_real_sized(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "mochi_preflight_{tag}_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        for (relative, len) in [
+            ("q4/transformer/model.safetensors", MOCHI_Q4_DIT_BYTES),
+            ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
+            ("vae/model.safetensors", MOCHI_Q4_VAE_BYTES),
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        }
+        std::fs::create_dir_all(root.join("tokenizer")).unwrap();
+        std::fs::write(
+            root.join("q4").join("split_model.json"),
+            serde_json::to_string(
+                &json!({ "quantized": true, "quantization_bits": 4, "quantization_group_size": 64 }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        root
+    }
+
+    /// sc-11992 review: pin the frame lattice AT THE SEAM THE GENERATION ARM CALLS, not just as a free
+    /// function. `generate_mochi` is `async` and needs a live `ApiClient`/`JobSnapshot`, so it is
+    /// unreachable from a unit test — `mochi_preflight` is the pure seam it delegates the decision to.
+    ///
+    /// Kills the review mutation `video_frame_count(...)` → `wan_frame_count(...)`, which survived
+    /// 835/0 green when this logic sat inline in `generate_mochi`: the wan stride answers 149 for the
+    /// shipped 5 s default, and `149 % 6 == 5` is off the lattice the engine accepts.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_preflight_coerces_the_frame_count_on_mochis_lattice_by_model_id() {
+        let root = mochi_root_real_sized("lattice");
+        // A budget no clip can overflow, so ONLY the lattice is under test here.
+        let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "512", || {
+            mochi_preflight("mochi_1", "mochi_1", &root.join("q4"), 150, 848, 480)
+        });
+        std::fs::remove_dir_all(&root).ok();
+
+        let preflight = out.expect("a 151-frame clip fits a 512 GB budget");
+        assert_eq!(
+            preflight.frames, 151,
+            "the seam must snap the shipped 5 s default onto the 6k+1 lattice"
+        );
+        assert_eq!(
+            preflight.frames,
+            mochi_frame_count(150),
+            "the seam's mochi arm must BE mochi_frame_count"
+        );
+        assert_ne!(
+            preflight.frames,
+            wan_frame_count(150),
+            "routing the seam through the wan stride is the bug this story exists to fix"
+        );
+        assert_eq!(
+            preflight.quant,
+            Some(Quant::Q4),
+            "the tier dir's split_model.json carries the quant the load asserts"
+        );
+    }
+
+    /// sc-11992 review / epic AC "a missing-weights or unsupported environment shows an ACTIONABLE
+    /// ERROR, not a crash": the fit gate must run on the generation seam, with the REAL coerced frame
+    /// count. MLX's default error handler is `exit(-1)` — a hard process kill that cannot be mapped to
+    /// a job error after the fact — so an over-budget job must be refused here or it takes the worker
+    /// down with it.
+    ///
+    /// Kills BOTH remaining review mutations, each of which survived 835/0 green:
+    ///   * hardcoding the gate's `frames` argument to `7` ⇒ the gate sees 4.66 GiB of decode instead
+    ///     of 60.56, totals ~25 GiB, and ADMITS this job ⇒ `expect_err` fails.
+    ///   * deleting the `mochi_fit_check(...)?` call ⇒ nothing rejects ⇒ `expect_err` fails.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_preflight_rejects_the_5s_default_on_a_64gb_mac() {
+        let root = mochi_root_real_sized("reject");
+        // A 64 GB Mac — the machine the epic's crash report names.
+        let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
+            mochi_preflight("mochi_1", "mochi_1", &root.join("q4"), 150, 848, 480)
+        });
+        std::fs::remove_dir_all(&root).ok();
+
+        let message = out
+            .expect_err(
+                "the shipped 5 s default (151 frames) needs 18.73 GiB weights + 60.56 GiB untiled \
+                 decode + 2 GiB OS reserve = 81.3 GiB, which does NOT fit a 64 GB Mac — admitting it \
+                 is exactly the SIGKILL this gate exists to prevent",
+            )
+            .to_string();
+        assert!(message.contains("mochi_1"), "names the model: {message}");
+        assert!(
+            message.contains("Shorten the clip"),
+            "leads with the only lever that moves the dominant term: {message}"
+        );
+    }
+
+    /// The other half of the gate's contract: on the SAME 64 GB Mac a short clip is ADMITTED. Without
+    /// this, `mochi_preflight_rejects_the_5s_default_on_a_64gb_mac` would still pass against a gate
+    /// that blanket-refuses everything — so this is what makes the pair prove the gate is
+    /// FRAME-SENSITIVE, which is the whole point of a decode peak that scales with clip length.
+    ///
+    /// Also independently kills the `wan_frame_count` substitution: `wan_frame_count(19) = 17`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mochi_preflight_admits_a_short_clip_on_the_same_64gb_mac() {
+        let root = mochi_root_real_sized("admit");
+        let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
+            mochi_preflight("mochi_1", "mochi_1", &root.join("q4"), 19, 848, 480)
+        });
+        std::fs::remove_dir_all(&root).ok();
+
+        let preflight = out.expect(
+            "19 frames (the engine's own DEFAULT_FRAMES) needs 18.73 + 9.32 + 2 = 30.1 GiB, which \
+             fits a 64 GB Mac and must NOT be rejected",
+        );
+        assert_eq!(
+            preflight.frames, 19,
+            "19 already sits on the 6k+1 lattice, so the snap is a no-op"
+        );
     }
 
     /// Mochi is text-to-video ONLY (`conditioning: []` on both descriptors). `VideoRequest`'s mode

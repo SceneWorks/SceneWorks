@@ -411,8 +411,13 @@ const MOCHI_DECODE_EXTRA_FRAMES: u32 = 5;
 /// peak tensor is `[1, C, T, H, W]` and the decode is untiled. This is the term the generic gate's
 /// flat `HEADROOM_GB` structurally cannot represent.
 ///
-/// DERIVED, not measured. Sanity points at the native 848×480 bucket: 7 frames ⇒ ~5.0 GiB, 19 ⇒
-/// ~10.1, 61 ⇒ ~27.5, 151 ⇒ ~60.6, 163 ⇒ ~65.2 GiB.
+/// DERIVED, not measured. Sanity points at the native 848×480 bucket — all **GiB**, the unit this
+/// function returns (it divides by [`BYTES_PER_GIB`]): 7 frames ⇒ ~4.66, 19 ⇒ ~9.32, 61 ⇒ ~25.62,
+/// 151 ⇒ ~60.56, 163 ⇒ ~65.21.
+///
+/// (These are the constants the whole derivation leans on, so they are stated in ONE unit on purpose:
+/// an earlier revision mixed decimal GB into this list — 5.0/10.1/27.5 are the same three points in
+/// GB — which made the table read as if the peak grew faster than it does.)
 pub(crate) fn mochi_decode_peak_gb(frames: u32, width: u32, height: u32) -> f64 {
     let decoded_frames = f64::from(frames.saturating_add(MOCHI_DECODE_EXTRA_FRAMES));
     MOCHI_DECODE_LIVE_TENSORS
@@ -1443,12 +1448,12 @@ mod tests {
             );
         }
 
-        // The architectural anchor: 2 live × 128 ch × (151+5) frames × 848×480 × 4 B (f32) = 60.55 GiB.
+        // The architectural anchor: 2 live × 128 ch × (151+5) frames × 848×480 × 4 B (f32) = 60.56 GiB.
         // This is the number a bf16 derivation would halve — pin it so the dtype can't silently drift.
         let at_151 = mochi_decode_peak_gb(151, 848, 480);
         assert!(
-            (at_151 - 60.55).abs() < 0.1,
-            "151-frame 848x480 decode peak should be ~60.6 GiB (f32), got {at_151:.2}"
+            (at_151 - 60.56).abs() < 0.1,
+            "151-frame 848x480 decode peak should be ~60.56 GiB (f32), got {at_151:.2}"
         );
 
         // The 5 s default costs ~50 GiB MORE than the engine's 19-frame default on the same machine —
@@ -1480,14 +1485,14 @@ mod tests {
         // the epic's crash report names.
         let mac_64 = Some(MemoryBudget { total_gb: 64.0 });
 
-        // 19 frames (the engine's own DEFAULT_FRAMES, ~0.6 s): 18.73 weights + 10.1 decode + 2 OS
-        // ≈ 30.8 GiB ⇒ admitted.
+        // 19 frames (the engine's own DEFAULT_FRAMES, ~0.6 s): 18.73 weights + 9.32 decode + 2 OS
+        // ≈ 30.1 GiB ⇒ admitted. (All GiB — see `mochi_decode_peak_gb`.)
         assert!(
             mochi_fit_error("mochi_1", MOCHI_Q4_RESIDENT_BYTES, 19, 848, 480, mac_64).is_none(),
             "a 19-frame clip fits a 64 GB Mac and must NOT be rejected"
         );
 
-        // 151 frames (the shipped 5 s default): 18.73 + 60.6 + 2 ≈ 81.3 GiB ⇒ rejected BEFORE the
+        // 151 frames (the shipped 5 s default): 18.73 + 60.56 + 2 ≈ 81.3 GiB ⇒ rejected BEFORE the
         // untiled decode can trip MLX's `exit(-1)`.
         assert!(
             mochi_fit_error("mochi_1", MOCHI_Q4_RESIDENT_BYTES, 151, 848, 480, mac_64).is_some(),

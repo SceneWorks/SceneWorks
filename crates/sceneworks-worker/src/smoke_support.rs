@@ -88,6 +88,41 @@ pub(crate) fn image_std(img: &Image) -> f64 {
     var.sqrt()
 }
 
+/// Mean absolute per-pixel difference between two same-sized RGB8 frames, on the native 0–255 scale
+/// (sc-11992). The video lanes' "did the clip actually MOVE?" metric.
+///
+/// A FROZEN clip — the temporal path collapsed to N copies of one still — scores EXACTLY 0.0 here,
+/// while passing every per-frame check a smoke makes (dimensions, non-all-zero, per-pixel std): each
+/// individual frame is a perfectly good image, so the per-frame floors are structurally blind to it.
+/// That is the same blind spot [`ghost_cepstrum_score`] exists for on the spatial axis.
+///
+/// Why the mean ABSOLUTE delta and not the difference of the two frames' [`image_mean`]s (the first
+/// thing sc-11992 reached for): `image_mean` collapses a frame to ONE scalar, and motion routinely
+/// preserves it — a pan, or any subject moving across a roughly uniform background, leaves the frame
+/// mean essentially unchanged while every pixel moved. So `|mean(a) − mean(b)|` can read ~0 on a
+/// perfectly live clip (false alarm) and, worse, is trivially cleared by a global brightness drift on
+/// a frozen-geometry clip (false pass). The per-pixel mean-abs delta is 0 if and only if the frames
+/// are bit-identical, which is exactly the property the guard needs.
+///
+/// Mismatched dimensions (or an empty frame) return 0.0 — no comparable signal. That fails SAFE for
+/// the intended use: callers assert the delta is ABOVE a floor, so a mismatch trips the assertion
+/// loudly instead of silently admitting.
+pub(crate) fn mean_abs_frame_delta(a: &Image, b: &Image) -> f64 {
+    if a.width != b.width || a.height != b.height || a.pixels.len() != b.pixels.len() {
+        return 0.0;
+    }
+    let n = a.pixels.len() as f64;
+    if n == 0.0 {
+        return 0.0;
+    }
+    a.pixels
+        .iter()
+        .zip(b.pixels.iter())
+        .map(|(&x, &y)| (x as f64 - y as f64).abs())
+        .sum::<f64>()
+        / n
+}
+
 /// Ceiling on the ghost/double-exposure cepstral score (sc-10852). See [`ghost_cepstrum_score`].
 ///
 /// A coherent render leaves the score (a robust z-score of the strongest off-origin **cepstral** peak)
@@ -369,6 +404,94 @@ pub(crate) fn save_png(img: &Image, path: &Path) {
         .expect("rgb buffer")
         .save(path)
         .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
+}
+
+/// GPU-free structural coverage for the video-lane motion metric (sc-11992). The smoke that consumes
+/// [`mean_abs_frame_delta`] is `#[ignore]`d and needs ~50 GB of weights, so these tests pin the
+/// metric's two load-bearing properties against synthetic frames: a frozen pair scores EXACTLY 0
+/// (the failure the floor exists to catch), and a moved subject scores well clear of it — including
+/// the case where the frame MEAN is preserved, which is precisely where the `image_mean`-difference
+/// check the smoke used to print would have read ~0 on a live clip.
+#[cfg(test)]
+mod motion_metric_tests {
+    use super::*;
+
+    /// A `w`×`h` RGB8 frame: mid-gray with one white `size`×`size` square at (`x`, `y`). Moving the
+    /// square translates content without changing how many white pixels exist — so the frame MEAN is
+    /// identical between two positions, while every pixel under the square changed.
+    fn frame_with_square(w: u32, h: u32, x: u32, y: u32, size: u32) -> Image {
+        let mut pixels = vec![128u8; (w * h * 3) as usize];
+        for row in y..(y + size).min(h) {
+            for col in x..(x + size).min(w) {
+                let i = ((row * w + col) * 3) as usize;
+                pixels[i] = 255;
+                pixels[i + 1] = 255;
+                pixels[i + 2] = 255;
+            }
+        }
+        Image {
+            width: w,
+            height: h,
+            pixels,
+        }
+    }
+
+    #[test]
+    fn a_frozen_pair_scores_exactly_zero() {
+        // The whole point: N copies of one good still. Every per-frame smoke check passes; this is the
+        // only signal that separates it from a live clip.
+        let frame = frame_with_square(64, 64, 8, 8, 16);
+        assert_eq!(mean_abs_frame_delta(&frame, &frame), 0.0);
+        let identical = frame_with_square(64, 64, 8, 8, 16);
+        assert_eq!(mean_abs_frame_delta(&frame, &identical), 0.0);
+    }
+
+    #[test]
+    fn a_moved_subject_scores_above_zero_even_when_the_frame_mean_is_unchanged() {
+        // Translating the square leaves `image_mean` bit-identical (same pixel population), so the
+        // old `|mean(first) − mean(last)|` check reads ~0 here — a live clip it would call frozen.
+        // The per-pixel metric sees the motion.
+        let a = frame_with_square(64, 64, 8, 8, 16);
+        let b = frame_with_square(64, 64, 32, 32, 16);
+        assert_eq!(
+            image_mean(&a),
+            image_mean(&b),
+            "fixture invariant: translation preserves the frame mean"
+        );
+        let delta = mean_abs_frame_delta(&a, &b);
+        assert!(
+            delta > 1.0,
+            "a fully displaced subject must score well above the liveness floor, got {delta:.3}"
+        );
+    }
+
+    #[test]
+    fn the_metric_scales_with_how_much_moved() {
+        // Monotone in the amount of changed content — a partial overlap moves less than a full
+        // displacement. Guards against a metric that saturates (e.g. any-pixel-changed booleans).
+        let base = frame_with_square(64, 64, 8, 8, 16);
+        let small = mean_abs_frame_delta(&base, &frame_with_square(64, 64, 12, 12, 16));
+        let large = mean_abs_frame_delta(&base, &frame_with_square(64, 64, 40, 40, 16));
+        assert!(
+            large > small && small > 0.0,
+            "expected 0 < small ({small:.3}) < large ({large:.3})"
+        );
+    }
+
+    #[test]
+    fn mismatched_or_empty_frames_score_zero_and_fail_safe() {
+        // No comparable signal ⇒ 0.0, which is BELOW any motion floor ⇒ the caller's assertion trips
+        // loudly rather than silently admitting an unverifiable clip.
+        let a = frame_with_square(64, 64, 8, 8, 16);
+        let smaller = frame_with_square(32, 32, 4, 4, 8);
+        assert_eq!(mean_abs_frame_delta(&a, &smaller), 0.0);
+        let empty = Image {
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+        };
+        assert_eq!(mean_abs_frame_delta(&empty, &empty), 0.0);
+    }
 }
 
 /// GPU-free structural coverage for the ghost/double-exposure guard (sc-10852). The `*_gpu_smoke`
