@@ -2287,6 +2287,272 @@ async fn video_jobs_expand_recipe_presets_server_side() {
 }
 
 #[tokio::test]
+async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
+    // sc-12300: a client that OMITS `model` (MCP's submit_video_job documents its `model`
+    // param as "Omit for the server default") gets `default_video_model()` from serde, which
+    // is exactly the gate `apply_recipe_preset_to_video_payload` uses to let the preset's
+    // model win. The preset then overwrites job_payload["model"] — but the manifest entry
+    // used to be resolved from the DTO's pre-override `payload.model`, so the job was
+    // enqueued carrying the OVERRIDDEN model id alongside the DEFAULT model's entry.
+    //
+    // Both halves of that mismatch are asserted, because they fail in opposite ways:
+    //   - `repo`   — the LOUD failure: the worker reaches for the wrong model's weights.
+    //   - `limits.requiresDimensionsMultipleOf` — the SILENT one: sceneworks-core's
+    //     normalized_dimensions honors this (sc-11993). A 16-multiple model handed a
+    //     32-declaring entry silently renders off-bucket (Mochi's native 848x480 -> 832x480).
+    // Pinning only `repo` would let the silent geometry bug regress undetected.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    // `default-vid` is BUILT FROM default_video_model() rather than hardcoding its id. That
+    // literal is what the preset-override gate compares against, so a hardcoded fixture would
+    // quietly stop modelling *the default's* entry if the default ever changed: the pre-fix
+    // failure would degrade from "carries the DEFAULT's entry" to "carries {}" — still red,
+    // but no longer demonstrating the documented defect. Its 32 / owner/default mirror the
+    // real default video manifest; `preset-vid` mirrors mochi_1's 16 / distinct repo.
+    let default_video_model = crate::defaults::default_video_model();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "__DEFAULT_VIDEO_MODEL__",
+              "name": "Default Vid",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/default-vid", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": { "requiresDimensionsMultipleOf": 32 },
+              "ui": { "label": "Default Vid" }
+            },
+            {
+              "id": "preset-vid",
+              "name": "Preset Vid",
+              "family": "mochi",
+              "type": "video",
+              "adapter": "mochi_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/preset-vid", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": { "requiresDimensionsMultipleOf": 16 },
+              "ui": { "label": "Preset Vid" }
+            }
+          ]
+        }
+        "#
+        .replace("__DEFAULT_VIDEO_MODEL__", &default_video_model),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [
+            {
+              "id": "preset_override",
+              "name": "Preset Override",
+              "workflow": "text_to_video",
+              "model": "preset-vid",
+              "defaults": {},
+              "prompt": { "prefix": "cinematic", "suffix": "smooth" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin recipe presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user recipe presets writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Preset Override Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, video_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            // `model` deliberately OMITTED — this is the trigger. Sending it explicitly
+            // closes the gate and the bug never fires.
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // The preset's model won over the omitted-model default...
+    assert_eq!(video_job["payload"]["model"], "preset-vid");
+    // ...and the entry travelling with it must describe THAT model, not the default's.
+    let entry = &video_job["payload"]["modelManifestEntry"];
+    assert_eq!(
+        entry["id"], "preset-vid",
+        "manifest entry should be resolved from the post-override model"
+    );
+    assert_eq!(
+        entry["downloads"][0]["repo"], "owner/preset-vid",
+        "wrong repo => the worker fetches the wrong model's weights (loud failure)"
+    );
+    assert_eq!(
+        entry["limits"]["requiresDimensionsMultipleOf"], 16,
+        "wrong dimension floor => silently renders off-bucket geometry (sc-11993)"
+    );
+}
+
+#[tokio::test]
+async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
+    // sc-12300: create_image_job has the identical ordering shape as create_video_job —
+    // apply_recipe_preset_to_image_payload may overwrite job_payload["model"] (gated on the
+    // omitted-model default_image_model()), and the entry was likewise resolved from the
+    // pre-override DTO. Same defect, same function family, so it is pinned the same way.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    // Built FROM default_image_model() — the id the override gate compares against — for the
+    // same durability reason as the video fixture above.
+    let default_image_model = crate::defaults::default_image_model();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "__DEFAULT_IMAGE_MODEL__",
+              "name": "Default Img",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/default-img", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": { "requiresDimensionsMultipleOf": 32 },
+              "ui": { "label": "Default Img" }
+            },
+            {
+              "id": "preset-img",
+              "name": "Preset Img",
+              "family": "flux",
+              "type": "image",
+              "adapter": "flux",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/preset-img", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": { "requiresDimensionsMultipleOf": 16 },
+              "ui": { "label": "Preset Img" }
+            }
+          ]
+        }
+        "#
+        .replace("__DEFAULT_IMAGE_MODEL__", &default_image_model),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [
+            {
+              "id": "img_override",
+              "name": "Img Override",
+              "workflow": "text_to_image",
+              "model": "preset-img",
+              "defaults": {},
+              "prompt": { "prefix": "cinematic", "suffix": "smooth" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin recipe presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user recipe presets writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Img Override Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, image_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "a fox runs",
+            // `model` deliberately OMITTED — the trigger.
+            "recipePresetId": "img_override"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(image_job["payload"]["model"], "preset-img");
+    let entry = &image_job["payload"]["modelManifestEntry"];
+    assert_eq!(
+        entry["id"], "preset-img",
+        "manifest entry should be resolved from the post-override model"
+    );
+    assert_eq!(
+        entry["downloads"][0]["repo"], "owner/preset-img",
+        "wrong repo => the worker fetches the wrong model's weights (loud failure)"
+    );
+    assert_eq!(
+        entry["limits"]["requiresDimensionsMultipleOf"], 16,
+        "wrong dimension floor => silently renders off-bucket geometry"
+    );
+}
+
+#[tokio::test]
 async fn preset_image_job_builds_each_catalog_once() {
     // sc-8819 (F-017): a preset-backed POST /image/jobs fans out into recipe_preset_catalog,
     // merge_preset_loras_into_payload, and validate_job_lora_compatibility. Before the fix
