@@ -653,14 +653,12 @@ export const fallbackModels = [
     name: "Wan2.2",
     type: "video",
     capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
-    // Mirrors the manifest's 720p default (see videoGeometryParity.test.js). NOTE: sc-4997 set this
-    // mirror to 832x480 for a sane out-of-the-box Mac MLX time (measured 5B @ 832x480/121f/20-step/CFG
-    // = ~5 min vs ~20 min at 720p — the z48 VAE decode dominates at high res), but it only ever changed
-    // this file, never `builtin.models.jsonc`. The live catalog is authoritative once loaded, so that
-    // fast-path default never actually shipped; this mirror was advertising a default the app does not
-    // use. Realigning to the manifest makes the mirror truthful. Whether the manifest itself should
-    // adopt sc-4997's 832x480 fast path is a separate product call, tracked in sc-12319.
-    defaults: { duration: 5, fps: 24, resolution: "1280x704", quality: "balanced" },
+    // Mirrors the manifest's 832x480 fast-path default (see videoGeometryParity.test.js) — sc-12319
+    // adopted it there, so this mirror and the catalog finally agree. sc-4997 measured the reason on
+    // real weights (~5 min at 832x480 vs ~20 min at 720p; the z48 VAE decode dominates at high res
+    // and no quant tier shrinks it), but only ever changed THIS file, so the catalog kept serving
+    // 720p and the fast path never shipped. 720p stays user-selectable via limits.resolutions.
+    defaults: { duration: 5, fps: 24, resolution: "832x480", quality: "balanced" },
     limits: {
       durations: [4, 5, 6, 7, 8],
       recommendedMaxDuration: 7,
