@@ -1254,6 +1254,15 @@ fn video_asset_fact(
         "lastFrameAssetId": request.last_frame_asset_id,
         "sourceClipAssetId": request.source_clip_asset_id,
         "bridgeRightClipAssetId": request.bridge_right_clip_asset_id,
+        // The multi-source ids and the fit are top-level payload fields, NOT `advanced` — so the
+        // `advanced.clone()` every real `*_raw_settings` builder starts with does not carry them.
+        // They must be written here or the recipe cannot reproduce the modes that use them
+        // (mv2v / reference_to_video / reference_video_to_video / ads2v / animate_character, and
+        // the fit for image_to_video / first_last_frame). sc-12345, prereq for sc-12324 replay.
+        "fitMode": request.fit_mode,
+        "sourceClipAssetIds": request.source_clip_asset_ids,
+        "referenceAssetIds": request.reference_asset_ids,
+        "referenceClipAssetId": request.reference_clip_asset_id,
         "characterId": request.character_id,
         "characterLookId": request.character_look_id,
         "personTrackId": request.person_track_id,
@@ -12723,6 +12732,48 @@ mod tests {
             stub_raw_settings(&request),
             None,
         );
+        // Exhaustive, mirroring the image lane's key sweep (`image_jobs/tests.rs`). The recipe is
+        // the ONLY record of what a user asked for, so a field silently dropped here is a field
+        // the replay path (sc-12324) cannot reproduce — which is exactly how `fitMode` and the
+        // multi-source ids went missing until sc-12345. Add a key here when you add one to the
+        // fact; a spot-check would let the next one through.
+        for key in [
+            "type",
+            "assetId",
+            "mediaPath",
+            "mimeType",
+            "width",
+            "height",
+            "duration",
+            "fps",
+            "quality",
+            "family",
+            "seed",
+            "displayName",
+            "createdAt",
+            "mode",
+            "model",
+            "adapter",
+            "prompt",
+            "negativePrompt",
+            "loras",
+            "rawAdapterSettings",
+            "sourceAssetId",
+            "lastFrameAssetId",
+            "sourceClipAssetId",
+            "bridgeRightClipAssetId",
+            "fitMode",
+            "sourceClipAssetIds",
+            "referenceAssetIds",
+            "referenceClipAssetId",
+            "characterId",
+            "characterLookId",
+            "personTrackId",
+            "replacementMode",
+            "timelineContext",
+        ] {
+            assert!(fact.get(key).is_some(), "fact missing key {key}");
+        }
         assert_eq!(fact["type"], json!("video"));
         assert_eq!(fact["mimeType"], json!("video/mp4"));
         assert_eq!(fact["mediaPath"], json!(plan.media_rel));
@@ -12740,6 +12791,37 @@ mod tests {
         assert_eq!(result["adapter"], json!("procedural_video"));
         assert_eq!(result["assetWrites"].as_array().unwrap().len(), 1);
         assert_eq!(result["generationSet"]["count"], json!(1));
+    }
+
+    /// The fit and the list-valued source ids reach the fact (sc-12345). These arrive as
+    /// TOP-LEVEL payload fields, so the `advanced.clone()` every real `*_raw_settings` builder
+    /// starts with does not carry them — `video_asset_fact` is their only path onto the recipe.
+    /// ads2v is the densest mode: source clip + reference clip + subject references at once.
+    #[test]
+    fn asset_fact_records_fit_and_multi_source_ids() {
+        let ads2v = request(json!({
+            "projectId": "p", "model": "bernini_2", "mode": "ads2v",
+            "prompt": "the hero drives past",
+            "sourceClipAssetId": "clip_main",
+            "referenceClipAssetId": "clip_ref",
+            "referenceAssetIds": ["ref_1", "ref_2"],
+            "fitMode": "pad",
+        }));
+        let plan = VideoPlan::new(&ads2v, Path::new("/tmp/project"));
+        let fact = video_asset_fact(&plan, 5, "mlx_bernini", json!({}), None);
+        assert_eq!(fact["referenceClipAssetId"], json!("clip_ref"));
+        assert_eq!(fact["referenceAssetIds"], json!(["ref_1", "ref_2"]));
+        assert_eq!(fact["fitMode"], json!("pad"));
+
+        // mv2v carries the clip array instead; the other list stays empty rather than absent.
+        let mv2v = request(json!({
+            "projectId": "p", "model": "bernini_2", "mode": "multi_video_to_video",
+            "prompt": "stitch them", "sourceClipAssetIds": ["clip_a", "clip_b"],
+        }));
+        let mv2v_plan = VideoPlan::new(&mv2v, Path::new("/tmp/project"));
+        let mv2v_fact = video_asset_fact(&mv2v_plan, 5, "mlx_bernini", json!({}), None);
+        assert_eq!(mv2v_fact["sourceClipAssetIds"], json!(["clip_a", "clip_b"]));
+        assert_eq!(mv2v_fact["referenceAssetIds"], json!([]));
     }
 
     /// A replace_person asset fact carries the `replacementStatus` object the API folds into

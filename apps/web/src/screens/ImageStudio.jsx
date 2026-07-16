@@ -142,6 +142,7 @@ import { readLastTier, writeLastTier } from "../lastTierStore.js";
 import { readDefaultGenerationQuality } from "../generationQuality.js";
 import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
+import { finiteRecipeNumber, recipeLoraSelection, recipeResolution } from "../recipeFields.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
@@ -224,22 +225,6 @@ function formatResolutionLabel(value) {
   return height ? `${width} × ${height}` : value;
 }
 
-function finiteRecipeNumber(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
-}
-
-function recipeResolution(recipe) {
-  const settings = recipe?.normalizedSettings ?? {};
-  const width = finiteRecipeNumber(settings.width);
-  const height = finiteRecipeNumber(settings.height);
-  if (width && height) {
-    return `${width}x${height}`;
-  }
-  const rawResolution = recipe?.rawAdapterSettings?.resolution;
-  return typeof rawResolution === "string" && rawResolution.includes("x") ? rawResolution : null;
-}
-
 // Fold any mode the tabs no longer expose (a legacy `style_variations` snapshot,
 // an unknown value) back to text_to_image so a restored studio never lands on a
 // missing tab. style_variations was a no-op duplicate of text_to_image (sc-5950).
@@ -259,17 +244,6 @@ function gcd(a, b) {
 
 function recipeMode(recipe) {
   return normalizeImageMode(recipe?.mode);
-}
-
-function recipeLoraId(lora) {
-  return typeof lora === "string" ? lora : lora?.id ?? lora?.loraId;
-}
-
-function recipeLoraWeight(lora) {
-  if (typeof lora === "string") {
-    return undefined;
-  }
-  return finiteRecipeNumber(lora?.weight) ?? undefined;
 }
 
 // Image Studio review slots: images in worker-emitted batch-slot order (sc-8853;
@@ -1497,13 +1471,7 @@ export function ImageStudio() {
     const rawSettings = recipe.rawAdapterSettings ?? {};
     const nextMode = recipeMode(recipe);
     const resolutionFromRecipe = recipeResolution(recipe);
-    const recipeLoras = Array.isArray(recipe.loras) ? recipe.loras : [];
-    const loraIds = recipeLoras.map(recipeLoraId).filter(Boolean);
-    const loraWeightMap = Object.fromEntries(
-      recipeLoras
-        .map((lora) => [recipeLoraId(lora), recipeLoraWeight(lora)])
-        .filter(([id, weight]) => id && weight !== undefined),
-    );
+    const { loraIds, loraWeights: loraWeightMap } = recipeLoraSelection(recipe);
 
     skipReferenceTuningReset.current = true;
     // A recipe injects its own reference tuning below (setIpAdapterScale/…), so disarm the

@@ -428,6 +428,54 @@ describe("SceneWorks app shell", () => {
     expect(onUseRecipe).toHaveBeenCalledWith(asset, { keepSeed: false });
   });
 
+  // sc-12324: a generated clip records a full recipe, but the affordance was hard-gated to
+  // images, so there was no way to re-run one. Videos re-run exactly as images do — keep-seed
+  // included, which is the explicit ask.
+  it("offers recipe reuse, with keep-seed, from FullscreenPreview video assets", async () => {
+    const noop = () => {};
+    const onUseRecipe = vi.fn();
+    const asset = {
+      id: "asset-clip",
+      displayName: "Hero walks through rain",
+      type: "video",
+      status: {},
+      file: { path: "assets/videos/hero.mp4" },
+      recipe: {
+        mode: "text_to_video",
+        model: "wan_i2v",
+        prompt: "the hero walks through rain",
+        seed: 4242,
+      },
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <FullscreenPreview
+          asset={asset}
+          deleteAsset={noop}
+          nextAsset={null}
+          onClose={noop}
+          onPreviewAsset={noop}
+          onUseRecipe={onUseRecipe}
+          previousAsset={null}
+          purgeAsset={noop}
+          updateAssetStatus={noop}
+        />,
+      );
+    });
+
+    // The clip records a seed, so the keep-seed toggle is offered — turn it on and reuse.
+    await act(async () => {
+      document.body.querySelector(".preview-keep-seed input").click();
+    });
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use this recipe").click();
+    });
+
+    expect(onUseRecipe).toHaveBeenCalledWith(asset, { keepSeed: true });
+  });
+
   it("resolves each image's own seed, preferring the per-asset recipe over the shared set seed", () => {
     // Two siblings of one generation set: the set recipe carries the batch's base seed
     // (7), while each image records its own seed. assetSeed must return the per-image
