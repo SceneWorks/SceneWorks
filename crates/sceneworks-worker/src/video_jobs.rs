@@ -5192,7 +5192,11 @@ async fn generate_candle_video(
     // co-requisite are identical off-Mac. It must NOT fall through to the wan tier-select below: the
     // Mochi tier layout is `<root>/{q4|q8|bf16}/transformer/` with the T5/VAE/tokenizer as siblings of
     // the tier dir, which `candle_wan_tier_subdir` does not understand.
-    let is_mochi = is_mochi_model(&request.model);
+    //
+    // Keyed off the RESOLVED engine id, mirroring the `is_ltx` binding below — the id is already
+    // resolved through `candle_video_engine_id`, so re-deriving the family from the model string here
+    // would be a second, drift-prone source of truth.
+    let is_mochi = engine_id == "mochi_1";
     if is_mochi {
         ensure_mochi_q8_present(api, settings, job, request).await?;
         ensure_mochi_bf16_present(api, settings, job, request).await?;
@@ -8641,14 +8645,16 @@ const MOCHI_REVISION: &str = "90a87786d9b5b592c3b3c083e5fcdf130007b1de";
 ))]
 const MOCHI_DIR_ENV: &str = "SCENEWORKS_MLX_MOCHI_DIR";
 
-/// SceneWorks Mochi model id → the gen-core registry id, or `None` if not a Mochi family id. ONE id
-/// covers BOTH backends (both providers register `MODEL_ID = "mochi_1"`), so this is lane-agnostic —
-/// contrast [`ltx_engine_id`], which folds two sceneworks ids onto one engine, and the candle LTX
-/// arm, which maps to a DIFFERENT `ltx_2_3_distilled` id.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+/// SceneWorks Mochi model id → the gen-core registry id, or `None` if not a Mochi family id.
+///
+/// ONE id covers BOTH backends (both providers register `MODEL_ID = "mochi_1"`) — contrast
+/// [`ltx_engine_id`], which folds two sceneworks ids onto one engine, and the candle LTX arm, which
+/// maps to a DIFFERENT `ltx_2_3_distilled` id. Despite that, this is the **MLX lane's** resolver: it
+/// is the `resolve_video_route` / `mochi_available` / `ensure_video_engine_weights` key. The candle
+/// lane resolves the same id through its own [`candle_video_engine_id`] table and then keys off the
+/// resolved `engine_id` (mirroring its local `is_ltx`), so it never calls this — hence the macOS gate
+/// rather than the superset one the shared tier helpers below carry.
+#[cfg(target_os = "macos")]
 fn mochi_engine_id(model: &str) -> Option<&'static str> {
     (model == "mochi_1").then_some("mochi_1")
 }
@@ -10604,11 +10610,9 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// `mochi_1` is the engine id on BOTH backends — no `_distilled`-style split, unlike LTX.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    /// `mochi_1` is the engine id on BOTH backends — no `_distilled`-style split, unlike LTX. (The
+    /// candle lane's equivalent is pinned by `candle_mochi_resolves_the_engine_and_never_falls_to_the_stub`.)
+    #[cfg(target_os = "macos")]
     #[test]
     fn mochi_engine_id_is_the_model_id_and_matches_nothing_else() {
         assert_eq!(mochi_engine_id("mochi_1"), Some("mochi_1"));
