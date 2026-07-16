@@ -1276,16 +1276,33 @@ describe("VideoStudio Mochi 1 (epic 1788, sc-11994)", () => {
     expect(buttonWithText(container, "Render clip").disabled).toBe(true);
   });
 
-  it("renders no image-to-video controls (no source band at all)", async () => {
+  // MODE-scoped, not capability-scoped — worth stating plainly, because the reverse claim would be
+  // false. The band is gated purely on `mode !== "text_to_video"` (VideoStudio.jsx:1159), so what this
+  // pins is: text_to_video renders no conditioning slot, for ANY video model. Nothing here is specific
+  // to Mochi — swap in a full-i2v model and it passes unchanged.
+  //
+  // The claim it must NOT make is that "a t2v-only model shows no conditioning slot": Mochi's own
+  // "Image → Video" tab renders a complete band (First frame picker + Fit), because mode tabs are not
+  // capability-filtered anywhere in the app (sc-5716 disables them only under Mac gating). What stops
+  // Mochi there is the submit refusal, pinned by the test above — that is the capability guard.
+  //
+  // This still earns its place: it is the suite's only guard against a source-band leak into t2v.
+  it("renders no conditioning slot in text_to_video, even with an image selected", async () => {
     const source = { id: "img_src", type: "image", projectId: "project_1", displayName: "Source" };
-    // Even with an image selected in context — the case that would tempt a stray first-frame picker
-    // into rendering — a t2v-only model must show no conditioning slot.
+    // An image selected in context is the case that would tempt a stray first-frame picker into rendering.
     await render(mochiContext({ assets: [source], selectedAsset: source }));
 
     expect(container.querySelector(".studio-source-band")).toBeFalsy();
     expect(container.querySelector(".fit-mode-field")).toBeFalsy();
-    expect(labelledField("First frame")).toBeFalsy();
-    expect(labelledField("Last frame")).toBeFalsy();
+    // Query the pickers' OWN label nodes. `labelledField` scans <label> elements, but AssetPickerField
+    // renders `<span class="asset-picker-label">` — so `labelledField("First frame")` stays falsy even
+    // when the picker IS on screen (verified against Mochi's i2v tab, which renders exactly that), which
+    // left the two assertions this replaces unable to fail.
+    const pickerLabels = [...container.querySelectorAll(".asset-picker-label")].map((node) =>
+      node.textContent.trim(),
+    );
+    expect(pickerLabels).not.toContain("First frame");
+    expect(pickerLabels).not.toContain("Last frame");
   });
 
   it("advertises no sampler/scheduler axis and no Lightning toggle", async () => {

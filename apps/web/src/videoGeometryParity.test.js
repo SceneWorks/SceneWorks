@@ -38,6 +38,29 @@ describe("video geometry ↔ manifest parity (sc-12294)", () => {
   const manifestById = new Map(manifestModels.map((model) => [model.id, model]));
   const fallbackVideo = fallbackModels.filter((model) => model.type === "video");
 
+  // The dimension stride the ENGINE actually applies to a model: its declared
+  // `limits.requiresDimensionsMultipleOf`, else the blanket 32. This mirrors sceneworks-core's
+  // `dimension_multiple_of` (video_request.rs) exactly, including its validity filter — a declared
+  // multiple is only honored when it is positive and divides 256, because `floor_to_multiple` clamps up
+  // to a hard floor of 256 and that rescue is only on-lattice when the multiple divides 256. Anything
+  // else falls back to `DEFAULT_DIMENSION_MULTIPLE`, so the test agrees with the worker on typo'd input
+  // instead of inventing its own rule.
+  const DEFAULT_STRIDE = 32;
+  const strideFor = (manifest) => {
+    const declared = manifest?.limits?.requiresDimensionsMultipleOf;
+    return Number.isInteger(declared) && declared > 0 && 256 % declared === 0 ? declared : DEFAULT_STRIDE;
+  };
+
+  // A row's stride declaration is LOAD-BEARING exactly when the row advertises a bucket the default
+  // 32-px stride would not explain: that declaration is the only thing that makes `848x480` a legal
+  // bucket rather than a typo. Rows whose buckets are all on the ÷32 lattice are already explained by
+  // the default, so a stride there is a nicety and stays opt-in.
+  const advertisesOffDefaultLattice = (fallback) =>
+    (fallback.limits?.resolutions ?? []).some((bucket) => {
+      const [w, h] = bucket.split("x").map(Number);
+      return w % DEFAULT_STRIDE !== 0 || h % DEFAULT_STRIDE !== 0;
+    });
+
   it("fallbackModels carries the video entries the picker falls back to", () => {
     // App.jsx:823 serves exactly this set to the Video Studio picker before the catalog loads, so an
     // empty/!video-typed list would silently make the rest of this suite vacuous.
@@ -57,10 +80,22 @@ describe("video geometry ↔ manifest parity (sc-12294)", () => {
         fallback.defaults?.resolution,
         `${id} defaults.resolution must mirror the manifest`,
       ).toEqual(manifest.defaults?.resolution);
+      // Where the stride is load-bearing, pin its PRESENCE — not just its value. Pinning only the
+      // value is how this check first shipped, gated on `if (requiresDimensionsMultipleOf !== undefined)`,
+      // which made it a guard whose trigger was the very field it asserted: DELETING mochi_1's
+      // `requiresDimensionsMultipleOf: 16` passed the whole suite. The pair could drift apart by
+      // deletion — the same defect class this file fixes in the bucket guard below, where a `maxPixels`
+      // trigger was gating an orthogonal stride assertion.
+      if (advertisesOffDefaultLattice(fallback)) {
+        expect(
+          fallback.limits?.requiresDimensionsMultipleOf,
+          `${id} advertises a bucket that is not a multiple of ${DEFAULT_STRIDE}px, so its mirror must declare the stride that makes that bucket legal`,
+        ).toBeDefined();
+      }
       // A mirror that states a stride must state the RIGHT one. The web never reads this field (the
       // worker resolves it from the live catalog), so nothing else would notice it going stale — but a
       // wrong stride sitting next to the buckets is worse than none: it is the note a future reader
-      // trusts when deciding whether a new bucket is legal. Only checked when the mirror opts in.
+      // trusts when deciding whether a new bucket is legal.
       if (fallback.limits?.requiresDimensionsMultipleOf !== undefined) {
         expect(
           fallback.limits.requiresDimensionsMultipleOf,
@@ -69,19 +104,6 @@ describe("video geometry ↔ manifest parity (sc-12294)", () => {
       }
     },
   );
-
-  // The dimension stride the ENGINE actually applies to a model: its declared
-  // `limits.requiresDimensionsMultipleOf`, else the blanket 32. This mirrors sceneworks-core's
-  // `dimension_multiple_of` (video_request.rs) exactly, including its validity filter — a declared
-  // multiple is only honored when it is positive and divides 256, because `floor_to_multiple` clamps up
-  // to a hard floor of 256 and that rescue is only on-lattice when the multiple divides 256. Anything
-  // else falls back to `DEFAULT_DIMENSION_MULTIPLE`, so the test agrees with the worker on typo'd input
-  // instead of inventing its own rule.
-  const DEFAULT_STRIDE = 32;
-  const strideFor = (manifest) => {
-    const declared = manifest?.limits?.requiresDimensionsMultipleOf;
-    return Number.isInteger(declared) && declared > 0 && 256 % declared === 0 ? declared : DEFAULT_STRIDE;
-  };
 
   it("no video entry advertises a bucket its engine would floor (sc-12294, stride fixed in sc-11994)", () => {
     // The direct regression guard: every advertised bucket must be renderable AS ADVERTISED — on the
