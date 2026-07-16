@@ -513,6 +513,28 @@ pub(crate) async fn create_video_job(
         .unwrap_or(payload.model.as_str())
         .to_owned();
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    // The model's declared `limits.hardMaxDuration`, enforced at enqueue (sc-12297). It had ten
+    // declarations and zero readers, so `validate_video_job`'s blanket `1..=30` was the ONLY
+    // ceiling: a raw API/MCP/preset-replay caller could ask mochi_1 (cap 5) for 30s @ 30fps, and
+    // the resulting 901 frames clear the engine's own `frames % 6 == 1` check — nothing downstream
+    // says no. Rejected, never clamped: silently rendering 5s of a 30s request is the same
+    // silent-coercion class as the 848→832 rewrite (sc-11993/sc-12294).
+    //
+    // It lives HERE, not in `validate_video_job`, because this is the first point that holds BOTH
+    // halves of the decision: the resolved manifest entry (the cap) and the post-preset `model_id`
+    // (whose cap). Reading either from the DTO is precisely sc-12300 — a preset may have replaced
+    // the model, leaving `payload.model` stale, which would gate against the DEFAULT model's cap.
+    // Duration comes off `job_payload` for the same reason: gate the value actually enqueued.
+    // (Presets deliberately do not patch duration today — see `apply_recipe_preset_to_video_payload`
+    // — so this reads the DTO's value; it just stops being a latent bug if that ever changes.)
+    if let Some(message) = model_manifest_entry.as_object().and_then(|entry| {
+        job_payload
+            .get("duration")
+            .and_then(Value::as_f64)
+            .and_then(|duration| duration_limit_error(&model_id, duration as f32, entry))
+    }) {
+        return Err(ApiError::bad_request(message));
+    }
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility_with(
         &state,

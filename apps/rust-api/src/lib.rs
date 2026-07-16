@@ -56,6 +56,7 @@ use sceneworks_core::training_store::{
     TrainingDatasetCaptionSidecarsInput, TrainingDatasetCreateInput, TrainingDatasetMutationResult,
     TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
+use sceneworks_core::video_request::duration_limit_error;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
