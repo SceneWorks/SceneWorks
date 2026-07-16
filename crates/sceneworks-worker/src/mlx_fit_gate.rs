@@ -140,8 +140,9 @@ const HEADROOM_GB: f64 = 18.0;
 const OS_RESERVE_GB: f64 = 2.0;
 
 /// Bytes per binary gigabyte (GiB) — matches `gpu::total_unified_memory_gb`, which divides
-/// `hw.memsize` by 1024³, and the epic's measured on-disk table.
-const BYTES_PER_GIB: f64 = 1_073_741_824.0;
+/// `hw.memsize` by 1024³, and the epic's measured on-disk table. Shared with the candle gate
+/// (sc-12306) so a "GB" in either lane's fit message means the same thing.
+use crate::fit_gate::BYTES_PER_GIB;
 
 /// A usable unified-memory budget for the machine, in GB. Single field (no free/total split): on
 /// unified memory the whole pool is the budget, and current pressure is absorbed by [`HEADROOM_GB`]
@@ -371,80 +372,25 @@ fn sysctl_total_unified_memory_gib() -> Option<f64> {
 // than a calibration constant, because nothing has been measured on-device yet (B5/sc-11995 backfills
 // `footprint.residentMemoryBytes`/`peakMemoryBytes`; sc-12291 tiles the decode and should then cut
 // the frame term sharply).
+//
+// All three points above hold verbatim for the candle lane, which grew the same gate in sc-12306 —
+// except (3), where a CUDA OOM is catchable rather than a SIGKILL, so the pre-flight buys an
+// actionable message and minutes of un-wasted denoise rather than process survival. What remains here
+// is MLX-SPECIFIC: the unified-memory budget probe, the `OS_RESERVE_GB` reserve, and the Mac-worded
+// message. The shared ARITHMETIC lives in `crate::fit_gate` (`mochi_decode_peak_gb` /
+// `mochi_needed_gb`); the candle half is `vram_gate::mochi_fit_error`. The on-disk scan
+// (`mochi_resident_bytes`) is shared too — the hosted tier layout is one repo serving both lanes.
 
-/// The AsymmVAE decoder's final-stage channel count — `decoder_block_out_channels[0]` (config
-/// default `[128, 256, 512, 768]`). The last `block_out` mid-block runs THIS many channels at FULL
-/// output resolution, which is the decode's peak stage: every earlier stage is either fewer pixels
-/// (pre-upsample) or, at 256/512/768 channels, at 1/4/1/16/1/64 of the spatial extent, so their
-/// products are strictly smaller.
-const MOCHI_DECODE_CHANNELS: f64 = 128.0;
-
-/// Bytes per element in the MLX AsymmVAE decode. **f32 (4), NOT bf16 (2)** — `MochiVaeDecoder::
-/// from_weights` pins `Dtype::Float32` and `decode_denormalized` casts the latent to that dtype, so
-/// the whole decode flows f32 ("the reference decode ran bf16 — the parity residual reflects that
-/// bf16 rounding", mlx-gen-mochi/src/vae.rs).
+/// Predicted whole-generation peak (GiB) for an MLX Mochi request, in UNIFIED memory: the shared
+/// backend-neutral arithmetic ([`crate::fit_gate::mochi_needed_gb`]) reserving [`OS_RESERVE_GB`],
+/// because on unified memory the OS draws from the same pool the model does.
 ///
-/// ⚠️ This DELIBERATELY disagrees with the sc-12291 / B1-manifest derivation, which assumed **bf16**
-/// (`128 × 156 × 480 × 848 × 2 B`) and therefore under-predicts the real MLX peak by 2×. Surfaced as
-/// a follow-up on sc-12291 — that story's table (19→7, 61→19, 151→45 GiB) and B1's
-/// `mlx.minMemoryGb: 96` are both bf16-derived and want re-deriving against the shipped f32 decode.
-/// This gate uses the dtype the code actually runs.
-const MOCHI_DECODE_BYTES_PER_ELEM: f64 = 4.0;
-
-/// Full-resolution tensors live simultaneously at the decode peak. `MochiResnetBlock3D` is
-/// `GroupNorm → silu → CausalConv3d → GroupNorm → silu → CausalConv3d → + residual`, so the residual
-/// and the in-flight intermediate are both live across the block — the "residual + intermediate live
-/// at once" claim B1's manifest derivation makes. B1 then hedged "2–3×"; 2 is the concrete,
-/// defensible liveness (3 assumes an extra un-freed temporary, which MLX's allocator need not hold).
-/// Combined with the f32 correction above this lands at ~79 GiB for the shipped 5 s / 151-frame
-/// default — consistent with B1's declared `mlx.minMemoryGb: 96` floor.
-const MOCHI_DECODE_LIVE_TENSORS: f64 = 2.0;
-
-/// Extra leading frames the causal decode materializes before `drop_last_temporal_frames` trims them:
-/// `temporal_ratio − 1` = 5. The peak is paid on the UNTRIMMED length, so a 151-frame clip decodes
-/// 156 frames wide.
-const MOCHI_DECODE_EXTRA_FRAMES: u32 = 5;
-
-/// Predicted AsymmVAE decode peak (GiB) for a `frames` × `width` × `height` clip.
-///
-/// `live × C × (frames + 5) × H × W × 4 B`. Linear in BOTH clip length and pixel count, because the
-/// peak tensor is `[1, C, T, H, W]` and the decode is untiled. This is the term the generic gate's
-/// flat `HEADROOM_GB` structurally cannot represent.
-///
-/// DERIVED, not measured. Sanity points at the native 848×480 bucket — all **GiB**, the unit this
-/// function returns (it divides by [`BYTES_PER_GIB`]): 7 frames ⇒ ~4.66, 19 ⇒ ~9.32, 61 ⇒ ~25.62,
-/// 151 ⇒ ~60.56, 163 ⇒ ~65.21.
-///
-/// (These are the constants the whole derivation leans on, so they are stated in ONE unit on purpose:
-/// an earlier revision mixed decimal GB into this list — 5.0/10.1/27.5 are the same three points in
-/// GB — which made the table read as if the peak grew faster than it does.)
-pub(crate) fn mochi_decode_peak_gb(frames: u32, width: u32, height: u32) -> f64 {
-    let decoded_frames = f64::from(frames.saturating_add(MOCHI_DECODE_EXTRA_FRAMES));
-    MOCHI_DECODE_LIVE_TENSORS
-        * MOCHI_DECODE_CHANNELS
-        * decoded_frames
-        * f64::from(width)
-        * f64::from(height)
-        * MOCHI_DECODE_BYTES_PER_ELEM
-        / BYTES_PER_GIB
-}
-
-/// Predicted whole-generation peak (GiB) for a Mochi request: the ALL-RESIDENT weights
-/// (`supports_sequential_offload: false` ⇒ T5-XXL + AsymmDiT + VAE are held for the whole run, so
-/// nothing drops) + the frame-dependent decode peak + [`OS_RESERVE_GB`]. `None` when the weights are
-/// unmeasurable (`weight_bytes == 0`) ⇒ no signal ⇒ the gate never blocks, matching
-/// [`predicted_peak_gb`].
-pub(crate) fn mochi_needed_gb(
-    weight_bytes: u64,
-    frames: u32,
-    width: u32,
-    height: u32,
-) -> Option<f64> {
-    (weight_bytes > 0).then(|| {
-        weight_bytes as f64 / BYTES_PER_GIB
-            + mochi_decode_peak_gb(frames, width, height)
-            + OS_RESERVE_GB
-    })
+/// The formula itself moved to [`crate::fit_gate`] when the candle video lane needed the identical
+/// arithmetic (sc-12306) — every term in it is a fact about the MODEL (tensor shapes × the f32 dtype
+/// both decoders pin), so duplicating it per lane would let the two gates disagree about one model.
+/// The RESERVE is what stays lane-specific; see that function's note.
+fn mochi_needed_gb(weight_bytes: u64, frames: u32, width: u32, height: u32) -> Option<f64> {
+    crate::fit_gate::mochi_needed_gb(weight_bytes, frames, width, height, OS_RESERVE_GB)
 }
 
 /// The pure Mochi admission decision: `Some(error)` when the predicted peak overflows the budget,
@@ -539,7 +485,16 @@ pub(crate) fn mochi_fit_check(
 /// and `vae/` components resolved from the tier dir's parent (the A6 shared-sibling layout). A
 /// self-contained dir — the raw snapshot, where the components live under the dir itself — is summed
 /// once, never double-counted, because the parent scan only adds SIBLING dirs of `tier_dir`.
-fn mochi_resident_bytes(tier_dir: &Path) -> u64 {
+///
+/// **Shared by both lanes** (sc-12306), despite the module name: this describes the HOSTED REPO LAYOUT,
+/// not MLX. `SceneWorks/mochi-1-mlx` serves candle too — A6's `.scales`-detect seam ingests the same
+/// mlx-affine tiers 1:1 through the same `resolve_mochi_model_dir` — so the resident byte total is
+/// identical off-Mac, and both providers set `supports_sequential_offload: false`, so both hold all
+/// three components for the whole run. It stays here beside its `sum_safetensors_bytes` helper (which
+/// has several other MLX callers) rather than moving to `fit_gate` with the arithmetic; the candle
+/// video gate calls it through this path, exactly as `image_jobs/base.rs` already calls
+/// `mlx_fit_gate::engine_supports_sequential` from the candle image lane (sc-12130).
+pub(crate) fn mochi_resident_bytes(tier_dir: &Path) -> u64 {
     let mut total = sum_safetensors_bytes(tier_dir);
     if let Some(parent) = tier_dir.parent() {
         for component in ["text_encoder", "vae"] {
@@ -1432,49 +1387,10 @@ mod tests {
     /// exact hosted bytes B1's manifest derivation pins). Used as the weight signal in the gate tests.
     const MOCHI_Q4_RESIDENT_BYTES: u64 = 9_670_883_602 + 9_524_669_250 + 919_551_200;
 
-    /// The decode peak must scale with CLIP LENGTH — the whole reason Mochi cannot ride the generic
-    /// resolution-blind gate. Pins linearity in frames and in pixels, and the architectural anchor.
-    #[test]
-    fn mochi_decode_peak_scales_with_frames_and_pixels() {
-        // Strictly monotonic in frames.
-        let peaks: Vec<f64> = [7, 19, 61, 151, 163]
-            .iter()
-            .map(|f| mochi_decode_peak_gb(*f, 848, 480))
-            .collect();
-        for pair in peaks.windows(2) {
-            assert!(
-                pair[1] > pair[0],
-                "decode peak must grow with clip length: {peaks:?}"
-            );
-        }
-
-        // The architectural anchor: 2 live × 128 ch × (151+5) frames × 848×480 × 4 B (f32) = 60.56 GiB.
-        // This is the number a bf16 derivation would halve — pin it so the dtype can't silently drift.
-        let at_151 = mochi_decode_peak_gb(151, 848, 480);
-        assert!(
-            (at_151 - 60.56).abs() < 0.1,
-            "151-frame 848x480 decode peak should be ~60.56 GiB (f32), got {at_151:.2}"
-        );
-
-        // The 5 s default costs ~50 GiB MORE than the engine's 19-frame default on the same machine —
-        // the spread a flat HEADROOM_GB constant cannot express.
-        let at_19 = mochi_decode_peak_gb(19, 848, 480);
-        assert!(
-            at_151 - at_19 > 45.0,
-            "151 vs 19 frames must differ by tens of GiB (got {at_19:.1} → {at_151:.2})"
-        );
-
-        // Linear in pixel count: halving the height halves the peak.
-        let half = mochi_decode_peak_gb(151, 848, 240);
-        assert!(
-            (at_151 / 2.0 - half).abs() < 0.01,
-            "decode peak must be linear in pixels: {at_151:.2} vs {half:.2}"
-        );
-
-        // The causal decode pays for `temporal_ratio − 1` extra leading frames before they're
-        // trimmed, so the 1-frame floor is not free.
-        assert!(mochi_decode_peak_gb(1, 848, 480) > 0.0);
-    }
+    // The pure decode arithmetic (`mochi_decode_peak_gb`: linearity in frames + pixels, the f32
+    // anchor) is pinned in `crate::fit_gate`'s tests alongside the formula, which moved there in
+    // sc-12306 when the candle video lane grew the same gate. What stays here is what is genuinely
+    // MLX: the unified-memory budget shape, the `OS_RESERVE_GB` reserve, and the Mac-worded message.
 
     /// THE gate behavior: on ONE fixed machine, a short Mochi clip is admitted and a long one is
     /// rejected. A frame-blind gate (the plausible wrong implementation — reusing `predicted_peak_gb`

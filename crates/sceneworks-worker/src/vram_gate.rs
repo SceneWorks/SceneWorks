@@ -21,6 +21,7 @@
 use super::*;
 use serde_json::Value;
 
+use crate::fit_gate::BYTES_PER_GIB;
 pub(crate) use crate::fit_gate::{resolve_offload, FitDecision};
 
 /// Emulate a smaller card: cap usable VRAM (GB). Set e.g. `SCENEWORKS_CUDA_VRAM_CAP_GB=10` to make the
@@ -248,6 +249,108 @@ pub(crate) fn sequential_overflow_gb(
 ) -> Option<f64> {
     let (needed_gb, budget) = (sequential_needed_gb?, budget?);
     (budget.free_gb + f64::EPSILON < needed_gb).then_some(needed_gb)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mochi 1: the FRAME-DEPENDENT decode fit gate, candle/CUDA half (epic 1788 / sc-12306)
+// ---------------------------------------------------------------------------------------------
+//
+// The candle twin of `mlx_fit_gate`'s Mochi gate. Both call the SAME arithmetic
+// (`crate::fit_gate::mochi_needed_gb`); this half supplies the CUDA budget, the CUDA reserve, and the
+// CUDA-worded message.
+//
+// Why Mochi needs its own gate here rather than riding `fit_decision` above:
+//
+//  1. `predicted_peak_gb` is MANIFEST-driven (`candle.vramGbByTier`), and **`mochi_1` has no `candle`
+//     block at all** — it ships `mlx` only (builtin.models.jsonc:7233). So the generic gate returns
+//     `None` ⇒ `Unknown` ⇒ admit. It could not protect Mochi even if the video lane called it. (No
+//     candle VIDEO model has such a block; closing that is sc-12344.)
+//
+//  2. Even given a block, the generic gate is deliberately RESOLUTION-BLIND: a per-tier constant
+//     calibrated at load time, where the seam cannot see the request geometry (the generator is cached
+//     across resolutions). Mochi's AsymmVAE decode is UNTILED (candle-gen-mochi pipeline.rs:151 —
+//     `vae.decode(&latents)` materializes the whole clip; sc-12291), so its peak grows LINEARLY IN CLIP
+//     LENGTH: a 7-frame and a 151-frame request differ by ~55 GiB on the same model and the same tier.
+//     A constant cannot express that.
+//
+//  3. Unlike the MLX lane, a CUDA OOM here is CATCHABLE (`classify_engine_error`) rather than MLX's
+//     unmappable `exit(-1)` (sc-12178/12179). So this gate is not preventing a process kill — it is
+//     preventing a raw allocator error that arrives only AFTER the full 64-step denoise has burned
+//     minutes of GPU time, and that says nothing about the one lever that actually fixes it. At the
+//     shipped 5 s / 151-frame default Mochi needs ~81 GB; an RTX 5090 has 32 GB, so on consumer
+//     hardware this is not an edge case but the DEFAULT path.
+
+/// The pure candle Mochi admission decision: `Some(error)` when the predicted peak overflows the VRAM
+/// budget, `None` to admit. Missing either signal (unmeasurable weights / no budget) admits — the gate
+/// never blocks without evidence, exactly like [`fit_decision`].
+///
+/// Budgets against `free_gb` (what is allocatable now), like [`fit_decision`] and unlike the MLX gate,
+/// which has only a unified `total_gb`. Reserves [`HEADROOM_GB`] rather than the MLX gate's
+/// `OS_RESERVE_GB`: the OS does not draw from discrete VRAM, so the term covers allocator slack and
+/// CUDA context overhead instead. The two constants agree at 2.0 today but mean different things.
+///
+/// Pure (no GPU probe, no env) so the whole decision is unit-testable without CUDA; the caller resolves
+/// the budget.
+pub(crate) fn mochi_fit_error(
+    model_label: &str,
+    weight_bytes: u64,
+    frames: u32,
+    width: u32,
+    height: u32,
+    gpu_id: &str,
+    budget: Option<VramBudget>,
+) -> Option<WorkerError> {
+    let (needed_gb, budget) = (
+        crate::fit_gate::mochi_needed_gb(weight_bytes, frames, width, height, HEADROOM_GB)?,
+        budget?,
+    );
+    (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
+        mochi_too_big_error(
+            model_label,
+            needed_gb,
+            budget.free_gb,
+            frames,
+            width,
+            height,
+            weight_bytes as f64 / BYTES_PER_GIB,
+            gpu_id,
+        )
+    })
+}
+
+/// Build Mochi's actionable over-budget rejection for the candle lane. Follows this module's existing
+/// reject convention — name the model, state what it needs and what the GPU has — and adds the lever
+/// that is UNIQUE to Mochi: the clip length.
+///
+/// The generic candle message's advice ("choose a smaller quant tier, lower the resolution") is nearly
+/// useless here: Mochi has one trained bucket (848×480), and the decode dwarfs the tier delta (q4→bf16
+/// is ~11 GiB against a ~60 GiB decode), so neither lever closes a 49 GB gap. The message therefore
+/// leads with shortening the clip — the only lever that moves the dominant term.
+///
+/// Deliberately does NOT reuse `mlx_fit_gate::mochi_too_big_error`: that one says "unified memory" and
+/// "run on a Mac with more memory", both false on CUDA. The shared thing between the lanes is the
+/// arithmetic, not the prose.
+#[allow(clippy::too_many_arguments)]
+fn mochi_too_big_error(
+    model_label: &str,
+    needed_gb: f64,
+    available_gb: f64,
+    frames: u32,
+    width: u32,
+    height: u32,
+    weights_gb: f64,
+    gpu_id: &str,
+) -> WorkerError {
+    WorkerError::InvalidPayload(format!(
+        "{model_label} needs ~{needed} GB of VRAM to render a {frames}-frame {width}x{height} clip \
+         (~{weights} GB of weights, held resident for the whole run, plus an untiled VAE decode whose \
+         peak grows with clip length) but GPU {gpu_id} has ~{available} GB available. Shorten the \
+         clip — the decode peak scales roughly linearly with duration — or run on a card with more \
+         VRAM.",
+        needed = needed_gb.round() as i64,
+        available = available_gb.round() as i64,
+        weights = weights_gb.round() as i64,
+    ))
 }
 
 /// Parse a JSON uint/int from either a number or a numeric string (mirrors base.rs `quant_int`).
