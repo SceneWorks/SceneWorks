@@ -2052,6 +2052,51 @@ export function App() {
     [token],
   );
 
+  // Clear completed items from the queue (issue #1556 / sc-12231). The server
+  // soft-hides every terminal job (keeping Generation Stats + generated assets
+  // intact) and returns the cleared ids; prune exactly those from the live jobs
+  // list so the queue empties immediately without waiting for a refetch. Scoped
+  // to the active project filter so it clears exactly what the operator sees
+  // ("all" clears every project).
+  const clearCompletedJobs = useCallback(
+    async (projectId) => {
+      try {
+        const body = projectId && projectId !== "all" ? { projectId } : {};
+        const response = await apiFetch("/api/v1/jobs/clear", token, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const clearedIds = new Set(response?.clearedIds ?? []);
+        if (clearedIds.size) {
+          setJobs((items) => items.filter((job) => !clearedIds.has(job.id)));
+        }
+        setError("");
+      } catch (err) {
+        setError(err.message);
+      }
+    },
+    [token],
+  );
+
+  // Clear a single completed item from the queue (issue #1556 / sc-12231) — the
+  // per-card "×". The server soft-hides just this terminal job; drop it from the
+  // live list on success so the card disappears immediately.
+  const clearJob = useCallback(
+    async (job) => {
+      try {
+        await apiFetch(`/api/v1/jobs/${job.id}/clear`, token, {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+        setJobs((items) => items.filter((item) => item.id !== job.id));
+        setError("");
+      } catch (err) {
+        setError(err.message);
+      }
+    },
+    [token],
+  );
+
   const titleInfo = viewTitles[activeView] ?? { title: activeView, blurb: "" };
   // A keep-alive view is rendered once it is active OR has been visited before
   // (sc-11959): it mounts on first visit and then stays mounted (hidden) thereafter.
@@ -2140,6 +2185,8 @@ export function App() {
     latestImageAssets,
     // Job actions (creation/control — stable callbacks, NOT the churning jobs list)
     jobAction,
+    clearCompletedJobs,
+    clearJob,
     createVqaJob,
     createInterleaveJob,
     // Queue screen (sc-1651 Phase B batch 2)
@@ -2276,7 +2323,7 @@ export function App() {
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
     assets, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
-    jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob,
+    jobAction, clearCompletedJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects,
     createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, studioLaunch,

@@ -365,6 +365,47 @@ pub(crate) async fn duplicate_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
+/// Clear completed items from the queue (sc-12231, issue #1556). Soft-hides every
+/// terminal (completed / failed / canceled / interrupted) job so it drops off the
+/// operator's queue list + counts, optionally scoped to one project via the
+/// request body. The job rows are kept so the Generation Stats feed and the
+/// generated assets are untouched (see `JobsStore::clear_terminal_jobs`). Returns
+/// the cleared ids so the client can prune them from its live queue immediately.
+pub(crate) async fn clear_jobs(
+    State(state): State<AppState>,
+    ApiJson(payload): ApiJson<ClearJobsRequest>,
+) -> Result<Json<ClearJobsResponse>, ApiError> {
+    let cleared_ids = store_call(state.clone(), move |store, _timeout| {
+        store.clear_terminal_jobs(payload.project_id.as_deref())
+    })
+    .await?;
+    // Republish the queue so every subscriber's status counts drop the cleared
+    // jobs; the acting client also prunes them locally from the returned ids.
+    publish_queue(&state).await?;
+    Ok(Json(ClearJobsResponse {
+        cleared: cleared_ids.len(),
+        cleared_ids,
+        extra: Default::default(),
+    }))
+}
+
+/// Clear a single completed item from the queue (sc-12231, issue #1556) — the
+/// per-card "×" dismiss. Soft-hides one terminal job (see `JobsStore::clear_job`)
+/// so it drops off the queue list + counts while its row (and generated assets)
+/// stay put. Rejects a non-terminal job with 400 (cancel an in-flight job
+/// instead). Returns the updated snapshot and republishes the queue.
+pub(crate) async fn clear_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<JobSnapshot>, ApiError> {
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.clear_job(&job_id)
+    })
+    .await?;
+    publish_queue(&state).await?;
+    Ok(Json(job))
+}
+
 pub(crate) async fn update_job_progress(
     State(state): State<AppState>,
     Path(job_id): Path<String>,

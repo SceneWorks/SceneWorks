@@ -187,6 +187,8 @@ export function QueueScreen() {
   const {
     activeProject,
     assets = [],
+    clearCompletedJobs,
+    clearJob,
     createPlaceholderJob,
     filteredJobs,
     gpuOptions,
@@ -207,6 +209,13 @@ export function QueueScreen() {
   // Prefer the shared index from context (sc-2082); fall back for legacy
   // contexts that may not yet expose it (test harnesses, etc.).
   const gpuWorkers = useMemo(() => workers.filter(isGpuWorker), [workers]);
+  // "Clear completed" (issue #1556): how many of the jobs in view are terminal
+  // (completed / failed / canceled / interrupted) and thus clearable. Gates the
+  // button so it disables when there's nothing to clear.
+  const completedCount = useMemo(
+    () => filteredJobs.filter((job) => terminalStatuses.has(job.status)).length,
+    [filteredJobs],
+  );
   return (
     <section className="page-frame queue-surface">
       <WorkPanel
@@ -239,6 +248,17 @@ export function QueueScreen() {
             </option>
           ))}
         </select>
+        {/* Clear completed items from the queue (issue #1556). Scoped to the
+            current project filter; disabled when nothing in view is terminal. */}
+        <button
+          className="queue-clear-completed"
+          disabled={completedCount === 0 || !clearCompletedJobs}
+          onClick={() => clearCompletedJobs?.(projectFilter)}
+          title="Remove completed, failed, and canceled jobs from the queue"
+          type="button"
+        >
+          Clear completed{completedCount > 0 ? ` (${completedCount})` : ""}
+        </button>
         </div>
       </WorkPanel>
 
@@ -272,6 +292,7 @@ export function QueueScreen() {
                 thumbnailAssets={thumbnails}
                 onThumbnailClick={setPreviewAsset ? (asset) => setPreviewAsset(asset, thumbnails) : undefined}
                 onCancel={(j) => jobAction(j, "cancel")}
+                onClear={clearJob ? (j) => clearJob(j) : undefined}
                 onRetry={(j, payload) => jobAction(j, "retry", { body: payload ?? {} })}
                 onFreshRetry={(j, payload) => jobAction(j, "retry", { body: payload ?? {} })}
                 onDuplicate={(j) => jobAction(j, "duplicate")}

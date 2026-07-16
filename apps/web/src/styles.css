@@ -10315,6 +10315,31 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 10px;
 }
 
+/* "Clear completed" (issue #1556) rides at the trailing edge of the queue tools
+   row — a subtle secondary control next to the project filter. */
+.queue-clear-completed {
+  margin-left: auto;
+  min-height: var(--control-h);
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.queue-clear-completed:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+
+.queue-clear-completed:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .job-composer {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) minmax(108px, 140px) auto;
@@ -11076,6 +11101,38 @@ details[open] > summary.lora-scope-group-heading::before,
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+/* Status badge + the optional per-card × dismiss (issue #1556), kept together at
+   the header's trailing edge. */
+.worker-progress-card__header-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Per-card "×" that clears a completed item from the queue (issue #1556). Ghost
+   button that firms up on hover; sits in the card's top-right corner. */
+.worker-progress-card__dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.worker-progress-card__dismiss:hover {
+  border-color: var(--border);
+  background: var(--surface-hover);
+  color: var(--text);
 }
 
 .worker-progress-card__type {

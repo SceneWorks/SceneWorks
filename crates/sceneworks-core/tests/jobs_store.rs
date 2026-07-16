@@ -196,6 +196,195 @@ fn job_lifecycle_create_claim_complete() {
     assert_eq!(worker.current_job_id, None);
 }
 
+#[test]
+fn clear_terminal_jobs_soft_hides_from_queue_but_keeps_stats() {
+    // sc-12231 / issue #1556: "Clear completed" drops every terminal job from the
+    // operator's queue list + counts, WITHOUT deleting the rows — the Generation
+    // Stats feed inner-joins metrics to jobs, so a hard delete would wipe history.
+    let store = store("clear-terminal");
+    register_image_worker(&store);
+
+    // A completed run (with recorded generation metrics)...
+    let completed = store
+        .create_job(image_job(object(json!({ "prompt": "done" }))))
+        .expect("job creates");
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim")
+        .expect("claimed");
+    assert_eq!(claimed.id, completed.id);
+    store
+        .update_job_progress(
+            &completed.id,
+            ProgressUpdate {
+                status: JobStatus::Completed,
+                stage: ProgressStage::Completed,
+                progress: 1.0,
+                message: "Done".to_owned(),
+                error: None,
+                result: Some(object(json!({ "assetIds": ["asset-1"] }))),
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: None,
+                worker_id: Some("worker-1".to_owned()),
+            },
+        )
+        .expect("completes");
+    store
+        .upsert_generation_metrics(
+            &completed.id,
+            &GenerationMetrics {
+                model: Some("qwen_image".to_owned()),
+                total_ms: Some(9400),
+                ..Default::default()
+            },
+        )
+        .expect("metrics upsert");
+
+    // ...a canceled job (terminal)...
+    let canceled = store
+        .create_job(image_job(object(json!({ "prompt": "stop" }))))
+        .expect("job creates");
+    store.cancel_job(&canceled.id).expect("cancels");
+
+    // ...and a still-queued job (active).
+    let queued = store
+        .create_job(image_job(object(json!({ "prompt": "wait" }))))
+        .expect("job creates");
+
+    // Before clearing, all three are listed.
+    assert_eq!(store.list_jobs(None, None, 100).expect("list").len(), 3);
+
+    let cleared = store
+        .clear_terminal_jobs(None)
+        .expect("clears terminal jobs");
+    assert_eq!(
+        cleared.len(),
+        2,
+        "completed + canceled cleared, queued kept"
+    );
+    assert!(cleared.contains(&completed.id));
+    assert!(cleared.contains(&canceled.id));
+
+    // The queue now lists only the still-queued job.
+    let remaining = store.list_jobs(None, None, 100).expect("list after clear");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, queued.id);
+
+    // Status counts drop the cleared jobs.
+    let summary = store.queue_summary().expect("summary");
+    assert_eq!(*summary.counts.get(&JobStatus::Completed).unwrap_or(&0), 0);
+    assert_eq!(*summary.counts.get(&JobStatus::Canceled).unwrap_or(&0), 0);
+    assert_eq!(*summary.counts.get(&JobStatus::Queued).unwrap_or(&0), 1);
+
+    // Generation Stats history survives: the completed run's metrics are kept
+    // because the job row is soft-hidden, not deleted, so the join still matches.
+    let metrics = store
+        .list_generation_metrics(None, None, None, 100)
+        .expect("metrics list");
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0].job_id, completed.id);
+
+    // A second clear is a no-op — the already-cleared rows are not re-reported.
+    assert!(store
+        .clear_terminal_jobs(None)
+        .expect("second clear")
+        .is_empty());
+}
+
+#[test]
+fn clear_terminal_jobs_scopes_to_one_project() {
+    // sc-12231: the clear honors the queue's project filter — clearing one project
+    // must never touch another project's completed items.
+    let store = store("clear-terminal-scope");
+    let job_in = |project: &str, prompt: &str| CreateJob {
+        project_id: Some(project.to_owned()),
+        ..image_job(object(json!({ "prompt": prompt })))
+    };
+
+    let a = store.create_job(job_in("project-a", "a")).expect("creates");
+    store.cancel_job(&a.id).expect("cancels a");
+    let b = store.create_job(job_in("project-b", "b")).expect("creates");
+    store.cancel_job(&b.id).expect("cancels b");
+
+    let cleared = store
+        .clear_terminal_jobs(Some("project-a"))
+        .expect("clears project-a");
+    assert_eq!(cleared, vec![a.id.clone()]);
+
+    // project-a's queue is empty; project-b's canceled job is untouched.
+    assert!(store
+        .list_jobs(Some("project-a"), None, 100)
+        .expect("list a")
+        .is_empty());
+    let b_list = store
+        .list_jobs(Some("project-b"), None, 100)
+        .expect("list b");
+    assert_eq!(b_list.len(), 1);
+    assert_eq!(b_list[0].id, b.id);
+}
+
+#[test]
+fn clear_job_soft_hides_a_single_terminal_job() {
+    // sc-12231 / issue #1556: the per-card "×" clears one terminal job, leaving
+    // its siblings in the queue and (like the bulk clear) keeping the row so
+    // Generation Stats history survives.
+    let store = store("clear-one");
+
+    let canceled = store
+        .create_job(image_job(object(json!({ "prompt": "stop" }))))
+        .expect("job creates");
+    store.cancel_job(&canceled.id).expect("cancels");
+    let other_terminal = store
+        .create_job(image_job(object(json!({ "prompt": "also done" }))))
+        .expect("job creates");
+    store.cancel_job(&other_terminal.id).expect("cancels other");
+    let queued = store
+        .create_job(image_job(object(json!({ "prompt": "wait" }))))
+        .expect("job creates");
+
+    let cleared = store.clear_job(&canceled.id).expect("clears one job");
+    assert_eq!(cleared.id, canceled.id);
+
+    // Only the one job is gone; the other terminal job and the queued job remain.
+    let remaining: Vec<String> = store
+        .list_jobs(None, None, 100)
+        .expect("list")
+        .into_iter()
+        .map(|job| job.id)
+        .collect();
+    assert!(!remaining.contains(&canceled.id));
+    assert!(remaining.contains(&other_terminal.id));
+    assert!(remaining.contains(&queued.id));
+
+    // Idempotent: clearing an already-cleared job is a no-op success.
+    assert_eq!(
+        store.clear_job(&canceled.id).expect("second clear").id,
+        canceled.id
+    );
+}
+
+#[test]
+fn clear_job_rejects_a_non_terminal_job() {
+    // sc-12231: an active job can't be cleared — it would resurrect on the next
+    // SSE tick and "clear" is for finished work. Rejected with InvalidStatus (400).
+    let store = store("clear-active");
+    let queued = store
+        .create_job(image_job(object(json!({ "prompt": "wait" }))))
+        .expect("job creates");
+
+    let error = store
+        .clear_job(&queued.id)
+        .expect_err("non-terminal is rejected");
+    assert!(matches!(error, JobsStoreError::InvalidStatus(_)));
+
+    // The job is untouched — still listed in the queue.
+    let listed = store.list_jobs(None, None, 100).expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, queued.id);
+}
+
 /// An Ideogram auto-caption image job (sc-9120). Created NON-claimable in `pending_caption`.
 fn pending_caption_job(payload: Value) -> CreateJob {
     CreateJob {
