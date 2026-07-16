@@ -351,7 +351,16 @@ where
     .await
 }
 
-async fn with_cached_generator_using<R>(
+/// [`with_cached_generator`] with the loader supplied by the caller — the seam a test injects a
+/// backend-neutral stub `Generator` through (sc-3724), so the load→progress→cancel→output contract can
+/// be driven with no tensor backend linked.
+///
+/// `pub(crate)` for sc-12318: `video_jobs`' `generate_video_using` threads its own loader down to here,
+/// which is what makes the async per-family generation arms (`generate_mochi`,
+/// `generate_candle_video`) reachable from a unit test. Their pre-load decisions — the frame lattice
+/// and the Mochi fit gate — are otherwise unpinned, since a test can assert the free functions an arm
+/// calls but never that it calls them.
+pub(crate) async fn with_cached_generator_using<R>(
     engine_id: &'static str,
     spec: LoadSpec,
     load_error_context: impl Into<String>,

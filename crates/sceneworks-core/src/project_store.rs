@@ -3763,16 +3763,38 @@ fn build_image_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
 /// and lineage tracks the four source clip/frame ids + the timeline context.
 fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value) {
     let get = |key: &str| fact.get(key).cloned().unwrap_or(Value::Null);
+    // List-valued ids keep an array shape even on facts written before sc-12345, so the replay
+    // reader never has to distinguish "absent" from "empty".
+    let list_or_empty = |key: &str| match fact.get(key) {
+        Some(value @ Value::Array(_)) => value.clone(),
+        _ => json!([]),
+    };
     let source_keys = [
         "sourceAssetId",
         "lastFrameAssetId",
         "sourceClipAssetId",
         "bridgeRightClipAssetId",
     ];
+    // The list-valued source ids are parents too — mv2v's clips, the reference-driven modes'
+    // subject images, and ads2v's reference video. Without them those modes' provenance names
+    // only a subset of what the clip was actually derived from (sc-12345).
+    let list_source_keys = ["sourceClipAssetIds", "referenceAssetIds"];
     let parents: Vec<Value> = source_keys
         .iter()
+        .chain(std::iter::once(&"referenceClipAssetId"))
         .filter_map(|key| fact.get(*key).and_then(Value::as_str))
         .map(|id| Value::String(id.to_owned()))
+        .chain(list_source_keys.iter().flat_map(|key| {
+            fact.get(*key)
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .map(|id| Value::String(id.to_owned()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        }))
         .collect();
     let file = json!({
         "path": get("mediaPath"),
@@ -3793,6 +3815,12 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         "lastFrameAssetId": get("lastFrameAssetId"),
         "sourceClipAssetId": get("sourceClipAssetId"),
         "bridgeRightClipAssetId": get("bridgeRightClipAssetId"),
+        // sc-12345: the fit and the list-valued source ids the replay path needs. Older facts
+        // predate them — `get` yields null and the studio falls back to its own defaults.
+        "fitMode": get("fitMode"),
+        "sourceClipAssetIds": list_or_empty("sourceClipAssetIds"),
+        "referenceAssetIds": list_or_empty("referenceAssetIds"),
+        "referenceClipAssetId": get("referenceClipAssetId"),
         "characterId": get("characterId"),
         "characterLookId": get("characterLookId"),
         "personTrackId": get("personTrackId"),
@@ -5935,6 +5963,75 @@ mod tests {
         assert_eq!(asset["lineage"]["sourceClipAssetId"], json!("asset-video"));
         assert_eq!(asset["lineage"]["characterId"], json!("character-1"));
         assert_eq!(asset["lineage"]["parents"], json!(["asset-video"]));
+    }
+
+    /// sc-12345: the fit and the list-valued source ids survive onto `recipe.normalizedSettings`
+    /// so the sc-12324 replay can rebuild the form, and every source asset lands in
+    /// `lineage.parents` — not just the singular ones. ads2v is the densest mode.
+    #[test]
+    fn build_generated_asset_sidecar_carries_video_fit_and_multi_source_ids() {
+        let fact = json!({
+            "type": "video",
+            "assetId": "asset-output",
+            "mediaPath": "assets/videos/ad.mp4",
+            "mimeType": "video/mp4",
+            "width": 1280, "height": 720, "duration": 6.0, "fps": 25,
+            "quality": "balanced", "family": "bernini",
+            "seed": 44, "displayName": "The hero drives past",
+            "createdAt": "2026-07-16T00:00:00Z",
+            "mode": "ads2v", "model": "bernini_2", "adapter": "mlx_bernini",
+            "prompt": "the hero drives past", "negativePrompt": "", "loras": [],
+            "rawAdapterSettings": {},
+            "fitMode": "pad",
+            "sourceClipAssetId": "clip-main",
+            "referenceClipAssetId": "clip-ref",
+            "referenceAssetIds": ["ref-1", "ref-2"],
+            "sourceClipAssetIds": [],
+            "timelineContext": {},
+        });
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset-1", &fact);
+        let normalized = &asset["recipe"]["normalizedSettings"];
+        assert_eq!(normalized["fitMode"], json!("pad"));
+        assert_eq!(normalized["referenceClipAssetId"], json!("clip-ref"));
+        assert_eq!(normalized["referenceAssetIds"], json!(["ref-1", "ref-2"]));
+        // Every source the clip was derived from — the reference video and the subject
+        // references are parents just as much as the main clip.
+        assert_eq!(
+            asset["lineage"]["parents"],
+            json!(["clip-main", "clip-ref", "ref-1", "ref-2"])
+        );
+
+        // mv2v's clip array is a parent set too.
+        let mv2v = json!({
+            "type": "video",
+            "assetId": "asset-mv2v",
+            "mediaPath": "assets/videos/stitch.mp4",
+            "mimeType": "video/mp4",
+            "mode": "multi_video_to_video", "model": "bernini_2",
+            "sourceClipAssetIds": ["clip-a", "clip-b"],
+        });
+        let stitched = build_generated_asset_sidecar("project-1", "job-2", "genset-1", &mv2v);
+        assert_eq!(
+            stitched["recipe"]["normalizedSettings"]["sourceClipAssetIds"],
+            json!(["clip-a", "clip-b"])
+        );
+        assert_eq!(stitched["lineage"]["parents"], json!(["clip-a", "clip-b"]));
+
+        // A fact written before sc-12345 has no such keys: the lists stay array-shaped so the
+        // replay reader never distinguishes "absent" from "empty", and the fit reads null.
+        let legacy = json!({
+            "type": "video",
+            "assetId": "asset-old",
+            "mediaPath": "assets/videos/old.mp4",
+            "mimeType": "video/mp4",
+            "mode": "text_to_video", "model": "ltx_2_3",
+        });
+        let old = build_generated_asset_sidecar("project-1", "job-3", "genset-1", &legacy);
+        let old_normalized = &old["recipe"]["normalizedSettings"];
+        assert_eq!(old_normalized["referenceAssetIds"], json!([]));
+        assert_eq!(old_normalized["sourceClipAssetIds"], json!([]));
+        assert_eq!(old_normalized["fitMode"], Value::Null);
+        assert_eq!(old["lineage"]["parents"], json!([]));
     }
 
     #[test]
