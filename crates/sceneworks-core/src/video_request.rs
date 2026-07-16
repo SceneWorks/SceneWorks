@@ -42,11 +42,16 @@ pub struct VideoRequest {
     pub duration: f32,
     /// Frames per second, clamped to 1..=60 (Python `safe_int`).
     pub fps: u32,
-    /// Output dimensions: clamped to 256..=1920, then floored to the model's dimension
+    /// Output dimensions: clamped to 256..=1920, floored to the model's dimension
     /// granularity — `model_manifest_entry.limits.requiresDimensionsMultipleOf`, default
-    /// 32 (Python `normalized_dimensions`). Defaults 768x512. Each video model declares the
-    /// stride its engine actually needs, so the advertised buckets survive the floor: 16 for
-    /// mochi (sc-11993) and for bernini / the Wan A14B trio, 64 for ltx and svd (sc-12294).
+    /// 32 (Python `normalized_dimensions`) — then fitted into the model's area cap,
+    /// `limits.maxPixels`, if it declares one (no cap when absent). Defaults 768x512.
+    ///
+    /// Each video model declares the stride its engine actually needs, so the advertised
+    /// buckets survive the floor: 16 for mochi (sc-11993) and for bernini / the Wan A14B
+    /// trio, 64 for ltx and svd. The A14B-family engines additionally cap area at 901,120
+    /// px; `maxPixels` is what keeps a raw over-cap request (retry / MCP / preset replay,
+    /// none of which pass through the UI dropdown) from reaching them (sc-12294).
     pub width: u32,
     pub height: u32,
     pub quality: String,
@@ -250,19 +255,31 @@ const DEFAULT_DIMENSION_MULTIPLE: u32 = 32;
 /// answer differed per model — the floor is not one number:
 ///
 /// * **16** — bernini and the Wan A14B trio (t2v / i2v / vace-fun) ride a z16 VAE:
-///   `patch 2 × vae_stride 8`. They now declare it, so bernini's own default 848x480 stops
-///   silently rendering as 832x480. Their 720p buckets still move to 704, but for a
-///   different reason: the A14B **area** cap (704×1280 = 901,120 px), which candle
+///   `patch 2 × vae_stride 8`. The constraint is the engines' own divisibility check —
+///   candle `SIZE_MULTIPLE_14B = 16`, enforced via `is_multiple_of`, and mlx's `align_dim`
+///   rounding to `patch · vae_stride`. They now declare it, so bernini's own default
+///   848x480 stops silently rendering as 832x480. Their 720p buckets still move to 704, but
+///   for a different reason: the A14B **area** cap (704×1280 = 901,120 px), which candle
 ///   hard-errors on and mlx i2v silently rescales for — not the stride.
-/// * **32** — the dense Wan TI2V-5B (z48 vae22, `vae_stride 16`) and scail2 (hardcoded
-///   `DIM_ALIGN`) genuinely need it. There the *advertisement* was wrong, so their 720p
-///   buckets were corrected to the 704 they always rendered; both keep this default.
+/// * **32** — the dense Wan TI2V-5B (z48 vae22, `vae_stride 16` → candle `SIZE_MULTIPLE =
+///   32`) and scail2 (hardcoded `DIM_ALIGN`) genuinely need it. There the *advertisement*
+///   was wrong, so their 720p buckets were corrected to the 704 they always rendered; both
+///   keep this default.
 /// * **64** — ltx (`validate_request` hard-errors below it: stage-1 runs at `//2//32`) and
-///   svd (VAE 8× then the UNet's 8×). A declared 32 was too *loose* for these: it could
+///   svd (`SIZE_ALIGN = VAE_SCALE * 8`). A declared 32 was too *loose* for these: it could
 ///   floor onto a ÷32-but-not-÷64 size the engine then rejects.
+///
+/// (The descriptors' `min_size` corroborates each stride by convention, but it is NOT the
+/// evidence: gen-core checks `req.width < self.min_size` — a lower *bound*, not a lattice.
+/// The divisibility constants above are the actual constraint.)
 ///
 /// So a declared value can be looser OR stricter than the default — it is the engine's
 /// truth, not a blanket policy.
+///
+/// The stride is only half the geometry. Some engines also cap **area**, and the stride
+/// floor does not imply the cap: a finer stride makes MORE over-cap sizes reachable, not
+/// fewer. Models whose engine caps declare `limits.maxPixels`, and the result is fitted
+/// into it by [`fit_to_max_pixels`]. A model that declares nothing is uncapped (sc-12294).
 fn normalized_dimensions(
     width: Option<&Value>,
     height: Option<&Value>,
@@ -271,7 +288,76 @@ fn normalized_dimensions(
     let multiple = dimension_multiple_of(model_manifest_entry);
     let w = floor_to_multiple(clamped_u32(width, 768, 256, 1920), multiple);
     let h = floor_to_multiple(clamped_u32(height, 512, 256, 1920), multiple);
-    (w, h)
+    match max_pixels_of(model_manifest_entry) {
+        Some(cap) if (w as u64) * (h as u64) > cap => fit_to_max_pixels(w, h, multiple, cap),
+        _ => (w, h),
+    }
+}
+
+/// The lower bound a [`max_pixels_of`] cap must clear to be honorable: [`floor_to_multiple`]
+/// hard-floors every dimension at 256, so a cap under 256×256 could never be satisfied.
+const MIN_HONORABLE_MAX_PIXELS: u64 = 256 * 256;
+
+/// `limits.maxPixels` from a resolved manifest entry, or `None` for **no cap** — the
+/// default-absent behavior, so every model that does not declare one is byte-identical to
+/// before this key existed (sc-12294).
+///
+/// A cap is declared only where the *engine* enforces one, and it is deliberately not a
+/// blanket: ltx / svd / mochi have no area check in either backend, so they get no key.
+/// Where the two backends disagree the manifest carries the STRICTER truth, because one
+/// manifest serves both — see the per-model notes in `builtin.models.jsonc`.
+///
+/// Same infallibility posture as [`dimension_multiple_of`]: `from_payload` must survive a
+/// typo'd manifest, so a cap the geometry could never honor (zero / negative / non-integer /
+/// below the 256×256 floor) falls back to *no cap* rather than emitting a degenerate size.
+/// That matches the default-absent behavior instead of inventing a constraint from a typo.
+fn max_pixels_of(model_manifest_entry: &JsonObject) -> Option<u64> {
+    model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object)
+        .and_then(|limits| limits.get("maxPixels"))
+        .and_then(Value::as_u64)
+        .filter(|cap| *cap >= MIN_HONORABLE_MAX_PIXELS)
+}
+
+/// The largest `(width, height)` inside `max_pixels` that preserves the input aspect ratio and
+/// stays on the `multiple` lattice.
+///
+/// A direct port of the mlx engine's `best_output_size` (`mlx-gen-wan/src/pipeline.rs:94`,
+/// itself a port of `generate_wan.py`'s `_best_output_size`): derive the ideal `(ow, oh)` from
+/// `√(max_area·ratio)`, then try width-first and height-first alignment and keep whichever
+/// distorts the ratio less. Porting it rather than inventing a fit is the point of the story —
+/// mlx I2V/TI2V silently rescale through this exact function, so matching it is what makes the
+/// app's normalization agree with the backend that rescales, while keeping the result inside the
+/// cap that the candle backend hard-errors on. One geometry, both backends (sc-12294).
+///
+/// The `.max(d)` clamps mirror the engine's own F-030 guard against a degenerate area flooring a
+/// dimension to 0 (and a subsequent `area / 0` → NaN ratio). They cannot fire here — a cap below
+/// 256×256 is rejected by [`max_pixels_of`] — but the port is kept faithful rather than trimmed.
+fn fit_to_max_pixels(width: u32, height: u32, multiple: u32, max_pixels: u64) -> (u32, u32) {
+    let (w, h, d) = (width as f64, height as f64, multiple as f64);
+    let area = max_pixels as f64;
+    let ratio = w / h;
+    let ow = (area * ratio).sqrt();
+    let oh = area / ow;
+
+    // Option 1: align width first, derive height from the remaining area.
+    let ow1 = ((ow / d).floor() * d).max(d);
+    let oh1 = ((area / ow1 / d).floor() * d).max(d);
+    let ratio1 = ow1 / oh1;
+
+    // Option 2: align height first, derive width.
+    let oh2 = ((oh / d).floor() * d).max(d);
+    let ow2 = ((area / oh2 / d).floor() * d).max(d);
+    let ratio2 = ow2 / oh2;
+
+    let dist1 = (ratio / ratio1).max(ratio1 / ratio);
+    let dist2 = (ratio / ratio2).max(ratio2 / ratio);
+    if dist1 < dist2 {
+        (ow1 as u32, oh1 as u32)
+    } else {
+        (ow2 as u32, oh2 as u32)
+    }
 }
 
 /// `limits.requiresDimensionsMultipleOf` from a resolved manifest entry, else
@@ -560,6 +646,283 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every video model in the SHIPPED `builtin.models.jsonc`, keyed by id, with the geometry
+    /// its ENGINE actually enforces — derived from the runtime source, NOT read back from the
+    /// manifest. That independence is the whole point: this table is the expectation, the
+    /// manifest is the thing under test, so a manifest edit that drifts from engine truth
+    /// fails here instead of shipping.
+    ///
+    /// `multiple` — the divisibility the engine checks (`is_multiple_of` on candle,
+    /// `align_dim` rounding on mlx). `None` = declares nothing, inherits the 32 default.
+    /// `max_pixels` — the engine's area cap; `None` = neither backend caps, so the manifest
+    /// must NOT invent one.
+    ///
+    /// Where the backends disagree the table carries the STRICTER side, because one manifest
+    /// serves both:
+    /// * `wan_2_2_t2v_14b`  — candle errors (`wan14b.rs:645`); mlx `max_area: 0`, uncapped.
+    /// * `wan_2_2_vace_fun_14b` — candle errors (`model_vace.rs:298`); mlx uncapped (`:107`).
+    /// * `bernini`  — candle errors (`candle-gen-bernini/src/config.rs:164`); mlx calls
+    ///   `align_dim` directly and never caps.
+    /// * `scail2_14b` — candle errors (`candle-gen-scail2/src/pipeline.rs:294`); mlx uncapped.
+    /// * `wan_2_2` (TI2V-5B) — the reverse: mlx caps + silently rescales
+    ///   (`config.rs:293`); candle's 5B `validate` (`lib.rs:328`) has NO area check.
+    /// * `wan_2_2_i2v_14b` — the only agreement, and even there candle errors while mlx
+    ///   rescales.
+    /// * `ltx_2_3` / `ltx_2_3_eros` / `svd` / `mochi_1` — zero area checks in either backend.
+    const ENGINE_GEOMETRY: &[(&str, Option<u32>, Option<u64>)] = &[
+        ("ltx_2_3", Some(64), None),
+        ("ltx_2_3_eros", Some(64), None),
+        ("svd", Some(64), None),
+        ("mochi_1", Some(16), None),
+        ("wan_2_2", None, Some(901_120)),
+        ("wan_2_2_t2v_14b", Some(16), Some(901_120)),
+        ("wan_2_2_i2v_14b", Some(16), Some(901_120)),
+        ("wan_2_2_vace_fun_14b", Some(16), Some(901_120)),
+        ("bernini", Some(16), Some(901_120)),
+        ("scail2_14b", None, Some(901_120)),
+    ];
+
+    /// The `models` array of the SHIPPED manifest — the exact bytes the app embeds and seeds.
+    fn builtin_video_models() -> Vec<Value> {
+        let raw = crate::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .expect("builtin.models.jsonc present");
+        let manifest: Value =
+            serde_json::from_str(&crate::jsonc::strip_jsonc_comments(raw)).expect("parses as JSON");
+        manifest
+            .get("models")
+            .and_then(Value::as_array)
+            .expect("models array")
+            .iter()
+            .filter(|m| m.get("type").and_then(Value::as_str) == Some("video"))
+            .cloned()
+            .collect()
+    }
+
+    /// sc-12294 — the invariant this story exists to establish, asserted against the REAL
+    /// manifest bytes rather than inline literals: **what a video model advertises is what it
+    /// renders, and everything it advertises is legal on its engine.**
+    ///
+    /// The earlier revision of this suite hardcoded the manifest values it claimed to verify
+    /// (`"limits": { "requiresDimensionsMultipleOf": 16 }` written straight into the payload),
+    /// so it only re-tested `normalized_dimensions`' arithmetic — reverting bernini's manifest
+    /// declaration to 32 (restoring the original sc-12294 bug) left the whole suite GREEN.
+    /// This test loads the shipped manifest and checks it against [`ENGINE_GEOMETRY`], so that
+    /// mutation is RED.
+    #[test]
+    fn shipped_manifest_matches_each_engines_real_geometry() {
+        let models = builtin_video_models();
+        assert_eq!(
+            models.len(),
+            ENGINE_GEOMETRY.len(),
+            "a video model was added/removed; derive its stride + area cap from its engine \
+             source and add it to ENGINE_GEOMETRY — do not blanket-apply"
+        );
+
+        for (id, want_multiple, want_max_pixels) in ENGINE_GEOMETRY {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(*id))
+                .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
+                .as_object()
+                .expect("model entry object");
+            let limits = entry
+                .get("limits")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{id} has limits"));
+
+            // 1. The manifest declares exactly the stride the engine enforces.
+            let declared = limits
+                .get("requiresDimensionsMultipleOf")
+                .and_then(Value::as_u64)
+                .map(|m| m as u32);
+            assert_eq!(
+                declared, *want_multiple,
+                "{id}: manifest stride disagrees with its engine's divisibility check"
+            );
+            // ...and the effective floor is what the geometry will actually apply.
+            assert_eq!(
+                dimension_multiple_of(entry),
+                want_multiple.unwrap_or(DEFAULT_DIMENSION_MULTIPLE),
+                "{id}: effective dimension multiple"
+            );
+
+            // 2. The manifest declares an area cap exactly where an engine has one. A model
+            //    with no engine cap must not invent one.
+            assert_eq!(
+                limits.get("maxPixels").and_then(Value::as_u64),
+                *want_max_pixels,
+                "{id}: manifest area cap disagrees with its engine's max-area check"
+            );
+            assert_eq!(
+                max_pixels_of(entry),
+                *want_max_pixels,
+                "{id}: effective max pixels"
+            );
+
+            // 3. Every advertised bucket AND the shipped default is a FIXED POINT of the
+            //    geometry — advertise 848x480 and 848x480 is what renders — and fits the cap.
+            let buckets = limits
+                .get("resolutions")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("{id} advertises resolutions"));
+            let default_res = entry
+                .get("defaults")
+                .and_then(Value::as_object)
+                .and_then(|d| d.get("resolution"))
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{id} has a default resolution"));
+            assert!(
+                buckets.iter().any(|b| b.as_str() == Some(default_res)),
+                "{id}: default {default_res} is not one of its advertised buckets"
+            );
+
+            for advertised in buckets
+                .iter()
+                .map(|b| b.as_str().expect("resolution is a string"))
+                .chain(std::iter::once(default_res))
+            {
+                let (w, h) = advertised
+                    .split_once('x')
+                    .map(|(w, h)| (w.parse::<u32>().unwrap(), h.parse::<u32>().unwrap()))
+                    .unwrap_or_else(|| panic!("{id}: malformed resolution {advertised}"));
+
+                let request = VideoRequest::from_payload(&payload(json!({
+                    "projectId": "p", "model": *id, "width": w, "height": h,
+                    "modelManifestEntry": Value::Object(entry.clone()),
+                })));
+                assert_eq!(
+                    (request.width, request.height),
+                    (w, h),
+                    "{id} advertises {advertised}; it must render {advertised}"
+                );
+                if let Some(cap) = want_max_pixels {
+                    assert!(
+                        (w as u64) * (h as u64) <= *cap,
+                        "{id}: advertised {advertised} exceeds its engine's area cap {cap}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// sc-12294 BLOCKER — the case the dropdown never produces but every raw path does.
+    ///
+    /// `1280x720` was the shipped `defaults.resolution` of the A14B T2V/I2V entries, so it is
+    /// the single most common stored value. On `main` a blanket ÷32 floored it to 1280x704 (=
+    /// the cap exactly) by accident. Declaring ÷16 removes that accidental protection — so the
+    /// cap must be enforced, or job retry / MCP / `POST /api/v1/jobs` / preset replay would
+    /// hand candle a hard error and mlx a silent rescale.
+    ///
+    /// Driven through the REAL manifest entries, but judged against [`ENGINE_GEOMETRY`] — the
+    /// engine's truth, never the manifest's own claim. Reading the cap back out of the entry
+    /// would make this vacuous exactly when it matters: delete a `maxPixels` and the area
+    /// assertion would simply stop running. Judged independently, a deleted cap is RED here.
+    #[test]
+    fn stored_720p_is_legal_on_every_video_model() {
+        for model in builtin_video_models() {
+            let entry = model.as_object().expect("model entry object");
+            let id = entry.get("id").and_then(Value::as_str).expect("id");
+            let (_, want_multiple, want_max_pixels) = ENGINE_GEOMETRY
+                .iter()
+                .find(|(known, _, _)| known == &id)
+                .unwrap_or_else(|| panic!("{id} covered by ENGINE_GEOMETRY"));
+
+            let request = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "model": id, "width": 1280, "height": 720,
+                "modelManifestEntry": model.clone(),
+            })));
+
+            let multiple = want_multiple.unwrap_or(DEFAULT_DIMENSION_MULTIPLE);
+            assert_eq!(
+                (request.width % multiple, request.height % multiple),
+                (0, 0),
+                "{id}: stored 1280x720 -> {}x{} is off the ÷{multiple} lattice its engine checks",
+                request.width,
+                request.height
+            );
+            if let Some(cap) = want_max_pixels {
+                assert!(
+                    (request.width as u64) * (request.height as u64) <= *cap,
+                    "{id}: stored 1280x720 -> {}x{} = {} px exceeds the engine cap {cap} — \
+                     candle would hard-error and mlx would silently rescale",
+                    request.width,
+                    request.height,
+                    (request.width as u64) * (request.height as u64)
+                );
+            }
+        }
+    }
+
+    /// The fit is a port of mlx's `best_output_size`, and this pins it to the value the
+    /// engine's OWN test pins (`mlx-gen-wan/src/pipeline.rs:1510`): `best_output_size(1280,
+    /// 720, 16, 16, 704*1280) == (1264, 704)`. If the two ever diverge, the app stops agreeing
+    /// with the backend that silently rescales — which is the whole reason to port rather than
+    /// invent a fit.
+    #[test]
+    fn area_fit_matches_the_mlx_engines_own_pinned_value() {
+        assert_eq!(fit_to_max_pixels(1280, 720, 16, 901_120), (1264, 704));
+
+        // Aspect-preserving and grid-aligned, and it only ever shrinks.
+        let (w, h) = fit_to_max_pixels(1280, 720, 16, 901_120);
+        assert!((w as u64) * (h as u64) <= 901_120, "fits the cap");
+        assert_eq!((w % 16, h % 16), (0, 0), "lands on the declared lattice");
+        assert!(w <= 1280 && h <= 720, "never upscales");
+        let (orig, fitted) = (1280.0 / 720.0, w as f64 / h as f64);
+        assert!(
+            (orig - fitted).abs() / orig < 0.05,
+            "aspect preserved within 5%: {orig} vs {fitted}"
+        );
+
+        // An at-cap request is untouched: the engines check `>`, so 901,120 exactly passes.
+        assert_eq!(1280 * 704, 901_120);
+        let at_cap = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "wan_2_2_i2v_14b", "width": 1280, "height": 704,
+            "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 16, "maxPixels": 901_120 } }
+        })));
+        assert_eq!((at_cap.width, at_cap.height), (1280, 704));
+    }
+
+    /// A model that declares no `maxPixels` is UNCONSTRAINED — the default-absent behavior that
+    /// keeps every non-declaring model byte-identical to before the key existed. Also covers the
+    /// infallibility contract: a typo'd cap the geometry could never honor falls back to no cap
+    /// rather than emitting a degenerate size.
+    #[test]
+    fn absent_or_unhonorable_max_pixels_means_no_cap() {
+        // No `maxPixels` → 1280x720 floors on stride alone and is NOT area-fitted.
+        let uncapped = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "mochi_1", "width": 1280, "height": 720,
+            "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 16 } }
+        })));
+        assert_eq!((uncapped.width, uncapped.height), (1280, 720));
+        assert!((uncapped.width as u64) * (uncapped.height as u64) > 901_120);
+
+        // Same entry + a cap → fitted. This is what makes the assertion above meaningful.
+        let capped = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "mochi_1", "width": 1280, "height": 720,
+            "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 16, "maxPixels": 901_120 } }
+        })));
+        assert_eq!((capped.width, capped.height), (1264, 704));
+
+        // Unhonorable caps fall back to NO cap (never a degenerate size): the 256 floor means
+        // nothing under 256×256 is satisfiable.
+        for bad in [
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!("901120"),
+            json!(65_535),
+        ] {
+            let entry = payload(json!({ "limits": { "maxPixels": bad } }));
+            assert_eq!(max_pixels_of(&entry), None, "unhonorable maxPixels {bad}");
+        }
+        // The smallest honorable cap is exactly the 256x256 floor.
+        let floor = payload(json!({ "limits": { "maxPixels": 65_536 } }));
+        assert_eq!(max_pixels_of(&floor), Some(65_536));
     }
 
     #[test]
