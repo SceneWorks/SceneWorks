@@ -685,6 +685,10 @@ pub(crate) const VIDEO_ENGINE_IDS: &[&str] = &[
     // ([`registry_capabilities`]) picks up the candle LTX descriptor too (sc-5097).
     "ltx_2_3_distilled",
     "svd_xt",
+    // Mochi 1 (epic 1788 / sc-11991). ONE id covers BOTH backends — unlike LTX above, `mlx-gen-mochi`
+    // and `candle-gen-mochi` both register `MODEL_ID = "mochi_1"`, so a single row is correct and a
+    // `_distilled`-style sibling would resolve to nothing.
+    "mochi_1",
 ];
 
 /// The trainer registry ids this worker serves (the ids `engine_trainer_id` maps TO). Used by
@@ -1226,6 +1230,9 @@ mod tests {
             "wan_2_2_vace_fun_14b" => &["wan2_2_vace_fun_14b"],
             "svd" => &["svd_xt"],
             "ltx_2_3" | "ltx_2_3_eros" => &["ltx_2_3", "ltx_2_3_distilled"],
+            // Mochi 1 (sc-11991): the sceneworks id IS the engine id, and BOTH backends register it,
+            // so one entry resolves the descriptor on either lane.
+            "mochi_1" => &["mochi_1"],
             _ => &[],
         }
     }
@@ -1455,6 +1462,77 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// sc-11991 (epic 1788): `mochi_1` resolves through THIS module to a real gen-core descriptor on
+    /// the active backend — the story's acceptance criterion, asserted directly.
+    ///
+    /// [`manifest_menu_is_subset_of_descriptor`] cannot stand in for this: it `continue`s past any
+    /// model whose descriptor does not resolve, so it stays green whether Mochi is wired or not.
+    /// Mochi also advertises NO sampler/scheduler axis, which makes its subset check vacuous. This
+    /// test fails if the `VIDEO_ENGINE_IDS` row, the `video_engine_ids` mapping, or the runtime pin
+    /// regresses.
+    ///
+    /// It further pins the descriptor facts the manifest entry is derived from, so a runtime bump
+    /// that changes them fails HERE rather than silently making the manifest lie.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn mochi_resolves_one_engine_id_to_the_gen_core_descriptor() {
+        assert!(
+            VIDEO_ENGINE_IDS.contains(&"mochi_1"),
+            "mochi_1 must be in VIDEO_ENGINE_IDS or the registry-derived video_generate \
+             advertisement drops it"
+        );
+        // ONE engine id covers both backends — unlike LTX's `ltx_2_3` + `ltx_2_3_distilled` split,
+        // `mlx-gen-mochi` and `candle-gen-mochi` both register `MODEL_ID = "mochi_1"`.
+        assert_eq!(
+            video_engine_ids("mochi_1"),
+            &["mochi_1"],
+            "mochi maps to exactly one engine id on both backends"
+        );
+
+        let descriptor = video_descriptor("mochi_1")
+            .expect("mochi_1 resolves to a gen-core descriptor on the active backend");
+        assert_eq!(descriptor.id, "mochi_1");
+        assert!(
+            matches!(descriptor.modality, gen_core::Modality::Video),
+            "mochi is a video generator"
+        );
+
+        let caps = &descriptor.capabilities;
+        // The manifest advertises NO sampler/scheduler axis because the engine honors none (one
+        // fixed flow-match Euler integrator). If this ever becomes non-empty, revisit `limits`.
+        assert!(
+            caps.samplers.is_empty() && caps.schedulers.is_empty(),
+            "mochi advertises no sampler/scheduler axis"
+        );
+        // Tiers ship PRE-QUANTIZED as directories; `spec.quantize` only asserts the tier's baked-in
+        // level. An empty `supported_quants` is what makes a tier a DIR rather than a requant toggle.
+        assert!(
+            caps.supported_quants.is_empty(),
+            "mochi tiers are pre-quantized dirs, not an on-the-fly requant toggle"
+        );
+        // t2v only + no adapter path — the two facts the routing rows and `loraCompatibility` encode.
+        assert!(
+            caps.conditioning.is_empty(),
+            "mochi is text-to-video only (no conditioning kinds)"
+        );
+        assert!(
+            !caps.supports_lora && !caps.supports_lokr,
+            "mochi has no LoRA/LoKr path on either backend"
+        );
+        // Everything stays resident: the basis for the manifest's mlx.minMemoryGb derivation.
+        assert!(
+            !caps.supports_sequential_offload,
+            "mochi holds T5 + DiT + VAE resident (the minMemoryGb derivation assumes it)"
+        );
+        assert_eq!(caps.max_count, 1, "mochi renders one clip per run");
+        // The manifest's `requiresDimensionsMultipleOf: 16` + the 848x480 bucket ride these.
+        assert_eq!(caps.min_size, 16);
+        assert_eq!(caps.max_size, 1280);
     }
 
     // Explicit test registrations exercise capability derivation without mutating a process-global

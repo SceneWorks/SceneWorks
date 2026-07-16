@@ -751,6 +751,22 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     // (sc-6837) is a DISTINCT engine gated by its own predicates, NOT Wan-VACE membership — so its
     // candle-video columns are all false (it is deliberately absent from `CANDLE_VIDEO_*`).
     VideoModelCaps::new("scail2_14b", true, false, false, false),
+    // Mochi 1 (epic 1788 / sc-11991): 10B AsymmDiT text-to-video on BOTH backends — `mlx-gen-mochi`
+    // (macOS) and `candle-gen-mochi` (Windows/CUDA + Linux), which ingests the SAME mlx-affine tiers
+    // via the A6 `.scales`-detect seam. Both register the SAME engine id (`mochi_1`), unlike LTX's
+    // `ltx_2_3` + `ltx_2_3_distilled` split.
+    //
+    // `candle_video_routed = true` is load-bearing: the MLX descriptor is `mac_only: true` but the
+    // CANDLE descriptor is `mac_only: false`, so Mochi must NOT be hard mac-gated app-side — the
+    // off-Mac lane is real and CUDA-validated on Blackwell (sc-11990). Per-backend gating is exactly
+    // what this table's two routed columns express, so no new mechanism is needed.
+    //
+    // t2v ONLY (`conditioning: []` on both descriptors): NOT an i2v model and NOT a VACE model, so
+    // those columns stay false — `video_request_candle_eligible`'s non-i2v arm then requires an
+    // explicit `text_to_video` mode and rejects a stray source image, and `video_mode_is_mlx_eligible`
+    // carries the matching t2v-only arm. Absent from `CANDLE_VIDEO_LORA_MODELS` because both
+    // descriptors set `supports_lora`/`supports_lokr` = false, so a LoRA-carrying job is refused.
+    VideoModelCaps::new("mochi_1", true, true, false, false),
 ];
 
 /// Derive a `&'static [&'static str]` list constant from a boolean column of one of the capability
@@ -1127,6 +1143,9 @@ mod tests {
         // Bernini VIDEO lane (sc-10997, epic 6562): the full candle planner+renderer serves t2v + the
         // editing/reference/multi-source modes. Not in the i2v/VACE subsets (a distinct engine).
         "bernini",
+        // Mochi 1 (sc-11991): the candle descriptor is `mac_only: false` and ingests the same hosted
+        // mlx-affine tiers, so the off-Mac t2v lane is real. Not in the i2v/VACE subsets (t2v only).
+        "mochi_1",
     ];
 
     const EXPECTED_CANDLE_VIDEO_I2V_ROUTED_MODELS: &[&str] = &["wan_2_2_i2v_14b", "svd"];
@@ -1143,6 +1162,7 @@ mod tests {
         "svd",
         "bernini",
         "scail2_14b",
+        "mochi_1",
     ];
 
     const EXPECTED_MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
