@@ -132,9 +132,10 @@ pub(crate) fn default_video_duration() -> ContractNumber {
     ContractNumber::from(6)
 }
 
-pub(crate) fn default_video_fps() -> u32 {
-    25
-}
+// No `default_video_fps`: an omitted fps resolves to the model's declared `defaults.fps` (core's
+// `resolve_fps`, applied in `create_video_job` once the manifest entry is resolved), not to a
+// blanket this layer invents. The blanket 25 that used to live here was off-menu for 7 of the 10
+// shipped video models — see `VideoJobRequest::fps` (sc-12347).
 
 pub(crate) fn default_video_width() -> u32 {
     768

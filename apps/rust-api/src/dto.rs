@@ -765,8 +765,18 @@ pub(crate) struct VideoJobRequest {
     pub(crate) model: String,
     #[serde(default = "default_video_duration")]
     pub(crate) duration: ContractNumber,
-    #[serde(default = "default_video_fps")]
-    pub(crate) fps: u32,
+    /// Frames per second, or `None` when the caller named none — which the MCP server does whenever
+    /// *its* caller does (`server.rs` omits the key entirely rather than sending a default).
+    ///
+    /// Deliberately optional rather than `#[serde(default = …)]` = 25: that blanket is off-menu for
+    /// 7 of the 10 shipped video models, so it silently rendered them at a rate they do not declare
+    /// (mochi_1 at 25 instead of 30 — a 30 fps prior played 20% slow), and it is not a value any
+    /// model chose. `create_video_job` resolves `None` from the model's declared `defaults.fps` once
+    /// the manifest entry is in hand, then writes the resolved rate back into the payload. Keeping
+    /// the blanket here would also make `limits.fps` unenforceable: the gate would reject a payload
+    /// this route constructed itself (sc-12347).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fps: Option<u32>,
     #[serde(default = "default_video_width")]
     pub(crate) width: u32,
     #[serde(default = "default_video_height")]

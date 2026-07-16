@@ -63,11 +63,12 @@ pub(crate) fn optional_i64(payload: &JsonObject, key: &str) -> Option<i64> {
     })
 }
 
-/// Parse an int (JSON number or numeric string), clamp to `[min, max]`, default when
-/// absent/unparseable — the `safe_int` contract. Takes the raw `Option<&Value>` so both
-/// the `payload.get(key)` (image) and pre-fetched `payload.get("width")` (video) call
-/// sites share one primitive.
-pub(crate) fn clamped_u32(value: Option<&Value>, default: u32, min: u32, max: u32) -> u32 {
+/// The `safe_int` READ with no default applied: a JSON number or a numeric string, `None` when
+/// absent or unparseable. Split out of [`clamped_u32`] so a caller whose default is not a constant
+/// can tell "the caller named nothing" from "the caller named a value" — video's fps resolves an
+/// omission from the model's declared `defaults.fps`, which [`clamped_u32`]'s eager `unwrap_or`
+/// collapses (sc-12347).
+pub(crate) fn parse_u32(value: Option<&Value>) -> Option<u32> {
     value
         .and_then(|value| {
             value
@@ -75,8 +76,14 @@ pub(crate) fn clamped_u32(value: Option<&Value>, default: u32, min: u32, max: u3
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
         .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(default)
-        .clamp(min, max)
+}
+
+/// Parse an int (JSON number or numeric string), clamp to `[min, max]`, default when
+/// absent/unparseable — the `safe_int` contract. Takes the raw `Option<&Value>` so both
+/// the `payload.get(key)` (image) and pre-fetched `payload.get("width")` (video) call
+/// sites share one primitive.
+pub(crate) fn clamped_u32(value: Option<&Value>, default: u32, min: u32, max: u32) -> u32 {
+    parse_u32(value).unwrap_or(default).clamp(min, max)
 }
 
 /// Collect a JSON int array (numbers or numeric strings), dropping non-numeric entries.

@@ -3594,3 +3594,371 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
         "10s is within the default model's 15s cap: {body}"
     );
 }
+
+/// sc-12347: `limits.fps` is enforced at enqueue against the POST-PRESET model's menu, and an
+/// OMITTED fps resolves to that model's declared `defaults.fps` rather than a blanket.
+///
+/// The fixture makes both halves load-bearing by having the two models' menus disagree:
+///   * default video model — `[24, 25, 30]`, default 25 (permissive)
+///   * `preset-vid`        — `[30]`, default 30 (strict, the mochi_1 shape)
+///
+/// `fps: 25` is the discriminator. It is on the default's menu and off `preset-vid`'s, so a gate
+/// reading the DTO's stale `payload.model` — i.e. inside `validate_video_job`, before
+/// `apply_recipe_preset_to_video_payload` — admits it and enqueues a job the strict model does not
+/// advertise. 25 is also the blanket the DTO used to default to, which is why the omitted-fps case
+/// below is the regression this story nearly shipped rather than a nicety.
+#[tokio::test]
+async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let default_video_model = crate::defaults::default_video_model();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "__DEFAULT_VIDEO_MODEL__",
+              "name": "Default Vid",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/default-vid", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "fps": 25 },
+              "limits": { "fps": [24, 25, 30] },
+              "ui": { "label": "Default Vid" }
+            },
+            {
+              "id": "preset-vid",
+              "name": "Preset Vid",
+              "family": "mochi",
+              "type": "video",
+              "adapter": "mochi_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/preset-vid", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "fps": 30 },
+              "limits": { "fps": [30] },
+              "ui": { "label": "Preset Vid" }
+            }
+          ]
+        }
+        "#
+        .replace("__DEFAULT_VIDEO_MODEL__", &default_video_model),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [
+            {
+              "id": "preset_override",
+              "name": "Preset Override",
+              "workflow": "text_to_video",
+              "model": "preset-vid",
+              "defaults": {},
+              "prompt": { "prefix": "cinematic", "suffix": "smooth" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin recipe presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user recipe presets writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Fps Menu Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // 25fps: on the DEFAULT's menu, off the preset-resolved model's. `model` omitted so the preset's
+    // model wins — the sc-12300 shape. A gate reading the stale DTO model admits this.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "fps": 25,
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "25fps is off preset-vid's [30] menu and must be refused at enqueue, not snapped: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("preset-vid"),
+        "names the model whose menu applied — NOT the default's: {detail}"
+    );
+    assert!(
+        detail.contains("30 fps"),
+        "states what is allowed: {detail}"
+    );
+    assert!(detail.contains("25 fps"), "states what was asked: {detail}");
+
+    // THE REGRESSION THIS STORY NEARLY SHIPPED: omitting fps must be ADMITTED, and must resolve to
+    // the post-preset model's declared 30 — not the blanket 25 (which the assertion above proves is
+    // rejected), and not the DEFAULT model's 25. Both wrong answers are 25, so this pins the
+    // resolution AND that it is keyed off the post-preset model.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a request naming no fps must not be refused by the menu: {body}"
+    );
+    assert_eq!(body["payload"]["model"], "preset-vid");
+    assert_eq!(
+        body["payload"]["fps"], 30,
+        "the enqueued payload records the model's declared rate, not the blanket 25: {body}"
+    );
+
+    // An advertised rate admits — keeps the rejection above from passing for a gate that refuses
+    // everything.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "fps": 30,
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "30 is what preset-vid advertises: {body}"
+    );
+    assert_eq!(body["payload"]["fps"], 30);
+
+    // ...and the SAME 25fps request against the default model IS admitted, proving the rejection
+    // came from the per-model menu rather than a blanket fps bound.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "fps": 25,
+            "model": default_video_model
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "25 is on the default model's [24, 25, 30] menu: {body}"
+    );
+    assert_eq!(body["payload"]["fps"], 25);
+
+    // The blanket payload-sanity bound still applies to a NAMED fps, and still comes from
+    // `validate_video_job` — a different message than the per-model menu's.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "fps": 240,
+            "model": default_video_model
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "240 is past the sanity bound: {body}"
+    );
+    assert!(body["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("fps must be between 1 and 60"));
+}
+
+/// sc-12347 END TO END, against the **REAL shipped manifest** rather than a fixture — the route the
+/// app actually serves, the bytes the app actually ships, the model the story is about.
+///
+/// The fixture test above pins the gate's PLACEMENT (post-preset, post-resolution). This one pins
+/// that the placement is wired to the real `mochi_1` entry: a fixture proves the wiring, not the
+/// values, and `limits.fps` spent its whole existence declared-but-unread precisely because nothing
+/// ever connected the two. Both are needed — reverting mochi's manifest `fps` to `[24, 25, 30]`
+/// leaves the fixture test green and turns this one red.
+#[tokio::test]
+async fn real_manifest_mochi_refuses_an_unadvertised_fps_and_defaults_to_its_own_30() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    // The real binary seeds these at startup (`server.rs`); `create_app` does not, so a test that
+    // skipped this would resolve mochi_1 to `{}` — no menu, everything admitted — and assert nothing.
+    sceneworks_core::builtin_manifests::seed_builtin_manifests(
+        &settings.config_dir,
+        sceneworks_core::builtin_manifests::SeedMode::Overwrite,
+    )
+    .expect("builtin manifests seed");
+
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Real Manifest Fps Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // The story's headline case: a LEGALLY 5-second request — sc-12297's cap admits it — that still
+    // asks for 301 frames because fps multiplies into length.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "model": "mochi_1",
+            "duration": 5,
+            "fps": 60
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "mochi_1 advertises 30 fps only; 5s @ 60fps is 301 frames from a legal 5s request: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("mochi_1"), "names the model: {detail}");
+    // `renders at 30 fps` in full, NOT `contains("30 fps")` — the latter is also a substring of
+    // "24, 25, or 30 fps", so it would pass against a mochi entry advertising three rates and pin
+    // nothing about the shipped `[30]`.
+    assert!(
+        detail.contains("renders at 30 fps"),
+        "states mochi's real menu — exactly one rate: {detail}"
+    );
+    assert!(detail.contains("60 fps"), "states what was asked: {detail}");
+
+    // THE DISCRIMINATOR for the shipped bytes: 25 fps. It is the blanket the DTO used to apply, and
+    // it is off mochi's real `[30]` menu — so this is red both if mochi's manifest ever re-advertises
+    // 25 and if the blanket ever comes back. `fps: 60` above cannot pin either: it is off-menu under
+    // any plausible mochi menu.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "model": "mochi_1",
+            "duration": 5,
+            "fps": 25
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "mochi_1 renders at 30 only; 25 is the old blanket and must be refused, not snapped: {body}"
+    );
+
+    // THE LIVE BUG THIS CLOSES: `generate_video(model = "mochi_1", duration = 5)` — the natural MCP
+    // call, which omits fps entirely. It used to enqueue 25 fps (the blanket), rendering a 30 fps
+    // motion prior 20% slow at 127 frames. It must now record mochi's own declared 30.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "model": "mochi_1",
+            "duration": 5
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "omitting fps is an ordinary request and must be admitted: {body}"
+    );
+    assert_eq!(
+        body["payload"]["fps"], 30,
+        "the enqueued payload records mochi's declared 30, not the old blanket 25: {body}"
+    );
+
+    // And every rate the real manifest advertises for a model with a real CHOICE is admitted, so
+    // the gate matches the shipped dropdown rather than merely rejecting things.
+    for fps in [24, 25, 30] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": project_id,
+                "mode": "text_to_video",
+                "prompt": "a fox runs",
+                "model": "ltx_2_3",
+                "duration": 4,
+                "fps": fps
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "ltx_2_3 advertises {fps} fps in the shipped manifest: {body}"
+        );
+        assert_eq!(body["payload"]["fps"], fps);
+    }
+}

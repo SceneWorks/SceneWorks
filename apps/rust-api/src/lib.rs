@@ -56,7 +56,7 @@ use sceneworks_core::training_store::{
     TrainingDatasetCaptionSidecarsInput, TrainingDatasetCreateInput, TrainingDatasetMutationResult,
     TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
-use sceneworks_core::video_request::duration_limit_error;
+use sceneworks_core::video_request::{duration_limit_error, fps_limit_error, resolve_fps};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -2683,8 +2683,14 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     if !duration.is_finite() || !(1.0..=30.0).contains(&duration) {
         return Err(ApiError::bad_request("duration must be between 1 and 30"));
     }
-    if !(1..=60).contains(&payload.fps) {
-        return Err(ApiError::bad_request("fps must be between 1 and 60"));
+    // Only a *named* fps is bounded here: an omitted one is resolved from the model's declared
+    // `defaults.fps` in `create_video_job`, which is the first point that knows the model (this
+    // runs before preset expansion, so the model here may be stale — sc-12300). This blanket stays
+    // a payload-sanity check; the model's own `limits.fps` menu is enforced there (sc-12347).
+    if let Some(fps) = payload.fps {
+        if !(1..=60).contains(&fps) {
+            return Err(ApiError::bad_request("fps must be between 1 and 60"));
+        }
     }
     validate_dimension(payload.width, "width", MAX_VIDEO_DIMENSION)?;
     validate_dimension(payload.height, "height", MAX_VIDEO_DIMENSION)?;
