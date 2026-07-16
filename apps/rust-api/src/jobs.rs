@@ -76,6 +76,20 @@ pub(crate) async fn create_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<JobCreateRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    // A generation job type must be created through its typed route, which resolves the
+    // model's merged manifest entry into the payload (and validates the request). This
+    // route is the raw queue primitive: it enqueues `job_type` + payload verbatim, so a
+    // generation job through this door carries no `modelManifestEntry` and renders at the
+    // wrong geometry with no error (sc-12305). See `typed_generation_route`.
+    if let Some(route) = typed_generation_route(&payload.job_type) {
+        return Err(ApiError::bad_request(format!(
+            "{} jobs must be created via POST {route}. That route resolves the model's \
+             manifest entry — its repo, quant and geometry limits — and validates the \
+             request; POST /api/v1/jobs enqueues the payload verbatim, so the job would run \
+             with none of it.",
+            payload.job_type.as_str()
+        )));
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: payload.job_type,

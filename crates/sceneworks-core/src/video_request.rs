@@ -39,6 +39,11 @@ pub struct VideoRequest {
     pub negative_prompt: String,
     pub model: String,
     /// Clip length in seconds, clamped to 1.0..=30.0 (Python `safe_float`).
+    ///
+    /// That blanket 30 is a payload-sanity bound, NOT the model's limit: each video model
+    /// declares its own `limits.hardMaxDuration` (4–15 s), enforced as a *rejection* by
+    /// [`duration_limit_error`] at the API and worker gates rather than clamped here — see
+    /// that function for why this parse is the wrong home for it (sc-12297).
     pub duration: f32,
     /// Frames per second, clamped to 1..=60 (Python `safe_int`).
     pub fps: u32,
@@ -234,6 +239,55 @@ pub fn is_wan_model(model: &str) -> bool {
 /// Whether `model` is a Mochi 1 family id (`mochi_1`, …). Epic 1788 / sc-11993.
 pub fn is_mochi_model(model: &str) -> bool {
     model.starts_with("mochi")
+}
+
+/// `limits.hardMaxDuration` (seconds) from a resolved manifest entry, or `None` for **no cap**.
+///
+/// The second constraint key core reads, after B3's [`dimension_multiple_of`] (sc-11993). It had
+/// ten declarations and zero readers — in Rust *and* in the web — for as long as it has existed
+/// (sc-12297): the word "hard" promised an enforcement that was never written, so every video
+/// model accepted any duration the blanket `1..=30` clamp allowed.
+///
+/// Absent ⇒ no cap, so a model that declares nothing is byte-identical to before this key had a
+/// reader. Same never-block-without-evidence posture as `mlx_fit_gate`'s `fit_decision`, and the
+/// same typo'd-manifest tolerance as [`max_pixels_of`]: a non-positive or non-finite cap is not a
+/// constraint anyone could satisfy (it would reject *every* request, including the model's own
+/// `defaults.duration`), so it falls back to no cap rather than bricking the model.
+pub fn hard_max_duration(model_manifest_entry: &JsonObject) -> Option<f32> {
+    model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object)
+        .and_then(|limits| limits.get("hardMaxDuration"))
+        .and_then(Value::as_f64)
+        .map(|cap| cap as f32)
+        .filter(|cap| cap.is_finite() && *cap > 0.0)
+}
+
+/// The actionable rejection for a `duration` past the model's declared [`hard_max_duration`], or
+/// `None` to admit. The pure decision, so both enqueue gates assert on one message (sc-12297).
+///
+/// **Reject, never clamp.** Quietly rewriting a 30 s request into a 5 s render is the same
+/// silent-coercion bug class B3 exists to fix (the invisible 848→832 dimension rewrite, sc-11993 /
+/// sc-12294): duration is a creative choice, and returning a sixth of the clip the caller asked for
+/// — with no error — is worse than refusing. This is also why the cap has no home in
+/// [`VideoRequest::from_payload`], which is infallible by contract and has no error surface; the
+/// rejection lives where a rejection can actually happen.
+///
+/// Message follows the house convention (`mlx_fit_gate::too_big_error`): name the model, state
+/// what was asked and what the cap is, and give the lever. Pinned by
+/// `duration_limit_error_names_the_model_the_request_and_the_cap`.
+pub fn duration_limit_error(
+    model: &str,
+    duration: f32,
+    model_manifest_entry: &JsonObject,
+) -> Option<String> {
+    let cap = hard_max_duration(model_manifest_entry)?;
+    (duration > cap).then(|| {
+        format!(
+            "{model} renders clips up to {cap}s, but this request asks for {duration}s. Shorten \
+             the clip to {cap}s or less, or choose a model that renders longer clips."
+        )
+    })
 }
 
 /// The dimension granularity applied when a model's manifest entry does not declare
@@ -502,6 +556,42 @@ mod tests {
             "modelManifestEntry": { "family": "wan-video", "limits": { "resolutions": ["832x480"] } }
         })));
         assert_eq!((undeclared.width, undeclared.height), (832, 480));
+    }
+
+    /// sc-12305 — the silent failure that justifies rejecting a generation job on the
+    /// generic `POST /api/v1/jobs`.
+    ///
+    /// That route enqueues `type` + payload verbatim, resolving no manifest entry (only the
+    /// typed `/api/v1/video/jobs` and `/api/v1/image/jobs` do). With the entry absent,
+    /// `dimension_multiple_of` misses `requiresDimensionsMultipleOf` and falls back to 32,
+    /// so Mochi's native — and only trained — 848x480 bucket renders as 832x480. The engine
+    /// never catches it: `832 % 16 == 0` satisfies its own ÷16 check, so there is no error,
+    /// just off-bucket inference.
+    ///
+    /// This pins the *reason* the API guard exists. It is deliberately asserted here, at the
+    /// geometry, rather than only at the route: if a future change ever makes an absent entry
+    /// safe (a distinguishable absent-vs-unknown signal — sc-12304), this test goes RED and
+    /// the guard can be revisited on evidence instead of belief.
+    #[test]
+    fn mochi_without_manifest_entry_silently_loses_its_native_bucket() {
+        let no_entry = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "mochi_1", "width": 848, "height": 480,
+        })));
+        assert_eq!(
+            (no_entry.width, no_entry.height),
+            (832, 480),
+            "an absent modelManifestEntry must still be the ÷32 fallback — if this changed, \
+             the sc-12305 API guard's premise changed with it"
+        );
+        // Silent, not loud: the engine's own divisibility check passes on the rewritten size.
+        assert_eq!(no_entry.width % 16, 0);
+
+        // The same payload through a typed route — which resolves the entry — keeps 848.
+        let with_entry = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "mochi_1", "width": 848, "height": 480,
+            "modelManifestEntry": { "family": "mochi", "limits": { "requiresDimensionsMultipleOf": 16 } }
+        })));
+        assert_eq!((with_entry.width, with_entry.height), (848, 480));
     }
 
     #[test]
@@ -829,6 +919,168 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// sc-12297 — the same invariant as [`shipped_manifest_matches_each_engines_real_geometry`],
+    /// on the temporal axis: **what a video model advertises is what it will render.** Asserted
+    /// against the REAL manifest bytes, because `hardMaxDuration` spent its whole existence with
+    /// ten declarations and zero readers — a suite that hardcoded the caps it claimed to check
+    /// would re-test `duration_limit_error`'s `>` and notice nothing.
+    ///
+    /// The table is derived from the shipped `limits.durations` dropdown, not copied from
+    /// `hardMaxDuration` — that independence is what makes the `cap == max(durations)` assertion
+    /// below a real check rather than a tautology.
+    const DURATION_LIMITS: &[(&str, f32)] = &[
+        ("ltx_2_3", 15.0),
+        ("ltx_2_3_eros", 15.0),
+        ("svd", 4.0),
+        ("mochi_1", 5.0),
+        ("wan_2_2", 8.0),
+        ("wan_2_2_t2v_14b", 5.0),
+        ("wan_2_2_i2v_14b", 5.0),
+        ("wan_2_2_vace_fun_14b", 5.0),
+        ("bernini", 5.0),
+        ("scail2_14b", 5.0),
+    ];
+
+    #[test]
+    fn shipped_manifest_duration_caps_admit_everything_they_advertise() {
+        let models = builtin_video_models();
+        assert_eq!(
+            models.len(),
+            DURATION_LIMITS.len(),
+            "a video model was added/removed; declare its hardMaxDuration and add it to \
+             DURATION_LIMITS — an undeclared cap is silently NO cap"
+        );
+
+        for (id, want_cap) in DURATION_LIMITS {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(*id))
+                .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
+                .as_object()
+                .expect("model entry object");
+            let limits = entry
+                .get("limits")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{id} has limits"));
+
+            // 1. Every video model DECLARES a cap, and core reads exactly it. `None` here is the
+            //    sc-12297 bug itself — an absent key means "no cap", which is how a 30 s request
+            //    reached every one of these models.
+            assert_eq!(
+                hard_max_duration(entry),
+                Some(*want_cap),
+                "{id}: effective hard max duration"
+            );
+
+            let buckets: Vec<f64> = limits
+                .get("durations")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("{id} advertises durations"))
+                .iter()
+                .map(|d| {
+                    d.as_f64()
+                        .unwrap_or_else(|| panic!("{id}: non-numeric duration"))
+                })
+                .collect();
+            let default_duration = entry
+                .get("defaults")
+                .and_then(Value::as_object)
+                .and_then(|d| d.get("duration"))
+                .and_then(Value::as_f64)
+                .unwrap_or_else(|| panic!("{id} has a default duration"));
+
+            // 2. THE UI-PARITY INVARIANT, and the reason this change is safe to ship: the cap is
+            //    exactly the top of the advertised dropdown, for all ten models. The web UI bounds
+            //    duration via `limits.durations` (VideoStudio.jsx:894), so enforcing the cap cannot
+            //    reject a single request the studio is capable of sending — it rejects only what
+            //    the raw API / MCP / preset-replay paths send past the advertisement. A model whose
+            //    cap sat BELOW its own dropdown would start rejecting its own UI, which is what
+            //    this assertion exists to catch before it ships.
+            let advertised_max = buckets.iter().copied().fold(f64::MIN, f64::max);
+            assert_eq!(
+                f64::from(*want_cap),
+                advertised_max,
+                "{id}: hardMaxDuration must equal the top of its advertised durations — a lower \
+                 cap rejects the model's own dropdown; a higher one advertises less than it allows"
+            );
+
+            // 3. FIXED POINT: every advertised bucket and the shipped default are ADMITTED.
+            //    Advertise 5s and 5s renders — the cap is `>`, so an at-cap request passes.
+            for advertised in buckets
+                .iter()
+                .copied()
+                .chain(std::iter::once(default_duration))
+            {
+                assert_eq!(
+                    duration_limit_error(id, advertised as f32, entry),
+                    None,
+                    "{id} advertises {advertised}s; the cap must admit it"
+                );
+            }
+
+            // 4. MUTATION CHECK: the cap actually rejects something. Without this, a cap read as
+            //    `None` (the shipped bug) or a neutered `>` passes every assertion above.
+            let over = *want_cap + 0.5;
+            let message = duration_limit_error(id, over, entry).unwrap_or_else(|| {
+                panic!("{id}: {over}s is past the {want_cap}s cap and must be rejected")
+            });
+            assert!(message.contains(id), "{id}: names the model: {message}");
+        }
+    }
+
+    /// The house message convention (`mlx_fit_gate::too_big_error_names_model_budget_and_optional_staged`):
+    /// name the model, state what was asked and what the limit is, and give the lever. A caller
+    /// that hits this has no other signal — the request simply stops — so the message IS the UX.
+    #[test]
+    fn duration_limit_error_names_the_model_the_request_and_the_cap() {
+        let mochi = payload(json!({ "limits": { "hardMaxDuration": 5 } }));
+        let message =
+            duration_limit_error("mochi_1", 30.0, &mochi).expect("30s is past the 5s cap");
+        assert!(message.contains("mochi_1"), "names the model: {message}");
+        assert!(message.contains("5s"), "states the cap: {message}");
+        assert!(message.contains("30s"), "states what was asked: {message}");
+        assert!(message.contains("Shorten"), "gives the lever: {message}");
+
+        // At-cap and under-cap admit: the bound is `>`, matching every advertised bucket being a
+        // legal request (`shipped_manifest_duration_caps_admit_everything_they_advertise`).
+        assert_eq!(duration_limit_error("mochi_1", 5.0, &mochi), None);
+        assert_eq!(duration_limit_error("mochi_1", 1.0, &mochi), None);
+        assert!(duration_limit_error("mochi_1", 5.5, &mochi).is_some());
+    }
+
+    /// A model that declares no cap is UNCONSTRAINED — the default-absent behavior that keeps
+    /// every non-declaring model (a user-manifest entry, the stub lane, an uncatalogued id whose
+    /// entry resolves to `{}`) byte-identical to before the key had a reader.
+    ///
+    /// Also the infallibility contract: a cap nobody could satisfy falls back to NO cap rather
+    /// than bricking the model. A typo'd `0` or `-1` would otherwise reject every request the
+    /// model has — including its own `defaults.duration` — turning a manifest typo into a
+    /// completely dead model instead of an unenforced limit.
+    #[test]
+    fn absent_or_unhonorable_hard_max_duration_means_no_cap() {
+        for empty in [json!({}), json!({ "limits": {} })] {
+            let entry = payload(empty.clone());
+            assert_eq!(hard_max_duration(&entry), None, "no cap declared: {empty}");
+            assert_eq!(duration_limit_error("any_model", 30.0, &entry), None);
+        }
+
+        for bad in [json!(0), json!(-1), json!("5"), json!(null), json!([5])] {
+            let entry = payload(json!({ "limits": { "hardMaxDuration": bad } }));
+            assert_eq!(hard_max_duration(&entry), None, "unhonorable cap {bad}");
+            assert_eq!(
+                duration_limit_error("any_model", 30.0, &entry),
+                None,
+                "an unsatisfiable cap must not brick the model: {bad}"
+            );
+        }
+
+        // A fractional cap IS honorable — nothing about the key requires an integer.
+        let fractional = payload(json!({ "limits": { "hardMaxDuration": 2.5 } }));
+        assert_eq!(hard_max_duration(&fractional), Some(2.5));
+        assert!(duration_limit_error("m", 3.0, &fractional).is_some());
+        assert_eq!(duration_limit_error("m", 2.5, &fractional), None);
     }
 
     /// sc-12294 BLOCKER — the case the dropdown never produces but every raw path does.
