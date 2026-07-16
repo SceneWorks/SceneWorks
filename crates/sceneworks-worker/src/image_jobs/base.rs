@@ -1073,6 +1073,96 @@ fn min_quality_floor(request: &ImageRequest) -> Option<&str> {
         .filter(|tier| tier_quality_rank(tier) > 0)
 }
 
+/// The component subdirs a diffusers-style tier snapshot declares in its own `model_index.json`.
+///
+/// `None` when the tier ships no readable `model_index.json` — a flat unified turnkey (SenseNova-U1
+/// MoT, sc-8771) roots its weights + `tokenizer.json` directly in the tier dir and has no component
+/// tree to verify, so callers treat `None` as "nothing to check" and keep the backbone-only probe.
+///
+/// KNOWN LIMIT (sc-12279): that also means a tier torn badly enough to lack `model_index.json`
+/// ITSELF is unverifiable and still resolves on its backbone alone. Deliberate — absence of the index
+/// is not evidence the tier is torn, and inferring "component-shaped but no index ⇒ torn" would let a
+/// perfectly good tier lose the chain to a sibling that merely ships an index, which is a worse bug
+/// than the one this fixes. We only ever demote a tier on POSITIVE evidence: its own index naming a
+/// component that is not on disk.
+fn tier_declared_components(dir: &Path) -> Option<Vec<String>> {
+    let raw = std::fs::read_to_string(dir.join("model_index.json")).ok()?;
+    let index: Value = serde_json::from_str(&raw).ok()?;
+    Some(
+        index
+            .as_object()?
+            .iter()
+            .filter(|(key, value)| !key.starts_with('_') && is_component_entry(value))
+            .map(|(key, _)| key.clone())
+            .collect(),
+    )
+}
+
+/// Whether a `model_index.json` value names a COMPONENT — the diffusers `[library, class]` pair.
+///
+/// Three things in a real index are NOT components, and all three must be rejected here (each is
+/// live in a shipping turnkey, so a laxer test fails a good tier):
+/// - `[null, null]` marks an ABSENT optional component — `SceneWorks/realvisxl-mlx` declares
+///   `feature_extractor` and `image_encoder` this way and ships neither dir.
+/// - config arrays — `SceneWorks/krea-2-raw-mlx` declares `text_encoder_select_layers: [2, 5, 8, …]`.
+/// - config scalars — krea's `patch_size: 2`, realvisxl's `force_zeros_for_empty_prompt: true`.
+fn is_component_entry(value: &Value) -> bool {
+    value
+        .as_array()
+        .is_some_and(|pair| pair.len() == 2 && pair.iter().all(Value::is_string))
+}
+
+/// Whether every component `dir`'s own `model_index.json` declares is actually on disk (sc-12279).
+///
+/// Presence is "the subdir holds at least one non-hidden entry", NOT "holds weights": `tokenizer/`
+/// and `scheduler/` are config-only. Hidden entries don't count for the same reason the backbone
+/// probes skip them — a dir holding only an AppleDouble `._tokenizer.json` sidecar has no tokenizer
+/// (SceneWorks#1333).
+fn tier_components_present(dir: &Path) -> bool {
+    let Some(components) = tier_declared_components(dir) else {
+        return true;
+    };
+    components
+        .iter()
+        .all(|component| dir_has_visible_entry(&dir.join(component)))
+}
+
+/// Whether `dir` is a directory holding at least one non-hidden entry.
+fn dir_has_visible_entry(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|entry| !sceneworks_core::lora_family::is_hidden_file(&entry.path()))
+    })
+}
+
+/// Walk `chain` (a tier-name preference order) and return the first tier that is safe to load: one
+/// whose declared component tree is COMPLETE if any qualifies, else the first that merely clears
+/// `present`'s backbone probe. `None` when no tier is installed at all.
+///
+/// The shared tail of every tier resolver (sc-12279). `present` alone accepts a tier on its backbone,
+/// so a torn tier — the transformer landed, `tokenizer/` did not — short-circuited the chain and the
+/// loader died on `tokenizer: No such file or directory` even when a complete sibling tier was
+/// installed (issue #850's symptom). Running the chain twice, rather than folding completeness into
+/// `present`, is deliberate: if [`tier_components_present`] ever misjudges a tier shape we haven't
+/// seen, pass 2 lands exactly where the pre-sc-12279 code did, so this can never strand a model that
+/// loads today. Duplicates in `chain` (the preferred tier is usually also a fallback) are harmless.
+fn pick_loadable_tier(chain: &[&str], present: &dyn Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
+    let first = |probe: &dyn Fn(&str) -> Option<PathBuf>| chain.iter().find_map(|name| probe(name));
+    if let Some(dir) = first(&|name: &str| present(name).filter(|dir| tier_components_present(dir))) {
+        return Some(dir);
+    }
+    // No complete tier: load the torn one anyway (pre-sc-12279 behavior) but say so — the loader
+    // error it usually raises names a missing file, never the tier that lacks it.
+    let torn = first(present)?;
+    tracing::warn!(
+        tier = %torn.display(),
+        "Tier is missing components its model_index.json declares, and no complete tier is \
+         installed. Loading it anyway; re-download the tier if load fails."
+    );
+    Some(torn)
+}
+
 /// Pick the engine-complete tier subdir of a standard SceneWorks quant-matrix turnkey `root`:
 /// `bf16/` when the request opts out of quantization (`advanced.mlxQuantize <= 0` / "none"), `q8/`
 /// when it opts into Q8 (`> 4`), `q4/` for an explicit Q4 pick (`1..=4`), else — with NO explicit
@@ -1170,10 +1260,11 @@ fn standard_tier_subdir_gated(root: &Path, request: &ImageRequest, nvfp4_host: b
         min_quality_floor(request),
         nvfp4_requested(request) && nvfp4_host,
     );
-    present(preferred)
-        .or_else(|| present("q8"))
-        .or_else(|| present("bf16"))
-        .or_else(|| present("q4"))
+    // sc-12279: prefer a tier whose `model_index.json` component tree is fully on disk, so a torn
+    // tier falls through to a complete sibling instead of reaching the loader. Flat unified tiers
+    // (SenseNova-U1 MoT) ship no `model_index.json`, so `tier_components_present` passes them through
+    // and they resolve on the backbone probe exactly as before.
+    pick_loadable_tier(&[preferred, "q8", "bf16", "q4"], &present)
         .unwrap_or_else(|| root.to_path_buf())
 }
 
@@ -1326,10 +1417,9 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     // `nvfp4: false` (sc-11042): the Ideogram turnkey hosts no NVFP4 tier. Byte-identical to its
     // pre-sc-11042 behavior; wire it here if one is ever converted.
     let preferred = preferred_tier(bits, min_quality_floor(request), false);
-    present(preferred)
-        .or_else(|| present("q8"))
-        .or_else(|| present("q4"))
-        .unwrap_or_else(|| root.to_path_buf())
+    // sc-12279: the Ideogram turnkey ships a per-tier `model_index.json`, so the shared chain prefers
+    // a tier whose declared component tree is fully on disk over a torn one.
+    pick_loadable_tier(&[preferred, "q8", "q4"], &present).unwrap_or_else(|| root.to_path_buf())
 }
 
 /// The Boogu subfolder for a `mlxQuantize` request — `None` keeps the Q8 default. The FETCH-side helper
@@ -1469,10 +1559,11 @@ fn krea_model_subdir_gated(root: &Path, request: &ImageRequest, nvfp4_host: bool
         min_quality_floor(request),
         nvfp4_requested(request) && nvfp4_host,
     );
-    present(preferred)
-        .or_else(|| present("q8"))
-        .or_else(|| present("q4"))
-        .or_else(|| present("bf16"))
+    // sc-12279: a torn tier no longer short-circuits this chain — `pick_loadable_tier` prefers a tier
+    // whose `model_index.json` component tree is fully on disk, so Raw with a torn `q8/` and a
+    // complete `bf16/` training-base tier now generates off bf16 instead of dying on the absent
+    // `q8/tokenizer/` (issue #850's symptom).
+    pick_loadable_tier(&[preferred, "q8", "q4", "bf16"], &present)
         .unwrap_or_else(|| root.to_path_buf())
 }
 
@@ -7205,6 +7296,145 @@ mod standard_tier_tests {
         );
     }
 
+    /// Seed a diffusers-shaped tier: a backbone, a `model_index.json` declaring `declared` as
+    /// `[library, class]` components, and an on-disk dir for each of `on_disk`. The index also carries
+    /// the three NON-component value shapes a real one does (see [`is_component_entry`]) so every test
+    /// through this helper proves they aren't mistaken for required dirs.
+    fn seed_diffusers_tier(root: &Path, tier: &str, declared: &[&str], on_disk: &[&str]) {
+        seed_tier(root, tier, "diffusion_pytorch_model.safetensors");
+        let dir = root.join(tier);
+        let mut index = serde_json::Map::new();
+        index.insert("_class_name".to_owned(), json!("Krea2Pipeline"));
+        // Config array + scalar (krea's real `text_encoder_select_layers` / `patch_size`), and an
+        // ABSENT optional component (realvisxl's real `feature_extractor`). None is a required dir.
+        index.insert("text_encoder_select_layers".to_owned(), json!([2, 5, 8]));
+        index.insert("patch_size".to_owned(), json!(2));
+        index.insert("feature_extractor".to_owned(), json!([null, null]));
+        for component in declared {
+            index.insert((*component).to_owned(), json!(["transformers", "SomeClass"]));
+        }
+        std::fs::write(
+            dir.join("model_index.json"),
+            serde_json::to_vec(&Value::Object(index)).unwrap(),
+        )
+        .unwrap();
+        for component in on_disk {
+            let component_dir = dir.join(component);
+            std::fs::create_dir_all(&component_dir).unwrap();
+            std::fs::write(component_dir.join("config.json"), b"{}").unwrap();
+        }
+    }
+
+    /// The Krea tier component set, as the real `q8/model_index.json` declares it.
+    const KREA_COMPONENTS: &[&str] = &["transformer", "tokenizer", "text_encoder", "vae", "scheduler"];
+
+    /// sc-12279 (issue #850): a TORN tier — backbone landed, `tokenizer/` did not — must not
+    /// short-circuit the fallback chain. Before this, `present()` accepted a tier on its transformer
+    /// alone, so the q8 default resolved to the torn `q8/` and the loader died on
+    /// `tokenizer: No such file or directory (os error 2)` even though a complete `bf16/` was installed.
+    #[test]
+    fn krea_tier_probe_skips_a_torn_tier_for_a_complete_sibling() {
+        let krea_request = |bits: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "krea_2_raw", "advanced": { "mlxQuantize": bits } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // q8 (the default tier) is torn: everything but `tokenizer/`. bf16 is complete.
+        seed_diffusers_tier(
+            root,
+            "q8",
+            KREA_COMPONENTS,
+            &["text_encoder", "vae", "scheduler"],
+        );
+        seed_diffusers_tier(
+            root,
+            "bf16",
+            KREA_COMPONENTS,
+            &["tokenizer", "text_encoder", "vae", "scheduler"],
+        );
+        assert_eq!(
+            krea_model_subdir(root, &krea_request(json!(null))),
+            root.join("bf16"),
+            "the q8 default is torn (no tokenizer/), so the chain must land on the complete bf16 tier"
+        );
+        // An EXPLICIT pick of the torn tier is also redirected — the user asked for a tier that cannot
+        // load, and a working render beats an os-error-2 on a request we can serve.
+        assert_eq!(
+            krea_model_subdir(root, &krea_request(json!(8))),
+            root.join("bf16"),
+            "an explicit q8 pick still skips the torn tier for the complete sibling"
+        );
+    }
+
+    /// sc-12279: with NO complete tier, the torn one is still returned — pass 2 of the chain preserves
+    /// the pre-sc-12279 result exactly. The user gets the same loader error as before (they have no
+    /// loadable tier), never a silent no-op, and the resolver logs which tier is short.
+    #[test]
+    fn krea_tier_probe_still_returns_a_torn_tier_when_it_is_all_there_is() {
+        let request = ImageRequest::from_payload(
+            json!({ "model": "krea_2_raw", "advanced": {} }).as_object().unwrap(),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        seed_diffusers_tier(
+            tmp.path(),
+            "q8",
+            KREA_COMPONENTS,
+            &["text_encoder", "vae", "scheduler"],
+        );
+        assert_eq!(
+            krea_model_subdir(tmp.path(), &request),
+            tmp.path().join("q8"),
+            "no complete tier: the torn tier still resolves (unchanged behavior), not the repo root"
+        );
+    }
+
+    /// sc-12279: [`tier_components_present`] reads the tier's OWN `model_index.json`, and must not
+    /// mistake diffusers' non-component value shapes for required dirs. Each of these is live in a
+    /// shipping turnkey, so getting any wrong would fail a perfectly good tier.
+    #[test]
+    fn tier_components_present_reads_model_index_and_ignores_non_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Complete: every declared component on disk. The `[null, null]` optional, the config array and
+        // the config scalar that `seed_diffusers_tier` always writes must NOT be required as dirs —
+        // this asserting true IS the proof (no `feature_extractor/` dir exists).
+        seed_diffusers_tier(
+            root,
+            "q8",
+            KREA_COMPONENTS,
+            &["tokenizer", "text_encoder", "vae", "scheduler"],
+        );
+        assert!(tier_components_present(&root.join("q8")));
+
+        // Torn: `tokenizer/` declared but absent.
+        seed_diffusers_tier(root, "q4", KREA_COMPONENTS, &["text_encoder", "vae", "scheduler"]);
+        assert!(!tier_components_present(&root.join("q4")));
+
+        // A component dir holding ONLY an AppleDouble sidecar has no tokenizer (SceneWorks#1333).
+        let sidecar = root.join("q4").join("tokenizer");
+        std::fs::create_dir_all(&sidecar).unwrap();
+        std::fs::write(sidecar.join("._tokenizer.json"), b"x").unwrap();
+        assert!(
+            !tier_components_present(&root.join("q4")),
+            "a hidden sidecar must not satisfy a declared component"
+        );
+        std::fs::write(sidecar.join("tokenizer.json"), b"{}").unwrap();
+        assert!(tier_components_present(&root.join("q4")));
+
+        // No `model_index.json` at all (flat unified turnkeys — SenseNova-U1 MoT roots its weights +
+        // `tokenizer.json` directly in the tier dir): nothing to verify, so the backbone probe rules.
+        seed_tier(root, "bf16", "model.safetensors");
+        assert!(
+            tier_components_present(&root.join("bf16")),
+            "a tier with no model_index.json has no component tree to check"
+        );
+    }
+
     /// sc-10845 (epic 10721): [`krea_model_subdir`] — the last bespoke tier resolver — routes its DEFAULT
     /// through the shared, floor-aware [`preferred_tier`]`(bits, `[`min_quality_floor`]`(request))`, exactly
     /// like [`standard_tier_subdir`] / [`anima_tier_subdir`] / [`ideogram_model_subdir`] /
@@ -8047,3 +8277,4 @@ mod text_style_gain_gate_tests {
         assert_eq!(resolve_text_style_gain(&undeclared), None);
     }
 }
+
