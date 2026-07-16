@@ -1062,6 +1062,29 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     expect(q8Row.querySelector(".status-badge").textContent).toBe("installed");
   });
 
+  // sc-12279 (issue #850): a TORN tier — some of its files cached, some not — used to render as "not
+  // installed", indistinguishable from one that was never downloaded. It will fail at load, and the
+  // model-level Fix button is suppressed whenever a complete sibling tier exists (sc-9907), so this row
+  // is the only place the user can be told. It must say "incomplete" and stay selectable for repair.
+  it("marks a torn tier incomplete rather than not installed, and keeps it selectable to repair", async () => {
+    const model = matrixModel({ installed: ["bf16"] });
+    const q8 = model.variants.find((variant) => variant.variant === "q8");
+    q8.cacheState = "incomplete";
+    q8.missingRequiredFiles = ["q8/tokenizer/*"];
+    await render([model]);
+    const rows = tierRows();
+    const q8Row = rows.find((row) => row.querySelector(".model-tier-label").textContent.includes("Q8"));
+    expect(q8Row.querySelector(".status-badge").textContent).toBe("incomplete");
+    expect(q8Row.querySelector(".status-badge").title).toContain("q8/tokenizer/*");
+    // Still repairable: the checkbox is enabled, so the user can re-select the tier and download it.
+    expect(q8Row.querySelector("input[type=checkbox]").disabled).toBe(false);
+    // The complete sibling and the absent tier keep their existing wording.
+    const bf16Row = rows.find((row) => row.querySelector(".model-tier-label").textContent.includes("bf16"));
+    expect(bf16Row.querySelector(".status-badge").textContent).toBe("installed");
+    const q4Row = rows.find((row) => row.querySelector(".model-tier-label").textContent.includes("Q4"));
+    expect(q4Row.querySelector(".status-badge").textContent).toBe("not installed");
+  });
+
   it("highlights q4 as the suggested tier on a 32 GB host", async () => {
     hostMemoryGb = 32;
     await render([matrixModel()]);

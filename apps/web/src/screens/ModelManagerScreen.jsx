@@ -422,12 +422,22 @@ function ModelTierDownloadPanel({
           // (e.g. bf16 on a small Mac) is flagged. Advisory only — SUGGEST-NEVER-WITHHOLD (epic 8506
           // decision 1) keeps every tier's checkbox enabled regardless.
           const overBudget = !tierFits(variant, unifiedMemoryGb);
+          // A torn tier: the cache holds SOME of this tier's declared files but not all. Distinct from
+          // both "installed" and "not installed" (sc-12279).
+          const incomplete = !installed && variant.cacheState === "incomplete";
+          const missingHere = Array.isArray(variant.missingRequiredFiles) ? variant.missingRequiredFiles : [];
+          const incompleteHint = missingHere.length
+            ? `This tier is partly downloaded and won't load. Missing: ${missingHere.join(", ")}. Select it and download again to repair.`
+            : "This tier is partly downloaded and won't load. Select it and download again to repair.";
           const rowClasses = ["model-tier-row"];
           if (isSuggested) {
             rowClasses.push("suggested");
           }
           if (overBudget) {
             rowClasses.push("over-budget");
+          }
+          if (incomplete) {
+            rowClasses.push("incomplete");
           }
           return (
             <li className={rowClasses.join(" ")} key={tier}>
@@ -456,8 +466,20 @@ function ModelTierDownloadPanel({
               <span className="model-tier-size">
                 {formatTierSize(variant.footprint?.diskSizeBytes ?? variant.downloadSizeBytes)}
               </span>
-              <span className={installed ? "status-badge installed" : "status-badge"}>
-                {activeJob ? activeJob.status : installed ? "installed" : "not installed"}
+              {/* sc-12279: a TORN tier (some of its files present, some not) is not the same as an
+                  absent one — the API already distinguishes them via `cacheState`, but this row used to
+                  render both as "not installed". That reads as "nothing to do here" for a tier that is
+                  actually half-downloaded and will fail at load, and the model-level Fix button is
+                  suppressed whenever a complete sibling tier exists (sc-9907). Say "incomplete" and
+                  point at the repair: the checkbox below is already enabled for it, so re-selecting the
+                  tier and downloading repairs it. */}
+              <span
+                className={
+                  installed ? "status-badge installed" : incomplete ? "status-badge incomplete" : "status-badge"
+                }
+                title={incomplete ? incompleteHint : undefined}
+              >
+                {activeJob ? activeJob.status : installed ? "installed" : incomplete ? "incomplete" : "not installed"}
               </span>
               {/* Reclaim an installed tier's disk (sc-12024). Only this tier's files/blobs are
                   removed; the model and its other tiers stay installed. Disabled while a download

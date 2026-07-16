@@ -5385,6 +5385,14 @@ details[open] > summary.lora-scope-group-heading::before,
   color: color-mix(in oklch, var(--danger) 85%, var(--text));
 }
 
+/* A torn tier — partly downloaded, will not load (sc-12279). Warn, not danger: nothing is broken and
+   the repair is a re-download, so it reads like `.dataset-status-pill.unsaved`, not like a failure. */
+.status-badge.incomplete {
+  border-color: transparent;
+  background: var(--warn-soft);
+  color: color-mix(in oklch, var(--warn) 78%, var(--text));
+}
+
 .lora-panel {
   display: grid;
   gap: 12px;
