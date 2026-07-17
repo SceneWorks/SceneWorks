@@ -567,6 +567,110 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
     );
 }
 
+/// sc-12402: the shipped Wan `candle` blocks drive the candle VIDEO fit gate end-to-end against the
+/// SHIPPED manifest bytes — both halves of the story's acceptance: a real over-budget tier REFUSED, and
+/// a tier that fits ADMITTED.
+///
+/// The video sibling of [`flux2_candle_blocks_drive_the_fit_gate_and_reject`], and it exists for the
+/// same reason: this guards the DATA half. Dropping `wan_2_2`'s `vramGbByTier` makes
+/// `wan_video_fit_error` fall back to the sc-12344 weights FLOOR, which reads 18.13 GiB against a real
+/// 86.3 GB peak — so the gate would silently go back to admitting a 32 GB card and OOMing mid-denoise.
+/// That regression is invisible without this test: the gate still "works", it just gates on a number
+/// that is 4.4x wrong.
+///
+/// Numbers are MEASURED on an idle RTX PRO 6000 at each model's own shipped default geometry
+/// (sc-12402; see the manifest comment for the harness + the A/B proving they are card-independent).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
+    use crate::vram_gate::{apply_vram_cap, predicted_peak_gb, wan_video_fit_error};
+
+    let wan = builtin_model_entry("wan_2_2");
+    let entry = wan.as_object().expect("wan_2_2 entry object");
+    assert!(
+        entry.get("candle").and_then(Value::as_object).is_some(),
+        "wan_2_2 candle block present (absent ⇒ the video gate falls back to the weights floor, which \
+         under-counts the real peak by 4.4x and admits a card that OOMs)"
+    );
+
+    // Measured (sc-12402): each tier + the gate's 2 GB headroom.
+    let q4 = predicted_peak_gb(entry, "q4").expect("q4 peak measured");
+    let q8 = predicted_peak_gb(entry, "q8").expect("q8 peak measured");
+    let bf16 = predicted_peak_gb(entry, "bf16").expect("bf16 peak measured");
+    assert!((q4 - 88.3).abs() < 1e-6, "q4 86.3 + 2 headroom, got {q4}");
+    assert!((q8 - 90.8).abs() < 1e-6, "q8 88.8 + 2 headroom, got {q8}");
+    assert!((bf16 - 96.1).abs() < 1e-6, "bf16 94.1 + 2 headroom, got {bf16}");
+    // The tier ladder is monotonic, and SHALLOW: every term but the DiT is tier-independent (the f32
+    // UMT5 TE, the f32 z48 VAE, and the tier-blind attention). q8 − q4 is exactly the DiT delta.
+    assert!(q4 < q8 && q8 < bf16, "heavier tier ⇒ heavier peak");
+    assert!(
+        (q8 - q4 - 2.5).abs() < 0.05,
+        "q8 − q4 must stay the measured 2.5 GB DiT delta (5.25 − 2.92 GiB), got {}",
+        q8 - q4
+    );
+    // The whole q4→bf16 ladder is under 8 GB. If this ever widens dramatically, the block was
+    // re-measured against a different geometry (or a chunked attention landed — sc-12434) and every
+    // number here needs revisiting rather than patching.
+    assert!(
+        bf16 - q4 < 10.0,
+        "the 5B ladder spans ~7.8 GB because only the DiT is tier-dependent, got {}",
+        bf16 - q4
+    );
+
+    // The on-disk weights floor for the shipped q4 tier (`estimatedSizeBytes`), for the A/B below.
+    const WAN_5B_Q4_DISK_BYTES: u64 = 17_338_835_457;
+
+    // THE story: an RTX 5090 (32 GB) — the biggest consumer NVIDIA card — is REFUSED before the load +
+    // denoise, where the weights floor admitted it and let it OOM.
+    let rtx_5090 = apply_vram_cap(None, Some(32.0));
+    let message = wan_video_fit_error(
+        "wan_2_2",
+        entry,
+        "q4",
+        WAN_5B_Q4_DISK_BYTES,
+        "0",
+        rtx_5090,
+    )
+    .expect("the measured 86.3 GB peak cannot fit a 32 GB card — refuse before the OOM")
+    .to_string();
+    assert!(message.contains("wan_2_2"), "names the model: {message}");
+    assert!(message.contains("q4"), "names the sized tier: {message}");
+
+    // …and the SAME job is ADMITTED on the 96 GB card it was measured rendering on. A gate that
+    // refuses everything would satisfy the assert above and be worthless.
+    let card96 = apply_vram_cap(None, Some(95.6));
+    assert!(
+        wan_video_fit_error("wan_2_2", entry, "q4", WAN_5B_Q4_DISK_BYTES, "0", card96).is_none(),
+        "q4's measured 88.3 GB need fits a 95.6 GB card — it is the exact configuration sc-12402 \
+         measured rendering, so wall-rejecting it would be the sc-12179 regression"
+    );
+
+    // Both A14B models carry blocks too, so THEIR gate is live. They are `measured: false` —
+    // sibling-scaled, because the candle A14B does not render at any advertised geometry (sc-12434:
+    // 832x480 OOMs a 96 GB card before step 1; the 1280x720 default is engine-rejected, sc-12433). The
+    // gate refusing them everywhere is the TRUE answer until chunking lands, and it turns a ~30 GiB
+    // download + ~100 s load + OOM into an instant refusal.
+    for id in ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"] {
+        let model = builtin_model_entry(id);
+        let a14b = model.as_object().expect("a14b entry object");
+        assert!(
+            a14b.get("candle").and_then(Value::as_object).is_some(),
+            "{id} candle block present (absent ⇒ the floor admits it on a small card and it OOMs)"
+        );
+        let peak = predicted_peak_gb(a14b, "q4").expect("a14b q4 peak carried");
+        assert!(
+            peak > 96.0,
+            "{id} q4 must not appear to fit ANY existing GPU — sc-12434 proved 832x480 OOMs a 96 GB \
+             card before step 1, got {peak}"
+        );
+        assert!(
+            wan_video_fit_error(id, a14b, "q4", 0, "0", card96).is_some(),
+            "{id} must be refused even on the 96 GB dev box"
+        );
+    }
+    eprintln!("wan candle blocks: 5090 → refused, 96 GB → q4 admitted, A14B → refused everywhere ✓");
+}
+
 /// sc-12130/sc-12131: the shipped Krea base block feeds both stages of the generic Candle gate. This
 /// pins the provider-derived capability handoff and the measured `sequentialPeakGb` values that turn a
 /// small-card staged attempt into a clean reject instead of relying on reactive OOM containment.

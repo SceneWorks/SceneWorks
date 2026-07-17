@@ -6097,6 +6097,51 @@
           "schedulers": ["default"]
         }
       },
+      // candle/CUDA VRAM gate (sc-12402, epic 1788) — MEASURED on an idle RTX PRO 6000 (Blackwell
+      // sm_120) via the candle-gen-wan VramProbe harness (candle-gen-wan/tests/vram_probe.rs, the Wan
+      // sibling of the sc-9094 harness behind the flux2/qwen blocks), at this model's OWN shipped
+      // default — 832x480, 121 frames (5s @ 24fps), 20 steps, CFG on — i.e. the schema's "video =
+      // default frames", not 1024². Each tier measured in its own process (cudarc's caching allocator
+      // never returns pages, so a second tier in-process re-reports the first one's high-water).
+      //
+      // THE PEAK IS THE DENOISE, NOT THE DECODE — which is why a per-tier CONSTANT is honest here.
+      // candle-gen-wan's sdpa (transformer.rs:46) materializes the full [B,H,S,S] attention plus an f32
+      // softmax copy (the sc-6217 query-row chunking Qwen/Krea got was never ported to Wan), so at this
+      // geometry S = 12,090 tokens x 24 heads x CFG batch-2 ≈ 55 GB of transient — dwarfing the ~29 GiB
+      // of weights. The z48 vae22 decode contributes **0.0 GB**: it reuses the pool the denoise just
+      // freed. Instrumented at the Progress::Decoding boundary: `pre-decode 88.8 GB | decode adds 0.0`.
+      //
+      // That the decode is free also means these numbers are CARD-INDEPENDENT, which is not obvious:
+      // `auto_tiling_budgeted_wan22` budgets 0.85 x TOTAL VRAM, so the decode tiles to whatever card it
+      // is on. A/B with the tiler's budget forced 81.3 -> 12 GiB left the peak IDENTICAL at 86.3 GB and
+      // only made it slower (358s -> 401s) — the tiling engaged and never touched the ceiling. So this
+      // is a property of the model, not of the measuring GPU.
+      //
+      // Coherence check — the ladder is the DiT delta and nothing else: q8 - q4 = 2.5 GB = exactly the
+      // q8-vs-q4 DiT delta (5.25 - 2.92 GiB); bf16 - q4 = 7.8 GB against the 6.9 GB the dense DiT
+      // predicts (its shards are **fp32** — `index.json` total_size 19,999,150,848 = 4.0 bytes/param for
+      // a 5B — so it HALVES to ~9.31 GiB on load, it does not land at its 18.63 GiB on-disk size). Every
+      // other term is tier-independent: the UMT5 TE loads **f32** (10.58 GiB on disk -> 21.16 GiB
+      // resident), the z48 VAE loads f32, and the attention is tier-blind. That is why the whole quant
+      // ladder spans only ~8 GB and no tier brings this model near a consumer card.
+      //
+      // minMemoryGb 88 gates the DEFAULT/lightest (q4) tier (86.3 + the gate's 2 GB headroom), matching
+      // the qwen convention. NOTE the resolver actually prefers **q8** when installed (sc-10726 /
+      // epic 10721 made q8 the app-wide default, clamping to q4) even though downloads[] marks q4
+      // `"default": true`; the two tiers differ by 2.5 GB, so gating the lighter one is the safe read.
+      //
+      // ⚠️ These numbers say a 480p 5s clip on the 5B needs an ~88 GB card. That is real, and it is the
+      // unchunked attention, not the weights (weights are ~29 GiB of an 86 GB peak; the sc-12344 floor
+      // reads 18.13 GiB — a 4.4x UNDER-count, which is exactly why a 32 GB 5090 was admitted and then
+      // OOM'd mid-denoise). Porting sc-6217 chunking to candle-gen-wan (sc-12434) is what would collapse
+      // these; re-measure when it lands. No `sequentialPeakGb`: every candle video engine declares
+      // `supports_sequential_offload: false` (candle-gen-wan lib.rs:417), so `resolve_offload` is a
+      // no-op here and that key would be dead data.
+      "candle": {
+        "minMemoryGb": 88,
+        "vramGbByTier": { "q4": 86.3, "q8": 88.8, "bf16": 94.1 },
+        "measured": true
+      },
       "ui": {
         "label": "Wan2.2",
         "description": "Fallback video family kept behind the adapter contract for future runtime support.",
@@ -6324,6 +6369,40 @@
           "schedulers": ["default"]
         }
       },
+      // candle/CUDA VRAM gate (sc-12402, epic 1788) — ESTIMATED, `measured: false`. **This model does
+      // not render on the candle lane at all**, so there is no peak to measure (sc-12434):
+      //   * its shipped 1280x720 default EXCEEDS both engines' own `MAX_AREA_14B` (704*1280 = 901,120
+      //     px) and is hard-rejected by `validate` — an sc-12308/#1581 regression, tracked as sc-12433;
+      //   * `832x480` (the only advertised bucket the engine admits) OOM'd a 96 GB RTX PRO 6000 BEFORE
+      //     step 1, at **q4** — the lightest tier — with Lightning's CFG-off batch-1 4-step recipe,
+      //     i.e. the cheapest configuration this model has. GPU-proven, sc-12434.
+      //
+      // Derivation (the alternative to a measurement, not a fudge): `peak = weights + B·H·S²·8 bytes`,
+      // the cost of candle-gen-wan's unchunked materialized sdpa (transformer.rs:46 — the sc-6217
+      // chunking Qwen/Krea got was never ported). The weights term is the real ~40 GiB read off the
+      // device pre-denoise. At 832x480x81: S = 21·30·52 = 32,760 tokens x 40 heads ⇒ ~343 GB of
+      // attention — TIER-INDEPENDENT, which is why the whole ladder spans only ~40 GB and no tier
+      // helps. q8/bf16 weights are q4 + the two-expert delta.
+      //
+      // ⚠️ These are LOWER BOUNDS, not predictions. The closed form tracks the 5B closely (predicted
+      // 56 GB vs 54.8 GB measured) but UNDER-predicts the A14B: at 512x320x49 — the one sub-advertised
+      // geometry small enough to actually render — it predicted 65.2 GB and the real measured peak was
+      // **89.5 GB**. The gap is cudarc pool fragmentation, which no closed form captures (and which is
+      // the whole reason this campaign measures instead of models). Under-prediction is harmless HERE
+      // only because every bound already exceeds every GPU in existence: a postage-stamp 512x320 clip
+      // needs 89.5 GB, so the advertised 832x480 is not close.
+      //
+      // Recorded so the fit gate REFUSES this model rather than admitting it: the sc-12344 floor reads
+      // 29.72 GiB, so today a 32 GB card is admitted, pays a ~28 GiB tier download + a ~100 s load, and
+      // then dies in the first attention. An instant honest refusal is strictly better. These numbers
+      // are correct-in-OUTCOME (refuse everywhere) rather than correct-in-magnitude, and they go stale
+      // the moment sc-12434 ports chunking — `measured: false` is the flag to re-measure then, and
+      // sc-12434 owns that task.
+      "candle": {
+        "minMemoryGb": 388,
+        "vramGbByTier": { "q4": 386, "q8": 401, "bf16": 426 },
+        "measured": false
+      },
       "ui": {
         "label": "Wan2.2 14B (T2V)",
         "description": "Wan2.2 A14B text-to-video (high/low-noise mixture-of-experts). Higher fidelity than the 5B model; needs ample VRAM for both experts.",
@@ -6526,6 +6605,23 @@
           "samplers": ["default", "uni_pc", "euler", "dpmpp_2m", "euler_ancestral", "heun", "dpmpp_sde", "ddim"],
           "schedulers": ["default"]
         }
+      },
+      // candle/CUDA VRAM gate (sc-12402, epic 1788) — ESTIMATED, `measured: false`. The image→video
+      // twin of the T2V-A14B block above; see that comment for the derivation, the validated cost
+      // model, and why there is nothing to measure. **This model does not render on the candle lane at
+      // all** (sc-12434): its 1280x720 default is engine-rejected over `MAX_AREA_14B` (sc-12433) and
+      // `832x480` OOMs a 96 GB card before step 1 at the lightest tier.
+      //
+      // Identical numbers to T2V by construction: the I2V experts are the same shape (config
+      // `i2v_14b()` differs only in `in_channels` 36 vs 16 — the 20-channel image-conditioning concat —
+      // which changes the patch embedding, not the 40-layer/40-head attention that IS the peak), and
+      // the hosted tier bytes match to within 0.01% (q4 29,792,232,225 vs 29,788,704,888). The VAE
+      // ENCODER is additionally resident here (`WanVae16::new_with_encoder`, wan14b.rs:331) for the
+      // first-frame latent, which is noise at this scale.
+      "candle": {
+        "minMemoryGb": 388,
+        "vramGbByTier": { "q4": 386, "q8": 401, "bf16": 426 },
+        "measured": false
       },
       "ui": {
         "label": "Wan2.2 14B (I2V)",
