@@ -3824,6 +3824,162 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
         .contains("fps must be between 1 and 60"));
 }
 
+/// sc-12400 — the regression sc-12297 shipped: a request that names **no duration at all** was
+/// rejected for "asking for 6s", on 7 of the 10 shipped video models.
+///
+/// Against the REAL manifest, because the whole bug is that the DTO's blanket 6.0 was never compared
+/// to the caps sc-12297 began enforcing — a fixture would let me pick a cap that hides it.
+///
+/// This is the exact payload the MCP `generate_video` tool sends when its caller names only a model
+/// and a prompt (`server.rs` omits every `None` optional), so it is the natural non-UI call, not an
+/// edge case. Before the fix: `400 mochi_1 renders clips up to 5s, but this request asks for 6s` —
+/// naming a value the caller never set, with a lever for a field they never touched.
+#[tokio::test]
+async fn a_video_request_naming_no_duration_is_admitted_at_the_models_own_default() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    sceneworks_core::builtin_manifests::seed_builtin_manifests(
+        &settings.config_dir,
+        sceneworks_core::builtin_manifests::SeedMode::Overwrite,
+    )
+    .expect("builtin manifests seed");
+
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Duration Default Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // Every shipped video model whose cap is UNDER the old blanket 6.0 — i.e. every model this
+    // regression bricked — plus ltx_2_3, whose cap of 15 admitted 6.0 and which therefore stayed
+    // green throughout. Listing the survivor alongside the victims is what makes this a per-model
+    // assertion rather than "the route works".
+    for (model, want_duration) in [
+        ("mochi_1", 5.0),
+        ("bernini", 5.0),
+        ("scail2_14b", 5.0),
+        ("wan_2_2_t2v_14b", 5.0),
+        ("wan_2_2_i2v_14b", 5.0),
+        ("wan_2_2_vace_fun_14b", 5.0),
+        ("svd", 4.0),
+        ("ltx_2_3", 6.0),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": project_id,
+                "mode": "text_to_video",
+                "prompt": "a fox runs",
+                "model": model
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{model}: a request naming no duration must be admitted, not 400'd for a value it \
+             never set: {body}"
+        );
+        assert_eq!(
+            body["payload"]["duration"], want_duration,
+            "{model}: the enqueued payload records the model's declared defaults.duration, not the \
+             blanket 6.0: {body}"
+        );
+    }
+
+    // A NAMED over-cap duration is still refused — the cap is intact; only the phantom 6.0 is gone.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "model": "mochi_1",
+            "duration": 30
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "sc-12297's cap must still refuse a duration the caller actually asked for: {body}"
+    );
+    assert!(body["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("asks for 30s"));
+
+    // The GEOMETRY axis of the same bug — the third dead `defaults.*` key. No 400 to observe here
+    // (dimensions coerce), so the observable is the enqueued size itself: mochi_1 must take its
+    // declared 848x480 native bucket, NOT the blanket 768x512 it is never trained on and never
+    // advertises. `bernini` (848x480, stride 16) and `wan_2_2_t2v_14b` (1280x704) come along to
+    // prove this reads the per-model value rather than one hardcoded pair.
+    for (model, want_w, want_h) in [
+        ("mochi_1", 848, 480),
+        ("bernini", 848, 480),
+        // True 720p since sc-12308 (#1581) lifted the A14B area cap to its real 921,600.
+        ("wan_2_2_t2v_14b", 1280, 720),
+        ("ltx_2_3", 768, 512),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": project_id,
+                "mode": "text_to_video",
+                "prompt": "a fox runs",
+                "model": model
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{model}: {body}");
+        assert_eq!(
+            (
+                body["payload"]["width"].as_u64(),
+                body["payload"]["height"].as_u64()
+            ),
+            (Some(want_w), Some(want_h)),
+            "{model}: a size-less request must enqueue the model's declared defaults.resolution: \
+             {body}"
+        );
+    }
+
+    // A NAMED size is still honored verbatim — resolution fills a gap, it does not override.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "model": "mochi_1",
+            "width": 640,
+            "height": 384
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        (
+            body["payload"]["width"].as_u64(),
+            body["payload"]["height"].as_u64()
+        ),
+        (Some(640), Some(384)),
+        "a caller's own size must not be replaced by the model's default: {body}"
+    );
+}
+
 /// sc-12347 END TO END, against the **REAL shipped manifest** rather than a fixture — the route the
 /// app actually serves, the bytes the app actually ships, the model the story is about.
 ///

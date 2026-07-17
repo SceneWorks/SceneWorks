@@ -8,8 +8,6 @@
 //! `#[serde(default = "default_x")]` string path and sibling call site
 //! resolving unchanged.
 
-use sceneworks_core::contracts::ContractNumber;
-
 pub(crate) fn default_timeline_name() -> String {
     "Main timeline".to_owned()
 }
@@ -128,22 +126,21 @@ pub(crate) fn default_video_model() -> String {
     "ltx_2_3".to_owned()
 }
 
-pub(crate) fn default_video_duration() -> ContractNumber {
-    ContractNumber::from(6)
-}
+// No `default_video_duration` either, and for a sharper reason than fps: the blanket 6.0 that used
+// to live here is past the `hardMaxDuration` of 7 of the 10 shipped video models, so once sc-12297
+// began enforcing that cap, this default made the API reject its own duration-less requests
+// (sc-12400). An omitted duration resolves to the model's declared `defaults.duration` via core's
+// `resolve_duration` — see `VideoJobRequest::duration`.
 
 // No `default_video_fps`: an omitted fps resolves to the model's declared `defaults.fps` (core's
 // `resolve_fps`, applied in `create_video_job` once the manifest entry is resolved), not to a
 // blanket this layer invents. The blanket 25 that used to live here was off-menu for 7 of the 10
 // shipped video models — see `VideoJobRequest::fps` (sc-12347).
 
-pub(crate) fn default_video_width() -> u32 {
-    768
-}
-
-pub(crate) fn default_video_height() -> u32 {
-    512
-}
+// No `default_video_width` / `default_video_height` either: an omitted side resolves to the model's
+// declared `defaults.resolution` (core's `default_resolution`). The blanket 768x512 that used to
+// live here is not in `limits.resolutions` for 8 of the 10 shipped video models — mochi_1 rendered
+// at 768x512 instead of its native, only-trained 848x480 (sc-12400). See `VideoJobRequest::width`.
 
 pub(crate) fn default_video_quality() -> String {
     "balanced".to_owned()
