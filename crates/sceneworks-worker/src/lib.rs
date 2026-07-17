@@ -1536,4 +1536,7 @@ fn retry_delay(poll_seconds: u64, attempt: u32) -> u64 {
 }
 
 #[cfg(test)]
+mod test_env;
+
+#[cfg(test)]
 mod tests;

@@ -1442,13 +1442,14 @@ async fn run_training_execution(
 mod tests {
     use super::*;
 
-    /// Serializes every test that mutates the process-global `HF_HUB_CACHE` env
-    /// var. Must be a SINGLE module-level mutex: per-function `static`s are
-    /// distinct locks and do not serialize against each other, so under parallel
-    /// test execution one test's `set_var`/`remove_var` races another's
-    /// validation read (the intermittent "must be inside an app-managed
-    /// directory" flake on the macOS nax-worker CI lane).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Every test that mutates the process-global `HF_HUB_CACHE` goes through the crate-wide env
+    // seam. This module used to own a module-level mutex, on the reasoning that per-function
+    // `static`s are distinct locks that do not serialize against each other (the intermittent "must
+    // be inside an app-managed directory" flake on the macOS nax-worker lane). That reasoning was
+    // right and simply did not go far enough: the whole crate's tests share ONE process, so a
+    // per-MODULE lock is distinct from `video_jobs`' and `image_jobs`' in exactly the same way, and
+    // those modules write `HF_HUB_CACHE` too (sc-12380).
+    use crate::test_env::EnvVars;
 
     /// sc-9989: only LTX-2.3 gets a trainer `LoadSpec::text_encoder` override, and only from the
     /// bundled sibling `gemma/` (the self-contained turnkey install). Every other family's TE lives
@@ -1820,11 +1821,6 @@ mod tests {
     /// mutation can't race other env-reading tests.
     #[test]
     fn validate_accepts_base_model_in_hf_cache_outside_data_dir() {
-        // Recover from poisoning: a panic in another env-mutating test must not
-        // cascade into a spurious failure here — we only need the mutual
-        // exclusion, not the guarded data.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let dir = tempfile::tempdir().expect("tempdir");
         let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
         let settings = test_settings(dir.path());
@@ -1849,13 +1845,10 @@ mod tests {
         );
         value["target"]["baseModelPath"] = json!(base_model.display().to_string());
 
-        let prior = std::env::var("HF_HUB_CACHE").ok();
-        std::env::set_var("HF_HUB_CACHE", hf_cache.path());
-        let result = validate_training_plan(&settings, &parse(value));
-        match prior {
-            Some(value) => std::env::set_var("HF_HUB_CACHE", value),
-            None => std::env::remove_var("HF_HUB_CACHE"),
-        }
+        let result = {
+            let _env = EnvVars::set(&[("HF_HUB_CACHE", hf_cache.path().to_str().expect("utf-8"))]);
+            validate_training_plan(&settings, &parse(value))
+        };
 
         assert!(
             result.is_ok(),
@@ -1871,8 +1864,6 @@ mod tests {
     /// real run rejected the same `~/.cache/huggingface` snapshot).
     #[test]
     fn resolve_app_managed_model_dir_accepts_hf_cache_snapshot() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let dir = tempfile::tempdir().expect("tempdir");
         let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
         let settings = test_settings(dir.path());
@@ -1886,17 +1877,14 @@ mod tests {
             .join("abc123");
         std::fs::create_dir_all(&snapshot).expect("snapshot dir");
 
-        let prior = std::env::var("HF_HUB_CACHE").ok();
-        std::env::set_var("HF_HUB_CACHE", hf_cache.path());
-        let resolved = resolve_app_managed_model_dir(
-            &settings,
-            &snapshot.display().to_string(),
-            "Training baseModelPath",
-        );
-        match prior {
-            Some(value) => std::env::set_var("HF_HUB_CACHE", value),
-            None => std::env::remove_var("HF_HUB_CACHE"),
-        }
+        let resolved = {
+            let _env = EnvVars::set(&[("HF_HUB_CACHE", hf_cache.path().to_str().expect("utf-8"))]);
+            resolve_app_managed_model_dir(
+                &settings,
+                &snapshot.display().to_string(),
+                "Training baseModelPath",
+            )
+        };
 
         assert!(
             resolved.is_ok(),
