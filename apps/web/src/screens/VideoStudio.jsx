@@ -394,11 +394,11 @@ export function VideoStudio() {
   const activeBackend = macGating ? "mlx" : "candle";
   // MLX tier installs and the torch/GGUF quantization variants can coexist on one catalog model,
   // but they target different worker lanes. Only derive an MLX tier while the MLX lane is active;
-  // the existing quantization picker owns the non-MLX lane. `convRotEligible: false` keeps the
-  // candle-only INT8-ConvRot image tier out of this MLX video control.
+  // the existing quantization picker owns the non-MLX lane. The explicit false gates keep the
+  // candle-only INT8-ConvRot and NVFP4 image tiers out of this MLX video control.
   const mlxTierLane = activeBackend === "mlx";
   const tierOptions = useMemo(
-    () => ({ convRotEligible: false, defaultQuality: VIDEO_DEFAULT_TIER }),
+    () => ({ convRotEligible: false, nvfp4Eligible: false, defaultQuality: VIDEO_DEFAULT_TIER }),
     [],
   );
   const availableTiers = useMemo(

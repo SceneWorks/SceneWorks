@@ -880,7 +880,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     loraCompatibility: {},
     ui: {},
     hasVariantMatrix: true,
-    variants: ["q4", "q8", "bf16"].map((tier) => ({
+    variants: ["q4", "q8", "bf16", "nvfp4"].map((tier) => ({
       variant: tier,
       installState: installed.includes(tier) ? "installed" : "missing",
     })),
@@ -948,6 +948,20 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     expect(tierPicker()).toBeNull();
     await click(buttonWithText(container, "Render clip"));
     expect(context.createVideoJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
+  });
+
+  it("keeps the candle-only NVFP4 tier out of the MLX video picker", async () => {
+    const context = baseContext({
+      videoModels: [tieredVideoModel(["q4", "nvfp4"])],
+      macCapabilities: MAC_CAPS,
+    });
+    await render(context);
+    await openAdvanced();
+
+    expect(tierPicker()).toBeNull();
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 4 });
+    expect(context.createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("quantTier");
   });
 
   it("emits a selected high tier, warns about memory, and restores the video/model sticky", async () => {
