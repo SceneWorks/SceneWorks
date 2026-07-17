@@ -19,8 +19,8 @@ use serde_json::Value;
 
 use crate::contracts::JsonObject;
 use crate::payload_util::{
-    array_or_empty, clamped_u32, nonempty_string_or, object_or_empty, optional_i64, optional_id,
-    parse_u32, string_list,
+    array_or_empty, clamped_u32, declared_resolution, nonempty_string_or, object_or_empty,
+    optional_i64, optional_id, parse_u32, string_list,
 };
 
 /// Defaults matching the Python `video_request_from_job` (`.get(key, default)`).
@@ -498,19 +498,7 @@ const MAX_DIMENSION: u32 = 1920;
 /// [`normalized_dimensions`] does that for declared and blanket geometry alike, so a model whose
 /// advertised default is off its own lattice is floored exactly as a caller's request would be.
 pub fn default_resolution(model_manifest_entry: &JsonObject) -> Option<(u32, u32)> {
-    let (width, height) = model_manifest_entry
-        .get("defaults")
-        .and_then(Value::as_object)
-        .and_then(|defaults| defaults.get("resolution"))
-        .and_then(Value::as_str)?
-        .split_once(['x', 'X'])?;
-    let honorable = |raw: &str| {
-        raw.trim()
-            .parse::<u32>()
-            .ok()
-            .filter(|side| (MIN_DIMENSION..=MAX_DIMENSION).contains(side))
-    };
-    Some((honorable(width)?, honorable(height)?))
+    declared_resolution(model_manifest_entry, MIN_DIMENSION, MAX_DIMENSION)
 }
 
 /// The advertised frame rates as a human list: `30`, `16 or 24`, `6, 7, 8, 10, 12, or 25`.

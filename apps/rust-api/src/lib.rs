@@ -27,6 +27,7 @@ use sceneworks_core::contracts::{
     WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
 };
 use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
+use sceneworks_core::image_request::default_resolution as image_default_resolution;
 use sceneworks_core::jobs_store::{
     candle_supported, mac_capabilities, mac_rust_supported, model_mac_support, CreateJob,
     DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
@@ -2592,8 +2593,15 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     if !(1..=8).contains(&payload.count) {
         return Err(ApiError::bad_request("count must be between 1 and 8"));
     }
-    validate_dimension(payload.width, "width", MAX_IMAGE_DIMENSION)?;
-    validate_dimension(payload.height, "height", MAX_IMAGE_DIMENSION)?;
+    // Only a *named* dimension is bounded here: an omitted side is resolved from the model's
+    // declared `defaults.resolution` in `create_image_job` (sc-12400), the same shape as the video
+    // route's duration/fps/size.
+    if let Some(width) = payload.width {
+        validate_dimension(width, "width", MAX_IMAGE_DIMENSION)?;
+    }
+    if let Some(height) = payload.height {
+        validate_dimension(height, "height", MAX_IMAGE_DIMENSION)?;
+    }
     if payload.upscale.enabled {
         if ![2, 4].contains(&payload.upscale.factor) {
             return Err(ApiError::bad_request("upscale.factor must be 2 or 4"));

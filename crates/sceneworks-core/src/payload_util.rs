@@ -86,6 +86,38 @@ pub(crate) fn clamped_u32(value: Option<&Value>, default: u32, min: u32, max: u3
     parse_u32(value).unwrap_or(default).clamp(min, max)
 }
 
+/// A resolved manifest entry's `defaults.resolution` (`"848x480"`) as `(width, height)`, or `None`
+/// when the model declares none or declares one the caller's `[min, max]` cannot honor.
+///
+/// Shared by both lanes because the *parse* is generic while the honorable range is not: video
+/// clamps dimensions to 256..=1920 and images to 256..=4096, so image models legitimately declare
+/// 2048x2048 (the sensenova U1 family) — a value video's bound would reject. Passing the bounds in
+/// keeps one parser without pretending the two lanes share a geometry envelope.
+///
+/// Never-invent-from-a-typo posture, like every other manifest reader: anything that is not
+/// `W x H` with both sides inside `[min, max]` yields `None`, so the caller falls back to its own
+/// blanket rather than emitting a degenerate size. The value is deliberately NOT snapped to any
+/// stride here — each lane's normalization floors declared and blanket geometry alike (sc-12400).
+pub(crate) fn declared_resolution(
+    model_manifest_entry: &JsonObject,
+    min: u32,
+    max: u32,
+) -> Option<(u32, u32)> {
+    let (width, height) = model_manifest_entry
+        .get("defaults")
+        .and_then(Value::as_object)
+        .and_then(|defaults| defaults.get("resolution"))
+        .and_then(Value::as_str)?
+        .split_once(['x', 'X'])?;
+    let honorable = |raw: &str| {
+        raw.trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|side| (min..=max).contains(side))
+    };
+    Some((honorable(width)?, honorable(height)?))
+}
+
 /// Collect a JSON int array (numbers or numeric strings), dropping non-numeric entries.
 /// Absent / non-array → empty.
 pub(crate) fn int_array(payload: &JsonObject, key: &str) -> Vec<i64> {
