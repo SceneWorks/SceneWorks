@@ -54,7 +54,6 @@ const EXPECTED_VIDEO_IDS: &[&str] = &[
     "ltx_2_3",
     "ltx_2_3_eros",
     "svd",
-    "mochi_1",
     "wan_2_2",
     "wan_2_2_t2v_14b",
     "wan_2_2_i2v_14b",
@@ -72,7 +71,7 @@ const EXPECTED_VIDEO_IDS: &[&str] = &[
 ///   const rather than declaring their own.
 /// * The TI2V-5B (`wan_2_2`) validates against [`MAX_AREA_5B`] (its z48 VAE's 32-px grid, a
 ///   genuinely lower budget than the 14B family's).
-/// * `ltx_2_3` / `ltx_2_3_eros` / `svd` / `mochi_1` have no `maxPixels`-expressible area cap in
+/// * `ltx_2_3` / `ltx_2_3_eros` / `svd` have no `maxPixels`-expressible area cap in
 ///   either backend, so the manifest must NOT invent one — expected `None` (key absent).
 ///
 /// An unmapped id panics: adding a video model is a deliberate act that must derive its own cap
@@ -85,7 +84,7 @@ fn expected_max_pixels(id: &str) -> Option<u64> {
         | "bernini"
         | "scail2_14b" => Some(MAX_AREA_14B as u64),
         "wan_2_2" => Some(MAX_AREA_5B as u64),
-        "ltx_2_3" | "ltx_2_3_eros" | "svd" | "mochi_1" => None,
+        "ltx_2_3" | "ltx_2_3_eros" | "svd" => None,
         other => panic!(
             "video model {other:?} is not mapped to a pinned engine area cap — derive its \
              MAX_AREA_* from that model's engine `config.rs` and add it to \

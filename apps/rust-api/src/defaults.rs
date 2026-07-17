@@ -139,8 +139,8 @@ pub(crate) fn default_video_model() -> String {
 
 // No `default_video_width` / `default_video_height` either: an omitted side resolves to the model's
 // declared `defaults.resolution` (core's `default_resolution`). The blanket 768x512 that used to
-// live here is not in `limits.resolutions` for 8 of the 10 shipped video models — mochi_1 rendered
-// at 768x512 instead of its native, only-trained 848x480 (sc-12400). See `VideoJobRequest::width`.
+// live here is not in `limits.resolutions` for 7 of the 9 shipped video models — e.g. `bernini`
+// would render at 768x512 instead of its native, only-trained 848x480 (sc-12400). See `VideoJobRequest::width`.
 
 pub(crate) fn default_video_quality() -> String {
     "balanced".to_owned()
