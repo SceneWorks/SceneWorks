@@ -2509,13 +2509,25 @@
       // remains an unmeasured non-shipping estimate and defers to resident.
       "candle": {
         "minMemoryGb": 32,
-        // sc-9300: the INT8-ConvRot tier's VRAM ceiling. The int8 DiT is ~half the bf16 DiT, but the
-        // rest of the resident surface (Qwen3-VL-4B TE + Qwen-Image VAE) is unchanged and the online
-        // Hadamard rotation adds transient activation, so ESTIMATE it near the q8 tier (~31 GB) pending
-        // measurement. It gates the `int8-convrot` variant through the SAME per-tier memory-eligibility
-        // path as q4/q8/bf16 (the third of the three ConvRot gates; the candle lane + sm_89 compute-cap
-        // are the worker's `int8_convrot` capability).
-        "vramGbByTier": { "q4": 26.4, "q8": 35.9, "bf16": 55.6, "int8-convrot": 31.0 },
+        // sc-12425: the INT8-ConvRot tier's VRAM ceiling, now MEASURED (sc-12381) — 42.9 GB overall-peak
+        // on an exclusive sm_120 at 1024²/8-step, the same shape q4's 26.4 was taken at.
+        //
+        // It replaces sc-9300's estimate of 31.0, which was wrong by 11.9 GB. That estimate named the
+        // right mechanism — "the online Hadamard rotation adds transient activation" — and then sized as
+        // if it didn't: measured, the tier is only 29.8 GB RESIDENT and the denoise adds 13.1 GB, so the
+        // peak lands ABOVE q8's 35.9 rather than "near" it. (29.8 is itself post-sc-12301, which removed
+        // 7.4 GB of duplicated per-projection cuBLASLt workspace; pre-fix this tier peaked at 50.3 GB.)
+        //
+        // The 31.0 survived because NOTHING READ IT: `vram_gate::requested_tier_key` is bits-derived and
+        // a ConvRot request carries no `mlxQuantize`, so it fell to `"q8"` and this row was dead. That
+        // aliasing is fixed in `base.rs` (`INT8_CONVROT_TIER`) — so this number is now load-bearing, and
+        // a wrong value here admits an OOM rather than sitting inert. Re-measure with
+        // `candle-gen-krea --example krea-convrot-vram` (sc-12381) rather than re-estimating.
+        //
+        // Gates the `int8-convrot` variant through the SAME per-tier memory-eligibility path as
+        // q4/q8/bf16 (the third of the three ConvRot gates; the candle lane + sm_89 compute-cap are the
+        // worker's `int8_convrot` capability).
+        "vramGbByTier": { "q4": 26.4, "q8": 35.9, "bf16": 55.6, "int8-convrot": 42.9 },
         // sc-12131 / sc-10856 second-stage gate: measured largest working set after the text phase has
         // been dropped. INT8-ConvRot is intentionally absent because that lane remains unmeasured and
         // does not advertise sequential residency.
