@@ -5322,6 +5322,41 @@ fn mochi_vram_preflight(
     }
 }
 
+/// Live pre-flight Wan VRAM admission check for the candle lane (sc-12344) — the non-Mochi half of this
+/// lane's gate, and the seam [`generate_candle_video`] calls before the load + denoise.
+///
+/// Budgets on the on-disk bytes of the components the Wan loader actually reads
+/// ([`crate::vram_gate::wan_weight_bytes`]), which for Wan ARE the resident set: both A14B MoE experts
+/// stay co-resident and every file in each component dir loads. `ltx`/`svd` read `0` there and are
+/// admitted unchanged — their on-disk bytes are not their loaded set, so a floor would wall-reject
+/// working cards (the exemption is recorded on `vram_gate::wan_weight_components`).
+///
+/// **Takes and returns `model_dir` rather than borrowing it**, so the gate cannot be deleted without
+/// breaking the build — the same "unskippable by construction" property [`MochiVramPreflight`] gets from
+/// bundling its quant marker, and the shape `mlx_fit_gate::apply_residency_policy(spec, engine_id) ->
+/// WorkerResult<LoadSpec>` already uses at the MLX cache seam. A free-standing `check(&dir)?` would
+/// still compile after a review mutation deleted it, silently un-gating the lane.
+///
+/// `budget` arrives resolved so this stays free of the GPU probe and is unit-testable without CUDA. No
+/// budget signal (or an exempt engine) ⇒ admits. `Err` is the actionable pre-load rejection.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn wan_vram_preflight(
+    engine_id: &str,
+    model_dir: PathBuf,
+    gpu_id: &str,
+    budget: Option<crate::vram_gate::VramBudget>,
+) -> WorkerResult<PathBuf> {
+    match crate::vram_gate::video_weights_fit_error(
+        engine_id,
+        crate::vram_gate::wan_weight_bytes(engine_id, &model_dir),
+        gpu_id,
+        budget,
+    ) {
+        Some(error) => Err(error),
+        None => Ok(model_dir),
+    }
+}
+
 /// The candle video lane's live VRAM budget: the real `nvidia-smi` reading, the
 /// `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card emulation folded over it, then this process's reclaimable
 /// cudarc pool added back (sc-11023).
@@ -5359,9 +5394,11 @@ async fn candle_video_vram_budget(settings: &Settings) -> Option<crate::vram_gat
 /// conditioning, builds a `VideoGenInput`, and runs it through the shared [`generate_video`] streaming
 /// driver. Returns the decoded clip + the candle adapter label.
 ///
-/// Mochi additionally passes a VRAM fit gate before the load (sc-12306); every other engine on this
-/// lane is still ungated (sc-12344 — no candle video model carries the `candle.vramGbByTier` block the
-/// generic `vram_gate` needs, so wiring it here today would admit unconditionally).
+/// Every engine passes a VRAM fit gate before the load: Mochi's frame-dependent decode gate (sc-12306),
+/// and the Wan weights-floor gate (sc-12344). `ltx`/`svd` are explicitly EXEMPT — their on-disk bytes are
+/// not their loaded set, so any byte-derived floor would wall-reject working cards; the reason is
+/// recorded on `vram_gate::wan_weight_components`. Neither gate reads `candle.vramGbByTier` (no candle
+/// video model carries a `candle` block, so that lookup would admit unconditionally — sc-12344).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_video(
     api: &ApiClient,
@@ -5386,10 +5423,11 @@ async fn generate_candle_video(
 /// [`generate_candle_video`] with the engine loader supplied by the caller (sc-12318) — the candle
 /// sibling of [`generate_mochi_using`], and for the same reason.
 ///
-/// The candle lane has no fit gate, so [`video_frame_count`] IS the whole pre-load exposure here:
-/// swapping it for `wan_frame_count` puts every non-Wan family (Mochi's `6k+1`, LTX's `8k+1`) off its
-/// engine's lattice, which `validate_request` hard-rejects. `generate_candle_video_using_*` pins that
-/// call at the caller.
+/// [`video_frame_count`] is a large part of the pre-load exposure here: swapping it for
+/// `wan_frame_count` puts every non-Wan family (Mochi's `6k+1`, LTX's `8k+1`) off its engine's lattice,
+/// which `validate_request` hard-rejects. `generate_candle_video_using_*` pins that call at the caller.
+/// (Mochi's fit gate reads the coerced count too, but Wan's weights floor is frame-blind and LTX is
+/// exempt, so the lattice remains this arm's own pin for those families.)
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_video_using(
     api: &ApiClient,
@@ -5454,10 +5492,22 @@ async fn generate_candle_video_using(
         )?;
         (snapshot_dir, quant)
     } else {
-        match candle_wan_tier_subdir(&snapshot_dir, engine_id, request) {
+        let (dir, quant) = match candle_wan_tier_subdir(&snapshot_dir, engine_id, request) {
             Some((tier_dir, quant)) => (tier_dir, quant),
             None => (snapshot_dir, None),
-        }
+        };
+        // The Wan weights-floor VRAM fit gate (sc-12344), the non-Mochi half of this lane's admission
+        // check. Runs on the RESOLVED tier dir (so it sizes the tier that will actually load, not the
+        // manifest's default — the sc-12090 lesson) and BEFORE `candle_ensure_wan_lightning_present`
+        // below, so a card that cannot hold the weights is refused without first paying for the
+        // Lightning fetch. A no-op for `ltx`/`svd`, which are exempt — see `vram_gate::wan_weight_components`.
+        let dir = wan_vram_preflight(
+            engine_id,
+            dir,
+            &settings.gpu_id,
+            candle_video_vram_budget(settings).await,
+        )?;
+        (dir, quant)
     };
     // ltx needs the separate Gemma-3-12B encoder (its only conditioning input). Resolve its snapshot
     // dir here and thread it onto the LoadSpec below (sc-8827) instead of mutating `$LTX_GEMMA_DIR`.
@@ -11631,6 +11681,73 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// sc-12344: the Wan weights-floor gate is keyed on the ENGINE id, and [`wan_vram_preflight`] is
+    /// handed `engine_id` — pin that the two agree for every candle video model the router serves.
+    ///
+    /// This is the mutation nothing else catches. The sceneworks model id and the engine id differ only
+    /// by underscores (`wan_2_2_t2v_14b` vs `wan2_2_t2v_14b`, `wan_2_2` vs `wan2_2_ti2v_5b`), so passing
+    /// `&request.model` at the call site instead of `engine_id` still compiles, still renders, and reads
+    /// **0 bytes** ⇒ no signal ⇒ the gate silently admits every job — dead code that reads as coverage,
+    /// the exact failure this story was filed to avoid. It also fails loudly if a future engine is added
+    /// to `candle_video_engine_id` without a decision about its fit gate.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn every_candle_video_model_maps_to_a_gated_or_recorded_exempt_engine() {
+        let root = std::env::temp_dir().join(format!(
+            "sc12344_engine_ids_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        // A populated Wan component tree, so a 0 read can only mean "not keyed to this engine".
+        for component in ["transformer", "transformer_2", "text_encoder", "vae"] {
+            let path = root.join(component).join("model.safetensors");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(&path)
+                .unwrap()
+                .set_len(1_000)
+                .unwrap();
+        }
+
+        // The GATED engines: every Wan model must read real bytes through its resolved engine id.
+        for model in ["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"] {
+            let engine_id = candle_video_engine_id(model).expect("a candle video engine");
+            assert!(
+                crate::vram_gate::wan_weight_bytes(engine_id, &root) > 0,
+                "{model} → {engine_id} must be gated; a 0 read means the component map and the engine \
+                 id disagree, and the gate is INERT for this model"
+            );
+            // …and the sceneworks id is NOT the key. This is the slip above, made concrete.
+            assert_eq!(
+                crate::vram_gate::wan_weight_bytes(model, &root),
+                0,
+                "{model} is the sceneworks id, not the engine id — passing it reads no bytes"
+            );
+        }
+
+        // The EXEMPT engines (sc-12344's recorded reason: their on-disk bytes are not their loaded set,
+        // so a byte-derived floor would wall-reject working cards — see `vram_gate::wan_weight_components`).
+        for model in ["ltx_2_3", "ltx_2_3_eros", "svd"] {
+            let engine_id = candle_video_engine_id(model).expect("a candle video engine");
+            assert_eq!(
+                crate::vram_gate::wan_weight_bytes(engine_id, &root),
+                0,
+                "{model} → {engine_id} is exempt by decision; gating it on a dir sum would over-count"
+            );
+        }
+
+        // Mochi rides its own frame-dependent gate (sc-12306), never this one.
+        assert_eq!(
+            crate::vram_gate::wan_weight_bytes(
+                candle_video_engine_id("mochi_1").expect("a candle video engine"),
+                &root
+            ),
+            0
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// The gate NO-OPS without a budget signal (the story's explicit AC) and without a weight signal.
     /// A worker on a card `nvidia-smi` cannot read, or pointed at a weights dir it cannot scan, must
     /// keep rendering exactly as it did before this gate existed — a fit gate that blocks on missing
@@ -12228,9 +12345,9 @@ mod tests {
 
     /// The candle half of the sc-12318 pin, and the reason the probe harness sits on the superset cfg:
     /// `generate_candle_video`'s `video_frame_count(&request.model, request.raw_frame_count())` is the
-    /// same unpinned caller `generate_mochi` had. This lane has **no fit gate**, so the frame lattice is
-    /// the whole pre-load exposure here — swapping the call for `wan_frame_count` hands the engine 149
-    /// for the shipped 5 s Mochi default, which `validate_request` hard-rejects (`149 % 6 == 5`).
+    /// same unpinned caller `generate_mochi` had — swapping the call for `wan_frame_count` hands the
+    /// engine 149 for the shipped 5 s Mochi default, which `validate_request` hard-rejects
+    /// (`149 % 6 == 5`).
     ///
     /// Runs on the windows-candle lane (`cargo test -p sceneworks-worker --features backend-candle`),
     /// which is what makes this arm genuinely covered rather than asserted — the macOS lane never
@@ -12282,8 +12399,7 @@ mod tests {
         assert_ne!(
             probe.engine_frames(),
             wan_frame_count(150),
-            "the candle lane has no fit gate, so routing this call through the wan stride is the whole \
-             exposure — the engine hard-rejects 149"
+            "routing this call through the wan stride hands the engine 149, which it hard-rejects"
         );
         assert_eq!(
             adapter, CANDLE_MOCHI_ADAPTER,
