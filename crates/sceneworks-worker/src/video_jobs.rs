@@ -12589,9 +12589,7 @@ mod tests {
     ) -> WorkerResult<(DecodedVideo, Value)> {
         let settings = Settings {
             data_dir: root.join("unused-data-dir"),
-            api_url: "http://127.0.0.1:0".to_owned(),
-            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
-            ..Settings::from_env()
+            ..offline_settings()
         };
         let job = mochi_job_snapshot();
         let loader = probe.loader();
@@ -12896,13 +12894,11 @@ mod tests {
         let hub = mochi_hf_cache_shared_only("arm_precheck");
         let probe = ArmProbe::default();
         let request = mochi_request(json!({ "mlxQuantize": 8 }));
+        // `offline_settings` pins BOTH `api_url` and the `huggingface_base_url` the tier fetch
+        // actually dials — see above, and its own doc comment.
         let settings = Settings {
             data_dir: hub.join("unused-data-dir"),
-            api_url: "http://127.0.0.1:0".to_owned(),
-            // The URL the tier fetch actually dials — see above. Unroutable ⇒ the failure path can
-            // never reach the real hub.
-            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
-            ..Settings::from_env()
+            ..offline_settings()
         };
         let job = mochi_job_snapshot();
         let loader = probe.loader();
@@ -12961,10 +12957,13 @@ mod tests {
         let root = mochi_root("arm_lattice_candle", &["q4"], true);
         let probe = ArmProbe::default();
         let request = mochi_request(json!({}));
+        // This pinned `api_url` alone until sc-12380. It never dialed the hub only because an empty
+        // `advanced` makes `mochi_wants_q8`/`_bf16` false, so `ensure_mochi_*_present` early-outs
+        // before the fetch — i.e. it was one request-shape change away from the #1577 bug.
+        // `offline_settings` pins `huggingface_base_url` too, so it cannot come back.
         let settings = Settings {
             data_dir: root.join("unused-data-dir"),
-            api_url: "http://127.0.0.1:0".to_owned(),
-            ..Settings::from_env()
+            ..offline_settings()
         };
         let job = mochi_job_snapshot();
         let loader = probe.loader();
@@ -13035,13 +13034,11 @@ mod tests {
         let hub = mochi_hf_cache_shared_only("candle_arm_precheck");
         let probe = ArmProbe::default();
         let request = mochi_request(json!({ "mlxQuantize": 8 }));
+        // `offline_settings` pins BOTH `api_url` and the `huggingface_base_url` the tier fetch
+        // actually dials, so the failure path can never reach the real hub.
         let settings = Settings {
             data_dir: hub.join("unused-data-dir"),
-            api_url: "http://127.0.0.1:0".to_owned(),
-            // The URL the tier fetch actually dials — unroutable ⇒ the failure path can never reach
-            // the real hub.
-            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
-            ..Settings::from_env()
+            ..offline_settings()
         };
         let job = mochi_job_snapshot();
         let loader = probe.loader();
@@ -13446,11 +13443,16 @@ mod tests {
     // Gated to match the consumers exactly. The parity lane builds this crate with NEITHER backend
     // and runs `clippy -D warnings` over the test target, so an import held under a wider cfg than
     // its users is an `unused_imports` error there rather than a warning.
+    // `offline_settings` is the one way to build a `Settings` for a test whose path could reach a
+    // download: it pins every network field unroutable, so no call site has to remember that
+    // `huggingface_base_url` (not `api_url`) is what a tier fetch dials. See its doc comment.
+    // Its consumers include the candle Mochi twins, so it rides the same `any(macos, candle)` gate
+    // as the helpers above rather than the macOS-only one below.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
-    use crate::test_env::{temp_env_var, temp_env_vars};
+    use crate::test_env::{offline_settings, temp_env_var, temp_env_vars};
 
     // Only the macOS-gated eros fixture pins a var for a whole test body — see the cfg note above.
     #[cfg(target_os = "macos")]
@@ -14757,7 +14759,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn bernini_conditioning_enforces_required_media() {
-        let settings = Settings::from_env();
+        // Offline: this builds a real `ApiClient`, and the guards under test are all that stand
+        // between it and the network. Pinned so a regression that moves a guard AFTER the I/O fails
+        // locally and loudly instead of dialing the real API/hub (sc-12380).
+        let settings = offline_settings();
         let api = ApiClient::new(&settings);
         let job: JobSnapshot = serde_json::from_value(json!({
             "id": "job-bernini-1",
@@ -15070,7 +15075,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn scail2_conditioning_guards_fire_before_io() {
-        let settings = Settings::from_env();
+        // "before_io" is the whole claim of this test — `offline_settings` is what makes a broken
+        // claim fail locally rather than reach the real API/hub (sc-12380).
+        let settings = offline_settings();
         let api = ApiClient::new(&settings);
         let job: JobSnapshot = serde_json::from_value(json!({
             "id": "job-scail2-1",
@@ -18384,7 +18391,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn video_clip_conditioning_requires_ic_lora() {
-        let settings = Settings::from_env();
+        // The IC-LoRA gate returning before any I/O is the claim; pin the network fields so a
+        // regression that breaks it fails locally instead of dialing out (sc-12380).
+        let settings = offline_settings();
         let api = ApiClient::new(&settings);
         // The IC-LoRA gate is the resolver's first check, so it returns before touching `job`
         // / the api / disk — a minimal snapshot suffices.
