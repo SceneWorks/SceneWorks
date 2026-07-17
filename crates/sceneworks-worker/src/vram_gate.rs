@@ -402,8 +402,9 @@ fn mochi_too_big_error(
 // unmappable `exit(-1)`). That is the honest bound from the data that exists: it refuses the
 // CLEARLY-impossible (wan A14B bf16 ≈ 67 GiB of weights on a 32 GB card — the story's case) rather than
 // promising every admitted job fits. Inventing a per-engine activation fudge factor would be worse than
-// stating the bound; measured `candle.vramGbByTier` blocks are what tighten this, and they layer on top
-// via `predicted_peak_gb` with no rework here.
+// stating the bound; measured `candle.vramGbByTier` blocks are what tighten this (**sc-12402**), and they
+// layer on top via `predicted_peak_gb` with no rework here — that key is already read and simply returns
+// `None` ⇒ `Unknown` ⇒ admit while it is absent.
 //
 // Deliberately NOT reusing Mochi's `mochi_decode_peak_gb`: that term is specific to Mochi's untiled
 // AsymmVAE (peak linear in clip length). Wan tiles/chunks differently, so applying it here would
