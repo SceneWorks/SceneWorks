@@ -1490,10 +1490,20 @@ fn pulid_flux_real_weights_holds_identity() {
         assert!(p.exists(), "missing PuLID weight: {}", p.display());
     }
     // Fill the engine's env-var weight seam from the local caches (exactly what
-    // `generate_pulid_flux_stream` does before the cached load).
-    std::env::set_var("PULID_FLUX_WEIGHTS", &pulid_adapter);
-    std::env::set_var("PULID_EVA_WEIGHTS", &eva);
-    std::env::set_var("PULID_FACE_WEIGHTS_DIR", &bundle);
+    // `generate_pulid_flux_stream` does before the cached load). Through the crate-wide seam so the
+    // three vars are RESTORED on drop — the bare `set_var`s this replaces leaked them into every
+    // later test in the process, and took no lock while doing it (sc-12380).
+    let _env = EnvVars::set(&[
+        (
+            "PULID_FLUX_WEIGHTS",
+            pulid_adapter.to_str().expect("utf-8 pulid adapter path"),
+        ),
+        ("PULID_EVA_WEIGHTS", eva.to_str().expect("utf-8 eva path")),
+        (
+            "PULID_FACE_WEIGHTS_DIR",
+            bundle.to_str().expect("utf-8 face bundle dir"),
+        ),
+    ]);
 
     // Reference face: a portrait PNG (`SCENEWORKS_TEST_FACE`) if present, else the real face image
     // embedded in the face-align golden (`<bundle>/face_align_goldens.safetensors`, the same
@@ -6310,10 +6320,19 @@ fn flux_ip_reference_worker_e2e() {
             .unwrap_or_else(|| panic!("a complete {repo} snapshot with {needs}"))
     }
 
-    // Point the worker's HF-cache resolver + Settings at the real cache + a temp data dir.
-    std::env::set_var("HF_HUB_CACHE", hf_cache());
+    // Point the worker's HF-cache resolver + Settings at the real cache + a temp data dir. Through
+    // the crate-wide seam so both are restored on drop (these were bare `set_var`s that leaked, and
+    // `SCENEWORKS_DATA_DIR` in particular re-points every later `Settings::from_env()` in the
+    // process). This one deliberately reads the REAL cache — the point of the E2E — so it pins
+    // rather than isolates (sc-12380).
     let data = tempfile::tempdir().unwrap();
-    std::env::set_var("SCENEWORKS_DATA_DIR", data.path());
+    let _env = EnvVars::set(&[
+        ("HF_HUB_CACHE", hf_cache().as_str()),
+        (
+            "SCENEWORKS_DATA_DIR",
+            data.path().to_str().expect("utf-8 temp data dir"),
+        ),
+    ]);
     let settings = Settings::from_env();
 
     // (1) The worker's OWN staging fn, against the real cache (the net-new sc-3625 fs logic).

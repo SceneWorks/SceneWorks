@@ -750,10 +750,12 @@ fn f011_test_settings(data_dir: PathBuf) -> Settings {
 #[test]
 fn resolve_detector_weights_env_pin_missing_errors_and_unset_falls_through() {
     let key = "SCENEWORKS_PERSON_DETECTOR_WEIGHTS";
-    let _env_guard = crate::test_env::env_lock();
+    // Holds the lock for the whole staged mutation AND restores the operator's prior value on drop —
+    // including if an assertion below panics, which the hand-rolled restore tail could not. The body
+    // re-points `key` freely inside the guard.
+    let _env = crate::test_env::EnvVars::set(&[(key, "")]);
     let dir = tempfile::tempdir().expect("tempdir");
     let settings = f011_test_settings(dir.path().to_path_buf());
-    let prior = std::env::var_os(key);
 
     // Set but missing → loud InvalidPayload naming the key.
     std::env::set_var(
@@ -773,9 +775,5 @@ fn resolve_detector_weights_env_pin_missing_errors_and_unset_falls_through() {
         matches!(unset, Ok(None)),
         "an unset detector pin must fall through to Ok(None), got {unset:?}"
     );
-
-    match prior {
-        Some(value) => std::env::set_var(key, value),
-        None => std::env::remove_var(key),
-    }
+    // `_env` restores the prior value on drop.
 }

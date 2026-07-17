@@ -103,3 +103,70 @@ pub(crate) fn temp_env_vars<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) 
     let _vars = EnvVars::set(vars);
     body()
 }
+
+/// An unroutable URL. Port 0 is never listened on, so a request fails immediately and locally
+/// instead of depending on a stub's fidelity — a test that reaches the network fails loudly.
+pub(crate) const OFFLINE_URL: &str = "http://127.0.0.1:0";
+
+/// [`Settings`] with EVERY network field pinned unroutable. **Use this instead of
+/// `Settings::from_env()` in any test whose path could reach a download**, keeping the
+/// `..offline_settings()` spread last so the fields you do pin still win:
+///
+/// ```ignore
+/// let settings = Settings { data_dir: fixture, ..offline_settings() };
+/// ```
+///
+/// `Settings::from_env()` defaults `api_url` to the real local API and `huggingface_base_url` to the
+/// real `https://huggingface.co`, and a `..Settings::from_env()` spread silently inherits BOTH for
+/// every field the test did not think to name. The two are NOT interchangeable, which is the trap:
+/// a tier fetch dials `huggingface_base_url` (`HuggingFaceSnapshot::resolve` →
+/// `{base_url}/api/models/…/tree/…`) while `api_url` only carries progress/heartbeat. Pin only
+/// `api_url` and the failure path still goes red — but only after really resolving the tree against
+/// the live hub, and for a public repo that resolve SUCCEEDS, so bytes can start landing first.
+///
+/// That exact bug shipped twice (#1577, then sc-12380 one field over), and a third site was found
+/// mid-fix pinning `api_url` alone and saved only by an early-out upstream. Three of four call sites
+/// remembered both; one did not. Hence a helper that cannot forget, rather than four comments asking
+/// people to remember.
+///
+/// This pins struct fields only. The HF **cache dir** is a separate axis that a pinned `data_dir`
+/// does NOT make hermetic — `huggingface_hub_cache_dir` reads `HF_HUB_CACHE` /
+/// `HUGGINGFACE_HUB_CACHE` / `HF_HOME` BEFORE `data_dir` — so a test that resolves a cache must also
+/// pin those via [`EnvVars::set`].
+pub(crate) fn offline_settings() -> crate::Settings {
+    crate::Settings {
+        api_url: OFFLINE_URL.to_owned(),
+        huggingface_base_url: OFFLINE_URL.to_owned(),
+        ..crate::Settings::from_env()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`offline_settings`] must move every network field OFF its real default. The `assert_ne`s are
+    /// the load-bearing half: asserting only `== OFFLINE_URL` would still pass if someone
+    /// "simplified" the helper to `Settings::from_env()` on a box where the env happens to hold that
+    /// value, and it is dropping a pin — not the constant — that this exists to catch.
+    #[test]
+    fn offline_settings_pins_every_network_field_off_its_real_default() {
+        let offline = offline_settings();
+
+        assert_eq!(offline.api_url, OFFLINE_URL, "api_url must be unroutable");
+        assert_eq!(
+            offline.huggingface_base_url, OFFLINE_URL,
+            "huggingface_base_url is what a tier fetch dials — it must be unroutable"
+        );
+        assert_ne!(
+            offline.huggingface_base_url,
+            crate::DEFAULT_HUGGINGFACE_BASE_URL,
+            "the real hub must never survive into a test's Settings"
+        );
+        assert_ne!(
+            offline.api_url,
+            crate::DEFAULT_API_URL,
+            "the real API must never survive into a test's Settings"
+        );
+    }
+}

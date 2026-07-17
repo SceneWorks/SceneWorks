@@ -1333,9 +1333,12 @@ mod tests {
         };
 
         // Emulate an 8 GB Mac through the same env the epic added for exactly this (sc-10835).
-        std::env::set_var(MLX_MEMORY_CAP_ENV, "8");
-        let outcome = residency_for_dir("z_image_turbo", &q4);
-        std::env::remove_var(MLX_MEMORY_CAP_ENV);
+        // Through the crate-wide seam: `set_var` is process-global, and the hand-rolled
+        // set/`remove_var` pair this replaces both skipped the lock AND left the cap set for the rest
+        // of the process if the assertion below panicked between them (sc-12380).
+        let outcome = crate::test_env::temp_env_var(MLX_MEMORY_CAP_ENV, "8", || {
+            residency_for_dir("z_image_turbo", &q4)
+        });
 
         eprintln!("live gate on {} @ 8 GB → {outcome:?}", q4.display());
         assert_eq!(
