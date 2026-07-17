@@ -64,9 +64,11 @@ pub struct VideoRequest {
     ///
     /// Each video model declares the stride its engine actually needs, so the advertised
     /// buckets survive the floor: 16 for mochi (sc-11993) and for bernini / the Wan A14B
-    /// trio, 64 for ltx and svd. The A14B-family engines additionally cap area at 901,120
-    /// px; `maxPixels` is what keeps a raw over-cap request (retry / MCP / preset replay,
-    /// none of which pass through the UI dropdown) from reaching them (sc-12294).
+    /// trio, 64 for ltx and svd. Several engines additionally cap **area** — 921,600 px for the
+    /// 14B family (bernini / the Wan A14B trio / scail2) and 901,120 px for the TI2V-5B, each
+    /// its own upstream budget (sc-12308). `maxPixels` is what keeps a raw over-cap request
+    /// (retry / MCP / preset replay, none of which pass through the UI dropdown) from reaching
+    /// them (sc-12294).
     pub width: u32,
     pub height: u32,
     pub quality: String,
@@ -558,13 +560,12 @@ const DEFAULT_DIMENSION_MULTIPLE: u32 = 32;
 ///   `patch 2 × vae_stride 8`. The constraint is the engines' own divisibility check —
 ///   candle `SIZE_MULTIPLE_14B = 16`, enforced via `is_multiple_of`, and mlx's `align_dim`
 ///   rounding to `patch · vae_stride`. They now declare it, so bernini's own default
-///   848x480 stops silently rendering as 832x480. Their 720p buckets still move to 704, but
-///   for a different reason: the A14B **area** cap (704×1280 = 901,120 px), which candle
-///   hard-errors on and mlx i2v silently rescales for — not the stride.
+///   848x480 stops silently rendering as 832x480. `720 = 45·16` is ON this lattice, so these
+///   models advertise **true 720p** (`1280x720`) — see the area note below.
 /// * **32** — the dense Wan TI2V-5B (z48 vae22, `vae_stride 16` → candle `SIZE_MULTIPLE =
 ///   32`) and scail2 (hardcoded `DIM_ALIGN`) genuinely need it. There the *advertisement*
-///   was wrong, so their 720p buckets were corrected to the 704 they always rendered; both
-///   keep this default.
+///   was wrong, so their 720p buckets were corrected to the 704 they always rendered (`704 =
+///   32·22`; 720 is off a 32 lattice); both keep this default.
 /// * **64** — ltx (`validate_request` hard-errors below it: stage-1 runs at `//2//32`) and
 ///   svd (`SIZE_ALIGN = VAE_SCALE * 8`). A declared 32 was too *loose* for these: it could
 ///   floor onto a ÷32-but-not-÷64 size the engine then rejects.
@@ -635,17 +636,20 @@ fn max_pixels_of(model_manifest_entry: &JsonObject) -> Option<u64> {
 /// The largest `(width, height)` inside `max_pixels` that preserves the input aspect ratio and
 /// stays on the `multiple` lattice.
 ///
-/// A direct port of the mlx engine's `best_output_size` (`mlx-gen-wan/src/pipeline.rs:94`,
-/// itself a port of `generate_wan.py`'s `_best_output_size`): derive the ideal `(ow, oh)` from
-/// `√(max_area·ratio)`, then try width-first and height-first alignment and keep whichever
-/// distorts the ratio less. Porting it rather than inventing a fit is the point of the story —
-/// mlx I2V/TI2V silently rescale through this exact function, so matching it is what makes the
-/// app's normalization agree with the backend that rescales, while keeping the result inside the
-/// cap that the candle backend hard-errors on. One geometry, both backends (sc-12294).
+/// Keeps the shape of `generate_wan.py`'s `_best_output_size`: derive the ideal `(ow, oh)` from
+/// `√(max_area·ratio)`, then try width-first and height-first alignment and keep whichever distorts
+/// the ratio less.
 ///
-/// The `.max(d)` clamps mirror the engine's own F-030 guard against a degenerate area flooring a
-/// dimension to 0 (and a subsequent `area / 0` → NaN ratio). They cannot fire for any *shipped*
-/// cap, and the port is kept faithful rather than trimmed.
+/// **This is app-layer normalization, not a mirror of engine code (sc-12308).** It was originally
+/// ported from mlx's `best_output_size` so the app would agree with the backend that *silently
+/// rescaled*. Neither backend does that any more — mlx now rejects an over-cap request exactly as
+/// candle always did — so this function's job is to normalize a genuinely over-cap **custom** request
+/// into a legal geometry before it ever reaches an engine. It must never fire for an advertised
+/// bucket: with each model's cap corrected to its own engine's real budget, every bucket is a fixed
+/// point (pinned by `shipped_manifest_matches_each_engines_real_geometry`).
+///
+/// The `.max(d)` clamps guard against a degenerate area flooring a dimension to 0 (and a subsequent
+/// `area / 0` → NaN ratio). They cannot fire for any *shipped* cap, and are kept rather than trimmed.
 ///
 /// The bound comes from the shipped caps, NOT from [`max_pixels_of`]'s filter — that distinction
 /// matters if a future cap is added. [`MIN_HONORABLE_MAX_PIXELS`] only guarantees a *square*
@@ -654,9 +658,10 @@ fn max_pixels_of(model_manifest_entry: &JsonObject) -> Option<u64> {
 /// stride 16, violating [`normalized_dimensions`]'s own 256 floor and every engine's `min_size`).
 /// What actually rules the clamps out is the reachable minimum: [`normalized_dimensions`] clamps
 /// both inputs to `[256, 1920]`, so the aspect ratio cannot exceed `1920/256 = 7.5`, and at the
-/// only cap the manifest declares (901,120) the smaller ideal dimension is `√(901120/7.5) ≈ 346`
-/// — comfortably above every stride, so nothing floors to 0. A cap below ~491,520 would put an
-/// extreme-ratio request back into clamp territory; the manifest's caps are test-pinned.
+/// SMALLEST cap the manifest declares (the 5B's 901,120) the smaller ideal dimension is
+/// `√(901120/7.5) ≈ 346` — comfortably above every stride, so nothing floors to 0. (The 14B family's
+/// 921,600 is larger, so it is slacker still.) A cap below ~491,520 would put an extreme-ratio
+/// request back into clamp territory; the manifest's caps are test-pinned.
 fn fit_to_max_pixels(width: u32, height: u32, multiple: u32, max_pixels: u64) -> (u32, u32) {
     let (w, h, d) = (width as f64, height as f64, multiple as f64);
     let area = max_pixels as f64;
@@ -900,11 +905,11 @@ mod tests {
         })));
         assert_eq!((bernini.width, bernini.height), (848, 480));
 
-        // A finer floor is NOT a licence to advertise 720p. The A14B family (bernini + the
-        // Wan trio) is capped by AREA, not stride: candle hard-errors above MAX_AREA_14B
-        // (704×1280 = 901,120 px) and mlx i2v silently rescales 1280×720 → 1264×704. So
-        // 1280x704 — exactly AT the cap — is the real 1280-wide bucket, and it must survive
-        // the ÷16 floor untouched.
+        // The grid-16 14B family (bernini + the Wan trio) renders TRUE 720p: `720 = 45·16` is on
+        // its lattice and `1280×720 = 921,600` is exactly its area cap (upstream's own
+        // `MAX_AREA_CONFIGS` for t2v/i2v-A14B and vace-14B). It must survive the ÷16 floor AND the
+        // area fit untouched. This bucket was previously advertised at 1280x704 — the TI2V-5B's
+        // geometry — because the cap wrongly carried the 5B's 901,120 (sc-12308).
         for model in [
             "bernini",
             "wan_2_2_t2v_14b",
@@ -912,16 +917,18 @@ mod tests {
             "wan_2_2_vace_fun_14b",
         ] {
             let req = VideoRequest::from_payload(&payload(json!({
-                "projectId": "p", "model": model, "width": 1280, "height": 704,
-                "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 16 } }
+                "projectId": "p", "model": model, "width": 1280, "height": 720,
+                "modelManifestEntry": { "limits": {
+                    "requiresDimensionsMultipleOf": 16, "maxPixels": 921_600
+                } }
             })));
             assert_eq!(
                 (req.width, req.height),
-                (1280, 704),
-                "{model} must keep its at-cap 1280x704 bucket"
+                (1280, 720),
+                "{model} must render its canonical 720p as asked, not refit it"
             );
             assert!(
-                (req.width as usize) * (req.height as usize) <= 704 * 1280,
+                (req.width as usize) * (req.height as usize) <= 1280 * 720,
                 "{model} bucket must fit MAX_AREA_14B"
             );
 
@@ -1018,17 +1025,17 @@ mod tests {
     /// `max_pixels` — the engine's area cap; `None` = neither backend caps, so the manifest
     /// must NOT invent one.
     ///
-    /// Where the backends disagree the table carries the STRICTER side, because one manifest
-    /// serves both:
-    /// * `wan_2_2_t2v_14b`  — candle errors (`wan14b.rs:645`); mlx `max_area: 0`, uncapped.
-    /// * `wan_2_2_vace_fun_14b` — candle errors (`model_vace.rs:298`); mlx uncapped (`:107`).
-    /// * `bernini`  — candle errors (`candle-gen-bernini/src/config.rs:164`); mlx calls
-    ///   `align_dim` directly and never caps.
-    /// * `scail2_14b` — candle errors (`candle-gen-scail2/src/pipeline.rs:294`); mlx uncapped.
-    /// * `wan_2_2` (TI2V-5B) — the reverse: mlx caps + silently rescales
-    ///   (`config.rs:293`); candle's 5B `validate` (`lib.rs:328`) has NO area check.
-    /// * `wan_2_2_i2v_14b` — the only agreement, and even there candle errors while mlx
-    ///   rescales.
+    /// **The backends now agree** — sc-12308 reconciled them, so the table is simply each
+    /// engine's cap rather than the stricter of two answers. Both reject an over-cap request
+    /// (candle `wan14b.rs:645` / `model_vace.rs:298` / `candle-gen-bernini/src/config.rs:164` /
+    /// `candle-gen-scail2/src/pipeline.rs:294` / `lib.rs`'s new `MAX_AREA_5B` check; mlx
+    /// `validate_impl` → `reject_over_area`), at these values.
+    ///
+    /// Before that they disagreed three ways on one manifest entry, and the table had to carry
+    /// the strictest: mlx T2V/VACE/bernini/scail2 were **uncapped**, mlx I2V/5B **silently
+    /// refit** (1280×720 → 1264×704, off every advertised bucket), and candle **hard-errored**
+    /// — except candle's own 5B, which had no area check at all and ran to an opaque OOM. The
+    /// values themselves were wrong too: the whole 14B family carried the TI2V-5B's 901,120.
     /// * `ltx_2_3` / `ltx_2_3_eros` / `svd` / `mochi_1` — no `maxPixels`-expressible area cap in
     ///   either backend, so no cap is declared. Not literally "no checks": candle-LTX caps
     ///   **latent tokens** (`candle-gen-ltx/src/lib.rs:454`: `t_lat·h_lat·w_lat > 131_072`), which
@@ -1045,12 +1052,19 @@ mod tests {
         ("ltx_2_3_eros", Some(64), None),
         ("svd", Some(64), None),
         ("mochi_1", Some(16), None),
+        // The 5B keeps 901,120 — upstream gives `ti2v-5B` exactly `1280*704` / `704*1280`, and its
+        // z48 VAE's 32-px grid is why 704, not 720, is its real 720p.
         ("wan_2_2", None, Some(901_120)),
-        ("wan_2_2_t2v_14b", Some(16), Some(901_120)),
-        ("wan_2_2_i2v_14b", Some(16), Some(901_120)),
-        ("wan_2_2_vace_fun_14b", Some(16), Some(901_120)),
-        ("bernini", Some(16), Some(901_120)),
-        ("scail2_14b", None, Some(901_120)),
+        // The 14B family carries upstream's own `1280*720` = 921,600 budget (sc-12308). It was
+        // 901,120 here only because the engine constant had borrowed the 5B's number.
+        ("wan_2_2_t2v_14b", Some(16), Some(921_600)),
+        ("wan_2_2_i2v_14b", Some(16), Some(921_600)),
+        ("wan_2_2_vace_fun_14b", Some(16), Some(921_600)),
+        ("bernini", Some(16), Some(921_600)),
+        // SCAIL-2 shares the 14B cap, but its buckets stay 704-tall for an unrelated reason: its
+        // own `DIM_ALIGN = 32` tiling grid (mlx-gen-scail2/src/generate.rs:73) — NOT the VAE stride
+        // — so 720 is off ITS lattice even though the area now fits.
+        ("scail2_14b", None, Some(921_600)),
     ];
 
     /// The `models` array of the SHIPPED manifest — the exact bytes the app embeds and seeds.
@@ -1958,11 +1972,16 @@ mod tests {
 
     /// sc-12294 BLOCKER — the case the dropdown never produces but every raw path does.
     ///
-    /// `1280x720` was the shipped `defaults.resolution` of the A14B T2V/I2V entries, so it is
-    /// the single most common stored value. On `main` a blanket ÷32 floored it to 1280x704 (=
-    /// the cap exactly) by accident. Declaring ÷16 removes that accidental protection — so the
-    /// cap must be enforced, or job retry / MCP / `POST /api/v1/jobs` / preset replay would
-    /// hand candle a hard error and mlx a silent rescale.
+    /// `1280x720` is the shipped `defaults.resolution` of the A14B T2V/I2V entries, so it is
+    /// the single most common stored value. On `main` a blanket ÷32 floored it to 1280x704 by
+    /// accident. Declaring ÷16 removes that accidental protection — so each model's cap must be
+    /// enforced, or job retry / MCP / `POST /api/v1/jobs` / preset replay would hand an engine a
+    /// geometry it rejects.
+    ///
+    /// sc-12308 changed what "legal" means per model, and this test spans both answers: the ÷16
+    /// 14B family now renders 1280x720 as-is (it is exactly at their 921,600 cap), while the ÷32
+    /// models (the 5B, scail2) still floor it to 1280x704 on their stride. Same stored value,
+    /// two legal outcomes — which is the point of judging against [`ENGINE_GEOMETRY`] per model.
     ///
     /// Driven through the REAL manifest entries, but judged against [`ENGINE_GEOMETRY`] — the
     /// engine's truth, never the manifest's own claim. Reading the cap back out of the entry
@@ -1995,7 +2014,7 @@ mod tests {
                 assert!(
                     (request.width as u64) * (request.height as u64) <= *cap,
                     "{id}: stored 1280x720 -> {}x{} = {} px exceeds the engine cap {cap} — \
-                     candle would hard-error and mlx would silently rescale",
+                     both backends would now reject it",
                     request.width,
                     request.height,
                     (request.width as u64) * (request.height as u64)
@@ -2004,33 +2023,48 @@ mod tests {
         }
     }
 
-    /// The fit is a port of mlx's `best_output_size`, and this pins it to the value the
-    /// engine's OWN test pins (`mlx-gen-wan/src/pipeline.rs:1510`): `best_output_size(1280,
-    /// 720, 16, 16, 704*1280) == (1264, 704)`. If the two ever diverge, the app stops agreeing
-    /// with the backend that silently rescales — which is the whole reason to port rather than
-    /// invent a fit.
+    /// The fit normalizes a genuinely over-cap CUSTOM request into a legal geometry, keeping the
+    /// shape of the reference's `_best_output_size` (aspect-preserving, grid-aligned, shrink-only).
+    ///
+    /// **sc-12308 reframed why this exists.** It used to be justified as mirroring mlx's
+    /// `best_output_size` so the app "agreed with the backend that silently rescales". Neither
+    /// backend rescales any more — both reject over-cap geometry — so this is now *app-layer
+    /// normalization*: it is what keeps a custom over-cap request from reaching an engine that would
+    /// reject it. It is no longer a mirror of engine code, so it is pinned on its own contract.
+    ///
+    /// Crucially it must NOT fire for anything advertised: `shipped_manifest_matches_each_engines_real_geometry`
+    /// pins every bucket as a fixed point, and the 14B family's `1280x720` is exactly at its cap.
     #[test]
-    fn area_fit_matches_the_mlx_engines_own_pinned_value() {
-        assert_eq!(fit_to_max_pixels(1280, 720, 16, 901_120), (1264, 704));
+    fn area_fit_normalizes_only_genuinely_over_cap_requests() {
+        // 14B family: the canonical 720p sits AT the cap (the check is `>`), so it is untouched.
+        // This is the sc-12308 regression — it used to be refit to 1264x704, off every bucket.
+        assert_eq!(1280 * 720, 921_600);
+        assert_eq!(fit_to_max_pixels(1280, 720, 16, 921_600), (1280, 720));
+        let at_cap = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "wan_2_2_i2v_14b", "width": 1280, "height": 720,
+            "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 16, "maxPixels": 921_600 } }
+        })));
+        assert_eq!(
+            (at_cap.width, at_cap.height),
+            (1280, 720),
+            "the 14B family's canonical 720p must survive normalization untouched"
+        );
 
-        // Aspect-preserving and grid-aligned, and it only ever shrinks.
-        let (w, h) = fit_to_max_pixels(1280, 720, 16, 901_120);
-        assert!((w as u64) * (h as u64) <= 901_120, "fits the cap");
+        // A genuinely over-cap custom request IS normalized: aspect-preserving, grid-aligned,
+        // shrink-only, and inside the cap.
+        let (w, h) = fit_to_max_pixels(1280, 1024, 16, 921_600);
+        assert!((w as u64) * (h as u64) <= 921_600, "fits the cap");
         assert_eq!((w % 16, h % 16), (0, 0), "lands on the declared lattice");
-        assert!(w <= 1280 && h <= 720, "never upscales");
-        let (orig, fitted) = (1280.0 / 720.0, w as f64 / h as f64);
+        assert!(w <= 1280 && h <= 1024, "never upscales");
+        let (orig, fitted) = (1280.0 / 1024.0, w as f64 / h as f64);
         assert!(
             (orig - fitted).abs() / orig < 0.05,
             "aspect preserved within 5%: {orig} vs {fitted}"
         );
 
-        // An at-cap request is untouched: the engines check `>`, so 901,120 exactly passes.
+        // The 5B keeps its own smaller budget, so ITS 720p is 704-tall and also a fixed point.
         assert_eq!(1280 * 704, 901_120);
-        let at_cap = VideoRequest::from_payload(&payload(json!({
-            "projectId": "p", "model": "wan_2_2_i2v_14b", "width": 1280, "height": 704,
-            "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 16, "maxPixels": 901_120 } }
-        })));
-        assert_eq!((at_cap.width, at_cap.height), (1280, 704));
+        assert_eq!(fit_to_max_pixels(1280, 704, 32, 901_120), (1280, 704));
     }
 
     /// A model that declares no `maxPixels` is UNCONSTRAINED — the default-absent behavior that
