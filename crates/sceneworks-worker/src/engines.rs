@@ -1464,6 +1464,204 @@ mod tests {
         }
     }
 
+    /// Every image model in the shipped `builtin.models.jsonc`. A model added, removed, or renamed
+    /// without updating this list trips the count tripwire in
+    /// [`shipped_image_geometry_is_within_the_pinned_engine_envelope`], so a new image model cannot
+    /// silently ship with its advertised geometry unchecked against its engine (sc-12384 — the image
+    /// twin of [`pinned_engine_geometry`]'s `EXPECTED_VIDEO_IDS`). Backend-independent: this is the
+    /// full catalog set, and each id is size-checked on whichever backend(s) resolve its engine.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    const EXPECTED_IMAGE_IDS: &[&str] = &[
+        "z_image_turbo",
+        "z_image",
+        "z_image_edit",
+        "qwen_image",
+        "qwen_image_edit_2511",
+        "qwen_image_edit_2511_lightning",
+        "lens",
+        "lens_turbo",
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "flux_schnell",
+        "flux_dev",
+        "ideogram_4",
+        "ideogram_4_turbo",
+        "boogu_image",
+        "boogu_image_turbo",
+        "boogu_image_edit",
+        "krea_2_turbo",
+        "krea_2_raw",
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2",
+        "flux2_dev",
+        "chroma1_hd",
+        "chroma1_base",
+        "chroma1_flash",
+        "kolors",
+        "sd3_5_large",
+        "sd3_5_large_turbo",
+        "sd3_5_medium",
+        "sana_1600m",
+        "sana_sprint_1600m",
+        "anima_base",
+        "anima_aesthetic",
+        "anima_turbo",
+        "sdxl",
+        "realvisxl",
+        "realvisxl_lightning",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
+        "instantid_realvisxl",
+        "pulid_flux_dev",
+        "bernini_image",
+    ];
+
+    /// The backend-effective default resolution (`<backend>.defaults.resolution` overriding the base
+    /// `defaults.resolution`) — the scalar companion to [`effective_list`], which handles the
+    /// per-backend list axes. `None` when the model declares no default at all.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn effective_default_resolution(model: &serde_json::Value, backend: &str) -> Option<String> {
+        let pick = |scope: &serde_json::Value| {
+            scope
+                .get("defaults")
+                .and_then(|d| d.get("resolution"))
+                .and_then(|r| r.as_str())
+                .map(str::to_owned)
+        };
+        model.get(backend).and_then(pick).or_else(|| pick(model))
+    }
+
+    /// sc-12384 — the image-lane twin of [`shipped_manifest_matches_each_engines_real_geometry`]
+    /// (sc-12294, video) and [`pinned_engine_geometry`] (sc-12409): every image model's advertised
+    /// geometry — each `limits.resolutions` bucket AND the shipped `defaults.resolution` — must be
+    /// LEGAL on the engine that actually ships, the one pinned by `Cargo.toml`'s `runtime-*` tag.
+    ///
+    /// The bug this closes: `bernini_image`'s own 1024² default was engine-rejected on candle and
+    /// nothing caught it, because `limits.maxPixels` / `requiresDimensionsMultipleOf` are read only
+    /// on the VIDEO request path (`video_request.rs`) — an image model's manifest buckets were an
+    /// unchecked claim. This asserts them against the PINNED descriptor's `[min_size, max_size]`
+    /// envelope (each provider sets those from its own `RES_MIN`/`RES_MAX` const), so a catalog
+    /// bucket that overshoots an engine's envelope — OR a `runtime-*` pin bump that narrows one —
+    /// is RED here instead of a silent job-time reject (candle) or wrong-aspect refit (mlx).
+    ///
+    /// It found two live over-advertisements when written: SANA (its per-side 1024 DC-AE envelope
+    /// — the 1152/1216 buckets hard-error) and SenseNova (per-side 2048 — the 2720/2496/2368 buckets
+    /// were silently squashed to a wrong aspect by `image_jobs::sensenova::sensenova_dim`). Both were
+    /// trimmed catalog-side; the fix is the catalog, because each engine cap is deliberate (SANA's is
+    /// test-pinned, `max_size_is_the_validated_1024_envelope`).
+    ///
+    /// Runs on whichever backend the current lane compiles — mlx on macOS CI, candle on the
+    /// `backend-candle` Windows CI — each checking the binary its own platform ships. A model that
+    /// registers on only one backend is size-checked on that backend's lane (every shipped image
+    /// model registers on at least one); the count tripwire is backend-independent, so a new image
+    /// model must still be assessed on both.
+    ///
+    /// SCOPE: the `[min, max]` size envelope — the axis `Capabilities` exposes, and the axis both
+    /// live bugs sat on. The per-engine ÷8/÷16/÷32 STRIDE is checked inside each engine's `validate`
+    /// and is NOT on `Capabilities`; every current image bucket is on-stride, so tying image strides
+    /// to a pinned const (as sc-12409 did for the wan-14B family, and sc-12587 tracks for the
+    /// remaining VIDEO strides) is a coverage extension tracked in sc-12612 — the image twin — not a
+    /// live miss.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn shipped_image_geometry_is_within_the_pinned_engine_envelope() {
+        let backend = if cfg!(target_os = "macos") {
+            "mlx"
+        } else {
+            "candle"
+        };
+        let manifest = parse_builtin_models();
+        let models = manifest["models"].as_array().expect("models array");
+        let image_models: Vec<&serde_json::Value> = models
+            .iter()
+            .filter(|m| m["type"].as_str() == Some("image"))
+            .collect();
+
+        // Count/rename tripwire (backend-independent): the shipped image set must be exactly
+        // EXPECTED_IMAGE_IDS. A new or renamed image model is RED here until it is added — and thereby
+        // consciously assessed against its engine's envelope — rather than shipping unguarded.
+        let mut shipped_ids: Vec<&str> = image_models
+            .iter()
+            .filter_map(|m| m["id"].as_str())
+            .collect();
+        shipped_ids.sort_unstable();
+        let mut expected = EXPECTED_IMAGE_IDS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            shipped_ids, expected,
+            "the shipped image-model set changed — add the new/renamed id to EXPECTED_IMAGE_IDS and \
+             confirm its advertised buckets + default fit its engine's [min_size, max_size] envelope \
+             (sc-12384); do not let a new image model ship with unchecked geometry"
+        );
+
+        let mut checked = 0usize;
+        for model in image_models {
+            let id = model["id"].as_str().expect("image model has an id");
+            // The PINNED engine's size envelope on THIS backend, or skip: a model that registers only
+            // on the other backend (a mac-only edit lane on the candle lane) or runs through a bespoke
+            // provider with no gen-core descriptor (InstantID; candle PuLID) is size-checked on the
+            // lane that does resolve it — the count tripwire above still forces every id to be listed.
+            let Some(resolved) = mlx_model(id) else {
+                continue;
+            };
+            let min = resolved.descriptor.capabilities.min_size;
+            let max = resolved.descriptor.capabilities.max_size;
+
+            // The backend-effective advertised buckets, plus the backend-effective default (which the
+            // picker preselects and sc-12400's `default_resolution` now hands the engine verbatim).
+            let buckets = effective_list(model, backend, "resolutions").unwrap_or_default();
+            let default = effective_default_resolution(model, backend);
+            assert!(
+                !buckets.is_empty() || default.is_some(),
+                "{id}: resolves engine {:?} on {backend} but advertises no resolutions or default \
+                 to check — an image model with a real engine must declare its geometry",
+                resolved.engine_id()
+            );
+            // The default must itself be one of the advertised buckets — a default the picker can't
+            // land on is a UI bug (mirrors the video guard's `default is one of its buckets` check).
+            if let Some(default) = &default {
+                assert!(
+                    buckets.iter().any(|b| b == default),
+                    "{id}: default resolution {default} is not one of its advertised buckets \
+                     {buckets:?} — the picker preselects a size the user cannot re-select (sc-12384)"
+                );
+            }
+            // Every advertised bucket AND the default is a claim the engine must honor: each must sit
+            // inside the PINNED engine's [min_size, max_size] envelope, on both axes.
+            for res in buckets.iter().chain(default.iter()) {
+                let (w, h) = res
+                    .split_once('x')
+                    .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+                    .unwrap_or_else(|| panic!("{id}: malformed resolution {res:?}"));
+                assert!(
+                    (min..=max).contains(&w) && (min..=max).contains(&h),
+                    "{id}: advertised {res} is outside its PINNED engine's size envelope \
+                     [{min}, {max}] on the {backend} backend — the catalog advertises a bucket the \
+                     shipped engine rejects (candle) or silently refits (mlx). Trim the catalog, or \
+                     move the `runtime-*` pin and the catalog in lockstep (sc-12384)."
+                );
+            }
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no image model resolved an engine on the {backend} backend — the guard would be \
+             vacuously green; a linked provider registry is required (macos/backend-candle)"
+        );
+    }
+
     /// sc-11991 (epic 1788): `mochi_1` resolves through THIS module to a real gen-core descriptor on
     /// the active backend — the story's acceptance criterion, asserted directly.
     ///
