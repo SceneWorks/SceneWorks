@@ -42,6 +42,24 @@ pub(crate) async fn create_image_job(
         .unwrap_or(payload.model.as_str())
         .to_owned();
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    // The model's declared `defaults.resolution`, keyed off the post-preset `model_id` for the same
+    // reason the video route's gates are (sc-12300). The image half of the dead-`defaults.*` sweep:
+    // the web honors this key (`ImageStudio.jsx:215`) but Rust did not, so a caller that named no
+    // size rendered a blanket 1024x1024 — HALF the declared 2048x2048 on the four sensenova_u1_8b
+    // variants, the text/infographic family where resolution is the whole point, and 1024 instead of
+    // chroma1_flash's declared 768. Silent: geometry coerces, so nothing ever errored (sc-12400).
+    //
+    // Written back per side only when the caller named none, so a caller's own size is untouched.
+    if let Some(entry) = model_manifest_entry.as_object() {
+        let (default_width, default_height) =
+            image_default_resolution(entry).unwrap_or((1024, 1024));
+        if !job_payload.contains_key("width") {
+            job_payload.insert("width".to_owned(), Value::from(default_width));
+        }
+        if !job_payload.contains_key("height") {
+            job_payload.insert("height".to_owned(), Value::from(default_height));
+        }
+    }
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility_with(
         &state,

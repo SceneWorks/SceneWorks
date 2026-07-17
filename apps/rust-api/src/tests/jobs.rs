@@ -4118,3 +4118,99 @@ async fn real_manifest_mochi_refuses_an_unadvertised_fps_and_defaults_to_its_own
         assert_eq!(body["payload"]["fps"], fps);
     }
 }
+
+/// sc-12400 (image half): a request that names no size renders the MODEL's declared
+/// `defaults.resolution`, not a blanket 1024 square.
+///
+/// The image twin of `a_video_request_naming_no_duration_is_admitted_at_the_models_own_default`,
+/// and against the REAL manifest for the same reason: the bug is precisely that the DTO's blanket
+/// was never compared to what each model declares, so a fixture would let me pick the values that
+/// hide it.
+///
+/// No 400 to observe on this axis — geometry coerces — so the observable IS the enqueued size. The
+/// expectations are transcribed from the manifest, never derived from `default_resolution`: routing
+/// them through the function under test is what made the video half's first cut a tautology that
+/// survived deleting the feature.
+#[tokio::test]
+async fn an_image_request_naming_no_size_renders_the_models_own_declared_resolution() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    sceneworks_core::builtin_manifests::seed_builtin_manifests(
+        &settings.config_dir,
+        sceneworks_core::builtin_manifests::SeedMode::Overwrite,
+    )
+    .expect("builtin manifests seed");
+
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Image Default Resolution Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // The two models the blanket was WRONG for, plus a model it happened to match. Listing the
+    // coincidental match alongside the victims is what keeps this a per-model assertion rather than
+    // "the route returns 1024".
+    for (model, want_w, want_h) in [
+        // 2048x2048 declared: the blanket rendered these at HALF resolution, on the
+        // text/infographic family where pixels are the entire point.
+        ("sensenova_u1_8b", 2048, 2048),
+        ("sensenova_u1_8b_fast", 2048, 2048),
+        // 768x768 declared.
+        ("chroma1_flash", 768, 768),
+        // 1024x1024 declared — the blanket was right here by coincidence, not by design.
+        ("flux1_schnell", 1024, 1024),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "mode": "text_to_image",
+                "prompt": "a fox",
+                "model": model
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{model}: {body}");
+        assert_eq!(
+            (
+                body["payload"]["width"].as_u64(),
+                body["payload"]["height"].as_u64()
+            ),
+            (Some(want_w), Some(want_h)),
+            "{model}: a size-less request must enqueue the model's declared defaults.resolution: \
+             {body}"
+        );
+    }
+
+    // A NAMED size is honored verbatim — resolution fills a gap, it never overrides.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "a fox",
+            "model": "sensenova_u1_8b",
+            "width": 512,
+            "height": 512
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        (
+            body["payload"]["width"].as_u64(),
+            body["payload"]["height"].as_u64()
+        ),
+        (Some(512), Some(512)),
+        "a caller's own size must not be replaced by the model's default: {body}"
+    );
+}

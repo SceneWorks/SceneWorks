@@ -11,8 +11,8 @@ use serde_json::Value;
 
 use crate::contracts::{ImageUpscaleRequest, JsonObject};
 use crate::payload_util::{
-    array_or_empty, clamped_u32, int_array, nonempty_string_or, object_or_empty, optional_i64,
-    optional_id, string_list, string_or,
+    array_or_empty, clamped_u32, declared_resolution, int_array, nonempty_string_or,
+    object_or_empty, optional_i64, optional_id, string_list, string_or,
 };
 
 /// Default model when the payload omits one (matches the Python worker).
@@ -23,6 +23,32 @@ const DEFAULT_STYLE_PRESET: &str = "cinematic";
 /// video request (sc-6139) so image- and video-conditioned sources normalize identically.
 pub(crate) const DEFAULT_FIT_MODE: &str = "crop";
 pub(crate) const FIT_MODES: [&str; 4] = ["crop", "pad", "outpaint", "stretch"];
+
+/// The square used when neither the caller nor the model's manifest entry names a size — the
+/// historical blanket, kept for models that declare no `defaults.resolution`.
+const DEFAULT_DIMENSION: u32 = 1024;
+
+/// The payload-sanity bounds on either dimension (the Python `safe_int` clamp). Deliberately wider
+/// than the video lane's 1920 ceiling: image models legitimately render at 2048 (the sensenova U1
+/// family declares `2048x2048`), which is why [`default_resolution`] takes its bounds rather than
+/// sharing one envelope across lanes.
+const MIN_DIMENSION: u32 = 256;
+const MAX_DIMENSION: u32 = 4096;
+
+/// `defaults.resolution` from a resolved manifest entry as `(width, height)`, or `None` for the
+/// blanket [`DEFAULT_DIMENSION`] square.
+///
+/// The image half of the dead-`defaults.*` sweep (sc-12400 closed the video lane's fps / duration /
+/// resolution). The web honors this key (`ImageStudio.jsx:215`); Rust did not, so a raw API / MCP
+/// caller that named no size rendered a blanket 1024x1024 for **5 of the 45** image models that
+/// declare something else — the four `sensenova_u1_8b` variants at `2048x2048` (HALF the declared
+/// resolution, on the text/infographic family where pixels are the point) and `chroma1_flash` at
+/// `768x768`.
+///
+/// Same never-invent-from-a-typo posture as its video twin; see [`declared_resolution`].
+pub fn default_resolution(model_manifest_entry: &JsonObject) -> Option<(u32, u32)> {
+    declared_resolution(model_manifest_entry, MIN_DIMENSION, MAX_DIMENSION)
+}
 
 /// A typed image-generation request, parsed from a job payload.
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +96,12 @@ impl ImageRequest {
     /// missing fields fall back to the Python defaults and `project_id` may be empty
     /// — the caller validates it is present (the worker rejects an empty project id).
     pub fn from_payload(payload: &JsonObject) -> Self {
+        // Hoisted above the struct literal because the geometry now depends on it — the same shape
+        // `VideoRequest::from_payload` uses, and the reason the field is read here rather than in
+        // field order below.
+        let model_manifest_entry = object_or_empty(payload, "modelManifestEntry");
+        let (default_width, default_height) = default_resolution(&model_manifest_entry)
+            .unwrap_or((DEFAULT_DIMENSION, DEFAULT_DIMENSION));
         Self {
             project_id: string_or(payload, "projectId", ""),
             mode: nonempty_string_or(payload, "mode", DEFAULT_MODE),
@@ -79,8 +111,18 @@ impl ImageRequest {
             count: clamped_u32(payload.get("count"), 4, 1, 8),
             seed: optional_i64(payload, "seed"),
             seeds: int_array(payload, "seeds"),
-            width: clamped_u32(payload.get("width"), 1024, 256, 4096),
-            height: clamped_u32(payload.get("height"), 1024, 256, 4096),
+            width: clamped_u32(
+                payload.get("width"),
+                default_width,
+                MIN_DIMENSION,
+                MAX_DIMENSION,
+            ),
+            height: clamped_u32(
+                payload.get("height"),
+                default_height,
+                MIN_DIMENSION,
+                MAX_DIMENSION,
+            ),
             style_preset: nonempty_string_or(payload, "stylePreset", DEFAULT_STYLE_PRESET),
             loras: array_or_empty(payload, "loras"),
             character_id: optional_id(payload, "characterId"),
@@ -90,7 +132,7 @@ impl ImageRequest {
             reference_asset_ids: string_list(payload, "referenceAssetIds"),
             mask_asset_id: optional_id(payload, "maskAssetId"),
             fit_mode: normalize_fit_mode(payload.get("fitMode").and_then(Value::as_str)),
-            model_manifest_entry: object_or_empty(payload, "modelManifestEntry"),
+            model_manifest_entry,
             advanced: object_or_empty(payload, "advanced"),
             upscale: parse_upscale(payload),
         }
