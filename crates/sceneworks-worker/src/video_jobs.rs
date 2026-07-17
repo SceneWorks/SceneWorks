@@ -11904,6 +11904,105 @@ mod tests {
         );
     }
 
+    /// **The floor-vs-full seam** — the one case where sc-12322's two gates DISAGREE, and the only
+    /// thing that pins the post-download `mochi_preflight` call now that `mochi_precheck` runs the same
+    /// `mochi_fit_check` earlier.
+    ///
+    /// Why the sibling tests can't cover this: they stage a COMPLETE tier, so the pre-check measures the
+    /// full weights and refuses first — the preflight becomes unobservable, and inlining it away stays
+    /// green (caught only by clippy's dead-code cascade, not by `cargo test`; sc-12318 AC #1).
+    ///
+    /// This makes the two verdicts diverge, with **no download and no network**:
+    ///   * `mlxQuantize: 8` ⇒ the pre-check names the **absent** `q8/` dir, so `mochi_resident_bytes`
+    ///     folds only the shared `text_encoder/` + `vae/` siblings — a 9.73 GiB FLOOR (`q4/` is not a
+    ///     folded component). At 115 frames: 9.73 + 46.58 + 2 = **58.31 ⇒ ADMITS** a 64 GB budget.
+    ///   * `ensure_mochi_q8_present` then no-ops rather than fetching: `drive_mochi_arm`'s `data_dir`
+    ///     has no HF cache, so `huggingface_snapshot_dir` is `None` and `ensure_mochi_tier_present`
+    ///     early-returns `Ok(())`. That is what keeps this hermetic — the divergence normally needs a
+    ///     real ~13 GiB download to materialize the tier.
+    ///   * `resolve_mochi_model_dir` falls back to the installed `q4/`, so `mochi_preflight` sees the
+    ///     FULL 18.73 GiB: 18.73 + 46.58 + 2 = **67.32 ⇒ REFUSES**.
+    ///
+    /// So the job is admitted by the floor and refused by the full check — exactly the case the
+    /// post-download gate exists for. It is REACHABLE in production (a 64 GB Mac, bf16/q8 not yet
+    /// installed, ~2.8-4.2 s clip — well under `hardMaxDuration`'s 151 frames), and without the
+    /// preflight those jobs run into MLX's `exit(-1)`.
+    ///
+    /// Kills the sc-12318 AC #1 mutation — inline `video_frame_count` + `mochi_tier_quant` in place of
+    /// `mochi_preflight` — which passes 856/0 on main: the pre-check admits here, so nothing else
+    /// refuses, the engine loads, and both assertions below fail.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn generate_mochi_using_refuses_after_the_fetch_when_the_precheck_floor_admitted() {
+        // q4 installed at its real hosted size; q8 is NOT — the fixture stages no other tier.
+        let root = mochi_root_real_sized("arm_floor_vs_full");
+        let probe = ArmProbe::default();
+        // 3.8 s x 30 fps = 114 raw ⇒ 115 frames at 848x480, inside the 109..127 divergence window on a
+        // 64 GB Mac. Every geometry term is EXPLICIT because `VideoRequest`'s defaults are none of
+        // Mochi's, and each default silently moves this OFF the seam — into the region where the floor
+        // and the full check agree — leaving a green test that proves nothing. The window is only ~9 GiB
+        // wide (the q4 tier), so it is unforgiving of drift:
+        //   * `fps` defaults to 25, not Mochi's 30 ⇒ 95 raw ⇒ 97 frames.
+        //   * the frame defaults to 768x512, not Mochi's one trained 848x480 bucket.
+        //   * `modelManifestEntry` carries `requiresDimensionsMultipleOf: 16` (Mochi's declared value)
+        //     because the DEFAULT stride is 64 — under which 848 floors to 832 and the decode term,
+        //     which is linear in pixels, lands ~2% low. Production passes the manifest entry; a fixture
+        //     that omits it is not running the geometry it claims to.
+        let request = request(json!({
+            "projectId": "p",
+            "model": "mochi_1",
+            "mode": "text_to_video",
+            "prompt": "a calico kitten",
+            "duration": 3.8,
+            "fps": 30,
+            "width": 848,
+            "height": 480,
+            "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 16 } },
+            "advanced": { "mlxQuantize": 8 },
+        }));
+        // Pin the fixture's own premises — the window is narrow, so a drifted default would silently
+        // move this off the seam and the test would prove nothing.
+        assert_eq!(request.raw_frame_count(), 114, "3.8 s x 30 fps");
+        assert_eq!(
+            mochi_frame_count(114),
+            115,
+            "115 sits in the divergence window"
+        );
+        assert_eq!((request.width, request.height), (848, 480));
+        assert_eq!(
+            mochi_tier_order(&request).first().copied(),
+            Some("q8"),
+            "the pre-check must name the ABSENT q8 tier, or it would measure q4 and refuse early"
+        );
+        assert!(!root.join("q8").exists(), "q8 must NOT be installed");
+        assert_eq!(
+            crate::mlx_fit_gate::mochi_resident_bytes(&root.join("q8")),
+            MOCHI_Q4_TE_BYTES + MOCHI_Q4_VAE_BYTES,
+            "the pre-check's floor must be the shared siblings ONLY — if it folded q4 it would refuse \
+             before the fetch and this test would collapse into its sibling"
+        );
+
+        let out = drive_mochi_arm(&root, "64", &probe, &request);
+        std::fs::remove_dir_all(&root).ok();
+
+        let message = out
+            .err()
+            .expect(
+                "the 9.73 GiB shared FLOOR admits this clip (58.31 < 64), but the resolved q4 tier's \
+                 full 18.73 GiB does not (67.32 > 64) — the post-download gate must refuse it",
+            )
+            .to_string();
+        assert!(
+            message.contains("Shorten the clip"),
+            "the refusal must be the fit gate's, i.e. `mochi_preflight` really ran: {message}"
+        );
+        assert!(
+            !probe.loaded(),
+            "an over-budget job that reaches the load is the exit(-1) SIGKILL the gate exists to \
+             prevent — the pre-check's floor cannot catch this one, only the preflight can"
+        );
+    }
+
     /// Stage a REAL HuggingFace hub cache holding Mochi's shared `coRequisite` components and **no
     /// tier dir** — the disk state of a machine that has the ~9.7 GiB shared download but has not
     /// fetched a tier. Returns the hub dir to point `HF_HUB_CACHE` at.
