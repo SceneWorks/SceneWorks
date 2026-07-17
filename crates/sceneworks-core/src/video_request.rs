@@ -167,23 +167,49 @@ impl VideoRequest {
         ((self.duration * self.fps as f32).round() as i64).max(1) as u32
     }
 
-    /// The frame count the model will actually produce: the raw `duration * fps`
-    /// snapped to the model's temporal constraint (LTX `8k + 1`, Wan `4n + 1`,
-    /// Mochi `6k + 1`). Unknown / stub models keep the raw count. The engine's
-    /// `validate()` is authoritative for the real models (sc-3034 / sc-3035); this
-    /// mirrors the Python worker's pre-snap so the stub clip length and the UI
-    /// estimate agree.
+    /// The frame count the model will actually produce: [`raw_frame_count`](Self::raw_frame_count)
+    /// snapped to the model's temporal stride by the shared [`video_frame_count`] ladder — the SAME
+    /// ladder the worker's generation arms resolve, so what the asset sidecar records can never
+    /// drift from what the engine renders (sc-12371). The engine's `validate()` stays authoritative
+    /// for the real models (sc-3034 / sc-3035); this is the pre-snap.
     pub fn frame_count(&self) -> u32 {
-        let raw = self.raw_frame_count();
-        if is_ltx_model(&self.model) {
-            ltx_frame_count(raw)
-        } else if is_wan_model(&self.model) {
-            wan_frame_count(raw)
-        } else if is_mochi_model(&self.model) {
-            mochi_frame_count(raw)
-        } else {
-            raw
-        }
+        video_frame_count(&self.model, self.raw_frame_count())
+    }
+}
+
+/// The frame count `model` will actually render for `raw_frames` requested, coerced onto that
+/// engine's temporal stride: LTX `8k+1`, **Mochi `6k+1`**, everything else (Wan and the families
+/// built on it) `4k+1`.
+///
+/// THE ONE LADDER (sc-12371). It has two kinds of caller by design: [`VideoRequest::frame_count`],
+/// which is what every asset sidecar records as `frameCount`, and the worker's generation arms,
+/// which is what the engine is actually handed. Those were two independent implementations with
+/// DIFFERENT fallback arms — the worker's fell through to Wan, this one kept the raw count — and the
+/// gap was not theoretical: every arm that drives a Wan engine under a non-Wan model id rendered
+/// `wan_frame_count(raw)` (149 at the 6 s x 25 fps default) while its sidecar wrote the unsnapped
+/// raw (150). `bernini`, `scail2_14b` and the in-place ComfyUI `external_base_*` ids all did this,
+/// on both lanes, and nothing failed loudly — the clip was simply one frame shorter than the asset
+/// claimed. A frame count is invisible in the output when it is wrong (epic 1788).
+///
+/// THE FALLBACK IS WAN, DELIBERATELY — it is not the "unknown model" arm it reads as. Every video
+/// model that reaches a real generation arm is a Wan-family renderer unless it is LTX or Mochi
+/// (the explicit arms above): `bernini` is a Wan2.2-T2V-A14B renderer, `scail2_14b` a Wan2.1-14B
+/// I2V one, `external_base_*` an in-place ComfyUI Wan2.2, and Wan-VACE pins the same stride. That
+/// is why an `is_wan_model` arm here would be a bug, not a tidy-up: the ids above are Wan engines
+/// that the predicate does not match. SVD is the one video engine off this lattice and it never
+/// asks — it takes an explicit `numFrames` burst knob on both its engine input and its sidecar.
+///
+/// The per-family arms are what sc-11992 bought: the stride used to be an inline
+/// `if is_ltx { ltx } else { wan }` binary repeated in each generation path, so Mochi silently
+/// inherited the WAN stride. Mochi's AsymmVAE is 6x temporal and its `validate_request` hard-rejects
+/// anything but `1 + 6k`, so EVERY default-duration Mochi job died on engine validation.
+pub fn video_frame_count(model: &str, raw_frames: u32) -> u32 {
+    if is_ltx_model(model) {
+        ltx_frame_count(raw_frames)
+    } else if is_mochi_model(model) {
+        mochi_frame_count(raw_frames)
+    } else {
+        wan_frame_count(raw_frames)
     }
 }
 
@@ -1923,8 +1949,14 @@ mod tests {
             "projectId": "p", "model": "stub", "duration": 2.0, "fps": 24
         })));
         assert_eq!(request.raw_frame_count(), 48);
-        // Unknown model keeps the raw count.
-        assert_eq!(request.frame_count(), 48);
+        // An id off the named families takes the ladder's WAN fallback, NOT the raw count
+        // (sc-12371 — see `video_frame_count`: that arm is where the real Wan engines carrying
+        // non-Wan ids live, so it cannot be the raw arm it used to be). For a genuinely unknown id
+        // like this one the only thing it decides is the procedural stub's placeholder length, and
+        // that stays self-consistent either way: `generate_stub_video` renders `frame_count()`
+        // frames and `stub_raw_settings` records the very same call.
+        assert_eq!(request.frame_count(), wan_frame_count(48));
+        assert_eq!(request.frame_count(), 45);
     }
 
     #[test]
@@ -2013,12 +2045,72 @@ mod tests {
         // Mochi is its own family — it must not fall through to the Wan floor.
         assert!(is_mochi_model("mochi_1"));
         // Prefix, not an exact id: a future `mochi_1_preview`/`mochi_2` must keep hitting
-        // the 6k+1 lattice. Exact-matching `mochi_1` would drop it into `frame_count`'s
-        // `else { raw }` arm -> off-lattice frames -> engine hard-reject.
+        // the 6k+1 lattice. Exact-matching `mochi_1` would drop it into `video_frame_count`'s
+        // fallback arm -> the WAN 4k+1 stride -> off-lattice frames -> engine hard-reject.
         assert!(is_mochi_model("mochi_1_preview"));
         assert!(is_mochi_model("mochi_2"));
         assert!(!is_mochi_model("wan_2_2"));
         assert!(!is_wan_model("mochi_1"));
         assert!(!is_ltx_model("mochi_1"));
+    }
+
+    /// sc-12371: the ladder's fallback arm is the WAN stride, and that is load-bearing — NOT the
+    /// "unknown model" default it reads as. `bernini`, `scail2_14b` and the in-place ComfyUI
+    /// `external_base_*` ids are all Wan engines that `is_wan_model` does not match, and their
+    /// generation arms hand the engine `wan_frame_count(raw)`. Reverting this arm to the raw count
+    /// (its pre-sc-12371 shape) makes each one's sidecar record a clip length the rendered file does
+    /// not have.
+    ///
+    /// DISCRIMINATING BY CONSTRUCTION: 150 is deliberately OFF the 4k+1 lattice
+    /// (`wan_frame_count(150) == 149`), so a raw fallback is RED here. Probing an already-on-lattice
+    /// count (149, 81, ...) would agree with BOTH fallbacks and pin nothing.
+    #[test]
+    fn video_frame_count_fallback_is_the_wan_stride_not_the_raw_count() {
+        assert_ne!(
+            wan_frame_count(150),
+            150,
+            "the probe must discriminate: 150 has to be OFF the 4k+1 lattice or this test \
+             passes with the fallback reverted to `raw`"
+        );
+        for model in ["bernini", "scail2_14b", "external_base_wan22_comfyui"] {
+            assert_eq!(
+                video_frame_count(model, 150),
+                wan_frame_count(150),
+                "{model} drives a Wan engine, so the ladder must return the Wan stride its \
+                 generation arm hands the engine — not the unsnapped raw count"
+            );
+        }
+        // The named families keep their own strides — the fallback must not swallow them.
+        assert_eq!(video_frame_count("ltx_2_3", 150), ltx_frame_count(150));
+        assert_eq!(video_frame_count("mochi_1", 150), mochi_frame_count(150));
+        assert_eq!(video_frame_count("wan_2_2", 150), wan_frame_count(150));
+        // ...and those three strides are mutually distinct at 150, so the arms above are really
+        // dispatching rather than all collapsing onto one lattice.
+        assert_eq!((ltx_frame_count(150), mochi_frame_count(150)), (153, 151));
+    }
+
+    /// sc-12371: `frame_count()` — what every asset sidecar records — must BE the shared ladder, so
+    /// it cannot drift from what the worker's arms hand the engine. Pinned on the Wan-engine ids
+    /// whose prefixes the family predicates do not match, which is exactly where the two
+    /// implementations used to disagree (149 rendered vs 150 recorded).
+    #[test]
+    fn frame_count_is_the_shared_ladder_for_wan_engines_off_the_prefix() {
+        for model in ["bernini", "scail2_14b", "external_base_wan22_comfyui"] {
+            let request = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "model": model, "duration": 6.0, "fps": 25
+            })));
+            assert_eq!(request.raw_frame_count(), 150);
+            assert_eq!(
+                request.frame_count(),
+                video_frame_count(model, 150),
+                "{model}: the sidecar's frame count must resolve through the shared ladder"
+            );
+            assert_eq!(
+                request.frame_count(),
+                149,
+                "{model}: the Wan engine renders 149 at the 6s x 25fps default, so the asset \
+                 must not claim the unsnapped 150"
+            );
+        }
     }
 }

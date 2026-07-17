@@ -3796,14 +3796,30 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
                 .unwrap_or_default()
         }))
         .collect();
+    // sc-12371: `file` describes the mp4 on disk, so it takes the worker's MEASURED clip facts —
+    // counted off the frames that were encoded, not the duration/fps the user asked for. Those
+    // differ whenever the model's temporal stride snaps the frame count, which is usually: a 6 s x
+    // 25 fps ask on a Wan engine renders 149 frames = 5.96 s, and `file.duration` claimed 6.0.
+    //
+    // Falls back to the requested values for facts written before the worker measured (assets
+    // already on disk, and the non-video callers of this shape) — a slightly-wrong duration on an
+    // old asset beats a missing one, and it is what those assets have always reported.
+    let measured = |encoded: &str, requested: &str| match fact.get(encoded) {
+        Some(value) if !value.is_null() => value.clone(),
+        _ => get(requested),
+    };
     let file = json!({
         "path": get("mediaPath"),
         "mimeType": get("mimeType"),
         "width": get("width"),
         "height": get("height"),
-        "duration": get("duration"),
-        "fps": get("fps"),
+        "duration": measured("encodedDuration", "duration"),
+        "fps": measured("encodedFps", "fps"),
+        "frameCount": fact.get("encodedFrameCount").cloned().unwrap_or(Value::Null),
     });
+    // ...whereas `normalizedSettings` is the REPLAY record: the knobs the user picked off the
+    // model's `limits.durations` / `limits.fps` menus, which "re-run this generation" (sc-12324 /
+    // sc-12345) rebuilds the payload from. It must round-trip the ask, not the measurement.
     let mut normalized = json!({
         "duration": get("duration"),
         "fps": get("fps"),
@@ -5963,6 +5979,87 @@ mod tests {
         assert_eq!(asset["lineage"]["sourceClipAssetId"], json!("asset-video"));
         assert_eq!(asset["lineage"]["characterId"], json!("character-1"));
         assert_eq!(asset["lineage"]["parents"], json!(["asset-video"]));
+    }
+
+    /// sc-12371: `asset.file` MEASURES the clip; `recipe.normalizedSettings` REPLAYS the ask. The
+    /// same fact feeds both and they must not be given the same number.
+    ///
+    /// The trap this pins is a real one that nearly shipped: making `file.duration` honest by
+    /// changing the fact's `duration` key ALSO rewrites `normalizedSettings.duration`, which
+    /// sc-12324's "re-run this generation" rebuilds the payload from. A 6 s ask would replay as
+    /// 5.96 s — off the model's `limits.durations` menu, which sc-12347 now enforces server-side,
+    /// so the re-run could be refused outright.
+    ///
+    /// DISCRIMINATING: the measured pair (149 frames / 5.96 s) differs from the requested pair
+    /// (6.0 s), so collapsing the two in EITHER direction is RED here.
+    #[test]
+    fn video_sidecar_file_measures_the_clip_while_normalized_settings_replay_the_ask() {
+        let fact = json!({
+            "type": "video",
+            "assetId": "asset-1",
+            "mediaPath": "assets/videos/hero.mp4",
+            "mimeType": "video/mp4",
+            "width": 1280, "height": 720,
+            // What the user PICKED off the model's menus.
+            "duration": 6.0, "fps": 25,
+            // What a Wan engine actually rendered for that ask: the 4k+1 stride's 149 frames.
+            "encodedFrameCount": 149, "encodedDuration": 5.96, "encodedFps": 25,
+            "quality": "balanced", "family": "wan-video",
+            "seed": 7, "displayName": "Hero", "createdAt": "2026-07-16T00:00:00Z",
+            "mode": "text_to_video", "model": "bernini", "adapter": "mlx_bernini",
+            "prompt": "hero", "negativePrompt": "", "loras": [],
+            "rawAdapterSettings": { "frameCount": 149 },
+            "timelineContext": {},
+        });
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset-1", &fact);
+
+        // The file block describes the mp4 that exists.
+        assert_eq!(asset["file"]["duration"], json!(5.96));
+        assert_eq!(asset["file"]["frameCount"], json!(149));
+        assert_eq!(asset["file"]["fps"], json!(25));
+        assert_ne!(
+            asset["file"]["duration"],
+            json!(6.0),
+            "file.duration must not echo the request — that is the sc-12371 lie"
+        );
+
+        // The recipe replays what was asked for, so the studio form's duration select still has an
+        // option to land on.
+        let normalized = &asset["recipe"]["normalizedSettings"];
+        assert_eq!(normalized["duration"], json!(6.0));
+        assert_eq!(normalized["fps"], json!(25));
+        assert_ne!(
+            normalized["duration"],
+            json!(5.96),
+            "normalizedSettings must round-trip the user's ask — a measured duration is off the \
+             model's limits.durations menu and sc-12347 enforces that menu"
+        );
+    }
+
+    /// sc-12371: a fact written before the worker measured its clip (every asset already on disk)
+    /// still gets a `file.duration` — the requested value it has always reported. A missing
+    /// duration would be worse than a slightly optimistic one.
+    #[test]
+    fn video_sidecar_file_falls_back_to_the_requested_duration_for_older_facts() {
+        let fact = json!({
+            "type": "video",
+            "assetId": "asset-old",
+            "mediaPath": "assets/videos/old.mp4",
+            "mimeType": "video/mp4",
+            "width": 1280, "height": 720, "duration": 6.0, "fps": 25,
+            "quality": "balanced", "family": "wan-video",
+            "seed": 7, "displayName": "Old", "createdAt": "2026-05-17T00:00:00Z",
+            "mode": "text_to_video", "model": "wan_2_2", "adapter": "mlx_wan",
+            "prompt": "old", "negativePrompt": "", "loras": [],
+            "rawAdapterSettings": {},
+            "timelineContext": {},
+        });
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset-1", &fact);
+        assert_eq!(asset["file"]["duration"], json!(6.0));
+        assert_eq!(asset["file"]["fps"], json!(25));
+        // No measurement was recorded, so the file block reports no frame count rather than
+        // inventing one.
+        assert_eq!(asset["file"]["frameCount"], Value::Null);
     }
 
     /// sc-12345: the fit and the list-valued source ids survive onto `recipe.normalizedSettings`
