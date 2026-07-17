@@ -396,15 +396,30 @@ fn mochi_too_big_error(
 // one, which co-locates both experts per (1). Sizing the candle lane off that number would under-predict
 // by a whole expert (~28 GiB at bf16).
 //
-// ## This is a FLOOR — it under-predicts, deliberately
+// ## This is a FLOOR — it under-predicts, deliberately — and it is now the FALLBACK, not the gate
 // It counts weights only: no activation transient, no VAE decode, no attention working set. A MARGINAL
 // job is still admitted and can still CUDA-OOM (catchably, via `classify_engine_error` — not MLX's
-// unmappable `exit(-1)`). That is the honest bound from the data that exists: it refuses the
-// CLEARLY-impossible (wan A14B bf16 ≈ 67 GiB of weights on a 32 GB card — the story's case) rather than
-// promising every admitted job fits. Inventing a per-engine activation fudge factor would be worse than
-// stating the bound; measured `candle.vramGbByTier` blocks are what tighten this (**sc-12402**), and they
-// layer on top via `predicted_peak_gb` with no rework here — that key is already read and simply returns
-// `None` ⇒ `Unknown` ⇒ admit while it is absent.
+// unmappable `exit(-1)`). That was the honest bound from the data that existed before a measurement.
+// [`wan_video_fit_error`] now prefers the MEASURED per-tier peak (`candle.vramGbByTier`, sc-12402) and
+// only falls back here when a model/tier was never measured.
+//
+// ⚠️ **Point (1) above is WRONG for the DENSE tier, and sc-12402 measured how wrong.** "On-disk bytes ARE
+// the loaded set" holds only for the PACKED q4/q8 tiers. `candle-gen-wan` casts dtypes on load
+// (`wan14b.rs:49-52`: `DIT_DTYPE = BF16`, `ENC_DTYPE = F32`, applied per-tensor by `mmap_var_builder`),
+// so the dense `Wan-AI/*-Diffusers` experts — which ship **fp32**, not bf16: `transformer/…index.json`
+// declares `total_size` 57,153,966,336 = 53.2 GiB for ONE 14B expert — HALVE on load, while the UMT5 TE
+// DOUBLES (bf16 10.58 → f32 21.16 GiB) on EVERY tier. Measured error vs the real device set:
+//
+//   * packed q4/q8 — floor UNDER-counts by ~9-11 GiB (the f32 TE). Safe direction: it just admits, the
+//     pre-gate status quo. (It is also nowhere near the real peak: the 5B q4's floor is 18.13 GiB and its
+//     MEASURED peak is 86.3 GB — the denoise's unchunked attention, not the weights, is the ceiling.)
+//   * dense bf16 — floor OVER-counts by ~44 GiB (117.5 GiB summed vs a ~75 GiB device set), which
+//     wall-rejects a 96 GB card that would render. That is the sc-12179 class this gate's note claims
+//     cannot arise here; it can, on this one tier.
+//
+// So the floor is kept for its ORIGINAL job — refusing the clearly-impossible where nothing was measured
+// — and a measurement supersedes it wherever one exists. The dense over-count is why
+// [`wan_video_fit_error`] does NOT `max` the two.
 //
 // Deliberately NOT reusing Mochi's `mochi_decode_peak_gb`: that term is specific to Mochi's untiled
 // AsymmVAE (peak linear in clip length). Wan tiles/chunks differently, so applying it here would
@@ -503,6 +518,84 @@ pub(crate) fn video_weights_fit_error(
             gpu_id,
         )
     })
+}
+
+/// The candle **video** admission decision (sc-12402): budget on the MEASURED per-tier peak
+/// (`candle.vramGbByTier[tier_key]` + [`HEADROOM_GB`], via [`predicted_peak_gb`]) when the manifest
+/// carries one, else fall back to the sc-12344 on-disk weights FLOOR ([`video_weights_fit_error`]).
+///
+/// This is the seam that makes the measured blocks LIVE. Until sc-12402 the video lane called the
+/// floor directly and nothing read `candle.vramGbByTier` — so adding the blocks alone would have been
+/// dead data that reads as coverage (the failure `tests/gpu_and_manifest.rs`'s flux2 test exists to
+/// catch). Pure, like both halves it composes: the caller resolves the budget and the tier.
+///
+/// ## Why a measurement REPLACES the floor rather than composing with it (`max`)
+///
+/// A `max(measured, floor)` looks safer and is not: **the floor OVER-counts the dense tier**, so
+/// maxing would re-introduce the exact wall-reject the measurement exists to remove.
+///
+/// The floor's premise — `wan_weight_components`' "on-disk bytes ARE the loaded set" — holds only for
+/// the PACKED q4/q8 tiers. The dense `Wan-AI/*-Diffusers` snapshot the manifest routes `bf16` to ships
+/// its experts in **fp32** (`transformer/…index.json` declares `total_size` 57,153,966,336 = 53.2 GiB
+/// for ONE 14B expert), and `candle-gen-wan` casts on load — `DIT_DTYPE = BF16`, `ENC_DTYPE = F32`
+/// (wan14b.rs:49-52), applied per-tensor by `mmap_var_builder`. So the experts HALVE (57.2 → 28.6 GB
+/// each) while the UMT5 TE DOUBLES (11.4 → 22.7 GB). Net, the dense floor sums ~117 GiB against a real
+/// ~81 GB resident set and refuses a 96 GB card that renders it. (The packed tiers fail the other way
+/// — the f32 TE doubling makes their floor UNDER-count — which is safe: a floor that under-counts just
+/// admits, the pre-gate status quo.)
+///
+/// A real measurement is not a better proxy for the peak, it IS the peak; deferring to a byte-sum that
+/// is provably wrong about dtype would be superstition. Where no measurement exists the floor is still
+/// the best available signal, so it stays as the fallback.
+///
+/// Missing either signal admits, exactly like [`fit_decision`]'s [`FitDecision::Unknown`]: no budget
+/// (`nvidia-smi` unreadable) ⇒ `None`, and an engine with neither a `candle` block nor countable
+/// weights (`ltx`/`svd`) ⇒ `None` through the floor.
+pub(crate) fn wan_video_fit_error(
+    model_label: &str,
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+    weight_bytes: u64,
+    gpu_id: &str,
+    budget: Option<VramBudget>,
+) -> Option<WorkerError> {
+    // Unmeasured (no `candle` block, or no row for this tier and no `minMemoryGb`) ⇒ the sc-12344
+    // floor, byte-for-byte the shipped behavior.
+    let Some(needed_gb) = predicted_peak_gb(manifest_entry, tier_key) else {
+        return video_weights_fit_error(model_label, weight_bytes, gpu_id, budget);
+    };
+    let budget = budget?;
+    (budget.free_gb + f64::EPSILON < needed_gb)
+        .then(|| video_peak_too_big_error(model_label, tier_key, needed_gb, budget.free_gb, gpu_id))
+}
+
+/// Build the MEASURED-peak candle video rejection (sc-12402). The measured sibling of
+/// [`video_weights_too_big_error`], and worded apart from it on purpose: that one can only honestly
+/// speak about weights, this one is the whole render's ceiling (weights + denoise + the budget-tiled
+/// VAE decode), so it names the render rather than the weights.
+///
+/// Names the TIER, because the tier is the lever that moves this number and the gate now knows which
+/// one it sized. Like the floor's message it does NOT offer "lower the resolution": the measured peak
+/// is a per-tier CONSTANT taken at the model's default geometry (the manifest schema's "video =
+/// default frames"), and Wan's decode is budget-tiled (`auto_tiling_budgeted_wan22`) so the weights
+/// dominate and a smaller clip cannot move the number the user was just shown. That is the same
+/// resolution-blind contract the image lane's `vramGbByTier` gate has always had, and the reason Mochi
+/// needs its own frame-scaled gate instead of this one (its untiled AsymmVAE decode IS the peak).
+fn video_peak_too_big_error(
+    model_label: &str,
+    tier_key: &str,
+    needed_gb: f64,
+    available_gb: f64,
+    gpu_id: &str,
+) -> WorkerError {
+    WorkerError::InvalidPayload(format!(
+        "{model_label} needs ~{needed} GB of VRAM to render at its {tier_key} tier (measured peak: \
+         every component held resident for the whole run — this engine does not stage components — \
+         plus the denoise and VAE-decode transient) but GPU {gpu_id} has ~{available} GB available. \
+         Select a smaller quant tier, or run on a GPU with more VRAM.",
+        needed = needed_gb.round() as i64,
+        available = available_gb.round() as i64,
+    ))
 }
 
 /// The predicted resident FLOOR (GiB) for a candle video job: the on-disk weights every component of
@@ -1199,6 +1292,180 @@ mod tests {
         assert!(wan_weight_bytes("wan2_2_t2v_14b", &populated) > 0);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The MEASURED per-tier peak supersedes the floor (sc-12402).
+    // -----------------------------------------------------------------------------------------
+
+    /// The shipped `wan_2_2` candle block — MEASURED on an idle RTX PRO 6000 Blackwell (sc-12402) at
+    /// the model's shipped 832x480 / 121-frame / 20-step default. Real numbers, so these tests prove the
+    /// REAL jobs are admitted/refused rather than that arithmetic is arithmetic.
+    ///
+    /// The q8 − q4 delta (88.8 − 86.3 = 2.5 GB) is exactly the q8-vs-q4 DiT delta (5.25 − 2.92 GiB),
+    /// which is the coherence check on the campaign: everything else in the peak is tier-independent
+    /// (the f32 UMT5 TE + the f32 VAE + the denoise attention).
+    fn wan_5b_entry() -> JsonObject {
+        obj(json!({
+            "candle": {
+                "minMemoryGb": 88,
+                "vramGbByTier": { "q4": 86.3, "q8": 88.8, "bf16": 94.1 },
+                "measured": true
+            }
+        }))
+    }
+
+    /// THE story (sc-12402): a tier the weights FLOOR admits, and that then CUDA-OOMs, is now refused.
+    ///
+    /// The 5B q4's floor is 16.13 GiB of on-disk weights + 2 = ~18 GB, so an RTX 5090 (32 GB) is
+    /// ADMITTED today — and the job dies in the denoise, because the MEASURED peak is 86.3 GB (the
+    /// unchunked materialized attention, not the weights: `transformer.rs:46`). The floor under-counts
+    /// by 4.4x, which is not a tuning error but a category error — it counts weights and the peak is
+    /// not weights.
+    ///
+    /// Kills the mutations a compile alone would not:
+    ///   * dropping the `predicted_peak_gb` branch (⇒ back to the floor) ⇒ the 5090 ADMITS;
+    ///   * keying the manifest lookup off the request instead of the RESOLVED tier ⇒ wrong row;
+    ///   * `max`-ing the measured peak with the floor ⇒ still passes here, but fails the dense test below.
+    #[test]
+    fn measured_peak_refuses_a_5b_job_the_weights_floor_would_admit() {
+        let entry = wan_5b_entry();
+        // The on-disk floor for the shipped q4 tier: 16.13 GiB.
+        const WAN_5B_Q4_DISK_BYTES: u64 = 17_315_750_512;
+
+        // Floor alone: ~18 GB needed vs 32 GB free ⇒ admits (the shipped behavior, and the bug).
+        assert!(
+            video_weights_fit_error("wan_2_2", WAN_5B_Q4_DISK_BYTES, "0", rtx_5090()).is_none(),
+            "precondition: the weights floor admits this job on a 5090 — that IS the sc-12402 bug"
+        );
+
+        // Measured peak: 86.3 + 2 headroom = 88.3 GB vs 32 GB ⇒ REFUSED before the load + denoise.
+        let message = wan_video_fit_error(
+            "wan_2_2",
+            &entry,
+            "q4",
+            WAN_5B_Q4_DISK_BYTES,
+            "0",
+            rtx_5090(),
+        )
+        .expect("the measured 86.3 GB peak cannot fit a 32 GB card — refuse before the OOM")
+        .to_string();
+        assert!(message.contains("wan_2_2"), "names the model: {message}");
+        assert!(message.contains("q4"), "names the sized tier: {message}");
+        assert!(
+            message.contains("88") && message.contains("32"),
+            "states what it needs and what the card has: {message}"
+        );
+        // The measured message is about the RENDER, not the weights — the floor's wording would be a
+        // lie here (weights are 16 GiB of an 86 GB peak).
+        assert!(
+            !message.contains("just to hold its weights"),
+            "must not reuse the weights-floor wording for a measured peak: {message}"
+        );
+        // Resolution is NOT offered as a lever: the measured peak is a per-tier constant at the model's
+        // default geometry, so it cannot move the number the user was just shown.
+        assert!(
+            !message.contains("resolution"),
+            "the resolution-blind gate must not send the user to a knob it cannot honor: {message}"
+        );
+    }
+
+    /// The other half of the story's acceptance: a tier that FITS is still ADMITTED. A gate that
+    /// refuses everything would pass the test above and be worthless.
+    #[test]
+    fn measured_peak_admits_a_tier_that_fits_the_card() {
+        let entry = wan_5b_entry();
+        const WAN_5B_Q4_DISK_BYTES: u64 = 17_315_750_512;
+        // The dev box: 96 GB. q4's measured 86.3 + 2 = 88.3 ≤ 95.6 ⇒ ADMIT (and it really does render —
+        // this exact configuration is the sc-12402 measurement).
+        let card96 = apply_vram_cap(None, Some(95.6));
+        assert!(
+            wan_video_fit_error("wan_2_2", &entry, "q4", WAN_5B_Q4_DISK_BYTES, "0", card96)
+                .is_none(),
+            "the measured q4 job renders on this card — the gate must not wall-reject it"
+        );
+        // …and the heavier bf16 row on the SAME card does NOT fit: its measured 94.1 + 2 headroom =
+        // 96.1 just overflows 95.6. Same card, same model, different tier ⇒ opposite verdict: the gate
+        // reads the TIER, not the model. (This is a genuinely narrow 0.5 GB margin, and it is the real
+        // measured one — the 5B's tier ladder spans only ~8 GB because everything but the DiT is
+        // tier-independent, so the tiers really do land this close together.)
+        assert!(
+            wan_video_fit_error("wan_2_2", &entry, "bf16", WAN_5B_Q4_DISK_BYTES, "0", card96)
+                .is_some(),
+            "bf16's measured 94.1 GB peak + 2 headroom overflows a 95.6 GB card — refuse"
+        );
+    }
+
+    /// sc-12402 regression pin: the measured peak REPLACES the floor, it does not compose with it.
+    ///
+    /// The dense `bf16` tier is the case that makes `max(measured, floor)` wrong. `Wan-AI/*-Diffusers`
+    /// ships its experts in **fp32** (~117.5 GiB summed for A14B T2V) and `candle-gen-wan` loads them as
+    /// bf16 (`wan14b.rs:49-52`), so the on-disk floor OVER-counts by ~44 GiB and would wall-reject a
+    /// 96 GB card that renders the job at ~75 GB — the sc-12179 class `wan_weight_components` claims
+    /// cannot arise on this lane. A measurement is not a better proxy for the peak; it IS the peak.
+    #[test]
+    fn a_measurement_supersedes_an_overcounting_dense_floor() {
+        // A14B T2V dense: 117.51 GiB of fp32 on disk, ~75 GB resident once cast to bf16.
+        const WAN_A14B_DENSE_DISK_BYTES: u64 = 126_170_000_000;
+        let entry = obj(json!({
+            "candle": { "vramGbByTier": { "bf16": 75.3 }, "measured": false }
+        }));
+        let card96 = apply_vram_cap(None, Some(95.6));
+
+        // The floor alone WALL-REJECTS this card (117.5 + 2 = ~120 > 95.6) — the bug.
+        assert!(
+            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_DENSE_DISK_BYTES, "0", card96)
+                .is_some(),
+            "precondition: the on-disk floor over-counts the fp32 dense tier and wall-rejects a 96 GB card"
+        );
+        // The measured/derived peak admits it: 75.3 + 2 = 77.3 ≤ 95.6.
+        assert!(
+            wan_video_fit_error(
+                "wan2_2_t2v_14b",
+                &entry,
+                "bf16",
+                WAN_A14B_DENSE_DISK_BYTES,
+                "0",
+                card96
+            )
+            .is_none(),
+            "a `max(measured, floor)` would keep the floor's 120 GB over-count and wall-reject here"
+        );
+    }
+
+    /// An unmeasured model keeps the sc-12344 floor EXACTLY — the fallback is not a silent un-gating.
+    #[test]
+    fn an_unmeasured_model_falls_back_to_the_weights_floor() {
+        let no_block = obj(json!({}));
+        const WAN_A14B_BF16_BYTES: u64 = 72_000_000_000;
+
+        // No `candle` block ⇒ the floor decides, byte-identical to `video_weights_fit_error`.
+        let via_wan = wan_video_fit_error(
+            "wan2_2_t2v_14b",
+            &no_block,
+            "bf16",
+            WAN_A14B_BF16_BYTES,
+            "0",
+            rtx_5090(),
+        );
+        let via_floor =
+            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_BF16_BYTES, "0", rtx_5090());
+        assert_eq!(
+            via_wan.map(|e| e.to_string()),
+            via_floor.map(|e| e.to_string()),
+            "an unmeasured model must behave exactly as it did before sc-12402"
+        );
+
+        // An exempt engine (0 weights) + no block ⇒ admit, never block without evidence.
+        assert!(
+            wan_video_fit_error("ltx_2_3_distilled", &no_block, "bf16", 0, "0", rtx_5090())
+                .is_none()
+        );
+        // No live budget ⇒ admit, even with a measured row that would overflow.
+        assert!(
+            wan_video_fit_error("wan_2_2", &wan_5b_entry(), "bf16", 0, "0", None).is_none(),
+            "no budget signal ⇒ never block"
+        );
     }
 
     /// Live real-hardware validation (sc-10766): exercises the REAL `nvidia-smi` VRAM reading on GPU 0

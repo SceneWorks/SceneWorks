@@ -5002,6 +5002,28 @@ fn candle_wan_tier_complete(dir: &Path, a14b: bool) -> bool {
         && (!a14b || has("transformer_2"))
 }
 
+/// (sc-12402) The `candle.vramGbByTier` manifest key for the tier [`candle_wan_tier_subdir`] actually
+/// resolved — derived from the RESOLVED quant marker, never re-derived from the request.
+///
+/// That is the sc-12090 lesson, which cost a false reject on the image lane: re-deriving the tier from
+/// `advanced.mlxQuantize` sizes the tier the request ASKED for, while the disk-probing resolver may
+/// have clamped to a different one (q8 default → q4 when only q4 is installed). Keying off the marker
+/// the resolver returned means the gate and the loader agree on which tier ran by construction.
+///
+/// `None` ⇒ `bf16`, and that one mapping covers BOTH bf16 shapes: an explicit `bf16/` tier subdir, and
+/// the flat dense `Wan-AI/*-Diffusers` fallback that [`candle_wan_tier_subdir`] declines (the caller
+/// pairs that snapshot with a `None` marker). Wan advertises only `Quant::{Q4, Q8}`
+/// (`supported_quants`, wan14b.rs), so no other variant can reach here; any future one would read
+/// `bf16` — the HEAVIEST row, i.e. conservative.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_tier_key(quant: Option<Quant>) -> &'static str {
+    match quant {
+        Some(Quant::Q4) => "q4",
+        Some(Quant::Q8) => "q8",
+        _ => "bf16",
+    }
+}
+
 /// (sc-10027) Resolve the candle wan quant tier subdir (`q4`/`q8`/`bf16`) + its quant marker under a
 /// `SceneWorks/wan2.2-*-candle` snapshot `root`, per `advanced.mlxQuantize` (default **q8** when
 /// installed, clamping to q4 — epic 10721 / sc-10726 — falling back through the tier order), or `None`
@@ -5420,14 +5442,23 @@ fn mochi_vram_preflight(
     }
 }
 
-/// Live pre-flight Wan VRAM admission check for the candle lane (sc-12344) — the non-Mochi half of this
-/// lane's gate, and the seam [`generate_candle_video`] calls before the load + denoise.
+/// Live pre-flight Wan VRAM admission check for the candle lane — the non-Mochi half of this lane's
+/// gate, and the seam [`generate_candle_video`] calls before the load + denoise.
 ///
-/// Budgets on the on-disk bytes of the components the Wan loader actually reads
-/// ([`crate::vram_gate::wan_weight_bytes`]), which for Wan ARE the resident set: both A14B MoE experts
-/// stay co-resident and every file in each component dir loads. `ltx`/`svd` read `0` there and are
-/// admitted unchanged — their on-disk bytes are not their loaded set, so a floor would wall-reject
-/// working cards (the exemption is recorded on `vram_gate::wan_weight_components`).
+/// Budgets on the tier's **MEASURED peak** (`candle.vramGbByTier[tier_key]`, sc-12402) when the
+/// manifest carries one, and falls back to the sc-12344 on-disk weights FLOOR when it does not — see
+/// [`crate::vram_gate::wan_video_fit_error`], which owns that choice and the reason a measurement
+/// REPLACES the floor rather than composing with it.
+///
+/// The measured peak matters because the floor is wrong in BOTH directions, from one cause: on-disk
+/// bytes are not the loaded set, because `candle-gen-wan` casts dtypes on load (`wan14b.rs:49-52` —
+/// experts fp32→bf16 HALVE on the dense tier, the UMT5 TE bf16→f32 DOUBLES on every tier). The packed
+/// tiers under-count by ~9-11 GiB (which is why a card that cannot fit the job is admitted and then
+/// OOMs — sc-12402's story) and the dense tier over-counts by ~44 GiB.
+///
+/// `ltx`/`svd` carry no `candle` block and read `0` weights, so both paths return `None` and they are
+/// admitted unchanged — their on-disk bytes are not their loaded set either, so any byte-derived floor
+/// would wall-reject working cards (recorded on `vram_gate::wan_weight_components`; sc-12397).
 ///
 /// **Takes and returns `model_dir` rather than borrowing it**, so the gate cannot be deleted without
 /// breaking the build — the same "unskippable by construction" property [`MochiVramPreflight`] gets from
@@ -5440,12 +5471,16 @@ fn mochi_vram_preflight(
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn wan_vram_preflight(
     engine_id: &str,
+    manifest_entry: &JsonObject,
+    tier_key: &str,
     model_dir: PathBuf,
     gpu_id: &str,
     budget: Option<crate::vram_gate::VramBudget>,
 ) -> WorkerResult<PathBuf> {
-    match crate::vram_gate::video_weights_fit_error(
+    match crate::vram_gate::wan_video_fit_error(
         engine_id,
+        manifest_entry,
+        tier_key,
         crate::vram_gate::wan_weight_bytes(engine_id, &model_dir),
         gpu_id,
         budget,
@@ -5499,10 +5534,16 @@ async fn candle_video_vram_budget(settings: &Settings) -> Option<crate::vram_gat
 /// driver. Returns the decoded clip + the candle adapter label.
 ///
 /// Every engine passes a VRAM fit gate before the load: Mochi's frame-dependent decode gate (sc-12306),
-/// and the Wan weights-floor gate (sc-12344). `ltx`/`svd` are explicitly EXEMPT — their on-disk bytes are
-/// not their loaded set, so any byte-derived floor would wall-reject working cards; the reason is
-/// recorded on `vram_gate::wan_weight_components`. Neither gate reads `candle.vramGbByTier` (no candle
-/// video model carries a `candle` block, so that lookup would admit unconditionally — sc-12344).
+/// and the Wan gate — the tier's MEASURED `candle.vramGbByTier` peak where the manifest carries one
+/// (sc-12402), else sc-12344's on-disk weights floor. `ltx`/`svd` are explicitly EXEMPT from both: they
+/// carry no `candle` block AND their on-disk bytes are not their loaded set, so any byte-derived floor
+/// would wall-reject working cards; the reason is recorded on `vram_gate::wan_weight_components`.
+///
+/// Mochi keeps its own gate rather than joining the Wan one: its AsymmVAE decode is UNTILED, so its peak
+/// grows linearly in clip length and no per-tier constant can express it (sc-12306). Wan's decode is
+/// budget-TILED (`auto_tiling_budgeted_wan22`) and its peak is owned by the denoise, so a per-tier
+/// constant at the model's default geometry is the honest shape there — the manifest schema's
+/// "video = default frames".
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_video(
     api: &ApiClient,
@@ -5617,13 +5658,17 @@ async fn generate_candle_video_using(
             Some((tier_dir, quant)) => (tier_dir, quant),
             None => (snapshot_dir, None),
         };
-        // The Wan weights-floor VRAM fit gate (sc-12344), the non-Mochi half of this lane's admission
-        // check. Runs on the RESOLVED tier dir (so it sizes the tier that will actually load, not the
-        // manifest's default — the sc-12090 lesson) and BEFORE `candle_ensure_wan_lightning_present`
-        // below, so a card that cannot hold the weights is refused without first paying for the
-        // Lightning fetch. A no-op for `ltx`/`svd`, which are exempt — see `vram_gate::wan_weight_components`.
+        // The Wan VRAM fit gate: the tier's MEASURED peak (sc-12402) when the manifest carries one,
+        // else the sc-12344 weights floor. The non-Mochi half of this lane's admission check. Runs on
+        // the RESOLVED tier (so it sizes the tier that will actually load, not the manifest's default —
+        // the sc-12090 lesson; `candle_wan_tier_key` derives the manifest key from the resolver's own
+        // marker for exactly that reason) and BEFORE `candle_ensure_wan_lightning_present` below, so a
+        // card that cannot fit the job is refused without first paying for the Lightning fetch. A no-op
+        // for `ltx`/`svd`, which are exempt — see `vram_gate::wan_weight_components`.
         let dir = wan_vram_preflight(
             engine_id,
+            &request.model_manifest_entry,
+            candle_wan_tier_key(quant),
             dir,
             &settings.gpu_id,
             candle_video_vram_budget(settings).await,
