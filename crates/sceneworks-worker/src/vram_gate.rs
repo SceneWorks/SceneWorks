@@ -353,6 +353,196 @@ fn mochi_too_big_error(
     ))
 }
 
+// ---------------------------------------------------------------------------------------------
+// The Wan candle video weights-floor gate (epic 1788 / sc-12344)
+// ---------------------------------------------------------------------------------------------
+//
+// Mochi above gets a bespoke gate because its decode peak is frame-dependent. Every OTHER candle video
+// engine was admitted with NO pre-flight check at all until this: `predicted_peak_gb` is manifest-driven
+// off `candle.vramGbByTier`, and **no candle video model carries a `candle` block**, so wiring the
+// generic gate would return `None` ⇒ `Unknown` ⇒ admit for every one of them — dead code that reads as
+// coverage (the failure `tests/gpu_and_manifest.rs`'s flux2 test warns about).
+//
+// So this budgets on the one signal that exists WITHOUT a measurement campaign: the on-disk weight
+// bytes of the components the loader actually reads. Three facts make that a sound admission check for
+// **Wan** rather than a guess:
+//
+//  1. **Every candle video engine holds all components resident for the whole run.** All six declare
+//     `supports_sequential_offload: false` (candle-gen-wan lib.rs:417 / wan14b.rs:727 / model_vace.rs:387,
+//     candle-gen-ltx lib.rs:527, candle-gen-svd lib.rs:183, candle-gen-mochi lib.rs:115, at the pinned
+//     `runtime-2026.07.6`), which `video_load_spec`'s "video providers have not wired sequential
+//     residency (sc-10821)" states in-tree. So `resolve_offload(TooBig, false)` is a no-op here and NO
+//     sequential-peak second stage applies — the `candle.sequentialPeakGb` this gate would otherwise
+//     need does not enter the decision at all. In particular the A14B MoE holds **BOTH** experts
+//     co-resident (`Components { high: Arc<_>, low: Arc<_> }`, wan14b.rs:337-343): the denoise picks an
+//     expert per step, it does not swap them out.
+//  2. **There is no host paging on CUDA.** Weights that do not fit VRAM cannot be demand-paged the way
+//     MLX's unified pool swaps, so Σweights is a genuine LOWER BOUND on the job's need. This is the
+//     asymmetry that makes the weights floor safe HERE but not on MLX: `mlx_fit_gate::weights_fit_floor`
+//     exists to stop a pageable transient from wall-rejecting a small Mac (sc-12179), and that whole
+//     class of false reject cannot arise on a discrete card.
+//  3. Therefore rejecting when the weights alone overflow can never wall-reject a machine that would
+//     have rendered — the sc-12179 regression this lane must not repeat.
+//
+// ⚠️ **(2) holds only where the on-disk bytes ARE the loaded set** — which is why [`wan_weight_bytes`]
+// sums NAMED component subdirs and why `ltx`/`svd` are exempt. See that function's note; getting this
+// wrong turns the floor from a lower bound into an over-count, i.e. straight into the sc-12179
+// wall-reject.
+//
+// ⚠️ **The manifest's `footprint.peakMemoryBytes` for these models is an MLX measurement and MUST NOT be
+// reused here.** `wan_2_2_t2v_14b`'s recorded 24.5 GiB peak sits BELOW its own `diskSizeBytes` because,
+// as that manifest comment says, "A14B is MoE — only ONE 14B expert is resident at a time, not both".
+// That is true of the MLX engine (measured on a 128 GB Mac, sc-10049/epic 10043) and FALSE of the candle
+// one, which co-locates both experts per (1). Sizing the candle lane off that number would under-predict
+// by a whole expert (~28 GiB at bf16).
+//
+// ## This is a FLOOR — it under-predicts, deliberately
+// It counts weights only: no activation transient, no VAE decode, no attention working set. A MARGINAL
+// job is still admitted and can still CUDA-OOM (catchably, via `classify_engine_error` — not MLX's
+// unmappable `exit(-1)`). That is the honest bound from the data that exists: it refuses the
+// CLEARLY-impossible (wan A14B bf16 ≈ 67 GiB of weights on a 32 GB card — the story's case) rather than
+// promising every admitted job fits. Inventing a per-engine activation fudge factor would be worse than
+// stating the bound; measured `candle.vramGbByTier` blocks are what tighten this, and they layer on top
+// via `predicted_peak_gb` with no rework here.
+//
+// Deliberately NOT reusing Mochi's `mochi_decode_peak_gb`: that term is specific to Mochi's untiled
+// AsymmVAE (peak linear in clip length). Wan tiles/chunks differently, so applying it here would
+// over-predict badly and wall-reject working hardware — hence this gate is frame-blind by construction.
+
+/// The exact component subdirs a candle **Wan** engine's loader reads, or `None` for an engine whose
+/// on-disk bytes are NOT its loaded set (see below) ⇒ no signal ⇒ the gate admits.
+///
+/// Each list is the set of dirs the provider enumerates with `sorted_safetensors`, which loads **every**
+/// `.safetensors` it finds — no variant selection — so the sum over these dirs IS the resident set:
+///  * 5B (`candle-gen-wan` lib.rs:122/141/124) — `transformer` + `text_encoder` + `vae`;
+///  * A14B T2V/I2V (wan14b.rs:288/301/302/328) — the same plus `transformer_2`, the second MoE expert,
+///    which is co-resident (see the module note) and must be counted.
+///
+/// Packed q4/q8 tiers and the dense `Wan-AI/*-Diffusers` snapshot use the SAME subdir names (the tier is
+/// detected from tensor content — the `proj_out.scales` marker — not from the directory layout), so one
+/// list serves both.
+///
+/// **Why NAMED subdirs and not a blind recursive sum of `model_dir`.** A blind sum cannot go inert,
+/// which is attractive — but it can OVER-count, and over-counting is the direction that hurts: it
+/// wall-rejects hardware that renders fine (sc-12179), whereas an under-count merely admits (the
+/// pre-gate status quo). Naming the dirs makes a wrong name read `0` for that component — permissive,
+/// the safe direction — and it also makes the tier-ROOT fallback safe: if no tier subdir resolved and
+/// `model_dir` is a root holding `q4/`+`q8/`, there is no top-level `transformer/`, so this reads 0 and
+/// admits rather than summing two tiers at once.
+///
+/// **Why `ltx_2_3_distilled` and `svd_xt` are `None` (sc-12344's recorded exemptions).** Their on-disk
+/// bytes are categorically not their loaded set, so ANY floor built from a directory sum would
+/// wall-reject working cards:
+///  * **ltx dense** — `ltx_checkpoint()` (candle-gen-ltx lib.rs:129-159) picks exactly ONE root-level
+///    file by substring rank (`distilled` > `bf16` > largest), skipping the `fp8`/`mixed`/lora/upscaler
+///    siblings shipped beside it. The hosted `Lightricks/LTX-2.3` is ~146 GiB on disk
+///    (`estimatedSizeBytes: 157004895813`) against a single-file load — summing it would refuse LTX on
+///    every GPU in existence.
+///  * **ltx packed tier** — reads 3 exact files (`transformer` / `connector` / `vae_decoder`,
+///    tier.rs:152-173) while the tier dir also ships `vae_encoder` + `audio_vae` + `vocoder` +
+///    `upsampler`, which the T2V render never loads (tier.rs:30).
+///  * **svd_xt** — resolves ONE exact file per component (candle-gen-svd lib.rs:128-141), but the
+///    upstream `stabilityai/stable-video-diffusion-img2vid-xt` snapshot ships `X.safetensors` AND
+///    `X.fp16.safetensors` side by side in each of `unet`/`vae`/`image_encoder`, so a dir sum roughly
+///    DOUBLES a ~8.9 GiB model — enough to false-reject a small card that runs it today.
+///
+/// Closing those two honestly needs the provider to own its split (`register_generators! { …;
+/// footprint = … }` — gen-core's `PerComponentBytes`, whose own doc explains that a consumer guessing
+/// component sizes is exactly this failure). None of the video crates registers one today, so that is a
+/// cross-repo change on the inference monorepo: **sc-12397**. Not a fudge factor — the LTX dense case is
+/// off by ~7x, not by a constant.
+fn wan_weight_components(engine_id: &str) -> Option<&'static [&'static str]> {
+    match engine_id {
+        "wan2_2_ti2v_5b" => Some(&["transformer", "text_encoder", "vae"]),
+        "wan2_2_t2v_14b" | "wan2_2_i2v_14b" => {
+            Some(&["transformer", "transformer_2", "text_encoder", "vae"])
+        }
+        // `mochi_1` has its own frame-dependent gate above; `ltx_2_3_distilled` / `svd_xt` are exempt.
+        _ => None,
+    }
+}
+
+/// The on-disk bytes a candle Wan load holds resident: [`wan_weight_components`] summed under
+/// `model_dir`. `0` for a non-Wan engine, or when nothing could be scanned ⇒ no signal ⇒ admit.
+///
+/// Reuses [`crate::mlx_fit_gate::sum_safetensors_bytes`] per component so the HF-cache symlink handling
+/// (shards are symlinks into `blobs/`) and the AppleDouble `._*` skip are shared with the MLX lane
+/// rather than re-implemented — the same reason sc-12306's Mochi gate reuses `mochi_resident_bytes`.
+pub(crate) fn wan_weight_bytes(engine_id: &str, model_dir: &Path) -> u64 {
+    wan_weight_components(engine_id).map_or(0, |components| {
+        components
+            .iter()
+            .map(|component| crate::mlx_fit_gate::sum_safetensors_bytes(&model_dir.join(component)))
+            .sum()
+    })
+}
+
+/// The pure Wan candle video admission decision: `Some(error)` when the model's RESIDENT WEIGHTS alone
+/// cannot fit the VRAM budget, `None` to admit. The non-Mochi twin of [`mochi_fit_error`], and pure for
+/// the same reason — the caller resolves the budget, so the whole decision is unit-testable with no CUDA
+/// driver and no GPU.
+///
+/// Missing either signal admits: no budget (`nvidia-smi` unreadable) or unmeasurable weights
+/// (`weight_bytes == 0` — an exempt engine, or a dir that could not be scanned) ⇒ `None`, exactly like
+/// [`fit_decision`]'s [`FitDecision::Unknown`]. A gate that blocks without evidence is a regression, not
+/// a safety net.
+pub(crate) fn video_weights_fit_error(
+    model_label: &str,
+    weight_bytes: u64,
+    gpu_id: &str,
+    budget: Option<VramBudget>,
+) -> Option<WorkerError> {
+    let (needed_gb, budget) = (video_weights_needed_gb(weight_bytes)?, budget?);
+    (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
+        video_weights_too_big_error(
+            model_label,
+            needed_gb,
+            budget.free_gb,
+            weight_bytes as f64 / BYTES_PER_GIB,
+            gpu_id,
+        )
+    })
+}
+
+/// The predicted resident FLOOR (GiB) for a candle video job: the on-disk weights every component of
+/// this engine holds for the whole run, plus [`HEADROOM_GB`].
+///
+/// [`HEADROOM_GB`] is the CUDA reserve — allocator slack + CUDA context overhead — not MLX's
+/// `OS_RESERVE_GB` (the OS does not draw from discrete VRAM). The two agree at 2.0 today but mean
+/// different things; this is the same split `fit_gate::mochi_needed_gb` takes its `reserve_gb`
+/// parameter for (sc-12306).
+///
+/// `None` when nothing was measured (`weight_bytes == 0`) ⇒ no signal ⇒ never block.
+fn video_weights_needed_gb(weight_bytes: u64) -> Option<f64> {
+    (weight_bytes > 0).then(|| weight_bytes as f64 / BYTES_PER_GIB + HEADROOM_GB)
+}
+
+/// Build the generic candle video weights-floor rejection. Names the model, what its weights alone
+/// need, and what the card has.
+///
+/// The levers are WEIGHTS levers, and only those. It deliberately does NOT say "lower the output
+/// resolution" like the image lane's `vram_reject_tail`: resolution has exactly ZERO effect on weight
+/// bytes, so offering it here would send the user to a knob that cannot move the number they were just
+/// shown. Nor does it say Mochi's "shorten the clip" — same reason (there is no decode term in this
+/// floor). The tier IS the lever that moves weights, plus the card itself.
+fn video_weights_too_big_error(
+    model_label: &str,
+    needed_gb: f64,
+    available_gb: f64,
+    weights_gb: f64,
+    gpu_id: &str,
+) -> WorkerError {
+    WorkerError::InvalidPayload(format!(
+        "{model_label} needs at least ~{needed} GB of VRAM just to hold its weights (~{weights} GB, \
+         every component held resident for the whole run — this engine does not stage components) but \
+         GPU {gpu_id} has ~{available} GB available. Select a smaller quant tier, or run on a GPU with \
+         more VRAM.",
+        needed = needed_gb.round() as i64,
+        available = available_gb.round() as i64,
+        weights = weights_gb.round() as i64,
+    ))
+}
+
 /// Parse a JSON uint/int from either a number or a numeric string (mirrors base.rs `quant_int`).
 fn quant_int(value: &Value) -> Option<i64> {
     value
@@ -754,6 +944,260 @@ mod tests {
         assert_eq!(reclaimable_pool_gb(gpu), 82.0);
         // Keyed per GPU — a different card is independent.
         assert_eq!(reclaimable_pool_gb(other), 0.0);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The Wan candle video weights-floor gate (sc-12344).
+    // -----------------------------------------------------------------------------------------
+
+    /// An RTX 5090 — the biggest consumer NVIDIA card, and the hardware the story names. 32 GB total,
+    /// all free (a cold card with nothing loaded). `apply_vram_cap(None, ..)` synthesizes the budget, so
+    /// the whole decision is exercisable here with no CUDA driver and no GPU.
+    fn rtx_5090() -> Option<VramBudget> {
+        apply_vram_cap(None, Some(32.0))
+    }
+
+    /// Wan2.2 T2V-A14B candle tier bytes — the SHIPPED hosted sizes, straight from this platform's
+    /// `downloads[]` `estimatedSizeBytes` in `builtin.models.jsonc`: q4/q8 from the packed
+    /// `SceneWorks/wan2.2-t2v-a14b-candle`, bf16 from the dense `Wan-AI/Wan2.2-T2V-A14B-Diffusers` the
+    /// manifest routes the bf16 variant to. Real numbers, so these tests prove the REAL jobs are
+    /// admitted/refused rather than that arithmetic is arithmetic.
+    const WAN_A14B_CANDLE_Q4_BYTES: u64 = 29_788_704_888; // 27.74 GiB
+    const WAN_A14B_CANDLE_Q8_BYTES: u64 = 44_071_949_832; // 41.05 GiB
+    const WAN_A14B_CANDLE_BF16_BYTES: u64 = 72_000_000_000; // 67.06 GiB
+
+    /// THE story (sc-12344): Wan A14B at bf16 is a ~67 GiB dual-expert MoE and was admitted on EVERY
+    /// consumer card with no pre-flight check. It is now refused before the load + denoise.
+    ///
+    /// Kills the mutations a compile alone would not:
+    ///   * dropping `transformer_2` from the A14B component list ⇒ ~half the bytes ⇒ ADMITS.
+    ///   * sizing off the manifest's `footprint.peakMemoryBytes` (24.5 GiB — an MLX measurement that
+    ///     assumes only ONE expert is resident) ⇒ ADMITS. The candle engine co-locates both.
+    ///   * reusing the Mochi message ⇒ the "Shorten the clip" assert fails.
+    #[test]
+    fn wan_a14b_bf16_is_refused_on_an_rtx_5090() {
+        let message = video_weights_fit_error(
+            "wan2_2_t2v_14b",
+            WAN_A14B_CANDLE_BF16_BYTES,
+            "0",
+            rtx_5090(),
+        )
+        .expect(
+            "wan A14B bf16 needs ~67 GiB of weights + 2 GiB headroom = ~69 GB and NO consumer NVIDIA \
+             card has that — admitting it burns the load + denoise before a raw CUDA OOM",
+        )
+        .to_string();
+        assert!(
+            message.contains("wan2_2_t2v_14b"),
+            "names the model: {message}"
+        );
+        assert!(
+            message.contains("69") && message.contains("32"),
+            "states what it needs and what the card has: {message}"
+        );
+        assert!(
+            message.contains("smaller quant tier"),
+            "names the lever that actually moves weight bytes: {message}"
+        );
+        // The levers must be WEIGHTS levers. Resolution cannot change weight bytes, and the clip length
+        // is Mochi's decode lever — offering either here sends the user to a knob that cannot move the
+        // number they were just shown.
+        assert!(
+            !message.contains("resolution"),
+            "resolution has zero effect on a weights floor: {message}"
+        );
+        assert!(
+            !message.contains("Shorten the clip"),
+            "Mochi's decode-lever prose leaking into the weights floor: {message}"
+        );
+        assert!(
+            message.contains("VRAM") && !message.contains("unified memory"),
+            "must be CUDA-worded, not the MLX lane's Mac prose: {message}"
+        );
+    }
+
+    /// The other half of the contract: on the SAME 32 GB card the q4 tier is ADMITTED, and bf16 fits the
+    /// 96 GB dev box. Without this the reject test above would pass against a gate that blanket-refuses
+    /// Wan on every card — so this pair is what proves the gate discriminates by BUDGET and by TIER
+    /// rather than wall-rejecting the lane.
+    #[test]
+    fn wan_a14b_admits_the_tier_that_fits_the_card() {
+        // q4 = 27.74 + 2 = 29.74 GB ≤ 32 — the tier a 5090 actually runs.
+        assert!(
+            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_CANDLE_Q4_BYTES, "0", rtx_5090())
+                .is_none(),
+            "q4 fits a 32 GB card — refusing it wall-rejects hardware that works today"
+        );
+        // q8 = 43.05 does NOT fit the same card…
+        assert!(
+            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_CANDLE_Q8_BYTES, "0", rtx_5090())
+                .is_some(),
+            "q8 does not fit 32 GB"
+        );
+        // …but does fit a 48 GB card, where bf16 (69.06) still does not — two tiers, one card, two
+        // verdicts: the gate reads the TIER's bytes, not the model id.
+        let card_48 = apply_vram_cap(None, Some(48.0));
+        assert!(
+            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_CANDLE_Q8_BYTES, "0", card_48)
+                .is_none(),
+            "q8 fits 48 GB"
+        );
+        assert!(
+            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_CANDLE_BF16_BYTES, "0", card_48)
+                .is_some(),
+            "bf16 does not fit the SAME 48 GB card"
+        );
+        // The 96 GB RTX PRO 6000 runs bf16 — the gate must not refuse the box this tier exists for.
+        assert!(
+            video_weights_fit_error(
+                "wan2_2_t2v_14b",
+                WAN_A14B_CANDLE_BF16_BYTES,
+                "0",
+                apply_vram_cap(None, Some(96.0))
+            )
+            .is_none(),
+            "bf16 fits a 96 GB card"
+        );
+    }
+
+    /// The CUDA reserve is real: a tier whose raw weights fit the card but whose weights + [`HEADROOM_GB`]
+    /// do not must be refused. Pinned on a NON-default budget chosen so the two answers differ — q4's
+    /// 27.74 GiB fits a 29 GB card outright, and only the reserve rejects it. Deleting the `+ HEADROOM_GB`
+    /// from `video_weights_needed_gb` flips this to admit; nothing else in the suite would notice.
+    #[test]
+    fn video_weights_needed_gb_reserves_the_cuda_headroom() {
+        let card_29 = apply_vram_cap(None, Some(29.0));
+        assert!(
+            WAN_A14B_CANDLE_Q4_BYTES as f64 / BYTES_PER_GIB < 29.0,
+            "fixture guard: the raw weights must FIT the card, else this proves nothing"
+        );
+        assert!(
+            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_CANDLE_Q4_BYTES, "0", card_29)
+                .is_some(),
+            "weights alone fit 29 GB but weights + 2 GB of allocator/context reserve do not"
+        );
+        // And the reserve is the CUDA one, not MLX's OS_RESERVE_GB: they agree at 2.0 today, so pin the
+        // arithmetic rather than the constant's name.
+        assert_eq!(
+            video_weights_needed_gb(WAN_A14B_CANDLE_Q4_BYTES),
+            Some(WAN_A14B_CANDLE_Q4_BYTES as f64 / BYTES_PER_GIB + 2.0)
+        );
+    }
+
+    /// The gate NO-OPS without a budget signal (the story's explicit AC) and without a weight signal — a
+    /// worker on a card `nvidia-smi` cannot read, or pointed at a dir it cannot scan, must keep rendering
+    /// exactly as it did before this gate existed. A fit gate that blocks on missing evidence is a
+    /// regression, not a safety net (sc-12179: never wall-reject a machine that worked).
+    #[test]
+    fn video_weights_fit_error_no_ops_without_a_budget_or_weight_signal() {
+        // No budget ⇒ admit, even for a model no card could hold.
+        assert!(
+            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_CANDLE_BF16_BYTES, "0", None)
+                .is_none()
+        );
+        // No weight signal ⇒ admit, even on a tiny card.
+        assert!(
+            video_weights_fit_error("wan2_2_t2v_14b", 0, "0", apply_vram_cap(None, Some(1.0)))
+                .is_none()
+        );
+        assert_eq!(video_weights_needed_gb(0), None);
+    }
+
+    /// The component lists ARE the gate's correctness: they must name exactly the dirs the loader reads.
+    ///
+    /// Pins the A14B's second expert in particular — `transformer_2` is co-resident (wan14b.rs:337-343),
+    /// and dropping it from the list halves the prediction and silently un-gates the bf16 tier this story
+    /// exists to catch.
+    #[test]
+    fn wan_weight_bytes_sums_exactly_the_components_the_loader_reads() {
+        let root = std::env::temp_dir().join(format!(
+            "sc12344_wan_components_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for (relative, len) in [
+            ("transformer/model.safetensors", 1_000_u64),
+            ("transformer_2/model.safetensors", 2_000),
+            ("text_encoder/model.safetensors", 400),
+            ("vae/model.safetensors", 30),
+            // NOT read by the loader — a decoy that must not be counted. A blind recursive sum of the
+            // dir would swallow it; naming the components is what keeps the floor from over-counting.
+            ("upsampler/model.safetensors", 9_000_000),
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        }
+
+        // A14B counts BOTH experts + TE + VAE, and nothing else.
+        assert_eq!(
+            wan_weight_bytes("wan2_2_t2v_14b", &root),
+            1_000 + 2_000 + 400 + 30
+        );
+        assert_eq!(
+            wan_weight_bytes("wan2_2_i2v_14b", &root),
+            1_000 + 2_000 + 400 + 30
+        );
+        // The 5B is single-expert: `transformer_2` must NOT be counted (it would not exist on a real 5B
+        // snapshot; counting it here would mean the list, not the disk, decided).
+        assert_eq!(wan_weight_bytes("wan2_2_ti2v_5b", &root), 1_000 + 400 + 30);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The EXEMPTIONS and the tier-ROOT fallback both read `0` ⇒ no signal ⇒ admit.
+    ///
+    /// This is the sc-12179 guard. `ltx`/`svd` are exempt because their on-disk bytes are not their
+    /// loaded set (LTX dense is a ~146 GiB repo that loads ONE root file; SVD ships both dtype variants
+    /// per component) — a floor built from a dir sum would refuse cards that render fine. And when NO wan
+    /// tier subdir resolved, `model_dir` is a ROOT holding `q4/`+`q8/`: there is no top-level
+    /// `transformer/`, so this reads 0 and admits rather than summing two tiers at once.
+    #[test]
+    fn wan_weight_bytes_is_zero_for_exempt_engines_and_a_tier_root() {
+        let root = std::env::temp_dir().join(format!(
+            "sc12344_wan_exempt_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        // A tier ROOT: the components live one level DOWN, under each tier.
+        for tier in ["q4", "q8"] {
+            for component in ["transformer", "transformer_2", "text_encoder", "vae"] {
+                let path = root.join(tier).join(component).join("model.safetensors");
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::File::create(&path)
+                    .unwrap()
+                    .set_len(5_000_000_000)
+                    .unwrap();
+            }
+        }
+
+        // No top-level component dirs ⇒ no signal ⇒ admit. A blind recursive sum would read ~37 GiB
+        // here — both tiers at once — and wall-reject a card that runs either one.
+        assert_eq!(wan_weight_bytes("wan2_2_t2v_14b", &root), 0);
+        assert!(
+            video_weights_fit_error(
+                "wan2_2_t2v_14b",
+                wan_weight_bytes("wan2_2_t2v_14b", &root),
+                "0",
+                rtx_5090()
+            )
+            .is_none(),
+            "an unrecognized layout must ADMIT, never reject on a number nothing verified"
+        );
+
+        // The exempt engines read 0 even pointed at a fully-populated component tree.
+        let populated = root.join("q4");
+        assert_eq!(wan_weight_bytes("ltx_2_3_distilled", &populated), 0);
+        assert_eq!(wan_weight_bytes("svd_xt", &populated), 0);
+        // Mochi has its own frame-dependent gate; it must not also ride this one.
+        assert_eq!(wan_weight_bytes("mochi_1", &populated), 0);
+        // …and the wan engines DO read that same tree, so the zeros above are the exemption, not a
+        // broken fixture.
+        assert!(wan_weight_bytes("wan2_2_t2v_14b", &populated) > 0);
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Live real-hardware validation (sc-10766): exercises the REAL `nvidia-smi` VRAM reading on GPU 0
