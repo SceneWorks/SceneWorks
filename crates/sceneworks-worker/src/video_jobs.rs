@@ -1335,10 +1335,24 @@ fn video_asset_fact(
         "mimeType": "video/mp4",
         "width": request.width,
         "height": request.height,
-        // MEASURED, not requested (sc-12371) — see `EncodedClip`. `request.duration` / `request.fps`
-        // are what was ASKED for; these three keys describe the file that exists.
-        "duration": clip.duration_seconds(),
-        "fps": clip.fps,
+        // REQUESTED, deliberately (sc-12371). These two are the knobs the user PICKED off the
+        // model's `limits.durations` / `limits.fps` menus, and `build_video_sidecar_parts` feeds
+        // them to `recipe.normalizedSettings` — which is what "re-run this generation" rebuilds the
+        // payload from (sc-12324/12345). Replacing them with the measured values would replay a 6 s
+        // ask as 5.96 s: off-menu, and sc-12347 now enforces those menus server-side, so it could be
+        // refused outright. The MEASURED pair below is what the `file` block uses.
+        "duration": request.duration,
+        "fps": request.fps,
+        // MEASURED off the encoded clip (sc-12371) — the `asset.file` block's honest running time
+        // and cadence. `file.duration` used to echo `request.duration`, so a 6 s ask on a Wan engine
+        // produced a 149-frame / 5.96 s file that the asset described as 6.0 s: exactly the "claims
+        // a duration the file does not have" this story was filed for. Kept as separate keys rather
+        // than overwriting the two above because a knob and a measurement are different facts that
+        // only happened to share a name — see `recipe_fields.js`, which already splits "the dims the
+        // app RAN at" from "the dims the user PICKED" for the same reason.
+        "encodedFrameCount": clip.frames,
+        "encodedDuration": clip.duration_seconds(),
+        "encodedFps": clip.fps,
         "quality": request.quality,
         "family": plan.family,
         "seed": seed,
@@ -13521,22 +13535,40 @@ mod tests {
         assert_eq!(fact["mediaPath"], json!(plan.media_rel));
         assert_eq!(fact["adapter"], json!("procedural_video"));
         assert_eq!(fact["seed"], json!(42));
-        // sc-12371: the file facts are MEASURED. LTX snaps 4.0 s x 24 fps (96 raw) onto its 8k+1
-        // lattice, so the clip is NOT 4.0 s and the asset must not claim it is — the old fact echoed
-        // `request.duration` and lied by exactly that snap.
+        // sc-12371 — THE SPLIT. LTX snaps 4.0 s x 24 fps (96 raw) onto its 8k+1 lattice, so the clip
+        // is NOT 4.0 s. The fact must carry BOTH truths, because they feed different consumers:
+        //
+        //   `duration`/`fps`              -> `recipe.normalizedSettings` -> "re-run this generation"
+        //   `encodedDuration`/`encodedFps` -> `asset.file`               -> what the mp4 really is
+        //
+        // Collapsing them either way is a bug: measured-into-normalizedSettings replays a 4 s ask as
+        // 4.04 s (off the model's `limits.durations` menu, which sc-12347 now enforces), and
+        // requested-into-file is the sc-12371 lie this story was filed for.
         let rendered = ltx_frame_count(96) as usize;
         assert_eq!(decoded.frames.len(), rendered);
-        assert_eq!(fact["rawAdapterSettings"]["frameCount"], json!(rendered));
+        assert_ne!(
+            rendered, 96,
+            "the probe must discriminate: LTX has to actually snap 96 here, or requested and \
+             measured agree and this pins nothing"
+        );
+        // The REPLAY knobs: exactly what the user picked, untouched.
+        assert_eq!(fact["duration"], json!(4.0));
         assert_eq!(fact["fps"], json!(24));
+        // The FILE facts: measured off the clip.
+        assert_eq!(fact["encodedFrameCount"], json!(rendered));
+        assert_eq!(fact["encodedFps"], json!(24));
+        assert_eq!(fact["rawAdapterSettings"]["frameCount"], json!(rendered));
         assert!(
-            (fact["duration"].as_f64().expect("duration") - rendered as f64 / 24.0).abs() < 1e-9,
-            "duration must be the encoded frames over the encoded fps"
+            (fact["encodedDuration"].as_f64().expect("encodedDuration") - rendered as f64 / 24.0)
+                .abs()
+                < 1e-9,
+            "encodedDuration must be the encoded frames over the encoded fps"
         );
         assert_ne!(
-            fact["duration"],
+            fact["encodedDuration"],
             json!(4.0),
-            "the REQUESTED 4.0 s is not the file's duration — if this ever matches, the probe has \
-             stopped discriminating and a `request.duration` regression would pass"
+            "the REQUESTED 4.0 s is not the file's duration — if this ever matches, a \
+             `request.duration` regression in the file block would pass unnoticed"
         );
         assert_eq!(fact["sourceAssetId"], json!("asset_src"));
         assert_eq!(fact["personTrackId"], json!("track_1"));
@@ -13565,7 +13597,13 @@ mod tests {
             "fitMode": "pad",
         }));
         let plan = VideoPlan::new(&ads2v, Path::new("/tmp/project"));
-        let fact = video_asset_fact(&plan, 5, "mlx_bernini", json!({}), None);
+        // The clip these ids ride on is irrelevant to them, but it is not optional: `video_asset_fact`
+        // requires the MEASURED clip so no caller can record a predicted length (sc-12371).
+        let clip = EncodedClip {
+            frames: 81,
+            fps: 16,
+        };
+        let fact = video_asset_fact(&plan, 5, "mlx_bernini", json!({}), None, clip);
         assert_eq!(fact["referenceClipAssetId"], json!("clip_ref"));
         assert_eq!(fact["referenceAssetIds"], json!(["ref_1", "ref_2"]));
         assert_eq!(fact["fitMode"], json!("pad"));
@@ -13576,7 +13614,7 @@ mod tests {
             "prompt": "stitch them", "sourceClipAssetIds": ["clip_a", "clip_b"],
         }));
         let mv2v_plan = VideoPlan::new(&mv2v, Path::new("/tmp/project"));
-        let mv2v_fact = video_asset_fact(&mv2v_plan, 5, "mlx_bernini", json!({}), None);
+        let mv2v_fact = video_asset_fact(&mv2v_plan, 5, "mlx_bernini", json!({}), None, clip);
         assert_eq!(mv2v_fact["sourceClipAssetIds"], json!(["clip_a", "clip_b"]));
         assert_eq!(mv2v_fact["referenceAssetIds"], json!([]));
     }
