@@ -11,7 +11,6 @@ vi.mock("../api.js", async (importOriginal) => {
 });
 
 import { AppContext } from "../context/AppContext.js";
-import { fallbackModels } from "../constants.js";
 import { VideoStudio } from "./VideoStudio.jsx";
 
 const LTX = {
