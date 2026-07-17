@@ -47,9 +47,19 @@ on:
     paths: *mlx_paths
   workflow_dispatch:
 
+# Cancel superseded PR runs, but never cancel a main-push run — same reasoning as
+# windows-candle.yml (sc-12399). This lane is the only thing in CI that runs
+# `nax_guard`, so a main commit whose run is killed carries no NAX verdict at all
+# and a later kernel break is misattributed to the next commit.
+#
+# Main must key on `github.sha`, not `github.ref`: GitHub keeps at most ONE pending
+# run per group and evicts it when a newer run queues, so a shared main group still
+# drops the middle commit of a 3+ merge burst even with cancel-in-progress off.
+# Per-SHA groups cannot evict each other; runs serialize on the self-hosted box
+# instead. Do NOT collapse this back to `group: ...${{ github.ref }}`.
 concurrency:
-  group: macos-mlx-${{ github.ref }}
-  cancel-in-progress: true
+  group: macos-mlx-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   nax-worker:

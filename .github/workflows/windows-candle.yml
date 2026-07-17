@@ -57,9 +57,27 @@ on:
     paths: *candle_paths
   workflow_dispatch:
 
+# Cancel superseded PR runs, but never cancel a main-push run: this lane is the
+# ONLY thing that compiles the candle-gated worker code, so a main commit whose
+# run is killed carries no candle verdict at all and a later break is misattributed
+# to the next commit (sc-12399 — 8 of 30 main runs cancelled over one 37h window).
+#
+# The group KEY is what does the work here, not just cancel-in-progress. GitHub
+# allows at most ONE pending run per concurrency group and cancels the previously
+# pending run when a new one queues, so keying main on `github.ref` would still
+# drop the middle commit of any 3+ merge burst (A runs, B pends, C evicts B) even
+# with cancel-in-progress off. Keying main on `github.sha` puts every commit in its
+# own group, where nothing can evict it; runs then serialize on the single
+# self-hosted box instead. Do NOT collapse this back to `group: ...${{ github.ref }}`.
+#
+# Cost is bounded and was measured before landing: the lane is ~4.2m median (p90
+# 4.5m) and the box sits ~12% utilized, so restoring the cancelled main runs adds
+# ~34m of box time per ~37h (≈12% -> ≈13% utilization). `queue: max` would be the
+# other way to do this, but it cannot combine with `cancel-in-progress: true`,
+# which the PR side still wants.
 concurrency:
-  group: windows-candle-${{ github.ref }}
-  cancel-in-progress: true
+  group: windows-candle-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   candle-worker:
