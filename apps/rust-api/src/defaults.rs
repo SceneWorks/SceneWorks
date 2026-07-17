@@ -137,13 +137,10 @@ pub(crate) fn default_video_model() -> String {
 // blanket this layer invents. The blanket 25 that used to live here was off-menu for 7 of the 10
 // shipped video models — see `VideoJobRequest::fps` (sc-12347).
 
-pub(crate) fn default_video_width() -> u32 {
-    768
-}
-
-pub(crate) fn default_video_height() -> u32 {
-    512
-}
+// No `default_video_width` / `default_video_height` either: an omitted side resolves to the model's
+// declared `defaults.resolution` (core's `default_resolution`). The blanket 768x512 that used to
+// live here is not in `limits.resolutions` for 8 of the 10 shipped video models — mochi_1 rendered
+// at 768x512 instead of its native, only-trained 848x480 (sc-12400). See `VideoJobRequest::width`.
 
 pub(crate) fn default_video_quality() -> String {
     "balanced".to_owned()

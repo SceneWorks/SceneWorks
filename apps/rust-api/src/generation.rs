@@ -572,6 +572,26 @@ pub(crate) async fn create_video_job(
             return Err(ApiError::bad_request(message));
         }
         job_payload.insert("fps".to_owned(), Value::from(fps));
+
+        // The model's declared `defaults.resolution` — the third dead `defaults.*` key, and the one
+        // with no error surface: dimensions COERCE rather than reject, so this was silent by
+        // construction. The blanket 768×512 is not in `limits.resolutions` for 8 of the 10 shipped
+        // video models, so an MCP `generate_video(model = "mochi_1", prompt = …)` naming no size
+        // rendered at 768×512 — a geometry mochi was never trained on — while the web rendered its
+        // declared 848×480 from the identical request (`VideoStudio.jsx:234`). Same convergence as
+        // fps and duration: the API adopts what the manifest and the dropdown already say.
+        //
+        // Written back per side only when the caller named none, so a caller's own size is untouched
+        // and each side still falls back independently. The stride/area normalization stays in
+        // core's `normalized_dimensions` — this records the RESOLVED request, not the final
+        // geometry, exactly as it did when the blanket lived in the DTO.
+        let (default_width, default_height) = default_resolution(entry).unwrap_or((768, 512));
+        if !job_payload.contains_key("width") {
+            job_payload.insert("width".to_owned(), Value::from(default_width));
+        }
+        if !job_payload.contains_key("height") {
+            job_payload.insert("height".to_owned(), Value::from(default_height));
+        }
     }
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility_with(

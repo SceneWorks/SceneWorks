@@ -785,10 +785,14 @@ pub(crate) struct VideoJobRequest {
     /// this route constructed itself (sc-12347).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) fps: Option<u32>,
-    #[serde(default = "default_video_width")]
-    pub(crate) width: u32,
-    #[serde(default = "default_video_height")]
-    pub(crate) height: u32,
+    /// Output geometry, or `None` per side when the caller named none — resolved from the model's
+    /// declared `defaults.resolution` in `create_video_job`, not from a blanket 768×512 that 8 of
+    /// the 10 shipped video models do not advertise anywhere (sc-12400). See
+    /// [`VideoJobRequest::fps`] for the pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) height: Option<u32>,
     #[serde(default = "default_video_quality")]
     pub(crate) quality: String,
     #[serde(default)]

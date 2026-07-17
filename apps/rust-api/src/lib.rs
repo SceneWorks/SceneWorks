@@ -57,7 +57,7 @@ use sceneworks_core::training_store::{
     TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
 use sceneworks_core::video_request::{
-    duration_limit_error, fps_limit_error, resolve_duration, resolve_fps,
+    default_resolution, duration_limit_error, fps_limit_error, resolve_duration, resolve_fps,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -2699,8 +2699,14 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
             return Err(ApiError::bad_request("fps must be between 1 and 60"));
         }
     }
-    validate_dimension(payload.width, "width", MAX_VIDEO_DIMENSION)?;
-    validate_dimension(payload.height, "height", MAX_VIDEO_DIMENSION)?;
+    // Only a *named* dimension is bounded here, like duration and fps above: an omitted side is
+    // resolved from the model's declared `defaults.resolution` in `create_video_job` (sc-12400).
+    if let Some(width) = payload.width {
+        validate_dimension(width, "width", MAX_VIDEO_DIMENSION)?;
+    }
+    if let Some(height) = payload.height {
+        validate_dimension(height, "height", MAX_VIDEO_DIMENSION)?;
+    }
     match payload.mode.as_str() {
         "image_to_video" if payload.source_asset_id.is_none() => Err(ApiError::bad_request(
             "Image to Video requires a source image.",

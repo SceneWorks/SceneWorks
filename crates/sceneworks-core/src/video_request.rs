@@ -439,6 +439,52 @@ pub fn resolve_fps(requested: Option<&Value>, model_manifest_entry: &JsonObject)
         .clamp(MIN_FPS, MAX_FPS)
 }
 
+/// The geometry used when neither the caller nor the model's manifest entry names one — the
+/// historical blanket, kept for models that declare no `defaults.resolution`.
+const DEFAULT_WIDTH: u32 = 768;
+const DEFAULT_HEIGHT: u32 = 512;
+
+/// The payload-sanity bounds on either dimension (the Python `normalized_dimensions` clamp). NOT a
+/// model's limit: the stride is [`dimension_multiple_of`] and the area cap is [`max_pixels_of`].
+const MIN_DIMENSION: u32 = 256;
+const MAX_DIMENSION: u32 = 1920;
+
+/// `defaults.resolution` (`"848x480"`) from a resolved manifest entry as `(width, height)`, or
+/// `None` when the model declares none or declares one this parse cannot honor.
+///
+/// The **third** instance of the dead-`defaults.*` key [`default_fps`] and [`default_duration`]
+/// document, and the one with no error surface at all: dimensions are *coerced* by
+/// [`normalized_dimensions`], never rejected, so this failure is silent by construction rather than
+/// a 400 someone eventually reports.
+///
+/// The blanket 768×512 is not merely un-declared for **8 of the 10** shipped video models — it is
+/// not even in their `limits.resolutions`, i.e. it is a geometry the model never advertised at any
+/// point. mochi_1 is the sharp case: its declared (and only trained) bucket is 848×480, so an MCP
+/// `generate_video(model = "mochi_1", prompt = …)` that names no size rendered at 768×512 — a
+/// geometry the model was never trained on — while the web, which reads `defaults.resolution` at
+/// `VideoStudio.jsx:234`, rendered 848×480 from the same request (sc-12400).
+///
+/// Same never-invent-from-a-typo posture as its siblings: anything that is not `W x H` with both
+/// dimensions inside the clamp range falls back to the blanket rather than emitting a degenerate
+/// size. The value is deliberately NOT snapped to the model's stride here —
+/// [`normalized_dimensions`] does that for declared and blanket geometry alike, so a model whose
+/// advertised default is off its own lattice is floored exactly as a caller's request would be.
+pub fn default_resolution(model_manifest_entry: &JsonObject) -> Option<(u32, u32)> {
+    let (width, height) = model_manifest_entry
+        .get("defaults")
+        .and_then(Value::as_object)
+        .and_then(|defaults| defaults.get("resolution"))
+        .and_then(Value::as_str)?
+        .split_once(['x', 'X'])?;
+    let honorable = |raw: &str| {
+        raw.trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|side| (MIN_DIMENSION..=MAX_DIMENSION).contains(side))
+    };
+    Some((honorable(width)?, honorable(height)?))
+}
+
 /// The advertised frame rates as a human list: `30`, `16 or 24`, `6, 7, 8, 10, 12, or 25`.
 fn humanized_fps_menu(menu: &[u32]) -> String {
     match menu {
@@ -540,8 +586,20 @@ fn normalized_dimensions(
     model_manifest_entry: &JsonObject,
 ) -> (u32, u32) {
     let multiple = dimension_multiple_of(model_manifest_entry);
-    let w = floor_to_multiple(clamped_u32(width, 768, 256, 1920), multiple);
-    let h = floor_to_multiple(clamped_u32(height, 512, 256, 1920), multiple);
+    // An omitted side takes the model's declared `defaults.resolution`, not the blanket 768×512 —
+    // which 8 of the 10 shipped video models do not advertise anywhere, mochi_1's 848×480 native
+    // bucket being the case that matters (sc-12400). Each side falls back independently, exactly as
+    // the two blanket constants did, so a caller naming only one dimension is unchanged in shape.
+    let (default_width, default_height) =
+        default_resolution(model_manifest_entry).unwrap_or((DEFAULT_WIDTH, DEFAULT_HEIGHT));
+    let w = floor_to_multiple(
+        clamped_u32(width, default_width, MIN_DIMENSION, MAX_DIMENSION),
+        multiple,
+    );
+    let h = floor_to_multiple(
+        clamped_u32(height, default_height, MIN_DIMENSION, MAX_DIMENSION),
+        multiple,
+    );
     match max_pixels_of(model_manifest_entry) {
         Some(cap) if (w as u64) * (h as u64) > cap => fit_to_max_pixels(w, h, multiple, cap),
         _ => (w, h),
@@ -1329,6 +1387,44 @@ mod tests {
                 bare.fps
             );
 
+            // The geometry axis has no gate to be admitted BY — dimensions coerce rather than
+            // reject — so the invariant takes its strongest available form: what a size-less
+            // request renders must be the model's own advertised default, snapped to its own
+            // stride. That is what the web produces from the same request (`VideoStudio.jsx:234`),
+            // and the blanket 768x512 is not even in `limits.resolutions` for 8 of these 10.
+            //
+            // The expectation comes from DEFAULT_RESOLUTIONS, NOT from `default_resolution` — see
+            // that table's comment: deriving it from the function under test made this green
+            // through the very bug it checks.
+            let &(_, declared_w, declared_h) = DEFAULT_RESOLUTIONS
+                .iter()
+                .find(|(model, ..)| model == id)
+                .unwrap_or_else(|| panic!("{id} listed in DEFAULT_RESOLUTIONS"));
+            assert_eq!(
+                default_resolution(entry),
+                Some((declared_w, declared_h)),
+                "{id}: core must read the resolution the manifest actually declares"
+            );
+
+            let (want_w, want_h) = (declared_w, declared_h);
+            let multiple = dimension_multiple_of(entry);
+            let (want_w, want_h) = (
+                floor_to_multiple(want_w, multiple),
+                floor_to_multiple(want_h, multiple),
+            );
+            let (want_w, want_h) = match max_pixels_of(entry) {
+                Some(cap) if u64::from(want_w) * u64::from(want_h) > cap => {
+                    fit_to_max_pixels(want_w, want_h, multiple, cap)
+                }
+                _ => (want_w, want_h),
+            };
+            assert_eq!(
+                (bare.width, bare.height),
+                (want_w, want_h),
+                "{id}: a size-less request must render the model's declared defaults.resolution, \
+                 not the blanket {DEFAULT_WIDTH}x{DEFAULT_HEIGHT}"
+            );
+
             // MUTATION CHECK: the assertions above are only meaningful where the blanket would have
             // FAILED. Pin that this model is one of those, or that it is a known survivor.
             let cap = hard_max_duration(entry).unwrap_or_else(|| panic!("{id} declares a cap"));
@@ -1362,6 +1458,34 @@ mod tests {
             7,
             "the blanket {DEFAULT_DURATION}s is past the cap of these models: {over_cap:?} — if this \
              count moved, re-read why resolve_duration consults defaults.duration before changing it"
+        );
+
+        // …and the geometry blanket is UNADVERTISED — not merely un-declared — for 8 of the 10:
+        // 768x512 is absent from their `limits.resolutions` entirely, so the API was rendering a
+        // size the model never offered anywhere. Pinned so reintroducing a blanket fails here.
+        let unadvertised: Vec<&str> = FPS_MENUS
+            .iter()
+            .filter_map(|(id, ..)| {
+                let entry = models
+                    .iter()
+                    .find(|m| m.get("id").and_then(Value::as_str) == Some(*id))?
+                    .as_object()?;
+                let blanket = format!("{DEFAULT_WIDTH}x{DEFAULT_HEIGHT}");
+                let advertises = entry
+                    .get("limits")?
+                    .as_object()?
+                    .get("resolutions")?
+                    .as_array()?
+                    .iter()
+                    .any(|r| r.as_str() == Some(blanket.as_str()));
+                (!advertises).then_some(*id)
+            })
+            .collect();
+        assert_eq!(
+            unadvertised.len(),
+            8,
+            "the blanket {DEFAULT_WIDTH}x{DEFAULT_HEIGHT} is not advertised by these models: \
+             {unadvertised:?}"
         );
     }
 
@@ -1437,6 +1561,27 @@ mod tests {
     /// point of assertion 5 is that this number is *wrong for most models* — deleting the constant
     /// would delete the regression guard.
     const THE_BLANKET_FPS: u32 = 25;
+
+    /// Each shipped model's declared `defaults.resolution`, TRANSCRIBED from the manifest — and
+    /// deliberately independent of [`default_resolution`], which is the function under test.
+    ///
+    /// Deriving the expectation by calling `default_resolution` instead made the geometry assertion
+    /// a tautology (`f(x) == f(x)`): stubbing the function to `None` moved the expected value AND
+    /// the actual value to the blanket together, so the test stayed GREEN through the exact bug it
+    /// exists to catch. Only the API's end-to-end test — which hardcodes 848x480 — was red. This
+    /// table is what makes the core half a real check.
+    const DEFAULT_RESOLUTIONS: &[(&str, u32, u32)] = &[
+        ("ltx_2_3", 768, 512),
+        ("ltx_2_3_eros", 768, 512),
+        ("svd", 1024, 576),
+        ("mochi_1", 848, 480),
+        ("wan_2_2", 832, 480),
+        ("wan_2_2_t2v_14b", 1280, 704),
+        ("wan_2_2_i2v_14b", 1280, 704),
+        ("wan_2_2_vace_fun_14b", 832, 480),
+        ("bernini", 848, 480),
+        ("scail2_14b", 832, 480),
+    ];
 
     /// sc-12347 — the temporal invariant's other half: **what a video model advertises is what it
     /// renders**, on the axis that actually multiplies into frame count.

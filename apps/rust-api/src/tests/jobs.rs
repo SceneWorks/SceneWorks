@@ -3917,6 +3917,66 @@ async fn a_video_request_naming_no_duration_is_admitted_at_the_models_own_defaul
         .as_str()
         .unwrap_or_default()
         .contains("asks for 30s"));
+
+    // The GEOMETRY axis of the same bug — the third dead `defaults.*` key. No 400 to observe here
+    // (dimensions coerce), so the observable is the enqueued size itself: mochi_1 must take its
+    // declared 848x480 native bucket, NOT the blanket 768x512 it is never trained on and never
+    // advertises. `bernini` (848x480, stride 16) and `wan_2_2_t2v_14b` (1280x704) come along to
+    // prove this reads the per-model value rather than one hardcoded pair.
+    for (model, want_w, want_h) in [
+        ("mochi_1", 848, 480),
+        ("bernini", 848, 480),
+        ("wan_2_2_t2v_14b", 1280, 704),
+        ("ltx_2_3", 768, 512),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": project_id,
+                "mode": "text_to_video",
+                "prompt": "a fox runs",
+                "model": model
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{model}: {body}");
+        assert_eq!(
+            (
+                body["payload"]["width"].as_u64(),
+                body["payload"]["height"].as_u64()
+            ),
+            (Some(want_w), Some(want_h)),
+            "{model}: a size-less request must enqueue the model's declared defaults.resolution: \
+             {body}"
+        );
+    }
+
+    // A NAMED size is still honored verbatim — resolution fills a gap, it does not override.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "model": "mochi_1",
+            "width": 640,
+            "height": 384
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        (
+            body["payload"]["width"].as_u64(),
+            body["payload"]["height"].as_u64()
+        ),
+        (Some(640), Some(384)),
+        "a caller's own size must not be replaced by the model's default: {body}"
+    );
 }
 
 /// sc-12347 END TO END, against the **REAL shipped manifest** rather than a fixture — the route the
