@@ -119,6 +119,40 @@ optional pre-push hook (installed by `npm run hooks:install`; skip a run with
 > hook, or the CI parity lane. This trap has bitten sc-10404 (`PhaseTimer`) and sc-8390
 > (`run_blocking_with_heartbeat`).
 
+**The "candle" build** — CI's `windows-candle` lane compiles the worker with
+`--features backend-candle` on Windows, i.e. the
+`all(not(target_os = "macos"), feature = "backend-candle")` configuration. That's where
+`vram_gate`, `krea_control_fit`, the candle-control image modules and `generate_candle_video`
+live — and **neither** `npm run rust:check` (macOS pins `target_os`, so the cfg is false
+whatever features you pass) **nor** `rust:check:neither` (candle off) compiles a line of it.
+It carries the most cfg-gated code in the repo. Reproduce it locally with:
+
+```bash
+npm run rust:check:candle
+```
+
+macOS hosts cross-compile to `x86_64-unknown-linux-gnu` (`rustup target add
+x86_64-unknown-linux-gnu` once); Linux/Windows hosts build for the host. **No CUDA toolkit is
+required**: `cudarc` and `candle-kernels` only need `nvcc`/`nvidia-smi` in their *build
+scripts*, and `cargo check`/`clippy` never link or run a kernel, so the script generates a stub
+`nvcc` and sets `CUDA_COMPUTE_CAP`. A real toolkit, if present, is used instead.
+
+So the three Rust configurations each have a local command:
+
+| command | configuration | CI lane |
+| --- | --- | --- |
+| `npm run rust:check` | macOS / mlx | `nax-worker` |
+| `npm run rust:check:neither` | Linux, candle **off** | `parity` |
+| `npm run rust:check:candle` | not-macOS, candle **on** | `windows-candle` |
+
+> **`rust:check:candle` TYPECHECKS — it does not run the candle tests.** `cargo test` links,
+> which needs a real libcuda, so candle-gated `#[test]`s still execute for the first time on
+> CI. Verify their fixtures and thresholds by other means (arithmetic, or by exercising the
+> shared non-gated helper on a Mac): sc-12306 shipped a candle test whose fixture asserted the
+> exact opposite of its intent, and it compiled perfectly. Green here means "it compiles under
+> the cfg CI compiles it under" — which is precisely the class (E0425 from a cfg-gated symbol,
+> dead code under `-D warnings`) that used to cost a full round-trip on a self-hosted runner.
+
 **Web** (from the repo root):
 
 ```bash
