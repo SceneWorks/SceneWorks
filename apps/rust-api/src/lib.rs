@@ -56,7 +56,9 @@ use sceneworks_core::training_store::{
     TrainingDatasetCaptionSidecarsInput, TrainingDatasetCreateInput, TrainingDatasetMutationResult,
     TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
-use sceneworks_core::video_request::{duration_limit_error, fps_limit_error, resolve_fps};
+use sceneworks_core::video_request::{
+    duration_limit_error, fps_limit_error, resolve_duration, resolve_fps,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -2676,12 +2678,17 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
             "sourceClipAssetIds must contain at most {MAX_VIDEO_SOURCE_CLIP_ASSET_IDS} ids"
         )));
     }
-    let duration = payload
-        .duration
-        .as_f64()
-        .ok_or_else(|| ApiError::bad_request("duration must be a number between 1 and 30"))?;
-    if !duration.is_finite() || !(1.0..=30.0).contains(&duration) {
-        return Err(ApiError::bad_request("duration must be between 1 and 30"));
+    // Only a *named* duration is bounded here, for the same reason as fps below: an omitted one is
+    // resolved from the model's declared `defaults.duration` in `create_video_job`. This blanket
+    // stays a payload-sanity check; the model's own `limits.hardMaxDuration` is enforced there
+    // (sc-12297 / sc-12400).
+    if let Some(duration) = payload.duration.as_ref() {
+        let duration = duration
+            .as_f64()
+            .ok_or_else(|| ApiError::bad_request("duration must be a number between 1 and 30"))?;
+        if !duration.is_finite() || !(1.0..=30.0).contains(&duration) {
+            return Err(ApiError::bad_request("duration must be between 1 and 30"));
+        }
     }
     // Only a *named* fps is bounded here: an omitted one is resolved from the model's declared
     // `defaults.fps` in `create_video_job`, which is the first point that knows the model (this

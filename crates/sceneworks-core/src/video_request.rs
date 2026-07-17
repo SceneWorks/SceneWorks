@@ -128,7 +128,7 @@ impl VideoRequest {
             prompt: nonempty_string_or(payload, "prompt", ""),
             negative_prompt: nonempty_string_or(payload, "negativePrompt", ""),
             model: nonempty_string_or(payload, "model", DEFAULT_MODEL),
-            duration: safe_float(payload.get("duration"), 6.0, 1.0, 30.0),
+            duration: resolve_duration(payload.get("duration"), &model_manifest_entry),
             fps: resolve_fps(payload.get("fps"), &model_manifest_entry),
             width,
             height,
@@ -298,6 +298,54 @@ pub fn duration_limit_error(
              the clip to {cap}s or less, or choose a model that renders longer clips."
         )
     })
+}
+
+/// The clip length used when neither the caller nor the model's manifest entry names one — the
+/// historical blanket, kept for models that declare no `defaults.duration`.
+const DEFAULT_DURATION: f32 = 6.0;
+
+/// The payload-sanity bounds on duration (the Python `safe_float`). NOT a model's limit: that is
+/// [`hard_max_duration`].
+const MIN_DURATION: f32 = 1.0;
+const MAX_DURATION: f32 = 30.0;
+
+/// `defaults.duration` (seconds) from a resolved manifest entry, or `None` when the model declares
+/// none.
+///
+/// Dead in exactly the way [`default_fps`] was, with a worse consequence: sc-12297 began enforcing
+/// [`hard_max_duration`] without ever comparing the API's **own** blanket [`DEFAULT_DURATION`] to
+/// the caps it was now enforcing. 6.0 is past the cap of **7 of the 10** shipped video models, and
+/// the DTO serializes it unconditionally, so a payload that named NO duration was rejected with
+/// "this request asks for 6s" — naming a value the caller never set, and offering a lever
+/// ("shorten the clip") for a field they never touched (sc-12400).
+///
+/// Same posture as [`default_fps`]: a default outside [`MIN_DURATION`]`..=`[`MAX_DURATION`], or
+/// non-finite, is not a length anyone meant, so it falls back to the blanket rather than
+/// propagating a degenerate value into `frames = duration × fps`.
+pub fn default_duration(model_manifest_entry: &JsonObject) -> Option<f32> {
+    model_manifest_entry
+        .get("defaults")
+        .and_then(Value::as_object)
+        .and_then(|defaults| defaults.get("duration"))
+        .and_then(Value::as_f64)
+        .map(|duration| duration as f32)
+        .filter(|duration| duration.is_finite() && (MIN_DURATION..=MAX_DURATION).contains(duration))
+}
+
+/// The clip length a payload actually renders at: the caller's value clamped to the sanity bounds,
+/// or — when the caller named none — the model's declared [`default_duration`], falling back to
+/// [`DEFAULT_DURATION`].
+///
+/// The duration twin of [`resolve_fps`], and the fix for the regression [`default_duration`]
+/// documents. **Resolution, not rejection**: a value the caller *did* name is clamped and then
+/// judged by [`duration_limit_error`], never quietly shortened onto the cap.
+///
+/// Reads through [`safe_float`], so the `safe_float` contract is unchanged: a numeric **string**
+/// (`"4.5"`) is a value the caller named. An unreadable / `null` duration is treated as absent — a
+/// value core cannot read is not a value the caller named.
+pub fn resolve_duration(requested: Option<&Value>, model_manifest_entry: &JsonObject) -> f32 {
+    let fallback = default_duration(model_manifest_entry).unwrap_or(DEFAULT_DURATION);
+    safe_float(requested, fallback, MIN_DURATION, MAX_DURATION)
 }
 
 /// The frame rate used when neither the caller nor the model's manifest entry names one — the
@@ -1233,6 +1281,139 @@ mod tests {
         assert_eq!(hard_max_duration(&fractional), Some(2.5));
         assert!(duration_limit_error("m", 3.0, &fractional).is_some());
         assert_eq!(duration_limit_error("m", 2.5, &fractional), None);
+    }
+
+    /// sc-12400 — **the invariant whose absence let sc-12297 ship a regression**, stated in the
+    /// general form so it covers every axis at once: *the value the API resolves for an OMITTED
+    /// field must be admitted by the gate the API then applies to it.*
+    ///
+    /// sc-12297's own conformance test asserts `duration_limit_error(id, defaults.duration) == None`
+    /// — the manifest's internal fixed point — and that passed. What nothing checked was the
+    /// **DTO's blanket** against the caps: 6.0 is past the cap of 7 of the 10 shipped models, and
+    /// the DTO serialized it unconditionally, so a payload naming NO duration was refused for
+    /// "asking for 6s". The manifest was self-consistent; the API's default simply was not part of
+    /// the test.
+    ///
+    /// So this asserts the resolution ITSELF (`resolve_*(None, entry)`), not a manifest value — the
+    /// only form that catches a blanket the model rejects.
+    #[test]
+    fn what_the_api_resolves_for_an_omitted_field_is_admitted_by_that_models_own_gate() {
+        let models = builtin_video_models();
+
+        for (id, ..) in FPS_MENUS {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(*id))
+                .unwrap_or_else(|| panic!("{id} present"))
+                .as_object()
+                .expect("model entry object");
+
+            // A payload naming NOTHING — the MCP `generate_video(model, prompt)` shape.
+            let bare = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "model": id,
+                "modelManifestEntry": Value::Object(entry.clone()),
+            })));
+
+            assert_eq!(
+                duration_limit_error(id, bare.duration, entry),
+                None,
+                "{id}: the duration resolved for an omitted field ({}s) must be admitted by the \
+                 model's own cap — this is sc-12400: the blanket {DEFAULT_DURATION}s was past 7 of \
+                 10 caps, so the API rejected requests that named no duration at all",
+                bare.duration
+            );
+            assert_eq!(
+                fps_limit_error(id, bare.fps, entry),
+                None,
+                "{id}: the fps resolved for an omitted field ({}) must be on the model's own menu",
+                bare.fps
+            );
+
+            // MUTATION CHECK: the assertions above are only meaningful where the blanket would have
+            // FAILED. Pin that this model is one of those, or that it is a known survivor.
+            let cap = hard_max_duration(entry).unwrap_or_else(|| panic!("{id} declares a cap"));
+            if DEFAULT_DURATION > cap {
+                assert!(
+                    duration_limit_error(id, DEFAULT_DURATION, entry).is_some(),
+                    "{id}: fixture assumes the blanket is over-cap here"
+                );
+                assert!(
+                    bare.duration < DEFAULT_DURATION,
+                    "{id}: resolution must have MOVED off the blanket, not merely passed"
+                );
+            }
+        }
+
+        // The blanket duration was over-cap for a MAJORITY of shipped models — the same 7-of-10
+        // shape as the fps blanket, and the reason this is a generalized invariant rather than two
+        // coincidences. Pinned as a number so reintroducing a blanket default fails here.
+        let over_cap: Vec<&str> = FPS_MENUS
+            .iter()
+            .filter_map(|(id, ..)| {
+                let entry = models
+                    .iter()
+                    .find(|m| m.get("id").and_then(Value::as_str) == Some(*id))?
+                    .as_object()?;
+                (hard_max_duration(entry)? < DEFAULT_DURATION).then_some(*id)
+            })
+            .collect();
+        assert_eq!(
+            over_cap.len(),
+            7,
+            "the blanket {DEFAULT_DURATION}s is past the cap of these models: {over_cap:?} — if this \
+             count moved, re-read why resolve_duration consults defaults.duration before changing it"
+        );
+    }
+
+    /// [`resolve_duration`] — the duration twin of
+    /// `omitted_fps_resolves_to_the_models_declared_default`.
+    #[test]
+    fn omitted_duration_resolves_to_the_models_declared_default() {
+        let mochi = payload(json!({
+            "limits": { "hardMaxDuration": 5 }, "defaults": { "duration": 5 }
+        }));
+
+        // Omitted / unreadable ⇒ the model's declared default, NOT the blanket 6.0 — which this
+        // model's own cap REJECTS, which is the entire bug.
+        assert_eq!(resolve_duration(None, &mochi), 5.0);
+        assert_eq!(resolve_duration(Some(&json!(null)), &mochi), 5.0);
+        assert_eq!(resolve_duration(Some(&json!("nonsense")), &mochi), 5.0);
+        assert_eq!(
+            duration_limit_error("mochi_1", resolve_duration(None, &mochi), &mochi),
+            None,
+            "the resolved default must be admitted by the cap that resolved it"
+        );
+        assert!(
+            duration_limit_error("mochi_1", DEFAULT_DURATION, &mochi).is_some(),
+            "…and the blanket would NOT have been — sc-12400"
+        );
+
+        // A numeric STRING is a value the caller NAMED (the `safe_float` contract). Pinned with 3,
+        // which is neither the blanket (6) nor this model's default (5), so falling back to either
+        // is RED.
+        assert_eq!(resolve_duration(Some(&json!("3")), &mochi), 3.0);
+        assert_eq!(resolve_duration(Some(&json!(4.5)), &mochi), 4.5);
+
+        // Named ⇒ honored verbatim, even past the cap. The gate refuses it; resolution does not
+        // quietly shorten it — reject, never clamp.
+        assert_eq!(resolve_duration(Some(&json!(30)), &mochi), 30.0);
+        assert!(duration_limit_error("mochi_1", 30.0, &mochi).is_some());
+
+        // Named-but-nonsense clamps to the sanity bounds (unchanged), then the cap judges.
+        assert_eq!(resolve_duration(Some(&json!(999)), &mochi), MAX_DURATION);
+        assert_eq!(resolve_duration(Some(&json!(0)), &mochi), MIN_DURATION);
+
+        // No declared default ⇒ the blanket, so a model that declares nothing is unchanged.
+        let bare = payload(json!({}));
+        assert_eq!(resolve_duration(None, &bare), DEFAULT_DURATION);
+        assert_eq!(default_duration(&bare), None);
+
+        // An unhonorable default is not a length anyone meant ⇒ the blanket.
+        for bad in [json!(0), json!(-1), json!(31), json!("5"), json!(null)] {
+            let entry = payload(json!({ "defaults": { "duration": bad } }));
+            assert_eq!(default_duration(&entry), None, "unhonorable default {bad}");
+            assert_eq!(resolve_duration(None, &entry), DEFAULT_DURATION);
+        }
     }
 
     /// sc-12347 — the fps axis of the same invariant, derived from the shipped `limits.fps` menus

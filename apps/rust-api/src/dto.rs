@@ -763,8 +763,16 @@ pub(crate) struct VideoJobRequest {
     pub(crate) negative_prompt: String,
     #[serde(default = "default_video_model")]
     pub(crate) model: String,
-    #[serde(default = "default_video_duration")]
-    pub(crate) duration: ContractNumber,
+    /// Clip length in seconds, or `None` when the caller named none — which the MCP server does
+    /// whenever *its* caller does (`server.rs` omits the key rather than sending a default).
+    ///
+    /// Optional for the same reason as [`VideoJobRequest::fps`], and with a sharper edge: the
+    /// blanket 6.0 that used to live here is past the `hardMaxDuration` of 7 of the 10 shipped video
+    /// models, and sc-12297's cap reads whatever lands in the payload — so a request that named NO
+    /// duration was rejected for "asking for 6s". `create_video_job` resolves `None` from the
+    /// model's declared `defaults.duration` once the manifest entry is in hand (sc-12400).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) duration: Option<ContractNumber>,
     /// Frames per second, or `None` when the caller named none — which the MCP server does whenever
     /// *its* caller does (`server.rs` omits the key entirely rather than sending a default).
     ///

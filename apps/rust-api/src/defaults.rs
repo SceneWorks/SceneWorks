@@ -8,8 +8,6 @@
 //! `#[serde(default = "default_x")]` string path and sibling call site
 //! resolving unchanged.
 
-use sceneworks_core::contracts::ContractNumber;
-
 pub(crate) fn default_timeline_name() -> String {
     "Main timeline".to_owned()
 }
@@ -128,9 +126,11 @@ pub(crate) fn default_video_model() -> String {
     "ltx_2_3".to_owned()
 }
 
-pub(crate) fn default_video_duration() -> ContractNumber {
-    ContractNumber::from(6)
-}
+// No `default_video_duration` either, and for a sharper reason than fps: the blanket 6.0 that used
+// to live here is past the `hardMaxDuration` of 7 of the 10 shipped video models, so once sc-12297
+// began enforcing that cap, this default made the API reject its own duration-less requests
+// (sc-12400). An omitted duration resolves to the model's declared `defaults.duration` via core's
+// `resolve_duration` — see `VideoJobRequest::duration`.
 
 // No `default_video_fps`: an omitted fps resolves to the model's declared `defaults.fps` (core's
 // `resolve_fps`, applied in `create_video_job` once the manifest entry is resolved), not to a

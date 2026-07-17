@@ -527,13 +527,27 @@ pub(crate) async fn create_video_job(
     // Duration comes off `job_payload` for the same reason: gate the value actually enqueued.
     // (Presets deliberately do not patch duration today — see `apply_recipe_preset_to_video_payload`
     // — so this reads the DTO's value; it just stops being a latent bug if that ever changes.)
-    if let Some(message) = model_manifest_entry.as_object().and_then(|entry| {
-        job_payload
-            .get("duration")
-            .and_then(Value::as_f64)
-            .and_then(|duration| duration_limit_error(&model_id, duration as f32, entry))
-    }) {
-        return Err(ApiError::bad_request(message));
+    //
+    // The duration is RESOLVED against the model's declared `defaults.duration` first, for the same
+    // reason the fps menu is below — and sc-12297 shipped without it, which is the bug sc-12400
+    // fixes. The DTO blanket was 6.0, serialized unconditionally, and 6.0 is past the cap of 7 of
+    // the 10 shipped video models: a payload that named NO duration was rejected for "asking for
+    // 6s", a value the caller never set, with a lever ("shorten the clip") for a field they never
+    // touched. Enforcing a manifest constraint requires the layer's own default to be
+    // manifest-aware first, or the gate refuses a payload this route constructed itself.
+    if let Some(entry) = model_manifest_entry.as_object() {
+        let duration = resolve_duration(job_payload.get("duration"), entry);
+        if let Some(message) = duration_limit_error(&model_id, duration, entry) {
+            return Err(ApiError::bad_request(message));
+        }
+        // Write back ONLY the resolved default. A duration the caller named is already in the
+        // payload verbatim — `validate_video_job` bounded it to 1..=30, so it needs no clamp — and
+        // rewriting it would flatten its JSON shape: `duration` is a `ContractNumber`
+        // (= `serde_json::Number`), which carries int-vs-float across the wire, so a caller's `10`
+        // must not become `10.0`.
+        if !job_payload.contains_key("duration") {
+            job_payload.insert("duration".to_owned(), contract_number(duration));
+        }
     }
     // The model's declared `defaults.fps` + `limits.fps`, the other half of `frames = duration ×
     // fps` (sc-12347). The cap above closes the *duration* axis only: a legally-5s mochi_1 request
@@ -578,6 +592,21 @@ pub(crate) async fn create_video_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// A resolved `duration` in the payload's `ContractNumber` (= `serde_json::Number`) shape: an
+/// integral value stays integral.
+///
+/// The wire has always carried `"duration": 5`, not `5.0` — `ContractNumber` preserves whatever the
+/// caller sent, and every shipped `defaults.duration` is a whole number. Writing an `f32` straight
+/// in flattens that (`Value::from(5.0_f32)` is `5.0`), a gratuitous contract change that the
+/// payload-normalization tests correctly catch.
+fn contract_number(value: f32) -> Value {
+    if value.fract() == 0.0 {
+        Value::from(value as i64)
+    } else {
+        Value::from(value)
+    }
 }
 
 /// The typed route that owns `job_type`, or `None` for every job type the generic
