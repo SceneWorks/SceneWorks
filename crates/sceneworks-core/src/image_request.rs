@@ -6,6 +6,21 @@
 //! and `model_manifest_entry` maps pass through verbatim (they carry per-family knobs
 //! like steps/guidanceScale/mlxQuantize/poses/angleSet/controlScale/referenceStrength
 //! and the resolved model manifest entry), so adding a family needs no DTO change.
+//!
+//! **Geometry, deliberately un-normalized (sc-12384).** Unlike the video request
+//! ([`crate::video_request`], which floors dims to `limits.requiresDimensionsMultipleOf`
+//! and fits them into `limits.maxPixels` via `normalized_dimensions`), the image lane
+//! applies NO stride/area refit — `width`/`height` are only sanity-clamped to
+//! `256..=4096` and handed to the engine as-is. The engine is the single authority on
+//! image geometry: it rejects an illegal size loudly rather than the app silently
+//! substituting a different one (the failure mode a refit twin would reintroduce — cf.
+//! the per-side clamp `image_jobs::sensenova::sensenova_dim` was doing to over-cap
+//! SenseNova buckets before sc-12384 trimmed them). What keeps that contract honest is
+//! not a runtime normalize but a build-time guard: every image model's advertised
+//! `limits.resolutions` + default must fit its PINNED engine's `[min_size, max_size]`
+//! envelope, asserted by `sceneworks_worker::engines`'s
+//! `shipped_image_geometry_is_within_the_pinned_engine_envelope`. So the manifest may
+//! only advertise buckets the engine honors, and no app-layer refit is needed or wanted.
 
 use serde_json::Value;
 
