@@ -2509,29 +2509,38 @@
       // remains an unmeasured non-shipping estimate and defers to resident.
       "candle": {
         "minMemoryGb": 32,
-        // sc-12425: the INT8-ConvRot tier's VRAM ceiling, now MEASURED (sc-12381) — 42.9 GB overall-peak
-        // on an exclusive sm_120 at 1024²/8-step, the same shape q4's 26.4 was taken at.
+        // sc-12425: the INT8-ConvRot tier's RESIDENT VRAM ceiling, now MEASURED (sc-12381) — 42.9 GB
+        // overall-peak on an exclusive sm_120 at 1024²/8-step, the same shape q4's 26.4 was taken at.
+        // This is the TE-CO-RESIDENT peak; the tier's efficient footprint is `sequentialPeakGb` (28.6).
         //
-        // It replaces sc-9300's estimate of 31.0, which was wrong by 11.9 GB. That estimate named the
-        // right mechanism — "the online Hadamard rotation adds transient activation" — and then sized as
-        // if it didn't: measured, the tier is only 29.8 GB RESIDENT and the denoise adds 13.1 GB, so the
-        // peak lands ABOVE q8's 35.9 rather than "near" it. (29.8 is itself post-sc-12301, which removed
-        // 7.4 GB of duplicated per-projection cuBLASLt workspace; pre-fix this tier peaked at 50.3 GB.)
+        // It replaces sc-9300's estimate of 31.0, which was wrong by 11.9 GB. That estimate blamed "the
+        // online Hadamard rotation adds transient activation"; the real cause is duller — ConvRot loads
+        // the Qwen3-VL text encoder at f32 (15.6 GB) and, pinned Resident, held it through the whole
+        // denoise. So 42.9 lands ABOVE q8's 35.9 purely on the f32 TE, NOT on anything int8-specific: the
+        // int8 DiT is the same size as q8's, and once the TE drops the two tiers match (28.6 vs 29.5
+        // sequential). (42.9 is itself post-sc-12301, which removed 7.4 GB of duplicated per-projection
+        // cuBLASLt workspace; pre-fix this tier peaked at 50.3 GB.)
         //
         // The 31.0 survived because NOTHING READ IT: `vram_gate::requested_tier_key` is bits-derived and
-        // a ConvRot request carries no `mlxQuantize`, so it fell to `"q8"` and this row was dead. That
-        // aliasing is fixed in `base.rs` (`INT8_CONVROT_TIER`) — so this number is now load-bearing, and
-        // a wrong value here admits an OOM rather than sitting inert. Re-measure with
-        // `candle-gen-krea --example krea-convrot-vram` (sc-12381) rather than re-estimating.
+        // a ConvRot request carries no `mlxQuantize`, so it fell to `"q8"` and this row was dead. Fixed in
+        // `base.rs` (`INT8_CONVROT_TIER`) — so this number is now load-bearing. It is the RESIDENT need
+        // that decides fit-then-fall-back: a card too small for 42.9 drops to the sequential path (28.6)
+        // rather than being rejected — which needs the inference runtime pinned to a tag that honors the
+        // ConvRot offload policy (inference PR #67). Re-measure both with `krea_probed_generate_for_offload_ab`
+        // (`KREA_CONVROT_DIT`, resident vs spec-sequential), NOT by re-estimating.
         //
         // Gates the `int8-convrot` variant through the SAME per-tier memory-eligibility path as
         // q4/q8/bf16 (the third of the three ConvRot gates; the candle lane + sm_89 compute-cap are the
         // worker's `int8_convrot` capability).
         "vramGbByTier": { "q4": 26.4, "q8": 35.9, "bf16": 55.6, "int8-convrot": 42.9 },
         // sc-12131 / sc-10856 second-stage gate: measured largest working set after the text phase has
-        // been dropped. INT8-ConvRot is intentionally absent because that lane remains unmeasured and
-        // does not advertise sequential residency.
-        "sequentialPeakGb": { "q4": 22.7, "q8": 29.5, "bf16": 39.8 },
+        // been dropped. `int8-convrot` = 28.6 GB (sc-12425, measured sm_120 1024²/8-step, byte-identical
+        // pixels resident vs sequential) — it lands next to q8's 29.5 because the int8 DiT is the same
+        // size as q8's, so once the shared 15.6 GB f32 Qwen3-VL TE drops the two tiers cost the same. Its
+        // RESIDENT peak (`vramGbByTier` above, 42.9) is higher than q8's 35.9 ONLY because ConvRot holds
+        // that f32 TE co-resident; sequential residency (inference PR: convrot now honors the offload
+        // policy) erases the gap. So on a card too small for 42.9 the worker falls back to this 28.6.
+        "sequentialPeakGb": { "q4": 22.7, "q8": 29.5, "bf16": 39.8, "int8-convrot": 28.6 },
         "measured": true,
         // Pose-ControlNet lane VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The control lane loads
         // the base at the installed tier PLUS the trained ~6.6 GB bf16 control branch, so its render peak
