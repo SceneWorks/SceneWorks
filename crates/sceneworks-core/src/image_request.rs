@@ -28,6 +28,46 @@ pub(crate) const FIT_MODES: [&str; 4] = ["crop", "pad", "outpaint", "stretch"];
 /// historical blanket, kept for models that declare no `defaults.resolution`.
 const DEFAULT_DIMENSION: u32 = 1024;
 
+/// The batch size used when neither the caller nor the model's manifest entry names one — the
+/// historical blanket, kept for models that declare no `defaults.count`.
+const DEFAULT_COUNT: u32 = 4;
+
+/// The payload-sanity bounds on batch size. NOT a model's limit: that is `limits.count`, which is
+/// still unread (sc-12335 — a menu, and a separate question from this default).
+const MIN_COUNT: u32 = 1;
+const MAX_COUNT: u32 = 8;
+
+/// `defaults.count` from a resolved manifest entry, or `None` for the blanket [`DEFAULT_COUNT`].
+///
+/// The fifth and last dead `defaults.*` key, and the widest: **29 of the 45** image models declare
+/// `defaults.count: 1` while the API blanket-defaulted to **4**, so a caller that named no count got
+/// four images from a model that asks for one.
+///
+/// It matters most on exactly the family sc-12427 just moved: `sensenova_u1_8b` declares
+/// `2048x2048` **and** `count: 1`. Honoring only the resolution took a bare
+/// `generate_image(model = "sensenova_u1_8b", prompt = …)` from `4 x 1024²` to `4 x 2048²` — **4x
+/// the pixels of what shipped before**, where the model's own declaration is `1 x 2048²`, i.e. the
+/// original cost at the correct geometry. The two keys are one intent; reading half of it made the
+/// bare call more expensive rather than more correct.
+///
+/// Zero web blast radius, for the same reason as every other key here: the studio always SENDS a
+/// count (`ImageStudio.jsx:1950`), so it is a caller that names a value and never reaches this
+/// path. That the studio *seeds* its own control with a hardcoded 4 rather than the model's
+/// declaration is a separate, user-visible question — it belongs to `limits.count` / sc-12335, not
+/// to this default.
+///
+/// Same never-invent-from-a-typo posture as its siblings: a declared count outside
+/// [`MIN_COUNT`]`..=`[`MAX_COUNT`] is not a batch anyone meant, so it falls back to the blanket.
+pub fn default_count(model_manifest_entry: &JsonObject) -> Option<u32> {
+    model_manifest_entry
+        .get("defaults")
+        .and_then(Value::as_object)
+        .and_then(|defaults| defaults.get("count"))
+        .and_then(Value::as_u64)
+        .filter(|count| (u64::from(MIN_COUNT)..=u64::from(MAX_COUNT)).contains(count))
+        .map(|count| count as u32)
+}
+
 /// The payload-sanity bounds on either dimension (the Python `safe_int` clamp). Deliberately wider
 /// than the video lane's 1920 ceiling: image models legitimately render at 2048 (the sensenova U1
 /// family declares `2048x2048`), which is why [`default_resolution`] takes its bounds rather than
@@ -102,13 +142,14 @@ impl ImageRequest {
         let model_manifest_entry = object_or_empty(payload, "modelManifestEntry");
         let (default_width, default_height) = default_resolution(&model_manifest_entry)
             .unwrap_or((DEFAULT_DIMENSION, DEFAULT_DIMENSION));
+        let default_count = default_count(&model_manifest_entry).unwrap_or(DEFAULT_COUNT);
         Self {
             project_id: string_or(payload, "projectId", ""),
             mode: nonempty_string_or(payload, "mode", DEFAULT_MODE),
             prompt: string_or(payload, "prompt", ""),
             negative_prompt: string_or(payload, "negativePrompt", ""),
             model: nonempty_string_or(payload, "model", DEFAULT_MODEL),
-            count: clamped_u32(payload.get("count"), 4, 1, 8),
+            count: clamped_u32(payload.get("count"), default_count, MIN_COUNT, MAX_COUNT),
             seed: optional_i64(payload, "seed"),
             seeds: int_array(payload, "seeds"),
             width: clamped_u32(

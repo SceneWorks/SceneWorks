@@ -4152,18 +4152,29 @@ async fn an_image_request_naming_no_size_renders_the_models_own_declared_resolut
     .await;
     let project_id = project["id"].as_str().expect("project id");
 
-    // The two models the blanket was WRONG for, plus a model it happened to match. Listing the
-    // coincidental match alongside the victims is what keeps this a per-model assertion rather than
-    // "the route returns 1024".
-    for (model, want_w, want_h) in [
-        // 2048x2048 declared: the blanket rendered these at HALF resolution, on the
-        // text/infographic family where pixels are the entire point.
-        ("sensenova_u1_8b", 2048, 2048),
-        ("sensenova_u1_8b_fast", 2048, 2048),
-        // 768x768 declared.
-        ("chroma1_flash", 768, 768),
-        // 1024x1024 declared — the blanket was right here by coincidence, not by design.
-        ("flux1_schnell", 1024, 1024),
+    // A matrix that pins each axis INDEPENDENTLY. `defaults.resolution` and `defaults.count` are
+    // read by separate code, so a fixture where the two always agree cannot tell a working pair
+    // from one reader quietly carrying the other.
+    //
+    // Every id here is verified to exist. The first cut used `flux1_schnell`, which is NOT a model
+    // (it is `flux_schnell`): it resolved to `{}`, took the unknown-model blanket, and passed —
+    // green, while testing nothing about a declared default. **A typo'd id is a silent no-op in
+    // this test by construction**, which is exactly why the control row must be a REAL model whose
+    // declarations happen to equal the blankets.
+    for (model, want_w, want_h, want_count) in [
+        // BOTH axes discriminate. 2048x2048 + count 1: the blankets rendered this at HALF
+        // resolution and FOUR times over, on the text/infographic family where pixels are the
+        // entire point — and honoring only the size made the bare call 4x MORE expensive.
+        ("sensenova_u1_8b", 2048, 2048, 1),
+        ("sensenova_u1_8b_fast", 2048, 2048, 1),
+        // COUNT discriminates, resolution coincides — red if the count reader is dropped, green if
+        // only the size reader works.
+        ("z_image", 1024, 1024, 1),
+        // RESOLUTION discriminates, count coincides — the mirror image.
+        ("chroma1_flash", 768, 768, 4),
+        // NEITHER discriminates: a real model whose declarations equal both blankets. Keeps the
+        // rows above from passing for a reader that returns some other model's values.
+        ("z_image_turbo", 1024, 1024, 4),
     ] {
         let (status, body) = request(
             app.clone(),
@@ -4186,6 +4197,19 @@ async fn an_image_request_naming_no_size_renders_the_models_own_declared_resolut
             (Some(want_w), Some(want_h)),
             "{model}: a size-less request must enqueue the model's declared defaults.resolution: \
              {body}"
+        );
+        assert_eq!(
+            body["payload"]["count"].as_u64(),
+            Some(want_count),
+            "{model}: a count-less request must enqueue the model's declared defaults.count, not \
+             the blanket 4: {body}"
+        );
+        // The seed batch is generated from the RESOLVED count, so it must agree — otherwise a
+        // count-1 model would still carry four seeds and the payload would contradict itself.
+        assert_eq!(
+            body["payload"]["seeds"].as_array().map(Vec::len),
+            Some(want_count as usize),
+            "{model}: one seed per image actually rendered: {body}"
         );
     }
 

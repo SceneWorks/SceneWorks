@@ -624,8 +624,13 @@ pub(crate) struct ImageJobRequest {
     pub(crate) negative_prompt: String,
     #[serde(default = "default_image_model")]
     pub(crate) model: String,
-    #[serde(default = "default_image_count")]
-    pub(crate) count: u32,
+    /// Batch size, or `None` when the caller named none — resolved from the model's declared
+    /// `defaults.count` in `create_image_job`, not from a blanket 4 that **29 of the 45** image
+    /// models contradict with `count: 1` (sc-12427 follow-up).
+    ///
+    /// `CharacterTestRequest` keeps the blanket: its route resolves no `modelManifestEntry`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) count: Option<u32>,
     #[serde(default)]
     pub(crate) seed: Option<i64>,
     /// Output geometry, or `None` per side when the caller named none — resolved from the model's
