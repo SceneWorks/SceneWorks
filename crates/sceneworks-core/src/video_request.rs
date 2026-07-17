@@ -1590,8 +1590,13 @@ mod tests {
         ("svd", 1024, 576),
         ("mochi_1", 848, 480),
         ("wan_2_2", 832, 480),
-        ("wan_2_2_t2v_14b", 1280, 704),
-        ("wan_2_2_i2v_14b", 1280, 704),
+        // 720, not 704: sc-12308 (#1581) restored TRUE 720p to the A14B pair by lifting maxPixels
+        // to the 14B's real 921,600 (sc-12294 had walked the manifest down to the 5B's 901,120).
+        // This table caught that drift in CI when main moved under this branch — which is the
+        // table's whole purpose: transcribed from the manifest, so a manifest change forces a
+        // conscious update here instead of passing silently.
+        ("wan_2_2_t2v_14b", 1280, 720),
+        ("wan_2_2_i2v_14b", 1280, 720),
         ("wan_2_2_vace_fun_14b", 832, 480),
         ("bernini", 848, 480),
         ("scail2_14b", 832, 480),

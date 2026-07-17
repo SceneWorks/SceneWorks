@@ -3926,7 +3926,8 @@ async fn a_video_request_naming_no_duration_is_admitted_at_the_models_own_defaul
     for (model, want_w, want_h) in [
         ("mochi_1", 848, 480),
         ("bernini", 848, 480),
-        ("wan_2_2_t2v_14b", 1280, 704),
+        // True 720p since sc-12308 (#1581) lifted the A14B area cap to its real 921,600.
+        ("wan_2_2_t2v_14b", 1280, 720),
         ("ltx_2_3", 768, 512),
     ] {
         let (status, body) = request(
