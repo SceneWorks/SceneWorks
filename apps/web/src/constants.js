@@ -236,7 +236,9 @@ export const fallbackModels = [
     // face-locked options — sc-2015 spike measured outfit + accessories +
     // tattoos preserved across new scenes, face may drift.
     capabilities: ["text_to_image", "edit_image", "character_image", "vqa", "interleave"],
-    limits: { resolutions: ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"] },
+    // ≤2048 per side — the engine caps each side at 2048 and the former 2720/2496/2368 buckets were
+    // silently squashed to a wrong aspect (sc-12384). Same aspect ladder, fit to the real envelope.
+    limits: { resolutions: ["2048x2048", "2048x1152", "1152x2048", "1888x1248", "1248x1888", "1760x1312", "1312x1760"] },
     ui: {
       description: "Unified multimodal model (NEO-unify, ~16B); native text-to-image and instruction editing with strong text rendering and infographics. In Character Studio, drives a wardrobe-preserving reference flow — outfit + accessories + tattoos + hair color carry through to new scenes, but face geometry may drift. Pick InstantID or PuLID-FLUX for face-locked identity. Heavy (~42GB bf16); CUDA or 96GB+ Apple Silicon.",
       promptGuide: { title: "SenseNova-U1 8B Prompt Guide", path: "/prompt-guides/sensenova-u1-8b.md" },
@@ -252,7 +254,9 @@ export const fallbackModels = [
     // character_image (sc-2016): same wardrobe-preserving reference flow as the
     // base 8B target, on the 8-step distilled variant (~50s/image vs ~4.6 min).
     capabilities: ["text_to_image", "edit_image", "character_image"],
-    limits: { resolutions: ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"] },
+    // ≤2048 per side — the engine caps each side at 2048 and the former 2720/2496/2368 buckets were
+    // silently squashed to a wrong aspect (sc-12384). Same aspect ladder, fit to the real envelope.
+    limits: { resolutions: ["2048x2048", "2048x1152", "1152x2048", "1888x1248", "1248x1888", "1760x1312", "1312x1760"] },
     ui: {
       description: "8-step distilled SenseNova-U1; ~5-6x faster text-to-image, editing, and Character Studio reference (~50s/image on MPS) at a small quality trade-off. Same wardrobe-preserving reference tradeoff as the base 8B (carries outfit + accessories across new scenes; face may drift). Shares the base 8B weights; a ~0.4GB distill LoRA downloads automatically. Distilled editing is experimental — use the base model for max-quality reference work.",
       promptGuide: { title: "SenseNova-U1 8B Fast Prompt Guide", path: "/prompt-guides/sensenova-u1-8b-fast.md" },

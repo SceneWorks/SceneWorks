@@ -1134,11 +1134,17 @@
         "schedulerShift": 3.0
       },
       "limits": {
-        // SenseNova-U1 renders at fixed trained buckets and degrades off them.
-        // These are the true output sizes; the adapter snaps any request to the
-        // nearest bucket by aspect ratio. (Panorama buckets 2:1/1:2/3:1/1:3 exist
-        // upstream but are omitted here.)
-        "resolutions": ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"],
+        // SenseNova-U1 renders at fixed trained buckets and degrades off them. Its engine caps EACH
+        // SIDE at 2048 (descriptor max_size = 2048, the [256, 2048] generation envelope; CELL=32).
+        // The former 2720/2496/2368 buckets exceeded that cap — the bespoke worker path
+        // (`image_jobs::sensenova::sensenova_dim`) silently clamped each side to 2048 INDEPENDENTLY,
+        // so e.g. 2720x1536 (16:9) rendered as 2048x1536 (4:3): a wrong-aspect image, not the
+        // advertised size. Trimmed to ≤2048 buckets that hold the same aspect ladder (16:9 / 3:2 / 4:3
+        // landscape + portrait), 32-aligned, mirroring the model's own INTERLEAVE_RESOLUTION_OPTIONS
+        // (constants.js) — every advertised size now renders at that exact size (sc-12384, guarded by
+        // `shipped_image_geometry_is_within_the_pinned_engine_envelope`). Larger native buckets would
+        // need the engine's max_size raised + a real-weight validation, tracked separately.
+        "resolutions": ["2048x2048", "2048x1152", "1152x2048", "1888x1248", "1248x1888", "1760x1312", "1312x1760"],
         "count": [1, 2, 4],
         "samplers": ["default"],
         "schedulers": ["default"]
@@ -1245,7 +1251,7 @@
         "schedulerShift": 3.0
       },
       "limits": {
-        "resolutions": ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"],
+        "resolutions": ["2048x2048", "2048x1152", "1152x2048", "1888x1248", "1248x1888", "1760x1312", "1312x1760"],
         "count": [1, 2, 4],
         "samplers": ["default"],
         "schedulers": ["default"]
@@ -1337,7 +1343,7 @@
       "limits": {
         // Same trained buckets as the base model; true output sizes (the adapter
         // snaps any request to the nearest bucket by aspect ratio).
-        "resolutions": ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"],
+        "resolutions": ["2048x2048", "2048x1152", "1152x2048", "1888x1248", "1248x1888", "1760x1312", "1312x1760"],
         "count": [1, 2, 4],
         "samplers": ["default"],
         "schedulers": ["default"]
@@ -1446,7 +1452,7 @@
         "schedulerShift": 3.0
       },
       "limits": {
-        "resolutions": ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"],
+        "resolutions": ["2048x2048", "2048x1152", "1152x2048", "1888x1248", "1248x1888", "1760x1312", "1312x1760"],
         "count": [1, 2, 4],
         "samplers": ["default"],
         "schedulers": ["default"]
@@ -4219,12 +4225,18 @@
         "schedulerShift": 3.0
       },
       "limits": {
-        // 32× DC-AE divisor → W×H must be multiples of 32 (descriptor RES_MULTIPLE). Native 1024².
+        // 32× DC-AE divisor → W×H must be multiples of 32 (descriptor RES_MULTIPLE). 1024² ONLY:
+        // SANA-1600M is the "1024px" model — its engine caps EACH SIDE at 1024 (descriptor max_size =
+        // RES_MAX = 1024), the validated DC-AE envelope (mlx-gen-sana `max_size_is_the_validated_1024_
+        // envelope`; the f32 DC-AE decode is monolithic, un-tiled). The old 1152/896/1216/832 buckets
+        // exceed 1024 per side and HARD-ERROR before any weights load — off-catalog, never rendered.
+        // Trimmed to 1024² so every advertised bucket is legal (sc-12384, guarded by
+        // `shipped_image_geometry_is_within_the_pinned_engine_envelope`).
         // SANA routes the per-generation sampler/scheduler knobs through the unified flow framework
         // (epic 7114), so it advertises the full curated flow menu. "default" is the native
         // flow-match Euler loop. The `sana_1600m` descriptor advertises curated_sampler_names()/
         // curated_scheduler_names(); the engines.rs drift guard checks this list is a subset.
-        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216"],
+        "resolutions": ["1024x1024"],
         "count": [1, 2, 4],
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
         "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
@@ -4373,13 +4385,15 @@
         "schedulerShift": 3.0
       },
       "limits": {
-        // 32× DC-AE divisor → W×H must be multiples of 32 (descriptor RES_MULTIPLE). Native 1024².
+        // 32× DC-AE divisor → W×H must be multiples of 32 (descriptor RES_MULTIPLE). 1024² ONLY —
+        // same validated per-side 1024 DC-AE envelope as base SANA (sc-12384); the old non-square
+        // buckets exceeded it and hard-errored. See `sana_1600m` above for the full rationale.
         // Sprint's native loop is the SCM/TrigFlow few-step consistency sampler — a DEDICATED loop, NOT
         // a curated epic-7114 `Solver`. Unlike base SANA, the Sprint descriptor (`sprint_descriptor()`
         // in mlx-gen-sana) advertises ONLY the engine-default sentinel for both axes (and NO guidance
         // methods — CFG-free embedded-scalar guidance). The engines.rs drift guard requires this list to
         // be a SUBSET of the descriptor's honored set, so it must be exactly ["default"].
-        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216"],
+        "resolutions": ["1024x1024"],
         "count": [1, 2, 4],
         "samplers": ["default"],
         "schedulers": ["default"]
