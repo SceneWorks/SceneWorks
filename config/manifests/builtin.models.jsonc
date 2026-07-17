@@ -6033,11 +6033,14 @@
         // geometry they actually render (704 = 32·22), the way scail2_14b already does.
         // Core's default floor is 32, so this entry declares no stride (sc-12294).
         //
-        // It DOES declare the area cap. The backends disagree in the opposite direction
-        // from the A14B trio: mlx `wan22_ti2v_5b()` sets `max_area: 704*1280` and silently
-        // rescales (config.rs:293 → resolve_capped_dims at model.rs:1074), while candle's
-        // 5B `validate` (lib.rs:328) checks only the multiple and has NO area check. The
-        // stricter truth is mlx's, so `maxPixels` carries it and both backends now agree.
+        // It DOES declare the area cap, and 901,120 is the 5B's OWN budget — upstream gives
+        // `ti2v-5B` exactly two sizes, `1280*704` / `704*1280` (`MAX_AREA_CONFIGS`). This is the one
+        // model the number was ever correct for; the 14B family had merely borrowed it (sc-12308).
+        //
+        // Both backends now reject above it. Previously they disagreed in the opposite direction
+        // from the 14B trio: mlx `wan22_ti2v_5b()` capped but silently REFIT, while candle's 5B
+        // `validate` checked only the multiple and had NO area check at all — so a grid-aligned
+        // 1280×1280 ran to an opaque OOM there. candle-gen-wan/src/lib.rs now enforces MAX_AREA_5B.
         "maxPixels": 901120,
         "durations": [4, 5, 6, 7, 8],
         "recommendedMaxDuration": 7,
@@ -6227,7 +6230,7 @@
       "defaults": {
         "duration": 5,
         "fps": 16,
-        "resolution": "1280x704",
+        "resolution": "1280x720",
         "quality": "balanced",
         "sampler": "default",
         "scheduler": "default"
@@ -6247,19 +6250,25 @@
         // needs 32 (its z48 VAE has vae_stride 16). Declaring 16 is the engine's truth and
         // keeps custom dims honest (sc-12294).
         //
-        // The 720p buckets are 704 for a SEPARATE reason — the A14B **area** cap, not the
-        // stride: candle-gen-wan/src/wan14b.rs:645 hard-errors above MAX_AREA_14B
-        // (704×1280 = 901,120 px) and 1280×720 = 921,600 exceeds it. 1280x704 is exactly
-        // AT the cap (`>` check) so it passes.
+        // The 720p buckets are TRUE 720p. `720 = 45·16` is on the stride above, and the A14B's
+        // **area** cap is upstream's own `1280*720` = 921,600 (`MAX_AREA_CONFIGS[t2v-A14B]` in
+        // Wan2.2's wan/configs/__init__.py — the same set i2v-A14B and Wan2.1's vace-14B get).
+        // 1280x720 sits exactly AT the cap (the check is `>`), so it renders as advertised.
         //
-        // `maxPixels` makes that cap ENFORCED rather than merely advertised: nothing in the
-        // app validates against `resolutions`, so a raw over-cap request (job retry, MCP,
-        // preset replay) reaches the engine untouched. The backends DISAGREE here — candle
-        // hard-errors, while mlx T2V has `max_area: 0` and never caps — so the manifest
-        // carries the STRICTER truth (candle's), which one geometry can serve to both.
+        // These buckets read 1280x704 until sc-12308. That is the TI2V-5B's geometry, and it was
+        // adopted here only because MAX_AREA_14B had borrowed the 5B's 901,120 budget — a number
+        // whose 704 comes from the 5B's 32-px grid, not from any 14B limit. Being 2.3% low, it
+        // excluded exactly the canonical 720p: candle hard-errored on it, mlx i2v silently refit it
+        // to 1264x704, and the manifest was walked down to match rather than the cap questioned.
+        //
+        // `maxPixels` makes the cap ENFORCED rather than merely advertised: nothing in the app
+        // validates against `resolutions`, so a raw over-cap request (job retry, MCP, preset replay)
+        // reaches the engine untouched. The backends now AGREE — candle rejects above MAX_AREA_14B
+        // (candle-gen-wan/src/wan14b.rs:645) and mlx rejects too (its T2V `max_area: 0` is gone;
+        // model.rs `validate_impl` → `reject_over_area`), both at 921,600.
         "requiresDimensionsMultipleOf": 16,
-        "maxPixels": 901120,
-        "resolutions": ["832x480", "480x832", "1280x704", "704x1280"],
+        "maxPixels": 921600,
+        "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
         // Epic 7114 curated menu (sc-7296). Base = the candle (Windows) A14B engine's curated
         // set (native `uni_pc`/`euler`); the macOS mlx override below exposes the full curated
         // fold-in. No scheduler axis (flow shift = `scheduler_shift`).
@@ -6442,7 +6451,7 @@
       "defaults": {
         "duration": 5,
         "fps": 16,
-        "resolution": "1280x704",
+        "resolution": "1280x720",
         "quality": "balanced",
         "sampler": "default",
         "scheduler": "default"
@@ -6456,16 +6465,16 @@
         // (candle `SIZE_MULTIPLE_14B` at config.rs:209 via `is_multiple_of`; mlx `align_dim`
         // at pipeline.rs:36) (sc-12294).
         //
-        // I2V is the one model where BOTH backends enforce the 704×1280 = 901,120 px cap —
-        // but they disagree on HOW: candle hard-errors (wan14b.rs:645) while mlx silently
-        // RESCALES via `best_output_size` (model.rs:1074), whose own test pins
-        // 1280×720 → 1264×704 (pipeline.rs:1510). `maxPixels` resolves that split in ONE
-        // place: core fits to the cap with a port of mlx's `best_output_size`, so a request
-        // that used to hard-error on candle and silently rescale on mlx now arrives already
-        // at the geometry mlx would have produced — legal on candle, a no-op on mlx.
+        // Shares the 14B family's upstream `1280*720` = 921,600 budget (`MAX_AREA_CONFIGS[i2v-A14B]`),
+        // so 1280x720 is at the cap and renders as advertised.
+        //
+        // I2V was where the old 901,120 did the most damage: candle hard-errored on 1280×720 while
+        // mlx silently REFIT it to 1264×704 — a geometry on no advertised bucket (the fit's
+        // aspect-distortion metric prefers it over the at-cap 1280×704). Both are gone: the cap now
+        // carries the 14B's real budget, and mlx rejects rather than refits (sc-12308).
         "requiresDimensionsMultipleOf": 16,
-        "maxPixels": 901120,
-        "resolutions": ["832x480", "480x832", "1280x704", "704x1280"],
+        "maxPixels": 921600,
+        "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
         // Epic 7114 curated menu (sc-7296). Base = the candle (Windows) A14B engine's curated
         // set (native `uni_pc`/`euler`); the macOS mlx override below exposes the full curated
         // fold-in. No scheduler axis (flow shift = `scheduler_shift`).
@@ -6608,21 +6617,22 @@
         // (model_vace.rs:380). (`min_size` agrees by convention but is only a lower bound.)
         // (sc-12294)
         //
-        // The 720p buckets are 704 on the **area** cap, not the stride: mlx VACE is uncapped
-        // (model_vace.rs:107 — "no max-area cap"), but candle VACE hard-errors above
-        // MAX_AREA_14B = 901,120 px (model_vace.rs:298) and 1280×720 = 921,600 exceeds it.
-        // 1280x704 is exactly AT the cap, so it renders as advertised on both backends.
+        // The 720p buckets are TRUE 720p: 720 is on the ÷16 stride above, and Wan2.1 gives
+        // `vace-14B` the same `1280*720` = 921,600 budget as the rest of the 14B family. 1280x720
+        // is exactly AT the cap, so it renders as advertised.
         //
-        // Backends DISAGREE (mlx uncapped, candle errors) → the manifest carries the
-        // STRICTER truth so one geometry serves both. `maxPixels` enforces it: advertising
-        // 704 does not stop a raw request (retry / MCP / preset replay) asking for 720.
+        // They read 1280x704 until sc-12308, when MAX_AREA_14B still carried the TI2V-5B's 901,120.
+        // The backends also no longer disagree: mlx VACE was UNCAPPED entirely (model_vace.rs:107,
+        // "no max-area cap") while candle hard-errored (model_vace.rs:298) — mlx now rejects at the
+        // same 921,600 (validate_vace_clip → reject_over_area). `maxPixels` still enforces it here:
+        // advertising a bucket does not stop a raw request (retry / MCP / preset replay).
         "durations": [3, 4, 5],
         "recommendedMaxDuration": 5,
         "hardMaxDuration": 5,
         "requiresDimensionsMultipleOf": 16,
-        "maxPixels": 901120,
+        "maxPixels": 921600,
         "fps": [16],
-        "resolutions": ["832x480", "480x832", "1280x704", "704x1280"],
+        "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
         // Epic 7114 curated menu (sc-7296). mlx-only model (no candle/Torch backend) — the native
         // dual-expert VACE-Fun engine over Wan's flow σ schedule exposes the native curated set.
         // No scheduler axis (flow shift = `scheduler_shift`).
@@ -6775,19 +6785,18 @@
         // lattice.) Declaring it stops core's default-32 floor from silently rewriting THIS
         // model's own default 848x480 → 832x480 (sc-12294).
         //
-        // Separately, the 720p buckets are 704 — NOT a stride effect but the A14B
-        // **area** cap: candle-gen-bernini/src/config.rs:164 hard-errors above
-        // MAX_AREA_14B (704×1280 = 901,120 px), and 1280×720 = 921,600 exceeds it.
-        // 1280x704 sits exactly AT the cap (the check is `>`), so it passes on candle.
-        // 848x480 (407,040) is far under the cap.
+        // Separately, the **area** cap: candle-gen-bernini/src/config.rs:164 rejects a multi-frame
+        // request above MAX_AREA_14B. Bernini is a Wan2.2-T2V-A14B snapshot, so it carries the 14B
+        // family's `1280*720` = 921,600 budget, and 720 is on its ÷16 stride — 1280x720 is at the
+        // cap and renders as advertised. 848x480 (407,040) is far under it.
         //
-        // Backends DISAGREE — mlx bernini calls `align_dim` directly and never caps area —
-        // so the manifest carries the STRICTER truth (candle's). `maxPixels` is what makes
-        // it real: declaring 16 REMOVES the accidental ÷32 protection that used to floor a
-        // stored 1280x720 to 1280x704, so the cap has to be enforced, not just advertised.
+        // These buckets read 1280x704 until sc-12308, when MAX_AREA_14B still carried the TI2V-5B's
+        // 901,120 — a 5B geometry advertised for a 14B model. `maxPixels` is what makes the cap
+        // real: declaring 16 REMOVES the accidental ÷32 protection that used to floor a stored
+        // 1280x720, so the cap has to be enforced, not just advertised.
         "requiresDimensionsMultipleOf": 16,
-        "maxPixels": 901120,
-        "resolutions": ["848x480", "480x848", "1280x704", "704x1280"],
+        "maxPixels": 921600,
+        "resolutions": ["848x480", "480x848", "1280x720", "720x1280"],
         // MLX path is default-only (UniPC flow). Sampler/scheduler menus are
         // pinned on mlx.limits to mirror the other native-MLX video models.
         "samplers": ["default"],
@@ -7047,16 +7056,20 @@
         // max_size 1280. The output bucket should match the driving clip's aspect (the
         // clip sets the motion + framing).
         //
-        // Area: candle shares the A14B envelope — `reject_over_area` hard-errors above
-        // MAX_AREA_14B = 901,120 px (candle-gen-scail2/src/pipeline.rs:294), added because
-        // `max_size` alone only bounds each EDGE, so 1280×1280 slipped through. mlx scail2
-        // has no area check, so the backends disagree and the manifest carries the stricter
-        // (candle's) truth (sc-12294).
+        // Area: candle shares the 14B envelope — `reject_over_area` rejects above MAX_AREA_14B
+        // (candle-gen-scail2/src/pipeline.rs:294), added because `max_size` alone only bounds each
+        // EDGE, so 1280×1280 slipped through. That cap is now the 14B family's real 921,600, up
+        // from the TI2V-5B's 901,120 it had borrowed (sc-12308).
+        //
+        // Raising it does NOT give SCAIL-2 720p, and that is expected: its buckets stay 704-tall
+        // because of its own `DIM_ALIGN = 32` tiling grid above — 720 is off THAT lattice, an
+        // unrelated constraint from the area. 1280x704 (901,120) remains its largest legal bucket
+        // (the next 32-aligned step, 1280x736, is 942,080 — over the cap).
         "durations": [3, 4, 5],
         "recommendedMaxDuration": 5,
         "hardMaxDuration": 5,
         "fps": [16],
-        "maxPixels": 901120,
+        "maxPixels": 921600,
         "resolutions": ["832x480", "480x832", "1280x704", "704x1280"],
         "samplers": ["default"],
         "schedulers": ["default"]
