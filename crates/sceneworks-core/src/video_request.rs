@@ -20,7 +20,7 @@ use serde_json::Value;
 use crate::contracts::JsonObject;
 use crate::payload_util::{
     array_or_empty, clamped_u32, nonempty_string_or, object_or_empty, optional_i64, optional_id,
-    string_list,
+    parse_u32, string_list,
 };
 
 /// Defaults matching the Python `video_request_from_job` (`.get(key, default)`).
@@ -46,6 +46,16 @@ pub struct VideoRequest {
     /// that function for why this parse is the wrong home for it (sc-12297).
     pub duration: f32,
     /// Frames per second, clamped to 1..=60 (Python `safe_int`).
+    ///
+    /// An **omitted** fps resolves to the model's declared `defaults.fps` rather than the blanket
+    /// 25 — see [`resolve_fps`]. That blanket is out of menu for 7 of the 10 shipped video models,
+    /// so it silently rendered them off-spec (mochi at 25 instead of 30 plays a 30 fps prior 20%
+    /// slow) and would make [`fps_limit_error`] reject requests that name no fps at all.
+    ///
+    /// A value the caller *did* name is clamped here but never rewritten onto the model's menu:
+    /// `limits.fps` is enforced as a *rejection* by [`fps_limit_error`] at the API and worker
+    /// gates, because fps multiplies into `frames = duration × fps` and snapping it would silently
+    /// change the clip length asked for (sc-12347).
     pub fps: u32,
     /// Output dimensions: clamped to 256..=1920, floored to the model's dimension
     /// granularity — `model_manifest_entry.limits.requiresDimensionsMultipleOf`, default
@@ -119,7 +129,7 @@ impl VideoRequest {
             negative_prompt: nonempty_string_or(payload, "negativePrompt", ""),
             model: nonempty_string_or(payload, "model", DEFAULT_MODEL),
             duration: safe_float(payload.get("duration"), 6.0, 1.0, 30.0),
-            fps: clamped_u32(payload.get("fps"), 25, 1, 60),
+            fps: resolve_fps(payload.get("fps"), &model_manifest_entry),
             width,
             height,
             quality: nonempty_string_or(payload, "quality", DEFAULT_QUALITY),
@@ -286,6 +296,148 @@ pub fn duration_limit_error(
         format!(
             "{model} renders clips up to {cap}s, but this request asks for {duration}s. Shorten \
              the clip to {cap}s or less, or choose a model that renders longer clips."
+        )
+    })
+}
+
+/// The frame rate used when neither the caller nor the model's manifest entry names one — the
+/// historical blanket default, kept for models that declare no `defaults.fps` so an undeclared
+/// model is byte-identical to before [`default_fps`] had a reader.
+const DEFAULT_FPS: u32 = 25;
+
+/// The payload-sanity bounds on fps (the Python `safe_int`). NOT a model's limit: that is
+/// [`allowed_fps`]. Values outside this are a nonsense payload rather than an off-menu request,
+/// so they clamp here and the model's menu judges the result.
+const MIN_FPS: u32 = 1;
+const MAX_FPS: u32 = 60;
+
+/// `defaults.fps` from a resolved manifest entry, or `None` when the model declares none.
+///
+/// The third dead manifest key epic 12334 revives, and the one that makes [`fps_limit_error`]
+/// shippable at all. `dto.rs`'s `default_video_fps` is a blanket **25** that no model chose, and
+/// the MCP server omits `fps` entirely when its caller does — so "the caller said nothing" has
+/// always resolved to 25 regardless of what the model declares. That is out of menu for **7 of 10**
+/// shipped video models (every `[16]` model, `wan_2_2`'s `[16, 24]`, and mochi's `[30]`), which
+/// means an fps allowlist alone would reject the API's *own default* on a request that merely
+/// omits the field (sc-12347).
+///
+/// It is also a live bug on its own, with no odd input required: an MCP `generate_video(model =
+/// "mochi_1", duration = 5)` resolves to 25 fps, not mochi's declared 30, so `5 × 25 = 125` snaps
+/// to 127 frames — `127 % 6 == 1`, so the engine accepts it — and a 30 fps motion prior plays back
+/// 20% slow. Exactly the harm mochi's own manifest comment predicts. The web never had this
+/// problem because `VideoStudio.jsx:223` reads `defaults.fps`; only the backend ignored it.
+///
+/// Same never-invent-a-constraint-from-a-typo posture as [`hard_max_duration`] / [`max_pixels_of`]:
+/// a default outside [`MIN_FPS`]`..=`[`MAX_FPS`] is not a frame rate anyone could have meant, so it
+/// falls back to [`DEFAULT_FPS`] rather than propagating a degenerate value into the frame count.
+pub fn default_fps(model_manifest_entry: &JsonObject) -> Option<u32> {
+    model_manifest_entry
+        .get("defaults")
+        .and_then(Value::as_object)
+        .and_then(|defaults| defaults.get("fps"))
+        .and_then(Value::as_u64)
+        .filter(|fps| (u64::from(MIN_FPS)..=u64::from(MAX_FPS)).contains(fps))
+        .map(|fps| fps as u32)
+}
+
+/// `limits.fps` — the discrete set of frame rates a model advertises — or `None` for **no menu**,
+/// meaning any fps the blanket [`MIN_FPS`]`..=`[`MAX_FPS`] bound allows.
+///
+/// Unlike [`hard_max_duration`]'s scalar ceiling this is an **allowlist**, so the comparison is
+/// membership rather than `>`. It had ten declarations and zero *Rust* readers (sc-12347) while
+/// the web bounded the picker with it at `VideoStudio.jsx:599/912` and `PresetManagerScreen.jsx`
+/// already refused to *save* an off-menu fps via `checkInMenu` — so the product treated this key as
+/// binding everywhere except the backend that actually renders.
+///
+/// Absent ⇒ no menu, so a model that declares nothing is byte-identical to before this key had a
+/// reader. An array with no usable entry (empty, or every value non-integer / out of the sanity
+/// bounds) is likewise **no menu**: a menu nothing can satisfy would reject every request including
+/// the model's own `defaults.fps`, which is a typo'd manifest bricking a model rather than a
+/// constraint. Same fallback as an unhonorable `hardMaxDuration` or `maxPixels`.
+pub fn allowed_fps(model_manifest_entry: &JsonObject) -> Option<Vec<u32>> {
+    let menu: Vec<u32> = model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object)
+        .and_then(|limits| limits.get("fps"))
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_u64)
+        .filter(|fps| (u64::from(MIN_FPS)..=u64::from(MAX_FPS)).contains(fps))
+        .map(|fps| fps as u32)
+        .collect();
+    (!menu.is_empty()).then_some(menu)
+}
+
+/// The fps a payload actually renders at: the caller's value clamped to the sanity bounds, or —
+/// when the caller named none — the model's declared [`default_fps`], falling back to the blanket
+/// [`DEFAULT_FPS`].
+///
+/// **Resolution, not rejection**, which is why it belongs in [`VideoRequest::from_payload`] (whose
+/// infallibility [`fps_limit_error`] must not disturb) next to [`normalized_dimensions`] — the
+/// established precedent for consulting the manifest entry during the parse. Filling an omitted
+/// field from the model's own declaration is not coercion: nothing the caller asked for is being
+/// overridden, and the alternative is the blanket 25 that silently renders 7 of 10 models off-spec.
+/// A value the caller *did* name is never rewritten — it is clamped and then judged by
+/// [`fps_limit_error`], so an off-menu fps is refused rather than quietly snapped onto the menu
+/// (the reject-never-clamp rule [`duration_limit_error`] states).
+///
+/// Reads through [`parse_u32`], so the `safe_int` contract is unchanged: a numeric **string**
+/// (`"30"`) is a value the caller named, not an omission. An unparseable / `null` fps IS treated as
+/// absent — a value core cannot read is not a value the caller named. The API never produces one
+/// (serde types the field), so that only governs hand-written worker payloads.
+pub fn resolve_fps(requested: Option<&Value>, model_manifest_entry: &JsonObject) -> u32 {
+    parse_u32(requested)
+        .unwrap_or_else(|| default_fps(model_manifest_entry).unwrap_or(DEFAULT_FPS))
+        .clamp(MIN_FPS, MAX_FPS)
+}
+
+/// The advertised frame rates as a human list: `30`, `16 or 24`, `6, 7, 8, 10, 12, or 25`.
+fn humanized_fps_menu(menu: &[u32]) -> String {
+    match menu {
+        [only] => only.to_string(),
+        [first, second] => format!("{first} or {second}"),
+        [rest @ .., last] => format!(
+            "{}, or {last}",
+            rest.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        [] => String::new(),
+    }
+}
+
+/// The actionable rejection for an `fps` outside the model's declared [`allowed_fps`], or `None` to
+/// admit. The pure decision, so both enqueue gates assert on one message (sc-12347).
+///
+/// **Reject, never clamp**, for [`duration_limit_error`]'s reason and one of its own: fps is the
+/// other multiplier in `frames = duration × fps`, so silently snapping 60 onto mochi's 30 would
+/// halve the clip the caller asked for. sc-12297's duration cap does not bound frames — a *legally
+/// 5-second* mochi request at 60 fps is 301 frames, double the shipped default's 151, and
+/// `301 % 6 == 1` clears the engine's own check.
+///
+/// The gate is **uniform**, deliberately. svd's fps is pacing-only (its manifest says duration only
+/// sets playback pacing), so an off-menu fps there does not multiply into length and is a weaker
+/// harm than mochi's. Keying the gate on "does fps drive frame count" would hardcode family
+/// knowledge into the gate — the exact anti-pattern epic 12334 exists to remove. The manifest is
+/// the seam: a model that renders at more rates declares them, and one that renders at any rate
+/// omits the key.
+///
+/// ⚠️ This bounds frames only as far as the *contract* goes — with sc-12297 it pins mochi at
+/// `hardMaxDuration × max(limits.fps) = 5 × 30 → 151` frames, which is still ~4× past the ~36-frame
+/// correctness ceiling MLX's `i32::MAX` element limit imposes (sc-12349). Honoring what a model
+/// advertises is not a safety gate; do not read it as one.
+///
+/// Message follows the house convention (`mlx_fit_gate::too_big_error`): name the model, state what
+/// was asked and what is allowed, and give the lever. Pinned by
+/// `fps_limit_error_names_the_model_the_request_and_the_menu`.
+pub fn fps_limit_error(model: &str, fps: u32, model_manifest_entry: &JsonObject) -> Option<String> {
+    let menu = allowed_fps(model_manifest_entry)?;
+    (!menu.contains(&fps)).then(|| {
+        let allowed = humanized_fps_menu(&menu);
+        format!(
+            "{model} renders at {allowed} fps, but this request asks for {fps} fps. Set fps to \
+             {allowed}, or choose a model that renders at {fps} fps."
         )
     })
 }
@@ -1081,6 +1233,401 @@ mod tests {
         assert_eq!(hard_max_duration(&fractional), Some(2.5));
         assert!(duration_limit_error("m", 3.0, &fractional).is_some());
         assert_eq!(duration_limit_error("m", 2.5, &fractional), None);
+    }
+
+    /// sc-12347 — the fps axis of the same invariant, derived from the shipped `limits.fps` menus
+    /// and the `defaults.fps` each model declares. `THE_BLANKET_FPS` is the value `dto.rs` used to
+    /// default to; it is listed here so assertion 5 can prove *why* [`resolve_fps`] must consult
+    /// the manifest, rather than that claim living only in a comment.
+    const FPS_MENUS: &[(&str, &[u32], u32)] = &[
+        ("ltx_2_3", &[24, 25, 30], 25),
+        ("ltx_2_3_eros", &[24, 25, 30], 25),
+        ("svd", &[6, 7, 8, 10, 12, 25], 7),
+        ("mochi_1", &[30], 30),
+        ("wan_2_2", &[16, 24], 24),
+        ("wan_2_2_t2v_14b", &[16], 16),
+        ("wan_2_2_i2v_14b", &[16], 16),
+        ("wan_2_2_vace_fun_14b", &[16], 16),
+        ("bernini", &[16], 16),
+        ("scail2_14b", &[16], 16),
+    ];
+
+    /// The fps the API blanket-defaulted to before sc-12347, kept as a named constant because the
+    /// point of assertion 5 is that this number is *wrong for most models* — deleting the constant
+    /// would delete the regression guard.
+    const THE_BLANKET_FPS: u32 = 25;
+
+    /// sc-12347 — the temporal invariant's other half: **what a video model advertises is what it
+    /// renders**, on the axis that actually multiplies into frame count.
+    ///
+    /// Same four-part skeleton as `shipped_manifest_duration_caps_admit_everything_they_advertise`,
+    /// against the REAL manifest bytes for the same reason: `limits.fps` spent its whole existence
+    /// with ten declarations and zero Rust readers, so a suite that hardcoded the menus it claims to
+    /// check would re-test `Vec::contains` and notice nothing.
+    #[test]
+    fn shipped_manifest_fps_menus_admit_everything_they_advertise() {
+        let models = builtin_video_models();
+        assert_eq!(
+            models.len(),
+            FPS_MENUS.len(),
+            "a video model was added/removed; declare its limits.fps + defaults.fps and add it to \
+             FPS_MENUS — an undeclared menu is silently NO menu"
+        );
+
+        for (id, want_menu, want_default) in FPS_MENUS {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(*id))
+                .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
+                .as_object()
+                .expect("model entry object");
+
+            // 1. Every video model DECLARES a menu, and core reads exactly it. `None` here is the
+            //    sc-12347 bug itself — an absent menu means "any fps", which is how a 60 fps
+            //    request reached a model that advertises only 30.
+            assert_eq!(
+                allowed_fps(entry),
+                Some(want_menu.to_vec()),
+                "{id}: effective fps menu"
+            );
+
+            // 2. FIXED POINT: the model's own declared default is on its own menu. This is the
+            //    assertion the story asks for, and it is what makes `resolve_fps` safe — resolving
+            //    an omitted fps from `defaults.fps` must never produce a value this gate refuses.
+            assert_eq!(
+                default_fps(entry),
+                Some(*want_default),
+                "{id}: effective default fps"
+            );
+            assert!(
+                want_menu.contains(want_default),
+                "{id}: defaults.fps {want_default} must be on its own limits.fps menu {want_menu:?}"
+            );
+
+            // 3. Every advertised rate is ADMITTED — the menu IS the web's dropdown source
+            //    (`VideoStudio.jsx:912`), so anything the picker can emit must pass the gate.
+            for advertised in want_menu.iter().copied().chain([*want_default]) {
+                assert_eq!(
+                    fps_limit_error(id, advertised, entry),
+                    None,
+                    "{id} advertises {advertised} fps; the menu must admit it"
+                );
+            }
+
+            // 4. MUTATION CHECK: the menu actually rejects something. Assertions 1-3 all pass if
+            //    `allowed_fps` returns `None` (the shipped bug) or the membership test is neutered.
+            //    61 is past the blanket sanity bound, so it is off EVERY shipped menu.
+            let off_menu = 61;
+            assert!(
+                !want_menu.contains(&off_menu),
+                "{id}: fixture assumes {off_menu} is off-menu"
+            );
+            let message = fps_limit_error(id, off_menu, entry)
+                .unwrap_or_else(|| panic!("{id}: {off_menu} fps is off-menu and must be rejected"));
+            assert!(message.contains(id), "{id}: names the model: {message}");
+
+            // 5. THE REASON `resolve_fps` READS THE MANIFEST: a payload that names NO fps must
+            //    resolve to a rate this model's own menu admits. Enforcing `limits.fps` while
+            //    defaulting to a blanket the menu rejects would 400 the API's own default — which
+            //    is exactly what the pre-sc-12347 blanket did on 7 of these 10 models.
+            let resolved = resolve_fps(None, entry);
+            assert_eq!(
+                resolved, *want_default,
+                "{id}: omitted fps takes the model's default"
+            );
+            assert_eq!(
+                fps_limit_error(id, resolved, entry),
+                None,
+                "{id}: an fps-less payload must be ADMITTED, not rejected"
+            );
+        }
+
+        // The blanket the DTO used to apply is off-menu for a MAJORITY of shipped models — the
+        // finding that made "enforce limits.fps" unshippable on its own. Pinned as a number rather
+        // than prose so re-introducing a blanket default fails here.
+        let rejecting_the_blanket: Vec<&str> = FPS_MENUS
+            .iter()
+            .filter(|(_, menu, _)| !menu.contains(&THE_BLANKET_FPS))
+            .map(|(id, _, _)| *id)
+            .collect();
+        assert_eq!(
+            rejecting_the_blanket.len(),
+            7,
+            "the blanket {THE_BLANKET_FPS} fps is off-menu for these models: {rejecting_the_blanket:?} \
+             — if this count moved, re-read why resolve_fps consults defaults.fps before changing it"
+        );
+    }
+
+    /// sc-12347 + sc-12297 together — **the frame ceiling the story's Option B would have built
+    /// explicitly, obtained for free as a derived property.**
+    ///
+    /// Neither gate bounds frames alone: the duration cap admits 5s @ 60fps (301 mochi frames), and
+    /// the fps menu admits 30fps @ 30s (901). Together they pin `frames ≤ hardMaxDuration ×
+    /// max(limits.fps)` for every shipped model, which is exactly B's ceiling — so A subsumes B
+    /// rather than trading against it.
+    ///
+    /// ⚠️ This is a CONTRACT bound, NOT a safety gate. Mochi's 151 is still ~4× past the ~36-frame
+    /// correctness ceiling that MLX's `i32::MAX` element limit imposes (sc-12349), and no amount of
+    /// honoring the manifest closes that — see `mlx-gen-mochi`'s `MAX_TENSOR_ELEMS`.
+    #[test]
+    fn the_two_gates_together_bound_frames_at_the_advertised_ceiling() {
+        let models = builtin_video_models();
+
+        for (id, menu, _) in FPS_MENUS {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(*id))
+                .unwrap_or_else(|| panic!("{id} present"))
+                .as_object()
+                .expect("model entry object");
+            let cap = hard_max_duration(entry).unwrap_or_else(|| panic!("{id} declares a cap"));
+            let fastest = menu.iter().copied().max().expect("non-empty menu");
+            let ceiling = (cap * fastest as f32).round() as u32;
+
+            // Anything BOTH gates admit lands at or under the derived ceiling.
+            for fps in menu.iter() {
+                let request = VideoRequest::from_payload(&payload(json!({
+                    "projectId": "p", "model": id, "duration": cap, "fps": fps,
+                    "modelManifestEntry": Value::Object(entry.clone()),
+                })));
+                assert_eq!(duration_limit_error(id, request.duration, entry), None);
+                assert_eq!(fps_limit_error(id, request.fps, entry), None);
+                assert!(
+                    request.raw_frame_count() <= ceiling,
+                    "{id}: {cap}s @ {fps}fps = {} raw frames, past the advertised ceiling {ceiling}",
+                    request.raw_frame_count()
+                );
+            }
+
+            // MUTATION CHECK: the ceiling binds because BOTH gates hold. Drop either one and the
+            // frame count blows past it — which is the whole argument for this story existing
+            // alongside sc-12297.
+            let over_fps = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "model": id, "duration": cap, "fps": 60,
+                "modelManifestEntry": Value::Object(entry.clone()),
+            })));
+            if fastest < 60 {
+                assert!(
+                    over_fps.raw_frame_count() > ceiling,
+                    "{id}: 60fps must exceed the ceiling for this test to mean anything"
+                );
+                assert!(
+                    fps_limit_error(id, over_fps.fps, entry).is_some(),
+                    "{id}: only the FPS gate refuses {cap}s @ 60fps — the duration cap admits it"
+                );
+                assert_eq!(
+                    duration_limit_error(id, over_fps.duration, entry),
+                    None,
+                    "{id}: the duration cap admits this request; it is legally {cap}s"
+                );
+            }
+        }
+
+        // The concrete case from the story: mochi_1, a *legally 5-second* request at 60fps.
+        let mochi = payload(json!({
+            "limits": { "hardMaxDuration": 5, "fps": [30] }, "defaults": { "fps": 30 }
+        }));
+        let request = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "mochi_1", "duration": 5, "fps": 60,
+            "modelManifestEntry": Value::Object(mochi.clone()),
+        })));
+        assert_eq!(request.raw_frame_count(), 300);
+        assert_eq!(
+            request.frame_count(),
+            301,
+            "301 % 6 == 1, so the engine accepts it"
+        );
+        assert_eq!(
+            duration_limit_error("mochi_1", request.duration, &mochi),
+            None,
+            "the request IS 5 seconds — sc-12297's cap is doing exactly what it says"
+        );
+        assert!(
+            fps_limit_error("mochi_1", request.fps, &mochi).is_some(),
+            "301 frames from a legal 5s request is refused only by the fps menu"
+        );
+
+        // …and the shipped default is the documented 151.
+        let default_request = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "mochi_1", "duration": 5,
+            "modelManifestEntry": Value::Object(mochi),
+        })));
+        assert_eq!(
+            default_request.fps, 30,
+            "omitted fps takes mochi's declared 30"
+        );
+        assert_eq!(default_request.frame_count(), 151);
+    }
+
+    /// The house message convention: name the model, state what was asked and what is allowed, and
+    /// give the lever. A caller that hits this has no other signal — the request simply stops.
+    #[test]
+    fn fps_limit_error_names_the_model_the_request_and_the_menu() {
+        let mochi = payload(json!({ "limits": { "fps": [30] } }));
+        let message = fps_limit_error("mochi_1", 60, &mochi).expect("60 is off mochi's [30] menu");
+        assert!(message.contains("mochi_1"), "names the model: {message}");
+        assert!(
+            message.contains("30 fps"),
+            "states what is allowed: {message}"
+        );
+        assert!(
+            message.contains("60 fps"),
+            "states what was asked: {message}"
+        );
+        assert!(message.contains("Set fps to"), "gives the lever: {message}");
+
+        // Every advertised rate admits; anything else is refused — membership, not a range. 24 and
+        // 30 bracket 25, so a `>=`/`<=` mutation of the check cannot pass this.
+        let ltx = payload(json!({ "limits": { "fps": [24, 25, 30] } }));
+        for advertised in [24, 25, 30] {
+            assert_eq!(fps_limit_error("ltx_2_3", advertised, &ltx), None);
+        }
+        for off_menu in [23, 26, 29, 31] {
+            assert!(
+                fps_limit_error("ltx_2_3", off_menu, &ltx).is_some(),
+                "{off_menu} is between/around advertised rates but is not one of them"
+            );
+        }
+
+        // The menu is humanized per arity: one value, two values, and a long list each read as
+        // English rather than as a debug-printed Vec.
+        assert!(
+            fps_limit_error("m", 1, &payload(json!({ "limits": { "fps": [30] } })))
+                .expect("off-menu")
+                .contains("renders at 30 fps")
+        );
+        assert!(
+            fps_limit_error("m", 1, &payload(json!({ "limits": { "fps": [16, 24] } })))
+                .expect("off-menu")
+                .contains("renders at 16 or 24 fps")
+        );
+        assert!(fps_limit_error(
+            "m",
+            1,
+            &payload(json!({ "limits": { "fps": [6, 7, 8, 10, 12, 25] } }))
+        )
+        .expect("off-menu")
+        .contains("renders at 6, 7, 8, 10, 12, or 25 fps"));
+    }
+
+    /// A model that declares no menu is UNCONSTRAINED — the default-absent behavior that keeps
+    /// every non-declaring model (a user-manifest entry, the stub lane, an uncatalogued id whose
+    /// entry resolves to `{}`) byte-identical to before the key had a reader.
+    ///
+    /// Also the infallibility contract: a menu nobody could satisfy falls back to NO menu rather
+    /// than bricking the model. An empty array, or one whose every entry is unusable, would
+    /// otherwise reject every request the model has — including its own `defaults.fps`.
+    #[test]
+    fn absent_or_unhonorable_limits_fps_means_no_menu() {
+        for empty in [json!({}), json!({ "limits": {} })] {
+            let entry = payload(empty.clone());
+            assert_eq!(allowed_fps(&entry), None, "no menu declared: {empty}");
+            assert_eq!(fps_limit_error("any_model", 60, &entry), None);
+        }
+
+        for bad in [
+            json!([]),
+            json!(30),
+            json!("30"),
+            json!(null),
+            json!({ "min": 30 }),
+        ] {
+            let entry = payload(json!({ "limits": { "fps": bad } }));
+            assert_eq!(allowed_fps(&entry), None, "unhonorable menu {bad}");
+            assert_eq!(
+                fps_limit_error("any_model", 60, &entry),
+                None,
+                "an unsatisfiable menu must not brick the model: {bad}"
+            );
+        }
+
+        // A menu whose every entry is out of the sanity bounds is no menu at all — but a menu with
+        // ONE usable entry keeps that entry and drops the junk, rather than falling back to
+        // unconstrained. Dropping junk is not the same decision as having no menu.
+        let all_junk = payload(json!({ "limits": { "fps": [0, 61, "30", null] } }));
+        assert_eq!(allowed_fps(&all_junk), None);
+        assert_eq!(fps_limit_error("m", 60, &all_junk), None);
+
+        let partly_junk = payload(json!({ "limits": { "fps": [0, 30, 999] } }));
+        assert_eq!(allowed_fps(&partly_junk), Some(vec![30]));
+        assert_eq!(fps_limit_error("m", 30, &partly_junk), None);
+        assert!(fps_limit_error("m", 24, &partly_junk).is_some());
+    }
+
+    /// [`resolve_fps`] — resolution, not coercion. An omitted fps takes the model's declared
+    /// default; a NAMED fps is never rewritten onto the menu, only clamped to the sanity bounds and
+    /// then judged by [`fps_limit_error`].
+    ///
+    /// The named-value half is the reject-never-clamp rule: silently snapping a 60 fps request onto
+    /// mochi's 30 would halve the clip the caller asked for, which is the same silent-coercion class
+    /// as the 848→832 rewrite.
+    #[test]
+    fn omitted_fps_resolves_to_the_models_declared_default() {
+        let mochi = payload(json!({ "limits": { "fps": [30] }, "defaults": { "fps": 30 } }));
+
+        // Omitted / unreadable ⇒ the model's declared default, NOT the blanket 25. Asserted
+        // against a menu whose default (30) differs from the blanket, so a `resolve_fps` that
+        // ignored the manifest would be RED here rather than coincidentally right.
+        assert_eq!(resolve_fps(None, &mochi), 30);
+        assert_eq!(resolve_fps(Some(&json!(null)), &mochi), 30);
+        assert_eq!(resolve_fps(Some(&json!("nonsense")), &mochi), 30);
+
+        // A numeric STRING is a value the caller NAMED, not an omission — the pre-existing
+        // `safe_int` contract (`reads_numeric_strings_and_carries_advanced_fields`). Pinned with 24,
+        // which is neither the blanket nor this model's default, so falling back to either is RED.
+        assert_eq!(resolve_fps(Some(&json!("24")), &mochi), 24);
+        assert!(
+            fps_limit_error("mochi_1", 24, &mochi).is_some(),
+            "and it is then judged by the menu like any named value"
+        );
+
+        // Named ⇒ honored verbatim, even when off-menu. The gate refuses it; resolution does not
+        // quietly fix it up.
+        assert_eq!(resolve_fps(Some(&json!(60)), &mochi), 60);
+        assert!(fps_limit_error("mochi_1", 60, &mochi).is_some());
+
+        // Named-but-nonsense clamps to the sanity bounds (unchanged behavior), then the menu judges.
+        assert_eq!(resolve_fps(Some(&json!(999)), &mochi), 60);
+        assert_eq!(resolve_fps(Some(&json!(0)), &mochi), 1);
+
+        // No declared default ⇒ the blanket, so a model that declares nothing is unchanged.
+        let bare = payload(json!({}));
+        assert_eq!(resolve_fps(None, &bare), THE_BLANKET_FPS);
+        assert_eq!(default_fps(&bare), None);
+
+        // An unhonorable default is not a rate anyone meant ⇒ the blanket, rather than propagating
+        // a degenerate value into `frames = duration × fps`.
+        for bad in [json!(0), json!(61), json!(-1), json!("30"), json!(null)] {
+            let entry = payload(json!({ "defaults": { "fps": bad } }));
+            assert_eq!(default_fps(&entry), None, "unhonorable default {bad}");
+            assert_eq!(resolve_fps(None, &entry), THE_BLANKET_FPS);
+        }
+
+        // The live bug this closes, end to end: mochi at the blanket renders a 30fps prior 20% slow.
+        let before = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "mochi_1", "duration": 5,
+            "modelManifestEntry": json!({ "limits": { "fps": [30] } }),
+        })));
+        assert_eq!(
+            before.fps, THE_BLANKET_FPS,
+            "no declared default ⇒ the old behavior"
+        );
+        assert_eq!(
+            before.frame_count(),
+            127,
+            "5 × 25 = 125 → 127, and 127 % 6 == 1"
+        );
+
+        let after = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "model": "mochi_1", "duration": 5,
+            "modelManifestEntry": Value::Object(mochi),
+        })));
+        assert_eq!(after.fps, 30, "the declared default is honored");
+        assert_eq!(
+            after.frame_count(),
+            151,
+            "the frame count the manifest documents"
+        );
     }
 
     /// sc-12294 BLOCKER — the case the dropdown never produces but every raw path does.
