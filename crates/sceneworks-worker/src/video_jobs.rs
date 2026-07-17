@@ -82,12 +82,13 @@ use sceneworks_core::character_store::CharacterStore;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use sceneworks_core::video_request::{video_frame_count, wan_frame_count};
-// `ltx_frame_count` is the MLX LTX arm's own stride expression — the candle lane resolves LTX through
-// the shared `video_frame_count` ladder instead, so it is dead there outside the lattice tests; and
-// `mochi_frame_count` is only ever named BY those tests. Each is gated to exactly the configs that
-// use it: an import left dead on a single cfg fails the parity lane's `-D warnings` while a macOS
-// check stays green (sc-10404's trap).
-#[cfg(any(target_os = "macos", all(test, feature = "backend-candle")))]
+// `ltx_frame_count` is the MLX LTX arm's own stride expression (the candle lane resolves LTX through
+// the shared `video_frame_count` ladder, so the candle LIB never names it) and is also asserted by
+// the lattice + asset-fact tests, which run on EVERY cfg — hence `any(macos, test)`.
+// `mochi_frame_count` is named only by tests that are themselves macOS/candle-gated.
+// Each is gated to exactly the configs that use it: an import left dead on a single cfg fails the
+// parity lane's `-D warnings` while a macOS check stays green (sc-10404's trap).
+#[cfg(any(target_os = "macos", test))]
 use sceneworks_core::video_request::ltx_frame_count;
 #[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
 use sceneworks_core::video_request::mochi_frame_count;
@@ -782,10 +783,15 @@ pub(crate) async fn run_video_generate_job(
         ),
     )
     .await?;
+    // sc-12371: measure the clip BEFORE it is moved into the encoder. This is the single seam every
+    // video job funnels through — whatever lane, engine or route produced `decoded` — so measuring
+    // once here is what makes "the sidecar can lie about clip length" structurally impossible rather
+    // than merely fixed for today's models. `video_asset_fact` cannot be called without it.
+    let clip = EncodedClip::measure(&decoded);
     let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
     encode_media(&plan.media_path, decoded, Some(ctx)).await?;
 
-    let fact = video_asset_fact(&plan, seed, adapter, raw_settings, replacement_status);
+    let fact = video_asset_fact(&plan, seed, adapter, raw_settings, replacement_status, clip);
     let result = streaming_result(&plan, &fact, adapter);
     update_job(
         api,
@@ -1212,16 +1218,85 @@ async fn write_poster_frame(media_path: &Path) {
 // Asset fact + streaming result (mirrors `video_generation_result`).
 // ---------------------------------------------------------------------------
 
+/// The MEASURED facts of the clip that was encoded — counted off the `DecodedVideo` itself, never
+/// predicted from the request (sc-12371).
+///
+/// Everything under an asset's `file` block is a claim about bytes on disk: `frameCount`, `fps` and
+/// `duration` must describe the mp4 that exists, not the one that was ordered. They used to be
+/// predictions — `request.frame_count()` re-ran the temporal lattice and `request.duration` echoed
+/// the user's ask — and the predictions were wrong: the arms driving a Wan engine under a non-Wan
+/// model id (`bernini`, `scail2_14b`, `external_base_*`) rendered `wan_frame_count(raw)` = 149 while
+/// the asset claimed 150 frames at the requested 6.0 s. Nothing failed loudly; a wrong clip length
+/// is invisible in the output (epic 1788).
+///
+/// Making the predictions agree with the engine would only fix today's models. Measuring removes the
+/// prediction: there is no second computation left to drift, and it also covers what agreement never
+/// could — an engine returning a count nobody predicted (SVD's burst clamps to its own `numFrames`;
+/// a `validate()` re-snap or truncated decode would too).
+///
+/// [`video_asset_fact`] takes one of these BY VALUE for that reason: an asset fact cannot be built
+/// without measuring the clip, so the record cannot silently fall back to a prediction. That is a
+/// compile error rather than a test we would have to remember to write.
+///
+/// Mirrors [`run_video_upscale_job`], which has always recorded its real `out_count` and
+/// `out_count / out_fps`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EncodedClip {
+    /// `decoded.frames.len()` — `encode_inner` writes exactly one PNG per entry, so this IS the
+    /// file's frame count.
+    frames: usize,
+    /// The framerate the file is encoded at. `decoded.fps.max(1)` — the SAME clamp `encode_inner`
+    /// applies when it hands `-framerate` to ffmpeg, so the record matches the container.
+    fps: u32,
+}
+
+impl EncodedClip {
+    /// Measure the clip that is about to be written.
+    fn measure(decoded: &DecodedVideo) -> Self {
+        Self {
+            frames: decoded.frames.len(),
+            fps: decoded.fps.max(1),
+        }
+    }
+
+    /// The clip's real running time. Not `request.duration`: at the 6 s x 25 fps default a Wan
+    /// engine renders 149 frames, so the file is 5.96 s and an asset claiming 6.0 s is lying about
+    /// a file sitting right next to it.
+    fn duration_seconds(&self) -> f64 {
+        self.frames as f64 / f64::from(self.fps)
+    }
+
+    /// Stamp the measured frame count onto a builder's raw settings — THE ONE WRITER of
+    /// `frameCount`. No `*_raw_settings` builder may record one (pinned by
+    /// `no_raw_settings_builder_records_its_own_frame_count`), so this is the only opinion there is.
+    fn record_frame_count(&self, raw_settings: Value) -> Value {
+        match raw_settings {
+            Value::Object(mut map) => {
+                map.insert("frameCount".to_owned(), json!(self.frames));
+                Value::Object(map)
+            }
+            // Every builder returns an object; a non-object carries no keys to correct, so pass it
+            // through rather than fabricating a record around it.
+            other => other,
+        }
+    }
+}
+
 /// The flat per-asset fact the Rust API turns into an indexed video asset (every key
 /// is consumed by the API's video sidecar builder). Mirrors `video_generation_result`.
 /// `adapter` is the generating adapter id (`procedural_video` stub / `mlx_wan` real)
 /// and `raw_settings` its recorded knobs.
+///
+/// `clip` is the MEASURED [`EncodedClip`] and is required, not optional: `frameCount`, `fps` and
+/// `duration` all land under the API's `asset.file` block — claims about the mp4 on disk — so they
+/// are derived from the clip that was encoded rather than predicted from the request (sc-12371).
 fn video_asset_fact(
     plan: &VideoPlan,
     seed: i64,
     adapter: &str,
     raw_settings: Value,
     replacement_status: Option<Value>,
+    clip: EncodedClip,
 ) -> Value {
     let request = &plan.request;
     let title: String = request.prompt.chars().take(56).collect();
@@ -1243,8 +1318,10 @@ fn video_asset_fact(
         "mimeType": "video/mp4",
         "width": request.width,
         "height": request.height,
-        "duration": request.duration,
-        "fps": request.fps,
+        // MEASURED, not requested (sc-12371) — see `EncodedClip`. `request.duration` / `request.fps`
+        // are what was ASKED for; these three keys describe the file that exists.
+        "duration": clip.duration_seconds(),
+        "fps": clip.fps,
         "quality": request.quality,
         "family": plan.family,
         "seed": seed,
@@ -1256,7 +1333,7 @@ fn video_asset_fact(
         "prompt": request.prompt,
         "negativePrompt": request.negative_prompt,
         "loras": request.loras,
-        "rawAdapterSettings": raw_settings,
+        "rawAdapterSettings": clip.record_frame_count(raw_settings),
         "sourceAssetId": request.source_asset_id,
         "lastFrameAssetId": request.last_frame_asset_id,
         "sourceClipAssetId": request.source_clip_asset_id,
@@ -1275,10 +1352,12 @@ fn video_asset_fact(
     fact
 }
 
+/// Raw-settings recorded on a procedural stub asset — the dispatched KNOBS (`duration` here is what
+/// was ASKED for, which is what `rawAdapterSettings` is for). Like every other builder it records no
+/// `frameCount`: [`EncodedClip::record_frame_count`] stamps the clip's real length (sc-12371).
 fn stub_raw_settings(request: &VideoRequest) -> Value {
     json!({
         "model": request.model,
-        "frameCount": request.frame_count(),
         "fps": request.fps,
         "duration": request.duration,
         "quality": request.quality,
@@ -2774,7 +2853,6 @@ fn wan_raw_settings(request: &VideoRequest, engine_id: &str) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
-    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
     raw.insert("fps".to_owned(), json!(request.fps));
     let (steps, guidance) = wan_sampling(engine_id, request);
     if let Some(steps) = steps {
@@ -4947,7 +5025,6 @@ fn candle_video_raw_settings(request: &VideoRequest, repo: &str) -> Value {
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
-    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
     raw.insert("fps".to_owned(), json!(request.fps));
     Value::Object(raw)
 }
@@ -5769,7 +5846,6 @@ fn candle_scail2_raw_settings(request: &VideoRequest, lightning: bool) -> Value 
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
-    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
     raw.insert("fps".to_owned(), json!(request.fps));
     raw.insert(
         "scail2Task".to_owned(),
@@ -6681,7 +6757,6 @@ fn bernini_raw_settings(request: &VideoRequest) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
-    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
     raw.insert("fps".to_owned(), json!(request.fps));
     // The engine guidance task the SceneWorks mode resolved to (lineage / observability).
     raw.insert(
@@ -6917,7 +6992,6 @@ fn candle_bernini_raw_settings(request: &VideoRequest) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
-    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
     raw.insert("fps".to_owned(), json!(request.fps));
     // The engine guidance task the SceneWorks mode resolved to (lineage / observability).
     raw.insert(
@@ -7289,7 +7363,6 @@ fn scail2_raw_settings(request: &VideoRequest, lightning: bool) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
-    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
     raw.insert("fps".to_owned(), json!(request.fps));
     // The engine task the SceneWorks mode resolved to (lineage / observability).
     raw.insert(
@@ -8632,7 +8705,6 @@ fn ltx_raw_settings(request: &VideoRequest) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
-    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
     raw.insert("fps".to_owned(), json!(request.fps));
     Value::Object(raw)
 }
@@ -9144,7 +9216,6 @@ fn mochi_raw_settings(request: &VideoRequest, quant: Option<Quant>) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
-    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
     raw.insert("fps".to_owned(), json!(request.fps));
     raw.insert(
         "mochiTier".to_owned(),
@@ -9680,10 +9751,6 @@ fn wan_vace_raw_settings(request: &VideoRequest, model: &str) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(model.to_owned()));
-    raw.insert(
-        "frameCount".to_owned(),
-        json!(wan_frame_count(request.raw_frame_count())),
-    );
     raw.insert("fps".to_owned(), json!(request.fps));
     raw.insert(
         "replacementMode".to_owned(),
@@ -10583,10 +10650,6 @@ fn wan_vace_extend_raw_settings(request: &VideoRequest) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String("wan_vace".to_owned()));
-    raw.insert(
-        "frameCount".to_owned(),
-        json!(wan_frame_count(request.raw_frame_count())),
-    );
     raw.insert("fps".to_owned(), json!(request.fps));
     raw.insert(
         "fidelityTier".to_owned(),
@@ -11096,137 +11159,219 @@ mod tests {
         assert!(accepted > 0, "the invariant must be exercised, not vacuous");
     }
 
-    /// sc-12371: an asset's `frameCount` must be the frame count its arm actually handed the engine.
+    /// sc-12371: **no `*_raw_settings` builder may have an opinion about clip length.**
     ///
-    /// The arm and its sidecar are separate code with no structural tie — the arm builds
-    /// `VideoGenInput.frames`, the dispatch separately calls a `*_raw_settings` builder — and they
-    /// DID drift. `generate_bernini` / `generate_scail2` drive Wan engines (`bernini` is a
-    /// Wan2.2-T2V-A14B renderer, `scail2_14b` a Wan2.1-14B I2V one) under model ids that
-    /// `is_wan_model` does not match, so the arm rendered `wan_frame_count(raw)` = 149 while the
-    /// builder's `request.frame_count()` fell through to its old raw arm = 150. The clip was a frame
-    /// shorter than the asset claimed and nothing failed loudly.
+    /// This is the structural half of the fix, and the reason the class is dead rather than merely
+    /// patched. Every builder used to compute its own `frameCount` from the REQUEST, independently
+    /// of the arm that had just told the engine how many frames to render — two answers to one
+    /// question. They diverged: the arms driving a Wan engine under a non-Wan model id (`bernini`,
+    /// `scail2_14b`, `external_base_*`) rendered `wan_frame_count(raw)` = 149 while their builder
+    /// recorded the unsnapped 150, and nothing failed loudly.
     ///
-    /// WHY THIS SHAPE: each case restates the arm's LITERAL engine expression, so the two
-    /// implementations are compared rather than one being compared to itself. The existing builder
-    /// tests assert `raw["frameCount"] == req.frame_count()`, which CANNOT catch this — the builder
-    /// IS `frame_count()`, so it agrees with itself whatever the engine got.
+    /// Making the two computations agree would only fix today's models. Deleting the second
+    /// computation means a builder has nothing to drift FROM: `record_frame_count` stamps the count
+    /// off the encoded clip at the one seam every video job funnels through. This test is what stops
+    /// a future builder from quietly reintroducing a second opinion.
     #[test]
     #[cfg(target_os = "macos")]
-    fn sidecar_frame_count_is_what_the_arm_hands_the_engine() {
-        // 6 s x 25 fps = 150 raw, deliberately OFF every lattice here: `wan_frame_count(150)` is
-        // 149 and `ltx_frame_count(150)` is 153, so a sidecar that records the raw count (the
-        // pre-sc-12371 bug) is RED. A duration already on-lattice would agree either way.
+    fn no_raw_settings_builder_records_its_own_frame_count() {
         let req = |model: &str| {
             request(json!({
                 "projectId": "p", "model": model, "mode": "text_to_video",
-                "duration": 6.0, "fps": 25
+                "duration": 6.0, "fps": 25, "advanced": { "userKnob": "keep-me" }
             }))
         };
-        let frame_count_of = |raw: &Value| raw["frameCount"].clone();
-        assert_eq!(req("bernini").raw_frame_count(), 150);
-        assert_ne!(wan_frame_count(150), 150, "the probe must discriminate");
-
-        // `generate_bernini`  -> `frames: wan_frame_count(request.raw_frame_count())`
-        let bernini = req("bernini");
-        assert_eq!(
-            frame_count_of(&bernini_raw_settings(&bernini)),
-            json!(wan_frame_count(bernini.raw_frame_count())),
-            "the bernini asset must record the 149 frames its arm renders, not the raw 150"
-        );
-
-        // `generate_scail2`   -> `frames: wan_frame_count(request.raw_frame_count())`
-        let scail2 = req("scail2_14b");
-        assert_eq!(
-            frame_count_of(&scail2_raw_settings(&scail2, false)),
-            json!(wan_frame_count(scail2.raw_frame_count())),
-            "the scail2 asset must record the 149 frames its arm renders, not the raw 150"
-        );
-
-        // `generate_wan`      -> `frames: wan_frame_count(request.raw_frame_count())`
-        let wan = req("wan_2_2");
-        assert_eq!(
-            frame_count_of(&wan_raw_settings(&wan, "wan2_2_ti2v_5b")),
-            json!(wan_frame_count(wan.raw_frame_count()))
-        );
-
-        // `generate_ltx`      -> `frames: ltx_frame_count(request.raw_frame_count())`
-        let ltx = req("ltx_2_3");
-        assert_eq!(
-            frame_count_of(&ltx_raw_settings(&ltx)),
-            json!(ltx_frame_count(ltx.raw_frame_count()))
-        );
-
-        // `generate_mochi`    -> `mochi_preflight`'s `video_frame_count(model, raw)`
-        let mochi = req("mochi_1");
-        assert_eq!(
-            frame_count_of(&mochi_raw_settings(&mochi, None)),
-            json!(video_frame_count(&mochi.model, mochi.raw_frame_count()))
-        );
-
-        // The Wan-VACE builders already record their arm's own `wan_frame_count` expression rather
-        // than routing through `frame_count()` — which is exactly why they never drifted. Pin that.
-        let vace = req("wan_2_2");
-        assert_eq!(
-            frame_count_of(&wan_vace_raw_settings(&vace, "wan_vace")),
-            json!(wan_frame_count(vace.raw_frame_count()))
-        );
-    }
-
-    /// The candle-lane half of [`sidecar_frame_count_is_what_the_arm_hands_the_engine`] (sc-12371).
-    /// Same bug, same shape, different `#[cfg]`: `generate_candle_bernini` /
-    /// `generate_candle_scail2` / `generate_candle_scail2_replace` all hand the engine
-    /// `wan_frame_count(raw)`, and `generate_candle_wan_comfyui` does too under an
-    /// `external_base_*` id — another Wan engine `is_wan_model` does not match.
-    #[test]
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    fn candle_sidecar_frame_count_is_what_the_arm_hands_the_engine() {
-        let req = |model: &str| {
-            request(json!({
-                "projectId": "p", "model": model, "mode": "text_to_video",
-                "duration": 6.0, "fps": 25
-            }))
-        };
-        let frame_count_of = |raw: &Value| raw["frameCount"].clone();
-        assert_ne!(wan_frame_count(150), 150, "the probe must discriminate");
-
-        // `generate_candle_scail2` / `_replace` -> `frames: wan_frame_count(raw_frame_count())`
-        let scail2 = req("scail2_14b");
-        assert_eq!(
-            frame_count_of(&candle_scail2_raw_settings(&scail2, false)),
-            json!(wan_frame_count(scail2.raw_frame_count())),
-            "the candle scail2 asset must record the 149 frames its arm renders, not the raw 150"
-        );
-
-        // `generate_candle_bernini` -> `frames: wan_frame_count(raw_frame_count())`
-        let bernini = req("bernini");
-        assert_eq!(
-            frame_count_of(&candle_bernini_raw_settings(&bernini)),
-            json!(wan_frame_count(bernini.raw_frame_count())),
-            "the candle bernini asset must record the 149 frames its arm renders, not the raw 150"
-        );
-
-        // `generate_candle_wan_comfyui` -> `frames: wan_frame_count(raw_frame_count())`, recorded
-        // through the SHARED `candle_video_raw_settings` under an `external_base_*` model id.
-        let comfyui = req("external_base_wan22_comfyui");
-        assert_eq!(
-            frame_count_of(&candle_video_raw_settings(
-                &comfyui,
-                WAN_COMFYUI_SNAPSHOT_REPO
-            )),
-            json!(wan_frame_count(comfyui.raw_frame_count())),
-            "the in-place ComfyUI Wan asset must record the 149 frames its arm renders"
-        );
-
-        // The generic candle arm -> `frames: video_frame_count(&request.model, raw_frame_count())`,
-        // the SAME ladder `candle_video_raw_settings` records. Pinned across the families it serves.
-        for model in ["wan_2_2", "ltx_2_3", "mochi_1"] {
-            let r = req(model);
-            assert_eq!(
-                frame_count_of(&candle_video_raw_settings(&r, "repo")),
-                json!(video_frame_count(&r.model, r.raw_frame_count())),
-                "{model}: the candle asset must record what the generic arm hands the engine"
+        let builders: Vec<(&str, Value)> = vec![
+            ("stub", stub_raw_settings(&req("stub"))),
+            ("wan", wan_raw_settings(&req("wan_2_2"), "wan2_2_ti2v_5b")),
+            ("ltx", ltx_raw_settings(&req("ltx_2_3"))),
+            ("mochi", mochi_raw_settings(&req("mochi_1"), None)),
+            ("bernini", bernini_raw_settings(&req("bernini"))),
+            ("scail2", scail2_raw_settings(&req("scail2_14b"), false)),
+            ("svd", svd_raw_settings(&req("svd"))),
+            (
+                "wan_vace",
+                wan_vace_raw_settings(&req("wan_2_2"), "wan_vace"),
+            ),
+            (
+                "wan_vace_extend",
+                wan_vace_extend_raw_settings(&req("wan_2_2")),
+            ),
+        ];
+        for (name, raw) in &builders {
+            let map = raw.as_object().expect("raw settings is an object");
+            assert!(
+                !map.contains_key("frameCount"),
+                "{name}_raw_settings must not record a frameCount — `record_frame_count` counts it \
+                 off the encoded clip; a builder that recomputes it is the sc-12371 bug returning"
+            );
+            // The builders still carry their own knobs — this is not vacuously passing on an empty
+            // object, and SVD keeps `numFrames` (its engine burst KNOB, a different thing).
+            assert!(
+                !map.is_empty(),
+                "{name}_raw_settings records nothing at all"
             );
         }
+        // SVD's `numFrames` is a dispatched knob, not a clip length — it must survive.
+        let svd = svd_raw_settings(&req("svd"));
+        assert_eq!(svd["numFrames"], json!(25));
+    }
+
+    /// sc-12371: the stamped `frameCount` is the ENCODED CLIP's length, not any prediction of it.
+    ///
+    /// DISCRIMINATING BY CONSTRUCTION: every probe stamps a count that differs from what the request
+    /// would have predicted, so a `record_frame_count` that reached back to `request.frame_count()`
+    /// (or to any lattice at all) is RED. `bernini` at 6 s x 25 fps predicts 149 from the ladder and
+    /// 150 from the old raw arm — the stamp records neither, because it records the clip.
+    ///
+    /// This is the property the "make both sides agree" fix could NOT buy: the engine is free to
+    /// return a count that is nobody's prediction (SVD's fixed burst clamps to its own `numFrames`;
+    /// a `validate()` re-snap or a truncated decode would too). The asset follows the file.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn record_frame_count_records_the_encoded_clip_not_the_request() {
+        let bernini = request(json!({
+            "projectId": "p", "model": "bernini", "mode": "text_to_video",
+            "duration": 6.0, "fps": 25
+        }));
+        assert_eq!(bernini.raw_frame_count(), 150);
+        assert_eq!(bernini.frame_count(), 149, "the ladder predicts 149 here");
+
+        // A clip whose length matches NEITHER prediction — the shape sc-12318's stub probe produces
+        // (asked for 151, returned 1). The record must follow the frames that exist.
+        let odd = EncodedClip { frames: 7, fps: 25 };
+        let stamped = odd.record_frame_count(bernini_raw_settings(&bernini));
+        assert_eq!(
+            stamped["frameCount"],
+            json!(7),
+            "the asset records the clip that was encoded, not what the request predicted"
+        );
+        assert_ne!(stamped["frameCount"], json!(bernini.frame_count()));
+        assert_ne!(stamped["frameCount"], json!(bernini.raw_frame_count()));
+        // The builder's own knobs survive the stamp.
+        assert_eq!(stamped["model"], json!("bernini"));
+        assert_eq!(stamped["realModelInference"], json!(true));
+
+        // The real pairing: `generate_bernini` hands the engine `wan_frame_count(raw)` and the
+        // engine returns that many frames, so the asset records 149 — never the raw 150 the old
+        // builder wrote.
+        let rendered = wan_frame_count(bernini.raw_frame_count()) as usize;
+        assert_eq!(rendered, 149);
+        let clip = EncodedClip {
+            frames: rendered,
+            fps: 25,
+        };
+        let stamped = clip.record_frame_count(bernini_raw_settings(&bernini));
+        assert_eq!(stamped["frameCount"], json!(149));
+
+        // An already-stamped record is corrected, not duplicated (the stamp is the ONE writer).
+        let restamped = EncodedClip { frames: 5, fps: 25 }.record_frame_count(stamped);
+        assert_eq!(restamped["frameCount"], json!(5));
+
+        // A non-object carries no keys to correct and passes through rather than being wrapped.
+        assert_eq!(clip.record_frame_count(Value::Null), Value::Null);
+    }
+
+    /// sc-12371: `EncodedClip::measure` reads the clip, and `duration_seconds` is the FILE's running
+    /// time — the second half of the story's harm ("claims a duration/frame count the file does not
+    /// have"). The asset used to echo `request.duration`, so a 6.0 s ask on a Wan engine produced a
+    /// 149-frame / 5.96 s file described as 6.0 s.
+    ///
+    /// DISCRIMINATING: 149 frames at 25 fps is 5.96 s, which is NOT the requested 6.0 — so a
+    /// `duration` that reached back to `request.duration` is RED here.
+    #[test]
+    fn encoded_clip_measures_the_file_not_the_request() {
+        let frame = |()| RgbFrame {
+            width: 2,
+            height: 2,
+            pixels: vec![0; 12],
+        };
+        // What a bernini 6 s x 25 fps job actually produces: the Wan stride's 149 frames.
+        let decoded = DecodedVideo {
+            frames: (0..149).map(|_| frame(())).collect(),
+            fps: 25,
+            audio: None,
+        };
+        let clip = EncodedClip::measure(&decoded);
+        assert_eq!(clip.frames, 149, "counted off the frames, not predicted");
+        assert_eq!(clip.fps, 25);
+        assert!(
+            (clip.duration_seconds() - 5.96).abs() < 1e-9,
+            "149 frames at 25 fps is 5.96 s — the file's real length, not the 6.0 s requested"
+        );
+        assert_ne!(
+            clip.duration_seconds(),
+            6.0,
+            "the probe must discriminate: a `duration` echoing request.duration passes otherwise"
+        );
+
+        // `encode_inner` clamps the framerate with `.max(1)`; the record mirrors that clamp so the
+        // asset always describes the container ffmpeg was actually handed.
+        let zero_fps = DecodedVideo {
+            frames: vec![frame(()), frame(())],
+            fps: 0,
+            audio: None,
+        };
+        let clip = EncodedClip::measure(&zero_fps);
+        assert_eq!(clip.fps, 1, "mirrors encode_inner's `decoded.fps.max(1)`");
+        assert_eq!(clip.duration_seconds(), 2.0);
+    }
+
+    /// The candle-lane half of [`no_raw_settings_builder_records_its_own_frame_count`] (sc-12371).
+    /// Same invariant, different `#[cfg]`: these builders were the other half of the live bug —
+    /// `candle_bernini` / `candle_scail2`(`_replace`) and `candle_wan_comfyui` (under an
+    /// `external_base_*` id) all drive Wan engines whose ids `is_wan_model` does not match.
+    #[test]
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    fn no_candle_raw_settings_builder_records_its_own_frame_count() {
+        let req = |model: &str| {
+            request(json!({
+                "projectId": "p", "model": model, "mode": "text_to_video",
+                "duration": 6.0, "fps": 25, "advanced": { "userKnob": "keep-me" }
+            }))
+        };
+        let builders: Vec<(&str, Value)> = vec![
+            (
+                "candle_video",
+                candle_video_raw_settings(&req("wan_2_2"), "repo"),
+            ),
+            (
+                "candle_video/comfyui",
+                candle_video_raw_settings(&req("external_base_wan22_comfyui"), "repo"),
+            ),
+            (
+                "candle_scail2",
+                candle_scail2_raw_settings(&req("scail2_14b"), false),
+            ),
+            (
+                "candle_bernini",
+                candle_bernini_raw_settings(&req("bernini")),
+            ),
+            (
+                "wan_vace",
+                wan_vace_raw_settings(&req("wan_2_2"), "wan_vace"),
+            ),
+            (
+                "wan_vace_extend",
+                wan_vace_extend_raw_settings(&req("wan_2_2")),
+            ),
+        ];
+        for (name, raw) in &builders {
+            let map = raw.as_object().expect("raw settings is an object");
+            assert!(
+                !map.contains_key("frameCount"),
+                "{name}_raw_settings must not record a frameCount — `record_frame_count` counts it \
+                 off the encoded clip; a builder that recomputes it is the sc-12371 bug returning"
+            );
+            assert!(
+                !map.is_empty(),
+                "{name}_raw_settings records nothing at all"
+            );
+        }
+        // And the stamp still writes the clip's real length on this lane.
+        let stamped = EncodedClip { frames: 7, fps: 25 }
+            .record_frame_count(candle_bernini_raw_settings(&req("bernini")));
+        assert_eq!(stamped["frameCount"], json!(7));
     }
 
     /// Mochi's REAL hosted q4 resident footprint, split by component: AsymmDiT 9.007 GiB + T5-XXL
@@ -11623,17 +11768,34 @@ mod tests {
             Some(Quant::Q4),
             "the arm must carry the resolved tier's quant onto the LoadSpec"
         );
-        assert_eq!(
-            raw_settings.get("frameCount").and_then(Value::as_u64),
-            Some(u64::from(probe.engine_frames())),
-            "the sidecar's frameCount is `sceneworks-core::frame_count()` — an INDEPENDENT mirror of \
-             the same lattice, not the arm's own `video_frame_count` — so the two must agree or the \
-             asset records a clip length it does not have"
+        // sc-12371 REPLACED this pin's premise. It used to assert that the arm's `raw_settings`
+        // carried a `frameCount` equal to `probe.engine_frames()` — i.e. that core's INDEPENDENT
+        // mirror of the lattice happened to agree with the arm. That mirror is gone: the builder no
+        // longer has an opinion, and the asset's `frameCount` is stamped from the ENCODED clip at
+        // the funnel (`record_frame_count`). So the arm must carry no count...
+        assert!(
+            raw_settings.get("frameCount").is_none(),
+            "the arm must not record a clip length — the funnel stamps it off the encoded frames"
         );
+        // ...and this probe is the exact case that proves why recording beats predicting: the arm
+        // asked the engine for 151 frames and the stub returned ONE. The old builder would have
+        // written 151 onto a 1-frame clip — a sidecar lying about a file that is right there. The
+        // stamp records what actually came back.
         assert_eq!(
             decoded.frames.len(),
             1,
             "the probe returns a one-frame clip"
+        );
+        assert_eq!(
+            EncodedClip::measure(&decoded).record_frame_count(raw_settings)["frameCount"],
+            json!(1),
+            "the asset records the clip that exists (1), not the 151 the arm requested"
+        );
+        assert_ne!(
+            u64::from(probe.engine_frames()),
+            1,
+            "the probe must discriminate: if the stub returned exactly what was requested, \
+             recording and predicting would agree and this would pin nothing"
         );
     }
 
@@ -12173,7 +12335,9 @@ mod tests {
         assert_eq!(raw["mochiTier"], json!("q4"));
         assert_eq!(raw["realModelInference"], json!(true));
         assert_eq!(raw["model"], json!("mochi_1"));
-        assert_eq!(raw["frameCount"], json!(req.frame_count()));
+        // No frameCount: the builder records the dispatched KNOBS; the clip's length is stamped from
+        // the encoded frames at the funnel (sc-12371, `record_frame_count`).
+        assert!(raw.get("frameCount").is_none());
         assert_eq!(
             mochi_raw_settings(&req, Some(Quant::Q8))["mochiTier"],
             json!("q8")
@@ -12829,20 +12993,39 @@ mod tests {
             "sourceAssetId": "asset_src", "personTrackId": "track_1"
         }));
         let plan = VideoPlan::new(&request, Path::new("/tmp/project"));
+        // Drive the real stub arm and measure what it produced — the funnel's exact sequence.
+        let decoded = generate_stub_video(&request, 42);
+        let clip = EncodedClip::measure(&decoded);
         let fact = video_asset_fact(
             &plan,
             42,
             "procedural_video",
             stub_raw_settings(&request),
             None,
+            clip,
         );
         assert_eq!(fact["type"], json!("video"));
         assert_eq!(fact["mimeType"], json!("video/mp4"));
         assert_eq!(fact["mediaPath"], json!(plan.media_rel));
         assert_eq!(fact["adapter"], json!("procedural_video"));
         assert_eq!(fact["seed"], json!(42));
-        assert_eq!(fact["duration"], json!(4.0));
+        // sc-12371: the file facts are MEASURED. LTX snaps 4.0 s x 24 fps (96 raw) onto its 8k+1
+        // lattice, so the clip is NOT 4.0 s and the asset must not claim it is — the old fact echoed
+        // `request.duration` and lied by exactly that snap.
+        let rendered = ltx_frame_count(96) as usize;
+        assert_eq!(decoded.frames.len(), rendered);
+        assert_eq!(fact["rawAdapterSettings"]["frameCount"], json!(rendered));
         assert_eq!(fact["fps"], json!(24));
+        assert!(
+            (fact["duration"].as_f64().expect("duration") - rendered as f64 / 24.0).abs() < 1e-9,
+            "duration must be the encoded frames over the encoded fps"
+        );
+        assert_ne!(
+            fact["duration"],
+            json!(4.0),
+            "the REQUESTED 4.0 s is not the file's duration — if this ever matches, the probe has \
+             stopped discriminating and a `request.duration` regression would pass"
+        );
         assert_eq!(fact["sourceAssetId"], json!("asset_src"));
         assert_eq!(fact["personTrackId"], json!("track_1"));
         assert_eq!(fact["displayName"], json!("A red fox"));
@@ -12865,11 +13048,15 @@ mod tests {
         }));
         let plan = VideoPlan::new(&request, Path::new("/tmp/project"));
         let status = json!({ "replacementActive": true, "maskMode": "segmentation" });
-        let fact = video_asset_fact(&plan, 7, "mlx_wan_vace", json!({}), Some(status));
+        let clip = EncodedClip {
+            frames: 81,
+            fps: 16,
+        };
+        let fact = video_asset_fact(&plan, 7, "mlx_wan_vace", json!({}), Some(status), clip);
         assert_eq!(fact["replacementStatus"]["replacementActive"], json!(true));
         assert_eq!(fact["replacementStatus"]["maskMode"], json!("segmentation"));
         // Without a status the key is absent (the non-replace paths).
-        let bare = video_asset_fact(&plan, 7, "mlx_wan", json!({}), None);
+        let bare = video_asset_fact(&plan, 7, "mlx_wan", json!({}), None, clip);
         assert!(bare.get("replacementStatus").is_none());
     }
 
@@ -13394,7 +13581,11 @@ mod tests {
         assert_eq!(raw["realModelInference"], json!(true));
         assert_eq!(raw["model"], json!("bernini"));
         assert_eq!(raw["fps"], json!(req.fps));
-        assert_eq!(raw["frameCount"], json!(req.frame_count()));
+        // No frameCount: this builder is exactly where the sc-12371 bug lived (it recorded
+        // `request.frame_count()` = the raw 150 while `generate_bernini` rendered 149). The clip's
+        // length is now stamped from the encoded frames at the funnel — see
+        // `no_raw_settings_builder_records_its_own_frame_count`.
+        assert!(raw.get("frameCount").is_none());
         // The SceneWorks mode resolved to its engine guidance task for observability/lineage.
         assert_eq!(raw["berniniTask"], json!("rv2v"));
         // The user's advanced controls survive verbatim (provenance).
@@ -13666,7 +13857,9 @@ mod tests {
         assert_eq!(raw["realModelInference"], json!(true));
         assert_eq!(raw["model"], json!("scail2_14b"));
         assert_eq!(raw["fps"], json!(req.fps));
-        assert_eq!(raw["frameCount"], json!(req.frame_count()));
+        // No frameCount — the other half of the sc-12371 bug (recorded the raw count while
+        // `generate_scail2` rendered the Wan stride). Stamped at the funnel now.
+        assert!(raw.get("frameCount").is_none());
         assert_eq!(raw["scail2Task"], json!("animation"));
         assert_eq!(raw["userKnob"], json!("keep-me"));
         // No lightning LoRA ⇒ no effective-recipe override recorded (engine quality defaults stand).
