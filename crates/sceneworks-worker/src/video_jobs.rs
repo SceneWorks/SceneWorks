@@ -20,7 +20,9 @@
 use std::f32::consts::PI;
 use std::path::Path;
 
-use sceneworks_core::video_request::{duration_limit_error, is_ltx_model, VideoRequest};
+use sceneworks_core::video_request::{
+    duration_limit_error, fps_limit_error, is_ltx_model, VideoRequest,
+};
 
 // Used only by the video generation metrics builders below, which are themselves
 // gated to the macOS / backend-candle lanes (the shared `generate_video` funnel) —
@@ -328,6 +330,21 @@ fn video_preflight(request: &VideoRequest) -> WorkerResult<()> {
         request.duration,
         &request.model_manifest_entry,
     ) {
+        return Err(WorkerError::InvalidPayload(message));
+    }
+    // The model's declared `limits.fps`. NOT redundant with the duration cap above — they bound
+    // different axes, and the cost/quality axis is `frames = duration × fps`, which only both
+    // together bound. A *legally 5-second* mochi_1 request (cap 5 ✓) at 60 fps is 301 frames,
+    // double the shipped 5s default's 151, and `301 % 6 == 1` clears the engine's own check, so
+    // nothing downstream says no (sc-12347).
+    //
+    // `request.fps` is already resolved against the model's `defaults.fps` by `from_payload`, so a
+    // payload that names no fps is judged on the value the model itself declares — not the blanket
+    // 25, which is off-menu for 7 of the 10 shipped video models and would make this gate reject
+    // every fps-less payload.
+    if let Some(message) =
+        fps_limit_error(&request.model, request.fps, &request.model_manifest_entry)
+    {
         return Err(WorkerError::InvalidPayload(message));
     }
     Ok(())
@@ -1338,6 +1355,15 @@ fn video_asset_fact(
         "lastFrameAssetId": request.last_frame_asset_id,
         "sourceClipAssetId": request.source_clip_asset_id,
         "bridgeRightClipAssetId": request.bridge_right_clip_asset_id,
+        // The multi-source ids and the fit are top-level payload fields, NOT `advanced` — so the
+        // `advanced.clone()` every real `*_raw_settings` builder starts with does not carry them.
+        // They must be written here or the recipe cannot reproduce the modes that use them
+        // (mv2v / reference_to_video / reference_video_to_video / ads2v / animate_character, and
+        // the fit for image_to_video / first_last_frame). sc-12345, prereq for sc-12324 replay.
+        "fitMode": request.fit_mode,
+        "sourceClipAssetIds": request.source_clip_asset_ids,
+        "referenceAssetIds": request.reference_asset_ids,
+        "referenceClipAssetId": request.reference_clip_asset_id,
         "characterId": request.character_id,
         "characterLookId": request.character_look_id,
         "personTrackId": request.person_track_id,
@@ -5331,10 +5357,95 @@ fn candle_resolve_wan_adapters(
     Ok(specs)
 }
 
+/// The candle Mochi pre-flight's gated result (sc-12306): the tier's baked-in quant marker, obtainable
+/// ONLY by passing the VRAM fit gate.
+///
+/// Bundling the marker into the gated return is deliberate, and mirrors the MLX lane's [`MochiPreflight`]
+/// — which adopted the shape after a review mutation that deleted a free-standing `mochi_fit_check(...)?`
+/// call still compiled and still rendered, silently un-gating the lane. With the marker only obtainable
+/// here, the generation arm cannot reach a quant on a path that skipped the gate.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MochiVramPreflight {
+    quant: Option<Quant>,
+}
+
+/// Live pre-flight Mochi VRAM admission check for the candle lane (sc-12306) — the seam
+/// [`generate_candle_video`] calls before the load + 64-step denoise.
+///
+/// Sums the on-disk bytes the load will hold resident via the SHARED [`crate::mlx_fit_gate::mochi_resident_bytes`]
+/// (the tier dir's AsymmDiT plus the `text_encoder/` + `vae/` siblings from its parent): despite the
+/// module name that scan describes the hosted repo layout, which is one repo serving both lanes, and
+/// summing only the tier dir would miss the ~9.7 GiB T5-XXL + VAE — over half the resident footprint.
+///
+/// `budget` arrives resolved so this stays free of the GPU probe and is unit-testable without CUDA. No
+/// budget signal ⇒ admits. `Err` is the actionable pre-denoise rejection.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn mochi_vram_preflight(
+    model_label: &str,
+    tier_dir: &Path,
+    frames: u32,
+    width: u32,
+    height: u32,
+    gpu_id: &str,
+    budget: Option<crate::vram_gate::VramBudget>,
+) -> WorkerResult<MochiVramPreflight> {
+    match crate::vram_gate::mochi_fit_error(
+        model_label,
+        crate::mlx_fit_gate::mochi_resident_bytes(tier_dir),
+        frames,
+        width,
+        height,
+        gpu_id,
+        budget,
+    ) {
+        Some(error) => Err(error),
+        None => Ok(MochiVramPreflight {
+            quant: mochi_tier_quant(tier_dir),
+        }),
+    }
+}
+
+/// The candle video lane's live VRAM budget: the real `nvidia-smi` reading, the
+/// `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card emulation folded over it, then this process's reclaimable
+/// cudarc pool added back (sc-11023).
+///
+/// The reclaimable fold IS correct here, unlike `krea_control_candle.rs` which deliberately omits it:
+/// video routes through `generator_cache::with_cached_generator` (the `comfyui` in-place MoE is the one
+/// uncached exception, and it is not Mochi), so the single exclusive cache slot evicts its occupant
+/// BEFORE the incoming load and cudarc reuses those pages in-process. Without the fold, a warm re-gate
+/// would be measured against a `free` that still counts the model it is about to replace. Matches
+/// `generate_candle_stream` (image_jobs/base.rs).
+///
+/// The reverse direction is deliberately NOT wired: an admitted Mochi job does not call
+/// [`crate::vram_gate::note_loaded_peak`], so it contributes nothing to the reclaimable high-water the
+/// image lane reads. That keeps today's behavior (the video lane has never recorded a peak) rather than
+/// guessing: Mochi's predicted peak is dominated by a TRANSIENT decode, not by resident weights, and
+/// publishing ~81 GB as "reclaimable" on the strength of a derived floor would relax later image gates
+/// on a number nothing has measured. Under-reporting the pool only ever fails conservative (a spurious
+/// reject, never an OOM). Revisit once B5/sc-11995 backfills real `footprint.peakMemoryBytes`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn candle_video_vram_budget(settings: &Settings) -> Option<crate::vram_gate::VramBudget> {
+    let budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    budget.map(|budget| {
+        crate::vram_gate::with_reclaimable(
+            budget,
+            crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id),
+        )
+    })
+}
+
 /// Windows/CUDA candle video path (sc-5097 txt2video; sc-5175 adds the Wan2.2 14B MoE T2V + I2V).
 /// Resolves the engine + weights, provisions the LTX Gemma encoder, resolves any i2v source-image
 /// conditioning, builds a `VideoGenInput`, and runs it through the shared [`generate_video`] streaming
 /// driver. Returns the decoded clip + the candle adapter label.
+///
+/// Mochi additionally passes a VRAM fit gate before the load (sc-12306); every other engine on this
+/// lane is still ungated (sc-12344 — no candle video model carries the `candle.vramGbByTier` block the
+/// generic `vram_gate` needs, so wiring it here today would admit unconditionally).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_video(
     api: &ApiClient,
@@ -5402,14 +5513,29 @@ async fn generate_candle_video_using(
     } else {
         candle_video_snapshot_dir(settings, &repo)?
     };
+    // Coerce the requested frame count onto the engine's temporal stride — the ONE shared ladder both
+    // lanes use (sc-11992), so the candle stride can never drift from the MLX one. Computed HERE, above
+    // the tier binding, because Mochi's fit gate (sc-12306) needs the coerced count: the decode peak is
+    // linear in frames, so gating on the raw request would size the check against a length that never
+    // renders. (The SVD arm below returns before this is read; it derives its own model-fixed burst.)
+    let frames = video_frame_count(&request.model, request.raw_frame_count());
     // Wan quant-matrix tier-select (sc-10027): a candle wan tier repo (`SceneWorks/wan2.2-*-candle`) ships
     // q4/q8/bf16 subdirs — resolve the one matching `advanced.mlxQuantize` (default q4) and load from it
     // (the packed-detect seam reads the baked-in quant). A flat/dense repo (no subdirs, e.g. the
     // `Wan-AI/*-Diffusers` fallback) stays as-is with no quant marker.
     let (model_dir, wan_quant) = if is_mochi {
-        // `resolve_mochi_model_dir` already returned the TIER dir; the quant marker is the tier's own
-        // baked-in level, read from its `split_model.json` (the candle loader asserts it matches).
-        let quant = mochi_tier_quant(&snapshot_dir);
+        // `resolve_mochi_model_dir` already returned the TIER dir. The VRAM fit gate (sc-12306) runs
+        // here, and the quant marker comes back OUT of it — see `mochi_vram_preflight` for why the
+        // marker is bundled into the gated return rather than read alongside a free-standing check.
+        let MochiVramPreflight { quant } = mochi_vram_preflight(
+            engine_id,
+            &snapshot_dir,
+            frames,
+            request.width,
+            request.height,
+            &settings.gpu_id,
+            candle_video_vram_budget(settings).await,
+        )?;
         (snapshot_dir, quant)
     } else {
         match candle_wan_tier_subdir(&snapshot_dir, engine_id, request) {
@@ -5517,9 +5643,6 @@ async fn generate_candle_video_using(
         let (steps, guidance) = candle_wan_sampling(engine_id, request);
         (steps, guidance, non_empty_negative_prompt(request))
     };
-    // Coerce the requested frame count onto the engine's temporal stride — the ONE shared ladder both
-    // lanes use (sc-11992), so the candle stride can never drift from the MLX one.
-    let frames = video_frame_count(&request.model, request.raw_frame_count());
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -10841,6 +10964,100 @@ mod tests {
         ));
     }
 
+    /// sc-12347: the same backstop on the fps axis — refuses a rate the model does not advertise,
+    /// and admits a payload that names no rate at all.
+    ///
+    /// Kills the same class of mutation: deleting the `fps_limit_error` call from `video_preflight`
+    /// leaves every core test green, because the core function is still correct — just not CALLED.
+    ///
+    /// Ungated for the same reason as the duration test: `mochi_preflight`'s fit gate is macOS-only
+    /// AND is a *memory* test, so it cannot refuse an off-spec-but-affordable rate on any lane.
+    #[test]
+    fn video_preflight_refuses_an_fps_the_model_does_not_advertise() {
+        let mochi_entry = json!({
+            "limits": { "hardMaxDuration": 5, "fps": [30] }, "defaults": { "fps": 30 }
+        });
+
+        // The story's shape: a request that is LEGALLY 5 seconds — sc-12297's cap admits it — but
+        // asks for 60fps. 5 x 60 = 300 raw frames snapping to 301, double the shipped default's
+        // 151, and `301 % 6 == 1` so the engine's own validate_request ACCEPTS it. The duration gate
+        // cannot see this; only the fps menu refuses it.
+        let off_menu = request(json!({
+            "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p",
+            "duration": 5, "fps": 60, "modelManifestEntry": mochi_entry
+        }));
+        assert_eq!(off_menu.raw_frame_count(), 300);
+        assert_eq!(
+            off_menu.frame_count(),
+            301,
+            "on-lattice, and the engine would accept it"
+        );
+        assert_eq!(
+            duration_limit_error(
+                &off_menu.model,
+                off_menu.duration,
+                &off_menu.model_manifest_entry
+            ),
+            None,
+            "the duration cap ADMITS this request — it is legally 5 seconds"
+        );
+        let Err(WorkerError::InvalidPayload(message)) = video_preflight(&off_menu) else {
+            panic!("60fps on a model that advertises only 30 must be refused before the load");
+        };
+        assert!(message.contains("mochi_1"), "names the model: {message}");
+        assert!(
+            message.contains("30 fps"),
+            "states what is allowed: {message}"
+        );
+        assert!(
+            message.contains("60 fps"),
+            "states what was asked: {message}"
+        );
+
+        // The model's own advertised rate admits — the shipped default must still run.
+        let on_menu = request(json!({
+            "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p",
+            "duration": 5, "fps": 30, "modelManifestEntry": mochi_entry
+        }));
+        assert!(
+            video_preflight(&on_menu).is_ok(),
+            "30 is what mochi advertises"
+        );
+        assert_eq!(on_menu.frame_count(), 151);
+
+        // THE REGRESSION THIS STORY NEARLY SHIPPED: a payload naming NO fps must be ADMITTED. It
+        // resolves to the model's declared 30, not the blanket 25 — which is off mochi's menu and
+        // would make this gate refuse a perfectly ordinary job (7 of the 10 shipped video models
+        // are in that position, so this is the common case, not an edge).
+        let no_fps = request(json!({
+            "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p",
+            "duration": 5, "modelManifestEntry": mochi_entry
+        }));
+        assert_eq!(
+            no_fps.fps, 30,
+            "resolved from the model's declared defaults.fps"
+        );
+        assert!(
+            video_preflight(&no_fps).is_ok(),
+            "an fps-less payload must not be refused by the menu"
+        );
+        assert_eq!(
+            no_fps.frame_count(),
+            151,
+            "the frame count the manifest documents"
+        );
+
+        // A job carrying no manifest entry is UNCONSTRAINED — never block without a declared menu.
+        let no_entry = request(json!({
+            "projectId": "p", "model": "stub-model", "mode": "text_to_video", "prompt": "p",
+            "duration": 5, "fps": 60
+        }));
+        assert!(
+            video_preflight(&no_entry).is_ok(),
+            "no menu declared => no menu"
+        );
+    }
+
     // -----------------------------------------------------------------------------------------
     // Mochi 1 (epic 1788 / sc-11992). These sit on the SUPERSET cfg because the tier resolver, the
     // stride and the on-demand fetches are SHARED by both lanes (one repo, both backends) — so they
@@ -11379,21 +11596,37 @@ mod tests {
     /// (which asserts the same total against the pure gate) — the preflight tests need them SPLIT
     /// across the A6 sibling layout so the on-disk scan has to fold the shared components to get the
     /// total right.
-    #[cfg(target_os = "macos")]
+    ///
+    /// On the SUPERSET cfg (sc-12306): both lanes ingest these same hosted tiers, so both gates budget
+    /// against these exact bytes.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     const MOCHI_Q4_DIT_BYTES: u64 = 9_670_883_602;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     const MOCHI_Q4_TE_BYTES: u64 = 9_524_669_250;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     const MOCHI_Q4_VAE_BYTES: u64 = 919_551_200;
 
     /// A Mochi A6-layout root (q4 tier + shared `text_encoder`/`vae`/`tokenizer` siblings) whose
-    /// `.safetensors` report the REAL hosted byte sizes, so `mochi_fit_check`'s on-disk scan resolves
-    /// the true ~18.73 GiB resident footprint instead of the 1-byte stubs `mochi_root` writes.
+    /// `.safetensors` report the REAL hosted byte sizes, so the on-disk scan behind either lane's fit
+    /// gate resolves the true ~18.73 GiB resident footprint instead of the 1-byte stubs `mochi_root`
+    /// writes.
     ///
-    /// The files are SPARSE: `set_len` sets the apparent size with zero allocated blocks on APFS, and
-    /// `sum_safetensors_bytes` reads `metadata().len()`. So this is instant and costs no disk —
+    /// The files are SPARSE: `set_len` sets the apparent size with zero allocated blocks on APFS/NTFS,
+    /// and `sum_safetensors_bytes` reads `metadata().len()`. So this is instant and costs no disk —
     /// materializing 18.7 GiB of real zeros per test would not be viable.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     fn mochi_root_real_sized(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "mochi_preflight_{tag}_{}_{}",
@@ -11517,6 +11750,229 @@ mod tests {
         assert_eq!(
             preflight.frames, 19,
             "19 already sits on the 6k+1 lattice, so the snap is a no-op"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Mochi 1 candle/CUDA VRAM fit gate (sc-12306). These run on the windows-candle.yml lane, which
+    // is the ONLY lane that compiles `generate_candle_video` — the macOS lane and the Linux `parity`
+    // job never see this code. `mochi_vram_preflight` takes its budget as a parameter precisely so the
+    // whole decision is exercisable here with no CUDA driver and no GPU.
+    // -----------------------------------------------------------------------------------------
+
+    /// An RTX 5090 — the biggest consumer NVIDIA card, and the machine the story names. 32 GB total,
+    /// all free (a cold card with nothing loaded).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    fn rtx_5090() -> Option<crate::vram_gate::VramBudget> {
+        crate::vram_gate::apply_vram_cap(None, Some(32.0))
+    }
+
+    /// THE story: the shipped 5 s / 151-frame default is refused BEFORE the load + 64-step denoise, with
+    /// a message naming the clip-length lever. Needs 18.73 GiB weights + 60.56 GiB untiled decode + 2 GiB
+    /// headroom ≈ 81.3 GB against 32 GB — so on consumer hardware this is the DEFAULT path, not an edge
+    /// case.
+    ///
+    /// Kills the mutations that a compile alone would not:
+    ///   * hardcoding the gate's `frames` to a small number (e.g. B2's 7-frame smoke geometry) ⇒ the gate
+    ///     sees 4.66 GiB of decode instead of 60.56, totals ~25 GB, and ADMITS ⇒ `expect_err` fails.
+    ///   * passing `request.raw_frame_count()` instead of the coerced count ⇒ 150 not 151 — caught by
+    ///     `mochi_vram_preflight_coerces_the_frame_count_on_the_candle_lane` below.
+    ///   * dropping the frames term entirely (reusing the resolution-blind `predicted_peak_gb` shape) ⇒
+    ///     admits ⇒ `expect_err` fails.
+    ///   * reusing the MLX message ⇒ the "unified memory" assert fails.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn mochi_vram_preflight_rejects_the_5s_default_on_an_rtx_5090() {
+        let root = mochi_root_real_sized("candle_reject");
+        let out = mochi_vram_preflight(
+            "mochi_1",
+            &root.join("q4"),
+            video_frame_count("mochi_1", 150),
+            848,
+            480,
+            "0",
+            rtx_5090(),
+        );
+        std::fs::remove_dir_all(&root).ok();
+
+        let message = out
+            .expect_err(
+                "the shipped 5 s default (151 frames) needs ~81 GB and NO consumer NVIDIA GPU has \
+                 that — admitting it burns a full 64-step denoise before a raw CUDA OOM",
+            )
+            .to_string();
+        assert!(message.contains("mochi_1"), "names the model: {message}");
+        assert!(
+            message.contains("151-frame"),
+            "names the clip length that was refused, so the user can act on it: {message}"
+        );
+        assert!(
+            message.contains("Shorten the clip"),
+            "leads with the only lever that moves the dominant term — Mochi has one trained bucket \
+             and the tier delta is ~11 GiB against a ~60 GiB decode: {message}"
+        );
+        assert!(
+            message.contains("VRAM") && !message.contains("unified memory"),
+            "must be CUDA-worded, not the MLX lane's Mac prose: {message}"
+        );
+        assert!(
+            !message.contains("run on a Mac"),
+            "telling a Windows/CUDA user to buy a Mac is the MLX message leaking: {message}"
+        );
+    }
+
+    /// The other half of the contract: on the SAME 32 GB card a short clip is ADMITTED. Without this,
+    /// the reject test above would pass against a gate that blanket-refuses Mochi on every consumer
+    /// card — so this pair is what proves the gate is FRAME-SENSITIVE, which is the whole point of a
+    /// decode peak that scales with clip length.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn mochi_vram_preflight_admits_a_short_clip_on_the_same_rtx_5090() {
+        let root = mochi_root_real_sized("candle_admit");
+        // 7 frames: 18.73 weights + 4.66 decode + 2 headroom ≈ 25.4 GB, which fits 32 GB.
+        let out = mochi_vram_preflight("mochi_1", &root.join("q4"), 7, 848, 480, "0", rtx_5090());
+        std::fs::remove_dir_all(&root).ok();
+
+        let preflight = out.expect(
+            "a 7-frame clip needs ~25 GB and FITS a 32 GB card — a gate that refuses this has \
+             wall-rejected hardware that works",
+        );
+        assert_eq!(
+            preflight.quant,
+            Some(Quant::Q4),
+            "the tier dir's split_model.json carries the quant the candle loader asserts — and it is \
+             reachable ONLY through the gate"
+        );
+    }
+
+    /// The gate must budget on the COERCED frame count, not the raw request: the decode peak is linear
+    /// in frames, so gating on a length that never renders sizes the check against fiction. 150 raw
+    /// snaps to 151 on Mochi's 6k+1 lattice.
+    ///
+    /// Kills the `wan_frame_count` substitution independently of the MLX lane's copy of this check:
+    /// `wan_frame_count(150) = 149`, and `149 % 6 == 5` is off the lattice the engine accepts.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn mochi_vram_preflight_coerces_the_frame_count_on_the_candle_lane() {
+        let root = mochi_root_real_sized("candle_lattice");
+        let tier = root.join("q4");
+        // A budget nothing overflows, so ONLY the frame arithmetic is under test.
+        let huge = crate::vram_gate::apply_vram_cap(None, Some(512.0));
+
+        // The seam the generation arm passes: `video_frame_count(&request.model, raw)`.
+        let frames = video_frame_count("mochi_1", 150);
+        assert_eq!(
+            frames, 151,
+            "the shipped 5 s default snaps onto the 6k+1 lattice"
+        );
+        assert_ne!(
+            frames,
+            wan_frame_count(150),
+            "routing the candle lane through the wan stride would gate on 149 — off Mochi's lattice"
+        );
+        assert!(
+            mochi_vram_preflight("mochi_1", &tier, frames, 848, 480, "0", huge).is_ok(),
+            "151 frames fits a 512 GB budget — the gate rejects by BUDGET, never by duration alone"
+        );
+
+        // Frame-sensitivity at the seam: the SAME tier + card, two lengths, two verdicts. A 48 GB card
+        // sits between the 7-frame (~25 GB) and 151-frame (~81 GB) totals.
+        let card_48 = crate::vram_gate::apply_vram_cap(None, Some(48.0));
+        assert!(
+            mochi_vram_preflight("mochi_1", &tier, 7, 848, 480, "0", card_48).is_ok(),
+            "a short clip fits 48 GB"
+        );
+        assert!(
+            mochi_vram_preflight("mochi_1", &tier, frames, 848, 480, "0", card_48).is_err(),
+            "the 5 s default does not fit the SAME 48 GB card — the gate must see the frame count"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The gate NO-OPS without a budget signal (the story's explicit AC) and without a weight signal.
+    /// A worker on a card `nvidia-smi` cannot read, or pointed at a weights dir it cannot scan, must
+    /// keep rendering exactly as it did before this gate existed — a fit gate that blocks on missing
+    /// evidence is a regression, not a safety net (sc-12179: never wall-reject a machine that worked).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn mochi_vram_preflight_no_ops_without_a_budget_or_weight_signal() {
+        let root = mochi_root_real_sized("candle_nosignal");
+
+        // No budget: `nvidia_vram_budget_gb` → None (non-NVIDIA / unreadable) and no cap set.
+        assert!(
+            mochi_vram_preflight("mochi_1", &root.join("q4"), 151, 848, 480, "0", None).is_ok(),
+            "no budget signal ⇒ admit — the 5 s default is refused ONLY against a real reading"
+        );
+        assert_eq!(
+            crate::vram_gate::apply_vram_cap(None, None),
+            None,
+            "no real reading + no cap ⇒ no budget, so the wiring above really can pass None"
+        );
+
+        // No weights: a dir with no safetensors scans to 0 bytes ⇒ unmeasurable ⇒ admit, even on a
+        // tiny card. The fixture needs its OWN root, for two reasons: `mochi_resident_bytes` folds the
+        // shared `text_encoder/` + `vae/` siblings from the tier dir's PARENT, so (a) an "empty" tier
+        // under `root` above would still scan ~9.7 GiB and be REJECTED — testing the exact opposite of
+        // the intent — and (b) hanging it directly off `temp_dir()` would make the parent scan read
+        // /tmp, so an unrelated `/tmp/text_encoder` would flake it. A private root has neither problem.
+        let bare_root = std::env::temp_dir().join(format!(
+            "mochi_candle_nosignal_bare_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let bare = bare_root.join("q4");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert_eq!(
+            crate::mlx_fit_gate::mochi_resident_bytes(&bare),
+            0,
+            "the fixture must really have no weight signal, or the assert below proves nothing"
+        );
+        let out = mochi_vram_preflight(
+            "mochi_1",
+            &bare,
+            151,
+            848,
+            480,
+            "0",
+            crate::vram_gate::apply_vram_cap(None, Some(4.0)),
+        );
+        std::fs::remove_dir_all(&bare_root).ok();
+        std::fs::remove_dir_all(&root).ok();
+        assert!(out.is_ok(), "unmeasurable weights ⇒ no signal ⇒ admit");
+    }
+
+    /// The on-disk scan must fold the SHARED `text_encoder/` + `vae/` siblings from the tier dir's
+    /// PARENT — both providers set `supports_sequential_offload: false`, so all three components are
+    /// held for the whole run. Summing only the tier dir would miss ~9.7 GiB (T5-XXL + VAE), over half
+    /// the resident footprint, and silently under-gate every candle Mochi job.
+    ///
+    /// This pins that the candle lane reuses the SHARED scan rather than growing its own tier-only one.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn mochi_vram_preflight_folds_the_shared_siblings_on_the_candle_lane() {
+        let root = mochi_root_real_sized("candle_siblings");
+        assert_eq!(
+            crate::mlx_fit_gate::mochi_resident_bytes(&root.join("q4")),
+            MOCHI_Q4_DIT_BYTES + MOCHI_Q4_TE_BYTES + MOCHI_Q4_VAE_BYTES,
+            "the candle gate must budget on DiT + T5 + VAE (~18.73 GiB), not the tier dir alone"
+        );
+
+        // Behavioral consequence: a card sized to fit the DiT alone must still refuse. DiT-only is
+        // 9.01 + 4.66 decode + 2 = ~15.7 GB; the true total is 18.73 + 4.66 + 2 = ~25.4 GB. A 20 GB
+        // card admits the former and must reject the latter.
+        let out = mochi_vram_preflight(
+            "mochi_1",
+            &root.join("q4"),
+            7,
+            848,
+            480,
+            "0",
+            crate::vram_gate::apply_vram_cap(None, Some(20.0)),
+        );
+        std::fs::remove_dir_all(&root).ok();
+        assert!(
+            out.is_err(),
+            "a tier-only scan would admit this job on a 20 GB card and then OOM on the T5 + VAE"
         );
     }
 
@@ -11875,10 +12331,19 @@ mod tests {
     ///
     /// How it discriminates. The job asks for **q8**, and the staged cache has the shared components
     /// but no q8 tier — so `ensure_mochi_q8_present` is past its `!mochi_wants_q8` early-out and MUST
-    /// attempt a real `ensure_hf_files_cached` fetch. `api` points at a closed port, so the two orders
-    /// give different errors:
+    /// attempt a real `ensure_hf_files_cached` fetch. The two orders then give different errors:
     ///   * pre-check first (correct) ⇒ the gate's actionable "Shorten the clip", no network touched.
-    ///   * pre-check after the fetches ⇒ a `WorkerError::Http` from the download instead ⇒ RED.
+    ///   * pre-check after the fetches ⇒ a transport error from the download instead ⇒ RED.
+    ///
+    /// **`huggingface_base_url` is what makes that hermetic, and it is NOT `api_url`.** The fetch dials
+    /// `settings.huggingface_base_url` (`HuggingFaceSnapshot::resolve` → `{base_url}/api/models/…/tree/…`);
+    /// `api_url` only carries progress/heartbeat. `Settings::from_env()` defaults the former to the real
+    /// `https://huggingface.co`, so overriding only `api_url` would send this test's FAILURE path to the
+    /// live internet: it still goes red (the download's `report_download_progress` hard-`?`s on a
+    /// heartbeat to the closed `api_url`), but only after really resolving the tree — and the tier is a
+    /// public ungated repo, so that resolve succeeds and bytes can start landing before the heartbeat
+    /// trips. Pinning BOTH at a closed port keeps the whole thing offline and instant. Verified by
+    /// pointing the base at a sentinel host and reading it back out of the mutation's error.
     ///
     /// `HF_HUB_CACHE` is pinned at the fixture because `huggingface_hub_cache_dir` reads it (and
     /// `HF_HOME`) BEFORE `data_dir` — left ambient, a dev box's real cache would decide this test.
@@ -11893,6 +12358,9 @@ mod tests {
         let settings = Settings {
             data_dir: hub.join("unused-data-dir"),
             api_url: "http://127.0.0.1:0".to_owned(),
+            // The URL the tier fetch actually dials — see above. Unroutable ⇒ the failure path can
+            // never reach the real hub.
+            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
             ..Settings::from_env()
         };
         let job = mochi_job_snapshot();
@@ -12077,7 +12545,9 @@ mod tests {
     #[test]
     fn mochi_precheck_needs_the_shared_weights_floor_to_catch_the_64gb_default() {
         // Decode + OS alone does NOT bust a 64 GB budget at the shipped default …
-        let decode_only = crate::mlx_fit_gate::mochi_decode_peak_gb(151, 848, 480) + 2.0;
+        // (`mochi_decode_peak_gb` moved to the backend-neutral `fit_gate` in sc-12306, when the candle
+        // video lane grew the same frame-dependent gate; the arithmetic is unchanged.)
+        let decode_only = crate::fit_gate::mochi_decode_peak_gb(151, 848, 480) + 2.0;
         assert!(
             decode_only < 64.0,
             "a weights-free pre-check would ADMIT the titled case ({decode_only:.2} < 64) — which is \
@@ -13004,6 +13474,48 @@ mod tests {
             None,
             clip,
         );
+        // Exhaustive, mirroring the image lane's key sweep (`image_jobs/tests.rs`). The recipe is
+        // the ONLY record of what a user asked for, so a field silently dropped here is a field
+        // the replay path (sc-12324) cannot reproduce — which is exactly how `fitMode` and the
+        // multi-source ids went missing until sc-12345. Add a key here when you add one to the
+        // fact; a spot-check would let the next one through.
+        for key in [
+            "type",
+            "assetId",
+            "mediaPath",
+            "mimeType",
+            "width",
+            "height",
+            "duration",
+            "fps",
+            "quality",
+            "family",
+            "seed",
+            "displayName",
+            "createdAt",
+            "mode",
+            "model",
+            "adapter",
+            "prompt",
+            "negativePrompt",
+            "loras",
+            "rawAdapterSettings",
+            "sourceAssetId",
+            "lastFrameAssetId",
+            "sourceClipAssetId",
+            "bridgeRightClipAssetId",
+            "fitMode",
+            "sourceClipAssetIds",
+            "referenceAssetIds",
+            "referenceClipAssetId",
+            "characterId",
+            "characterLookId",
+            "personTrackId",
+            "replacementMode",
+            "timelineContext",
+        ] {
+            assert!(fact.get(key).is_some(), "fact missing key {key}");
+        }
         assert_eq!(fact["type"], json!("video"));
         assert_eq!(fact["mimeType"], json!("video/mp4"));
         assert_eq!(fact["mediaPath"], json!(plan.media_rel));
@@ -13036,6 +13548,37 @@ mod tests {
         assert_eq!(result["adapter"], json!("procedural_video"));
         assert_eq!(result["assetWrites"].as_array().unwrap().len(), 1);
         assert_eq!(result["generationSet"]["count"], json!(1));
+    }
+
+    /// The fit and the list-valued source ids reach the fact (sc-12345). These arrive as
+    /// TOP-LEVEL payload fields, so the `advanced.clone()` every real `*_raw_settings` builder
+    /// starts with does not carry them — `video_asset_fact` is their only path onto the recipe.
+    /// ads2v is the densest mode: source clip + reference clip + subject references at once.
+    #[test]
+    fn asset_fact_records_fit_and_multi_source_ids() {
+        let ads2v = request(json!({
+            "projectId": "p", "model": "bernini_2", "mode": "ads2v",
+            "prompt": "the hero drives past",
+            "sourceClipAssetId": "clip_main",
+            "referenceClipAssetId": "clip_ref",
+            "referenceAssetIds": ["ref_1", "ref_2"],
+            "fitMode": "pad",
+        }));
+        let plan = VideoPlan::new(&ads2v, Path::new("/tmp/project"));
+        let fact = video_asset_fact(&plan, 5, "mlx_bernini", json!({}), None);
+        assert_eq!(fact["referenceClipAssetId"], json!("clip_ref"));
+        assert_eq!(fact["referenceAssetIds"], json!(["ref_1", "ref_2"]));
+        assert_eq!(fact["fitMode"], json!("pad"));
+
+        // mv2v carries the clip array instead; the other list stays empty rather than absent.
+        let mv2v = request(json!({
+            "projectId": "p", "model": "bernini_2", "mode": "multi_video_to_video",
+            "prompt": "stitch them", "sourceClipAssetIds": ["clip_a", "clip_b"],
+        }));
+        let mv2v_plan = VideoPlan::new(&mv2v, Path::new("/tmp/project"));
+        let mv2v_fact = video_asset_fact(&mv2v_plan, 5, "mlx_bernini", json!({}), None);
+        assert_eq!(mv2v_fact["sourceClipAssetIds"], json!(["clip_a", "clip_b"]));
+        assert_eq!(mv2v_fact["referenceAssetIds"], json!([]));
     }
 
     /// A replace_person asset fact carries the `replacementStatus` object the API folds into
@@ -16827,6 +17370,16 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn ltx_eros_auto_injects_distill_lora_per_pass() {
+        // Hold ENV_LOCK for the whole test. This fixture resolves ONLY while the HF cache-dir env
+        // overrides are unset (`huggingface_hub_cache_dir` reads them BEFORE `data_dir`), and the
+        // check below reads them once, at entry. Without the lock a concurrent `temp_env_var(s)`
+        // caller — e.g. `generate_mochi_using_refuses_before_paying_for_the_tier_download`, which
+        // pins `HF_HUB_CACHE` to its own fixture hub — can set the var AFTER that check passes and
+        // BEFORE `resolve_ltx_adapters` reads it, pointing the resolver at the wrong cache: the
+        // distill LoRA is then "not installed" and this test fails for a reason that has nothing to
+        // do with it. `set_var` is process-global; only the lock makes the read-then-use atomic.
+        // Deterministic (12/12) when the two tests are selected together (sc-12306).
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // The fake HF snapshot only resolves when the cache-dir env overrides are unset (else the real
         // cache is consulted). Skip rather than assert-false in that unusual local config.
         if std::env::var_os("HF_HUB_CACHE").is_some()

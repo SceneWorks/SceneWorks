@@ -1776,6 +1776,38 @@ export function App() {
     setActiveView("Image");
   }
 
+  // sc-12324: the video twin of sendAssetRecipeToImage — re-run a generated clip from its own
+  // recorded recipe, with or without its seed. Distinct from `sendAssetToVideo` below, which
+  // sends an asset as a source clip/frame and replays no settings.
+  function sendAssetRecipeToVideo(asset, options = {}) {
+    const recipe = recipeForAsset(asset);
+    if (!asset || !recipe) {
+      return;
+    }
+    const seed = assetSeed(asset);
+    const replaySeed = options.keepSeed && seed != null && seed !== "" ? seed : null;
+    setSelectedAssetId(asset.id);
+    closePreview();
+    setStudioLaunch({
+      id: crypto.randomUUID(),
+      view: "Video",
+      assetId: asset.id,
+      recipe,
+      replaySeed,
+    });
+    setActiveView("Video");
+  }
+
+  // Route the viewer's "Use this recipe" to the studio that can actually run the asset's recipe.
+  // The two studios own different forms, so a video's recipe must not land in the Image Studio.
+  function sendAssetRecipeToStudio(asset, options = {}) {
+    if (asset?.type === "video") {
+      sendAssetRecipeToVideo(asset, options);
+      return;
+    }
+    sendAssetRecipeToImage(asset, options);
+  }
+
   // sc-10516: launch a saved preset straight into the studio that can run it.
   //
   // The id alone is not enough: a studio only resolves `selectedPresetId` against its
@@ -2625,7 +2657,7 @@ export function App() {
             }
             setPreviewAsset(asset);
           }}
-          onUseRecipe={sendAssetRecipeToImage}
+          onUseRecipe={sendAssetRecipeToStudio}
           previousAsset={previewNavigation.previous}
           purgeAsset={async (asset) => {
             await purgeAsset(asset);

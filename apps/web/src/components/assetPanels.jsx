@@ -1097,7 +1097,9 @@ export function FullscreenPreview({
             <button onClick={() => saveAssetAs(displayedAsset)} type="button">
               Save As…
             </button>
-            {onUseRecipe && asset.type === "image" && (asset.generationSet?.recipe || asset.recipe) ? (
+            {/* Videos re-run from their recipe exactly as images do, seed and all (sc-12324) —
+                the affordance follows the recipe, not the media type. */}
+            {onUseRecipe && ["image", "video"].includes(asset.type) && (asset.generationSet?.recipe || asset.recipe) ? (
               <>
                 {hasSeed ? (
                   <label className="checkline preview-keep-seed" title="Reuse the exact seed for a byte-for-byte rerun">

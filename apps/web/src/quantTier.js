@@ -101,6 +101,20 @@ export function tierQuantize(tier) {
     : null;
 }
 
+// Inverse of `tierQuantize`: the tier a recorded `advanced.mlxQuantize` was produced from, or null
+// when the value matches no known tier (absent, or a non-bits tier that never emits an mlxQuantize).
+//
+// Recipe replay (sc-12324) needs this to put a re-run back on the tier the clip was generated at.
+// The tier is an aesthetic choice, not just a perf knob — landing a replay on the default tier
+// would silently reproduce a different look.
+export function quantizeTier(quantize) {
+  if (typeof quantize !== "number") {
+    return null;
+  }
+  // `bf16` maps to 0, so compare explicitly rather than leaning on truthiness.
+  return Object.keys(TIER_QUANTIZE).find((tier) => TIER_QUANTIZE[tier] === quantize) ?? null;
+}
+
 export function tierLabel(tier) {
   return TIER_LABELS[tier] ?? tier;
 }
