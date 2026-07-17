@@ -5473,6 +5473,12 @@ fn wan_vram_preflight(
 /// publishing ~81 GB as "reclaimable" on the strength of a derived floor would relax later image gates
 /// on a number nothing has measured. Under-reporting the pool only ever fails conservative (a spurious
 /// reject, never an OOM). Revisit once B5/sc-11995 backfills real `footprint.peakMemoryBytes`.
+///
+/// **Called once per GATE, not once per job** (sc-12373): the pre-download check and the pre-load check
+/// each take a fresh reading. They are minutes apart across a ~13–20 GiB download, and free VRAM is not
+/// stable across that window — another process (or another worker) can take or release a card in the
+/// meantime, so caching the first reading would gate the load against a stale number. The cost is one
+/// extra `nvidia-smi` per Mochi job, which is noise next to the download it exists to avoid.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn candle_video_vram_budget(settings: &Settings) -> Option<crate::vram_gate::VramBudget> {
     let budget = crate::vram_gate::apply_vram_cap(
@@ -5555,6 +5561,23 @@ async fn generate_candle_video_using(
     // would be a second, drift-prone source of truth.
     let is_mochi = engine_id == "mochi_1";
     if is_mochi {
+        // Refuse a job that cannot possibly fit BEFORE paying for its tier download (sc-12373, the
+        // candle half of sc-12322). Runs on a weights FLOOR — the already-present shared
+        // co-requisites — so it only ever refuses when the full gate below would refuse too.
+        //
+        // MUST stay ahead of the fetches: that ordering IS the story. Below this point the user has
+        // already paid ~13-20 GiB for an answer that was knowable here. Pinned by
+        // `generate_candle_video_using_refuses_before_paying_for_the_tier_download`.
+        mochi_vram_precheck(
+            &request.model,
+            engine_id,
+            mochi_precheck_dir(settings, request).as_deref(),
+            request.raw_frame_count(),
+            request.width,
+            request.height,
+            &settings.gpu_id,
+            candle_video_vram_budget(settings).await,
+        )?;
         ensure_mochi_q8_present(api, settings, job, request).await?;
         ensure_mochi_bf16_present(api, settings, job, request).await?;
     }
@@ -9191,7 +9214,15 @@ fn mochi_tier_quant(tier_dir: &Path) -> Option<Quant> {
 /// Naming the REQUESTED tier (not the fallback) is what keeps the weights term a strict lower bound on
 /// what THIS job will hold resident: the scan finds the shared co-requisites plus this tier's own bytes
 /// if present, never a different tier's.
-#[cfg(target_os = "macos")]
+///
+/// **Shared by both lanes** (sc-12373): every input is lane-neutral — the tier ORDER the request asked
+/// for, the `MOCHI_DIR_ENV` override, and the one hosted [`MOCHI_REPO`] snapshot that serves candle and
+/// MLX alike. Widened from macOS-only rather than copied, so the two pre-download gates cannot disagree
+/// about which directory they are measuring.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn mochi_precheck_dir(settings: &Settings, request: &VideoRequest) -> Option<PathBuf> {
     // The preferred tier — `mochi_tier_order`'s head is the one the request actually asked for; the
     // rest of the order is fallback, which the pre-check must not measure.
@@ -9254,6 +9285,58 @@ fn mochi_precheck(
     // computes it. Pre-checking the raw request would gate on a length the engine never renders.
     let frames = video_frame_count(model, raw_frames);
     crate::mlx_fit_gate::mochi_fit_check(engine_id, tier_dir, frames, width, height)
+}
+
+/// PRE-DOWNLOAD Mochi admission check for the candle lane (sc-12373) — the CUDA twin of
+/// [`mochi_precheck`], run BEFORE `ensure_mochi_*_present` fetches a ~13–20 GiB tier.
+///
+/// **The soundness argument is [`mochi_precheck`]'s, verbatim, and it is lane-neutral:** the weights
+/// term here is a conservative FLOOR, not zero. Mochi's `text_encoder/` + `tokenizer/` + `vae/` are a
+/// `coRequisite: true` download (~9.7 GiB) already on disk before an on-demand `<tier>/*` fetch, and
+/// `mochi_resident_bytes` sums those shared siblings from the tier dir's PARENT even when the tier dir
+/// itself is absent. So `floor ≤ actual` ⇒ `needed(floor) ≤ needed(actual)` ⇒ `{pre-check refuses} ⊆
+/// {full gate refuses}`: it can only refuse when refusal is CERTAIN. Anything it admits still faces the
+/// unchanged [`mochi_vram_preflight`] after the download.
+///
+/// What is NOT shared with the MLX twin, and why this is a sibling rather than a widened cfg: the
+/// budget is a `VramBudget` gated on `free_gb` (not unified `total_gb`), the reserve is
+/// `vram_gate::HEADROOM_GB` (not `OS_RESERVE_GB` — the OS does not draw from discrete VRAM), and the
+/// message is CUDA-worded. `budget` arrives resolved, so this stays free of the GPU probe and the whole
+/// decision is unit-testable without CUDA.
+///
+/// Its ORDER against the fetches — the entire point — is pinned at the call site by
+/// `generate_candle_video_using_refuses_before_paying_for_the_tier_download`, not by this function's
+/// existence: clippy's dead-code pass proves the call exists, never that it runs first.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(clippy::too_many_arguments)]
+fn mochi_vram_precheck(
+    model: &str,
+    engine_id: &str,
+    tier_dir: Option<&Path>,
+    raw_frames: u32,
+    width: u32,
+    height: u32,
+    gpu_id: &str,
+    budget: Option<crate::vram_gate::VramBudget>,
+) -> WorkerResult<()> {
+    let Some(tier_dir) = tier_dir else {
+        return Ok(());
+    };
+    // The COERCED count — the frames the decode will really pay for, exactly as `mochi_vram_preflight`
+    // computes it. Pre-checking the raw request would gate on a length the engine never renders.
+    let frames = video_frame_count(model, raw_frames);
+    match crate::vram_gate::mochi_fit_error(
+        engine_id,
+        crate::mlx_fit_gate::mochi_resident_bytes(tier_dir),
+        frames,
+        width,
+        height,
+        gpu_id,
+        budget,
+    ) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// Resolve the Mochi tier dir to load: the `$SCENEWORKS_MLX_MOCHI_DIR` override (accepted as either a
@@ -12108,6 +12191,159 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------------------------
+    // Mochi 1 candle/CUDA PRE-DOWNLOAD fit gate (sc-12373) — the CUDA half of sc-12322.
+    //
+    // The gate above refuses before the DENOISE; these refuse before the ~13-20 GiB tier DOWNLOAD.
+    // The fixture is the real pre-download state: an HF cache holding ONLY the shared co-requisites
+    // (T5 + VAE + tokenizer), with no tier dir at all.
+    // -----------------------------------------------------------------------------------------
+
+    /// The pre-check refuses the shipped 5 s default on an RTX 5090 with **no tier on disk** — the
+    /// answer is knowable from the shared co-requisites alone, so the user never pays for the download.
+    ///
+    /// Floor = 9.73 GiB (T5 + VAE, already present) + 60.56 decode + 2 headroom ≈ 72.3 GB vs 32.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn candle_mochi_precheck_refuses_the_5s_default_before_any_tier_is_downloaded() {
+        let root = mochi_root_shared_only("candle_reject");
+        // The requested tier does NOT exist yet — the pre-check must still decide.
+        let tier_dir = root.join("bf16");
+        assert!(
+            !tier_dir.exists(),
+            "the fixture must model the PRE-download state — no tier dir on disk"
+        );
+        let out = mochi_vram_precheck(
+            "mochi_1",
+            "mochi_1",
+            Some(&tier_dir),
+            150,
+            848,
+            480,
+            "0",
+            rtx_5090(),
+        );
+        std::fs::remove_dir_all(&root).ok();
+
+        let message = out
+            .expect_err(
+                "the shared components alone already put this job ~40 GB over a 32 GB card — \
+                 downloading the tier cannot change that",
+            )
+            .to_string();
+        assert!(
+            message.contains("Shorten the clip"),
+            "the pre-download refusal carries the same actionable lever: {message}"
+        );
+        assert!(
+            message.contains("151-frame"),
+            "the pre-check must gate on the COERCED count (150 raw ⇒ 151), like the full gate: \
+             {message}"
+        );
+    }
+
+    /// **Why the pre-check measures the WEIGHTS FLOOR and not just the decode term** — the candle twin
+    /// of `mochi_precheck_needs_the_shared_weights_floor_to_catch_the_64gb_default`, and it needs its
+    /// OWN budget: at 32 GB the decode term alone already busts the card, so the RTX-5090 test above
+    /// cannot tell a floor-aware pre-check from a weights-free one.
+    ///
+    /// At a 64 GB budget it can: decode + headroom = 62.56 (FITS, by 1.44), floor + decode + headroom
+    /// = 72.28 (does not). So a weights-free pre-check ADMITS, downloads ~20 GiB, and only then
+    /// refuses — the exact bug. This test fails the moment someone "simplifies" the floor away.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn candle_mochi_precheck_needs_the_shared_weights_floor_to_catch_the_64gb_card() {
+        let root = mochi_root_shared_only("candle_floor");
+        let tier_dir = root.join("bf16");
+        let card_64 = crate::vram_gate::apply_vram_cap(None, Some(64.0));
+
+        // Decode + headroom alone does NOT bust 64 …
+        let decode_only = crate::fit_gate::mochi_decode_peak_gb(151, 848, 480) + 2.0;
+        assert!(
+            decode_only < 64.0,
+            "a weights-free pre-check would ADMIT here ({decode_only:.2} < 64) — which is precisely \
+             why the shared-components floor is load-bearing"
+        );
+
+        // … but the floor the already-present shared components put on disk does.
+        let out = mochi_vram_precheck(
+            "mochi_1",
+            "mochi_1",
+            Some(&tier_dir),
+            150,
+            848,
+            480,
+            "0",
+            card_64,
+        );
+        std::fs::remove_dir_all(&root).ok();
+        assert!(
+            out.is_err(),
+            "the shared T5 + VAE (~9.73 GiB) push the total to ~72 GB, over the 64 GB card — a \
+             decode-only pre-check misses this and charges the user ~20 GiB to learn it"
+        );
+    }
+
+    /// The other half of the contract: the pre-check must NOT refuse a job that fits, or it becomes a
+    /// wall-reject on hardware that works (sc-12179). A short clip on the same 32 GB card is admitted
+    /// and goes on to download. Without this, the reject tests pass against a pre-check that refuses
+    /// Mochi outright.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn candle_mochi_precheck_admits_a_short_clip_on_the_same_rtx_5090() {
+        let root = mochi_root_shared_only("candle_admit");
+        let tier_dir = root.join("bf16");
+        // 7 frames: 9.73 floor + 4.66 decode + 2 ≈ 16.4 GB, well inside 32.
+        let out = mochi_vram_precheck(
+            "mochi_1",
+            "mochi_1",
+            Some(&tier_dir),
+            7,
+            848,
+            480,
+            "0",
+            rtx_5090(),
+        );
+        std::fs::remove_dir_all(&root).ok();
+        assert!(
+            out.is_ok(),
+            "a 7-frame clip fits a 32 GB card — refusing it here would block the download for a job \
+             that renders fine"
+        );
+    }
+
+    /// No signal ⇒ admit, on every axis: no tier dir resolvable (a first-ever install with no model
+    /// root), no budget reading, and no weights on disk. The pre-check is the EARLIEST gate, so a
+    /// false refusal here blocks a download the user may well need — it must never fire on a guess.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn candle_mochi_precheck_admits_without_a_signal() {
+        // No dir at all (`mochi_precheck_dir` → None) ⇒ nothing to measure ⇒ admit.
+        assert!(
+            mochi_vram_precheck("mochi_1", "mochi_1", None, 150, 848, 480, "0", rtx_5090()).is_ok(),
+            "no locatable model root ⇒ no signal ⇒ the download must proceed"
+        );
+
+        let root = mochi_root_shared_only("candle_nosignal");
+        let tier_dir = root.join("bf16");
+        // A real floor, but no budget ⇒ admit.
+        assert!(
+            mochi_vram_precheck(
+                "mochi_1",
+                "mochi_1",
+                Some(&tier_dir),
+                150,
+                848,
+                480,
+                "0",
+                None
+            )
+            .is_ok(),
+            "no budget signal ⇒ admit — the pre-check refuses only against a real reading"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // -----------------------------------------------------------------------------------------
     // sc-12318 — driving the ASYNC generation arms.
     //
     // The `mochi_preflight_*` tests above pin the pure seam, but nothing asserted that
@@ -12183,10 +12419,17 @@ mod tests {
                 .expect("a video request carries a frame count")
         }
 
-        /// Whether the arm got as far as loading an engine at all. macOS-only: the pre-load assertion
-        /// it serves belongs to the fit gate, which is an MLX-lane concern — the candle lane has none,
-        /// so carrying this there would be dead code under `clippy --all-targets -D warnings`.
-        #[cfg(target_os = "macos")]
+        /// Whether the arm got as far as loading an engine at all — the "nothing loaded on a refused
+        /// job" assertion behind both lanes' pre-download gates.
+        ///
+        /// Was macOS-only on the stated grounds that "the fit gate is an MLX-lane concern — the candle
+        /// lane has none". That stopped being true in sc-12306 (the candle lane grew a pre-load gate)
+        /// and again in sc-12373 (a pre-download one), so it is now on the superset cfg and is live
+        /// code on both.
+        #[cfg(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ))]
         fn loaded(&self) -> bool {
             self.spec.lock().unwrap().is_some()
         }
@@ -12527,7 +12770,10 @@ mod tests {
     /// Goes through `safe_repo_dir_name` rather than hand-writing `models--SceneWorks--mochi-1-mlx`, so
     /// the fixture cannot drift from the slug the real resolver computes. Sparse, like
     /// [`mochi_root_real_sized`].
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     fn mochi_hf_cache_shared_only(tag: &str) -> PathBuf {
         let hub = std::env::temp_dir().join(format!(
             "mochi_hf_hub_{tag}_{}_{}",
@@ -12696,10 +12942,94 @@ mod tests {
         );
     }
 
+    /// **THE sc-12373 behavior, and the only test that can prove it.** The pre-download gate's entire
+    /// value is its ORDER against `ensure_mochi_*_present`: a `mochi_vram_precheck` that runs AFTER the
+    /// fetches is a no-op the user paid ~13–20 GiB for. Nothing structural pins that — clippy's
+    /// dead-code pass proves the call EXISTS, never that it runs FIRST — so this drives the real async
+    /// arm against a stub engine (sc-12318's `_using` seam), which is what makes the ordering assertable
+    /// at all.
+    ///
+    /// Kills the mutation the seam tests above cannot: move `mochi_vram_precheck(...)?` below the two
+    /// `ensure_mochi_*_present` calls ⇒ the fetch dials the unroutable hub and the failure becomes a
+    /// TRANSPORT error instead of "Shorten the clip" ⇒ RED. It is also the sc-12306 mutation's twin:
+    /// deleting the pre-check entirely leaves only the post-download gate, and the same assert fires.
+    ///
+    /// Hermeticity, per #1577's lesson on the MLX twin: the tier fetch dials
+    /// `settings.huggingface_base_url` (NOT `api_url` — that only carries progress/heartbeat), and
+    /// `Settings::from_env()` defaults it to the real `https://huggingface.co`. Both are pinned at a
+    /// closed port so the FAILURE path can never reach the live hub.
+    ///
+    /// The budget is synthetic and deterministic: `gpu_id` defaults to `"cpu"` ⇒
+    /// `nvidia_vram_budget_gb` → `None` ⇒ `apply_vram_cap(None, Some(64))` ⇒ `free = total = 64`. So
+    /// this asserts nothing about the runner's live VRAM. 64 is also the budget at which the
+    /// shared-components FLOOR is load-bearing at the arm level: decode + headroom alone is 62.56 and
+    /// would ADMIT.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn generate_candle_video_using_refuses_before_paying_for_the_tier_download() {
+        let hub = mochi_hf_cache_shared_only("candle_arm_precheck");
+        let probe = ArmProbe::default();
+        let request = mochi_request(json!({ "mlxQuantize": 8 }));
+        let settings = Settings {
+            data_dir: hub.join("unused-data-dir"),
+            api_url: "http://127.0.0.1:0".to_owned(),
+            // The URL the tier fetch actually dials — unroutable ⇒ the failure path can never reach
+            // the real hub.
+            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
+            ..Settings::from_env()
+        };
+        let job = mochi_job_snapshot();
+        let loader = probe.loader();
+        let out = temp_env_vars(
+            &[
+                ("HF_HUB_CACHE", hub.to_str().expect("utf-8 fixture hub")),
+                (MOCHI_DIR_ENV, ""),
+                (crate::vram_gate::CUDA_VRAM_CAP_ENV, "64"),
+            ],
+            || {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime builds")
+                    .block_on(generate_candle_video_using(
+                        &ApiClient::new(&settings),
+                        &settings,
+                        &job,
+                        &request,
+                        std::path::Path::new(""),
+                        "candle",
+                        loader,
+                    ))
+            },
+        );
+        std::fs::remove_dir_all(&hub).ok();
+
+        let message = out
+            .err()
+            .expect("a 151-frame clip cannot fit a 64 GB card even on the shared-components floor")
+            .to_string();
+        assert!(
+            message.contains("Shorten the clip"),
+            "the refusal must come from the PRE-DOWNLOAD gate, before `ensure_mochi_q8_present` \
+             charges ~13-20 GiB for an answer it never needed. A transport error here means the \
+             pre-check now runs after the fetches: {message}"
+        );
+        assert!(
+            message.contains("VRAM"),
+            "and it must be the CANDLE gate's message, not the MLX one leaking: {message}"
+        );
+        assert!(!probe.loaded(), "nothing may load on a refused job");
+    }
+
     /// The PRE-DOWNLOAD disk state (sc-12322): the shared `coRequisite` components at their REAL
     /// hosted sizes, and NO tier dir — exactly what a machine looks like when a job has toggled q8/bf16
     /// but `ensure_mochi_*_present` has not run yet. Sparse, like [`mochi_root_real_sized`].
-    #[cfg(target_os = "macos")]
+    ///
+    /// Superset cfg (sc-12373): both lanes' pre-download gates measure this same disk state.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     fn mochi_root_shared_only(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "mochi_precheck_{tag}_{}_{}",
