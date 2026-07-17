@@ -6127,7 +6127,7 @@
       // Post-chunking the peak is WEIGHTS-dominated, not attention: the UMT5 TE still loads f32 (10.58
       // GiB on disk -> 21.16 GiB resident), the z48 VAE loads f32, and the DiT rides on top with the
       // chunked attention now a bounded transient. The quant ladder is still just the DiT delta:
-      // q8 - q4 = 2.6 GB, bf16 - q4 = 7.9 GB (the dense fp32 DiT shards halve to ~9.3 GiB on load);
+      // q8 - q4 = 2.6 GB, bf16 - q4 = 7.9 GB (~1 GB above the ~6.9 GB the dense fp32 DiT halving predicts);
       // TE + VAE + chunked attention are tier-blind, so the whole ladder spans ~8 GB. The still-resident
       // f32 TE + both experts + no component offload is the next lever (sc-12730 -- run the 14B, and
       // shrink this 5B further, on a 24 GB card).

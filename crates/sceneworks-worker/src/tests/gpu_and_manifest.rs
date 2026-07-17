@@ -576,7 +576,7 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
 /// `wan_video_fit_error` fall back to the sc-12344 weights FLOOR, which reads 18.13 GiB against a real
 /// 46.1 GB peak — so the gate would silently go back to admitting a 32 GB card and OOMing mid-denoise.
 /// That regression is invisible without this test: the gate still "works", it just gates on a number
-/// that is 2.5x wrong.
+/// that is 2.4x wrong.
 ///
 /// Numbers are MEASURED on an idle RTX PRO 6000 at each model's own shipped default geometry
 /// (sc-12402; see the manifest comment for the harness + the A/B proving they are card-independent).
@@ -590,7 +590,7 @@ fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
     assert!(
         entry.get("candle").and_then(Value::as_object).is_some(),
         "wan_2_2 candle block present (absent ⇒ the video gate falls back to the weights floor, which \
-         under-counts the real peak by 4.4x and admits a card that OOMs)"
+         under-counts the real peak by 2.4x and admits a card that OOMs)"
     );
 
     // Measured (sc-12402; re-measured sc-12631 post-chunking): each tier + gate 2 GB headroom.
@@ -601,11 +601,11 @@ fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
     assert!((q8 - 50.7).abs() < 1e-6, "q8 48.7 + 2 headroom, got {q8}");
     assert!((bf16 - 56.0).abs() < 1e-6, "bf16 54.0 + 2 headroom, got {bf16}");
     // The tier ladder is monotonic, and SHALLOW: every term but the DiT is tier-independent (the f32
-    // UMT5 TE, the f32 z48 VAE, and the tier-blind attention). q8 − q4 is exactly the DiT delta.
+    // UMT5 TE, the f32 z48 VAE, and the tier-blind attention). q8 − q4 is essentially the DiT quant delta.
     assert!(q4 < q8 && q8 < bf16, "heavier tier ⇒ heavier peak");
     assert!(
         (q8 - q4 - 2.6).abs() < 0.05,
-        "q8 − q4 must stay the measured 2.6 GB DiT delta (5.25 − 2.92 GiB), got {}",
+        "q8 − q4 must stay the ~2.6 GB q8/q4 DiT quant delta, got {}",
         q8 - q4
     );
     // The whole q4→bf16 ladder is under 8 GB. If this ever widens dramatically, the block was
