@@ -1065,7 +1065,6 @@ mod tests {
         ("ltx_2_3", Some(64), None),
         ("ltx_2_3_eros", Some(64), None),
         ("svd", Some(64), None),
-        ("mochi_1", Some(16), None),
         // The 5B keeps 901,120 — upstream gives `ti2v-5B` exactly `1280*704` / `704*1280`, and its
         // z48 VAE's 32-px grid is why 704, not 720, is its real 720p.
         ("wan_2_2", None, Some(901_120)),
@@ -1220,7 +1219,6 @@ mod tests {
         ("ltx_2_3", 15.0),
         ("ltx_2_3_eros", 15.0),
         ("svd", 4.0),
-        ("mochi_1", 5.0),
         ("wan_2_2", 8.0),
         ("wan_2_2_t2v_14b", 5.0),
         ("wan_2_2_i2v_14b", 5.0),
@@ -1483,7 +1481,7 @@ mod tests {
             .collect();
         assert_eq!(
             over_cap.len(),
-            7,
+            6,
             "the blanket {DEFAULT_DURATION}s is past the cap of these models: {over_cap:?} — if this \
              count moved, re-read why resolve_duration consults defaults.duration before changing it"
         );
@@ -1511,7 +1509,7 @@ mod tests {
             .collect();
         assert_eq!(
             unadvertised.len(),
-            8,
+            7,
             "the blanket {DEFAULT_WIDTH}x{DEFAULT_HEIGHT} is not advertised by these models: \
              {unadvertised:?}"
         );
@@ -1576,7 +1574,6 @@ mod tests {
         ("ltx_2_3", &[24, 25, 30], 25),
         ("ltx_2_3_eros", &[24, 25, 30], 25),
         ("svd", &[6, 7, 8, 10, 12, 25], 7),
-        ("mochi_1", &[30], 30),
         ("wan_2_2", &[16, 24], 24),
         ("wan_2_2_t2v_14b", &[16], 16),
         ("wan_2_2_i2v_14b", &[16], 16),
@@ -1602,7 +1599,6 @@ mod tests {
         ("ltx_2_3", 768, 512),
         ("ltx_2_3_eros", 768, 512),
         ("svd", 1024, 576),
-        ("mochi_1", 848, 480),
         ("wan_2_2", 832, 480),
         // 720, not 704: sc-12308 (#1581) restored TRUE 720p to the A14B pair by lifting maxPixels
         // to the 14B's real 921,600 (sc-12294 had walked the manifest down to the 5B's 901,120).
@@ -1711,7 +1707,7 @@ mod tests {
             .collect();
         assert_eq!(
             rejecting_the_blanket.len(),
-            7,
+            6,
             "the blanket {THE_BLANKET_FPS} fps is off-menu for these models: {rejecting_the_blanket:?} \
              — if this count moved, re-read why resolve_fps consults defaults.fps before changing it"
         );

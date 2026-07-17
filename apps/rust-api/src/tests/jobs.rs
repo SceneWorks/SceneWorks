@@ -3860,7 +3860,6 @@ async fn a_video_request_naming_no_duration_is_admitted_at_the_models_own_defaul
     // green throughout. Listing the survivor alongside the victims is what makes this a per-model
     // assertion rather than "the route works".
     for (model, want_duration) in [
-        ("mochi_1", 5.0),
         ("bernini", 5.0),
         ("scail2_14b", 5.0),
         ("wan_2_2_t2v_14b", 5.0),
@@ -3903,7 +3902,7 @@ async fn a_video_request_naming_no_duration_is_admitted_at_the_models_own_defaul
             "projectId": project_id,
             "mode": "text_to_video",
             "prompt": "a fox runs",
-            "model": "mochi_1",
+            "model": "bernini",
             "duration": 30
         }),
     )
@@ -3919,12 +3918,11 @@ async fn a_video_request_naming_no_duration_is_admitted_at_the_models_own_defaul
         .contains("asks for 30s"));
 
     // The GEOMETRY axis of the same bug — the third dead `defaults.*` key. No 400 to observe here
-    // (dimensions coerce), so the observable is the enqueued size itself: mochi_1 must take its
-    // declared 848x480 native bucket, NOT the blanket 768x512 it is never trained on and never
-    // advertises. `bernini` (848x480, stride 16) and `wan_2_2_t2v_14b` (1280x704) come along to
-    // prove this reads the per-model value rather than one hardcoded pair.
+    // (dimensions coerce), so the observable is the enqueued size itself: `bernini` must take its
+    // declared 848x480 native bucket (stride 16), NOT the blanket 768x512 it never advertises.
+    // `wan_2_2_t2v_14b` (1280x720) and `ltx_2_3` (768x512) come along to prove this reads the
+    // per-model value rather than one hardcoded pair.
     for (model, want_w, want_h) in [
-        ("mochi_1", 848, 480),
         ("bernini", 848, 480),
         // True 720p since sc-12308 (#1581) lifted the A14B area cap to its real 921,600.
         ("wan_2_2_t2v_14b", 1280, 720),
@@ -3963,7 +3961,7 @@ async fn a_video_request_naming_no_duration_is_admitted_at_the_models_own_defaul
             "projectId": project_id,
             "mode": "text_to_video",
             "prompt": "a fox runs",
-            "model": "mochi_1",
+            "model": "bernini",
             "width": 640,
             "height": 384
         }),
@@ -3978,145 +3976,6 @@ async fn a_video_request_naming_no_duration_is_admitted_at_the_models_own_defaul
         (Some(640), Some(384)),
         "a caller's own size must not be replaced by the model's default: {body}"
     );
-}
-
-/// sc-12347 END TO END, against the **REAL shipped manifest** rather than a fixture — the route the
-/// app actually serves, the bytes the app actually ships, the model the story is about.
-///
-/// The fixture test above pins the gate's PLACEMENT (post-preset, post-resolution). This one pins
-/// that the placement is wired to the real `mochi_1` entry: a fixture proves the wiring, not the
-/// values, and `limits.fps` spent its whole existence declared-but-unread precisely because nothing
-/// ever connected the two. Both are needed — reverting mochi's manifest `fps` to `[24, 25, 30]`
-/// leaves the fixture test green and turns this one red.
-#[tokio::test]
-async fn real_manifest_mochi_refuses_an_unadvertised_fps_and_defaults_to_its_own_30() {
-    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
-    let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let settings = test_settings(&temp_dir);
-    // The real binary seeds these at startup (`server.rs`); `create_app` does not, so a test that
-    // skipped this would resolve mochi_1 to `{}` — no menu, everything admitted — and assert nothing.
-    sceneworks_core::builtin_manifests::seed_builtin_manifests(
-        &settings.config_dir,
-        sceneworks_core::builtin_manifests::SeedMode::Overwrite,
-    )
-    .expect("builtin manifests seed");
-
-    let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Real Manifest Fps Project" }),
-    )
-    .await;
-    let project_id = project["id"].as_str().expect("project id");
-
-    // The story's headline case: a LEGALLY 5-second request — sc-12297's cap admits it — that still
-    // asks for 301 frames because fps multiplies into length.
-    let (status, body) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/video/jobs",
-        json!({
-            "projectId": project_id,
-            "mode": "text_to_video",
-            "prompt": "a fox runs",
-            "model": "mochi_1",
-            "duration": 5,
-            "fps": 60
-        }),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "mochi_1 advertises 30 fps only; 5s @ 60fps is 301 frames from a legal 5s request: {body}"
-    );
-    let detail = body["detail"].as_str().unwrap_or_default();
-    assert!(detail.contains("mochi_1"), "names the model: {detail}");
-    // `renders at 30 fps` in full, NOT `contains("30 fps")` — the latter is also a substring of
-    // "24, 25, or 30 fps", so it would pass against a mochi entry advertising three rates and pin
-    // nothing about the shipped `[30]`.
-    assert!(
-        detail.contains("renders at 30 fps"),
-        "states mochi's real menu — exactly one rate: {detail}"
-    );
-    assert!(detail.contains("60 fps"), "states what was asked: {detail}");
-
-    // THE DISCRIMINATOR for the shipped bytes: 25 fps. It is the blanket the DTO used to apply, and
-    // it is off mochi's real `[30]` menu — so this is red both if mochi's manifest ever re-advertises
-    // 25 and if the blanket ever comes back. `fps: 60` above cannot pin either: it is off-menu under
-    // any plausible mochi menu.
-    let (status, body) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/video/jobs",
-        json!({
-            "projectId": project_id,
-            "mode": "text_to_video",
-            "prompt": "a fox runs",
-            "model": "mochi_1",
-            "duration": 5,
-            "fps": 25
-        }),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "mochi_1 renders at 30 only; 25 is the old blanket and must be refused, not snapped: {body}"
-    );
-
-    // THE LIVE BUG THIS CLOSES: `generate_video(model = "mochi_1", duration = 5)` — the natural MCP
-    // call, which omits fps entirely. It used to enqueue 25 fps (the blanket), rendering a 30 fps
-    // motion prior 20% slow at 127 frames. It must now record mochi's own declared 30.
-    let (status, body) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/video/jobs",
-        json!({
-            "projectId": project_id,
-            "mode": "text_to_video",
-            "prompt": "a fox runs",
-            "model": "mochi_1",
-            "duration": 5
-        }),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::CREATED,
-        "omitting fps is an ordinary request and must be admitted: {body}"
-    );
-    assert_eq!(
-        body["payload"]["fps"], 30,
-        "the enqueued payload records mochi's declared 30, not the old blanket 25: {body}"
-    );
-
-    // And every rate the real manifest advertises for a model with a real CHOICE is admitted, so
-    // the gate matches the shipped dropdown rather than merely rejecting things.
-    for fps in [24, 25, 30] {
-        let (status, body) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/video/jobs",
-            json!({
-                "projectId": project_id,
-                "mode": "text_to_video",
-                "prompt": "a fox runs",
-                "model": "ltx_2_3",
-                "duration": 4,
-                "fps": fps
-            }),
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::CREATED,
-            "ltx_2_3 advertises {fps} fps in the shipped manifest: {body}"
-        );
-        assert_eq!(body["payload"]["fps"], fps);
-    }
 }
 
 /// sc-12400 (image half): a request that names no size renders the MODEL's declared
