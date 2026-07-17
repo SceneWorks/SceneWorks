@@ -535,6 +535,30 @@ pub(crate) async fn create_video_job(
     }) {
         return Err(ApiError::bad_request(message));
     }
+    // The model's declared `defaults.fps` + `limits.fps`, the other half of `frames = duration ×
+    // fps` (sc-12347). The cap above closes the *duration* axis only: a legally-5s mochi_1 request
+    // (cap 5 ✓) at 60 fps is 301 frames — double the shipped default's 151 — and `301 % 6 == 1`
+    // clears the engine's own check, so nothing downstream refuses it.
+    //
+    // Resolving the omission is what makes the menu enforceable, not a separate nicety. The DTO
+    // used to default fps to a blanket 25, which is off-menu for 7 of the 10 shipped video models,
+    // so gating alone would 400 a payload this route constructed itself — and the MCP server omits
+    // `fps` whenever its caller does, making that the likeliest non-UI call shape. It was already
+    // silently wrong: `generate_video(model = "mochi_1", duration = 5)` rendered at 25 fps, not
+    // mochi's declared 30, playing a 30 fps motion prior 20% slow. The web never had this bug —
+    // `VideoStudio.jsx:223` reads `defaults.fps` — so this is the API converging on the UI.
+    //
+    // Same placement rationale as the duration cap: keyed off the post-preset `model_id` and the
+    // resolved entry (reading either from the DTO is sc-12300). The RESOLVED rate is written back so
+    // the enqueued payload records what was actually rendered — the worker re-resolves identically
+    // from the same entry, but a recipe replay reads this row.
+    if let Some(entry) = model_manifest_entry.as_object() {
+        let fps = resolve_fps(job_payload.get("fps"), entry);
+        if let Some(message) = fps_limit_error(&model_id, fps, entry) {
+            return Err(ApiError::bad_request(message));
+        }
+        job_payload.insert("fps".to_owned(), Value::from(fps));
+    }
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility_with(
         &state,

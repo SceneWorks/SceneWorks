@@ -20,7 +20,9 @@
 use std::f32::consts::PI;
 use std::path::Path;
 
-use sceneworks_core::video_request::{duration_limit_error, is_ltx_model, VideoRequest};
+use sceneworks_core::video_request::{
+    duration_limit_error, fps_limit_error, is_ltx_model, VideoRequest,
+};
 
 // Used only by the video generation metrics builders below, which are themselves
 // gated to the macOS / backend-candle lanes (the shared `generate_video` funnel) —
@@ -320,6 +322,21 @@ fn video_preflight(request: &VideoRequest) -> WorkerResult<()> {
         request.duration,
         &request.model_manifest_entry,
     ) {
+        return Err(WorkerError::InvalidPayload(message));
+    }
+    // The model's declared `limits.fps`. NOT redundant with the duration cap above — they bound
+    // different axes, and the cost/quality axis is `frames = duration × fps`, which only both
+    // together bound. A *legally 5-second* mochi_1 request (cap 5 ✓) at 60 fps is 301 frames,
+    // double the shipped 5s default's 151, and `301 % 6 == 1` clears the engine's own check, so
+    // nothing downstream says no (sc-12347).
+    //
+    // `request.fps` is already resolved against the model's `defaults.fps` by `from_payload`, so a
+    // payload that names no fps is judged on the value the model itself declares — not the blanket
+    // 25, which is off-menu for 7 of the 10 shipped video models and would make this gate reject
+    // every fps-less payload.
+    if let Some(message) =
+        fps_limit_error(&request.model, request.fps, &request.model_manifest_entry)
+    {
         return Err(WorkerError::InvalidPayload(message));
     }
     Ok(())
@@ -10954,6 +10971,100 @@ mod tests {
         ));
     }
 
+    /// sc-12347: the same backstop on the fps axis — refuses a rate the model does not advertise,
+    /// and admits a payload that names no rate at all.
+    ///
+    /// Kills the same class of mutation: deleting the `fps_limit_error` call from `video_preflight`
+    /// leaves every core test green, because the core function is still correct — just not CALLED.
+    ///
+    /// Ungated for the same reason as the duration test: `mochi_preflight`'s fit gate is macOS-only
+    /// AND is a *memory* test, so it cannot refuse an off-spec-but-affordable rate on any lane.
+    #[test]
+    fn video_preflight_refuses_an_fps_the_model_does_not_advertise() {
+        let mochi_entry = json!({
+            "limits": { "hardMaxDuration": 5, "fps": [30] }, "defaults": { "fps": 30 }
+        });
+
+        // The story's shape: a request that is LEGALLY 5 seconds — sc-12297's cap admits it — but
+        // asks for 60fps. 5 x 60 = 300 raw frames snapping to 301, double the shipped default's
+        // 151, and `301 % 6 == 1` so the engine's own validate_request ACCEPTS it. The duration gate
+        // cannot see this; only the fps menu refuses it.
+        let off_menu = request(json!({
+            "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p",
+            "duration": 5, "fps": 60, "modelManifestEntry": mochi_entry
+        }));
+        assert_eq!(off_menu.raw_frame_count(), 300);
+        assert_eq!(
+            off_menu.frame_count(),
+            301,
+            "on-lattice, and the engine would accept it"
+        );
+        assert_eq!(
+            duration_limit_error(
+                &off_menu.model,
+                off_menu.duration,
+                &off_menu.model_manifest_entry
+            ),
+            None,
+            "the duration cap ADMITS this request — it is legally 5 seconds"
+        );
+        let Err(WorkerError::InvalidPayload(message)) = video_preflight(&off_menu) else {
+            panic!("60fps on a model that advertises only 30 must be refused before the load");
+        };
+        assert!(message.contains("mochi_1"), "names the model: {message}");
+        assert!(
+            message.contains("30 fps"),
+            "states what is allowed: {message}"
+        );
+        assert!(
+            message.contains("60 fps"),
+            "states what was asked: {message}"
+        );
+
+        // The model's own advertised rate admits — the shipped default must still run.
+        let on_menu = request(json!({
+            "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p",
+            "duration": 5, "fps": 30, "modelManifestEntry": mochi_entry
+        }));
+        assert!(
+            video_preflight(&on_menu).is_ok(),
+            "30 is what mochi advertises"
+        );
+        assert_eq!(on_menu.frame_count(), 151);
+
+        // THE REGRESSION THIS STORY NEARLY SHIPPED: a payload naming NO fps must be ADMITTED. It
+        // resolves to the model's declared 30, not the blanket 25 — which is off mochi's menu and
+        // would make this gate refuse a perfectly ordinary job (7 of the 10 shipped video models
+        // are in that position, so this is the common case, not an edge).
+        let no_fps = request(json!({
+            "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p",
+            "duration": 5, "modelManifestEntry": mochi_entry
+        }));
+        assert_eq!(
+            no_fps.fps, 30,
+            "resolved from the model's declared defaults.fps"
+        );
+        assert!(
+            video_preflight(&no_fps).is_ok(),
+            "an fps-less payload must not be refused by the menu"
+        );
+        assert_eq!(
+            no_fps.frame_count(),
+            151,
+            "the frame count the manifest documents"
+        );
+
+        // A job carrying no manifest entry is UNCONSTRAINED — never block without a declared menu.
+        let no_entry = request(json!({
+            "projectId": "p", "model": "stub-model", "mode": "text_to_video", "prompt": "p",
+            "duration": 5, "fps": 60
+        }));
+        assert!(
+            video_preflight(&no_entry).is_ok(),
+            "no menu declared => no menu"
+        );
+    }
+
     // -----------------------------------------------------------------------------------------
     // Mochi 1 (epic 1788 / sc-11992). These sit on the SUPERSET cfg because the tier resolver, the
     // stride and the on-demand fetches are SHARED by both lanes (one repo, both backends) — so they
@@ -12062,10 +12173,19 @@ mod tests {
     ///
     /// How it discriminates. The job asks for **q8**, and the staged cache has the shared components
     /// but no q8 tier — so `ensure_mochi_q8_present` is past its `!mochi_wants_q8` early-out and MUST
-    /// attempt a real `ensure_hf_files_cached` fetch. `api` points at a closed port, so the two orders
-    /// give different errors:
+    /// attempt a real `ensure_hf_files_cached` fetch. The two orders then give different errors:
     ///   * pre-check first (correct) ⇒ the gate's actionable "Shorten the clip", no network touched.
-    ///   * pre-check after the fetches ⇒ a `WorkerError::Http` from the download instead ⇒ RED.
+    ///   * pre-check after the fetches ⇒ a transport error from the download instead ⇒ RED.
+    ///
+    /// **`huggingface_base_url` is what makes that hermetic, and it is NOT `api_url`.** The fetch dials
+    /// `settings.huggingface_base_url` (`HuggingFaceSnapshot::resolve` → `{base_url}/api/models/…/tree/…`);
+    /// `api_url` only carries progress/heartbeat. `Settings::from_env()` defaults the former to the real
+    /// `https://huggingface.co`, so overriding only `api_url` would send this test's FAILURE path to the
+    /// live internet: it still goes red (the download's `report_download_progress` hard-`?`s on a
+    /// heartbeat to the closed `api_url`), but only after really resolving the tree — and the tier is a
+    /// public ungated repo, so that resolve succeeds and bytes can start landing before the heartbeat
+    /// trips. Pinning BOTH at a closed port keeps the whole thing offline and instant. Verified by
+    /// pointing the base at a sentinel host and reading it back out of the mutation's error.
     ///
     /// `HF_HUB_CACHE` is pinned at the fixture because `huggingface_hub_cache_dir` reads it (and
     /// `HF_HOME`) BEFORE `data_dir` — left ambient, a dev box's real cache would decide this test.
@@ -12080,6 +12200,9 @@ mod tests {
         let settings = Settings {
             data_dir: hub.join("unused-data-dir"),
             api_url: "http://127.0.0.1:0".to_owned(),
+            // The URL the tier fetch actually dials — see above. Unroutable ⇒ the failure path can
+            // never reach the real hub.
+            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
             ..Settings::from_env()
         };
         let job = mochi_job_snapshot();
