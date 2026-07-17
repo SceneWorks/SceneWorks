@@ -682,10 +682,16 @@ mod tests {
     /// loudly when set-but-missing OR set to an incomplete dir (missing either file of the
     /// `{model.safetensors, tokenizer.json}` pair), instead of silently falling through to the
     /// cache/HF download. An unset pin (nothing staged) falls through to `Ok(None)`.
-    /// `RUST_TEST_THREADS=1` is forced workspace-wide, so the env mutation is serial.
+    ///
+    /// Holds the crate-wide env lock across the whole staged mutation (set → assert → unset →
+    /// assert), because `set_var` is process-global and the rest of the crate's tests run as threads
+    /// in this same process. This used to claim "`RUST_TEST_THREADS=1` is forced workspace-wide, so
+    /// the env mutation is serial" and take no lock — nothing sets that variable anywhere in the
+    /// repo, so the tests were in fact fully parallel and the mutation was unsynchronized (sc-12380).
     #[test]
     fn resolve_segmenter_weights_env_pin_missing_and_incomplete_error_unset_falls_through() {
         let key = "SCENEWORKS_SAM3_WEIGHTS";
+        let _env_guard = crate::test_env::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let settings = f011_test_settings(dir.path().to_path_buf());
         let prior = std::env::var_os(key);

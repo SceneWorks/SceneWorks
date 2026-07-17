@@ -12517,10 +12517,24 @@ mod tests {
 
     /// Drive `generate_mochi_using` against `probe` with the Mochi tier at `root` and an MLX budget of
     /// `cap_gb`, from a plain `#[test]` — the env overrides are process-global, so the whole async run
-    /// has to sit inside the [`ENV_LOCK`] the sync `temp_env_vars` holds.
+    /// has to sit inside the crate-wide env lock the sync `temp_env_vars` holds.
     ///
-    /// `api` points at a closed port on purpose: reaching the network would be a bug in this test, and
-    /// an unroutable URL makes that fail loudly rather than depending on a stub's fidelity.
+    /// Both URLs point at a closed port on purpose: reaching the network would be a bug in these tests,
+    /// and an unroutable URL makes that fail loudly rather than depending on a stub's fidelity.
+    /// `api_url` alone is NOT enough — a tier fetch dials `huggingface_base_url`
+    /// (`HuggingFaceSnapshot::resolve` → `{base_url}/api/models/…/tree/…`), which `Settings::from_env()`
+    /// defaults to the real `https://huggingface.co`; `api_url` only carries progress/heartbeat. That is
+    /// exactly the trap #1577 fixed in `generate_mochi_using_refuses_before_paying_for_the_tier_download`
+    /// (see its doc comment), and this helper had it one field over: a caller passing `mlxQuantize: 8`
+    /// reaches `ensure_mochi_q8_present` → `ensure_mochi_tier_present`, and `SceneWorks/mochi-1-mlx` is a
+    /// public repo, so the tree resolve SUCCEEDS against the live hub and a ~13 GiB pull can start
+    /// landing before the heartbeat to the closed `api_url` trips it (sc-12380).
+    ///
+    /// `HF_HUB_CACHE` is pinned for the same reason: `huggingface_hub_cache_dir` reads it (and
+    /// `HUGGINGFACE_HUB_CACHE` / `HF_HOME`) BEFORE `data_dir`, so pinning `data_dir` does NOT make the
+    /// cache lookup hermetic — left ambient, a dev box's real cache decides it, and the desktop injects
+    /// `HF_HOME` as a matter of course. Pointed at a dir with no Mochi repo, so `huggingface_snapshot_dir`
+    /// is `None` and `ensure_mochi_tier_present` early-returns before any network touch.
     #[cfg(target_os = "macos")]
     fn drive_mochi_arm(
         root: &Path,
@@ -12531,12 +12545,18 @@ mod tests {
         let settings = Settings {
             data_dir: root.join("unused-data-dir"),
             api_url: "http://127.0.0.1:0".to_owned(),
+            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
             ..Settings::from_env()
         };
         let job = mochi_job_snapshot();
         let loader = probe.loader();
+        let hf_cache = root.join("unused-hf-cache");
         temp_env_vars(
             &[
+                (
+                    "HF_HUB_CACHE",
+                    hf_cache.to_str().expect("utf-8 fixture hub"),
+                ),
                 (MOCHI_DIR_ENV, root.to_str().expect("utf-8 fixture root")),
                 (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, cap_gb),
             ],
@@ -13374,57 +13394,22 @@ mod tests {
         assert_eq!(mochi_raw_settings(&req, None)["mochiTier"], json!("bf16"));
     }
 
-    /// Set `key` to `value` (empty ⇒ removed) for the duration of `body`, then restore. The Mochi
-    /// resolver reads an operator override from the environment, and `std::env::set_var` is
-    /// process-global, so the tests that use it are serialized behind one mutex.
+    // The env seam is crate-wide (`crate::test_env`), not per-module: this binary runs every
+    // module's tests in ONE process, so a lock private to `video_jobs` serializes nothing against
+    // the `image_jobs` / `training_jobs` tests that write the same vars (sc-12380).
+    //
+    // Gated to match the consumers exactly. The parity lane builds this crate with NEITHER backend
+    // and runs `clippy -D warnings` over the test target, so an import held under a wider cfg than
+    // its users is an `unused_imports` error there rather than a warning.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
-    fn temp_env_var<T>(key: &str, value: &str, body: impl FnOnce() -> T) -> T {
-        temp_env_vars(&[(key, value)], body)
-    }
+    use crate::test_env::{temp_env_var, temp_env_vars};
 
-    /// The single lock every env-scoped test serializes on. Shared by [`temp_env_var`] and
-    /// [`temp_env_vars`] so a one-var and a multi-var test can never interleave their mutations of the
-    /// process-global environment.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// [`temp_env_var`] for several vars set together, under ONE acquisition of the shared
-    /// [`ENV_LOCK`]. Nesting the single-var helper to get a second var would self-deadlock — the lock
-    /// is not reentrant — so a test needing e.g. both the Mochi dir override and the MLX memory cap
-    /// must come through here.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
-    fn temp_env_vars<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let restore: Vec<(String, Option<String>)> = vars
-            .iter()
-            .map(|(key, value)| {
-                let previous = std::env::var(key).ok();
-                if value.is_empty() {
-                    std::env::remove_var(key);
-                } else {
-                    std::env::set_var(key, value);
-                }
-                ((*key).to_owned(), previous)
-            })
-            .collect();
-        let out = body();
-        for (key, previous) in restore {
-            match previous {
-                Some(prior) => std::env::set_var(&key, prior),
-                None => std::env::remove_var(&key),
-            }
-        }
-        out
-    }
+    // Only the macOS-gated eros fixture pins a var for a whole test body — see the cfg note above.
+    #[cfg(target_os = "macos")]
+    use crate::test_env::EnvVars;
 
     /// sc-10418: the resolved video quant maps to the same normalized tier labels the
     /// image lane uses, so the Stats charts group video + image runs on one axis.
@@ -17917,15 +17902,21 @@ mod tests {
         assert!(none.is_empty());
     }
 
+    /// The fixture's own HF hub cache: the path `huggingface_hub_cache_dir` falls back to for this
+    /// `data_dir`. Pin `HF_HUB_CACHE` here (see [`ltx_eros_auto_injects_distill_lora_per_pass`]) and
+    /// the resolver returns this dir outright rather than by fallback, so the fixture no longer
+    /// depends on the ambient environment being unset.
+    #[cfg(target_os = "macos")]
+    fn fake_hf_hub_dir(data_dir: &Path) -> PathBuf {
+        data_dir.join("cache").join("huggingface").join("hub")
+    }
+
     /// Lay down a fake HF snapshot file under `data_dir`
     /// (`cache/huggingface/hub/models--<org>--<name>/snapshots/<rev>/<file>`) and return its path, so
     /// [`resolve_ltx_distill_adapter`] resolves hermetically (mirrors `write_fake_wan_lightning`).
     #[cfg(target_os = "macos")]
     fn write_fake_hf_lora(data_dir: &Path, repo: &str, file: &str) -> PathBuf {
-        let snapshot = data_dir
-            .join("cache")
-            .join("huggingface")
-            .join("hub")
+        let snapshot = fake_hf_hub_dir(data_dir)
             .join(format!("models--{}", repo.replace('/', "--")))
             .join("snapshots")
             .join("deadbeef");
@@ -17953,26 +17944,23 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn ltx_eros_auto_injects_distill_lora_per_pass() {
-        // Hold ENV_LOCK for the whole test. This fixture resolves ONLY while the HF cache-dir env
-        // overrides are unset (`huggingface_hub_cache_dir` reads them BEFORE `data_dir`), and the
-        // check below reads them once, at entry. Without the lock a concurrent `temp_env_var(s)`
-        // caller — e.g. `generate_mochi_using_refuses_before_paying_for_the_tier_download`, which
-        // pins `HF_HUB_CACHE` to its own fixture hub — can set the var AFTER that check passes and
-        // BEFORE `resolve_ltx_adapters` reads it, pointing the resolver at the wrong cache: the
-        // distill LoRA is then "not installed" and this test fails for a reason that has nothing to
-        // do with it. `set_var` is process-global; only the lock makes the read-then-use atomic.
-        // Deterministic (12/12) when the two tests are selected together (sc-12306).
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // The fake HF snapshot only resolves when the cache-dir env overrides are unset (else the real
-        // cache is consulted). Skip rather than assert-false in that unusual local config.
-        if std::env::var_os("HF_HUB_CACHE").is_some()
-            || std::env::var_os("HUGGINGFACE_HUB_CACHE").is_some()
-            || std::env::var_os("HF_HOME").is_some()
-        {
-            return;
-        }
         let dir = std::env::temp_dir().join(format!("sw_eros_distill_{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
+        // PIN the hub cache at this fixture's own dir for the whole test, rather than depending on
+        // the ambient environment. `huggingface_hub_cache_dir` reads `HF_HUB_CACHE` FIRST and returns
+        // it outright, so this alone decides the resolver — whatever the host or a concurrent test
+        // holds in the lower-priority `HUGGINGFACE_HUB_CACHE` / `HF_HOME`.
+        //
+        // This replaces a read-then-use ("skip if any HF var is set", then resolve) that was wrong
+        // twice over: process-global `set_var` from another test could land between the check and the
+        // use (sc-12380), AND on any box with an ambient HF cache the guard turned "env is set" into
+        // a silent PASS that asserted nothing. Pinning removes both — there is no window to race and
+        // no configuration in which this test quietly stops testing. `EnvVars` holds the crate-wide
+        // env lock until it drops at end of test, so no concurrent writer can retarget the resolver.
+        let _env = EnvVars::set(&[(
+            "HF_HUB_CACHE",
+            fake_hf_hub_dir(&dir).to_str().expect("utf-8 fixture hub"),
+        )]);
         let repo = "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments";
         let file = "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors";
         let distill = write_fake_hf_lora(&dir, repo, file);
