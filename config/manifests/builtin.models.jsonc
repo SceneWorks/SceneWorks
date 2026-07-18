@@ -2539,7 +2539,17 @@
         // Gates the `int8-convrot` variant through the SAME per-tier memory-eligibility path as
         // q4/q8/bf16 (the third of the three ConvRot gates; the candle lane + sm_89 compute-cap are the
         // worker's `int8_convrot` capability).
-        "vramGbByTier": { "q4": 26.4, "q8": 35.9, "bf16": 55.6, "int8-convrot": 42.9 },
+        // sc-12828 RE-MEASURED int8-convrot: 42.9 → 34.7 GB. The pinned inference (fc1654a9, PR #101)
+        // now stores the Qwen3-VL TE bf16 (f32 compute, bit-identical) instead of at f32, so the f32-TE
+        // co-resident buffer this ConvRot RESIDENT peak was inflated by is halved. Measured on that
+        // pinned build, exclusive sm_120, 1024²/8-step seed 42: steady 29.76 → 21.5 GB, overall-peak
+        // 42.9 → 34.7 GB — a constant 8.2 GB shift = the 15.6 → 7.4 GB dense TE reduction, landing
+        // int8-convrot right next to q8 as the sc-12425 note predicted ("once the TE drops the two tiers
+        // match"). q4/q8/bf16 also now run the bf16 TE and carry ~8.2 GB less RESIDENT, but stay at their
+        // (still-safe, now-conservative) f32-TE figures pending their OWN direct re-measure — a derived
+        // subtraction is unsafe for a fit-gate (resident↔sequential don't compose arithmetically; an
+        // under-prediction OOMs). sc-12828 follow-up re-measures q4/q8/bf16 + ideogram/boogu directly.
+        "vramGbByTier": { "q4": 26.4, "q8": 35.9, "bf16": 55.6, "int8-convrot": 34.7 },
         // sc-12131 / sc-10856 second-stage gate: measured largest working set after the text phase has
         // been dropped. `int8-convrot` = 28.6 GB (sc-12425, measured sm_120 1024²/8-step, byte-identical
         // pixels resident vs sequential) — it lands next to q8's 29.5 because the int8 DiT is the same
