@@ -613,10 +613,30 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
         false,
         false,
     ),
+    // Infographic-V3 (epic 13095): tensor-identical checkpoint refresh of the SAME NEO-unify engine
+    // (config + 1,116 tensor keys byte-identical to V2, verified) — routes identically to the base/V2
+    // ids. Coexists with V2 (new id; V2 stays loadable for pinned recipes).
+    ModelCaps::new(
+        "sensenova_u1_8b_infographic_v3",
+        true,
+        true,
+        false,
+        false,
+        false,
+    ),
     ModelCaps::new("sensenova_u1_8b_fast", true, true, false, false, false),
     // Infographic-V2 8-step distilled variant (epic 9959): same fast engine, routes like the base fast.
     ModelCaps::new(
         "sensenova_u1_8b_infographic_v2_fast",
+        true,
+        true,
+        false,
+        false,
+        false,
+    ),
+    // Infographic-V3 8-step distilled variant (epic 13095): same fast engine, routes like the base fast.
+    ModelCaps::new(
+        "sensenova_u1_8b_infographic_v3_fast",
         true,
         true,
         false,
@@ -1019,6 +1039,8 @@ mod tests {
         "sensenova_u1_8b_fast",
         "sensenova_u1_8b_infographic_v2",
         "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_infographic_v3_fast",
         "kolors",
         "lens",
         "lens_turbo",
@@ -1065,8 +1087,10 @@ mod tests {
         "kolors",
         "sensenova_u1_8b",
         "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v3",
         "sensenova_u1_8b_fast",
         "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3_fast",
         "ideogram_4",
         "ideogram_4_turbo",
         "boogu_image",
