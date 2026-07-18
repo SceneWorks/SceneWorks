@@ -276,7 +276,7 @@ fn lora_paths_keep_safetensors_extension_for_hf_blob_symlink() {
     std::fs::create_dir_all(&snapshot).expect("snapshot dir creates");
     let blob = blobs.join("78b403a45024d51c24b618046ec1176c346416951f8f4c6c707d1b337ae1d40f");
     std::fs::write(&blob, b"adapter").expect("blob writes");
-    let link = snapshot.join("krea2_identity_edit_v1_1_r128.safetensors");
+    let link = snapshot.join("krea2_identity_edit_v1_2.safetensors");
     std::os::unix::fs::symlink(&blob, &link).expect("snapshot symlink creates");
 
     let mut settings = test_settings("http://127.0.0.1".to_owned(), None);

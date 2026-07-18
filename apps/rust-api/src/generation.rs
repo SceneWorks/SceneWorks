@@ -42,6 +42,34 @@ pub(crate) async fn create_image_job(
         .unwrap_or(payload.model.as_str())
         .to_owned();
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    // The model's declared `defaults.resolution`, keyed off the post-preset `model_id` for the same
+    // reason the video route's gates are (sc-12300). The image half of the dead-`defaults.*` sweep:
+    // the web honors this key (`ImageStudio.jsx:215`) but Rust did not, so a caller that named no
+    // size rendered a blanket 1024x1024 — HALF the declared 2048x2048 on the four sensenova_u1_8b
+    // variants, the text/infographic family where resolution is the whole point, and 1024 instead of
+    // chroma1_flash's declared 768. Silent: geometry coerces, so nothing ever errored (sc-12400).
+    //
+    // Written back per side only when the caller named none, so a caller's own size is untouched.
+    if let Some(entry) = model_manifest_entry.as_object() {
+        let (default_width, default_height) =
+            image_default_resolution(entry).unwrap_or((1024, 1024));
+        if !job_payload.contains_key("width") {
+            job_payload.insert("width".to_owned(), Value::from(default_width));
+        }
+        if !job_payload.contains_key("height") {
+            job_payload.insert("height".to_owned(), Value::from(default_height));
+        }
+        // `defaults.count`, the resolution key's other half — 29 of the 45 image models declare
+        // `count: 1` against this layer's blanket 4. Reading only the geometry made the bare call
+        // WORSE, not better: sensenova_u1_8b declares `2048x2048` AND `count: 1`, so honoring the
+        // size alone took `generate_image(model = "sensenova_u1_8b", prompt = …)` from 4x1024² to
+        // 4x2048² — 4x the pixels — where the model asks for 1x2048², i.e. the original cost at the
+        // correct geometry. One intent, two keys; reading half of it is what over-charged.
+        if !job_payload.contains_key("count") {
+            let count = image_default_count(entry).unwrap_or(4);
+            job_payload.insert("count".to_owned(), Value::from(count));
+        }
+    }
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility_with(
         &state,
@@ -61,11 +89,16 @@ pub(crate) async fn create_image_job(
     )
     .await?;
     if payload.seed.is_none() {
+        // `job_payload["count"]` is the resolved count — the block above writes the model's declared
+        // `defaults.count` whenever the caller named none, so the seed batch matches what actually
+        // renders. The fallback only survives for a manifest entry that is not an object (an
+        // unknown model resolves to `{}`, which IS one), where the caller's own count, then the
+        // blanket, is all there is.
         let count = job_payload
             .get("count")
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok())
-            .unwrap_or(payload.count);
+            .unwrap_or_else(|| payload.count.unwrap_or_else(default_image_count));
         job_payload.insert("seeds".to_owned(), random_image_seeds(count));
     }
     // Create in `pending_caption` when an async caption is pending, else the default `queued`. The

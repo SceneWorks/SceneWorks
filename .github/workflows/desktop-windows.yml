@@ -59,9 +59,19 @@ on:
     paths: *desktop_paths
   workflow_dispatch:
 
+# Cancel superseded PR runs, but never cancel a main-push run — same reasoning as
+# windows-candle.yml (sc-12399). `package-windows` below is non-PR-only, so main is
+# the ONLY place the full candle/CUDA desktop package is built before a release tag;
+# cancelling it pushes packaging breaks to release time. It also shares the one
+# `cuda` box with windows-candle.yml, so it is part of the same queue.
+#
+# Main must key on `github.sha`, not `github.ref`: GitHub keeps at most ONE pending
+# run per group and evicts it when a newer run queues, so a shared main group still
+# drops the middle commit of a 3+ merge burst even with cancel-in-progress off.
+# Per-SHA groups cannot evict each other; runs serialize on the box instead.
 concurrency:
-  group: desktop-windows-${{ github.ref }}
-  cancel-in-progress: true
+  group: desktop-windows-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # PR gate — cheap desktop-crate checks on a hosted runner. No candle/CUDA/packaging.

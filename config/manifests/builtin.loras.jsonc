@@ -110,9 +110,16 @@
       // distinct RoPE frame AND grounds the Qwen3-VL vision tower. `conditioningRole: image_edit` makes
       // selecting it auto-activate that dual-conditioning edit recipe (the base can't edit without it);
       // on a plain t2i job the weights do nothing. Referenced directly from the author's HF repo (NO
-      // re-host / NO bundle); downloaded on demand when selected. Default variant is rank-128 (v1.1);
-      // the repo also ships an r64 (smaller) file. Krea 2 Community License (commercial < $1M/yr) — the
-      // same license we already ship Krea 2 Raw/Turbo under, so no new gating beyond the base.
+      // re-host / NO bundle); downloaded on demand when selected. Pinned to v1.2
+      // (`krea2_identity_edit_v1_2.safetensors`, ~1.83 GB), the author-recommended default: better face
+      // likeness on restaged subjects and higher fidelity from a 1024 hi-res training pass, up from the
+      // earlier v1.1 rank-128 file (`_v1_1_r128`, ~914 MB). v1.2 ships full-rank only — no r64/r128
+      // variant — and our additive-LoRA core reads the rank from the tensor shapes at load, so the
+      // higher rank is a drop-in with no code change. (The v1.2 "nodes" the model card mentions —
+      // `ref_boost`, `fit` geometry — are ComfyUI workflow conveniences, not part of the safetensors;
+      // our dual-conditioning edit recipe applies the weights directly and doesn't need them.) Krea 2
+      // Community License (commercial < $1M/yr) — the same license we already ship Krea 2 Raw/Turbo
+      // under, so no new gating beyond the base.
       "id": "krea2_identity_edit",
       "name": "Krea 2 Identity Edit",
       "family": "krea_2",
@@ -123,7 +130,7 @@
       "source": {
         "provider": "huggingface",
         "repo": "conradlocke/krea2-identity-edit",
-        "file": "krea2_identity_edit_v1_1_r128.safetensors"
+        "file": "krea2_identity_edit_v1_2.safetensors"
       }
     }
   ]

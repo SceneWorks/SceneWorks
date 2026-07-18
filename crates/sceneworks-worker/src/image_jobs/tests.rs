@@ -1,6 +1,12 @@
 use super::*;
 use serde_json::json;
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use crate::test_env::EnvVars;
+
 fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
 }
@@ -1484,10 +1490,20 @@ fn pulid_flux_real_weights_holds_identity() {
         assert!(p.exists(), "missing PuLID weight: {}", p.display());
     }
     // Fill the engine's env-var weight seam from the local caches (exactly what
-    // `generate_pulid_flux_stream` does before the cached load).
-    std::env::set_var("PULID_FLUX_WEIGHTS", &pulid_adapter);
-    std::env::set_var("PULID_EVA_WEIGHTS", &eva);
-    std::env::set_var("PULID_FACE_WEIGHTS_DIR", &bundle);
+    // `generate_pulid_flux_stream` does before the cached load). Through the crate-wide seam so the
+    // three vars are RESTORED on drop — the bare `set_var`s this replaces leaked them into every
+    // later test in the process, and took no lock while doing it (sc-12380).
+    let _env = EnvVars::set(&[
+        (
+            "PULID_FLUX_WEIGHTS",
+            pulid_adapter.to_str().expect("utf-8 pulid adapter path"),
+        ),
+        ("PULID_EVA_WEIGHTS", eva.to_str().expect("utf-8 eva path")),
+        (
+            "PULID_FACE_WEIGHTS_DIR",
+            bundle.to_str().expect("utf-8 face bundle dir"),
+        ),
+    ]);
 
     // Reference face: a portrait PNG (`SCENEWORKS_TEST_FACE`) if present, else the real face image
     // embedded in the face-align golden (`<bundle>/face_align_goldens.safetensors`, the same
@@ -5025,7 +5041,7 @@ fn image_route_rejects_wired_pose_when_control_base_absent() {
     let dir = tempfile::tempdir().unwrap();
     // Isolate the HF hub cache to the empty tempdir so the control base is genuinely absent regardless of
     // the machine's real cache (the weight resolvers read the global HF cache in preference to `data_dir`).
-    let _hf = HfHubCacheGuard::isolate_to(dir.path());
+    let _hf = isolate_hf_hub_cache_to(dir.path());
     let mut settings = Settings::from_env();
     // Empty data_dir + isolated HF cache + no `modelPath` → every `…_control_available` weight-gate (and
     // `mlx_available`) resolves nothing, so each wired-family pose job falls through to the reject arm.
@@ -5213,52 +5229,35 @@ fn candle_image_route_sends_krea_img2img_to_txt2img() {
     );
 }
 
-/// RAII guard isolating the HF hub-cache env (`HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` / `HF_HOME`) to an
-/// explicit dir for a test, restoring the previous values on drop. The control-base resolvers (both the
-/// candle lanes and the MLX `resolve_krea_control_base`) read the GLOBAL HF hub cache in preference to
-/// `settings.data_dir` (`hf_home.rs` `huggingface_hub_cache_dir` checks the env vars first), so a test that
-/// wants a controlled base (absent, or a hand-seeded snapshot) must point that cache at its own dir —
-/// otherwise it observes the machine's / CI runner's REAL cache. E.g. when the real cache happens to hold
+/// Isolate the HF hub-cache env (`HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` / `HF_HOME`) to an explicit
+/// dir for as long as the returned guard lives, restoring the previous values on drop. The
+/// control-base resolvers (both the candle lanes and the MLX `resolve_krea_control_base`) read the
+/// GLOBAL HF hub cache in preference to `settings.data_dir` (`hf_home.rs` `huggingface_hub_cache_dir`
+/// checks the env vars first), so a test that wants a controlled base (absent, or a hand-seeded
+/// snapshot) must point that cache at its own dir — otherwise it observes the machine's / CI runner's
+/// REAL cache. E.g. when the real cache happens to hold
 /// `alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1` the candle base is NOT absent and the route flips
 /// `PoseControlBaseMissing` → `ZimageControl`; on the MLX side the real tiered turnkey masks a seeded one.
+///
+/// `HF_HUB_CACHE` is consulted first, so it decides the resolver outright; the lower-priority
+/// fallbacks are cleared anyway so nothing can resolve to the real cache.
+///
+/// Goes through the crate-wide [`EnvVars`] seam so it takes the shared env lock. This used to be an
+/// `HfHubCacheGuard` hand-rolling the same save/set/restore with NO lock at all, which made it an
+/// unsynchronized writer of vars other modules' tests read: it was what still broke
+/// `video_jobs::tests::ltx_eros_auto_injects_distill_lora_per_pass` (6/6) after that test's own
+/// module-local lock was supposed to have fixed it, and the two tests using it also clobbered each
+/// other's `HF_HUB_CACHE` (sc-12380).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-struct HfHubCacheGuard {
-    prev: [(&'static str, Option<String>); 3],
-}
-
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-impl HfHubCacheGuard {
-    fn isolate_to(hub: &std::path::Path) -> Self {
-        let prev = ["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME"]
-            .map(|key| (key, std::env::var(key).ok()));
-        // `HF_HUB_CACHE` is consulted first; point it at the isolated dir and clear the lower-priority
-        // fallbacks so nothing resolves to the real cache.
-        std::env::set_var("HF_HUB_CACHE", hub);
-        std::env::remove_var("HUGGINGFACE_HUB_CACHE");
-        std::env::remove_var("HF_HOME");
-        Self { prev }
-    }
-}
-
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-impl Drop for HfHubCacheGuard {
-    fn drop(&mut self) {
-        for (key, value) in &self.prev {
-            match value {
-                Some(val) => std::env::set_var(key, val),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
+fn isolate_hf_hub_cache_to(hub: &std::path::Path) -> EnvVars {
+    EnvVars::set(&[
+        ("HF_HUB_CACHE", hub.to_str().expect("utf-8 hub dir")),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ])
 }
 
 // sc-11171 (F-008): a strict-pose job on a WIRED candle pose family (e.g. `z_image_turbo`) whose control
@@ -5273,7 +5272,7 @@ fn candle_image_route_rejects_wired_pose_when_control_base_absent() {
     let dir = tempfile::tempdir().unwrap();
     // Isolate the HF hub cache to the empty tempdir so the control base is genuinely absent regardless of
     // the machine's real cache (the resolver reads the global HF cache in preference to `data_dir`).
-    let _hf = HfHubCacheGuard::isolate_to(dir.path());
+    let _hf = isolate_hf_hub_cache_to(dir.path());
     let mut settings = Settings::from_env();
     // A tempdir data_dir + isolated HF cache holds no HF snapshot, so `resolve_zimage_control_base` yields
     // `None` → the Z-Image control lane's weight-gate (`zimage_control_available`) fails and it falls through.
@@ -6321,10 +6320,19 @@ fn flux_ip_reference_worker_e2e() {
             .unwrap_or_else(|| panic!("a complete {repo} snapshot with {needs}"))
     }
 
-    // Point the worker's HF-cache resolver + Settings at the real cache + a temp data dir.
-    std::env::set_var("HF_HUB_CACHE", hf_cache());
+    // Point the worker's HF-cache resolver + Settings at the real cache + a temp data dir. Through
+    // the crate-wide seam so both are restored on drop (these were bare `set_var`s that leaked, and
+    // `SCENEWORKS_DATA_DIR` in particular re-points every later `Settings::from_env()` in the
+    // process). This one deliberately reads the REAL cache — the point of the E2E — so it pins
+    // rather than isolates (sc-12380).
     let data = tempfile::tempdir().unwrap();
-    std::env::set_var("SCENEWORKS_DATA_DIR", data.path());
+    let _env = EnvVars::set(&[
+        ("HF_HUB_CACHE", hf_cache().as_str()),
+        (
+            "SCENEWORKS_DATA_DIR",
+            data.path().to_str().expect("utf-8 temp data dir"),
+        ),
+    ]);
     let settings = Settings::from_env();
 
     // (1) The worker's OWN staging fn, against the real cache (the net-new sc-3625 fs logic).
@@ -9587,7 +9595,7 @@ fn krea_control_lora_end_to_end_mlx_smoke() {
     // Point the HF hub-cache env at the REAL cache so `resolve_krea_control_base` / overlay discovery find
     // the installed turnkey + overlay (the resolver reads the env cache before `settings.data_dir`).
     let real_hub = dirs_home().join(".cache/huggingface/hub");
-    let _hf = HfHubCacheGuard::isolate_to(&real_hub);
+    let _hf = isolate_hf_hub_cache_to(&real_hub);
 
     // The LoRA lives under the app data dir; `resolve_adapters` confines it to `settings.data_dir` via
     // `normalize_app_managed_lora_path`, so the data dir must be the real one holding `loras/`.
@@ -9772,7 +9780,7 @@ fn resolve_krea_control_base_descends_turnkey_root_into_tier_with_tokenizer() {
     // (it reads the env cache before `settings.data_dir` — a real cached turnkey would otherwise mask it).
     let hub = dir.path().join("hub");
     std::fs::create_dir_all(&hub).unwrap();
-    let _hf = HfHubCacheGuard::isolate_to(&hub);
+    let _hf = isolate_hf_hub_cache_to(&hub);
 
     // Seed a `SceneWorks/krea-2-turbo-mlx` HF snapshot with a packed q8 tier (transformer + tokenizer) and
     // NOTHING loadable at the root — the exact turnkey shape that triggered the bug.

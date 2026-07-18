@@ -5002,6 +5002,28 @@ fn candle_wan_tier_complete(dir: &Path, a14b: bool) -> bool {
         && (!a14b || has("transformer_2"))
 }
 
+/// (sc-12402) The `candle.vramGbByTier` manifest key for the tier [`candle_wan_tier_subdir`] actually
+/// resolved — derived from the RESOLVED quant marker, never re-derived from the request.
+///
+/// That is the sc-12090 lesson, which cost a false reject on the image lane: re-deriving the tier from
+/// `advanced.mlxQuantize` sizes the tier the request ASKED for, while the disk-probing resolver may
+/// have clamped to a different one (q8 default → q4 when only q4 is installed). Keying off the marker
+/// the resolver returned means the gate and the loader agree on which tier ran by construction.
+///
+/// `None` ⇒ `bf16`, and that one mapping covers BOTH bf16 shapes: an explicit `bf16/` tier subdir, and
+/// the flat dense `Wan-AI/*-Diffusers` fallback that [`candle_wan_tier_subdir`] declines (the caller
+/// pairs that snapshot with a `None` marker). Wan advertises only `Quant::{Q4, Q8}`
+/// (`supported_quants`, wan14b.rs), so no other variant can reach here; any future one would read
+/// `bf16` — the HEAVIEST row, i.e. conservative.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_tier_key(quant: Option<Quant>) -> &'static str {
+    match quant {
+        Some(Quant::Q4) => "q4",
+        Some(Quant::Q8) => "q8",
+        _ => "bf16",
+    }
+}
+
 /// (sc-10027) Resolve the candle wan quant tier subdir (`q4`/`q8`/`bf16`) + its quant marker under a
 /// `SceneWorks/wan2.2-*-candle` snapshot `root`, per `advanced.mlxQuantize` (default **q8** when
 /// installed, clamping to q4 — epic 10721 / sc-10726 — falling back through the tier order), or `None`
@@ -5420,14 +5442,23 @@ fn mochi_vram_preflight(
     }
 }
 
-/// Live pre-flight Wan VRAM admission check for the candle lane (sc-12344) — the non-Mochi half of this
-/// lane's gate, and the seam [`generate_candle_video`] calls before the load + denoise.
+/// Live pre-flight Wan VRAM admission check for the candle lane — the non-Mochi half of this lane's
+/// gate, and the seam [`generate_candle_video`] calls before the load + denoise.
 ///
-/// Budgets on the on-disk bytes of the components the Wan loader actually reads
-/// ([`crate::vram_gate::wan_weight_bytes`]), which for Wan ARE the resident set: both A14B MoE experts
-/// stay co-resident and every file in each component dir loads. `ltx`/`svd` read `0` there and are
-/// admitted unchanged — their on-disk bytes are not their loaded set, so a floor would wall-reject
-/// working cards (the exemption is recorded on `vram_gate::wan_weight_components`).
+/// Budgets on the tier's **MEASURED peak** (`candle.vramGbByTier[tier_key]`, sc-12402) when the
+/// manifest carries one, and falls back to the sc-12344 on-disk weights FLOOR when it does not — see
+/// [`crate::vram_gate::wan_video_fit_error`], which owns that choice and the reason a measurement
+/// REPLACES the floor rather than composing with it.
+///
+/// The measured peak matters because the floor is wrong in BOTH directions, from one cause: on-disk
+/// bytes are not the loaded set, because `candle-gen-wan` casts dtypes on load (`wan14b.rs:49-52` —
+/// experts fp32→bf16 HALVE on the dense tier, the UMT5 TE bf16→f32 DOUBLES on every tier). The packed
+/// tiers under-count by ~9-11 GiB (which is why a card that cannot fit the job is admitted and then
+/// OOMs — sc-12402's story) and the dense tier over-counts by ~44 GiB.
+///
+/// `ltx`/`svd` carry no `candle` block and read `0` weights, so both paths return `None` and they are
+/// admitted unchanged — their on-disk bytes are not their loaded set either, so any byte-derived floor
+/// would wall-reject working cards (recorded on `vram_gate::wan_weight_components`; sc-12397).
 ///
 /// **Takes and returns `model_dir` rather than borrowing it**, so the gate cannot be deleted without
 /// breaking the build — the same "unskippable by construction" property [`MochiVramPreflight`] gets from
@@ -5440,12 +5471,16 @@ fn mochi_vram_preflight(
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn wan_vram_preflight(
     engine_id: &str,
+    manifest_entry: &JsonObject,
+    tier_key: &str,
     model_dir: PathBuf,
     gpu_id: &str,
     budget: Option<crate::vram_gate::VramBudget>,
 ) -> WorkerResult<PathBuf> {
-    match crate::vram_gate::video_weights_fit_error(
+    match crate::vram_gate::wan_video_fit_error(
         engine_id,
+        manifest_entry,
+        tier_key,
         crate::vram_gate::wan_weight_bytes(engine_id, &model_dir),
         gpu_id,
         budget,
@@ -5499,10 +5534,16 @@ async fn candle_video_vram_budget(settings: &Settings) -> Option<crate::vram_gat
 /// driver. Returns the decoded clip + the candle adapter label.
 ///
 /// Every engine passes a VRAM fit gate before the load: Mochi's frame-dependent decode gate (sc-12306),
-/// and the Wan weights-floor gate (sc-12344). `ltx`/`svd` are explicitly EXEMPT — their on-disk bytes are
-/// not their loaded set, so any byte-derived floor would wall-reject working cards; the reason is
-/// recorded on `vram_gate::wan_weight_components`. Neither gate reads `candle.vramGbByTier` (no candle
-/// video model carries a `candle` block, so that lookup would admit unconditionally — sc-12344).
+/// and the Wan gate — the tier's MEASURED `candle.vramGbByTier` peak where the manifest carries one
+/// (sc-12402), else sc-12344's on-disk weights floor. `ltx`/`svd` are explicitly EXEMPT from both: they
+/// carry no `candle` block AND their on-disk bytes are not their loaded set, so any byte-derived floor
+/// would wall-reject working cards; the reason is recorded on `vram_gate::wan_weight_components`.
+///
+/// Mochi keeps its own gate rather than joining the Wan one: its AsymmVAE decode is UNTILED, so its peak
+/// grows linearly in clip length and no per-tier constant can express it (sc-12306). Wan's decode is
+/// budget-TILED (`auto_tiling_budgeted_wan22`) and its peak is owned by the denoise, so a per-tier
+/// constant at the model's default geometry is the honest shape there — the manifest schema's
+/// "video = default frames".
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_video(
     api: &ApiClient,
@@ -5617,13 +5658,17 @@ async fn generate_candle_video_using(
             Some((tier_dir, quant)) => (tier_dir, quant),
             None => (snapshot_dir, None),
         };
-        // The Wan weights-floor VRAM fit gate (sc-12344), the non-Mochi half of this lane's admission
-        // check. Runs on the RESOLVED tier dir (so it sizes the tier that will actually load, not the
-        // manifest's default — the sc-12090 lesson) and BEFORE `candle_ensure_wan_lightning_present`
-        // below, so a card that cannot hold the weights is refused without first paying for the
-        // Lightning fetch. A no-op for `ltx`/`svd`, which are exempt — see `vram_gate::wan_weight_components`.
+        // The Wan VRAM fit gate: the tier's MEASURED peak (sc-12402) when the manifest carries one,
+        // else the sc-12344 weights floor. The non-Mochi half of this lane's admission check. Runs on
+        // the RESOLVED tier (so it sizes the tier that will actually load, not the manifest's default —
+        // the sc-12090 lesson; `candle_wan_tier_key` derives the manifest key from the resolver's own
+        // marker for exactly that reason) and BEFORE `candle_ensure_wan_lightning_present` below, so a
+        // card that cannot fit the job is refused without first paying for the Lightning fetch. A no-op
+        // for `ltx`/`svd`, which are exempt — see `vram_gate::wan_weight_components`.
         let dir = wan_vram_preflight(
             engine_id,
+            &request.model_manifest_entry,
+            candle_wan_tier_key(quant),
             dir,
             &settings.gpu_id,
             candle_video_vram_budget(settings).await,
@@ -12517,10 +12562,24 @@ mod tests {
 
     /// Drive `generate_mochi_using` against `probe` with the Mochi tier at `root` and an MLX budget of
     /// `cap_gb`, from a plain `#[test]` — the env overrides are process-global, so the whole async run
-    /// has to sit inside the [`ENV_LOCK`] the sync `temp_env_vars` holds.
+    /// has to sit inside the crate-wide env lock the sync `temp_env_vars` holds.
     ///
-    /// `api` points at a closed port on purpose: reaching the network would be a bug in this test, and
-    /// an unroutable URL makes that fail loudly rather than depending on a stub's fidelity.
+    /// Both URLs point at a closed port on purpose: reaching the network would be a bug in these tests,
+    /// and an unroutable URL makes that fail loudly rather than depending on a stub's fidelity.
+    /// `api_url` alone is NOT enough — a tier fetch dials `huggingface_base_url`
+    /// (`HuggingFaceSnapshot::resolve` → `{base_url}/api/models/…/tree/…`), which `Settings::from_env()`
+    /// defaults to the real `https://huggingface.co`; `api_url` only carries progress/heartbeat. That is
+    /// exactly the trap #1577 fixed in `generate_mochi_using_refuses_before_paying_for_the_tier_download`
+    /// (see its doc comment), and this helper had it one field over: a caller passing `mlxQuantize: 8`
+    /// reaches `ensure_mochi_q8_present` → `ensure_mochi_tier_present`, and `SceneWorks/mochi-1-mlx` is a
+    /// public repo, so the tree resolve SUCCEEDS against the live hub and a ~13 GiB pull can start
+    /// landing before the heartbeat to the closed `api_url` trips it (sc-12380).
+    ///
+    /// `HF_HUB_CACHE` is pinned for the same reason: `huggingface_hub_cache_dir` reads it (and
+    /// `HUGGINGFACE_HUB_CACHE` / `HF_HOME`) BEFORE `data_dir`, so pinning `data_dir` does NOT make the
+    /// cache lookup hermetic — left ambient, a dev box's real cache decides it, and the desktop injects
+    /// `HF_HOME` as a matter of course. Pointed at a dir with no Mochi repo, so `huggingface_snapshot_dir`
+    /// is `None` and `ensure_mochi_tier_present` early-returns before any network touch.
     #[cfg(target_os = "macos")]
     fn drive_mochi_arm(
         root: &Path,
@@ -12530,13 +12589,17 @@ mod tests {
     ) -> WorkerResult<(DecodedVideo, Value)> {
         let settings = Settings {
             data_dir: root.join("unused-data-dir"),
-            api_url: "http://127.0.0.1:0".to_owned(),
-            ..Settings::from_env()
+            ..offline_settings()
         };
         let job = mochi_job_snapshot();
         let loader = probe.loader();
+        let hf_cache = root.join("unused-hf-cache");
         temp_env_vars(
             &[
+                (
+                    "HF_HUB_CACHE",
+                    hf_cache.to_str().expect("utf-8 fixture hub"),
+                ),
                 (MOCHI_DIR_ENV, root.to_str().expect("utf-8 fixture root")),
                 (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, cap_gb),
             ],
@@ -12831,13 +12894,11 @@ mod tests {
         let hub = mochi_hf_cache_shared_only("arm_precheck");
         let probe = ArmProbe::default();
         let request = mochi_request(json!({ "mlxQuantize": 8 }));
+        // `offline_settings` pins BOTH `api_url` and the `huggingface_base_url` the tier fetch
+        // actually dials — see above, and its own doc comment.
         let settings = Settings {
             data_dir: hub.join("unused-data-dir"),
-            api_url: "http://127.0.0.1:0".to_owned(),
-            // The URL the tier fetch actually dials — see above. Unroutable ⇒ the failure path can
-            // never reach the real hub.
-            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
-            ..Settings::from_env()
+            ..offline_settings()
         };
         let job = mochi_job_snapshot();
         let loader = probe.loader();
@@ -12896,10 +12957,13 @@ mod tests {
         let root = mochi_root("arm_lattice_candle", &["q4"], true);
         let probe = ArmProbe::default();
         let request = mochi_request(json!({}));
+        // This pinned `api_url` alone until sc-12380. It never dialed the hub only because an empty
+        // `advanced` makes `mochi_wants_q8`/`_bf16` false, so `ensure_mochi_*_present` early-outs
+        // before the fetch — i.e. it was one request-shape change away from the #1577 bug.
+        // `offline_settings` pins `huggingface_base_url` too, so it cannot come back.
         let settings = Settings {
             data_dir: root.join("unused-data-dir"),
-            api_url: "http://127.0.0.1:0".to_owned(),
-            ..Settings::from_env()
+            ..offline_settings()
         };
         let job = mochi_job_snapshot();
         let loader = probe.loader();
@@ -12970,13 +13034,11 @@ mod tests {
         let hub = mochi_hf_cache_shared_only("candle_arm_precheck");
         let probe = ArmProbe::default();
         let request = mochi_request(json!({ "mlxQuantize": 8 }));
+        // `offline_settings` pins BOTH `api_url` and the `huggingface_base_url` the tier fetch
+        // actually dials, so the failure path can never reach the real hub.
         let settings = Settings {
             data_dir: hub.join("unused-data-dir"),
-            api_url: "http://127.0.0.1:0".to_owned(),
-            // The URL the tier fetch actually dials — unroutable ⇒ the failure path can never reach
-            // the real hub.
-            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
-            ..Settings::from_env()
+            ..offline_settings()
         };
         let job = mochi_job_snapshot();
         let loader = probe.loader();
@@ -13374,57 +13436,27 @@ mod tests {
         assert_eq!(mochi_raw_settings(&req, None)["mochiTier"], json!("bf16"));
     }
 
-    /// Set `key` to `value` (empty ⇒ removed) for the duration of `body`, then restore. The Mochi
-    /// resolver reads an operator override from the environment, and `std::env::set_var` is
-    /// process-global, so the tests that use it are serialized behind one mutex.
+    // The env seam is crate-wide (`crate::test_env`), not per-module: this binary runs every
+    // module's tests in ONE process, so a lock private to `video_jobs` serializes nothing against
+    // the `image_jobs` / `training_jobs` tests that write the same vars (sc-12380).
+    //
+    // Gated to match the consumers exactly. The parity lane builds this crate with NEITHER backend
+    // and runs `clippy -D warnings` over the test target, so an import held under a wider cfg than
+    // its users is an `unused_imports` error there rather than a warning.
+    // `offline_settings` is the one way to build a `Settings` for a test whose path could reach a
+    // download: it pins every network field unroutable, so no call site has to remember that
+    // `huggingface_base_url` (not `api_url`) is what a tier fetch dials. See its doc comment.
+    // Its consumers include the candle Mochi twins, so it rides the same `any(macos, candle)` gate
+    // as the helpers above rather than the macOS-only one below.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
-    fn temp_env_var<T>(key: &str, value: &str, body: impl FnOnce() -> T) -> T {
-        temp_env_vars(&[(key, value)], body)
-    }
+    use crate::test_env::{offline_settings, temp_env_var, temp_env_vars};
 
-    /// The single lock every env-scoped test serializes on. Shared by [`temp_env_var`] and
-    /// [`temp_env_vars`] so a one-var and a multi-var test can never interleave their mutations of the
-    /// process-global environment.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// [`temp_env_var`] for several vars set together, under ONE acquisition of the shared
-    /// [`ENV_LOCK`]. Nesting the single-var helper to get a second var would self-deadlock — the lock
-    /// is not reentrant — so a test needing e.g. both the Mochi dir override and the MLX memory cap
-    /// must come through here.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
-    fn temp_env_vars<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let restore: Vec<(String, Option<String>)> = vars
-            .iter()
-            .map(|(key, value)| {
-                let previous = std::env::var(key).ok();
-                if value.is_empty() {
-                    std::env::remove_var(key);
-                } else {
-                    std::env::set_var(key, value);
-                }
-                ((*key).to_owned(), previous)
-            })
-            .collect();
-        let out = body();
-        for (key, previous) in restore {
-            match previous {
-                Some(prior) => std::env::set_var(&key, prior),
-                None => std::env::remove_var(&key),
-            }
-        }
-        out
-    }
+    // Only the macOS-gated eros fixture pins a var for a whole test body — see the cfg note above.
+    #[cfg(target_os = "macos")]
+    use crate::test_env::EnvVars;
 
     /// sc-10418: the resolved video quant maps to the same normalized tier labels the
     /// image lane uses, so the Stats charts group video + image runs on one axis.
@@ -14727,7 +14759,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn bernini_conditioning_enforces_required_media() {
-        let settings = Settings::from_env();
+        // Offline: this builds a real `ApiClient`, and the guards under test are all that stand
+        // between it and the network. Pinned so a regression that moves a guard AFTER the I/O fails
+        // locally and loudly instead of dialing the real API/hub (sc-12380).
+        let settings = offline_settings();
         let api = ApiClient::new(&settings);
         let job: JobSnapshot = serde_json::from_value(json!({
             "id": "job-bernini-1",
@@ -15040,7 +15075,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn scail2_conditioning_guards_fire_before_io() {
-        let settings = Settings::from_env();
+        // "before_io" is the whole claim of this test — `offline_settings` is what makes a broken
+        // claim fail locally rather than reach the real API/hub (sc-12380).
+        let settings = offline_settings();
         let api = ApiClient::new(&settings);
         let job: JobSnapshot = serde_json::from_value(json!({
             "id": "job-scail2-1",
@@ -17917,15 +17954,21 @@ mod tests {
         assert!(none.is_empty());
     }
 
+    /// The fixture's own HF hub cache: the path `huggingface_hub_cache_dir` falls back to for this
+    /// `data_dir`. Pin `HF_HUB_CACHE` here (see [`ltx_eros_auto_injects_distill_lora_per_pass`]) and
+    /// the resolver returns this dir outright rather than by fallback, so the fixture no longer
+    /// depends on the ambient environment being unset.
+    #[cfg(target_os = "macos")]
+    fn fake_hf_hub_dir(data_dir: &Path) -> PathBuf {
+        data_dir.join("cache").join("huggingface").join("hub")
+    }
+
     /// Lay down a fake HF snapshot file under `data_dir`
     /// (`cache/huggingface/hub/models--<org>--<name>/snapshots/<rev>/<file>`) and return its path, so
     /// [`resolve_ltx_distill_adapter`] resolves hermetically (mirrors `write_fake_wan_lightning`).
     #[cfg(target_os = "macos")]
     fn write_fake_hf_lora(data_dir: &Path, repo: &str, file: &str) -> PathBuf {
-        let snapshot = data_dir
-            .join("cache")
-            .join("huggingface")
-            .join("hub")
+        let snapshot = fake_hf_hub_dir(data_dir)
             .join(format!("models--{}", repo.replace('/', "--")))
             .join("snapshots")
             .join("deadbeef");
@@ -17953,26 +17996,23 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn ltx_eros_auto_injects_distill_lora_per_pass() {
-        // Hold ENV_LOCK for the whole test. This fixture resolves ONLY while the HF cache-dir env
-        // overrides are unset (`huggingface_hub_cache_dir` reads them BEFORE `data_dir`), and the
-        // check below reads them once, at entry. Without the lock a concurrent `temp_env_var(s)`
-        // caller — e.g. `generate_mochi_using_refuses_before_paying_for_the_tier_download`, which
-        // pins `HF_HUB_CACHE` to its own fixture hub — can set the var AFTER that check passes and
-        // BEFORE `resolve_ltx_adapters` reads it, pointing the resolver at the wrong cache: the
-        // distill LoRA is then "not installed" and this test fails for a reason that has nothing to
-        // do with it. `set_var` is process-global; only the lock makes the read-then-use atomic.
-        // Deterministic (12/12) when the two tests are selected together (sc-12306).
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // The fake HF snapshot only resolves when the cache-dir env overrides are unset (else the real
-        // cache is consulted). Skip rather than assert-false in that unusual local config.
-        if std::env::var_os("HF_HUB_CACHE").is_some()
-            || std::env::var_os("HUGGINGFACE_HUB_CACHE").is_some()
-            || std::env::var_os("HF_HOME").is_some()
-        {
-            return;
-        }
         let dir = std::env::temp_dir().join(format!("sw_eros_distill_{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
+        // PIN the hub cache at this fixture's own dir for the whole test, rather than depending on
+        // the ambient environment. `huggingface_hub_cache_dir` reads `HF_HUB_CACHE` FIRST and returns
+        // it outright, so this alone decides the resolver — whatever the host or a concurrent test
+        // holds in the lower-priority `HUGGINGFACE_HUB_CACHE` / `HF_HOME`.
+        //
+        // This replaces a read-then-use ("skip if any HF var is set", then resolve) that was wrong
+        // twice over: process-global `set_var` from another test could land between the check and the
+        // use (sc-12380), AND on any box with an ambient HF cache the guard turned "env is set" into
+        // a silent PASS that asserted nothing. Pinning removes both — there is no window to race and
+        // no configuration in which this test quietly stops testing. `EnvVars` holds the crate-wide
+        // env lock until it drops at end of test, so no concurrent writer can retarget the resolver.
+        let _env = EnvVars::set(&[(
+            "HF_HUB_CACHE",
+            fake_hf_hub_dir(&dir).to_str().expect("utf-8 fixture hub"),
+        )]);
         let repo = "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments";
         let file = "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors";
         let distill = write_fake_hf_lora(&dir, repo, file);
@@ -18351,7 +18391,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn video_clip_conditioning_requires_ic_lora() {
-        let settings = Settings::from_env();
+        // The IC-LoRA gate returning before any I/O is the claim; pin the network fields so a
+        // regression that breaks it fails locally instead of dialing out (sc-12380).
+        let settings = offline_settings();
         let api = ApiClient::new(&settings);
         // The IC-LoRA gate is the resolver's first check, so it returns before touching `job`
         // / the api / disk — a minimal snapshot suffices.

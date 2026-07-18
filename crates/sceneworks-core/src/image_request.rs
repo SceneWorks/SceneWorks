@@ -6,13 +6,28 @@
 //! and `model_manifest_entry` maps pass through verbatim (they carry per-family knobs
 //! like steps/guidanceScale/mlxQuantize/poses/angleSet/controlScale/referenceStrength
 //! and the resolved model manifest entry), so adding a family needs no DTO change.
+//!
+//! **Geometry, deliberately un-normalized (sc-12384).** Unlike the video request
+//! ([`crate::video_request`], which floors dims to `limits.requiresDimensionsMultipleOf`
+//! and fits them into `limits.maxPixels` via `normalized_dimensions`), the image lane
+//! applies NO stride/area refit — `width`/`height` are only sanity-clamped to
+//! `256..=4096` and handed to the engine as-is. The engine is the single authority on
+//! image geometry: it rejects an illegal size loudly rather than the app silently
+//! substituting a different one (the failure mode a refit twin would reintroduce — cf.
+//! the per-side clamp `image_jobs::sensenova::sensenova_dim` was doing to over-cap
+//! SenseNova buckets before sc-12384 trimmed them). What keeps that contract honest is
+//! not a runtime normalize but a build-time guard: every image model's advertised
+//! `limits.resolutions` + default must fit its PINNED engine's `[min_size, max_size]`
+//! envelope, asserted by `sceneworks_worker::engines`'s
+//! `shipped_image_geometry_is_within_the_pinned_engine_envelope`. So the manifest may
+//! only advertise buckets the engine honors, and no app-layer refit is needed or wanted.
 
 use serde_json::Value;
 
 use crate::contracts::{ImageUpscaleRequest, JsonObject};
 use crate::payload_util::{
-    array_or_empty, clamped_u32, int_array, nonempty_string_or, object_or_empty, optional_i64,
-    optional_id, string_list, string_or,
+    array_or_empty, clamped_u32, declared_resolution, int_array, nonempty_string_or,
+    object_or_empty, optional_i64, optional_id, string_list, string_or,
 };
 
 /// Default model when the payload omits one (matches the Python worker).
@@ -23,6 +38,72 @@ const DEFAULT_STYLE_PRESET: &str = "cinematic";
 /// video request (sc-6139) so image- and video-conditioned sources normalize identically.
 pub(crate) const DEFAULT_FIT_MODE: &str = "crop";
 pub(crate) const FIT_MODES: [&str; 4] = ["crop", "pad", "outpaint", "stretch"];
+
+/// The square used when neither the caller nor the model's manifest entry names a size — the
+/// historical blanket, kept for models that declare no `defaults.resolution`.
+const DEFAULT_DIMENSION: u32 = 1024;
+
+/// The batch size used when neither the caller nor the model's manifest entry names one — the
+/// historical blanket, kept for models that declare no `defaults.count`.
+const DEFAULT_COUNT: u32 = 4;
+
+/// The payload-sanity bounds on batch size. NOT a model's limit: that is `limits.count`, which is
+/// still unread (sc-12335 — a menu, and a separate question from this default).
+const MIN_COUNT: u32 = 1;
+const MAX_COUNT: u32 = 8;
+
+/// `defaults.count` from a resolved manifest entry, or `None` for the blanket [`DEFAULT_COUNT`].
+///
+/// The fifth and last dead `defaults.*` key, and the widest: **29 of the 45** image models declare
+/// `defaults.count: 1` while the API blanket-defaulted to **4**, so a caller that named no count got
+/// four images from a model that asks for one.
+///
+/// It matters most on exactly the family sc-12427 just moved: `sensenova_u1_8b` declares
+/// `2048x2048` **and** `count: 1`. Honoring only the resolution took a bare
+/// `generate_image(model = "sensenova_u1_8b", prompt = …)` from `4 x 1024²` to `4 x 2048²` — **4x
+/// the pixels of what shipped before**, where the model's own declaration is `1 x 2048²`, i.e. the
+/// original cost at the correct geometry. The two keys are one intent; reading half of it made the
+/// bare call more expensive rather than more correct.
+///
+/// Zero web blast radius, for the same reason as every other key here: the studio always SENDS a
+/// count (`ImageStudio.jsx:1950`), so it is a caller that names a value and never reaches this
+/// path. That the studio *seeds* its own control with a hardcoded 4 rather than the model's
+/// declaration is a separate, user-visible question — it belongs to `limits.count` / sc-12335, not
+/// to this default.
+///
+/// Same never-invent-from-a-typo posture as its siblings: a declared count outside
+/// [`MIN_COUNT`]`..=`[`MAX_COUNT`] is not a batch anyone meant, so it falls back to the blanket.
+pub fn default_count(model_manifest_entry: &JsonObject) -> Option<u32> {
+    model_manifest_entry
+        .get("defaults")
+        .and_then(Value::as_object)
+        .and_then(|defaults| defaults.get("count"))
+        .and_then(Value::as_u64)
+        .filter(|count| (u64::from(MIN_COUNT)..=u64::from(MAX_COUNT)).contains(count))
+        .map(|count| count as u32)
+}
+
+/// The payload-sanity bounds on either dimension (the Python `safe_int` clamp). Deliberately wider
+/// than the video lane's 1920 ceiling: image models legitimately render at 2048 (the sensenova U1
+/// family declares `2048x2048`), which is why [`default_resolution`] takes its bounds rather than
+/// sharing one envelope across lanes.
+const MIN_DIMENSION: u32 = 256;
+const MAX_DIMENSION: u32 = 4096;
+
+/// `defaults.resolution` from a resolved manifest entry as `(width, height)`, or `None` for the
+/// blanket [`DEFAULT_DIMENSION`] square.
+///
+/// The image half of the dead-`defaults.*` sweep (sc-12400 closed the video lane's fps / duration /
+/// resolution). The web honors this key (`ImageStudio.jsx:215`); Rust did not, so a raw API / MCP
+/// caller that named no size rendered a blanket 1024x1024 for **5 of the 45** image models that
+/// declare something else — the four `sensenova_u1_8b` variants at `2048x2048` (HALF the declared
+/// resolution, on the text/infographic family where pixels are the point) and `chroma1_flash` at
+/// `768x768`.
+///
+/// Same never-invent-from-a-typo posture as its video twin; see [`declared_resolution`].
+pub fn default_resolution(model_manifest_entry: &JsonObject) -> Option<(u32, u32)> {
+    declared_resolution(model_manifest_entry, MIN_DIMENSION, MAX_DIMENSION)
+}
 
 /// A typed image-generation request, parsed from a job payload.
 #[derive(Debug, Clone, PartialEq)]
@@ -70,17 +151,34 @@ impl ImageRequest {
     /// missing fields fall back to the Python defaults and `project_id` may be empty
     /// — the caller validates it is present (the worker rejects an empty project id).
     pub fn from_payload(payload: &JsonObject) -> Self {
+        // Hoisted above the struct literal because the geometry now depends on it — the same shape
+        // `VideoRequest::from_payload` uses, and the reason the field is read here rather than in
+        // field order below.
+        let model_manifest_entry = object_or_empty(payload, "modelManifestEntry");
+        let (default_width, default_height) = default_resolution(&model_manifest_entry)
+            .unwrap_or((DEFAULT_DIMENSION, DEFAULT_DIMENSION));
+        let default_count = default_count(&model_manifest_entry).unwrap_or(DEFAULT_COUNT);
         Self {
             project_id: string_or(payload, "projectId", ""),
             mode: nonempty_string_or(payload, "mode", DEFAULT_MODE),
             prompt: string_or(payload, "prompt", ""),
             negative_prompt: string_or(payload, "negativePrompt", ""),
             model: nonempty_string_or(payload, "model", DEFAULT_MODEL),
-            count: clamped_u32(payload.get("count"), 4, 1, 8),
+            count: clamped_u32(payload.get("count"), default_count, MIN_COUNT, MAX_COUNT),
             seed: optional_i64(payload, "seed"),
             seeds: int_array(payload, "seeds"),
-            width: clamped_u32(payload.get("width"), 1024, 256, 4096),
-            height: clamped_u32(payload.get("height"), 1024, 256, 4096),
+            width: clamped_u32(
+                payload.get("width"),
+                default_width,
+                MIN_DIMENSION,
+                MAX_DIMENSION,
+            ),
+            height: clamped_u32(
+                payload.get("height"),
+                default_height,
+                MIN_DIMENSION,
+                MAX_DIMENSION,
+            ),
             style_preset: nonempty_string_or(payload, "stylePreset", DEFAULT_STYLE_PRESET),
             loras: array_or_empty(payload, "loras"),
             character_id: optional_id(payload, "characterId"),
@@ -90,7 +188,7 @@ impl ImageRequest {
             reference_asset_ids: string_list(payload, "referenceAssetIds"),
             mask_asset_id: optional_id(payload, "maskAssetId"),
             fit_mode: normalize_fit_mode(payload.get("fitMode").and_then(Value::as_str)),
-            model_manifest_entry: object_or_empty(payload, "modelManifestEntry"),
+            model_manifest_entry,
             advanced: object_or_empty(payload, "advanced"),
             upscale: parse_upscale(payload),
         }

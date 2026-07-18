@@ -267,6 +267,50 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
     }
 
 
+def test_wan_2_2_candle_vram_tiers_match_measured_peaks():
+    """sc-12402/sc-12631: never regress the measured 5B peaks to estimates.
+
+    Measured on an idle RTX PRO 6000 at wan_2_2's own shipped default (832x480, 121 frames,
+    20 steps, CFG on) -- the schema's "video = default frames". The peak is the DENOISE
+    (weights-dominated after sc-12434 chunked the sdpa); the z48 vae22 decode adds 0.0 GB, which
+    is what makes these card-independent despite the decode tiler budgeting off total VRAM.
+    """
+    manifest = _load_builtin_models_manifest()
+    wan = next(model for model in manifest["models"] if model["id"] == "wan_2_2")
+    candle = wan["candle"]
+
+    assert candle["measured"] is True
+    assert {tier: candle["vramGbByTier"][tier] for tier in ("q4", "q8", "bf16")} == {
+        "q4": 46.1,
+        "q8": 48.7,
+        "bf16": 54.0,
+    }
+    # minMemoryGb gates the default/lightest (q4) tier + the fit gate's 2 GB headroom.
+    assert candle["minMemoryGb"] == 48
+
+
+def test_wan_a14b_candle_vram_tiers_are_flagged_estimated():
+    """sc-12402/sc-12434: the A14B blocks are ESTIMATED and must stay flagged as such.
+
+    The candle A14B does not render at ANY advertised geometry (sc-12434: 832x480 OOMs a 96 GB
+    card before step 1; the 1280x720 default is engine-rejected -- sc-12433), so there is no peak
+    to measure. The blocks exist so the fit gate REFUSES the model instead of admitting it into a
+    ~28 GiB download + ~100 s load + OOM. `measured: false` is the flag to re-measure once sc-12434
+    ports attention chunking -- if that ever flips to true without new numbers, this is the tripwire.
+    """
+    manifest = _load_builtin_models_manifest()
+    for model_id in ("wan_2_2_t2v_14b", "wan_2_2_i2v_14b"):
+        entry = next(m for m in manifest["models"] if m["id"] == model_id)
+        candle = entry["candle"]
+        assert candle["measured"] is False, f"{model_id}: A14B numbers are derived, not measured"
+        # Every tier must exceed any GPU that exists, so the gate refuses on all hardware.
+        for tier, peak in candle["vramGbByTier"].items():
+            assert peak > 96, (
+                f"{model_id} {tier} must not appear to fit a 96 GB card -- sc-12434 proved the "
+                f"lightest tier OOMs one before step 1, got {peak}"
+            )
+
+
 def test_sdxl_manifest_has_mlx_block():
     # sdxl carries an mlx block (no `limits` override here — the MLX SDXL schedule
     # matches the torch EulerDiscrete default, and there's no per-model sampler menu

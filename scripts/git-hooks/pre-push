@@ -1,13 +1,13 @@
 #!/bin/sh
-# sc-10463: before pushing Rust changes, run the "neither" build (Linux, no backend-candle) locally
-# so the cfg/dead-code trap that only surfaces in CI's parity lane is caught here instead of after a
-# full CI round-trip. Only runs when the pushed commits touch Rust; skip with SKIP_NEITHER_CHECK=1 or
-# `git push --no-verify`. See CONTRIBUTING.md ("The base.rs / candle cfg rule").
+# sc-10463: before pushing Rust changes, run the configurations a macOS `npm run rust:check` CANNOT
+# compile, so their cfg/dead-code traps are caught here instead of after a full CI round-trip:
+#   * the "neither" build (Linux, no backend-candle)   -> CI's parity lane
+#   * the "candle" build (not-macOS + backend-candle)  -> CI's windows-candle lane   (sc-12356)
+# The candle lane matters most: it is the ONLY compiler of `cfg(all(not(macos), backend-candle))`,
+# and its self-hosted runner can queue for 20+ minutes, so a typo there is expensive to learn about.
+# Only runs when the pushed commits touch Rust. Skip with SKIP_NEITHER_CHECK=1 / SKIP_CANDLE_CHECK=1
+# or `git push --no-verify`. See CONTRIBUTING.md ("The base.rs / candle cfg rule").
 set -eu
-
-if [ "${SKIP_NEITHER_CHECK:-0}" = "1" ]; then
-  exit 0
-fi
 
 zero="0000000000000000000000000000000000000000"
 rust_changed=0
@@ -37,19 +37,38 @@ done
 
 [ "$rust_changed" = "0" ] && exit 0
 
-echo "Running the 'neither' build (Linux, no backend-candle) for pushed Rust changes..."
-echo "(skip with SKIP_NEITHER_CHECK=1 or 'git push --no-verify')"
-
 if ! command -v npm >/dev/null 2>&1; then
-  echo "npm is required to run the neither-build check. Install Node/npm or add it to PATH."
+  echo "npm is required to run the pre-push Rust checks. Install Node/npm or add it to PATH."
   exit 1
 fi
 
-if ! npm run --silent rust:check:neither; then
-  echo
-  echo "The neither build failed: an item used only by base.rs / candle-only code is dead on the"
-  echo "Linux no-candle build. Gate it with the same cfg as base.rs:"
-  echo '  #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]'
-  echo "See CONTRIBUTING.md ('The base.rs / candle cfg rule')."
-  exit 1
+if [ "${SKIP_NEITHER_CHECK:-0}" != "1" ]; then
+  echo "Running the 'neither' build (Linux, no backend-candle) for pushed Rust changes..."
+  echo "(skip with SKIP_NEITHER_CHECK=1 or 'git push --no-verify')"
+
+  if ! npm run --silent rust:check:neither; then
+    echo
+    echo "The neither build failed: an item used only by base.rs / candle-only code is dead on the"
+    echo "Linux no-candle build. Gate it with the same cfg as base.rs:"
+    echo '  #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]'
+    echo "See CONTRIBUTING.md ('The base.rs / candle cfg rule')."
+    exit 1
+  fi
+fi
+
+if [ "${SKIP_CANDLE_CHECK:-0}" != "1" ]; then
+  echo "Running the 'candle' build (not-macOS + backend-candle) for pushed Rust changes..."
+  echo "(skip with SKIP_CANDLE_CHECK=1 or 'git push --no-verify')"
+
+  # --allow-skip: a missing cross target / CUDA toolkit means "cannot check here", not "broken" —
+  # it must never block a push from a dev who has not opted into the toolchain.
+  if ! npm run --silent rust:check:candle -- --allow-skip; then
+    echo
+    echo "The candle build failed: this is the ONLY lane that compiles"
+    echo '  #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]'
+    echo "so a macOS 'npm run rust:check' cannot see it. Common causes: a pub(crate) symbol defined"
+    echo "under a narrower cfg than its candle-only caller (E0425), or an item that is dead once the"
+    echo "macOS half is excluded. See CONTRIBUTING.md ('The candle build')."
+    exit 1
+  fi
 fi

@@ -624,14 +624,26 @@ pub(crate) struct ImageJobRequest {
     pub(crate) negative_prompt: String,
     #[serde(default = "default_image_model")]
     pub(crate) model: String,
-    #[serde(default = "default_image_count")]
-    pub(crate) count: u32,
+    /// Batch size, or `None` when the caller named none — resolved from the model's declared
+    /// `defaults.count` in `create_image_job`, not from a blanket 4 that **29 of the 45** image
+    /// models contradict with `count: 1` (sc-12427 follow-up).
+    ///
+    /// `CharacterTestRequest` keeps the blanket: its route resolves no `modelManifestEntry`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) count: Option<u32>,
     #[serde(default)]
     pub(crate) seed: Option<i64>,
-    #[serde(default = "default_image_size")]
-    pub(crate) width: u32,
-    #[serde(default = "default_image_size")]
-    pub(crate) height: u32,
+    /// Output geometry, or `None` per side when the caller named none — resolved from the model's
+    /// declared `defaults.resolution` in `create_image_job`, not from a blanket 1024 square that 5
+    /// of the 45 image models do not declare (sc-12400). Mirrors `VideoJobRequest::width`.
+    ///
+    /// Only this DTO goes optional: `CharacterTestRequest` and `InterleaveJobRequest` keep the
+    /// blanket because their routes resolve no `modelManifestEntry`, so there is no declared
+    /// default to resolve from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) height: Option<u32>,
     #[serde(default = "default_style_preset")]
     pub(crate) style_preset: String,
     #[serde(default)]

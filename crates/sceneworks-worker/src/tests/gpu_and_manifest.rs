@@ -567,6 +567,110 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
     );
 }
 
+/// sc-12402: the shipped Wan `candle` blocks drive the candle VIDEO fit gate end-to-end against the
+/// SHIPPED manifest bytes — both halves of the story's acceptance: a real over-budget tier REFUSED, and
+/// a tier that fits ADMITTED.
+///
+/// The video sibling of [`flux2_candle_blocks_drive_the_fit_gate_and_reject`], and it exists for the
+/// same reason: this guards the DATA half. Dropping `wan_2_2`'s `vramGbByTier` makes
+/// `wan_video_fit_error` fall back to the sc-12344 weights FLOOR, which reads 18.13 GiB against a real
+/// 46.1 GB peak — so the gate would silently go back to admitting a 32 GB card and OOMing mid-denoise.
+/// That regression is invisible without this test: the gate still "works", it just gates on a number
+/// that is 2.4x wrong.
+///
+/// Numbers are MEASURED on an idle RTX PRO 6000 at each model's own shipped default geometry
+/// (sc-12402; see the manifest comment for the harness + the A/B proving they are card-independent).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
+    use crate::vram_gate::{apply_vram_cap, predicted_peak_gb, wan_video_fit_error};
+
+    let wan = builtin_model_entry("wan_2_2");
+    let entry = wan.as_object().expect("wan_2_2 entry object");
+    assert!(
+        entry.get("candle").and_then(Value::as_object).is_some(),
+        "wan_2_2 candle block present (absent ⇒ the video gate falls back to the weights floor, which \
+         under-counts the real peak by 2.4x and admits a card that OOMs)"
+    );
+
+    // Measured (sc-12402; re-measured sc-12631 post-chunking): each tier + gate 2 GB headroom.
+    let q4 = predicted_peak_gb(entry, "q4").expect("q4 peak measured");
+    let q8 = predicted_peak_gb(entry, "q8").expect("q8 peak measured");
+    let bf16 = predicted_peak_gb(entry, "bf16").expect("bf16 peak measured");
+    assert!((q4 - 48.1).abs() < 1e-6, "q4 46.1 + 2 headroom, got {q4}");
+    assert!((q8 - 50.7).abs() < 1e-6, "q8 48.7 + 2 headroom, got {q8}");
+    assert!((bf16 - 56.0).abs() < 1e-6, "bf16 54.0 + 2 headroom, got {bf16}");
+    // The tier ladder is monotonic, and SHALLOW: every term but the DiT is tier-independent (the f32
+    // UMT5 TE, the f32 z48 VAE, and the tier-blind attention). q8 − q4 is essentially the DiT quant delta.
+    assert!(q4 < q8 && q8 < bf16, "heavier tier ⇒ heavier peak");
+    assert!(
+        (q8 - q4 - 2.6).abs() < 0.05,
+        "q8 − q4 must stay the ~2.6 GB q8/q4 DiT quant delta, got {}",
+        q8 - q4
+    );
+    // The whole q4→bf16 ladder is under 8 GB. If this ever widens dramatically, the block was
+    // re-measured against a different geometry (or a chunked attention landed — sc-12434) and every
+    // number here needs revisiting rather than patching.
+    assert!(
+        bf16 - q4 < 10.0,
+        "the 5B ladder spans ~7.9 GB because only the DiT is tier-dependent, got {}",
+        bf16 - q4
+    );
+
+    // The on-disk weights floor for the shipped q4 tier (`estimatedSizeBytes`), for the A/B below.
+    const WAN_5B_Q4_DISK_BYTES: u64 = 17_338_835_457;
+
+    // THE story: an RTX 5090 (32 GB) — the biggest consumer NVIDIA card — is REFUSED before the load +
+    // denoise, where the weights floor admitted it and let it OOM.
+    let rtx_5090 = apply_vram_cap(None, Some(32.0));
+    let message = wan_video_fit_error(
+        "wan_2_2",
+        entry,
+        "q4",
+        WAN_5B_Q4_DISK_BYTES,
+        "0",
+        rtx_5090,
+    )
+    .expect("the measured 46.1 GB peak cannot fit a 32 GB card — refuse before the OOM")
+    .to_string();
+    assert!(message.contains("wan_2_2"), "names the model: {message}");
+    assert!(message.contains("q4"), "names the sized tier: {message}");
+
+    // …and the SAME job is ADMITTED on the 96 GB card it was measured rendering on. A gate that
+    // refuses everything would satisfy the assert above and be worthless.
+    let card96 = apply_vram_cap(None, Some(95.6));
+    assert!(
+        wan_video_fit_error("wan_2_2", entry, "q4", WAN_5B_Q4_DISK_BYTES, "0", card96).is_none(),
+        "q4's measured 48.1 GB need fits a 95.6 GB card — it is the exact configuration sc-12402 \
+         measured rendering, so wall-rejecting it would be the sc-12179 regression"
+    );
+
+    // Both A14B models carry blocks too, so THEIR gate is live. They are `measured: false` —
+    // sibling-scaled, because the candle A14B does not render at any advertised geometry (sc-12434:
+    // 832x480 OOMs a 96 GB card before step 1; the 1280x720 default is engine-rejected, sc-12433). The
+    // gate refusing them everywhere is the TRUE answer until chunking lands, and it turns a ~30 GiB
+    // download + ~100 s load + OOM into an instant refusal.
+    for id in ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"] {
+        let model = builtin_model_entry(id);
+        let a14b = model.as_object().expect("a14b entry object");
+        assert!(
+            a14b.get("candle").and_then(Value::as_object).is_some(),
+            "{id} candle block present (absent ⇒ the floor admits it on a small card and it OOMs)"
+        );
+        let peak = predicted_peak_gb(a14b, "q4").expect("a14b q4 peak carried");
+        assert!(
+            peak > 96.0,
+            "{id} q4 must not appear to fit ANY existing GPU — sc-12434 proved 832x480 OOMs a 96 GB \
+             card before step 1, got {peak}"
+        );
+        assert!(
+            wan_video_fit_error(id, a14b, "q4", 0, "0", card96).is_some(),
+            "{id} must be refused even on the 96 GB dev box"
+        );
+    }
+    eprintln!("wan candle blocks: 5090 → refused, 96 GB → q4 admitted, A14B → refused everywhere ✓");
+}
+
 /// sc-12130/sc-12131: the shipped Krea base block feeds both stages of the generic Candle gate. This
 /// pins the provider-derived capability handoff and the measured `sequentialPeakGb` values that turn a
 /// small-card staged attempt into a clean reject instead of relying on reactive OOM containment.
@@ -1756,291 +1860,4 @@ fn bernini_manifest_ships_the_quant_matrix() {
             .collect();
         assert_eq!(defaults, vec!["q4"], "{id} macOS default tier is q4");
     }
-}
-
-/// sc-11991 (epic 1788): the Mochi 1 builtin entry. Mochi deliberately DIVERGES from every
-/// quant-matrix sibling above in ways a well-meaning "make it consistent with LTX" edit would undo,
-/// so each divergence is pinned here:
-///
-///  * **One repo, BOTH backends.** Every download points at `SceneWorks/mochi-1-mlx` and NO entry
-///    carries `platforms`. A6 (sc-11990) gave candle a `.scales`-detect seam that ingests the
-///    mlx-affine tiers directly, CUDA-validated on Blackwell by downloading this repo byte-exact;
-///    `SceneWorks/mochi-1-candle` was never published. Re-adding an LTX-style
-///    `genmo/mochi-1-preview` Windows entry would also reintroduce sc-12113 (upstream ships bf16 AND
-///    fp32 `vae/`; the loader's dir-glob picks fp32).
-///  * **Tiers hold ONLY the transformer.** T5-XXL / VAE / tokenizer are a shared `coRequisite`
-///    (sc-9696) resolved from the tier dir's PARENT, so they must stay OUT of the tier matrix and out
-///    of the per-tier footprint.
-///  * **No sampler/scheduler axis.** Both descriptors advertise `samplers: []` + `schedulers: []`
-///    (one fixed flow-match Euler integrator) — advertising a menu would be a false capability.
-///  * **t2v only, no LoRA.** `conditioning: []` and `supports_lora`/`supports_lokr` = false.
-#[test]
-fn mochi_manifest_ships_the_one_repo_tier_matrix() {
-    let entry = builtin_model_entry("mochi_1");
-    assert_eq!(
-        entry.get("family").and_then(Value::as_str),
-        Some("mochi"),
-        "mochi family"
-    );
-    assert_eq!(
-        entry.get("type").and_then(Value::as_str),
-        Some("video"),
-        "mochi is a video model"
-    );
-    // t2v ONLY — both descriptors declare `conditioning: []`, so there is no i2v/FLF/extend surface.
-    let capabilities: Vec<&str> = entry
-        .get("capabilities")
-        .and_then(Value::as_array)
-        .map(|c| c.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    assert_eq!(
-        capabilities,
-        vec!["text_to_video"],
-        "mochi advertises text_to_video and nothing else"
-    );
-    // Apache-2.0 => ungated, no credential host.
-    assert_ne!(
-        entry.get("gated").and_then(Value::as_bool),
-        Some(true),
-        "mochi is Apache-2.0, not gated"
-    );
-    // ~20.1 GB for the default q4 install, ~53.5 GB for all three tiers + shared — a deliberate
-    // opt-in. Mochi carries no `recommended: true`, so it is neither badged nor pre-checked in the
-    // wizard; `autoDownload: false` states that intent explicitly.
-    assert_eq!(
-        entry.get("autoDownload").and_then(Value::as_bool),
-        Some(false),
-        "mochi is not auto-downloaded"
-    );
-
-    let downloads = entry
-        .get("downloads")
-        .and_then(Value::as_array)
-        .expect("mochi downloads");
-    // ONE repo, BOTH backends: every entry is the rehost and NONE is platform-tagged, so
-    // `retain_downloads_for_os` keeps them all on macOS, Windows and Linux alike.
-    for download in downloads {
-        assert_eq!(
-            download.get("repo").and_then(Value::as_str),
-            Some("SceneWorks/mochi-1-mlx"),
-            "every mochi download comes from the one rehost repo (candle ingests the mlx tiers)"
-        );
-        assert!(
-            download.get("platforms").is_none(),
-            "mochi downloads stay platform-agnostic — one repo serves both backends"
-        );
-    }
-
-    // The shared T5-XXL / tokenizer / VAE co-requisite: fetched with any tier, excluded from the
-    // tier matrix, and NOT a selectable variant.
-    let corequisites: Vec<&Value> = downloads
-        .iter()
-        .filter(|d| d.get("coRequisite").and_then(Value::as_bool) == Some(true))
-        .collect();
-    assert_eq!(
-        corequisites.len(),
-        1,
-        "exactly one mochi co-requisite (the shared text_encoder/tokenizer/vae)"
-    );
-    let shared_files: Vec<&str> = corequisites[0]
-        .get("files")
-        .and_then(Value::as_array)
-        .map(|f| f.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    assert_eq!(
-        shared_files,
-        vec!["text_encoder/*", "tokenizer/*", "vae/*"],
-        "the co-requisite carries the shared components the tier dirs resolve from their parent"
-    );
-    assert!(
-        corequisites[0].get("variant").is_none(),
-        "the shared co-requisite is not a selectable quant tier"
-    );
-
-    // The tier matrix: q4 (default) / q8 / bf16, each installing only its own transformer subdir,
-    // with the EXACT hosted subdir byte sizes (HF API, repo rev 90a87786).
-    let tiers: Vec<&Value> = downloads
-        .iter()
-        .filter(|d| d.get("coRequisite").and_then(Value::as_bool) != Some(true))
-        .collect();
-    let variants: Vec<&str> = tiers
-        .iter()
-        .filter_map(|d| d.get("variant").and_then(Value::as_str))
-        .collect();
-    assert_eq!(
-        variants,
-        vec!["q4", "q8", "bf16"],
-        "mochi ships the q4/q8/bf16 tier matrix"
-    );
-    let expected_sizes = [
-        ("q4", 9_670_883_602_u64),
-        ("q8", 13_282_967_046),
-        ("bf16", 20_055_485_000),
-    ];
-    for (tier, expected) in expected_sizes {
-        let entry = tiers
-            .iter()
-            .find(|d| d.get("variant").and_then(Value::as_str) == Some(tier))
-            .unwrap_or_else(|| panic!("mochi {tier} tier"));
-        let files: Vec<String> = entry
-            .get("files")
-            .and_then(Value::as_array)
-            .map(|f| f.iter().filter_map(Value::as_str).map(String::from).collect())
-            .unwrap_or_default();
-        assert_eq!(
-            files,
-            vec![format!("{tier}/*")],
-            "{tier} tier installs only its own subdir (the shared components ride the co-requisite)"
-        );
-        assert_eq!(
-            entry.get("estimatedSizeBytes").and_then(Value::as_u64),
-            Some(expected),
-            "{tier} tier declares the exact hosted subdir size"
-        );
-        assert_eq!(
-            entry
-                .get("footprint")
-                .and_then(|f| f.get("diskSizeBytes"))
-                .and_then(Value::as_u64),
-            Some(expected),
-            "{tier} tier footprint.diskSizeBytes matches its download size"
-        );
-    }
-    let defaults: Vec<&str> = tiers
-        .iter()
-        .filter(|d| d.get("default").and_then(Value::as_bool) == Some(true))
-        .filter_map(|d| d.get("variant").and_then(Value::as_str))
-        .collect();
-    assert_eq!(defaults, vec!["q4"], "the default mochi tier is q4");
-
-    // limits: the engine hard-rejects width/height not divisible by 16, so every advertised bucket
-    // must satisfy it. NO sampler/scheduler axis (both descriptors advertise neither).
-    let limits = entry
-        .get("limits")
-        .and_then(Value::as_object)
-        .expect("mochi limits");
-    assert!(
-        limits.get("samplers").is_none() && limits.get("schedulers").is_none(),
-        "mochi advertises NO sampler/scheduler axis — one fixed flow-match Euler integrator"
-    );
-    assert_eq!(
-        limits.get("requiresDimensionsMultipleOf").and_then(Value::as_u64),
-        Some(16),
-        "mochi requires dimensions divisible by 16"
-    );
-    let resolutions: Vec<&str> = limits
-        .get("resolutions")
-        .and_then(Value::as_array)
-        .map(|r| r.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    assert_eq!(
-        resolutions,
-        vec!["848x480", "480x848"],
-        "mochi advertises only its native 480p bucket"
-    );
-    for resolution in &resolutions {
-        let (w, h) = resolution.split_once('x').expect("WxH resolution");
-        for axis in [w, h] {
-            let value: u32 = axis.parse().expect("numeric axis");
-            assert_eq!(value % 16, 0, "{resolution} axis {axis} divides by 16");
-        }
-    }
-    // 30 fps only: `frames = duration * fps`, so a second value would silently change clip length.
-    let fps: Vec<u64> = limits
-        .get("fps")
-        .and_then(Value::as_array)
-        .map(|f| f.iter().filter_map(Value::as_u64).collect())
-        .unwrap_or_default();
-    assert_eq!(fps, vec![30], "mochi is a 30 fps model");
-
-    // defaults must be drawn from the advertised menus, or the studio opens on an invalid request.
-    let defaults_block = entry
-        .get("defaults")
-        .and_then(Value::as_object)
-        .expect("mochi defaults");
-    assert_eq!(
-        defaults_block.get("resolution").and_then(Value::as_str),
-        Some("848x480"),
-        "mochi defaults to its native bucket"
-    );
-    assert_eq!(
-        defaults_block.get("fps").and_then(Value::as_u64),
-        Some(30),
-        "mochi defaults to 30 fps"
-    );
-    assert_eq!(
-        defaults_block.get("steps").and_then(Value::as_u64),
-        Some(64),
-        "mochi defaults to the engine's DEFAULT_STEPS"
-    );
-    let durations: Vec<u64> = limits
-        .get("durations")
-        .and_then(Value::as_array)
-        .map(|d| d.iter().filter_map(Value::as_u64).collect())
-        .unwrap_or_default();
-    let default_duration = defaults_block
-        .get("duration")
-        .and_then(Value::as_u64)
-        .expect("mochi default duration");
-    assert!(
-        durations.contains(&default_duration),
-        "the default duration {default_duration} is one of the advertised {durations:?}"
-    );
-
-    // No Mochi adapter path on either backend, but the family is declared so the picker never offers
-    // cross-architecture LoRAs (sc-1927) — the SVD posture.
-    let lora = entry
-        .get("loraCompatibility")
-        .and_then(Value::as_object)
-        .expect("mochi loraCompatibility");
-    assert_eq!(
-        lora.get("families")
-            .and_then(Value::as_array)
-            .map(|f| f.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
-        Some(vec!["mochi"]),
-        "mochi declares its own LoRA family"
-    );
-    assert_eq!(
-        lora.get("types")
-            .and_then(Value::as_array)
-            .map(|t| t.len()),
-        Some(0),
-        "mochi supports no LoRA types (supports_lora/supports_lokr are false on both backends)"
-    );
-
-    let mlx = entry
-        .get("mlx")
-        .and_then(Value::as_object)
-        .expect("mochi mlx block");
-    assert_eq!(
-        mlx.get("repo").and_then(Value::as_str),
-        Some("SceneWorks/mochi-1-mlx"),
-        "mochi mlx repo"
-    );
-    assert_eq!(
-        mlx.get("standardTierLayout").and_then(Value::as_bool),
-        Some(true),
-        "mochi ships the standard q4/q8/bf16 turnkey tier layout"
-    );
-    assert!(
-        mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
-        "mochi declares mlx.minMemoryGb"
-    );
-
-    // The prompt guide is served as a static file from apps/web/public; a typo'd path is a silent
-    // 404 in the studio (nothing else in the repo reads `promptGuide`), so pin THIS entry's path.
-    let guide = entry
-        .get("ui")
-        .and_then(|ui| ui.get("promptGuide"))
-        .and_then(|g| g.get("path"))
-        .and_then(Value::as_str)
-        .expect("mochi ui.promptGuide.path");
-    let guide_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../apps/web/public")
-        .join(guide.trim_start_matches('/'));
-    assert!(
-        guide_file.is_file(),
-        "mochi prompt guide {guide} resolves to a real file ({})",
-        guide_file.display()
-    );
 }

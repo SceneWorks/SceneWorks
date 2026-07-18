@@ -741,13 +741,21 @@ fn f011_test_settings(data_dir: PathBuf) -> Settings {
 /// sc-11175/F-011: a set-but-missing `SCENEWORKS_PERSON_DETECTOR_WEIGHTS` pin must fail
 /// loudly (`InvalidPayload`) via `resolve_env_file_pin` instead of silently falling through
 /// to the cache/HF download; an unset pin (with nothing staged) falls through to `Ok(None)`.
-/// `RUST_TEST_THREADS=1` is forced workspace-wide, so the env mutation is serial.
+///
+/// Holds the crate-wide env lock across the whole staged mutation (set → assert → unset → assert),
+/// because `set_var` is process-global and the rest of the crate's tests run as threads in this same
+/// process. This used to claim "`RUST_TEST_THREADS=1` is forced workspace-wide, so the env mutation
+/// is serial" and take no lock — nothing sets that variable anywhere in the repo, so the tests were
+/// in fact fully parallel and the mutation was unsynchronized (sc-12380).
 #[test]
 fn resolve_detector_weights_env_pin_missing_errors_and_unset_falls_through() {
     let key = "SCENEWORKS_PERSON_DETECTOR_WEIGHTS";
+    // Holds the lock for the whole staged mutation AND restores the operator's prior value on drop —
+    // including if an assertion below panics, which the hand-rolled restore tail could not. The body
+    // re-points `key` freely inside the guard.
+    let _env = crate::test_env::EnvVars::set(&[(key, "")]);
     let dir = tempfile::tempdir().expect("tempdir");
     let settings = f011_test_settings(dir.path().to_path_buf());
-    let prior = std::env::var_os(key);
 
     // Set but missing → loud InvalidPayload naming the key.
     std::env::set_var(
@@ -767,9 +775,5 @@ fn resolve_detector_weights_env_pin_missing_errors_and_unset_falls_through() {
         matches!(unset, Ok(None)),
         "an unset detector pin must fall through to Ok(None), got {unset:?}"
     );
-
-    match prior {
-        Some(value) => std::env::set_var(key, value),
-        None => std::env::remove_var(key),
-    }
+    // `_env` restores the prior value on drop.
 }

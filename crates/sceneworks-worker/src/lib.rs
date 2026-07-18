@@ -210,6 +210,19 @@ mod lora_train_driver;
     )
 ))]
 mod smoke_support;
+// sc-12409: parity guard tying the shipped video manifest's `limits.maxPixels` to the area cap of
+// the ENGINE PINNED by Cargo.toml (mlx via `runtime-macos` on macOS, candle via `runtime-cuda`
+// off-mac under backend-candle). Not a smoke — no weights, no GPU; just the shipped manifest bytes
+// vs the pinned `MAX_AREA_*` const. Gated on the same "engine bundle present" superset as
+// `smoke_support` because it needs a backend crate in scope to read the const.
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
+mod pinned_engine_geometry;
 // Real-weight GPU smoke for the candle SCAIL-2 lane (sc-7078). Test-only + candle-only; never built
 // in normal compiles. Drives the shipped worker conditioning + `crate::inference_runtime::load("scail2_14b")`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
@@ -1534,6 +1547,9 @@ fn retry_delay(poll_seconds: u64, attempt: u32) -> u64 {
     let multiplier = 2_u64.saturating_pow(attempt.saturating_sub(1).min(4));
     poll_seconds.max(1).saturating_mul(multiplier).clamp(1, 30)
 }
+
+#[cfg(test)]
+mod test_env;
 
 #[cfg(test)]
 mod tests;

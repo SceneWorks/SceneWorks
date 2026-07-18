@@ -236,7 +236,9 @@ export const fallbackModels = [
     // face-locked options — sc-2015 spike measured outfit + accessories +
     // tattoos preserved across new scenes, face may drift.
     capabilities: ["text_to_image", "edit_image", "character_image", "vqa", "interleave"],
-    limits: { resolutions: ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"] },
+    // ≤2048 per side — the engine caps each side at 2048 and the former 2720/2496/2368 buckets were
+    // silently squashed to a wrong aspect (sc-12384). Same aspect ladder, fit to the real envelope.
+    limits: { resolutions: ["2048x2048", "2048x1152", "1152x2048", "1888x1248", "1248x1888", "1760x1312", "1312x1760"] },
     ui: {
       description: "Unified multimodal model (NEO-unify, ~16B); native text-to-image and instruction editing with strong text rendering and infographics. In Character Studio, drives a wardrobe-preserving reference flow — outfit + accessories + tattoos + hair color carry through to new scenes, but face geometry may drift. Pick InstantID or PuLID-FLUX for face-locked identity. Heavy (~42GB bf16); CUDA or 96GB+ Apple Silicon.",
       promptGuide: { title: "SenseNova-U1 8B Prompt Guide", path: "/prompt-guides/sensenova-u1-8b.md" },
@@ -252,7 +254,9 @@ export const fallbackModels = [
     // character_image (sc-2016): same wardrobe-preserving reference flow as the
     // base 8B target, on the 8-step distilled variant (~50s/image vs ~4.6 min).
     capabilities: ["text_to_image", "edit_image", "character_image"],
-    limits: { resolutions: ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"] },
+    // ≤2048 per side — the engine caps each side at 2048 and the former 2720/2496/2368 buckets were
+    // silently squashed to a wrong aspect (sc-12384). Same aspect ladder, fit to the real envelope.
+    limits: { resolutions: ["2048x2048", "2048x1152", "1152x2048", "1888x1248", "1248x1888", "1760x1312", "1312x1760"] },
     ui: {
       description: "8-step distilled SenseNova-U1; ~5-6x faster text-to-image, editing, and Character Studio reference (~50s/image on MPS) at a small quality trade-off. Same wardrobe-preserving reference tradeoff as the base 8B (carries outfit + accessories across new scenes; face may drift). Shares the base 8B weights; a ~0.4GB distill LoRA downloads automatically. Distilled editing is experimental — use the base model for max-quality reference work.",
       promptGuide: { title: "SenseNova-U1 8B Fast Prompt Guide", path: "/prompt-guides/sensenova-u1-8b-fast.md" },
@@ -747,58 +751,6 @@ export const fallbackModels = [
       description: "Wan2.2 A14B VACE control model (high/low-noise mixture-of-experts) for person replacement and controllable video.",
       durationHint: "Heavy dual-expert control model — keep clips at 5s or less. Generates at 16fps.",
       promptGuide: { title: "Wan2.2 VACE-Fun Prompt Guide", path: "/prompt-guides/wan-2-2-t2v-14b.md" },
-    },
-  },
-  {
-    // Mochi 1 (epic 1788 / sc-11994): 10B AsymmDiT, TEXT-TO-VIDEO ONLY. The single capability is
-    // load-bearing — both engine descriptors declare `conditioning: []`, so the studio's mode tabs,
-    // model picker and source band (all keyed off `capabilities`) keep every i2v / first-last-frame /
-    // extend / bridge / reference control off this model by construction.
-    //
-    // NOT Mac-only: the MLX descriptor is `mac_only: true` but the CANDLE one is `mac_only: false`
-    // (VIDEO_MODEL_CAPS `mochi_1` is routed on BOTH lanes), so this entry carries no mac-gating copy —
-    // `macSupport` arrives per-model from the API and leaves Mochi unblocked on either platform.
-    // Claiming Mac exclusivity here would be a false capability.
-    id: "mochi_1",
-    name: "Mochi 1",
-    type: "video",
-    family: "mochi",
-    adapter: "mochi_video",
-    capabilities: ["text_to_video"],
-    // Mirrors the manifest (videoGeometryParity.test.js pins resolutions + defaults.resolution).
-    // `steps: 64` is the AsymmDiT's own default and IS read here — it is the Steps input's
-    // placeholder (`stepsDefaultFromModel`). No `guidanceScale`: no video model declares one, so the
-    // engine's DEFAULT_GUIDANCE (4.5) applies and the Guidance placeholder stays empty.
-    defaults: { duration: 5, fps: 30, resolution: "848x480", quality: "balanced", steps: 64 },
-    limits: {
-      // 5s x 30fps = 150 raw frames, which the worker's `mochi_frame_count` snaps to 151 (the
-      // AsymmVAE is 6x temporal, so the engine only accepts `1 + 6k` — sc-11993).
-      durations: [1, 2, 3, 4, 5],
-      recommendedMaxDuration: 5,
-      // 30 fps only — `frames = duration x fps`, so a second value would change clip length AND play
-      // the 30 fps motion prior off-speed.
-      fps: [30],
-      // 848x480 is Mochi's native — and only — trained bucket. Both axes divide by 16, NOT 32, which is
-      // why the stride travels with them: it is the reason these buckets are legal, and
-      // videoGeometryParity.test.js pins it against the manifest so the pair cannot drift apart. (The
-      // web itself never reads it — sceneworks-core's `dimension_multiple_of` does, off the live
-      // catalog — so the manifest stays authoritative at runtime.)
-      resolutions: ["848x480", "480x848"],
-      requiresDimensionsMultipleOf: 16,
-      // NO `samplers` / `schedulers` key: one fixed flow-match Euler on both descriptors. The studio
-      // hides both pickers when a model offers fewer than 2 options (`samplerOptionsFromModel` falls
-      // back to `["default"]`), so omitting them is what keeps the false axis off the panel.
-    },
-    loraCompatibility: {
-      // Both descriptors set supports_lora/supports_lokr = false. Declare the family anyway so the
-      // picker never offers cross-architecture LoRAs (sc-1927), exactly like SVD.
-      families: ["mochi"],
-      types: [],
-    },
-    ui: {
-      description: "Genmo Mochi 1 — a 10B AsymmDiT text-to-video model with a 6x-temporal AsymmVAE, native on Apple Silicon (MLX) and Windows/Linux (candle/CUDA). Renders 848x480 at 30 fps. Apache-2.0: commercial use free, ungated. Text-to-video only (no image conditioning) and no LoRA support. Needs ample memory — the VAE decode is untiled, so peak scales with clip length.",
-      durationHint: "Native design point is ~5s at 848x480 / 30 fps. Shorter clips cut memory roughly linearly — start at 1-2s if you are memory-constrained.",
-      promptGuide: { title: "Mochi 1 Prompt Guide", path: "/prompt-guides/mochi-1.md" },
     },
   },
 ];

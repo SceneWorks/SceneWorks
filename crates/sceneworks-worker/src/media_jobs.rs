@@ -3538,8 +3538,13 @@ mod person_track_e2e_tests {
         // Isolated scratch: a throwaway data dir (weights + frame cache resolve under it).
         let scratch = std::env::temp_dir().join("sw-person-track-e2e");
         let _ = std::fs::remove_dir_all(&scratch);
-        // `ensure_*_weights` resolve their cache under `settings.data_dir`.
-        std::env::set_var("SCENEWORKS_DATA_DIR", scratch.join("data"));
+        // `ensure_*_weights` resolve their cache under `settings.data_dir`. Through the crate-wide
+        // seam so the value is RESTORED on drop: this used to `set_var` with no restore at all, which
+        // leaked the scratch dir into every later `Settings::from_env()` in the process (sc-12380).
+        let _env = crate::test_env::EnvVars::set(&[(
+            "SCENEWORKS_DATA_DIR",
+            scratch.join("data").to_str().expect("utf-8 scratch dir"),
+        )]);
         let settings = crate::Settings::from_env();
 
         let duration = staged_duration();
@@ -3657,7 +3662,11 @@ mod person_track_e2e_tests {
         };
         let scratch = std::env::temp_dir().join("sw-person-track-e2e-sam3");
         let _ = std::fs::remove_dir_all(&scratch);
-        std::env::set_var("SCENEWORKS_DATA_DIR", scratch.join("data"));
+        // Restored on drop — see the twin above (sc-12380).
+        let _env = crate::test_env::EnvVars::set(&[(
+            "SCENEWORKS_DATA_DIR",
+            scratch.join("data").to_str().expect("utf-8 scratch dir"),
+        )]);
         let settings = crate::Settings::from_env();
         let duration = staged_duration();
         let timestamps = crate::person_track::sample_timestamps(duration);

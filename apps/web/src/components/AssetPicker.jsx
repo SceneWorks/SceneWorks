@@ -311,14 +311,19 @@ function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSe
     () => assets.filter((asset) => assetMatchesCharacter(asset, characterId, selectedCharacter)),
     [assets, characterId, selectedCharacter],
   );
-  const allCharacterAssetCount = useMemo(
+  // The Assets tab shows the project library *minus* images that already belong
+  // to a character — those live on the Character tab. Splitting the library this
+  // way is the whole point of the two tabs; without this exclusion every
+  // character asset appeared on both tabs, so "Assets" looked unfiltered.
+  const nonCharacterAssets = useMemo(
     () =>
-      assets.filter((asset) =>
-        characters.some((character) => assetMatchesCharacter(asset, character.id, character)),
-      ).length,
+      assets.filter(
+        (asset) => !characters.some((character) => assetMatchesCharacter(asset, character.id, character)),
+      ),
     [assets, characters],
   );
-  const tabAssets = tab === "character" ? characterAssets : assets;
+  const allCharacterAssetCount = assets.length - nonCharacterAssets.length;
+  const tabAssets = tab === "character" ? characterAssets : nonCharacterAssets;
   const searchIndex = useMemo(() => assetSearchIndex(tabAssets), [tabAssets]);
   const visibleAssets = useMemo(() => filterPickerAssets(tabAssets, query, searchIndex), [tabAssets, query, searchIndex]);
 
@@ -393,7 +398,7 @@ function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSe
               type="button"
             >
               {label}
-              {key === "assets" ? <span>{assets.length}</span> : null}
+              {key === "assets" ? <span>{nonCharacterAssets.length}</span> : null}
               {key === "character" ? <span>{allCharacterAssetCount}</span> : null}
             </button>
           ))}

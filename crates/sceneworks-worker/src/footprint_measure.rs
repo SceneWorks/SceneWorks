@@ -565,6 +565,12 @@ fn fit_gate_ab_illustrious_q8() {
         te as f64 / gib,
     );
 
+    // This test re-points the cap several times, so it holds the crate-wide env lock for the whole
+    // body rather than scoping each write. Binding `EnvVars` (rather than the bare lock) also means
+    // the cap's PRIOR value is restored on drop — including on a panicking assertion below, which the
+    // hand-rolled `remove_var` at the end could not do, and which is not the same thing as removing
+    // it (an operator's own cap would have been silently deleted) (sc-12380).
+    let _env = crate::test_env::EnvVars::set(&[(MLX_MEMORY_CAP_ENV, "")]);
     let set_cap = |gb: f64| std::env::set_var(MLX_MEMORY_CAP_ENV, format!("{gb}"));
 
     // (C) cap BELOW the staged peak ⇒ reject even one-component-at-a-time, with the actionable message.
@@ -623,6 +629,5 @@ fn fit_gate_ab_illustrious_q8() {
     println!(
         "[ab] RESIDENT generation ok (render std {std:.1}) — calibrated HEADROOM_GB confirmed through the real gate"
     );
-
-    std::env::remove_var(MLX_MEMORY_CAP_ENV);
+    // The cap is restored (not merely removed) when `_env` drops at end of scope.
 }
