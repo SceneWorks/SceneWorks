@@ -268,11 +268,11 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
 
 
 def test_wan_2_2_candle_vram_tiers_match_measured_peaks():
-    """sc-12402: never regress the measured 5B peaks to estimates.
+    """sc-12402/sc-12631: never regress the measured 5B peaks to estimates.
 
     Measured on an idle RTX PRO 6000 at wan_2_2's own shipped default (832x480, 121 frames,
     20 steps, CFG on) -- the schema's "video = default frames". The peak is the DENOISE
-    (candle-gen-wan's unchunked materialized sdpa); the z48 vae22 decode adds 0.0 GB, which
+    (weights-dominated after sc-12434 chunked the sdpa); the z48 vae22 decode adds 0.0 GB, which
     is what makes these card-independent despite the decode tiler budgeting off total VRAM.
     """
     manifest = _load_builtin_models_manifest()
@@ -281,12 +281,12 @@ def test_wan_2_2_candle_vram_tiers_match_measured_peaks():
 
     assert candle["measured"] is True
     assert {tier: candle["vramGbByTier"][tier] for tier in ("q4", "q8", "bf16")} == {
-        "q4": 86.3,
-        "q8": 88.8,
-        "bf16": 94.1,
+        "q4": 46.1,
+        "q8": 48.7,
+        "bf16": 54.0,
     }
     # minMemoryGb gates the default/lightest (q4) tier + the fit gate's 2 GB headroom.
-    assert candle["minMemoryGb"] == 88
+    assert candle["minMemoryGb"] == 48
 
 
 def test_wan_a14b_candle_vram_tiers_are_flagged_estimated():

@@ -6111,49 +6111,35 @@
           "schedulers": ["default"]
         }
       },
-      // candle/CUDA VRAM gate (sc-12402, epic 1788) — MEASURED on an idle RTX PRO 6000 (Blackwell
-      // sm_120) via the candle-gen-wan VramProbe harness (candle-gen-wan/tests/vram_probe.rs, the Wan
-      // sibling of the sc-9094 harness behind the flux2/qwen blocks), at this model's OWN shipped
-      // default — 832x480, 121 frames (5s @ 24fps), 20 steps, CFG on — i.e. the schema's "video =
-      // default frames", not 1024². Each tier measured in its own process (cudarc's caching allocator
-      // never returns pages, so a second tier in-process re-reports the first one's high-water).
+      // candle/CUDA VRAM gate (sc-12402, epic 1788; RE-MEASURED sc-12631 after sc-12434 landed) --
+      // MEASURED on an idle RTX PRO 6000 (Blackwell sm_120) via the candle-gen-wan VramProbe harness
+      // (candle-gen-wan/tests/vram_probe.rs), at this model's OWN shipped default -- 832x480, 121
+      // frames (5s @ 24fps), 20 steps, CFG on. Each tier measured in its own process (cudarc's caching
+      // allocator never returns pages, so a second tier in-process re-reports the first's high-water).
       //
-      // THE PEAK IS THE DENOISE, NOT THE DECODE — which is why a per-tier CONSTANT is honest here.
-      // candle-gen-wan's sdpa (transformer.rs:46) materializes the full [B,H,S,S] attention plus an f32
-      // softmax copy (the sc-6217 query-row chunking Qwen/Krea got was never ported to Wan), so at this
-      // geometry S = 12,090 tokens x 24 heads x CFG batch-2 ≈ 55 GB of transient — dwarfing the ~29 GiB
-      // of weights. The z48 vae22 decode contributes **0.0 GB**: it reuses the pool the denoise just
-      // freed. Instrumented at the Progress::Decoding boundary: `pre-decode 88.8 GB | decode adds 0.0`.
+      // THE PEAK IS THE DENOISE, NOT THE DECODE. sc-12434 ported the sc-6217 query-row chunking into
+      // candle-gen-wan's sdpa, so the attention no longer materializes the full [B,H,S,S] block: the
+      // ~55 GB attention transient that dominated the pre-chunking peak (q4 was 86.3 GB) collapsed,
+      // dropping q4 to 46.1 GB. The z48 vae22 decode still contributes 0.0 GB (it reuses the pool the
+      // denoise freed): `pre-decode 46.1 GB | decode adds 0.0`, so the number stays card-independent
+      // even though `auto_tiling_budgeted_wan22` budgets off TOTAL VRAM.
       //
-      // That the decode is free also means these numbers are CARD-INDEPENDENT, which is not obvious:
-      // `auto_tiling_budgeted_wan22` budgets 0.85 x TOTAL VRAM, so the decode tiles to whatever card it
-      // is on. A/B with the tiler's budget forced 81.3 -> 12 GiB left the peak IDENTICAL at 86.3 GB and
-      // only made it slower (358s -> 401s) — the tiling engaged and never touched the ceiling. So this
-      // is a property of the model, not of the measuring GPU.
+      // Post-chunking the peak is WEIGHTS-dominated, not attention: the UMT5 TE still loads f32 (10.58
+      // GiB on disk -> 21.16 GiB resident), the z48 VAE loads f32, and the DiT rides on top with the
+      // chunked attention now a bounded transient. The quant ladder is still just the DiT delta:
+      // q8 - q4 = 2.6 GB, bf16 - q4 = 7.9 GB (~1 GB above the ~6.9 GB the dense fp32 DiT halving predicts);
+      // TE + VAE + chunked attention are tier-blind, so the whole ladder spans ~8 GB. The still-resident
+      // f32 TE + both experts + no component offload is the next lever (sc-12730 -- run the 14B, and
+      // shrink this 5B further, on a 24 GB card).
       //
-      // Coherence check — the ladder is the DiT delta and nothing else: q8 - q4 = 2.5 GB = exactly the
-      // q8-vs-q4 DiT delta (5.25 - 2.92 GiB); bf16 - q4 = 7.8 GB against the 6.9 GB the dense DiT
-      // predicts (its shards are **fp32** — `index.json` total_size 19,999,150,848 = 4.0 bytes/param for
-      // a 5B — so it HALVES to ~9.31 GiB on load, it does not land at its 18.63 GiB on-disk size). Every
-      // other term is tier-independent: the UMT5 TE loads **f32** (10.58 GiB on disk -> 21.16 GiB
-      // resident), the z48 VAE loads f32, and the attention is tier-blind. That is why the whole quant
-      // ladder spans only ~8 GB and no tier brings this model near a consumer card.
-      //
-      // minMemoryGb 88 gates the DEFAULT/lightest (q4) tier (86.3 + the gate's 2 GB headroom), matching
-      // the qwen convention. NOTE the resolver actually prefers **q8** when installed (sc-10726 /
-      // epic 10721 made q8 the app-wide default, clamping to q4) even though downloads[] marks q4
-      // `"default": true`; the two tiers differ by 2.5 GB, so gating the lighter one is the safe read.
-      //
-      // ⚠️ These numbers say a 480p 5s clip on the 5B needs an ~88 GB card. That is real, and it is the
-      // unchunked attention, not the weights (weights are ~29 GiB of an 86 GB peak; the sc-12344 floor
-      // reads 18.13 GiB — a 4.4x UNDER-count, which is exactly why a 32 GB 5090 was admitted and then
-      // OOM'd mid-denoise). Porting sc-6217 chunking to candle-gen-wan (sc-12434) is what would collapse
-      // these; re-measure when it lands. No `sequentialPeakGb`: every candle video engine declares
-      // `supports_sequential_offload: false` (candle-gen-wan lib.rs:417), so `resolve_offload` is a
-      // no-op here and that key would be dead data.
+      // minMemoryGb 48 gates the DEFAULT/lightest (q4) tier (46.1 + the gate's 2 GB headroom). NOTE the
+      // resolver prefers q8 when installed (sc-10726) even though downloads[] marks q4 default; the two
+      // tiers differ by 2.6 GB, so gating the lighter one is the safe read. No `sequentialPeakGb`: every
+      // candle video engine declares `supports_sequential_offload: false` (candle-gen-wan lib.rs:417),
+      // so `resolve_offload` is a no-op and that key would be dead data.
       "candle": {
-        "minMemoryGb": 88,
-        "vramGbByTier": { "q4": 86.3, "q8": 88.8, "bf16": 94.1 },
+        "minMemoryGb": 48,
+        "vramGbByTier": { "q4": 46.1, "q8": 48.7, "bf16": 54.0 },
         "measured": true
       },
       "ui": {
