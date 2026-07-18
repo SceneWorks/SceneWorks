@@ -9,6 +9,22 @@ export function formatSeconds(seconds) {
   return minutes > 0 ? `${minutes}m ${remainder}s` : `${remainder}s`;
 }
 
+// Frame-accurate NLE timecode `MM:SS:FF` (Video Editor redesign, epic 12798). The
+// third field is the frame within the current second at the timeline's fps, so the
+// toolbar/ruler read like a pro editor. `fps` falls back to 30 for a nullish/invalid
+// rate; seconds are clamped to >= 0. Frames are floored and clamped to fps-1 so a
+// value sitting exactly on a second boundary never reads as ":30" at 30fps.
+export function formatTimecode(seconds, fps = 30) {
+  const safeFps = Number.isFinite(fps) && fps > 0 ? Math.round(fps) : 30;
+  const total = Math.max(0, Number(seconds) || 0);
+  const whole = Math.floor(total);
+  const minutes = Math.floor(whole / 60);
+  const secs = whole % 60;
+  const frames = Math.min(safeFps - 1, Math.floor((total - whole) * safeFps));
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${pad(minutes)}:${pad(secs)}:${pad(frames)}`;
+}
+
 export function percent(value) {
   return `${Math.round((value ?? 0) * 100)}%`;
 }
