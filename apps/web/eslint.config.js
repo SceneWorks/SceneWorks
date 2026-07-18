@@ -55,4 +55,14 @@ export default [
       },
     },
   },
+  {
+    // Build/codegen scripts run under Node (e.g. scripts/generate-styles.mjs).
+    files: ["scripts/**/*.{js,mjs}"],
+    languageOptions: {
+      sourceType: "module",
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
 ];

@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
     "lint": "eslint src",
-    "test": "vitest run --environment jsdom"
+    "test": "vitest run --environment jsdom",
+    "gen:styles": "node scripts/generate-styles.mjs"
   },
   "dependencies": {
     "konva": "^9.3.22",
