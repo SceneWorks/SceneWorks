@@ -56,3 +56,95 @@ describe("ImageEditSourcePickerField clear affordance", () => {
     expect(buttonByLabel("Remove")).toBeFalsy();
   });
 });
+
+// The source picker splits the project library into two disjoint tabs: "Assets"
+// (general images) and "Character" (images that already belong to a character).
+// The Assets tab must EXCLUDE character-owned images — otherwise every character
+// asset shows up on both tabs and the split does nothing (the "not filtering"
+// bug: the Assets tab was rendering the whole library).
+describe("ImageEditSourcePickerField Assets tab excludes character assets", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(ui) {
+    await act(async () => root.render(ui));
+  }
+
+  const click = async (el) =>
+    act(async () => el.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+
+  // Modal portals to document.body, so grid/tab queries target the document.
+  const gridTitles = () =>
+    [...document.body.querySelectorAll('.asset-picker-grid [role="option"] strong')].map((el) =>
+      el.textContent.trim(),
+    );
+  const tabBadge = (label) => {
+    const tab = [...document.body.querySelectorAll('[role="tab"]')].find((b) =>
+      b.textContent.startsWith(label),
+    );
+    return tab?.querySelector("span")?.textContent ?? null;
+  };
+
+  const asset = (id, displayName, extra = {}) => ({
+    id,
+    type: "image",
+    projectId: "p1",
+    url: `/${id}.png`,
+    displayName,
+    ...extra,
+  });
+
+  // a1: plain project image (belongs to no character) → Assets tab only.
+  // a2: generated FOR character c1 (recipe) → Character tab only.
+  // a3: an approved reference of c1 → Character tab only.
+  const assets = [
+    asset("a1", "Plain One"),
+    asset("a2", "Hero Gen", { recipe: { normalizedSettings: { characterId: "c1" } } }),
+    asset("a3", "Hero Ref"),
+  ];
+  const characters = [{ id: "c1", name: "Hero", approvedReferences: [{ assetId: "a3" }], references: [] }];
+
+  it("shows only non-character images on the Assets tab and moves the rest to Character", async () => {
+    await render(
+      <ImageEditSourcePickerField
+        assets={assets}
+        buttonLabel="Select reference image"
+        characters={characters}
+        clearable
+        label="Reference image"
+        onChange={() => {}}
+        projectId="p1"
+        value=""
+      />,
+    );
+
+    const openButton = container.querySelector('button[aria-haspopup="dialog"]');
+    await click(openButton);
+
+    // Assets tab is the default. Only the non-character image is listed; the two
+    // character-owned images are excluded.
+    expect(gridTitles()).toEqual(["Plain One"]);
+    expect(tabBadge("Assets")).toBe("1");
+    expect(tabBadge("Character")).toBe("2");
+
+    // The Character tab (defaulting to the first character) holds the two excluded images.
+    const characterTab = [...document.body.querySelectorAll('[role="tab"]')].find((b) =>
+      b.textContent.startsWith("Character"),
+    );
+    await click(characterTab);
+    expect(gridTitles().sort()).toEqual(["Hero Gen", "Hero Ref"]);
+  });
+});
