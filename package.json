@@ -15,6 +15,8 @@
     "check:download-patterns": "node scripts/check-download-patterns.mjs",
     "hooks:install": "git config core.hooksPath scripts/git-hooks",
     "check:docker:rust-api": "node scripts/check-docker-api-runtime.mjs",
+    "bump:inference": "node scripts/bump-inference.mjs",
+    "bump:inference:self-test": "node scripts/bump-inference.mjs --self-test",
     "rust:fmt": "cargo fmt --all -- --check",
     "rust:lint": "cargo clippy --all-targets -- -D warnings",
     "rust:test": "cargo test",
