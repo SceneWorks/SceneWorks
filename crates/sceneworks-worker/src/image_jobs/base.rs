@@ -7829,26 +7829,6 @@ mod quant_tier_reconcile_tests {
         assert_eq!(tier_quant_from_resolved_dir(root), None);
     }
 
-    /// sc-12090: the tier-NAME reader the candle VRAM gate uses to budget/name the on-disk tier. Same
-    /// basename mapping as [`tier_quant_from_resolved_dir`] (which now delegates to it), so a q4-only
-    /// install is gated at `q4`, never the manifest's `q8` default.
-    #[test]
-    fn tier_key_from_resolved_dir_reads_the_on_disk_tier() {
-        let root = std::path::Path::new("/models/krea-2-turbo-mlx");
-        assert_eq!(tier_key_from_resolved_dir(&root.join("q4")), Some("q4"));
-        assert_eq!(tier_key_from_resolved_dir(&root.join("q8")), Some("q8"));
-        assert_eq!(tier_key_from_resolved_dir(&root.join("bf16")), Some("bf16"));
-        // Boogu `<variant>-<tier>` suffix + the bare `<variant>` packed Q8 default.
-        assert_eq!(tier_key_from_resolved_dir(&root.join("base-q4")), Some("q4"));
-        assert_eq!(
-            tier_key_from_resolved_dir(&root.join("turbo-bf16")),
-            Some("bf16")
-        );
-        assert_eq!(tier_key_from_resolved_dir(&root.join("edit")), Some("q8"));
-        // Unrecognized basename (repo root / modelPath) → None; the gate keeps its manifest key.
-        assert_eq!(tier_key_from_resolved_dir(root), None);
-    }
-
     /// The end-to-end reconcile is macOS-only (the MLX generate path). When the resolved tier matches
     /// the request it's a pass-through; when it differs it records the tier that ran, and the
     /// dense-TE guard keeps the load quant `None` while still correcting the recorded bits.
@@ -8089,6 +8069,32 @@ mod capability_downtier_tests {
             gate_tier_key(false, convrot_base, &advanced, &entry, false),
             "bf16"
         );
+    }
+
+    /// sc-12090 / sc-12829: the basename → tier-NAME reader the candle VRAM gate keys off —
+    /// `generate_candle_stream` → `gate_tier_key` fallback and the sc-12090 disk-probe path
+    /// ([`resolve_tier_dir`] / `installed_tier_keys`) both resolve the on-disk tier through
+    /// [`tier_key_from_resolved_dir`]. That fn is `any(macos, candle)`, so its coverage lives HERE (this
+    /// cross-lane module), NOT in the `#[cfg(target_os = "macos")]` `quant_tier_reconcile_tests` where it
+    /// would compile out on the candle lane — leaving the exact basename→tier mapping the gate depends on
+    /// unexercised on `candle-worker`. A regression (e.g. a new Boogu `<variant>-<tier>` shape) now goes
+    /// RED on both lanes, not just the Mac runner. (`gate_tier_key`/`installed_tier_keys` are candle-only,
+    /// so they're named as plain code — only the cross-lane fns exist on both of this module's lanes.)
+    #[test]
+    fn tier_key_from_resolved_dir_reads_the_on_disk_tier() {
+        let root = std::path::Path::new("/models/krea-2-turbo-mlx");
+        assert_eq!(tier_key_from_resolved_dir(&root.join("q4")), Some("q4"));
+        assert_eq!(tier_key_from_resolved_dir(&root.join("q8")), Some("q8"));
+        assert_eq!(tier_key_from_resolved_dir(&root.join("bf16")), Some("bf16"));
+        // Boogu `<variant>-<tier>` suffix + the bare `<variant>` packed Q8 default.
+        assert_eq!(tier_key_from_resolved_dir(&root.join("base-q4")), Some("q4"));
+        assert_eq!(
+            tier_key_from_resolved_dir(&root.join("turbo-bf16")),
+            Some("bf16")
+        );
+        assert_eq!(tier_key_from_resolved_dir(&root.join("edit")), Some("q8"));
+        // Unrecognized basename (repo root / modelPath) → None; the gate keeps its manifest key.
+        assert_eq!(tier_key_from_resolved_dir(root), None);
     }
 
     fn too_big(needed: f64, avail: f64) -> TierFit {
