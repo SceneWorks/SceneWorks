@@ -2735,8 +2735,10 @@ fn is_sensenova_model(model: &str) -> bool {
         model,
         "sensenova_u1_8b"
             | "sensenova_u1_8b_infographic_v2"
+            | "sensenova_u1_8b_infographic_v3"
             | "sensenova_u1_8b_fast"
             | "sensenova_u1_8b_infographic_v2_fast"
+            | "sensenova_u1_8b_infographic_v3_fast"
     )
 }
 
@@ -4590,8 +4592,10 @@ fn is_candle_engine(model: &str) -> bool {
             | "kolors"
             | "sensenova_u1_8b"
             | "sensenova_u1_8b_infographic_v2"
+            | "sensenova_u1_8b_infographic_v3"
             | "sensenova_u1_8b_fast"
             | "sensenova_u1_8b_infographic_v2_fast"
+            | "sensenova_u1_8b_infographic_v3_fast"
             | "ideogram_4"
             | "ideogram_4_turbo"
             // Boogu-Image-0.1 (sc-7524, epic 6831): Base + Turbo (txt2img) and the Edit checkpoint, all
@@ -4668,8 +4672,10 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "kolors" => "candle_kolors",
         "sensenova_u1_8b"
         | "sensenova_u1_8b_infographic_v2"
+        | "sensenova_u1_8b_infographic_v3"
         | "sensenova_u1_8b_fast"
-        | "sensenova_u1_8b_infographic_v2_fast" => "candle_sensenova",
+        | "sensenova_u1_8b_infographic_v2_fast"
+        | "sensenova_u1_8b_infographic_v3_fast" => "candle_sensenova",
         "ideogram_4" | "ideogram_4_turbo" => "candle_ideogram",
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => "candle_boogu",
         "krea_2_turbo" | "krea_2_raw" => "candle_krea",

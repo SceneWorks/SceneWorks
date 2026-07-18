@@ -5899,6 +5899,22 @@ mod candle_routing_tests {
                 json!({ "model": "sensenova_u1_8b_infographic_v2", "prompt": "an illustrated explainer" })
             )
         ));
+        // Infographic-V3 base advertises the SAME understanding surface (epic 13095) — same regression
+        // guard: its id must be in the eligibility list or V3 VQA / Document-Studio jobs never route.
+        assert!(worker_supports_job(
+            &candle,
+            &understanding_job(
+                "image_vqa",
+                json!({ "model": "sensenova_u1_8b_infographic_v3", "question": "what is this?", "sourceAssetId": "a1" })
+            )
+        ));
+        assert!(worker_supports_job(
+            &candle,
+            &understanding_job(
+                "image_interleave",
+                json!({ "model": "sensenova_u1_8b_infographic_v3", "prompt": "an illustrated explainer" })
+            )
+        ));
         // Refuses a non-SenseNova understanding job → falls back to the Python torch worker.
         assert!(!worker_supports_job(
             &candle,

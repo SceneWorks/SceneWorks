@@ -13433,6 +13433,28 @@ details[open] > summary.lora-scope-group-heading::before,
   flex-direction: column;
   gap: 8px;
 }
+.batch-save-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.batch-new-link {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.batch-new-link:hover {
+  text-decoration: underline;
+}
+.batch-new-link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .batch-name {
   width: 100%;
   font-family: var(--font-ui);

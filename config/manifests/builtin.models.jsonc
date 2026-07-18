@@ -1280,6 +1280,95 @@
       }
     },
     {
+      // SenseNova-U1-8B-MoT-Infographic-V3 (epic 13095): a coexisting checkpoint refresh of the SAME
+      // NEO-unify architecture as `sensenova_u1_8b` / the V2 infographic id — config.json + all 1,116
+      // tensor keys are byte-identical to V2 (verified), so it rides the EXISTING `sensenova_u1_8b`
+      // engine (engines.rs ModelRow engine_id) with no engine change — only a new hosted quant-matrix
+      // re-host + this catalog entry. V3 is an independent training run from the same base as V2 (not a
+      // V2 fine-tune); its headline gain over V2 is robust image EDITING (localized + global) on top of
+      // the same dense-text / stable-layout strengths. Coexists with V2 — new id, V2 stays loadable so
+      // recipes/replays that pin V2 keep their output.
+      "id": "sensenova_u1_8b_infographic_v3",
+      "name": "SenseNova-U1 8B Infographic V3",
+      "family": "sensenova-u1",
+      "type": "image",
+      "adapter": "sensenova_u1",
+      "capabilities": ["text_to_image", "edit_image", "character_image", "vqa", "interleave"],
+      "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (epic 13095, S2): a public/ungated re-host of
+        // sensenova/SenseNova-U1-8B-MoT-Infographic-V3 built with the same `prequantize_turnkey` harness
+        // as V2. Per-tier subdirs (each a complete from_snapshot tree): q4/ (default), q8/, bf16/.
+        // NOTE: byte sizes below are V2's on-disk measurements as a near-identical PLACEHOLDER (V3 is
+        // tensor-identical); re-measure the hosted V3 repo per subdir and backfill after S2 upload.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 11824526363,
+          "footprint": { "diskSizeBytes": 11824526363, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19927923905,
+          "footprint": { "diskSizeBytes": 19927923905, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 35121744859,
+          "footprint": { "diskSizeBytes": 35121744859, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/sensenova-u1-8b-infographic-v3-mlx"
+      },
+      "gated": false,
+      "defaults": {
+        "resolution": "2048x2048",
+        "steps": 50,
+        "guidanceScale": 4.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "shift",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        "resolutions": ["2048x2048", "2048x1152", "1152x2048", "1888x1248", "1248x1888", "1760x1312", "1312x1760"],
+        "count": [1, 2, 4],
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "loraCompatibility": {
+        "families": ["sensenova-u1"],
+        "types": []
+      },
+      "mlx": {
+        "quantize": 4,
+        "standardTierLayout": true
+      },
+      "ui": {
+        "label": "SenseNova-U1 8B Infographic V3",
+        "description": "Infographic-specialized variant of SenseNova-U1 (NEO-unify, ~16B), the third-generation checkpoint. Tuned for information-dense visual content — posters, presentations, comics, resumes, knowledge illustrations — with the same dense small-text and stable-layout strengths as V2, plus notably stronger image editing (localized text/content edits and global style/layout changes). Same unified surface: text-to-image, instruction editing, wardrobe-preserving Character Studio, VQA, and Document Studio (interleaved text+image). Heavy: ~35GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS).",
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "promptGuide": {
+          "title": "SenseNova-U1 8B Infographic V3 Prompt Guide",
+          "path": "/prompt-guides/sensenova-u1-8b-infographic-v3.md",
+          "sources": [
+            { "label": "SenseNova-U1 Infographic V3 model card", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT-Infographic-V3" },
+            { "label": "SenseNova-U1 prompt enhancement doc", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT/blob/main/docs/prompt_enhancement.md" }
+          ]
+        }
+      }
+    },
+    {
       "id": "sensenova_u1_8b_fast",
       "name": "SenseNova-U1 8B Fast",
       "family": "sensenova-u1",
@@ -1488,6 +1577,104 @@
           "path": "/prompt-guides/sensenova-u1-8b-infographic-v2.md",
           "sources": [
             { "label": "SenseNova-U1 Infographic V2 model card", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT-Infographic-V2" },
+            { "label": "SenseNova-U1 prompt enhancement doc", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT/blob/main/docs/prompt_enhancement.md" }
+          ]
+        }
+      }
+    },
+    {
+      // Infographic-V3 8-step distilled variant (epic 13095, S3). The V1 8-step distill LoRA
+      // (sensenova/SenseNova-U1-8B-MoT-LoRAs) is expected to merge onto V3 as cleanly as onto V2 (V3 is
+      // tensor-identical to V2 → same gen-path targets), pre-merged + packed per tier
+      // (distill_merged.json marker → load_fast skips the load-time merge), riding the existing
+      // sensenova_u1_8b_fast engine. T2I / edit / character only (no VQA / interleave), 8 steps / cfg 1.0.
+      // 8-step render quality on V3 is validated on-device in S3 (independent training run — not assumed
+      // from V2's result).
+      "id": "sensenova_u1_8b_infographic_v3_fast",
+      "name": "SenseNova-U1 8B Infographic V3 Fast",
+      "family": "sensenova-u1",
+      "type": "image",
+      "adapter": "sensenova_u1",
+      "capabilities": ["text_to_image", "edit_image", "character_image"],
+      "downloads": [
+        // NOTE: byte sizes are V2-fast on-disk measurements as a near-identical PLACEHOLDER (tensor-
+        // identical); re-measure the hosted V3-fast repo per subdir and backfill after S3 upload.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 11824526409,
+          "footprint": { "diskSizeBytes": 11824526409, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19927924235,
+          "footprint": { "diskSizeBytes": 19927924235, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 35121633249,
+          "footprint": { "diskSizeBytes": 35121633249, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx"
+      },
+      "gated": false,
+      "defaults": {
+        "resolution": "2048x2048",
+        "steps": 8,
+        "guidanceScale": 1.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "shift",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        "resolutions": ["2048x2048", "2048x1152", "1152x2048", "1888x1248", "1248x1888", "1760x1312", "1312x1760"],
+        "count": [1, 2, 4],
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "loraCompatibility": {
+        "families": ["sensenova-u1"],
+        "types": []
+      },
+      "mlx": {
+        "quantize": 4,
+        "standardTierLayout": true
+      },
+      "ui": {
+        "label": "SenseNova-U1 8B Infographic V3 Fast",
+        "description": "8-step distilled SenseNova-U1 Infographic V3 — ~5–6× faster infographic/poster text-to-image, editing, and Character Studio reference at a small quality trade-off. Same infographic strengths and stronger editing as the V3 base, at 8 steps / cfg 1.0. Ships as its own pre-built quant-matrix (q4 default / q8 / bf16), each a self-contained tier with the 8-step distill LoRA already merged in — no separate LoRA download. Use the V3 base for max-quality dense-text work.",
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "viewAngles": [
+          { "id": "three_quarter_left", "label": "Three-quarter left" },
+          { "id": "three_quarter_right", "label": "Three-quarter right" },
+          { "id": "left_profile", "label": "Left profile" },
+          { "id": "right_profile", "label": "Right profile" },
+          { "id": "up", "label": "Looking up" },
+          { "id": "down", "label": "Looking down" },
+          { "id": "up_left", "label": "Up · left" },
+          { "id": "up_right", "label": "Up · right" },
+          { "id": "down_left", "label": "Down · left" },
+          { "id": "down_right", "label": "Down · right" },
+          { "id": "front", "label": "Front" }
+        ],
+        "promptGuide": {
+          "title": "SenseNova-U1 8B Infographic V3 Fast Prompt Guide",
+          "path": "/prompt-guides/sensenova-u1-8b-infographic-v3.md",
+          "sources": [
+            { "label": "SenseNova-U1 Infographic V3 model card", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT-Infographic-V3" },
             { "label": "SenseNova-U1 prompt enhancement doc", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT/blob/main/docs/prompt_enhancement.md" }
           ]
         }
@@ -2539,7 +2726,17 @@
         // Gates the `int8-convrot` variant through the SAME per-tier memory-eligibility path as
         // q4/q8/bf16 (the third of the three ConvRot gates; the candle lane + sm_89 compute-cap are the
         // worker's `int8_convrot` capability).
-        "vramGbByTier": { "q4": 26.4, "q8": 35.9, "bf16": 55.6, "int8-convrot": 42.9 },
+        // sc-12828 RE-MEASURED int8-convrot: 42.9 → 34.7 GB. The pinned inference (fc1654a9, PR #101)
+        // now stores the Qwen3-VL TE bf16 (f32 compute, bit-identical) instead of at f32, so the f32-TE
+        // co-resident buffer this ConvRot RESIDENT peak was inflated by is halved. Measured on that
+        // pinned build, exclusive sm_120, 1024²/8-step seed 42: steady 29.76 → 21.5 GB, overall-peak
+        // 42.9 → 34.7 GB — a constant 8.2 GB shift = the 15.6 → 7.4 GB dense TE reduction, landing
+        // int8-convrot right next to q8 as the sc-12425 note predicted ("once the TE drops the two tiers
+        // match"). q4/q8/bf16 also now run the bf16 TE and carry ~8.2 GB less RESIDENT, but stay at their
+        // (still-safe, now-conservative) f32-TE figures pending their OWN direct re-measure — a derived
+        // subtraction is unsafe for a fit-gate (resident↔sequential don't compose arithmetically; an
+        // under-prediction OOMs). sc-12828 follow-up re-measures q4/q8/bf16 + ideogram/boogu directly.
+        "vramGbByTier": { "q4": 26.4, "q8": 35.9, "bf16": 55.6, "int8-convrot": 34.7 },
         // sc-12131 / sc-10856 second-stage gate: measured largest working set after the text phase has
         // been dropped. `int8-convrot` = 28.6 GB (sc-12425, measured sm_120 1024²/8-step, byte-identical
         // pixels resident vs sequential) — it lands next to q8's 29.5 because the int8 DiT is the same

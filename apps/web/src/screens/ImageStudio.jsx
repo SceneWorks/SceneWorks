@@ -506,6 +506,18 @@ export function ImageStudio() {
     },
     [applyBatchContent],
   );
+
+  // Detach from the loaded batch and clear the authoring fields so the next Save creates a
+  // brand-new batch. Needed because loadedBatchId now persists in the studio snapshot: after
+  // a restart the panel restores its last-loaded batch and Save is stuck on "Update" with no
+  // way back to a blank slate. Scope is left as-is (a user preference, not batch content).
+  const handleNewBatch = useCallback(() => {
+    setBatchPromptsText("");
+    setBatchVariableValues({});
+    setBatchName("");
+    setLoadedBatchId(null);
+    setBatchError("");
+  }, []);
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? imageModels[0]?.id ?? "z_image_turbo");
   const [seed, setSeed] = useState(saved.seed ?? "");
@@ -2278,6 +2290,7 @@ export function ImageStudio() {
                 onScopeChange={setBatchScope}
                 loadedBatchId={loadedBatchId}
                 onSave={handleSaveBatch}
+                onNew={handleNewBatch}
                 onLoad={handleLoadBatch}
                 onDelete={handleDeleteBatch}
                 onImport={handleImportBatch}
