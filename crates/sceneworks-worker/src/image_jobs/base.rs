@@ -2022,7 +2022,11 @@ fn dense_te_requested_tier_bits(request: &ImageRequest) -> Option<i64> {
 /// 2. Else the **on-disk tier** the resolver landed on (sc-12090) — budget the tier that will load, not
 ///    one the user never installed. A `modelPath`/flat root has no recognizable basename ⇒ `None`.
 /// 3. Else the manifest/request key (`requested_tier_key`), whose own `nvfp4` arm is the sibling of (1).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+// Candle-lane only — NOT `any(macos, candle)` like `tier_key_from_resolved_dir`, because this fn calls
+// `crate::vram_gate`, which is itself `#[cfg(all(not(macos), backend-candle))]`. On the macOS/MLX build
+// `vram_gate` doesn't exist, so an `any(macos, ...)` gate here fails to compile (E0433). Its only caller,
+// `generate_candle_stream`, is candle-only too, so this loses nothing.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn gate_tier_key(
     convrot_resolved: bool,
     weights_dir: &Path,
@@ -8043,10 +8047,12 @@ mod capability_downtier_tests {
     /// instead of just asserting a constant: q8's row is what was actually being read, which is why
     /// "just correct the manifest row" would have fixed nothing.
     ///
-    /// Lives HERE, not in `quant_tier_reconcile_tests`, deliberately: that module is
-    /// `#[cfg(target_os = "macos")]`, so a test placed there would compile out on the candle lane —
-    /// i.e. never run anywhere this code path is even active. This module's cfg matches
-    /// [`gate_tier_key`]'s own.
+    /// Lives in `capability_downtier_tests` (not the `#[cfg(target_os = "macos")]`
+    /// `quant_tier_reconcile_tests`, where it would compile out on the candle lane), but carries its OWN
+    /// candle-only gate: it calls [`gate_tier_key`] + `crate::vram_gate`, both `not(macos)` — while this
+    /// module is `any(macos, candle)`, so without the attribute below it fails to compile on the MLX
+    /// build (E0433, no `vram_gate`).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
     fn gate_tier_key_names_convrot_by_identity_never_q8() {
         // The real shape: the ConvRot base surface IS the bf16 dir, and the request carries no bits.
