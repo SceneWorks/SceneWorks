@@ -92,6 +92,7 @@ export default function BatchPromptPanel({
   onScopeChange,
   loadedBatchId = null,
   onSave,
+  onNew,
   onLoad,
   onDelete,
   onImport,
@@ -241,7 +242,17 @@ export default function BatchPromptPanel({
 
       <div className="batch-panel-side">
         <div className="batch-save">
-          <span className="batch-field-label">Save this batch</span>
+          <div className="batch-save-head">
+            <span className="batch-field-label">{loadedBatchId ? "Editing saved batch" : "Save this batch"}</span>
+            {/* Once a saved batch is loaded, the panel stays linked to it (persisted across
+                restarts by the studio snapshot), so Save reads "Update" with no way back to a
+                blank batch. "New batch" unlinks and clears the authoring fields. */}
+            {loadedBatchId && onNew ? (
+              <button className="batch-new-link" disabled={busy} onClick={onNew} type="button">
+                + New batch
+              </button>
+            ) : null}
+          </div>
           <input
             aria-label="Batch name"
             className="batch-name"

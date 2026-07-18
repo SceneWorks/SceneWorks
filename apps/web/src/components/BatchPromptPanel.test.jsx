@@ -131,6 +131,29 @@ describe("BatchPromptPanel (sc-9955)", () => {
     expect(document.body.querySelector(".batch-preview-res").textContent).toBe("832×1216");
   });
 
+  it("shows Save (not Update) and no New-batch link when no batch is loaded", () => {
+    mount({ initialPrompts: "one" });
+    const saveButton = [...document.body.querySelectorAll(".batch-btn")].find((b) => /Save|Update/.test(b.textContent));
+    expect(saveButton.textContent).toContain("Save");
+    expect(document.body.querySelector(".batch-new-link")).toBeNull();
+    expect(document.body.querySelector(".batch-save-head .batch-field-label").textContent).toBe("Save this batch");
+  });
+
+  it("surfaces a New-batch action once a saved batch is loaded, and Save reads Update", () => {
+    mount({ initialPrompts: "one", extra: { loadedBatchId: "b1", onNew: vi.fn() } });
+    const saveButton = [...document.body.querySelectorAll(".batch-btn")].find((b) => /Save|Update/.test(b.textContent));
+    expect(saveButton.textContent).toContain("Update");
+    expect(document.body.querySelector(".batch-save-head .batch-field-label").textContent).toBe("Editing saved batch");
+    expect(document.body.querySelector(".batch-new-link")).toBeTruthy();
+  });
+
+  it("invokes onNew when the New-batch action is clicked", async () => {
+    const onNew = vi.fn();
+    mount({ initialPrompts: "one", extra: { loadedBatchId: "b1", onNew } });
+    await act(async () => document.body.querySelector(".batch-new-link").click());
+    expect(onNew).toHaveBeenCalledTimes(1);
+  });
+
   it("lists saved batches", () => {
     mount({
       batches: [
