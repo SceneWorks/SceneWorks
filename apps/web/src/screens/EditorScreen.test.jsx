@@ -79,10 +79,10 @@ function render(overrides = {}) {
   return { setSelectedTimelineId };
 }
 
-// The timeline dropdown is the first <select> in the editor header. Firing a native change
+// The timeline dropdown lives in the redesigned toolbar (design 2a). Firing a native change
 // event with a new value routes through the guarded onChange.
 function selectTimeline(nextId) {
-  const select = container.querySelector(".editor-header select");
+  const select = container.querySelector(".ve-timeline-select");
   act(() => {
     select.value = nextId;
     select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -215,9 +215,9 @@ describe("EditorScreen preview playback keep-alive gating (sc-11961)", () => {
 
   // Select the timeline clip (renders the preview <video>) then click Play.
   function selectClipAndPressPlay() {
-    const clip = container.querySelector(".timeline-item");
+    const clip = container.querySelector(".ve-clip");
     act(() => clip.dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
-    const playButton = container.querySelector(".playback-bar button");
+    const playButton = container.querySelector(".ve-play");
     act(() => playButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
   }
 

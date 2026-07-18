@@ -1,28 +1,32 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { AssetMedia, assetCanRenderAsImage, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
-import { WorkPanel } from "../components/WorkPanel.jsx";
-import { formatSeconds } from "../formatting.js";
+import { assetCanRenderAsImage, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
+import { formatTimecode } from "../formatting.js";
 import {
-  aspectOptions,
   ensureItemVersionFields,
   itemDuration,
   sourceTimestampAtPlayhead,
-  speedPresets,
   timelineDuration,
   trackItems,
-  transitionOptions,
 } from "../timeline.js";
 import { useAppStatic } from "../context/AppContext.js";
 import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { appConfirm } from "../appConfirm.jsx";
+import { EditorToolbar } from "../components/editor/EditorToolbar.jsx";
+import { MediaBin } from "../components/editor/MediaBin.jsx";
+import { ProgramMonitor } from "../components/editor/ProgramMonitor.jsx";
+import { GenerationRail } from "../components/editor/GenerationRail.jsx";
+import { StoryboardStrip } from "../components/editor/StoryboardStrip.jsx";
+import { Timeline } from "../components/editor/Timeline.jsx";
+import { useEditorGeneration } from "../components/editor/useEditorGeneration.js";
+import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, MAIN_TRACK_ID } from "../components/editor/editorUtils.js";
 
 export function EditorScreen() {
+  const app = useAppStatic();
   const {
     activeProject,
     activeTimeline,
     mediaAssets,
     setPreviewAsset,
-    sendAssetToImage,
     sendAssetToVideo,
     createTimeline,
     extractTimelineFrame,
@@ -34,85 +38,100 @@ export function EditorScreen() {
     setSelectedTimelineId,
     isActiveTimelineDirty,
     timelines,
-  } = useAppStatic();
+  } = app;
   const assets = mediaAssets;
-  const onPreview = setPreviewAsset;
-  const onSendImage = (asset) => sendAssetToImage(asset, "edit_image");
-  const onSendVideo = (asset) => sendAssetToVideo(asset, asset?.type === "video" ? "extend_clip" : "image_to_video");
+  const gen = useEditorGeneration({ context: app });
 
-  const [newTimelineName, setNewTimelineName] = useState("Main timeline");
-  const [newAspectRatio, setNewAspectRatio] = useState("16:9");
   const [selectedItemId, setSelectedItemId] = useState(null);
-  const [addDuration, setAddDuration] = useState(4);
-  const [exportResolution, setExportResolution] = useState(720);
+  const [selectionKind, setSelectionKind] = useState(null); // clip | audio | gap | key | marker
+  const [selectedGap, setSelectedGap] = useState(null);
+  const [selectedMarker, setSelectedMarker] = useState(null);
+  const [playheadSeconds, setPlayheadSeconds] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [snap, setSnap] = useState(true);
   const [history, setHistory] = useState([]);
   const [future, setFuture] = useState([]);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [playheadSeconds, setPlayheadSeconds] = useState(0);
-  const [generationPrompt, setGenerationPrompt] = useState("Continue the action with matching motion and lighting");
-  const [extensionDuration, setExtensionDuration] = useState(4);
+  const [trackVisible, setTrackVisible] = useState({});
+  const [trackMuted, setTrackMuted] = useState({});
+  const [trackSoloed, setTrackSoloed] = useState({});
+  const [markers] = useState([]); // Local UI markers only — no persisted marker model yet (audit).
   const [timelineNotice, setTimelineNotice] = useState("");
   const previewVideoRef = useRef(null);
-  // sc-11961 (S2): under keep-alive this editor stays mounted while backgrounded, so it
-  // can no longer rely on unmount to stop preview playback. `screenActive` is false when
-  // another view is foregrounded; the playback effect below gates on it so a hidden
-  // editor does no continuous video decode/audio work.
   const screenActive = useScreenActive();
 
+  const assetsById = useMemo(() => new Map(assets.map((asset) => [asset.id, asset])), [assets]);
+  const trackKindById = useMemo(() => {
+    const map = new Map();
+    (activeTimeline?.tracks ?? []).forEach((track) => map.set(track.id, track.kind));
+    return map;
+  }, [activeTimeline]);
   const selectedItem = useMemo(() => {
     if (!activeTimeline) {
       return null;
     }
     return activeTimeline.tracks.flatMap((track) => track.items).find((item) => item.id === selectedItemId) ?? null;
   }, [activeTimeline, selectedItemId]);
-  const selectedAsset = useMemo(() => assets.find((asset) => asset.id === selectedItem?.assetId) ?? null, [assets, selectedItem]);
+  const selectedAsset = assetsById.get(selectedItem?.assetId) ?? null;
   const duration = activeTimeline ? timelineDuration(activeTimeline) : 0;
-  const timelineScale = Math.max(12, duration + 4);
-  const mainAssets = assets.filter((asset) => asset.type === "video" || asset.file?.mimeType?.startsWith("video/"));
-  const stillAssets = assets.filter((asset) => assetCanRenderAsImage(asset));
+  const mainTrack = activeTimeline?.tracks?.find((track) => track.id === MAIN_TRACK_ID || track.kind === "video") ?? null;
+  const mainClips = mainTrack ? trackItems(mainTrack) : [];
+  const isSelectedAi = useMemo(() => {
+    const history = selectedItem?.versionHistory ?? [];
+    return history.some((entry) => ["extension", "bridge", "replacement"].includes(entry?.source));
+  }, [selectedItem]);
 
   useEffect(() => {
     setHistory([]);
     setFuture([]);
     setSelectedItemId(null);
+    setSelectionKind(null);
+    setPlayheadSeconds(0);
   }, [activeTimeline?.id]);
 
-  useEffect(() => {
-    if (selectedItem) {
-      setPlayheadSeconds(Number(selectedItem.timelineStart) || 0);
-    }
-    setIsPlaying(false);
-    setTimelineNotice("");
-  }, [selectedItem?.id]);
-
+  // Preview playback: drive the selected clip's <video> only while foregrounded (sc-11961).
   useEffect(() => {
     const video = previewVideoRef.current;
     if (!assetCanRenderAsVideo(selectedAsset) || !video) {
-      setIsPlaying(false);
       return;
     }
-    // Only drive playback while this is the foreground view (sc-11961). When the editor
-    // is backgrounded under keep-alive, pause instead — the <video>'s pause event flips
-    // isPlaying off (onPause), so re-showing the editor lands paused rather than silently
-    // resuming audio/decode work that ran while hidden.
     if (isPlaying && screenActive) {
       video.play().catch(() => setIsPlaying(false));
       return;
     }
     video.pause();
+    // Re-run only when the selected clip changes (by id), not on every asset-object identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying, selectedAsset?.id, screenActive]);
 
-  // Keep the global keydown listener mounted once and read live editor state
-  // through a ref, so undo/redo/delete don't re-bind window on every history
-  // or selection change.
+  // Playhead transport: a rAF loop advances the playhead across the whole timeline while
+  // playing, wrapping to 0 at the end. Only runs while foregrounded.
+  useEffect(() => {
+    if (!isPlaying || !screenActive || duration <= 0 || typeof window.requestAnimationFrame !== "function") {
+      return undefined;
+    }
+    let raf = 0;
+    let last = performance.now();
+    const tick = (now) => {
+      const dt = (now - last) / 1000;
+      last = now;
+      setPlayheadSeconds((prev) => {
+        const next = prev + dt;
+        return next >= duration ? 0 : next;
+      });
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [isPlaying, screenActive, duration]);
+
   const shortcutStateRef = useRef({ undo, redo, removeSelectedItem, selectedItemId });
   shortcutStateRef.current = { undo, redo, removeSelectedItem, selectedItemId };
 
   useEffect(() => {
     function onKeyDown(event) {
       const target = event.target;
-      const isTyping = ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName);
-      if (isTyping) {
+      if (["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName)) {
         return;
       }
       const { undo, redo, removeSelectedItem, selectedItemId } = shortcutStateRef.current;
@@ -122,57 +141,20 @@ export function EditorScreen() {
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
-        if (event.shiftKey) {
-          redo();
-        } else {
-          undo();
-        }
+        event.shiftKey ? redo() : undo();
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "y") {
         event.preventDefault();
         redo();
       }
-      if (event.key === "Delete" || event.key === "Backspace") {
-        if (selectedItemId) {
-          event.preventDefault();
-          removeSelectedItem();
-        }
+      if ((event.key === "Delete" || event.key === "Backspace") && selectedItemId) {
+        event.preventDefault();
+        removeSelectedItem();
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
-
-  async function submitNewTimeline(event) {
-    event.preventDefault();
-    await createTimeline({ name: newTimelineName, aspectRatio: newAspectRatio, fps: 30 });
-  }
-
-  // sc-11967 (S8): re-selecting a timeline from the dropdown reloads the server copy and
-  // replaces the in-memory working copy, dropping any unsaved structural edits. Guard the
-  // switch when the active timeline is dirty. The <select> is controlled by
-  // `selectedTimelineId`, so returning early (no state change) snaps its value back to the
-  // current timeline. sc-12018 (S8 follow-up): routed through the desktop-safe appConfirm
-  // (a real in-app dialog) rather than the raw window.confirm — window.confirm silently
-  // no-ops inside the Tauri WebView, so the guard would neither confirm nor cancel there.
-  async function handleSelectTimeline(nextId) {
-    if (nextId === selectedTimelineId) {
-      return;
-    }
-    if (isActiveTimelineDirty?.()) {
-      const proceed = await appConfirm({
-        title: "Discard timeline edits?",
-        message: "You have unsaved timeline edits. Switch timelines and discard them?",
-        confirmLabel: "Discard & switch",
-        cancelLabel: "Keep editing",
-        tone: "danger",
-      });
-      if (!proceed) {
-        return;
-      }
-    }
-    setSelectedTimelineId(nextId);
-  }
 
   function commit(nextTimeline) {
     if (!activeTimeline) {
@@ -183,17 +165,19 @@ export function EditorScreen() {
     setActiveTimeline({ ...nextTimeline, duration: timelineDuration(nextTimeline) });
   }
 
-  function updateTimelineItem(itemId, changes) {
-    if (!activeTimeline) {
-      return;
-    }
-    commit({
-      ...activeTimeline,
-      tracks: activeTimeline.tracks.map((track) => ({
-        ...track,
-        items: track.items.map((item) => (item.id === itemId ? normalizeTimelineItem({ ...item, ...changes }) : item)),
-      })),
-    });
+  function normalizeTimelineItem(item) {
+    const start = Number(item.timelineStart) || 0;
+    const end = Math.max(start + 0.1, Number(item.timelineEnd) || start + 0.1);
+    const sourceIn = Number(item.sourceIn) || 0;
+    const sourceOut = Math.max(sourceIn + 0.1, Number(item.sourceOut) || sourceIn + itemDuration(item));
+    return {
+      ...ensureItemVersionFields(item),
+      sourceIn,
+      sourceOut,
+      timelineStart: Math.max(0, start),
+      timelineEnd: end,
+      speed: Math.max(0.1, Number(item.speed) || 1),
+    };
   }
 
   function undo() {
@@ -216,15 +200,15 @@ export function EditorScreen() {
     setActiveTimeline(next);
   }
 
-  function addAssetToTrack(asset, trackId = "track_main") {
+  function addAssetToTrack(asset, trackId = MAIN_TRACK_ID) {
     if (!activeTimeline) {
       return;
     }
     const isStill = asset.type !== "video" && assetCanRenderAsImage(asset);
     const track = activeTimeline.tracks.find((item) => item.id === trackId) ?? activeTimeline.tracks[0];
     const start = Math.max(0, ...track.items.map((item) => item.timelineEnd));
-    const sourceDuration = Number(asset.file?.duration) || Number(addDuration) || 4;
-    const durationSeconds = isStill ? Number(addDuration) || 4 : sourceDuration;
+    const sourceDuration = Number(asset.file?.duration) || 4;
+    const durationSeconds = isStill ? 4 : sourceDuration;
     const item = normalizeTimelineItem({
       id: `item_${crypto.randomUUID().replaceAll("-", "")}`,
       trackId: track.id,
@@ -250,7 +234,24 @@ export function EditorScreen() {
         current.id === track.id ? { ...current, items: [...current.items, item] } : current,
       ),
     });
-    setSelectedItemId(item.id);
+    selectItem(item);
+  }
+
+  function addAudioTrack() {
+    if (!activeTimeline) {
+      return;
+    }
+    const count = activeTimeline.tracks.filter((track) => track.kind === "audio").length;
+    const newTrack = {
+      id: `track_audio_${crypto.randomUUID().replaceAll("-", "")}`,
+      name: `Audio ${count + 1}`,
+      kind: "audio",
+      locked: false,
+      muted: false,
+      items: [],
+    };
+    commit({ ...activeTimeline, tracks: [...activeTimeline.tracks, newTrack] });
+    setTimelineNotice("Audio track added. Note: audio isn't mixed into exports yet (tracked for the backend audit).");
   }
 
   function removeSelectedItem() {
@@ -265,72 +266,100 @@ export function EditorScreen() {
       })),
     });
     setSelectedItemId(null);
+    setSelectionKind(null);
   }
 
-  function changeItemTrack(trackId) {
-    if (!activeTimeline || !selectedItem) {
+  function rippleCloseGap(gap) {
+    if (!activeTimeline || !gap) {
+      return;
+    }
+    const shift = Number(gap.rightItem.timelineStart) - Number(gap.leftItem.timelineEnd);
+    if (shift <= 0) {
       return;
     }
     commit({
       ...activeTimeline,
       tracks: activeTimeline.tracks.map((track) => {
-        if (track.id === selectedItem.trackId) {
-          return { ...track, items: track.items.filter((item) => item.id !== selectedItem.id) };
+        if (track.id !== gap.rightItem.trackId) {
+          return track;
         }
-        if (track.id === trackId) {
-          return { ...track, items: [...track.items, normalizeTimelineItem({ ...selectedItem, trackId })] };
-        }
-        return track;
+        return {
+          ...track,
+          items: track.items.map((item) =>
+            Number(item.timelineStart) >= Number(gap.rightItem.timelineStart)
+              ? { ...item, timelineStart: item.timelineStart - shift, timelineEnd: item.timelineEnd - shift }
+              : item,
+          ),
+        };
       }),
     });
+    setSelectedGap(null);
+    setSelectionKind(null);
   }
 
-  function normalizeTimelineItem(item) {
-    const start = Number(item.timelineStart) || 0;
-    const end = Math.max(start + 0.1, Number(item.timelineEnd) || start + 0.1);
-    const sourceIn = Number(item.sourceIn) || 0;
-    const sourceOut = Math.max(sourceIn + 0.1, Number(item.sourceOut) || sourceIn + itemDuration(item));
-    return {
-      ...ensureItemVersionFields(item),
-      sourceIn,
-      sourceOut,
-      timelineStart: Math.max(0, start),
-      timelineEnd: end,
-      speed: Math.max(0.1, Number(item.speed) || 1),
-    };
+  // ---- selection ----
+  function selectItem(item) {
+    setSelectedItemId(item.id);
+    setSelectionKind(trackKindById.get(item.trackId) === "audio" ? "audio" : "clip");
+    setSelectedGap(null);
+    setSelectedMarker(null);
+    setPlayheadSeconds(Number(item.timelineStart) || 0);
+    setIsPlaying(false);
+    setTimelineNotice("");
+  }
+  function selectStoryboardKey(clip) {
+    selectItem(clip);
+  }
+  function selectKeyframe(item) {
+    setSelectedItemId(item.id);
+    setSelectionKind("key");
+    setSelectedGap(null);
+    setPlayheadSeconds(Number(item.timelineStart) || 0);
+    setIsPlaying(false);
+  }
+  function selectGap(gap) {
+    setSelectedGap(gap);
+    setSelectionKind("gap");
+    setSelectedItemId(null);
+    setSelectedMarker(null);
+    setPlayheadSeconds(Number(gap.leftItem.timelineEnd) || 0);
+    setIsPlaying(false);
+  }
+  function selectMarker(marker) {
+    setSelectedMarker(marker);
+    setSelectionKind("marker");
+    setPlayheadSeconds(Number(marker.time) || 0);
   }
 
-  function selectedTrackItems() {
-    if (!activeTimeline || !selectedItem) {
-      return [];
+  function stepClip(direction) {
+    if (!mainClips.length) {
+      return;
     }
-    const track = activeTimeline.tracks.find((item) => item.id === selectedItem.trackId);
-    return track ? trackItems(track) : [];
+    const index = mainClips.findIndex((item) => item.id === selectedItemId);
+    const nextIndex = index === -1 ? 0 : Math.min(mainClips.length - 1, Math.max(0, index + direction));
+    selectItem(mainClips[nextIndex]);
   }
 
-  function nextItemAfterSelection() {
-    return selectedTrackItems().find((item) => item.timelineStart >= selectedItem.timelineEnd && item.id !== selectedItem.id) ?? null;
-  }
-
-  function generationBaseContext(action, extra = {}) {
+  // ---- generation context ----
+  function generationContext(action, item, extra = {}) {
     return {
       action,
       timelineId: activeTimeline.id,
       timelineName: activeTimeline.name,
-      itemId: selectedItem.id,
-      trackId: selectedItem.trackId,
-      sourceAssetId: selectedItem.assetId,
-      sourceTimestamp: sourceTimestampAtPlayhead(selectedItem, playheadSeconds),
+      itemId: item.id,
+      trackId: item.trackId,
+      sourceAssetId: item.assetId,
+      sourceTimestamp: sourceTimestampAtPlayhead(item, playheadSeconds),
       ...extra,
     };
   }
 
-  async function extractFrame(intendedUse = "reuse") {
+  async function extractFrame() {
     if (!selectedItem || selectedItem.type !== "video") {
       setTimelineNotice("Select a video clip before extracting a frame.");
       return;
     }
-    const job = await extractTimelineFrame({ timeline: activeTimeline, item: selectedItem, playheadSeconds, intendedUse });
+    const job = await extractTimelineFrame({ timeline: activeTimeline, item: selectedItem, playheadSeconds, intendedUse: "reuse" });
     if (job) {
       setTimelineNotice("Frame extraction queued.");
     }
@@ -341,98 +370,82 @@ export function EditorScreen() {
       setTimelineNotice("Select a video clip before extending.");
       return;
     }
-    const duration = Math.min(15, Math.max(1, Number(extensionDuration) || itemDuration(selectedItem)));
+    const base = gen.buildBasePayload();
     const job = await queueTimelineVideoJob({
+      ...base,
       mode: "extend_clip",
-      prompt: generationPrompt,
-      model: "ltx_2_3",
-      duration,
-      fps: activeTimeline.fps,
-      width: activeTimeline.width,
-      height: activeTimeline.height,
-      quality: "balanced",
       sourceClipAssetId: selectedItem.assetId,
-      loras: [],
       advanced: {
-        resolution: `${activeTimeline.width}x${activeTimeline.height}`,
+        ...base.advanced,
         timelineAction: "extend",
-        timelineContext: generationBaseContext("extend", {
+        timelineContext: generationContext("extend", selectedItem, {
           endpointTimestamp: Number(selectedItem.sourceOut) || sourceTimestampAtPlayhead(selectedItem, selectedItem.timelineEnd),
           timelineStart: Number(selectedItem.timelineEnd),
         }),
       },
     });
     if (job) {
-      setTimelineNotice("Extension job queued. The new clip will land after the selection when it completes.");
+      setTimelineNotice("Extension job queued. The new clip lands after the selection when it completes.");
     }
   }
 
-  async function replaceSelectedItem() {
+  async function replaceSelectedItem({ variation = false } = {}) {
     if (!selectedItem) {
       return;
     }
     const isStill = selectedItem.type === "image";
-    const duration = itemDuration(selectedItem);
+    const base = gen.buildBasePayload();
     const job = await queueTimelineVideoJob({
+      ...base,
       mode: isStill ? "image_to_video" : "extend_clip",
-      prompt: generationPrompt,
-      model: "ltx_2_3",
-      duration,
-      fps: activeTimeline.fps,
-      width: activeTimeline.width,
-      height: activeTimeline.height,
-      quality: "balanced",
+      duration: itemDuration(selectedItem),
+      seed: variation ? Math.floor(Math.random() * 1_000_000_000) : base.seed,
       sourceAssetId: isStill ? selectedItem.assetId : null,
       sourceClipAssetId: isStill ? null : selectedItem.assetId,
-      loras: [],
       advanced: {
-        resolution: `${activeTimeline.width}x${activeTimeline.height}`,
+        ...base.advanced,
         timelineAction: "replace",
-        timelineContext: generationBaseContext("replace"),
+        timelineContext: generationContext("replace", selectedItem),
       },
     });
     if (job) {
-      setTimelineNotice("Replacement job queued. The prior asset will stay in this item's version history.");
+      setTimelineNotice(
+        variation
+          ? "Variation queued with a fresh seed. The prior asset stays in this item's version history."
+          : "Replacement job queued. The prior asset stays in this item's version history.",
+      );
     }
   }
 
-  async function bridgeAfterSelectedClip() {
-    if (!selectedItem || selectedItem.type !== "video") {
-      setTimelineNotice("Select the left video clip before generating a bridge.");
+  async function bridgeGap(gap) {
+    const left = gap?.leftItem;
+    const right = gap?.rightItem;
+    if (!left || left.type !== "video" || !right || right.type !== "video") {
+      setTimelineNotice("A bridge needs a video clip on each side of the gap.");
       return;
     }
-    const rightItem = nextItemAfterSelection();
-    if (!rightItem || rightItem.type !== "video") {
-      setTimelineNotice("Place another video clip after this one on the same track first.");
-      return;
-    }
-    const gap = Number(rightItem.timelineStart) - Number(selectedItem.timelineEnd);
-    if (gap <= 0.05) {
+    const gapSeconds = Number(right.timelineStart) - Number(left.timelineEnd);
+    if (gapSeconds <= 0.05) {
       setTimelineNotice("Create space between the clips before generating a bridge.");
       return;
     }
+    const base = gen.buildBasePayload();
     const job = await queueTimelineVideoJob({
+      ...base,
       mode: "video_bridge",
-      prompt: generationPrompt,
-      model: "ltx_2_3",
-      duration: Number(gap.toFixed(2)),
-      fps: activeTimeline.fps,
-      width: activeTimeline.width,
-      height: activeTimeline.height,
-      quality: "balanced",
-      sourceClipAssetId: selectedItem.assetId,
-      bridgeRightClipAssetId: rightItem.assetId,
-      loras: [],
+      duration: Number(gapSeconds.toFixed(2)),
+      sourceClipAssetId: left.assetId,
+      bridgeRightClipAssetId: right.assetId,
       advanced: {
-        resolution: `${activeTimeline.width}x${activeTimeline.height}`,
+        ...base.advanced,
         timelineAction: "bridge",
-        timelineContext: generationBaseContext("bridge", {
-          rightItemId: rightItem.id,
-          rightAssetId: rightItem.assetId,
-          leftTimestamp: Number(selectedItem.sourceOut) || sourceTimestampAtPlayhead(selectedItem, selectedItem.timelineEnd),
-          rightTimestamp: Number(rightItem.sourceIn) || 0,
-          timelineStart: Number(selectedItem.timelineEnd),
-          timelineEnd: Number(rightItem.timelineStart),
+        timelineContext: generationContext("bridge", left, {
+          rightItemId: right.id,
+          rightAssetId: right.assetId,
+          leftTimestamp: Number(left.sourceOut) || sourceTimestampAtPlayhead(left, left.timelineEnd),
+          rightTimestamp: Number(right.sourceIn) || 0,
+          timelineStart: Number(left.timelineEnd),
+          timelineEnd: Number(right.timelineStart),
         }),
       },
     });
@@ -441,362 +454,217 @@ export function EditorScreen() {
     }
   }
 
+  function noticeUnsupported(feature) {
+    setTimelineNotice(`${feature} isn't wired to a backend yet — tracked in the Video Editor audit (epic 12798).`);
+  }
+
+  // ---- timeline switching / creation ----
+  async function handleSelectTimeline(nextId) {
+    if (nextId === selectedTimelineId) {
+      return;
+    }
+    if (isActiveTimelineDirty?.()) {
+      const proceed = await appConfirm({
+        title: "Discard timeline edits?",
+        message: "You have unsaved timeline edits. Switch timelines and discard them?",
+        confirmLabel: "Discard & switch",
+        cancelLabel: "Keep editing",
+        tone: "danger",
+      });
+      if (!proceed) {
+        return;
+      }
+    }
+    setSelectedTimelineId(nextId);
+  }
+
+  async function handleNewTimeline() {
+    const count = timelines.length + 1;
+    await createTimeline({ name: `Timeline ${count}`, aspectRatio: "16:9", fps: 30 });
+  }
+
+  // ---- rail contextual header + actions ----
+  function buildContextActions() {
+    if (selectionKind === "clip" || selectionKind === "key") {
+      if (selectedItem?.type === "image") {
+        return [
+          { id: "animate", label: "Animate", primary: true, onClick: () => replaceSelectedItem() },
+          { id: "send-video", label: "Send to Video", onClick: () => sendAssetToVideo(selectedAsset, "image_to_video") },
+          { id: "variation", label: "Variation", onClick: () => replaceSelectedItem({ variation: true }) },
+          { id: "extract", label: "Extract frame", disabled: true, onClick: () => extractFrame() },
+        ];
+      }
+      return [
+        { id: "extend", label: "Extend clip", primary: true, onClick: extendSelectedClip },
+        { id: "regenerate", label: "Regenerate", onClick: () => replaceSelectedItem() },
+        { id: "extract", label: "Extract frame", onClick: extractFrame },
+        { id: "variation", label: "Variation", onClick: () => replaceSelectedItem({ variation: true }) },
+      ];
+    }
+    if (selectionKind === "gap") {
+      return [
+        { id: "bridge", label: "Generate bridge", primary: true, onClick: () => bridgeGap(selectedGap) },
+        { id: "fill", label: "Generate to fill", onClick: () => bridgeGap(selectedGap) },
+        { id: "ripple", label: "Ripple close gap", onClick: () => rippleCloseGap(selectedGap) },
+      ];
+    }
+    if (selectionKind === "audio") {
+      return [
+        { id: "music", label: "Regenerate music", primary: true, disabled: true, onClick: () => noticeUnsupported("Audio generation") },
+        { id: "match", label: "Match to cut", disabled: true, onClick: () => noticeUnsupported("Match to cut") },
+        { id: "vo", label: "Voiceover", disabled: true, onClick: () => noticeUnsupported("Voiceover") },
+        { id: "duck", label: "Ducking", disabled: true, onClick: () => noticeUnsupported("Ducking") },
+      ];
+    }
+    return [];
+  }
+
+  const contextActions = buildContextActions();
+  const primaryAction = contextActions.find((action) => action.primary && !action.disabled);
+
+  function railHeader() {
+    if (selectionKind === "gap" && selectedGap) {
+      const seconds = (Number(selectedGap.rightItem.timelineStart) - Number(selectedGap.leftItem.timelineEnd)).toFixed(1);
+      return { eyebrow: "GAP", title: `${seconds}s gap` };
+    }
+    if (selectionKind === "audio") {
+      return { eyebrow: "AUDIO", title: selectedItem?.displayName ?? "Audio clip" };
+    }
+    if (selectionKind === "key") {
+      return { eyebrow: "KEYFRAME", title: selectedItem?.displayName ?? "Key image" };
+    }
+    if (selectionKind === "marker" && selectedMarker) {
+      return { eyebrow: "MARKER", title: selectedMarker.label };
+    }
+    if (selectionKind === "clip" && selectedItem) {
+      const eyebrow = isSelectedAi ? "VIDEO · AI CLIP" : selectedItem.type === "image" ? "IMAGE CLIP" : "VIDEO CLIP";
+      return { eyebrow, title: selectedItem.displayName };
+    }
+    return { eyebrow: "NO SELECTION", title: activeTimeline?.name ?? "Timeline" };
+  }
+
+  function toggleMap(setter, key) {
+    if (!key) {
+      return;
+    }
+    setter((current) => ({ ...current, [key]: !current[key] }));
+  }
+
   if (!activeProject) {
     return (
-      <section className="page-frame">
+      <section className="ve-editor ve-editor-empty">
         <div className="empty-panel">Open a project before assembling a timeline.</div>
       </section>
     );
   }
 
+  if (!activeTimeline) {
+    return (
+      <section className="ve-editor ve-editor-empty">
+        <div className="empty-panel">
+          <p>Create a timeline to start editing.</p>
+          <button className="ve-generate" onClick={handleNewTimeline} type="button">
+            New timeline
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  const aspectClass = `ve-aspect-${activeTimeline.aspectRatio.replace(":", "-")}`;
+  const generateSummary = `${gen.duration}s · ${gen.resolution} · ${gen.fps}fps · queues to your GPU`;
+
   return (
-    <section className="page-frame editor-surface">
-      <WorkPanel
-        eyebrow={activeTimeline?.name ?? "Timelines"}
-        hint="Sequence clips on the timeline, scrub through the preview, and export when the cut feels right."
-        actions={
-          <>
-            <button className="secondary-action" disabled={!activeTimeline} onClick={() => saveTimeline(activeTimeline)} type="button">
-              Save
-            </button>
-            <button className="secondary-action" disabled={!history.length} onClick={undo} type="button">
-              Undo
-            </button>
-            <button className="secondary-action" disabled={!future.length} onClick={redo} type="button">
-              Redo
-            </button>
-          </>
-        }
-      >
-        <div className="editor-header">
-          <select onChange={(event) => handleSelectTimeline(event.target.value)} value={selectedTimelineId ?? ""}>
-            <option value="">Select timeline</option>
-            {timelines.map((timeline) => (
-              <option key={timeline.id} value={timeline.id}>
-                {timeline.name}
-              </option>
-            ))}
-          </select>
-        </div>
+    <section className="ve-editor">
+      <EditorToolbar
+        canRedo={future.length > 0}
+        canUndo={history.length > 0}
+        durationTimecode={formatTimecode(duration, activeTimeline.fps)}
+        exportDisabled={!activeTimeline.tracks.some((track) => track.items.length)}
+        onExport={() => exportTimeline(activeTimeline, { resolution: activeTimeline.height, fps: activeTimeline.fps })}
+        onNewTimeline={handleNewTimeline}
+        onRedo={redo}
+        onSave={() => saveTimeline(activeTimeline)}
+        onSelectTimeline={handleSelectTimeline}
+        onUndo={undo}
+        saveDisabled={!activeTimeline}
+        onZoomIn={() => setZoom((z) => Math.min(ZOOM_MAX, +(z + ZOOM_STEP).toFixed(2)))}
+        onZoomOut={() => setZoom((z) => Math.max(ZOOM_MIN, +(z - ZOOM_STEP).toFixed(2)))}
+        projectName={activeTimeline.name}
+        selectedTimelineId={selectedTimelineId}
+        subLabel={`timeline · ${activeTimeline.aspectRatio} · ${activeTimeline.fps}fps`}
+        timecode={formatTimecode(playheadSeconds, activeTimeline.fps)}
+        timelines={timelines}
+        zoomPct={`${Math.round(zoom * 100)}%`}
+      />
 
-        <form className="timeline-create" onSubmit={submitNewTimeline}>
-          <label>
-            Timeline
-            <input onChange={(event) => setNewTimelineName(event.target.value)} value={newTimelineName} />
-          </label>
-          <label>
-            Aspect
-            <select onChange={(event) => setNewAspectRatio(event.target.value)} value={newAspectRatio}>
-              {Object.entries(aspectOptions).map(([value, option]) => (
-                <option key={value} value={value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button type="submit">New Timeline</button>
-        </form>
-      </WorkPanel>
+      <div className="ve-upper">
+        <MediaBin assets={assets} onAddToTrack={(asset) => addAssetToTrack(asset)} onPreview={(asset) => setPreviewAsset(asset, assets)} />
+        <ProgramMonitor
+          aspectClass={aspectClass}
+          clipLabel={selectedItem ? `${selectedItem.displayName}${isSelectedAi ? " · AI" : ""}` : null}
+          isAi={isSelectedAi}
+          isPlaying={isPlaying}
+          onEnded={() => setIsPlaying(false)}
+          onNext={() => stepClip(1)}
+          onPause={() => setIsPlaying(false)}
+          onPlay={() => setIsPlaying(true)}
+          onPrev={() => stepClip(-1)}
+          onTogglePlay={() => setIsPlaying((value) => !value)}
+          previewVideoRef={previewVideoRef}
+          resolutionLabel={`${activeTimeline.width} × ${activeTimeline.height}`}
+          selectedAsset={selectedAsset}
+        />
+        <GenerationRail
+          contextActions={contextActions}
+          gen={gen}
+          generateDisabled={!activeTimeline}
+          generateSummary={generateSummary}
+          header={railHeader()}
+          onGenerate={() => (primaryAction ? primaryAction.onClick() : setTimelineNotice("Select a clip or gap to generate."))}
+        />
+      </div>
 
-      {activeTimeline ? (
-        <div className="editor-layout">
-          <section className="editor-preview">
-            <div className={`preview-canvas aspect-${activeTimeline.aspectRatio.replace(":", "-")}`}>
-              {selectedAsset ? (
-                <AssetMedia
-                  asset={selectedAsset}
-                  controls={false}
-                  onEnded={() => setIsPlaying(false)}
-                  onPause={() => setIsPlaying(false)}
-                  onPlay={() => setIsPlaying(true)}
-                  ref={previewVideoRef}
-                />
-              ) : (
-                <span>Select a timeline item</span>
-              )}
-            </div>
-            <div className="playback-bar">
-              <button disabled={!assetCanRenderAsVideo(selectedAsset)} onClick={() => setIsPlaying((value) => !value)} type="button">
-                {isPlaying ? "Pause" : "Play"}
-              </button>
-              <span>{formatSeconds(Math.round(duration))}</span>
-              <span>{activeTimeline.aspectRatio}</span>
-              <span>{activeTimeline.fps} fps</span>
-            </div>
-          </section>
+      {timelineNotice ? <p className="ve-notice">{timelineNotice}</p> : null}
 
-          <aside className="editor-inspector">
-            {selectedItem ? (
-              <>
-                <div className="section-heading">
-                  <p className="eyebrow">Clip</p>
-                  <h2>{selectedItem.displayName}</h2>
-                </div>
-                <label>
-                  Track
-                  <select onChange={(event) => changeItemTrack(event.target.value)} value={selectedItem.trackId}>
-                    {activeTimeline.tracks.map((track) => (
-                      <option key={track.id} value={track.id}>
-                        {track.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <div className="control-grid compact-controls">
-                  <label>
-                    Start
-                    <input
-                      min="0"
-                      onChange={(event) => updateTimelineItem(selectedItem.id, { timelineStart: Number(event.target.value) })}
-                      step="0.1"
-                      type="number"
-                      value={selectedItem.timelineStart}
-                    />
-                  </label>
-                  <label>
-                    End
-                    <input
-                      min="0.1"
-                      onChange={(event) => updateTimelineItem(selectedItem.id, { timelineEnd: Number(event.target.value) })}
-                      step="0.1"
-                      type="number"
-                      value={selectedItem.timelineEnd}
-                    />
-                  </label>
-                  <label>
-                    Source In
-                    <input
-                      min="0"
-                      onChange={(event) => updateTimelineItem(selectedItem.id, { sourceIn: Number(event.target.value) })}
-                      step="0.1"
-                      type="number"
-                      value={selectedItem.sourceIn}
-                    />
-                  </label>
-                  <label>
-                    Source Out
-                    <input
-                      min="0.1"
-                      onChange={(event) => updateTimelineItem(selectedItem.id, { sourceOut: Number(event.target.value) })}
-                      step="0.1"
-                      type="number"
-                      value={selectedItem.sourceOut}
-                    />
-                  </label>
-                </div>
-                <label>
-                  Speed
-                  <select onChange={(event) => updateTimelineItem(selectedItem.id, { speed: Number(event.target.value) })} value={selectedItem.speed}>
-                    {speedPresets.map((speed) => (
-                      <option key={speed} value={speed}>
-                        {speed}x
-                      </option>
-                    ))}
-                    {!speedPresets.includes(Number(selectedItem.speed)) ? <option value={selectedItem.speed}>Custom {selectedItem.speed}x</option> : null}
-                  </select>
-                </label>
-                <label>
-                  Custom speed
-                  <input
-                    min="0.1"
-                    onChange={(event) => updateTimelineItem(selectedItem.id, { speed: Number(event.target.value) })}
-                    step="0.05"
-                    type="number"
-                    value={selectedItem.speed}
-                  />
-                </label>
-                <div className="generation-hook-panel">
-                  <label>
-                    Playhead
-                    <input
-                      max={selectedItem.timelineEnd}
-                      min={selectedItem.timelineStart}
-                      onChange={(event) => setPlayheadSeconds(Number(event.target.value))}
-                      step="0.1"
-                      type="number"
-                      value={playheadSeconds}
-                    />
-                  </label>
-                  <label className="prompt-field">
-                    Generation prompt
-                    <textarea onChange={(event) => setGenerationPrompt(event.target.value)} value={generationPrompt} />
-                  </label>
-                  <label>
-                    Extension duration
-                    <input
-                      max="15"
-                      min="1"
-                      onChange={(event) => setExtensionDuration(Number(event.target.value))}
-                      step="0.5"
-                      type="number"
-                      value={extensionDuration}
-                    />
-                  </label>
-                  <div className="hook-actions">
-                    <button disabled={selectedItem.type !== "video"} onClick={() => extractFrame("reuse")} type="button">
-                      Extract Frame
-                    </button>
-                    <button disabled={selectedItem.type === "video"} onClick={() => onSendImage(selectedAsset)} type="button">
-                      Send Image
-                    </button>
-                    <button onClick={() => onSendVideo(selectedAsset)} type="button">
-                      Send Video
-                    </button>
-                    <button disabled={selectedItem.type !== "video"} onClick={extendSelectedClip} type="button">
-                      Extend
-                    </button>
-                    <button onClick={replaceSelectedItem} type="button">
-                      Replace
-                    </button>
-                    <button disabled={selectedItem.type !== "video"} onClick={bridgeAfterSelectedClip} type="button">
-                      Bridge Gap
-                    </button>
-                  </div>
-                  <div className="version-list">
-                    <strong>{ensureItemVersionFields(selectedItem).versionAssetIds.length} versions</strong>
-                    {ensureItemVersionFields(selectedItem)
-                      .versionAssetIds.slice(-4)
-                      .map((assetId) => (
-                        <button
-                          className={assetId === selectedItem.assetId ? "active" : ""}
-                          key={assetId}
-                          onClick={() => updateTimelineItem(selectedItem.id, { assetId, currentVersionAssetId: assetId })}
-                          type="button"
-                        >
-                          {assetId === selectedItem.assetId ? "Current" : "Restore"} {assetId.slice(-6)}
-                        </button>
-                      ))}
-                  </div>
-                  {timelineNotice ? <p className="inline-warning">{timelineNotice}</p> : null}
-                </div>
-                <label>
-                  Transition in
-                  <select
-                    onChange={(event) =>
-                      updateTimelineItem(selectedItem.id, {
-                        transitionIn: { ...(selectedItem.transitionIn ?? {}), type: event.target.value },
-                      })
-                    }
-                    value={selectedItem.transitionIn?.type ?? "cut"}
-                  >
-                    {transitionOptions.map((transition) => (
-                      <option key={transition} value={transition}>
-                        {transition.replaceAll("_", " ")}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Transition out
-                  <select
-                    onChange={(event) =>
-                      updateTimelineItem(selectedItem.id, {
-                        transitionOut: { ...(selectedItem.transitionOut ?? {}), type: event.target.value },
-                      })
-                    }
-                    value={selectedItem.transitionOut?.type ?? "cut"}
-                  >
-                    {transitionOptions.map((transition) => (
-                      <option key={transition} value={transition}>
-                        {transition.replaceAll("_", " ")}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button className="danger-action" onClick={removeSelectedItem} type="button">
-                  Delete Clip
-                </button>
-              </>
-            ) : (
-              <div className="empty-panel compact-panel">No clip selected</div>
-            )}
-          </aside>
+      <StoryboardStrip
+        assetsById={assetsById}
+        clips={mainClips}
+        fps={activeTimeline.fps}
+        onAddKey={() => noticeUnsupported("Storyboard key images")}
+        onSelectKey={selectStoryboardKey}
+        selectedItemId={selectedItemId}
+      />
 
-          <section className="timeline-panel">
-            <div className="timeline-ruler">
-              <span>0s</span>
-              <span>{formatSeconds(Math.ceil(timelineScale / 2))}</span>
-              <span>{formatSeconds(Math.ceil(timelineScale))}</span>
-            </div>
-            <div className="timeline-tracks">
-              {activeTimeline.tracks.map((track) => (
-                <div className="timeline-track" key={track.id}>
-                  <strong>{track.name}</strong>
-                  <div className="track-lane">
-                    {trackItems(track).map((item) => (
-                      <button
-                        className={selectedItemId === item.id ? "timeline-item active" : "timeline-item"}
-                        key={item.id}
-                        onClick={() => setSelectedItemId(item.id)}
-                        style={{
-                          left: `${(item.timelineStart / timelineScale) * 100}%`,
-                          width: `${Math.max(4, (itemDuration(item) / timelineScale) * 100)}%`,
-                        }}
-                        type="button"
-                      >
-                        <span>{item.displayName}</span>
-                        <small>{item.speed}x</small>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <aside className="asset-bin">
-            <div className="bin-controls">
-              <label>
-                Still duration
-                <input min="0.5" onChange={(event) => setAddDuration(Number(event.target.value))} step="0.5" type="number" value={addDuration} />
-              </label>
-            </div>
-            <div className="asset-bin-list">
-              {[...mainAssets, ...stillAssets].slice(0, 18).map((asset) => (
-                <article className="bin-asset" key={asset.id}>
-                  <button onClick={() => onPreview(asset, [...mainAssets, ...stillAssets].slice(0, 18))} type="button">
-                    <AssetMedia asset={asset} />
-                  </button>
-                  <strong>{asset.displayName}</strong>
-                  <div className="bin-actions">
-                    <button onClick={() => addAssetToTrack(asset, "track_main")} type="button">
-                      Main
-                    </button>
-                    <button onClick={() => addAssetToTrack(asset, "track_overlay")} type="button">
-                      Overlay
-                    </button>
-                  </div>
-                </article>
-              ))}
-              {assets.length === 0 ? <div className="empty-panel compact-panel">No media assets</div> : null}
-            </div>
-          </aside>
-
-          <form
-            className="export-strip"
-            onSubmit={(event) => {
-              event.preventDefault();
-              exportTimeline(activeTimeline, { resolution: Number(exportResolution), fps: activeTimeline.fps });
-            }}
-          >
-            <label>
-              MP4 height
-              <select onChange={(event) => setExportResolution(Number(event.target.value))} value={exportResolution}>
-                {[640, 720, 1024, 1280].map((resolution) => (
-                  <option key={resolution} value={resolution}>
-                    {resolution}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button className="primary-action" disabled={!activeTimeline.tracks.some((track) => track.items.length)} type="submit">
-              Export MP4
-            </button>
-          </form>
-        </div>
-      ) : (
-        <div className="empty-panel">Create a timeline to start editing.</div>
-      )}
+      <Timeline
+        assetsById={assetsById}
+        duration={duration}
+        markers={markers}
+        onAddAudioTrack={addAudioTrack}
+        onScrub={(seconds) => {
+          setIsPlaying(false);
+          setPlayheadSeconds(seconds);
+        }}
+        onSelectGap={selectGap}
+        onSelectItem={selectItem}
+        onSelectKey={(item) => selectKeyframe(item)}
+        onSelectMarker={selectMarker}
+        onToggleMute={(id) => toggleMap(setTrackMuted, id)}
+        onToggleSnap={() => setSnap((value) => !value)}
+        onToggleSolo={(id) => toggleMap(setTrackSoloed, id)}
+        onToggleVisible={(id) => toggleMap(setTrackVisible, id)}
+        onZoomIn={() => setZoom((z) => Math.min(ZOOM_MAX, +(z + ZOOM_STEP).toFixed(2)))}
+        onZoomOut={() => setZoom((z) => Math.max(ZOOM_MIN, +(z - ZOOM_STEP).toFixed(2)))}
+        playheadSeconds={playheadSeconds}
+        selectedGapId={selectedGap?.id}
+        selectedItemId={selectedItemId}
+        snap={snap}
+        timeline={activeTimeline}
+        trackMuted={trackMuted}
+        trackSoloed={trackSoloed}
+        trackVisible={trackVisible}
+        zoom={zoom}
+      />
     </section>
   );
 }
