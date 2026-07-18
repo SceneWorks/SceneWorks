@@ -4125,6 +4125,9 @@ fn run_loaded_video_generation(
         GenerationOutput::Images(_) => Err(WorkerError::Engine(
             "video model returned images, expected video frames".to_owned(),
         )),
+        GenerationOutput::Audio(_) => Err(WorkerError::Engine(
+            "video model returned audio, expected video frames".to_owned(),
+        )),
     }
 }
 
