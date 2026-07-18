@@ -932,6 +932,12 @@ pub(crate) const NVFP4_TIER: &str = "nvfp4";
 ///
 /// The `vramGbByTier["int8-convrot"]` row existed since sc-9300 but **nothing ever read it** — which is
 /// why its unmeasured 31.0 estimate survived without a symptom: a dead row cannot be wrong out loud.
+///
+/// Candle-lane only — UNLIKE [`NVFP4_TIER`], which is un-gated because macOS-compiled fns
+/// (`nvfp4_selected`, `preferred_tier`, …) use it. This const's ONLY users are candle-only
+/// (`gate_tier_key`, `vram_gate`), so on the macOS/MLX build it would be dead code (clippy `-D warnings`
+/// → error). ConvRot is a candle-only tier (sm_89, sc-9300), so nothing on the MLX path references it.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) const INT8_CONVROT_TIER: &str = "int8-convrot";
 
 /// Whether the request EXPLICITLY asked for the NVFP4 tier, via the `advanced.quantTier: "nvfp4"`
