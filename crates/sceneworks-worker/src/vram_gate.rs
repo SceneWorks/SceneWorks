@@ -794,6 +794,55 @@ mod tests {
     /// OOM. The q8 row over-predicts (q8's weights are ~2× NVFP4's), which is exactly the number this
     /// gate already used for an NVFP4 request when the bits-derived key returned `"q8"`. sc-11043 must
     /// add the real `nvfp4` rows when it converts a tier; until then this is the documented behavior.
+    /// sc-12425 — **the INT8-ConvRot row must be READ, and must exceed the q8 row it used to alias to.**
+    ///
+    /// The NVFP4 aliasing described above (`requested_tier_key` returning `"q8"` for a tier with no
+    /// honest `mlxQuantize`) hit ConvRot identically — but with the sign flipped, and the flip is the
+    /// bug. For NVFP4, q8 OVER-predicts, so the aliasing only cost a spurious `TooBig`/`Offload`
+    /// ("never an OOM"). For INT8-ConvRot q8 **under**-predicts: measured on a real trunk (sc-12381,
+    /// exclusive sm_120, 1024²/8-step) the tier peaks at **42.9 GB**, while q8's row predicts
+    /// 35.9 + 2.0 = 37.9 — the gate admitted a load that OOMs by ~5 GB. `image_jobs::base` now names the
+    /// tier by IDENTITY ([`INT8_CONVROT_TIER`], off a RESOLVED ConvRot load) rather than handing it to
+    /// the bits-derived key.
+    ///
+    /// Until sc-12425 this row was **dead** — nothing looked it up — which is exactly why its unmeasured
+    /// 31.0 estimate survived: a row nothing reads cannot be wrong out loud. It is load-bearing now.
+    #[test]
+    fn int8_convrot_is_sized_by_its_own_measured_row_not_the_q8_row_it_aliased_to() {
+        // The shipping Krea 2 Turbo shape, with sc-12425's corrected row.
+        let manifest = obj(json!({
+            "candle": {
+                "minMemoryGb": 32,
+                "vramGbByTier": { "q4": 26.4, "q8": 35.9, "bf16": 55.6, "int8-convrot": 42.9 }
+            }
+        }));
+        /// The real-trunk overall-peak (sc-12381). The gate must predict at least this.
+        const MEASURED_PEAK_GB: f64 = 42.9;
+
+        // The row is consulted at all — the regression that would silently restore the dead row.
+        let convrot = predicted_peak_gb(&manifest, INT8_CONVROT_TIER).expect("convrot row");
+        assert_eq!(convrot, MEASURED_PEAK_GB + HEADROOM_GB);
+
+        // The OOM sc-12425 fixes: q8's row under-predicts a 42.9 GB render.
+        let via_q8 = predicted_peak_gb(&manifest, "q8").expect("q8 row");
+        assert!(
+            convrot > via_q8,
+            "INT8-ConvRot must out-predict q8 ({convrot} vs {via_q8}); were q8 >= it, the pre-sc-12425 \
+             aliasing would have been harmless and this story would not exist"
+        );
+        assert!(
+            convrot >= MEASURED_PEAK_GB,
+            "the gate must predict at least the MEASURED peak ({MEASURED_PEAK_GB} GB); {convrot} would \
+             admit a render that OOMs. Re-measure with `krea-convrot-vram` (sc-12381), don't re-estimate."
+        );
+        assert!(
+            via_q8 < MEASURED_PEAK_GB,
+            "sanity: q8's row is expected to UNDER-predict the measured ConvRot peak — that under-\
+             prediction IS the defect. If this trips, the q8 row moved and the story's framing needs \
+             re-reading, not a threshold bump."
+        );
+    }
+
     #[test]
     fn nvfp4_without_a_measured_row_degrades_to_q8_not_min_memory() {
         let manifest = obj(json!({

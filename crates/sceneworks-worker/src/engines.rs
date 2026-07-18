@@ -1540,6 +1540,72 @@ mod tests {
         model.get(backend).and_then(pick).or_else(|| pick(model))
     }
 
+    /// The request width/height STRIDE the PINNED image engine enforces (÷8/÷16/÷32), read off the
+    /// SAME backend bundle the `[min_size, max_size]` envelope comes from — the axis the sc-12384
+    /// guard's SCOPE note deferred, now tied for real (sc-12612, the image twin of the video
+    /// `pinned_engine_geometry::pinned_stride`, sc-12587). Keyed on the gen-core engine id
+    /// ([`ResolvedModel::engine_id`]).
+    ///
+    /// `None` = a family with no exposed pinned stride on this backend. The two bespoke providers
+    /// (InstantID, candle PuLID) never reach this helper: `mlx_model` returns `None` for them and the
+    /// guard `continue`s first — exactly as the size check skips them.
+    ///
+    /// The const VALUE agrees across backends for every family (sana/sensenova ÷32, sdxl/kolors ÷8,
+    /// the rest ÷16), so [`pinned_image_stride_pins_each_engines_lattice`] pins one expected value per
+    /// engine on both lanes. Only the const NAME diverges — an accepted precedent (cf. the video
+    /// `SIZE_MULTIPLE` vs `SIZE_ALIGN`): mlx spells sana/anima/boogu/ideogram/krea `RES_MULTIPLE` and
+    /// sensenova `CELL`; candle spells those `SIZE_MULTIPLE` (sana/anima stay `RES_MULTIPLE`); lens is
+    /// `VAE_SCALE_FACTOR` on both — so the mapping is compiled per backend.
+    #[cfg(target_os = "macos")]
+    fn pinned_image_stride(engine_id: &str) -> Option<u32> {
+        use runtime_macos::providers as p;
+        Some(match engine_id {
+            "sana_1600m" | "sana_sprint_1600m" => p::sana::RES_MULTIPLE,
+            "sensenova_u1_8b" | "sensenova_u1_8b_fast" => p::sensenova::CELL,
+            "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => p::sd3::SIZE_MULTIPLE,
+            "sdxl" => p::sdxl::SIZE_MULTIPLE,
+            "kolors" => p::kolors::SIZE_MULTIPLE,
+            "chroma1_hd" | "chroma1_base" | "chroma1_flash" => p::chroma::SIZE_MULTIPLE,
+            "flux1_schnell" | "flux1_dev" => p::flux::SIZE_MULTIPLE,
+            "flux2_dev" | "flux2_klein_9b" => p::flux2::SIZE_MULTIPLE,
+            "ideogram_4" | "ideogram_4_turbo" => p::ideogram::RES_MULTIPLE,
+            "anima_base" | "anima_aesthetic" | "anima_turbo" => p::anima::RES_MULTIPLE,
+            "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => p::boogu::RES_MULTIPLE,
+            "krea_2_turbo" | "krea_2_raw" => p::krea::RES_MULTIPLE,
+            "lens" | "lens_turbo" => p::lens::VAE_SCALE_FACTOR,
+            "qwen_image" | "qwen_image_edit" => p::qwen_image::SIZE_MULTIPLE,
+            "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
+            // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
+            "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
+            _ => return None,
+        })
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    fn pinned_image_stride(engine_id: &str) -> Option<u32> {
+        use runtime_cuda::providers as p;
+        Some(match engine_id {
+            "sana_1600m" | "sana_sprint_1600m" => p::sana::RES_MULTIPLE,
+            "sensenova_u1_8b" | "sensenova_u1_8b_fast" => p::sensenova::SIZE_MULTIPLE,
+            "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => p::sd3::SIZE_MULTIPLE,
+            "sdxl" => p::sdxl::SIZE_MULTIPLE,
+            "kolors" => p::kolors::SIZE_MULTIPLE,
+            "chroma1_hd" | "chroma1_base" | "chroma1_flash" => p::chroma::SIZE_MULTIPLE,
+            "flux1_schnell" | "flux1_dev" => p::flux::SIZE_MULTIPLE,
+            "flux2_dev" | "flux2_klein_9b" => p::flux2::SIZE_MULTIPLE,
+            "ideogram_4" | "ideogram_4_turbo" => p::ideogram::SIZE_MULTIPLE,
+            "anima_base" | "anima_aesthetic" | "anima_turbo" => p::anima::RES_MULTIPLE,
+            "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => p::boogu::SIZE_MULTIPLE,
+            "krea_2_turbo" | "krea_2_raw" => p::krea::SIZE_MULTIPLE,
+            "lens" | "lens_turbo" => p::lens::VAE_SCALE_FACTOR,
+            "qwen_image" | "qwen_image_edit" => p::qwen_image::SIZE_MULTIPLE,
+            "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
+            // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
+            "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
+            _ => return None,
+        })
+    }
+
     /// sc-12384 — the image-lane twin of [`shipped_manifest_matches_each_engines_real_geometry`]
     /// (sc-12294, video) and [`pinned_engine_geometry`] (sc-12409): every image model's advertised
     /// geometry — each `limits.resolutions` bucket AND the shipped `defaults.resolution` — must be
@@ -1639,7 +1705,13 @@ mod tests {
                 );
             }
             // Every advertised bucket AND the default is a claim the engine must honor: each must sit
-            // inside the PINNED engine's [min_size, max_size] envelope, on both axes.
+            // inside the PINNED engine's [min_size, max_size] envelope, on both axes — AND (sc-12612)
+            // on the engine's request-dimension ÷8/÷16/÷32 STRIDE, the axis the SCOPE note above
+            // deferred. The stride is read off the SAME pinned backend, so an off-lattice bucket — or a
+            // `runtime-*` pin bump that moves the lattice — is RED here instead of a job-time reject
+            // (candle) / silent refit (mlx). `None` = no exposed stride on this backend (the bespoke
+            // InstantID/PuLID ids never reach here — `mlx_model` returned `None` and we `continue`d).
+            let stride = pinned_image_stride(resolved.engine_id());
             for res in buckets.iter().chain(default.iter()) {
                 let (w, h) = res
                     .split_once('x')
@@ -1652,6 +1724,14 @@ mod tests {
                      shipped engine rejects (candle) or silently refits (mlx). Trim the catalog, or \
                      move the `runtime-*` pin and the catalog in lockstep (sc-12384)."
                 );
+                if let Some(stride) = stride {
+                    assert!(
+                        w % stride == 0 && h % stride == 0,
+                        "{id}: advertised {res} is off its PINNED engine's ÷{stride} stride on the \
+                         {backend} backend — the shipped engine rejects an off-lattice request. Trim \
+                         the catalog, or move the `runtime-*` pin + catalog in lockstep (sc-12612)."
+                    );
+                }
             }
             checked += 1;
         }
@@ -1660,6 +1740,64 @@ mod tests {
             "no image model resolved an engine on the {backend} backend — the guard would be \
              vacuously green; a linked provider registry is required (macos/backend-candle)"
         );
+    }
+
+    /// sc-12612: the mutation guard for [`pinned_image_stride`] and the on-stride assert in
+    /// [`shipped_image_geometry_is_within_the_pinned_engine_envelope`]. That loop can only go RED when
+    /// a SHIPPED bucket drifts off-lattice; this pins the lattice VALUES themselves, so a wrong mapping
+    /// or a `runtime-*` pin bump that changes an engine const is RED even while every current bucket
+    /// stays on-stride (they all do — audited). Values are backend-agnostic (only the const NAME
+    /// diverges), so one table covers both lanes.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn pinned_image_stride_pins_each_engines_lattice() {
+        // One representative engine id per family × the exact request-dimension multiple its PINNED
+        // engine enforces on BOTH backends. A const that drifts (or a mis-keyed arm) fails here.
+        let expected: &[(&str, u32)] = &[
+            ("sana_1600m", 32),
+            ("sana_sprint_1600m", 32),
+            ("sensenova_u1_8b", 32),
+            ("sensenova_u1_8b_fast", 32),
+            ("sdxl", 8),
+            ("kolors", 8),
+            ("sd3_5_large", 16),
+            ("chroma1_hd", 16),
+            ("flux1_dev", 16),
+            ("flux2_klein_9b", 16),
+            ("ideogram_4", 16),
+            ("anima_base", 16),
+            ("boogu_image", 16),
+            ("krea_2_turbo", 16),
+            ("lens", 16),
+            ("qwen_image", 16),
+            ("z_image_turbo", 16),
+            ("bernini", 16),
+        ];
+        for (engine_id, want) in expected {
+            assert_eq!(
+                pinned_image_stride(engine_id),
+                Some(*want),
+                "{engine_id}: pinned image stride drifted from the expected ÷{want} lattice — the \
+                 SceneWorks mapping or the pinned engine const changed (sc-12612)"
+            );
+        }
+        // Completeness: no shipped image family may be silently un-tied. Every MODEL_TABLE engine must
+        // resolve a stride — a new family added without a `pinned_image_stride` arm falls through to
+        // `None`, which would skip the on-stride check above; catch that here instead.
+        for row in MODEL_TABLE {
+            assert!(
+                pinned_image_stride(row.engine_id).is_some(),
+                "{}: no pinned image stride mapped — add it to pinned_image_stride (sc-12612)",
+                row.engine_id
+            );
+        }
+        // The bespoke providers (skipped by the size guard too) and any unknown id have no stride here.
+        assert_eq!(pinned_image_stride("instantid_realvisxl"), None);
+        assert_eq!(pinned_image_stride("pulid_flux_dev"), None);
+        assert_eq!(pinned_image_stride("definitely_not_an_engine"), None);
     }
 
     /// sc-11991 (epic 1788): `mochi_1` resolves through THIS module to a real gen-core descriptor on
