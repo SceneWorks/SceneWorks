@@ -912,6 +912,34 @@ fn tier_static_name(tier: &str) -> &'static str {
 /// change that tier's output.
 pub(crate) const NVFP4_TIER: &str = "nvfp4";
 
+/// The `candle.vramGbByTier` key of the INT8-ConvRot tier (sc-9300), and the tier IDENTITY the VRAM
+/// gate sizes a ConvRot render against (sc-12425).
+///
+/// Like [`NVFP4_TIER`], this is a tier identity with **no honest `mlxQuantize` integer** — the
+/// online-rotation int8 DiT is not a point on the bits ladder, so the picker sends
+/// `advanced.convRot: true` instead ([`wants_krea_convrot`]). NVFP4's doc calls that "exactly the
+/// sc-9300 `convRot` precedent"; sc-12425 is that precedent finally reaching the gate.
+///
+/// **Why this const has to exist (sc-12425).** `vram_gate::requested_tier_key` is bits-derived and
+/// returns only `nvfp4`/`bf16`/`q8`/`q4`, so a ConvRot request — carrying no `mlxQuantize` — fell to
+/// its `None => "q8"` arm and was sized against `vramGbByTier["q8"]`. That is the identical aliasing
+/// sc-11042 fixed for NVFP4, **but with the sign flipped**: q8 OVER-predicts NVFP4 (a spurious
+/// `TooBig`/`Offload`, never an OOM), and UNDER-predicts INT8-ConvRot. Measured on a real trunk
+/// (sc-12381, sm_120, 1024²/8-step): the tier peaks at **42.9 GB** while the q8 row predicts
+/// 35.9 + 2.0 headroom = 37.9 GB — permissive by 5.0 GB, i.e. it admits a load that OOMs.
+/// `vram_gate::predicted_peak_gb`'s own doc names the hazard: "an under-prediction admits a load that
+/// can OOM".
+///
+/// The `vramGbByTier["int8-convrot"]` row existed since sc-9300 but **nothing ever read it** — which is
+/// why its unmeasured 31.0 estimate survived without a symptom: a dead row cannot be wrong out loud.
+///
+/// Candle-lane only — UNLIKE [`NVFP4_TIER`], which is un-gated because macOS-compiled fns
+/// (`nvfp4_selected`, `preferred_tier`, …) use it. This const's ONLY users are candle-only
+/// (`gate_tier_key`, `vram_gate`), so on the macOS/MLX build it would be dead code (clippy `-D warnings`
+/// → error). ConvRot is a candle-only tier (sm_89, sc-9300), so nothing on the MLX path references it.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const INT8_CONVROT_TIER: &str = "int8-convrot";
+
 /// Whether the request EXPLICITLY asked for the NVFP4 tier, via the `advanced.quantTier: "nvfp4"`
 /// label (sc-12006 established the label as asset telemetry; sc-11042 makes it a selection input).
 ///
@@ -1983,6 +2011,42 @@ fn dense_te_requested_tier_bits(request: &ImageRequest) -> Option<i64> {
 /// Available on the candle lane too (sc-12090): the candle VRAM fit-gate reads the tier the
 /// disk-probing resolver landed on here — instead of re-deriving from the manifest — so it names and
 /// budgets against the tier that would actually load, never an uninstalled one.
+/// The tier key the candle VRAM fit-gate sizes a render against — the ONE place that decision is made
+/// (sc-12425). Pure: extracted out of `generate_candle_stream` so the ConvRot identity below is
+/// unit-testable; that function takes an api/settings/job and cannot be exercised from a unit test, so
+/// the mapping had no gate of its own.
+///
+/// Resolution order:
+///
+/// 1. **A resolved ConvRot load ⇒ its tier IDENTITY** (`convrot_resolved` = the base dir AND the int8
+///    DiT are both on disk). This is the sc-12425 fix. It used to hand ConvRot to
+///    [`vram_gate::requested_tier_key`](crate::vram_gate::requested_tier_key), which is BITS-derived —
+///    and a ConvRot request carries no `mlxQuantize` ([`wants_krea_convrot`]), so it fell to that
+///    function's `None => "q8"` arm. That sized a **measured 42.9 GB** render (sc-12381) against q8's
+///    35.9 + 2.0 = 37.9 GB and admitted loads that OOM. Identical aliasing to the one sc-11042 fixed for
+///    NVFP4, except q8 OVER-predicts NVFP4 ("never an OOM") and UNDER-predicts ConvRot.
+/// 2. Else the **on-disk tier** the resolver landed on (sc-12090) — budget the tier that will load, not
+///    one the user never installed. A `modelPath`/flat root has no recognizable basename ⇒ `None`.
+/// 3. Else the manifest/request key (`requested_tier_key`), whose own `nvfp4` arm is the sibling of (1).
+// Candle-lane only — NOT `any(macos, candle)` like `tier_key_from_resolved_dir`, because this fn calls
+// `crate::vram_gate`, which is itself `#[cfg(all(not(macos), backend-candle))]`. On the macOS/MLX build
+// `vram_gate` doesn't exist, so an `any(macos, ...)` gate here fails to compile (E0433). Its only caller,
+// `generate_candle_stream`, is candle-only too, so this loses nothing.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn gate_tier_key(
+    convrot_resolved: bool,
+    weights_dir: &Path,
+    advanced: &JsonObject,
+    manifest_entry: &JsonObject,
+    nvfp4: bool,
+) -> &'static str {
+    if convrot_resolved {
+        return INT8_CONVROT_TIER;
+    }
+    tier_key_from_resolved_dir(weights_dir)
+        .unwrap_or_else(|| crate::vram_gate::requested_tier_key(advanced, manifest_entry, nvfp4))
+}
+
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn tier_key_from_resolved_dir(dir: &Path) -> Option<&'static str> {
     let name = dir.file_name()?.to_str()?;
@@ -5030,20 +5094,17 @@ async fn generate_candle_stream(
     // `nvfp4_selected` reads that same resolved `weights_dir`, so a `quantTier: "nvfp4"` label that fell
     // back to another tier's dir is sized/named as the tier that will actually load, not as nvfp4.
     let nvfp4_sel = nvfp4_selected(request, nvfp4_host_eligible(), Some(&weights_dir));
-    let mut tier = match convrot {
-        Some(_) => crate::vram_gate::requested_tier_key(
-            &request.advanced,
-            &request.model_manifest_entry,
-            nvfp4_sel,
-        ),
-        None => tier_key_from_resolved_dir(&weights_dir).unwrap_or_else(|| {
-            crate::vram_gate::requested_tier_key(
-                &request.advanced,
-                &request.model_manifest_entry,
-                nvfp4_sel,
-            )
-        }),
-    };
+    // sc-12425: a resolved ConvRot load is named by its tier IDENTITY (see [`gate_tier_key`]) — it used
+    // to be handed to the bits-derived `requested_tier_key`, which aliased it to q8 and under-gated it.
+    // The comment above already knew "its footprint is neither the bf16 nor the q8 tier"; now the gate
+    // acts on it. Extracted so that mapping has a unit test; this fn cannot be exercised from one.
+    let mut tier = gate_tier_key(
+        convrot.is_some(),
+        &weights_dir,
+        &request.advanced,
+        &request.model_manifest_entry,
+        nvfp4_sel,
+    );
     // sc-12130: derive Candle residency support from the provider's weights-free descriptor instead of
     // maintaining a second engine-id allowlist in the worker. The capability bit is the provider's
     // contract that every request shape accepted by this id honors Sequential. Bespoke edit/control,
@@ -7979,6 +8040,56 @@ mod quant_tier_reconcile_tests {
 #[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
 mod capability_downtier_tests {
     use super::*;
+
+    /// sc-12425 — **a resolved ConvRot load must be gated by its OWN tier, never aliased to q8.**
+    ///
+    /// The defect this kills: `generate_candle_stream` handed ConvRot to the BITS-derived
+    /// `vram_gate::requested_tier_key`. A ConvRot request carries no `mlxQuantize` (the picker sends
+    /// `advanced.convRot: true` — see [`wants_krea_convrot`]), so it hit that function's `None => "q8"`
+    /// arm, and a **measured 42.9 GB** render (sc-12381) was sized against q8's 35.9 + 2.0 = 37.9 GB row
+    /// — admitting loads that OOM.
+    ///
+    /// The second assertion pins the ALIASING itself, so this test says why the first one matters
+    /// instead of just asserting a constant: q8's row is what was actually being read, which is why
+    /// "just correct the manifest row" would have fixed nothing.
+    ///
+    /// Lives in `capability_downtier_tests` (not the `#[cfg(target_os = "macos")]`
+    /// `quant_tier_reconcile_tests`, where it would compile out on the candle lane), but carries its OWN
+    /// candle-only gate: it calls [`gate_tier_key`] + `crate::vram_gate`, both `not(macos)` — while this
+    /// module is `any(macos, candle)`, so without the attribute below it fails to compile on the MLX
+    /// build (E0433, no `vram_gate`).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn gate_tier_key_names_convrot_by_identity_never_q8() {
+        // The real shape: the ConvRot base surface IS the bf16 dir, and the request carries no bits.
+        let convrot_base = std::path::Path::new("/models/krea-2-turbo-mlx/bf16");
+        let advanced = serde_json::json!({ "convRot": true })
+            .as_object()
+            .expect("object")
+            .clone();
+        let entry = serde_json::Map::new();
+
+        assert_eq!(
+            gate_tier_key(true, convrot_base, &advanced, &entry, false),
+            INT8_CONVROT_TIER,
+            "a resolved ConvRot load must be named by tier identity, not sized against another tier"
+        );
+
+        // THE ALIASING, pinned. If this stops being q8, the aliasing changed shape and sc-12425 needs
+        // re-reading — do not just bump it to whatever it now returns.
+        assert_eq!(
+            crate::vram_gate::requested_tier_key(&advanced, &entry, false),
+            "q8",
+            "a ConvRot request carries no mlxQuantize, so the bits-derived key aliases it to q8 — the \
+             under-prediction sc-12425 fixes"
+        );
+
+        // The non-ConvRot path is untouched: the on-disk tier still wins (sc-12090).
+        assert_eq!(
+            gate_tier_key(false, convrot_base, &advanced, &entry, false),
+            "bf16"
+        );
+    }
 
     fn too_big(needed: f64, avail: f64) -> TierFit {
         TierFit::TooBig {
