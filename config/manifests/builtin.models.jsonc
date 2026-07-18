@@ -6391,38 +6391,44 @@
           "schedulers": ["default"]
         }
       },
-      // candle/CUDA VRAM gate (sc-12402, epic 1788) — ESTIMATED, `measured: false`. **This model does
-      // not render on the candle lane at all**, so there is no peak to measure (sc-12434):
-      //   * its shipped 1280x720 default EXCEEDS both engines' own `MAX_AREA_14B` (704*1280 = 901,120
-      //     px) and is hard-rejected by `validate` — an sc-12308/#1581 regression, tracked as sc-12433;
-      //   * `832x480` (the only advertised bucket the engine admits) OOM'd a 96 GB RTX PRO 6000 BEFORE
-      //     step 1, at **q4** — the lightest tier — with Lightning's CFG-off batch-1 4-step recipe,
-      //     i.e. the cheapest configuration this model has. GPU-proven, sc-12434.
+      // candle/CUDA VRAM gate — q4/q8 MEASURED, bf16 DERIVED (sc-12631, after the epic sc-12732 rework
+      // landed the 24 GB path). q4/q8 taken on an idle RTX PRO 6000 (Blackwell sm_120) via the
+      // candle-gen-wan VramProbe at the A14B's shipped 1280x720 / 81f / 4-step Lightning default, in the
+      // SEQUENTIAL-offload residency the model now renders with: the two 14B MoE experts are swapped
+      // one-resident-at-a-time (sc-12733), the bf16 UMT5 TE (sc-12778) is offloaded before denoise, and the
+      // z16 bf16 VAE decode is tiled against free VRAM (sc-12734/12758/12818) — so at most ONE expert +
+      // activations are live. The 24 GB lever was sc-12894 (8x-finer sdpa chunk; the denoise attention was
+      // the floor). q4/q8 are the driver's TRUE concurrent-live peak (`CU_MEMPOOL_ATTR_USED_MEM_HIGH`,
+      // sc-12818) in GiB — the honest figure; nvidia-smi reads the cudarc pool high-water (~27/37 GiB
+      // q4/q8, inflated — the pool never frees) and under-samples the attention transient. Each measured in
+      // its own process. The peak is DENOISE-owned; the VAE decode adds only ~5 GiB.
       //
-      // Derivation (the alternative to a measurement, not a fudge): `peak = weights + B·H·S²·8 bytes`,
-      // the cost of candle-gen-wan's unchunked materialized sdpa (transformer.rs:46 — the sc-6217
-      // chunking Qwen/Krea got was never ported). The weights term is the real ~40 GiB read off the
-      // device pre-denoise. At 832x480x81: S = 21·30·52 = 32,760 tokens x 40 heads ⇒ ~343 GB of
-      // attention — TIER-INDEPENDENT, which is why the whole ladder spans only ~40 GB and no tier
-      // helps. q8/bf16 weights are q4 + the two-expert delta.
+      // This model loads SEQUENTIAL, not resident: both bf16 experts co-resident is ~56 GiB + TE + VAE and
+      // OOMs even a 96 GB card (the pre-rework pathology sc-12730 fixed), so there is no meaningful
+      // resident peak — `video_load_spec` forces `OffloadPolicy::Sequential` for the A14B ids
+      // (`video_jobs::candle_wan_offload_policy`) and these are that SEQUENTIAL peak. The gate is only
+      // truthful because the load is coupled to it (pinned by the gpu_and_manifest tripwire). minMemoryGb
+      // 24 gates the DEFAULT/lightest (q4) tier (22.13 + the gate's 2 GB headroom), which admits a 32 GB
+      // RTX 5090 — the epic sc-12732 target. (The raw 22 GiB q4 peak physically fits a 24 GB card too, but
+      // the conservative headroom targets ~26 GB free, so a 24 GB card is refused — the safe direction.)
       //
-      // ⚠️ These are LOWER BOUNDS, not predictions. The closed form tracks the 5B closely (predicted
-      // 56 GB vs 54.8 GB measured) but UNDER-predicts the A14B: at 512x320x49 — the one sub-advertised
-      // geometry small enough to actually render — it predicted 65.2 GB and the real measured peak was
-      // **89.5 GB**. The gap is cudarc pool fragmentation, which no closed form captures (and which is
-      // the whole reason this campaign measures instead of models). Under-prediction is harmless HERE
-      // only because every bound already exceeds every GPU in existence: a postage-stamp 512x320 clip
-      // needs 89.5 GB, so the advertised 832x480 is not close.
-      //
-      // Recorded so the fit gate REFUSES this model rather than admitting it: the sc-12344 floor reads
-      // 29.72 GiB, so today a 32 GB card is admitted, pays a ~28 GiB tier download + a ~100 s load, and
-      // then dies in the first attention. An instant honest refusal is strictly better. These numbers
-      // are correct-in-OUTCOME (refuse everywhere) rather than correct-in-magnitude, and they go stale
-      // the moment sc-12434 ports chunking — `measured: false` is the flag to re-measure then, and
-      // sc-12434 owns that task.
+      // q8 and bf16 are DEFERRED (the handoff's "admit q4 now, re-measure q8/bf16 before admitting"), so
+      // the block stays `measured: false`:
+      //   * q8's live USED_MEM_HIGH peak measured 27.95 GiB, but its nvidia-smi POOL high-water was 34.4
+      //     GiB — cudarc holds the pool (it never frees to the driver), and whether the pool packs down to
+      //     the live peak under real memory pressure was only ever observed on a 96 GB card. It is gated at
+      //     the pool high-water (34.4) so an opt-in q8 render is refused on a 32 GB card rather than risk a
+      //     mid-denoise OOM there; it admits ~48 GB. Drop q8 to the 27.95 live peak once a ≤32 GB run
+      //     validates the small-card footprint.
+      //   * bf16 is DERIVED, not measured: its dense fp32 `Wan-AI/*-Diffusers` snapshot has no complete
+      //     stageable source (~200 GiB fp32, never fully cached). 56 = one dense bf16 expert (~28.6 GiB) +
+      //     the ~14 GiB activation set the measured tiers share + a fragmentation margin — a CONSERVATIVE
+      //     upper bound that refuses it rather than admit an untested tier that could OOM.
+      // Flipping to `measured: true` (and admitting q8 on 32 GB) needs a ≤32 GB validation + a bf16 stage
+      // (an sc-12631 follow-up).
       "candle": {
-        "minMemoryGb": 388,
-        "vramGbByTier": { "q4": 386, "q8": 401, "bf16": 426 },
+        "minMemoryGb": 24,
+        "vramGbByTier": { "q4": 22.13, "q8": 34.4, "bf16": 56.0 },
         "measured": false
       },
       "ui": {
@@ -6628,21 +6634,21 @@
           "schedulers": ["default"]
         }
       },
-      // candle/CUDA VRAM gate (sc-12402, epic 1788) — ESTIMATED, `measured: false`. The image→video
-      // twin of the T2V-A14B block above; see that comment for the derivation, the validated cost
-      // model, and why there is nothing to measure. **This model does not render on the candle lane at
-      // all** (sc-12434): its 1280x720 default is engine-rejected over `MAX_AREA_14B` (sc-12433) and
-      // `832x480` OOMs a 96 GB card before step 1 at the lightest tier.
-      //
-      // Identical numbers to T2V by construction: the I2V experts are the same shape (config
-      // `i2v_14b()` differs only in `in_channels` 36 vs 16 — the 20-channel image-conditioning concat —
-      // which changes the patch embedding, not the 40-layer/40-head attention that IS the peak), and
-      // the hosted tier bytes match to within 0.01% (q4 29,792,232,225 vs 29,788,704,888). The VAE
-      // ENCODER is additionally resident here (`WanVae16::new_with_encoder`, wan14b.rs:331) for the
-      // first-frame latent, which is noise at this scale.
+      // candle/CUDA VRAM gate (sc-12631, post epic sc-12732). The image→video twin of the T2V-A14B block
+      // above; see that comment for the harness, the SEQUENTIAL-offload residency the numbers are taken
+      // under (`OffloadPolicy::Sequential` forced for the A14B ids), the `USED_MEM_HIGH` methodology, and
+      // the DEFERRAL of q8/bf16 (`measured: false`). Measured at the same 1280x720 / 81f / 4-step Lightning
+      // default. The I2V live peak sits ~0.1 GiB above T2V's: the experts are the same shape (config
+      // `i2v_14b()` differs only in `in_channels` 36 vs 16 — the image concat — not the 40-layer/40-head
+      // attention that IS the peak), and the VAE ENCODER is additionally resident here
+      // (`WanVae16::new_with_encoder`) to latent-encode the first frame. minMemoryGb 24 gates the DEFAULT
+      // (q4) tier + 2 GB headroom → q4 admits a 32 GB card. q8 gated at its nvidia-smi pool high-water 35.6
+      // (live peak 28.02; deferred/refused on 32 pending a ≤32 GB validation, admits ~48 GB); bf16 DERIVED
+      // (56, same conservative bound as T2V), unmeasured. Flipping to `measured: true` is the same
+      // ≤32 GB-validation + bf16-stage follow-up.
       "candle": {
-        "minMemoryGb": 388,
-        "vramGbByTier": { "q4": 386, "q8": 401, "bf16": 426 },
+        "minMemoryGb": 24,
+        "vramGbByTier": { "q4": 22.20, "q8": 35.6, "bf16": 56.0 },
         "measured": false
       },
       "ui": {

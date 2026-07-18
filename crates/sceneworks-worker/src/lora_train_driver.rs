@@ -530,7 +530,9 @@ mod driver {
                 let out = generator.generate(&req, &mut |_p| {}).expect("generate");
                 let img = match out {
                     GenerationOutput::Images(mut v) => v.swap_remove(0),
-                    GenerationOutput::Video { .. } => panic!("expected an image"),
+                    GenerationOutput::Video { .. } | GenerationOutput::Audio(_) => {
+                        panic!("expected an image")
+                    }
                 };
                 write_png(&img, &gen_dir.join(format!("{id}_{seed}.png")));
                 written += 1;
