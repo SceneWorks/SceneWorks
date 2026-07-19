@@ -1430,6 +1430,79 @@ mod download_receipt_tests {
         assert!(!torn.installed);
         assert!(!torn.update_available);
     }
+
+    #[test]
+    fn breaking_and_corequisite_softness_matrix() {
+        for breaking in [false, true] {
+            for soft in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let data_dir = temp.path();
+                let repo = "owner/model";
+                let cache = huggingface_repo_cache_path(data_dir, repo).unwrap();
+                let snapshot = cache.join("snapshots/rev-a");
+                std::fs::create_dir_all(&snapshot).unwrap();
+                std::fs::write(snapshot.join("old.safetensors"), b"weights").unwrap();
+                let managed = data_dir.join("models").join(safe_download_dir(repo));
+                std::fs::create_dir_all(&managed).unwrap();
+                std::fs::write(
+                    managed.join(".sceneworks-download-complete.json"),
+                    serde_json::to_vec(&json!({
+                        "schemaVersion": 2, "repo": repo,
+                        "resolvedFiles": ["old.safetensors"]
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                let model = json!({
+                    "id": "model",
+                    "downloads": [
+                        {"provider":"huggingface", "repo":repo,
+                         "files":["new.safetensors"], "breaking":breaking},
+                        {"provider":"huggingface", "repo":"owner/dependency",
+                         "coRequisite":true, "required": if soft { "soft" } else { "hard" }}
+                    ]
+                });
+                let state =
+                    install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+                assert_eq!(
+                    state.installed,
+                    !breaking && soft,
+                    "breaking={breaking}, soft={soft}"
+                );
+                assert!(
+                    state.update_available,
+                    "every stale/soft combination offers an update"
+                );
+                if !soft {
+                    assert!(state
+                        .missing_required_files
+                        .iter()
+                        .any(|file| file.contains("owner/dependency")));
+                }
+                if !breaking && !soft {
+                    let mut omitted = model.clone();
+                    omitted.as_object_mut().unwrap()["downloads"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("breaking");
+                    omitted.as_object_mut().unwrap()["downloads"][1]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("required");
+                    let defaulted = install_state_for(
+                        model_download_context(&omitted).unwrap(),
+                        &omitted,
+                        data_dir,
+                    );
+                    assert!(!defaulted.installed, "omitted required defaults to hard");
+                    assert!(
+                        defaulted.update_available,
+                        "omitted breaking defaults to false"
+                    );
+                }
+            }
+        }
+    }
 }
 
 // Resolve a model's install/cache state from its (optional) download source. A
@@ -1496,10 +1569,30 @@ fn install_state_for(
         if cache_installed {
             backfill_current_receipt(&managed_path, model, &download_context, data_dir);
         }
-        let usable_stale = !cache_installed
+        let stale_files_present = !cache_installed
             && receipt_file_sets
                 .iter()
                 .any(|files| receipt_files_present(data_dir, &download_context.repo, files));
+        let breaking_update = model
+            .get("breaking")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || model
+                .get("downloads")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|entry| {
+                    !is_co_requisite_download(entry)
+                        && entry.get("repo").and_then(Value::as_str)
+                            == Some(download_context.repo.as_str())
+                        && string_array_field(entry, "files") == download_context.files
+                        && entry
+                            .get("breaking")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                });
+        let usable_stale = stale_files_present && !breaking_update;
         let primary_installed = managed_installed || cache_installed || usable_stale;
         let installed_path = if cache_installed || cache_incomplete || usable_stale {
             cache_path.clone()
@@ -1512,7 +1605,8 @@ fn install_state_for(
         // native VAE) from advertising as ready, and a present primary with a missing/partial
         // co-requisite surfaces as a repairable partial install (cache_incomplete → repairAvailable),
         // whose repair re-runs the download job that now fetches the co-requisite too.
-        let mut co_requisites_installed = true;
+        let mut hard_co_requisites_installed = true;
+        let mut soft_co_requisite_update = false;
         let mut co_requisite_incomplete = false;
         for co_requisite in model_co_requisite_downloads(model) {
             let Some(repo) = co_requisite.get("repo").and_then(Value::as_str) else {
@@ -1524,26 +1618,32 @@ fn install_state_for(
             if health.as_ref().is_some_and(|health| health.installed) {
                 continue;
             }
-            co_requisites_installed = false;
-            co_requisite_incomplete |= health.as_ref().is_some_and(|health| health.incomplete);
+            let soft = co_requisite.get("required").and_then(Value::as_str) == Some("soft");
+            if soft {
+                soft_co_requisite_update = true;
+            } else {
+                hard_co_requisites_installed = false;
+                co_requisite_incomplete |= health.as_ref().is_some_and(|health| health.incomplete);
+            }
             match health
                 .as_ref()
                 .map(|health| health.missing_files.as_slice())
             {
-                Some(missing) if !missing.is_empty() => missing_required_files
+                Some(missing) if !missing.is_empty() && !soft => missing_required_files
                     .extend(missing.iter().map(|file| format!("{repo}/{file}"))),
-                _ => missing_required_files.push(repo.to_owned()),
+                _ if !soft => missing_required_files.push(repo.to_owned()),
+                _ => {}
             }
         }
         ModelCatalogEntryState {
             downloadable: true,
             installed_path: installed_path.map(|path| path.display().to_string()),
-            installed: primary_installed && co_requisites_installed,
+            installed: primary_installed && hard_co_requisites_installed,
             cache_incomplete: cache_incomplete
-                || (primary_installed && !co_requisites_installed)
+                || (primary_installed && !hard_co_requisites_installed)
                 || co_requisite_incomplete,
             missing_required_files,
-            update_available: usable_stale,
+            update_available: stale_files_present || soft_co_requisite_update,
         }
     } else if let Some(installed_path) = model_manifest_installed_path(model, data_dir) {
         ModelCatalogEntryState {

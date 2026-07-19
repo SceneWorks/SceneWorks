@@ -1306,8 +1306,9 @@ export function ModelManagerScreen() {
           <div className="model-card-footer-actions">
             {hasTierMatrix ? (
               // A quant-matrix model installs its tiers from the panel above. Keep only a Fix
-              // affordance here for an incomplete cache; otherwise there's no single-tier button.
-              incomplete ? (
+              // affordance here for an incomplete cache or soft co-requisite update; otherwise
+              // there's no single-tier button. The default-tier job fetches every co-requisite.
+              incomplete || model.updateAvailable ? (
                 <button
                   className="model-card-primary"
                   disabled={!model.downloadable || Boolean(downloadJob) || licenseAckRequired}
@@ -1319,7 +1320,7 @@ export function ModelManagerScreen() {
                   }
                   type="button"
                 >
-                  {downloadJob ? downloadJob.status : failedDownload ? "Resume Download" : "Fix"}
+                  {downloadJob ? downloadJob.status : failedDownload ? "Resume Download" : model.updateAvailable ? "Update" : "Fix"}
                 </button>
               ) : null
             ) : (
