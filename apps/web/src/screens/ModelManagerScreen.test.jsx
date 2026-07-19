@@ -777,6 +777,35 @@ describe("ModelManagerScreen type-grouped layout", () => {
     expect(createLoraDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "ltx_ic" }));
   });
 
+  it("shows and runs the update action for an installed stale built-in LoRA", async () => {
+    const createLoraDownloadJob = vi.fn();
+    await render({
+      models: MODELS,
+      createLoraDownloadJob,
+      loras: [
+        {
+          id: "krea2_identity_edit",
+          name: "Krea identity edit",
+          family: "krea_2",
+          scope: "builtin",
+          installState: "installed",
+          updateAvailable: true,
+          source: { provider: "huggingface", repo: "SceneWorks/krea-edit", file: "v1.2.safetensors" },
+        },
+      ],
+    });
+    await selectTab(container, "LoRAs");
+    expect(builtinSection().textContent).toContain("update available");
+    const updateButton = [...builtinSection().querySelectorAll(".lora-row-actions button")].find(
+      (button) => button.textContent === "Update",
+    );
+    expect(updateButton).toBeTruthy();
+    await click(updateButton);
+    expect(createLoraDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "krea2_identity_edit", updateAvailable: true }),
+    );
+  });
+
   it("shows progress and disables the button while a built-in LoRA download runs", async () => {
     await render({
       models: MODELS,
@@ -1314,6 +1343,28 @@ describe("ModelManagerScreen convert-at-install Update button", () => {
     expect(mlxButtons().some((button) => button.textContent === "Update")).toBe(false);
     expect(mlxButtons().some((button) => button.textContent === "MLX ready")).toBe(true);
     expect(createModelDownloadJob).not.toHaveBeenCalled();
+  });
+
+  it("shows and runs the update action for a usable stale non-converted model", async () => {
+    await render([
+      convertModel({
+        id: "stale_image",
+        type: "image",
+        updateAvailable: true,
+        mlxConversionState: undefined,
+        mlxInstallState: undefined,
+        mlx: undefined,
+      }),
+    ]);
+    await selectTab(container, "Image Models");
+    const card = [...container.querySelectorAll(".model-card")].find((item) =>
+      item.textContent.includes("LTX-2.3 10Eros"),
+    );
+    expect(card?.textContent).toContain("update available");
+    expect(card?.textContent).toContain("installed version remains usable");
+    const updateButton = [...card.querySelectorAll("button")].find((button) => button.textContent === "Update");
+    await click(updateButton);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "stale_image" }));
   });
 });
 

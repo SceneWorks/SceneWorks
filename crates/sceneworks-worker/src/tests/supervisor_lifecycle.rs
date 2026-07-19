@@ -490,3 +490,64 @@ async fn writes_model_install_marker_with_expected_keys() {
     assert_eq!(marker["jobId"], "job-1");
     assert!(marker["completedAt"].as_str().is_some());
 }
+
+#[tokio::test]
+async fn writes_hf_download_receipt_with_resolved_manifest_and_variant() {
+    let temp = tempdir().expect("tempdir creates");
+    let mut payload = serde_json::Map::new();
+    payload.insert("modelId".to_owned(), json!("base-model"));
+    payload.insert("modelName".to_owned(), json!("Base Model"));
+    payload.insert("variant".to_owned(), json!("q4"));
+    payload.insert("files".to_owned(), json!(["q4/*.safetensors", "config.json"]));
+
+    write_model_download_receipt(
+        temp.path(),
+        &payload,
+        "owner/model",
+        "job-2",
+        &["q4/model.safetensors".to_owned(), "config.json".to_owned()],
+        Some("abc123"),
+    )
+    .await
+    .expect("receipt writes");
+
+    let receipt: serde_json::Value = serde_json::from_slice(
+        &tokio::fs::read(temp.path().join(INSTALL_MARKER)).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["schemaVersion"], 2);
+    assert_eq!(receipt["repo"], "owner/model");
+    assert_eq!(receipt["variant"], "q4");
+    assert_eq!(receipt["manifestFiles"], json!(["q4/*.safetensors", "config.json"]));
+    assert_eq!(receipt["resolvedFiles"], json!(["q4/model.safetensors", "config.json"]));
+    assert_eq!(receipt["snapshotRevision"], "abc123");
+}
+
+#[tokio::test]
+async fn receipt_writer_preserves_primary_and_corequisite_default_entries() {
+    let temp = tempdir().unwrap();
+    let mut primary = serde_json::Map::new();
+    primary.insert("modelId".to_owned(), json!("base-model"));
+    let mut dependency = serde_json::Map::new();
+    dependency.insert("modelId".to_owned(), json!("base-model"));
+
+    write_model_download_receipt(temp.path(), &primary, "owner/primary", "job-primary", &["model.safetensors".to_owned()], Some("rev-primary")).await.unwrap();
+    write_model_download_receipt(temp.path(), &dependency, "owner/corequisite", "job-corequisite", &["encoder.safetensors".to_owned()], Some("rev-corequisite")).await.unwrap();
+
+    let mut sibling_model = primary.clone();
+    sibling_model.insert("modelId".to_owned(), json!("other-model"));
+    write_model_download_receipt(temp.path(), &sibling_model, "owner/primary", "job-other", &["other.safetensors".to_owned()], Some("rev-other")).await.unwrap();
+    let mut sibling_variant = primary.clone();
+    sibling_variant.insert("variant".to_owned(), json!("q4"));
+    write_model_download_receipt(temp.path(), &sibling_variant, "owner/primary", "job-q4", &["q4/model.safetensors".to_owned()], Some("rev-q4")).await.unwrap();
+    write_model_download_receipt(temp.path(), &primary, "owner/primary", "job-primary-new", &["replacement.safetensors".to_owned()], Some("rev-primary-new")).await.unwrap();
+
+    let marker: serde_json::Value = serde_json::from_slice(&tokio::fs::read(temp.path().join(INSTALL_MARKER)).await.unwrap()).unwrap();
+    let receipts = marker["receipts"].as_array().unwrap();
+    assert_eq!(receipts.len(), 4, "only an exact repo/model/variant identity may be replaced");
+    assert!(receipts.iter().any(|entry| entry["repo"] == "owner/primary" && entry["modelId"] == "base-model" && entry["variant"] == "default" && entry["resolvedFiles"] == json!(["replacement.safetensors"])));
+    assert!(!receipts.iter().any(|entry| entry["resolvedFiles"] == json!(["model.safetensors"])));
+    assert!(receipts.iter().any(|entry| entry["repo"] == "owner/corequisite" && entry["resolvedFiles"] == json!(["encoder.safetensors"])));
+    assert!(receipts.iter().any(|entry| entry["modelId"] == "other-model" && entry["resolvedFiles"] == json!(["other.safetensors"])));
+    assert!(receipts.iter().any(|entry| entry["variant"] == "q4" && entry["resolvedFiles"] == json!(["q4/model.safetensors"])));
+}

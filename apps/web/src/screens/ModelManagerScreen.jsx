@@ -1167,6 +1167,7 @@ export function ModelManagerScreen() {
           </span>
           <span className="model-card-status">
             <span className={statusClass}>{statusText}</span>
+            {model.updateAvailable ? <span className="status-badge warning">update available</span> : null}
             {unassociated ? (
               <span className="status-badge warning" title="Set this model's family in user.models.jsonc before using it for generation.">
                 needs family
@@ -1297,13 +1298,17 @@ export function ModelManagerScreen() {
             deletingItem={deletingItem}
           />
         ) : null}
+        {model.updateAvailable && !mlxState ? (
+          <p className="inline-warning">A newer model download is available; the installed version remains usable.</p>
+        ) : null}
         <div className="model-card-footer">
           <span className="model-card-size">{downloadSize}</span>
           <div className="model-card-footer-actions">
             {hasTierMatrix ? (
               // A quant-matrix model installs its tiers from the panel above. Keep only a Fix
-              // affordance here for an incomplete cache; otherwise there's no single-tier button.
-              incomplete ? (
+              // affordance here for an incomplete cache or soft co-requisite update; otherwise
+              // there's no single-tier button. The default-tier job fetches every co-requisite.
+              incomplete || model.updateAvailable ? (
                 <button
                   className="model-card-primary"
                   disabled={!model.downloadable || Boolean(downloadJob) || licenseAckRequired}
@@ -1315,13 +1320,13 @@ export function ModelManagerScreen() {
                   }
                   type="button"
                 >
-                  {downloadJob ? downloadJob.status : failedDownload ? "Resume Download" : "Fix"}
+                  {downloadJob ? downloadJob.status : failedDownload ? "Resume Download" : model.updateAvailable ? "Update" : "Fix"}
                 </button>
               ) : null
             ) : (
               <button
                 className="model-card-primary"
-                disabled={(installed && !incomplete) || !model.downloadable || Boolean(downloadJob) || licenseAckRequired}
+                disabled={(installed && !incomplete && !model.updateAvailable) || !model.downloadable || Boolean(downloadJob) || licenseAckRequired}
                 title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
                 onClick={() =>
                   failedDownload
@@ -1336,6 +1341,8 @@ export function ModelManagerScreen() {
                       ? "Resume Download"
                       : incomplete
                         ? "Fix"
+                        : model.updateAvailable
+                          ? "Update"
                         : installed
                           ? "Ready"
                           : model.downloadSizeLabel
@@ -1407,7 +1414,7 @@ export function ModelManagerScreen() {
     // Built-in LoRAs with a Hugging Face source can be fetched on demand (sc-5944) —
     // user LoRAs are installed via the import form, so they get no Download affordance.
     const hfSource = (lora.source?.provider ?? lora.provider) === "huggingface";
-    const canDownload = Boolean(onDownloadLora) && lora.scope === "builtin" && !installed && hfSource;
+    const canDownload = Boolean(onDownloadLora) && lora.scope === "builtin" && (!installed || lora.updateAvailable) && hfSource;
     const downloadJob = loraDownloadJobsFor(lora).find((job) => !terminalStatuses.has(job.status));
     const keywords = Array.isArray(lora.triggerWords) ? lora.triggerWords : [];
     const notes = typeof lora.notes === "string" ? lora.notes : "";
@@ -1433,12 +1440,15 @@ export function ModelManagerScreen() {
             unusable
           </span>
         ) : (
-          <span className={statusClass}>{statusText}</span>
+          <>
+            <span className={statusClass}>{statusText}</span>
+            {lora.updateAvailable ? <span className="status-badge warning">update available</span> : null}
+          </>
         )}
         <span className="lora-row-actions">
           {canDownload ? (
             <button disabled={Boolean(downloadJob)} onClick={() => onDownloadLora(lora)} type="button">
-              {downloadJob ? downloadJob.status : "Download"}
+              {downloadJob ? downloadJob.status : lora.updateAvailable ? "Update" : "Download"}
             </button>
           ) : null}
           {canEdit && !isEditing ? (

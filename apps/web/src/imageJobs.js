@@ -33,10 +33,10 @@ export function tileControlNetModel(models) {
   return (models ?? []).find((model) => model.id === TILE_CONTROLNET_MODEL_ID) ?? null;
 }
 
-// Installed == present with any non-"missing" install state (matches App.jsx's `imageModels` gate).
+// A torn/incomplete dependency cannot run a job even though repair is available.
 export function tileControlNetInstalled(models) {
   const model = tileControlNetModel(models);
-  return Boolean(model) && model.installState !== "missing";
+  return Boolean(model) && model.installState !== "missing" && model.installState !== "incomplete";
 }
 
 // The `POST /api/v1/image/jobs` body for a prompt edit (sc-2435). Reuses the existing

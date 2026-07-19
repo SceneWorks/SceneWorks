@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { DocumentView } from "../components/DocumentView.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
+import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import {
@@ -79,6 +80,7 @@ export function DocumentStudio() {
     [jobs],
   );
   const [model, setModel] = useState("");
+  const selectedModel = interleaveModels.find((item) => item.id === model) ?? interleaveModels[0] ?? null;
   const [prompt, setPrompt] = useState("");
   const [sourceAssetIds, setSourceAssetIds] = useState([]);
   const [imageGuidance, setImageGuidance] = useState(DEFAULT_INTERLEAVE_IMAGE_GUIDANCE);
@@ -173,13 +175,15 @@ export function DocumentStudio() {
         <div className="field-row">
           <label className="field">
             <span>Model</span>
+            <StudioUpdateBadge item={selectedModel} />
             <select onChange={(event) => setModel(event.target.value)} value={model}>
               {interleaveModels.map((item) => (
                 <option key={item.id} value={item.id}>
-                  {item.name ?? item.id}
+                  {updateOptionLabel(item)}
                 </option>
               ))}
             </select>
+            <StudioUpdateNotice item={selectedModel} onUpdate={createModelDownloadJob} />
           </label>
           <label className="field">
             <span>Size</span>

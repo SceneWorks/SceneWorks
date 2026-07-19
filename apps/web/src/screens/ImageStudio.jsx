@@ -9,6 +9,7 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
+import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
 import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
 import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
 import BatchPromptPanel from "../components/BatchPromptPanel.jsx";
@@ -3044,13 +3045,15 @@ export function ImageStudio() {
             <div className="settings-bar-row">
               <label className="settings-field settings-field-model">
                 Model
+                <StudioUpdateBadge item={selectedModel} />
                 <select onChange={(event) => setModel(event.target.value)} value={model}>
                   {pickerModels.map((item) => (
                     <option key={item.id} value={item.id}>
-                      {item.name}
+                      {updateOptionLabel(item)}
                     </option>
                   ))}
                 </select>
+                <StudioUpdateNotice item={selectedModel} onUpdate={createModelDownloadJob} />
               </label>
               <label className="settings-field settings-field-aspect">
                 Aspect
@@ -3425,6 +3428,7 @@ export function ImageStudio() {
                 effectiveLoraWeight={effectiveLoraWeight}
                 setLoraWeight={setLoraWeight}
                 loraEmptyMessage={loraEmptyMessage}
+                onUpdateLora={createLoraDownloadJob}
               />
               {/* Save-as-preset folds into Advanced with the rest of the power-user
                   knobs (UI-refinement 2b). */}

@@ -1264,6 +1264,348 @@ struct ModelCatalogEntryState {
     installed: bool,
     cache_incomplete: bool,
     missing_required_files: Vec<String>,
+    update_available: bool,
+}
+
+#[derive(Debug, PartialEq)]
+struct ReceiptFileSet {
+    files: Vec<String>,
+    revision: Option<String>,
+}
+
+fn receipt_file_sets(managed_path: &FsPath, repo: &str) -> Vec<ReceiptFileSet> {
+    let Ok(bytes) = std::fs::read(managed_path.join(".sceneworks-download-complete.json")) else {
+        return Vec::new();
+    };
+    let Ok(receipt) = serde_json::from_slice::<Value>(&bytes) else {
+        return Vec::new();
+    };
+    let entries = receipt
+        .get("receipts")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| vec![receipt]);
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            if entry.get("repo").and_then(Value::as_str) != Some(repo) {
+                return None;
+            }
+            let files = entry
+                .get("resolvedFiles")?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let revision = entry
+                .get("snapshotRevision")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            (!files.is_empty()).then_some(ReceiptFileSet { files, revision })
+        })
+        .collect()
+}
+
+fn receipt_files_present(data_dir: &FsPath, repo: &str, receipt: &ReceiptFileSet) -> bool {
+    !receipt.files.is_empty()
+        && huggingface_repo_cache_path(data_dir, repo)
+            .map(|root| {
+                let matches = crate::huggingface_snapshot_dirs(&root)
+                    .into_iter()
+                    .filter(|snapshot| {
+                        receipt
+                            .files
+                            .iter()
+                            .all(|file| snapshot.join(file).is_file())
+                    })
+                    .collect::<Vec<_>>();
+                receipt
+                    .revision
+                    .as_deref()
+                    .map_or(matches.len() == 1, |revision| {
+                        matches.iter().any(|snapshot| {
+                            snapshot.file_name().and_then(|v| v.to_str()) == Some(revision)
+                        })
+                    })
+            })
+            .unwrap_or(false)
+}
+
+fn backfill_current_receipt(
+    managed_path: &FsPath,
+    model: &Value,
+    context: &DownloadContext,
+    data_dir: &FsPath,
+) {
+    if !receipt_file_sets(managed_path, &context.repo).is_empty() {
+        return;
+    }
+    let receipts = model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| is_supported_model_download(entry) && !is_co_requisite_download(entry))
+        .filter_map(|entry| {
+            let repo = entry.get("repo")?.as_str()?;
+            let files = string_array_field(entry, "files");
+            let root = huggingface_repo_cache_path(data_dir, repo)?;
+            let snapshot = crate::huggingface_snapshot_dirs(&root).into_iter().find(|snapshot| {
+                files.iter().all(|pattern| snapshot_contains_pattern(snapshot, pattern))
+            })?;
+            let resolved = snapshot_files(&snapshot).into_iter()
+                .filter(|file| allow_pattern_matches(file, &files)).collect::<Vec<_>>();
+            (!resolved.is_empty()).then(|| json!({
+                "schemaVersion": 2, "repo": repo,
+                "modelId": model.get("id").cloned().unwrap_or(Value::Null),
+                "variant": entry.get("variant").cloned().unwrap_or_else(|| Value::String("default".to_owned())),
+                "manifestFiles": files, "resolvedFiles": resolved, "backfilled": true,
+            }))
+        }).collect::<Vec<_>>();
+    if receipts.is_empty() {
+        return;
+    }
+    let mut receipt = receipts[0].clone();
+    receipt
+        .as_object_mut()
+        .unwrap()
+        .insert("receipts".to_owned(), Value::Array(receipts));
+    let _ = std::fs::create_dir_all(managed_path);
+    let _ = serde_json::to_vec_pretty(&receipt).ok().and_then(|bytes| {
+        std::fs::write(
+            managed_path.join(".sceneworks-download-complete.json"),
+            bytes,
+        )
+        .ok()
+    });
+}
+
+#[cfg(test)]
+mod download_receipt_tests {
+    use super::*;
+
+    #[test]
+    fn multi_repo_marker_filters_nested_receipts_by_requested_repo() {
+        let temp = tempfile::tempdir().unwrap();
+        let managed = temp.path().join("models/owner--primary");
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(managed.join(".sceneworks-download-complete.json"), serde_json::to_vec(&json!({
+            "repo": "owner/corequisite",
+            "receipts": [
+                {"repo":"owner/primary", "resolvedFiles":["model.safetensors"], "snapshotRevision":"primary-rev"},
+                {"repo":"owner/corequisite", "resolvedFiles":["encoder.safetensors"], "snapshotRevision":"dependency-rev"}
+            ]
+        })).unwrap()).unwrap();
+
+        let primary = receipt_file_sets(&managed, "owner/primary");
+        assert_eq!(
+            primary,
+            vec![ReceiptFileSet {
+                files: vec!["model.safetensors".to_owned()],
+                revision: Some("primary-rev".to_owned())
+            }]
+        );
+        let dependency = receipt_file_sets(&managed, "owner/corequisite");
+        assert_eq!(
+            dependency,
+            vec![ReceiptFileSet {
+                files: vec!["encoder.safetensors".to_owned()],
+                revision: Some("dependency-rev".to_owned())
+            }]
+        );
+    }
+
+    #[test]
+    fn complete_pre_receipt_install_is_backfilled_and_protected_after_rename() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/backfill";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("old.safetensors"), b"weights").unwrap();
+        let original = json!({"id":"backfill-model", "downloads":[{"provider":"huggingface", "repo":repo, "files":["old.safetensors"]}]});
+
+        let initial = install_state_for(
+            model_download_context(&original).unwrap(),
+            &original,
+            data_dir,
+        );
+        assert!(initial.installed);
+        let marker = data_dir
+            .join("models")
+            .join(safe_download_dir(repo))
+            .join(".sceneworks-download-complete.json");
+        let receipt: Value = serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
+        assert_eq!(receipt["resolvedFiles"], json!(["old.safetensors"]));
+        assert_eq!(receipt["backfilled"], true);
+
+        let renamed = json!({"id":"backfill-model", "downloads":[{"provider":"huggingface", "repo":repo, "files":["new.safetensors"]}]});
+        let protected = install_state_for(
+            model_download_context(&renamed).unwrap(),
+            &renamed,
+            data_dir,
+        );
+        assert!(
+            protected.installed,
+            "backfilled exact old set remains usable"
+        );
+        assert!(protected.update_available, "rename is offered as an update");
+    }
+
+    #[test]
+    fn receipt_remains_usable_when_current_manifest_file_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/model";
+        let cache = huggingface_repo_cache_path(data_dir, repo).unwrap();
+        let snapshot = cache.join("snapshots/rev-a");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("old.safetensors"), b"weights").unwrap();
+        let managed = data_dir.join("models/owner--model");
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(
+            managed.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec(&json!({
+                "schemaVersion": 2, "repo": repo,
+                "resolvedFiles": ["old.safetensors"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let files = receipt_file_sets(&managed, repo);
+        assert_eq!(files[0].files, vec!["old.safetensors".to_owned()]);
+        assert!(receipt_files_present(data_dir, repo, &files[0]));
+        assert!(!huggingface_cache_health(&cache, &["new.safetensors".to_owned()]).installed);
+
+        let ambiguous = cache.join("snapshots/rev-b");
+        std::fs::create_dir_all(&ambiguous).unwrap();
+        std::fs::write(ambiguous.join("old.safetensors"), b"other weights").unwrap();
+        assert!(
+            !receipt_files_present(data_dir, repo, &files[0]),
+            "legacy receipt must identify one snapshot"
+        );
+
+        std::fs::remove_file(snapshot.join("old.safetensors")).unwrap();
+        std::fs::remove_file(ambiguous.join("old.safetensors")).unwrap();
+        assert!(
+            !receipt_files_present(data_dir, repo, &files[0]),
+            "torn stale install is missing"
+        );
+    }
+
+    #[test]
+    fn catalog_distinguishes_usable_stale_from_torn_and_points_at_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/model";
+        let cache = huggingface_repo_cache_path(data_dir, repo).unwrap();
+        let snapshot = cache.join("snapshots/rev-a");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("old.safetensors"), b"weights").unwrap();
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(
+            managed.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec(&json!({
+                "schemaVersion": 2, "repo": repo, "resolvedFiles": ["old.safetensors"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let model = json!({"id":"model", "downloads":[{
+            "provider":"huggingface", "repo":repo, "files":["new.safetensors"]
+        }]});
+        let context = model_download_context(&model).unwrap().unwrap();
+        let stale = install_state_for(Some(context), &model, data_dir);
+        assert!(stale.installed);
+        assert!(stale.update_available);
+        assert_eq!(
+            stale.installed_path.as_deref(),
+            Some(cache.to_string_lossy().as_ref())
+        );
+
+        std::fs::remove_file(snapshot.join("old.safetensors")).unwrap();
+        let torn = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(!torn.installed);
+        assert!(!torn.update_available);
+    }
+
+    #[test]
+    fn breaking_and_corequisite_softness_matrix() {
+        for breaking in [false, true] {
+            for soft in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let data_dir = temp.path();
+                let repo = "owner/model";
+                let cache = huggingface_repo_cache_path(data_dir, repo).unwrap();
+                let snapshot = cache.join("snapshots/rev-a");
+                std::fs::create_dir_all(&snapshot).unwrap();
+                std::fs::write(snapshot.join("old.safetensors"), b"weights").unwrap();
+                let managed = data_dir.join("models").join(safe_download_dir(repo));
+                std::fs::create_dir_all(&managed).unwrap();
+                std::fs::write(
+                    managed.join(".sceneworks-download-complete.json"),
+                    serde_json::to_vec(&json!({
+                        "schemaVersion": 2, "repo": repo,
+                        "resolvedFiles": ["old.safetensors"]
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                let model = json!({
+                    "id": "model",
+                    "downloads": [
+                        {"provider":"huggingface", "repo":repo,
+                         "files":["new.safetensors"], "breaking":breaking},
+                        {"provider":"huggingface", "repo":"owner/dependency",
+                         "coRequisite":true, "required": if soft { "soft" } else { "hard" }}
+                    ]
+                });
+                let state =
+                    install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+                assert_eq!(
+                    state.installed,
+                    !breaking && soft,
+                    "breaking={breaking}, soft={soft}"
+                );
+                assert!(
+                    state.update_available,
+                    "every stale/soft combination offers an update"
+                );
+                if !soft {
+                    assert!(state
+                        .missing_required_files
+                        .iter()
+                        .any(|file| file.contains("owner/dependency")));
+                }
+                if !breaking && !soft {
+                    let mut omitted = model.clone();
+                    omitted.as_object_mut().unwrap()["downloads"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("breaking");
+                    omitted.as_object_mut().unwrap()["downloads"][1]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("required");
+                    let defaulted = install_state_for(
+                        model_download_context(&omitted).unwrap(),
+                        &omitted,
+                        data_dir,
+                    );
+                    assert!(!defaulted.installed, "omitted required defaults to hard");
+                    assert!(
+                        defaulted.update_available,
+                        "omitted breaking defaults to false"
+                    );
+                }
+            }
+        }
+    }
 }
 
 // Resolve a model's install/cache state from its (optional) download source. A
@@ -1323,10 +1665,39 @@ fn install_state_for(
         // NOT independently mark it installed (sc-9909): a stale .sceneworks-download-complete.json
         // left by an empty download would otherwise read the whole model as installed while every tier
         // reads missing. Single-variant models keep the repo-level managed contract.
-        let managed_installed =
-            !model_has_variant_matrix(model) && model_is_installed(&managed_path);
-        let primary_installed = managed_installed || cache_installed;
-        let installed_path = if cache_installed || cache_incomplete {
+        let receipt_file_sets = receipt_file_sets(&managed_path, &download_context.repo);
+        let managed_installed = !model_has_variant_matrix(model)
+            && receipt_file_sets.is_empty()
+            && model_is_installed(&managed_path);
+        if cache_installed {
+            backfill_current_receipt(&managed_path, model, &download_context, data_dir);
+        }
+        let stale_files_present = !cache_installed
+            && receipt_file_sets
+                .iter()
+                .any(|receipt| receipt_files_present(data_dir, &download_context.repo, receipt));
+        let breaking_update = model
+            .get("breaking")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || model
+                .get("downloads")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|entry| {
+                    !is_co_requisite_download(entry)
+                        && entry.get("repo").and_then(Value::as_str)
+                            == Some(download_context.repo.as_str())
+                        && string_array_field(entry, "files") == download_context.files
+                        && entry
+                            .get("breaking")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                });
+        let usable_stale = stale_files_present && !breaking_update;
+        let primary_installed = managed_installed || cache_installed || usable_stale;
+        let installed_path = if cache_installed || cache_incomplete || usable_stale {
             cache_path.clone()
         } else {
             Some(managed_path)
@@ -1337,7 +1708,8 @@ fn install_state_for(
         // native VAE) from advertising as ready, and a present primary with a missing/partial
         // co-requisite surfaces as a repairable partial install (cache_incomplete → repairAvailable),
         // whose repair re-runs the download job that now fetches the co-requisite too.
-        let mut co_requisites_installed = true;
+        let mut hard_co_requisites_installed = true;
+        let mut soft_co_requisite_update = false;
         let mut co_requisite_incomplete = false;
         for co_requisite in model_co_requisite_downloads(model) {
             let Some(repo) = co_requisite.get("repo").and_then(Value::as_str) else {
@@ -1349,25 +1721,32 @@ fn install_state_for(
             if health.as_ref().is_some_and(|health| health.installed) {
                 continue;
             }
-            co_requisites_installed = false;
-            co_requisite_incomplete |= health.as_ref().is_some_and(|health| health.incomplete);
+            let soft = co_requisite.get("required").and_then(Value::as_str) == Some("soft");
+            if soft {
+                soft_co_requisite_update = true;
+            } else {
+                hard_co_requisites_installed = false;
+                co_requisite_incomplete |= health.as_ref().is_some_and(|health| health.incomplete);
+            }
             match health
                 .as_ref()
                 .map(|health| health.missing_files.as_slice())
             {
-                Some(missing) if !missing.is_empty() => missing_required_files
+                Some(missing) if !missing.is_empty() && !soft => missing_required_files
                     .extend(missing.iter().map(|file| format!("{repo}/{file}"))),
-                _ => missing_required_files.push(repo.to_owned()),
+                _ if !soft => missing_required_files.push(repo.to_owned()),
+                _ => {}
             }
         }
         ModelCatalogEntryState {
             downloadable: true,
             installed_path: installed_path.map(|path| path.display().to_string()),
-            installed: primary_installed && co_requisites_installed,
+            installed: primary_installed && hard_co_requisites_installed,
             cache_incomplete: cache_incomplete
-                || (primary_installed && !co_requisites_installed)
+                || (primary_installed && !hard_co_requisites_installed)
                 || co_requisite_incomplete,
             missing_required_files,
+            update_available: stale_files_present || soft_co_requisite_update,
         }
     } else if let Some(installed_path) = model_manifest_installed_path(model, data_dir) {
         ModelCatalogEntryState {
@@ -1376,6 +1755,7 @@ fn install_state_for(
             installed: model_is_installed(&installed_path),
             cache_incomplete: false,
             missing_required_files: Vec::new(),
+            update_available: false,
         }
     } else {
         ModelCatalogEntryState {
@@ -1384,6 +1764,7 @@ fn install_state_for(
             installed: false,
             cache_incomplete: false,
             missing_required_files: Vec::new(),
+            update_available: false,
         }
     }
 }
@@ -1710,7 +2091,13 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
         );
         object.insert(
             "updateAvailable".to_owned(),
-            Value::Bool(status.update_available),
+            Value::Bool(
+                status.update_available
+                    || object
+                        .get("updateAvailable")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+            ),
         );
     }
 }
@@ -1852,6 +2239,10 @@ async fn model_catalog_inner(
             object.insert(
                 "repairAvailable".to_owned(),
                 Value::Bool(state.downloadable && state.cache_incomplete),
+            );
+            object.insert(
+                "updateAvailable".to_owned(),
+                Value::Bool(state.update_available),
             );
             object.insert(
                 "installedPath".to_owned(),

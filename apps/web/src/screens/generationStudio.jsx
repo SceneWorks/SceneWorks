@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LoraKeywordSummary } from "../components/LoraKeywordSummary.jsx";
 import { Icon } from "../components/Icons.jsx";
+import { StudioUpdateBadge, StudioUpdateNotice } from "../components/StudioUpdateNotice.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import {
   LORA_WEIGHT_MAX,
@@ -630,6 +631,7 @@ export function LoraPickerSection({
   effectiveLoraWeight,
   setLoraWeight,
   loraEmptyMessage,
+  onUpdateLora,
 }) {
   // Add-on-demand picker (UI-refinement 3b): only the LoRAs you've added render as
   // slots; everything else lives behind the "Add LoRA" dropdown. This replaces the
@@ -678,7 +680,7 @@ export function LoraPickerSection({
                   <div className="lora-slot" key={lora.id}>
                     <div className="lora-slot-head">
                       <span className="lora-slot-meta">
-                        <strong>{lora.name ?? lora.id}</strong>
+                        <strong>{lora.name ?? lora.id}{lora.updateAvailable ? <StudioUpdateBadge item={lora} /> : null}</strong>
                         <small>{loraMeta(lora)}</small>
                       </span>
                       <button
@@ -691,6 +693,7 @@ export function LoraPickerSection({
                         ×
                       </button>
                     </div>
+                    <StudioUpdateNotice item={lora} kind="LoRA" onUpdate={onUpdateLora} />
                     <LoraKeywordSummary lora={lora} />
                     <div className="lora-slot-weight">
                       <label>
@@ -741,7 +744,7 @@ export function LoraPickerSection({
                       type="button"
                     >
                       <span className="lora-slot-meta">
-                        <strong>{lora.name ?? lora.id}</strong>
+                        <strong>{lora.name ?? lora.id}{lora.updateAvailable ? <StudioUpdateBadge item={lora} /> : null}</strong>
                         <small>{loraMeta(lora)}</small>
                       </span>
                       <span className="lora-pick-add">{disabled ? "Limit reached" : "Add"}</span>

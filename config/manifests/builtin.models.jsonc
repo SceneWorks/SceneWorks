@@ -429,6 +429,7 @@
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-2512-fun-controlnet-union",
           "coRequisite": true,
+          "required": "soft",
           "files": ["q4/model.safetensors"],
           "estimatedSizeBytes": 989855744,
           "footprint": { "diskSizeBytes": 989855744, "residentMemoryBytes": null, "peakMemoryBytes": null }
@@ -437,6 +438,7 @@
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-2512-fun-controlnet-union",
           "coRequisite": true,
+          "required": "soft",
           "files": ["q8/model.safetensors"],
           "estimatedSizeBytes": 1873805312,
           "footprint": { "diskSizeBytes": 1873805312, "residentMemoryBytes": null, "peakMemoryBytes": null }
@@ -445,6 +447,7 @@
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-2512-fun-controlnet-union",
           "coRequisite": true,
+          "required": "soft",
           "files": ["bf16/model.safetensors"],
           "estimatedSizeBytes": 3506438144,
           "footprint": { "diskSizeBytes": 3506438144, "residentMemoryBytes": null, "peakMemoryBytes": null }

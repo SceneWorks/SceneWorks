@@ -10,6 +10,7 @@ import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
+import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
 import { VideoUpscalePanel } from "./VideoUpscalePanel.jsx";
 import { StylePicker } from "../components/StylePicker.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
@@ -117,6 +118,7 @@ export function VideoStudio() {
     createPreset,
     refinePrompt,
     createModelDownloadJob,
+    createLoraDownloadJob,
     deleteAsset,
     purgeAsset,
     gpuOptions,
@@ -1513,6 +1515,7 @@ export function VideoStudio() {
               <ReplacePersonPanel
                 createPersonDetectionJob={createPersonDetectionJob}
                 createPersonTrackJob={createPersonTrackJob}
+                createModelDownloadJob={createModelDownloadJob}
                 personReadiness={personReadiness}
                 detectionResult={detectionResult}
                 matchingTracks={matchingTracks}
@@ -1542,6 +1545,7 @@ export function VideoStudio() {
             <div className="settings-bar-row">
               <label className="settings-field settings-field-model">
                 Model
+                <StudioUpdateBadge item={selectedModel} />
                 <select
                   onChange={(event) => {
                     // Picking a model answers the recipe notice, so retire it.
@@ -1555,10 +1559,11 @@ export function VideoStudio() {
                       catalog) so the picker is never empty. */}
                   {(modelsForMode(mode).length ? modelsForMode(mode) : baseVideoModels).map((item) => (
                     <option key={item.id} value={item.id}>
-                      {item.name}
+                      {updateOptionLabel(item)}
                     </option>
                   ))}
                 </select>
+                <StudioUpdateNotice item={selectedModel} onUpdate={createModelDownloadJob} />
                 {recipeModelNotice ? (
                   <span className="field-hint" role="status">
                     This clip was made with “{recipeModelNotice}”, which isn’t installed. Its
@@ -1948,6 +1953,7 @@ export function VideoStudio() {
                 effectiveLoraWeight={effectiveLoraWeight}
                 setLoraWeight={setLoraWeight}
                 loraEmptyMessage={loraEmptyMessage}
+                onUpdateLora={createLoraDownloadJob}
               />
               {characterId ? (
                 <div className="guidance-strip">

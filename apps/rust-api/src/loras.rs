@@ -38,7 +38,9 @@ pub(crate) async fn create_lora_download_job(
             status: StatusCode::NOT_FOUND,
             detail: "LoRA not found".to_owned(),
         })?;
-    if lora.get("installState").and_then(Value::as_str) == Some("installed") {
+    if lora.get("installState").and_then(Value::as_str) == Some("installed")
+        && lora.get("updateAvailable").and_then(Value::as_bool) != Some(true)
+    {
         return Err(ApiError::bad_request("LoRA is already installed"));
     }
     let source = lora.get("source").and_then(Value::as_object);
@@ -106,6 +108,15 @@ pub(crate) async fn create_lora_download_job(
     );
     job_payload.insert("repo".to_owned(), Value::String(repo));
     job_payload.insert("files".to_owned(), json!(files));
+    if let Some(revision) = source
+        .and_then(|source| source.get("revision"))
+        .or_else(|| lora.get("revision"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        job_payload.insert("revision".to_owned(), Value::String(revision.to_owned()));
+    }
     if let Some(family) = lora.get("family").and_then(Value::as_str) {
         if !family.trim().is_empty() {
             job_payload.insert("family".to_owned(), Value::String(family.to_owned()));
@@ -711,6 +722,16 @@ pub(crate) fn normalize_lora_entry(
     object.insert(
         "installState".to_owned(),
         Value::String(install_state.to_owned()),
+    );
+    let requested_file_present =
+        lora_huggingface_requested_file(&lora_snapshot, data_dir).is_some();
+    object.insert(
+        "updateAvailable".to_owned(),
+        Value::Bool(
+            install_state == "installed"
+                && !requested_file_present
+                && lora_is_huggingface(&lora_snapshot),
+        ),
     );
     Ok(lora)
 }
@@ -1535,6 +1556,20 @@ pub(crate) fn lora_artifact_paths(lora: &Value, default_root: &FsPath) -> Vec<Pa
 }
 
 pub(crate) fn lora_huggingface_cached_file(lora: &Value, data_dir: &FsPath) -> Option<PathBuf> {
+    lora_huggingface_requested_file(lora, data_dir)
+        .or_else(|| lora_huggingface_receipted_file(lora, data_dir))
+}
+
+fn lora_is_huggingface(lora: &Value) -> bool {
+    let source = lora.get("source").and_then(Value::as_object);
+    source
+        .and_then(|source| source.get("provider"))
+        .or_else(|| lora.get("provider"))
+        .and_then(Value::as_str)
+        == Some("huggingface")
+}
+
+fn lora_huggingface_source(lora: &Value) -> Option<(&str, Option<&str>, &str)> {
     let source = lora.get("source").and_then(Value::as_object);
     let provider = source
         .and_then(|source| source.get("provider"))
@@ -1549,10 +1584,6 @@ pub(crate) fn lora_huggingface_cached_file(lora: &Value, data_dir: &FsPath) -> O
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
-    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
-    if !repo_root.exists() {
-        return None;
-    }
     let file_name = source
         .and_then(|source| source.get("file"))
         .or_else(|| lora.get("file"))
@@ -1565,17 +1596,85 @@ pub(crate) fn lora_huggingface_cached_file(lora: &Value, data_dir: &FsPath) -> O
                 .and_then(|files| files.first())
                 .and_then(Value::as_str)
         });
+    let revision = source
+        .and_then(|source| source.get("revision"))
+        .or_else(|| lora.get("revision"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("main");
+    Some((repo, file_name, revision))
+}
+
+fn lora_huggingface_requested_file(lora: &Value, data_dir: &FsPath) -> Option<PathBuf> {
+    let (repo, file_name, revision) = lora_huggingface_source(lora)?;
+    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
+    if !repo_root.exists() {
+        return None;
+    }
     if let Some(file_name) = file_name {
-        for snapshot in huggingface_snapshot_dirs(&repo_root) {
-            let candidate = snapshot.join(file_name);
-            if candidate.is_file() {
+        let resolved = std::fs::read_to_string(repo_root.join("refs").join(revision))
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| revision.to_owned());
+        let candidate = repo_root.join("snapshots").join(resolved).join(file_name);
+        return candidate.is_file().then_some(candidate);
+    }
+    None
+}
+
+fn lora_huggingface_receipted_file(lora: &Value, data_dir: &FsPath) -> Option<PathBuf> {
+    let (repo, _, _) = lora_huggingface_source(lora)?;
+    let id = lora.get("id").and_then(Value::as_str)?;
+    let marker = data_dir
+        .join("loras")
+        .join(safe_download_dir(id))
+        .join(".sceneworks-download-complete.json");
+    let value: Value = serde_json::from_slice(&std::fs::read(marker).ok()?).ok()?;
+    let entries = value
+        .get("receipts")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| vec![value]);
+    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
+    for receipt in entries.iter().rev() {
+        if receipt.get("repo").and_then(Value::as_str) != Some(repo) {
+            continue;
+        }
+        let Some(revision) = receipt.get("snapshotRevision").and_then(Value::as_str) else {
+            continue;
+        };
+        let revision_path = FsPath::new(revision);
+        if revision_path.is_absolute()
+            || revision_path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            continue;
+        }
+        let Some(files) = receipt.get("resolvedFiles").and_then(Value::as_array) else {
+            continue;
+        };
+        let snapshot = repo_root.join("snapshots").join(revision);
+        for file in files.iter().filter_map(Value::as_str) {
+            let file_path = FsPath::new(file);
+            if file_path.is_absolute()
+                || file_path
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                continue;
+            }
+            let candidate = snapshot.join(file_path);
+            if candidate.is_file()
+                && candidate.extension().and_then(|ext| ext.to_str()) == Some("safetensors")
+            {
                 return Some(candidate);
             }
         }
     }
-    huggingface_main_snapshot_dir(&repo_root)
-        .and_then(|snapshot| first_safetensors_path(&snapshot))
-        .or_else(|| first_safetensors_path(&repo_root))
+    None
 }
 
 pub(crate) fn lora_families(lora: &Value) -> Vec<String> {
@@ -1600,6 +1699,103 @@ pub(crate) fn lora_base_model(lora: &Value) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod huggingface_receipt_tests {
+    use super::*;
+
+    #[test]
+    fn old_receipted_adapter_is_usable_stale_but_arbitrary_safetensors_is_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "SceneWorks/krea-edit";
+        let repo_root = huggingface_repo_cache_path(data_dir, repo).unwrap();
+        let snapshot = repo_root.join("snapshots").join("old-revision");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("v1.1.safetensors"), b"old").unwrap();
+        let lora = json!({
+            "id": "krea2_identity_edit",
+            "source": { "provider": "huggingface", "repo": repo, "file": "v1.2.safetensors" }
+        });
+
+        assert_eq!(lora_huggingface_cached_file(&lora, data_dir), None);
+
+        let marker_dir = data_dir
+            .join("loras")
+            .join(safe_download_dir("krea2_identity_edit"));
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        std::fs::write(
+            marker_dir.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec(&json!({
+                "schemaVersion": 2, "repo": repo, "snapshotRevision": "old-revision",
+                "resolvedFiles": ["v1.1.safetensors"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            lora_huggingface_cached_file(&lora, data_dir),
+            Some(snapshot.join("v1.1.safetensors"))
+        );
+        let normalized = normalize_lora_entry(
+            lora,
+            "builtin",
+            FsPath::new("builtin.loras.jsonc"),
+            data_dir,
+            data_dir,
+        )
+        .unwrap();
+        assert_eq!(normalized["installState"], "installed");
+        assert_eq!(normalized["updateAvailable"], true);
+        assert_eq!(
+            normalized["installedPath"],
+            snapshot.join("v1.1.safetensors").display().to_string()
+        );
+    }
+
+    #[test]
+    fn current_adapter_clears_update_available() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "SceneWorks/krea-edit";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots")
+            .join("current-revision");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("v1.2.safetensors"), b"new").unwrap();
+        std::fs::create_dir_all(snapshot.parent().unwrap().parent().unwrap().join("refs")).unwrap();
+        std::fs::write(
+            snapshot
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("refs")
+                .join("main"),
+            "current-revision",
+        )
+        .unwrap();
+        let normalized = normalize_lora_entry(
+            json!({
+                "id": "krea2_identity_edit",
+                "source": { "provider": "huggingface", "repo": repo, "file": "v1.2.safetensors" }
+            }),
+            "builtin",
+            FsPath::new("builtin.loras.jsonc"),
+            data_dir,
+            data_dir,
+        )
+        .unwrap();
+        assert_eq!(normalized["installState"], "installed");
+        assert_eq!(normalized["updateAvailable"], false);
+        assert_eq!(
+            normalized["installedPath"],
+            snapshot.join("v1.2.safetensors").display().to_string()
+        );
+    }
 }
 
 #[cfg(test)]
