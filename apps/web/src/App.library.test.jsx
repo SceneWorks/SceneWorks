@@ -6,7 +6,7 @@ import { dropUpscaledVariants, foldUpscaledAssetVariants, restrictFoldedToScope 
 import { DocumentStudio } from "./screens/DocumentStudio.jsx";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { ReplacePersonPanel } from "./screens/ReplacePersonPanel.jsx";
-import { withAppContext, FakeEventSource, response, settle, changeField } from "./main.testSupport.jsx";
+import { withAppContext, FakeEventSource, response, settle, changeField, openAdvancedSection } from "./main.testSupport.jsx";
 
 // sc-12068: the Library Trashcan "Empty Trash" purge confirms through the shared desktop-safe
 // appConfirm dialog rather than the raw window.confirm, which silently no-ops inside the Tauri
@@ -1165,7 +1165,9 @@ describe("SceneWorks app shell", () => {
     expect(optionValues).not.toContain("z_image_turbo");
     // The size control offers the interleave buckets.
     expect(optionValues).toContain("2048x1152");
-    // The system prompt is exposed and prefilled with the default.
+    // The system prompt now lives in the Advanced disclosure (GPU · system prompt),
+    // collapsed by default. Expand it, then confirm it's prefilled with the default.
+    await openAdvancedSection();
     const textareas = [...document.body.querySelectorAll("textarea")];
     expect(textareas.some((field) => field.value.includes("multimodal assistant capable of reasoning"))).toBe(true);
 
@@ -1201,7 +1203,7 @@ describe("SceneWorks app shell", () => {
     expect(setActiveView).not.toHaveBeenCalledWith("Queue");
   });
 
-  it("DocumentStudio surfaces reference strength once references are attached and sends imageGuidanceScale", async () => {
+  it("DocumentStudio grounds on a storyboard frame and sends reference guidance in frame order", async () => {
     const createInterleaveJob = vi.fn(() =>
       Promise.resolve({ id: "job-il-ref", type: "image_interleave", status: "queued" }),
     );
@@ -1238,33 +1240,33 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    // No references yet → the reference-strength slider is hidden.
+    // The reference-guidance slider is part of the storyboard block (always visible),
+    // defaulting to the neutral 1.0 baseline. The old "Reference strength" label is gone.
     expect(container.textContent).not.toContain("Reference strength");
+    expect(container.textContent).toContain("Reference guidance");
+    const slider = document.body.querySelector(".doc-refguidance-slider");
+    expect(slider).not.toBeNull();
+    expect(slider.value).toBe("1");
 
-    // Attach a reference image through the picker: open it, pick the card, confirm.
+    // The storyboard starts empty. Add a frame, then attach a reference image to it
+    // through the frame's picker: open it, pick the card, confirm.
     await act(async () => {
-      [...document.body.querySelectorAll(".asset-picker-head button")]
-        .find((button) => button.textContent === "Add reference images")
-        .click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.includes("Add frame")).click();
+    });
+    await settle();
+    await act(async () => {
+      document.body.querySelector(".doc-frame-thumb").click();
     });
     await settle();
     await act(async () => {
       document.body.querySelector(".asset-picker-card").click();
     });
     await act(async () => {
-      [...document.body.querySelectorAll("button")]
-        .find((button) => button.textContent === "Use Selection")
-        .click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use Selection").click();
     });
     await settle();
 
-    // The slider now appears, defaulting to the neutral 1.00 baseline.
-    expect(container.textContent).toContain("Reference strength");
-    const slider = document.body.querySelector("input[type='range']");
-    expect(slider).not.toBeNull();
-    expect(slider.value).toBe("1");
-
-    // Dial the reference strength up toward the character/identity regime and submit.
+    // Dial the reference guidance up toward the character/identity regime and submit.
     await changeField(slider, "1.5");
     await changeField(document.body.querySelector("textarea"), "A brand lookbook grounded in the hero shot");
     await act(async () => {
@@ -1276,6 +1278,7 @@ describe("SceneWorks app shell", () => {
 
     expect(createInterleaveJob).toHaveBeenCalledTimes(1);
     const payload = createInterleaveJob.mock.calls[0][0];
+    // sourceAssetIds are derived from the storyboard frames in order.
     expect(payload.sourceAssetIds).toEqual(["img-ref-1"]);
     expect(payload.advanced.imageGuidanceScale).toBe(1.5);
   });
