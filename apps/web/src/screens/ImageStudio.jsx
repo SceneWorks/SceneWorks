@@ -158,6 +158,8 @@ import {
   useUpscaleEngineFallback,
 } from "../upscaleEngines.js";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
+import { StylePicker } from "../components/StylePicker.jsx";
+import { STYLE_GROUPS, styleTextForId } from "../data/styleCatalog.js";
 import {
   GUIDANCE_METHOD_LABELS,
   SAMPLER_LABELS,
@@ -380,6 +382,11 @@ export function ImageStudio() {
   const [characterSuggestions] = useState(() => pickSuggestions(4, CHARACTER_SUGGESTION_POOL));
   const [mode, setMode] = useState(() => normalizeImageMode(saved.mode));
   const [prompt, setPrompt] = useState(saved.prompt ?? DEFAULT_SCENE_PROMPT);
+  // sc-13130: the Style Catalog selection, an entry id from styles.json (or null for "None" /
+  // pass-through). Lives next to `prompt` and persists via the same studio saved-state mechanism.
+  // Kept as a bare id (not the full entry) so the sc-13132 recipe/replay rehydration can extend
+  // it cleanly; the payload fold resolves the id → prompt text via styleTextForId at build time.
+  const [styleId, setStyleId] = useState(saved.styleId ?? null);
   // True once the user types or picks a suggestion, so the character-mode default
   // prompt never clobbers their own wording. A restored prompt counts as edited so
   // re-entering character mode doesn't overwrite it.
@@ -1770,6 +1777,7 @@ export function ImageStudio() {
   useStudioSettingsWriter("image", activeProject?.id ?? null, {
     mode,
     prompt,
+    styleId,
     structuredCaption: caption,
     promptMode,
     magicPromptBackend,
@@ -1966,6 +1974,12 @@ export function ImageStudio() {
       height,
       recipePresetId: selectedPreset?.id ?? null,
       presetPromptResolvedClientSide: foldPrompt,
+      // sc-13130: the selected Style Catalog entry's prompt text (or null for None). The pure
+      // builder applies composeStyledPrompt as the LAST wrap — after the preset fold above has
+      // produced `promptToSend` — so the style's `Style:` block wraps the already-preset-composed
+      // user prompt as `Description:`. Null → pass-through (prompt sent unchanged). Structured
+      // caption models ignore it (the builder skips composition when sendStructured is true).
+      styleText: styleTextForId(styleId),
       characterId,
       characterLookId,
       multiReference,
@@ -2444,6 +2458,18 @@ export function ImageStudio() {
                   {suggestion}
                 </button>
               ))}
+            </div>
+          )}
+
+          {/* Style Catalog axis (sc-13130): a searchable, grouped single-select over the 278-style
+              catalog, applied to the outgoing prompt at build time (Style:/Description: composition).
+              Free-text only — structured JSON-caption models serialize a caption the composer can't
+              wrap. "None" resets to pass-through. NB: this is the Style Catalog, distinct from Krea's
+              numeric "text style" (textStyleGain) slider in the advanced section. */}
+          {structuredPromptModel ? null : (
+            <div className="style-row">
+              <span className="style-row-label">Style</span>
+              <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
             </div>
           )}
 

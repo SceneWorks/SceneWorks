@@ -1,6 +1,7 @@
 import { buildImageJobAdvanced } from "./imageJobAdvanced.js";
 import { effectiveFitMode } from "./components/FitModeControl.jsx";
 import { upscaleEngineHasSoftness } from "./upscaleEngines.js";
+import { composeStyledPrompt } from "./styleComposer.js";
 
 // sc-11219 (F-031): single pure builder for the Image Studio job request, shared by both the
 // single "Generate" submit and the batch run. It used to be duplicated — `submit()` held the
@@ -39,6 +40,10 @@ export function buildImageJobRequest(state) {
     height,
     recipePresetId,
     presetPromptResolvedClientSide,
+    // sc-13130: the free-text `prompt` of the catalog style the user picked (styleCatalog.styleTextForId),
+    // or null/"" when no style is selected. The caller resolves this from the selected style id; the
+    // builder needs the text (not the id) because the composer wraps prose, not a catalog reference.
+    styleText,
     characterId,
     characterLookId,
     multiReference,
@@ -92,9 +97,20 @@ export function buildImageJobRequest(state) {
     controlOverlayId,
   } = state;
 
+  // sc-13130: apply the Style Catalog composer as the LAST wrap on the outgoing prompt. By the
+  // time we get here `promptToSend` is already the preset-composed, user-facing prompt (the
+  // ImageStudio per-call fold runs composePreset first), so composeStyledPrompt wraps that as the
+  // `Description:` block under the selected style's `Style:` block. It is a no-op when no style is
+  // selected (empty styleText → returns promptToSend unchanged) and is skipped for structured
+  // JSON-caption models, where `promptToSend` is a serialized caption, not prose the composer can
+  // wrap. When a style IS applied client-side we set presetPromptResolvedClientSide truthy so the
+  // server leaves the composed prompt alone (there is no server-side style fold in v1).
+  const styleApplied = !sendStructured && typeof styleText === "string" && styleText.trim() !== "";
+  const composedPrompt = styleApplied ? composeStyledPrompt({ styleText, userPrompt: promptToSend }) : promptToSend;
+
   return {
     mode,
-    prompt: promptToSend,
+    prompt: composedPrompt,
     negativePrompt,
     model,
     count: posePayload.length ? 1 : count,
@@ -113,7 +129,7 @@ export function buildImageJobRequest(state) {
     // stacked fragments — the server can't reconstruct a stack from one recipePresetId), so it
     // sends the composed prompt verbatim and this flag tells the server to skip its own
     // prefix/suffix fold (epic 11949, mirrors presetLorasResolvedClientSide).
-    presetPromptResolvedClientSide: presetPromptResolvedClientSide || undefined,
+    presetPromptResolvedClientSide: presetPromptResolvedClientSide || styleApplied || undefined,
     characterId: mode === "character_image" ? characterId || null : null,
     characterLookId: mode === "character_image" ? characterLookId || null : null,
     // edit_image: a single source image, except for a multi-reference model (sc-6211,
