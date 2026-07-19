@@ -2245,9 +2245,10 @@ export function ImageStudio() {
   // byte-for-byte the prompt that will be sent (preset stack folds into the prompt FIRST, the style's
   // Style:/Description: wrap is applied LAST — see imageJobRequest.js). It recomputes every render, so
   // it tracks the prompt text, the selected style, and the active preset stack live. Only active for
-  // free-text models with a style actually selected: the style-row is hidden for structured-caption
-  // models (which serialize a caption the composer can't wrap), and a null/empty styleText is a
-  // pass-through with nothing extra to preview and no style-composition budget to guard.
+  // free-text models with a style actually selected: structured-caption models (Ideogram) merge the
+  // style into the caption's `aesthetics` instead (sc-13224), so there's no Style:/Description: prose
+  // to preview, and a null/empty styleText is a pass-through with nothing extra to preview and no
+  // style-composition budget to guard.
   const styledPreviewPrompt = stylePreviewActive ? buildJobRequest({ promptToSend: prompt }).prompt : null;
   const generateDraft = useMemo(
     () => ({
