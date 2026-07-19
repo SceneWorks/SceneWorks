@@ -2197,12 +2197,30 @@ export function ImageStudio() {
     }),
     [activeProject, batchStructuredExpandBlocked, batchTotal, batchMissingKeys, batchGroupIssues, batchResolutionIssues],
   );
+  // sc-13131 / sc-13133: the live composed-prompt preview for the selected Style Catalog entry, and
+  // the budget the composed string spends against the backend cap. ANTI-DRIFT: we do NOT re-derive
+  // the composition here — we run the SAME buildJobRequest the single Generate submit calls (with the
+  // live prompt as promptToSend) and read its `.prompt`, so the previewed/measured string is
+  // byte-for-byte the prompt that will be sent (preset stack folds into the prompt FIRST, the style's
+  // Style:/Description: wrap is applied LAST — see imageJobRequest.js). It recomputes every render, so
+  // it tracks the prompt text, the selected style, and the active preset stack live. Only active for
+  // free-text models with a style actually selected: the style-row is hidden for structured-caption
+  // models (which serialize a caption the composer can't wrap), and a null/empty styleText is a
+  // pass-through with nothing extra to preview and no style-composition budget to guard.
+  const activeStyleText = styleTextForId(styleId);
+  const stylePreviewActive =
+    !structuredPromptModel && typeof activeStyleText === "string" && activeStyleText.trim() !== "";
+  const styledPreviewPrompt = stylePreviewActive ? buildJobRequest({ promptToSend: prompt }).prompt : null;
   const generateDraft = useMemo(
     () => ({
       activeProject,
       structuredActive,
       captionHasContent,
       prompt,
+      // sc-13133: measure the COMPOSED outgoing prompt against the cap, but only when a style is
+      // active (styleless behavior unchanged). `styledPreviewPrompt` is the exact string submitted.
+      styleActive: stylePreviewActive,
+      composedPrompt: styledPreviewPrompt ?? "",
       mode,
       characterId,
       // Edit needs a source (single) or ≥1 reference (multiReference); a required edit LoRA must be
@@ -2221,6 +2239,8 @@ export function ImageStudio() {
       structuredActive,
       captionHasContent,
       prompt,
+      stylePreviewActive,
+      styledPreviewPrompt,
       mode,
       characterId,
       multiReference,
@@ -2244,21 +2264,6 @@ export function ImageStudio() {
     !generateValidity.ready ||
     (structuredActive && !captionValidation?.ok) ||
     Boolean(macActiveModeBlock);
-
-  // sc-13131: live composed-prompt preview for the selected Style Catalog entry. ANTI-DRIFT: we do
-  // NOT re-derive the composition here — we run the SAME buildJobRequest the single Generate submit
-  // calls (with the live prompt as promptToSend) and read its `.prompt`, so the previewed string is
-  // byte-for-byte the prompt that will be sent (preset stack folds into the prompt FIRST, the
-  // style's Style:/Description: wrap is applied LAST — see imageJobRequest.js). It recomputes every
-  // render, so it tracks the prompt text, the selected style, and the active preset stack live.
-  // Only shown for free-text models with a style actually selected: the style-row is already hidden
-  // for structured-caption models (which serialize a caption the composer can't wrap and where the
-  // builder skips style composition), and a null/empty styleText is a pass-through with nothing
-  // extra to preview.
-  const activeStyleText = styleTextForId(styleId);
-  const stylePreviewActive =
-    !structuredPromptModel && typeof activeStyleText === "string" && activeStyleText.trim() !== "";
-  const styledPreviewPrompt = stylePreviewActive ? buildJobRequest({ promptToSend: prompt }).prompt : null;
 
   return (
     <ModelAvailabilityGate

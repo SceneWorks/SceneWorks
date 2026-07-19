@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { composeStyledPrompt, parseDirectiveLines, STYLE_DIRECTIVE_KEYS } from "./styleComposer.js";
+import {
+  composeStyledPrompt,
+  parseDirectiveLines,
+  promptBudget,
+  PROMPT_MAX_CHARS,
+  STYLE_DIRECTIVE_KEYS,
+} from "./styleComposer.js";
 
 // sc-13129: the style composer wraps an already-preset-folded userPrompt in a Style/Description
 // template, splicing around any directive lines the user typed. These pin the exact composed
@@ -232,5 +238,47 @@ describe("parseDirectiveLines", () => {
       { type: "directive", key: "Angle", content: "low", raw: "Angle: low" },
       { type: "prose", key: null, content: "something", raw: "something" },
     ]);
+  });
+});
+
+// sc-13133: the composed-prompt budget the studio spends against the backend cap. The value is
+// measured on the COMPOSED string (what is sent), and length is counted in Unicode scalar values
+// to match rust-api's `prompt.chars().count()` bound.
+describe("promptBudget", () => {
+  it("pins the backend cap value", () => {
+    // The number rust-api enforces (apps/rust-api/src/generation.rs — `> 4000`). A drift here means
+    // the studio would gate at a different length than the server rejects at.
+    expect(PROMPT_MAX_CHARS).toBe(4000);
+  });
+
+  it("reports length, remaining, and not-over for an under-cap string", () => {
+    const budget = promptBudget("a".repeat(3820));
+    expect(budget).toEqual({ length: 3820, max: 4000, remaining: 180, over: false });
+  });
+
+  it("is exactly at the cap → remaining 0, not over (the cap is inclusive)", () => {
+    const budget = promptBudget("a".repeat(4000));
+    expect(budget.length).toBe(4000);
+    expect(budget.remaining).toBe(0);
+    expect(budget.over).toBe(false);
+  });
+
+  it("one past the cap → over, negative remaining", () => {
+    const budget = promptBudget("a".repeat(4001));
+    expect(budget.length).toBe(4001);
+    expect(budget.remaining).toBe(-1);
+    expect(budget.over).toBe(true);
+  });
+
+  it("counts Unicode scalar values, not UTF-16 code units (matches Rust chars().count())", () => {
+    // An astral emoji is ONE scalar value but TWO UTF-16 code units. A plain `.length` would report
+    // 2 and over-count; the budget must report 1 so it agrees with the backend's char count.
+    expect(promptBudget("😀").length).toBe(1);
+    expect(promptBudget("😀".repeat(10)).length).toBe(10);
+  });
+
+  it("treats a null/undefined composed prompt as empty", () => {
+    expect(promptBudget(undefined)).toEqual({ length: 0, max: 4000, remaining: 4000, over: false });
+    expect(promptBudget(null).length).toBe(0);
   });
 });

@@ -117,3 +117,29 @@ export function composeStyledPrompt({ styleText, userPrompt } = {}) {
 
   return blocks.join("\n");
 }
+
+// sc-13133 — the backend prompt bound. rust-api rejects any generation whose outgoing `prompt`
+// is empty or longer than this many characters (apps/rust-api/src/generation.rs:
+// `prompt.chars().count() > 4000`). A catalog style text runs ~700–900 chars and is wrapped
+// AROUND the user's prompt by composeStyledPrompt, so a long prompt + a style can compose past
+// the cap even though the raw prompt field is well under it — hence the budget is measured on the
+// COMPOSED string, not the raw prompt. Kept here beside the composer so the number and the
+// composition that spends it live together.
+export const PROMPT_MAX_CHARS = 4000;
+
+// Measure a COMPOSED prompt string against the backend cap. `composedPrompt` is the exact string
+// that will be sent (the composeStyledPrompt / buildJobRequest output the live preview shows), NOT
+// the raw prompt-field text — measuring the raw text would miss a style that pushes the composition
+// over on its own. Length is counted in Unicode scalar values via the string iterator so it matches
+// Rust's `chars().count()` (a plain `.length` counts UTF-16 code units and over-counts astral
+// characters). Returns the length, the cap, the remaining budget, and whether it is over.
+export function promptBudget(composedPrompt) {
+  const text = typeof composedPrompt === "string" ? composedPrompt : String(composedPrompt ?? "");
+  const length = [...text].length;
+  return {
+    length,
+    max: PROMPT_MAX_CHARS,
+    remaining: PROMPT_MAX_CHARS - length,
+    over: length > PROMPT_MAX_CHARS,
+  };
+}

@@ -7604,6 +7604,22 @@ details[open] > summary.lora-scope-group-heading::before,
   white-space: pre-wrap;
 }
 
+/* sc-13133 — Composed-prompt budget readout under the style preview: a live "N / 4000" count that
+   flips to a danger warning when the composition would exceed the backend cap (the blocking Generate
+   error surfaces separately in the validation summary). */
+.styled-prompt-budget {
+  margin: 0;
+  font: 500 11.5px/1.4 var(--font-sans, inherit);
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.styled-prompt-budget.over {
+  color: var(--danger);
+  font-weight: 600;
+  text-align: left;
+}
+
 .preset-stack-extras {
   margin: 0;
   font-size: 12px;

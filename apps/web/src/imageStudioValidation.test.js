@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { summarize } from "./validation/issues.js";
 import { imageBatchValidation, imageGenerateValidation } from "./imageStudioValidation.js";
+import { composeStyledPrompt, PROMPT_MAX_CHARS } from "./styleComposer.js";
 
 // The two Image Studio CTA gates in the app-wide vocabulary (epic 10649). The kinds are the
 // contract: a requirement blocks in silence (the empty field shows it), an error blocks and
@@ -102,6 +103,66 @@ describe("imageGenerateValidation", () => {
     const summary = summarize(imageGenerateValidation({ ...whole, activeProject: null, presetMissing: ["loraA"] }));
     expect(summary.surfaced).toHaveLength(1);
     expect(summary.surfaced[0].message).toContain("loraA");
+  });
+
+  // Composed-prompt budget guard (sc-13133). The cap is measured on the COMPOSED outgoing prompt,
+  // not the raw prompt field, and only when a style is active — styleless behavior is unchanged.
+  describe("composed-prompt budget (sc-13133)", () => {
+    // A raw prompt that is itself well UNDER the cap, but a style long enough that the composed
+    // Style:/Description: string runs OVER it. The whole point of the guard.
+    const rawPrompt = "a fox in the snow"; // 17 chars — nowhere near the cap on its own
+    const longStyle = "x".repeat(PROMPT_MAX_CHARS); // composed will exceed the cap by the wrapper + prompt
+    const overComposed = composeStyledPrompt({ styleText: longStyle, userPrompt: rawPrompt });
+
+    it("styleless is unchanged: an over-cap composedPrompt is ignored when no style is active", () => {
+      // Even handed an over-cap string, a styleless draft must not sprout a new error — the raw
+      // prompt keeps whatever gating it had (the backend still bounds it).
+      const issues = imageGenerateValidation({ ...whole, styleActive: false, composedPrompt: overComposed });
+      expect(summarize(issues).surfaced).toEqual([]);
+      expect(summarize(issues).ready).toBe(true);
+    });
+
+    it("under budget with a style active surfaces no error", () => {
+      const underComposed = composeStyledPrompt({ styleText: "cinematic watercolor", userPrompt: rawPrompt });
+      expect([...underComposed].length).toBeLessThanOrEqual(PROMPT_MAX_CHARS);
+      const issues = imageGenerateValidation({ ...whole, styleActive: true, composedPrompt: underComposed });
+      expect(summarize(issues).surfaced).toEqual([]);
+      expect(summarize(issues).ready).toBe(true);
+    });
+
+    // DISCRIMINATION: raw prompt < cap, composed > cap → the guard MUST fire. A guard that measured
+    // the raw `prompt` field (17 chars) instead of the composed string would let this through — this
+    // test fails that mutation.
+    it("blocks and surfaces an error when the COMPOSED prompt exceeds the cap (raw prompt is short)", () => {
+      expect([...rawPrompt].length).toBeLessThan(PROMPT_MAX_CHARS); // raw is well under
+      expect([...overComposed].length).toBeGreaterThan(PROMPT_MAX_CHARS); // composed is over
+      const issues = imageGenerateValidation({
+        ...whole,
+        prompt: rawPrompt,
+        styleActive: true,
+        composedPrompt: overComposed,
+      });
+      const summary = summarize(issues);
+      expect(summary.ready).toBe(false);
+      expect(summary.surfaced).toHaveLength(1);
+      expect(summary.surfaced[0].kind).toBe("error");
+      // The message names the real numbers and the two ways out — no raw internals.
+      expect(summary.surfaced[0].message).toContain(`${[...overComposed].length}/${PROMPT_MAX_CHARS}`);
+      expect(summary.surfaced[0].message).toContain("shorten your prompt or pick a shorter style");
+    });
+
+    it("does not add the budget error on a structured model even if styleActive is set", () => {
+      // Structured-caption models serialize a JSON caption the composer never wraps; the style
+      // guard must stay out of their gate.
+      const issues = imageGenerateValidation({
+        ...whole,
+        structuredActive: true,
+        captionHasContent: true,
+        styleActive: true,
+        composedPrompt: overComposed,
+      });
+      expect(summarize(issues).surfaced).toEqual([]);
+    });
   });
 });
 

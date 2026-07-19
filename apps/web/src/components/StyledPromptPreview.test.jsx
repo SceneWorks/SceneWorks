@@ -59,4 +59,33 @@ describe("StyledPromptPreview", () => {
     render(<StyledPromptPreview active composedPrompt="" />);
     expect(node().querySelector(".token").textContent).toBe("your prompt");
   });
+
+  // sc-13133: the composed-prompt budget readout lives here because a style is active exactly when
+  // this preview renders. The count is measured on the SAME composed string shown above.
+  const budget = () => container.querySelector('[data-testid="styled-prompt-budget"]');
+
+  it("shows the composed length / cap for an under-budget prompt, with no warning", () => {
+    const composed = "Style: cinematic\nDescription: a fox in the snow";
+    render(<StyledPromptPreview active composedPrompt={composed} />);
+    // Measured on the composed string the component was handed (Unicode scalar values).
+    expect(budget().textContent).toContain(`${[...composed].length} / 4000`);
+    expect(budget().classList.contains("over")).toBe(false);
+    expect(budget().getAttribute("role")).toBeNull();
+  });
+
+  it("flips to an over-budget warning (with alert role) when the composed prompt exceeds the cap", () => {
+    const composed = `Style: ${"x".repeat(4000)}\nDescription: a fox`;
+    render(<StyledPromptPreview active composedPrompt={composed} />);
+    const over = [...composed].length;
+    expect(over).toBeGreaterThan(4000);
+    expect(budget().classList.contains("over")).toBe(true);
+    expect(budget().getAttribute("role")).toBe("alert");
+    expect(budget().textContent).toContain(`${over} / 4000`);
+    expect(budget().textContent).toContain("shorten your prompt or pick a shorter style");
+  });
+
+  it("renders no budget readout when inactive", () => {
+    render(<StyledPromptPreview active={false} composedPrompt={"x".repeat(5000)} />);
+    expect(budget()).toBeNull();
+  });
 });
