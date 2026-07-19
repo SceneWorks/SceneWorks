@@ -1298,32 +1298,31 @@
         // SceneWorks pre-built MLX quant-matrix turnkey (epic 13095, S2): a public/ungated re-host of
         // sensenova/SenseNova-U1-8B-MoT-Infographic-V3 built with the same `prequantize_turnkey` harness
         // as V2. Per-tier subdirs (each a complete from_snapshot tree): q4/ (default), q8/, bf16/.
-        // NOTE: byte sizes below are V2's on-disk measurements as a near-identical PLACEHOLDER (V3 is
-        // tensor-identical); re-measure the hosted V3 repo per subdir and backfill after S2 upload.
+        // Byte sizes are EXACT on-disk measurements of the built/hosted V3 tiers (epic 13095 S2).
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-mlx",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 11824526363,
-          "footprint": { "diskSizeBytes": 11824526363, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 11824378614,
+          "footprint": { "diskSizeBytes": 11824378614, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-mlx",
           "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 19927923905,
-          "footprint": { "diskSizeBytes": 19927923905, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 19927776248,
+          "footprint": { "diskSizeBytes": 19927776248, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-mlx",
           "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 35121744859,
-          "footprint": { "diskSizeBytes": 35121744859, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 35121597119,
+          "footprint": { "diskSizeBytes": 35121597119, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -1597,32 +1596,31 @@
       "adapter": "sensenova_u1",
       "capabilities": ["text_to_image", "edit_image", "character_image"],
       "downloads": [
-        // NOTE: byte sizes are V2-fast on-disk measurements as a near-identical PLACEHOLDER (tensor-
-        // identical); re-measure the hosted V3-fast repo per subdir and backfill after S3 upload.
+        // Byte sizes are EXACT on-disk measurements of the built/hosted V3-fast tiers (epic 13095 S3).
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 11824526409,
-          "footprint": { "diskSizeBytes": 11824526409, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 11824378215,
+          "footprint": { "diskSizeBytes": 11824378215, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx",
           "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 19927924235,
-          "footprint": { "diskSizeBytes": 19927924235, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 19927776291,
+          "footprint": { "diskSizeBytes": 19927776291, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx",
           "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 35121633249,
-          "footprint": { "diskSizeBytes": 35121633249, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 35121485601,
+          "footprint": { "diskSizeBytes": 35121485601, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
