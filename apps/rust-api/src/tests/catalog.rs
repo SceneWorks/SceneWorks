@@ -512,7 +512,12 @@ async fn model_and_lora_routes_match_manifest_behavior() {
             {
               "schemaVersion": 1,
               "models": [
-                { "id": "base-model", "name": "User Model", "ui": { "label": "User" } }
+                {
+                  "id": "base-model",
+                  "name": "User Model",
+                  "ui": { "label": "User" },
+                  "customPluginMetadata": { "vendorKey": "preserved" }
+                }
               ]
             }
             "#,
@@ -587,6 +592,9 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models[0]["name"], "User Model");
+    // sc-12338: schema enforcement is builtin-only. User manifests remain a lenient
+    // extension surface; an unknown custom key must neither brick the route nor be dropped.
+    assert_eq!(models[0]["customPluginMetadata"]["vendorKey"], "preserved");
     assert_eq!(models[0]["adapter"], "z_image_diffusers");
     assert_eq!(models[0]["downloadable"], true);
     assert_eq!(models[0]["downloadSizeBytes"], 12884901888_u64);

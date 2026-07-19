@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sceneworks.local/schemas/model-manifest.schema.json",
   "title": "SceneWorks Model Manifest",
+  "description": "Authoring schema for the model catalog. Constraint-shaped properties carry x-sceneworks-contract: binding means authoritative backend behavior (rejection unless the property's description explicitly names deterministic normalization), advisory means UI/selection guidance that is deliberately not a backend gate, and descriptive means factual metadata. tests/test_builtin_manifest_audit.py treats these annotations as the gated contract registry (sc-12304).",
   "type": "object",
   "required": ["schemaVersion", "models"],
   "$defs": {
@@ -16,9 +17,11 @@
         "dpmpp_sde",
         "uni_pc",
         "lcm",
-        "ddim"
+        "ddim",
+        "er_sde",
+        "dpmpp_2m_sde"
       ],
-      "description": "Sampler (integration method) from the unified curated framework (epic 7114, decision 2), honored by the native mlx-gen / candle-gen engines. Names match gen-core's Solver registry exactly. \"default\" = the engine's native sampler (no swap). Supersedes the epic-1753 diffusers vocabulary (dpmpp -> dpmpp_2m, unipc -> uni_pc, + euler_ancestral / dpmpp_sde / lcm / ddim)."
+      "description": "Sampler (integration method) advertised by shipped model backends. The unified gen-core names are joined by backend-specific ER-SDE and DPM++ 2M SDE values used by current catalog entries. \"default\" preserves the engine's native sampler."
     },
     "schedulerKey": {
       "type": "string",
@@ -30,9 +33,11 @@
         "exponential",
         "sgm_uniform",
         "beta",
-        "ddim_uniform"
+        "ddim_uniform",
+        "shift",
+        "beta57"
       ],
-      "description": "Sigma schedule from the unified curated framework (epic 7114, decision 2). Names match gen-core's Scheduler registry exactly. \"default\" preserves the engine's native schedule. The epic-1753 \"shift\" pseudo-scheduler is gone — the per-generation time shift is the orthogonal defaults.schedulerShift / advanced.schedulerShift knob, not a scheduler choice."
+      "description": "Sigma schedule advertised by shipped model backends. \"default\" preserves the engine's native schedule; shift and beta57 remain valid for current backend-specific catalog entries."
     },
     "guidanceMethodKey": {
       "type": "string",
@@ -46,13 +51,14 @@
     },
     "quantVariantKey": {
       "type": "string",
-      "enum": ["bf16", "q8", "q4"],
-      "description": "Quantization tier of a downloadable model variant (epic 8506, sc-8508). `bf16` = dense full-precision, `q8` / `q4` = pre-quantized packed tiers. Matches the SceneWorks quant-matrix turnkey subdir names resolved by the worker's standard_tier_subdir. Maps to advanced.mlxQuantize at generation time (bf16 <=> 0/none, q8 <=> 8, q4 <=> 4)."
+      "enum": ["bf16", "q8", "q4", "int8-convrot", "training"],
+      "description": "Download variant identifier. bf16/q8/q4 are standard quant-matrix tiers; int8-convrot is Krea's hosted ConvRot tier; training selects the dedicated Lens training artifact."
     },
     "variantFootprint": {
       "type": "object",
       "description": "Footprint metadata for one downloadable model variant (sc-8508). `diskSizeBytes` is required; the measured-memory fields are OPTIONAL and nullable so a later story (sc-8516) can populate real resident/peak numbers without a schema change. The RAM-suggestion engine (sc-8509/8516) is out of scope here — this only declares the fields it will consume.",
       "required": ["diskSizeBytes"],
+      "additionalProperties": false,
       "properties": {
         "diskSizeBytes": {
           "type": ["integer", "string"],
@@ -68,42 +74,101 @@
         }
       }
     },
+    "numericControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string" },
+        "default": { "type": "number" },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "step": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
     "samplerLimits": {
       "type": "object",
+      "additionalProperties": false,
       "description": "Per-model sampler / scheduler / guidance capability lists used to gate Image / Video Studio dropdowns. Omit the keys entirely to disable the controls; include single-element [\"default\"] arrays for sealed adapters so the manifest is still self-describing.",
       "properties": {
         "samplers": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/samplerKey" }
+          "items": { "$ref": "#/$defs/samplerKey" },
+          "x-sceneworks-contract": "advisory",
+          "x-sceneworks-readers": [{ "path": "apps/web/src/samplerOptions.js", "anchor": "limits?.samplers" }]
         },
         "schedulers": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/schedulerKey" }
+          "items": { "$ref": "#/$defs/schedulerKey" },
+          "x-sceneworks-contract": "advisory",
+          "x-sceneworks-readers": [{ "path": "apps/web/src/samplerOptions.js", "anchor": "limits?.schedulers" }]
         },
         "guidanceMethods": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/guidanceMethodKey" }
+          "items": { "$ref": "#/$defs/guidanceMethodKey" },
+          "x-sceneworks-contract": "advisory",
+          "x-sceneworks-readers": [{ "path": "apps/web/src/samplerOptions.js", "anchor": "limits?.guidanceMethods" }]
         }
       }
     }
   },
   "properties": {
+    "$schema": { "type": "string" },
     "schemaVersion": { "type": "integer", "minimum": 1 },
     "models": {
       "type": "array",
       "items": {
         "type": "object",
+        "required": ["id", "name", "type"],
+        "additionalProperties": false,
         "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "type": { "type": "string", "enum": ["image", "video", "utility"] },
+          "family": { "type": "string" },
+          "adapter": { "type": "string" },
+          "capabilities": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "recommended": { "type": "boolean" },
+          "autoDownload": { "type": "boolean" },
+          "macOnly": { "type": "boolean" },
+          "gated": { "type": "boolean" },
+          "credentialHost": { "type": "string" },
+          "licenseUrl": { "type": "string", "format": "uri" },
+          "nonCommercial": { "type": "boolean" },
+          "promptless": { "type": "boolean" },
+          "structuredPrompt": { "type": "boolean" },
+          "minMemoryGb": { "type": "integer", "minimum": 1 },
+          "paths": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": { "model": { "type": "string" } }
+          },
+          "loraCompatibility": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "families": { "type": "array", "items": { "type": "string" } },
+              "types": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "quantization": { "type": "object" },
           "defaults": {
             "type": "object",
+            "additionalProperties": false,
             "description": "Model defaults surfaced as form initial values in the studios. Sampler / scheduler defaults are read by the UI (the worker just honors whatever rides on advanced).",
             "properties": {
+              "count": { "type": "integer", "minimum": 1 },
+              "duration": { "type": "number", "exclusiveMinimum": 0 },
+              "fps": { "type": "integer", "minimum": 1 },
+              "guidanceScale": { "type": "number" },
+              "quality": { "type": "string" },
+              "resolution": { "type": "string", "pattern": "^[0-9]+x[0-9]+$" },
+              "steps": { "type": "integer", "minimum": 1 },
               "sampler": { "$ref": "#/$defs/samplerKey" },
               "scheduler": { "$ref": "#/$defs/schedulerKey" },
               "schedulerShift": {
@@ -115,36 +180,139 @@
           },
           "limits": {
             "type": "object",
-            "description": "Per-model capability lists. Sampler / scheduler / guidance arrays gate the Image / Video Studio dropdowns; omit them to hide the controls.",
+            "additionalProperties": false,
+            "description": "Per-model constraints and capability menus. Each property is explicitly classified; never infer enforcement from the word limits.",
             "properties": {
+              "resolutions": {
+                "type": "array", "items": { "type": "string" },
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ImageStudio.jsx", "anchor": "selectedModel?.limits?.resolutions" }],
+                "description": "UI/recipe resolution menu. Runtime geometry is governed by the binding stride and pixel constraints."
+              },
+              "count": {
+                "type": "array", "items": { "type": "integer", "minimum": 1 },
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-reader-exemption": "sc-12335 owns the deliberate limits.count UI-reader decision",
+                "description": "Image Studio batch-size menu; deliberately not a backend rejection gate (sc-12335)."
+              },
+              "durations": {
+                "type": "array", "items": { "type": "number", "exclusiveMinimum": 0 },
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/VideoStudio.jsx", "anchor": "selectedModel?.limits?.durations" }],
+                "description": "UI duration menu. The binding hardMaxDuration ceiling owns backend rejection."
+              },
+              "fps": {
+                "type": "array", "items": { "type": "integer", "minimum": 1 },
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn allowed_fps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = fps_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs.rs", "anchor": "fps_limit_error(&request.model, request.fps" }],
+                "description": "Allowed render frame rates; API and worker reject off-menu requests."
+              },
+              "hardMaxDuration": {
+                "type": "number", "exclusiveMinimum": 0,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn hard_max_duration" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = duration_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs.rs", "anchor": "if let Some(message) = duration_limit_error(" }],
+                "description": "Hard clip-duration ceiling in seconds; API and worker reject rather than clamp."
+              },
+              "maxPixels": {
+                "type": "integer", "minimum": 1,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "fn max_pixels_of(" }, { "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "match max_pixels_of(model_manifest_entry)" }],
+                "description": "Maximum rendered pixel area; core fits requested geometry within this ceiling."
+              },
+              "requiresDimensionsMultipleOf": {
+                "type": "integer", "minimum": 1,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "fn dimension_multiple_of(" }, { "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "let multiple = dimension_multiple_of(model_manifest_entry)" }],
+                "description": "Required render-dimension stride; core normalizes geometry to this value."
+              },
+              "recommendedMaxDuration": {
+                "type": "number", "exclusiveMinimum": 0,
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/VideoStudio.jsx", "anchor": "selectedModel.limits.recommendedMaxDuration" }],
+                "description": "Non-blocking UI recommendation; intentionally not enforced."
+              },
               "samplers": {
                 "type": "array",
                 "minItems": 1,
                 "uniqueItems": true,
-                "items": { "$ref": "#/$defs/samplerKey" }
+                "items": { "$ref": "#/$defs/samplerKey" },
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/samplerOptions.js", "anchor": "limits?.samplers" }]
               },
               "schedulers": {
                 "type": "array",
                 "minItems": 1,
                 "uniqueItems": true,
-                "items": { "$ref": "#/$defs/schedulerKey" }
+                "items": { "$ref": "#/$defs/schedulerKey" },
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/samplerOptions.js", "anchor": "limits?.schedulers" }]
               },
               "guidanceMethods": {
                 "type": "array",
                 "minItems": 1,
                 "uniqueItems": true,
-                "items": { "$ref": "#/$defs/guidanceMethodKey" }
+                "items": { "$ref": "#/$defs/guidanceMethodKey" },
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "apps/web/src/samplerOptions.js", "anchor": "limits?.guidanceMethods" }],
+                "description": "Supported backend-neutral guidance menu shape; no builtin model currently needs it."
               }
             }
           },
           "ui": {
             "type": "object",
+            "additionalProperties": false,
             "description": "Display metadata for model catalog and studio surfaces.",
             "properties": {
+              "label": { "type": "string" },
+              "description": { "type": "string" },
+              "durationHint": { "type": "string" },
+              "promptHint": { "type": "string" },
+              "defaultPrompt": { "type": "string" },
+              "defaultNegativePrompt": { "type": "string" },
+              "recommendedFor": { "type": "array", "items": { "type": "string" } },
+              "controlModes": { "type": "array", "items": { "type": "string" } },
+              "viewAngles": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["id", "label"],
+                  "additionalProperties": false,
+                  "properties": { "id": { "type": "string" }, "label": { "type": "string" } }
+                }
+              },
+              "img2img": { "type": "boolean" },
+              "multiReference": { "type": "boolean" },
+              "poseLibrary": { "type": "boolean" },
+              "poseControlScale": { "type": "boolean" },
+              "controlOverlay": { "type": "boolean" },
+              "precisionToggle": { "type": "boolean" },
+              "promptEnhance": { "type": "boolean" },
+              "hideReferenceStrength": { "type": "boolean" },
+              "referenceStrengthDefault": { "type": "number" },
+              "controlScale": { "$ref": "#/$defs/numericControl" },
+              "identityStructure": { "$ref": "#/$defs/numericControl" },
+              "img2imgStrength": { "$ref": "#/$defs/numericControl" },
+              "textStyleGain": { "$ref": "#/$defs/numericControl" },
+              "variationStrength": { "$ref": "#/$defs/numericControl" },
+              "editReferences": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "secondaryHint": { "type": "string" },
+                  "secondaryLabel": { "type": "string" }
+                }
+              },
+              "pid": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": { "checkpointId": { "type": "string" } }
+              },
               "promptGuide": {
                 "type": "object",
                 "description": "Static Markdown prompt guide shown near prompt entry for this model.",
                 "required": ["title", "path"],
+                "additionalProperties": false,
                 "properties": {
                   "title": {
                     "type": "string",
@@ -162,6 +330,7 @@
                     "items": {
                       "type": "object",
                       "required": ["label", "url"],
+                      "additionalProperties": false,
                       "properties": {
                         "label": { "type": "string", "minLength": 1 },
                         "url": { "type": "string", "format": "uri" }
@@ -174,11 +343,27 @@
           },
           "mlx": {
             "type": "object",
+            "additionalProperties": false,
             "description": "macOS/Apple-Silicon MLX variant metadata (desktop only). Surfaced by the Model Manager to show MLX availability, conversion status, and the minimum unified-memory tier. Inference repos/paths are owned by the Python MlxVideoAdapter; these mirror them for catalog display.",
             "properties": {
+              "quantize": { "type": "integer", "minimum": 1 },
+              "minQualityTier": { "type": "string" },
+              "converter": { "type": "string" },
+              "convertSourceFile": { "type": "string" },
+              "convertBaseRepo": { "type": "string" },
+              "autoDistillLora": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "stage1Strength": { "type": "number" },
+                  "stage2Strength": { "type": "number" }
+                }
+              },
               "minMemoryGb": {
                 "type": "integer",
                 "minimum": 1,
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "model.mlx?.minMemoryGb" }],
                 "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
               },
               "repo": {
@@ -213,11 +398,14 @@
           },
           "candle": {
             "type": "object",
+            "additionalProperties": false,
             "description": "candle/CUDA (Windows/Linux) variant metadata — the discrete-VRAM sibling of the mlx block (epic 9083, sc-9094). CUDA cards do NOT share system RAM the way Apple unified memory does, so the candle lane needs its OWN measured VRAM gate: the mlx.minMemoryGb (unified-memory OS peak on a Mac) does not describe the VRAM a discrete GPU must hold. Populated from the candle-gen VramProbe harness (sc-9094) at 1024² (video = default frames).",
             "properties": {
               "minMemoryGb": {
                 "type": "integer",
                 "minimum": 1,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate.rs", "anchor": "candle.get(\"minMemoryGb\").and_then(json_f64)" }],
                 "description": "Minimum GPU VRAM (GB) to run this model on the candle/CUDA lane — the measured overall-peak of the DEFAULT (lightest, typically q4) hosted tier, plus headroom. This gates the default tier only, matching the established MLX default-tier-gating convention; heavier hosted tiers (q8 / bf16) can exceed this value, and their per-tier measured ceilings live in vramGbByTier. Retires the epic 7982 SD3.5 'minMemoryGb under measured peak' follow-up: this is a real measured CUDA number, not the inherited unified-memory mlx value."
               },
               "vramGbByTier": {
@@ -236,6 +424,7 @@
               },
               "control": {
                 "type": "object",
+                "additionalProperties": false,
                 "description": "Pose-ControlNet lane VRAM fit ladder numbers (sc-11754, epic 8459 → epic 10765), keyed by BASE quant tier. Present only for a model with a bespoke trained control branch (Krea 2 Turbo). The control lane loads the base at the installed tier PLUS the ~6.6 GB bf16 control branch, so its render peak exceeds the txt2img vramGbByTier and needs its own numbers; the worker's krea_control_fit gate reads these vs live/capped free VRAM and engages the cheapest sufficient rung only when constrained.",
                 "properties": {
                   "peakGbByTier": {
@@ -271,25 +460,18 @@
               },
               "limits": {
                 "$ref": "#/$defs/samplerLimits",
+                "x-sceneworks-allow-undeclared": true,
                 "description": "Per-backend candle/CUDA capability override, read by samplerOptionsFromModel(model, \"candle\"). The top-level limits.samplers/schedulers describe the default lane; this narrows/broadens them for the candle path."
               }
             }
           },
           "downloads": {
             "type": "array",
-            "description": "Download entries are usually PICK-ONE alternates for the same model: at most one may be marked default: true (else the first supported entry is used); a quant matrix (epic 8506, sc-8508) lists each tier (bf16 / Q8 / Q4) as a separate same-repo entry distinguished by `files`/`variant`; OS alternates are distinguished by `platforms`. Entries flagged `coRequisite: true` are the exception — FETCH-ALL dependencies (e.g. a decoder checkpoint plus its shared caption encoder) that install alongside the primary and gate its install state (sc-9696).",
-            "contains": {
-              "type": "object",
-              "properties": {
-                "default": { "const": true }
-              },
-              "required": ["default"]
-            },
-            "minContains": 0,
-            "maxContains": 1,
+            "description": "Download entries are usually PICK-ONE alternates for the same model: at most one applicable non-co-requisite may be marked default: true per OS (else the first supported entry is used). tests/test_builtin_manifest_audit.py enforces that platform-aware invariant because JSON Schema cannot compare overlapping platform sets. A quant matrix (epic 8506, sc-8508) lists each tier as a separate same-repo entry distinguished by files/variant; OS alternates are distinguished by platforms. Entries flagged coRequisite: true are FETCH-ALL dependencies installed alongside the primary (sc-9696).",
             "items": {
               "type": "object",
               "required": ["provider", "repo"],
+              "additionalProperties": false,
               "properties": {
                 "provider": {
                   "type": "string",
@@ -323,6 +505,11 @@
                   "type": "array",
                   "items": { "type": "string" },
                   "description": "Optional allow-list of provider file patterns included in the download."
+                },
+                "platforms": {
+                  "type": "array",
+                  "items": { "type": "string", "enum": ["macos", "linux", "windows"] },
+                  "uniqueItems": true
                 }
               }
             }
@@ -341,5 +528,6 @@
         }
       }
     }
-  }
+  },
+  "additionalProperties": false
 }

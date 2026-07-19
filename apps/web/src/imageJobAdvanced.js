@@ -71,6 +71,9 @@ export function buildImageJobAdvanced(state) {
     controlPassthroughId,
     effectiveControlScale,
     controlOverlayId,
+    // Style Catalog recipe round-trip (sc-13132). Both are undefined unless a style is applied.
+    styleId,
+    styleUserPrompt,
   } = state;
 
   return {
@@ -237,5 +240,16 @@ export function buildImageJobAdvanced(state) {
     ...(controlActive && controlOverlayId
       ? { controlWeights: { overlayId: controlOverlayId } }
       : {}),
+    // Style Catalog recipe round-trip (sc-13132): when a catalog style is applied client-side, the
+    // outgoing top-level `prompt` is the COMPOSED string (styleComposer wraps it into a `Style:` /
+    // `Description:` template — see imageJobRequest.js). Recording only the composed prompt would lose
+    // the two facts needed to reproduce the studio state on replay: WHICH style the user picked, and
+    // the RAW pre-style prompt. Persist both here (they ride `advanced`, which the worker clones
+    // verbatim into rawAdapterSettings — no backend change), so rehydrate can re-select the Style
+    // picker AND restore the raw prompt box. Re-running then recomposes the IDENTICAL prompt (the
+    // composer is pure) instead of re-wrapping the already-composed prompt into a second `Style:`
+    // block. Emitted ONLY when a style is applied (styleId set), so styleless recipes stay
+    // byte-identical. `stylePrompt` may be "" (a style with no user prose still round-trips exactly).
+    ...(styleId ? { styleId, stylePrompt: styleUserPrompt ?? "" } : {}),
   };
 }

@@ -1,5 +1,14 @@
 {
   "$schema": "../../packages/schemas/model-manifest.schema.json",
+  // MANIFEST CONTRACT (sc-12304): every constraint-shaped key is classified in
+  // model-manifest.schema.json with `x-sceneworks-contract`:
+  //   binding     — authoritative backend behavior (rejection unless the property's
+  //                 schema description explicitly names deterministic normalization);
+  //   advisory    — deliberately used only to guide UI/selection; never a backend gate;
+  //   descriptive — records facts and does not constrain a request.
+  // Do not add a `limits.*`, backend `limits.*`, or `*.minMemoryGb` key without
+  // adding its schema classification and production readers. The conformance audit in
+  // tests/test_builtin_manifest_audit.py checks the manifest and schema in both directions.
   "schemaVersion": 1,
   "models": [
     {

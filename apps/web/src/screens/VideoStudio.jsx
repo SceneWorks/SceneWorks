@@ -11,6 +11,10 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 import { VideoUpscalePanel } from "./VideoUpscalePanel.jsx";
+import { StylePicker } from "../components/StylePicker.jsx";
+import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
+import { STYLE_GROUPS, styleTextForId } from "../data/styleCatalog.js";
+import { composeStyledPrompt } from "../styleComposer.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
 
 const MOTIONS = [
@@ -174,6 +178,10 @@ export function VideoStudio() {
   // launch-request fallback below (sc-5716); the prior image_to_video default was the odd one out.
   const [mode, setMode] = useState(saved.mode ?? "text_to_video");
   const [prompt, setPrompt] = useState(saved.prompt ?? "Camera slowly pushes in while the scene comes alive");
+  // Style Catalog selection (sc-13136): an entry id from styles.json (a group id or a sub-style id)
+  // or null for "None"/pass-through. The id is opaque here; styleTextForId resolves it to the
+  // composer's free-text at build time. Persisted via saved-state, mirroring the Image Studio.
+  const [styleId, setStyleId] = useState(saved.styleId ?? null);
   const [quality, setQuality] = useState(saved.quality ?? "balanced");
   const [ltxPipeline, setLtxPipeline] = useState(saved.ltxPipeline ?? "auto");
   const [distilledVariant, setDistilledVariant] = useState(saved.distilledVariant ?? "1.1");
@@ -695,7 +703,14 @@ export function VideoStudio() {
     }
     setRecipeModelNotice(recipeModelAvailable ? "" : (recipe.model ?? ""));
 
-    setPrompt(String(recipe.prompt ?? ""));
+    // Style Catalog round-trip (sc-13136): re-select the picker to the recorded style id ONLY when
+    // the raw pre-style prompt was also recorded, and seed the box with THAT raw prompt (not the
+    // composed recipe.prompt) so the next submit recomposes the identical Style:/Description: prompt
+    // with no double-wrap. A styleless recipe clears any stale selection and uses recipe.prompt.
+    const restoredStyleId = rawSettings.styleId ?? null;
+    const hasRawStylePrompt = restoredStyleId != null && typeof rawSettings.stylePrompt === "string";
+    setStyleId(hasRawStylePrompt ? restoredStyleId : null);
+    setPrompt(hasRawStylePrompt ? rawSettings.stylePrompt : String(recipe.prompt ?? ""));
     setNegativePrompt(String(recipe.negativePrompt ?? ""));
     // Seed stays random by default, so "Use this recipe" makes a close variation; the viewer's
     // "Keep seed" resolves replaySeed to THIS clip's own seed for an exact rerun. Guard with
@@ -877,6 +892,7 @@ export function VideoStudio() {
     motion,
     mode,
     prompt,
+    styleId,
     quality,
     ltxPipeline,
     distilledVariant,
@@ -1007,41 +1023,6 @@ export function VideoStudio() {
   // Image-conditioned models (e.g. Stable Video Diffusion) take no text prompt;
   // they animate the source image, so don't gate submission on prompt text.
   const promptless = Boolean(selectedModel?.promptless);
-  // One summary gates Generate and carries every reason it might be dead, so the button
-  // and the messages can't drift — the bug this screen used to embody, where `canSubmit`
-  // and `blockedMessage` re-derived the same rules side by side (epic 10644).
-  const videoDraft = useMemo(
-    () => ({
-      activeProject,
-      promptless,
-      prompt,
-      supportsMode,
-      implementedMode,
-      hasInputs,
-      requiresLtxIcLora,
-      hasLtxIcLora,
-      replaceReady,
-      modelName: selectedModel?.name,
-      presetMissing: presetValidationResult.missing,
-      presetIncompatible: presetValidationResult.incompatible,
-      loraIncompatible: selectedLoraValidationResult.incompatible,
-    }),
-    [
-      activeProject,
-      promptless,
-      prompt,
-      supportsMode,
-      implementedMode,
-      hasInputs,
-      requiresLtxIcLora,
-      hasLtxIcLora,
-      replaceReady,
-      selectedModel,
-      presetValidationResult,
-      selectedLoraValidationResult,
-    ],
-  );
-  const videoValidity = useValidation(videoGenerateValidation, videoDraft, undefined);
   const [width, height] = resolution.split("x").map((value) => Number(value));
   const durationOptions = selectedModel?.limits?.durations ?? [4, 6, 8, 10];
   const resolutionOptions = selectedModel?.limits?.resolutions ?? ["768x512", "640x640", "1280x720", "720x1280"];
@@ -1059,6 +1040,64 @@ export function VideoStudio() {
       }),
     [selectedPreset, generalStack, prompt, negativePrompt, resolutionOptions],
   );
+  const stackActive = generalStack.length > 0;
+
+  // Style Catalog axis (sc-13136): mirror the Image Studio's Style picker into the Video Studio.
+  // composeStyledPrompt wraps the outgoing prompt LAST — AFTER the general-preset stack fold above —
+  // so the style's Style:/Description: block sits around the already-preset-composed prompt. Video
+  // has no structured-caption or batch modes (the two the image lane gates the composer off for), so
+  // the only exclusion here is a promptless (image-conditioned) model, which sends no text prompt to
+  // wrap. `stylePromptBase` is the SAME base the styleless submit sends, so the live preview and the
+  // submit compose from one string and can never drift.
+  const activeStyleText = styleTextForId(styleId);
+  const styleApplied = !promptless && typeof activeStyleText === "string" && activeStyleText.trim() !== "";
+  const stylePromptBase = stackActive ? composedStack.prompt : prompt;
+  const composedStylePrompt = styleApplied
+    ? composeStyledPrompt({ styleText: activeStyleText, userPrompt: stylePromptBase })
+    : null;
+
+  // One summary gates Generate and carries every reason it might be dead, so the button
+  // and the messages can't drift — the bug this screen used to embody, where `canSubmit`
+  // and `blockedMessage` re-derived the same rules side by side (epic 10644).
+  const videoDraft = useMemo(
+    () => ({
+      activeProject,
+      promptless,
+      prompt,
+      // sc-13136: measure the COMPOSED outgoing prompt against the backend cap, but only when a
+      // style is active (styleless behavior unchanged). `composedStylePrompt` is the exact string
+      // submitted, so the readout and the blocking Generate error can never disagree.
+      styleActive: styleApplied,
+      composedPrompt: composedStylePrompt ?? "",
+      supportsMode,
+      implementedMode,
+      hasInputs,
+      requiresLtxIcLora,
+      hasLtxIcLora,
+      replaceReady,
+      modelName: selectedModel?.name,
+      presetMissing: presetValidationResult.missing,
+      presetIncompatible: presetValidationResult.incompatible,
+      loraIncompatible: selectedLoraValidationResult.incompatible,
+    }),
+    [
+      activeProject,
+      promptless,
+      prompt,
+      styleApplied,
+      composedStylePrompt,
+      supportsMode,
+      implementedMode,
+      hasInputs,
+      requiresLtxIcLora,
+      hasLtxIcLora,
+      replaceReady,
+      selectedModel,
+      presetValidationResult,
+      selectedLoraValidationResult,
+    ],
+  );
+  const videoValidity = useValidation(videoGenerateValidation, videoDraft, undefined);
   const stackAddsNegative = generalStack.some((preset) => Boolean(preset?.defaults?.negativePrompt));
   const stackAddsCount = generalStack.some((preset) => Number.isFinite(Number(preset?.defaults?.count)));
   const fpsOptions = selectedModel?.limits?.fps ?? [24, 25, 30];
@@ -1082,11 +1121,13 @@ export function VideoStudio() {
       // when a general sets aspect, the snapped resolution. The client is authoritative for the
       // composed prompt, so presetPromptResolvedClientSide tells the server to skip its fold.
       // (Video has no `count` field, so the stack's variations don't apply here.)
-      const stackActive = generalStack.length > 0;
       const stackResolution = stackActive && composedStack.resolution ? parseResolution(composedStack.resolution) : null;
       const job = await createVideoJob({
         mode,
-        prompt: stackActive ? composedStack.prompt : prompt,
+        // sc-13136: when a Style Catalog entry is active the composer has already wrapped the
+        // (stack-folded) prompt LAST — send that composed string verbatim. Falls back to the plain
+        // stack-folded / raw prompt when no style is applied.
+        prompt: styleApplied ? composedStylePrompt : stackActive ? composedStack.prompt : prompt,
         negativePrompt: stackActive ? composedStack.negativePrompt : negativePrompt,
         model,
         duration: Number(duration),
@@ -1100,7 +1141,9 @@ export function VideoStudio() {
         // preset-LoRA seed effect), so the client is authoritative for preset LoRAs — tell the
         // server to skip its own merge so edits/removals stick. Parity with the Image Studio.
         presetLorasResolvedClientSide: selectedPreset ? true : undefined,
-        presetPromptResolvedClientSide: stackActive || undefined,
+        // The client composed the prompt (preset stack and/or Style Catalog wrap), so tell the
+        // server to skip its own fold and send the composed string as-is (sc-13136).
+        presetPromptResolvedClientSide: stackActive || styleApplied || undefined,
         characterId: characterId || null,
         characterLookId: characterLookId || null,
         sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
@@ -1147,6 +1190,12 @@ export function VideoStudio() {
           motion,
           selectedPersonTrack: selectedTrack ?? null,
           replacementModeLabel: replacementModeLabels[replacementMode],
+          // Style Catalog round-trip (sc-13136, mirrors image sc-13132): record the picked style id
+          // and the RAW pre-style prompt so replay re-selects the picker and recomposes the identical
+          // prompt without double-wrapping. Rides advanced → rawAdapterSettings (cloned verbatim by
+          // the worker; no backend change). Emitted only when a style is applied so styleless recipes
+          // stay byte-identical.
+          ...(styleApplied ? { styleId, stylePrompt: stylePromptBase } : {}),
           ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, precision } : {}),
           ...(showTorchQuantization && quantization !== "auto" ? { quantization } : {}),
           ...(selectedMlxQuantize !== null ? { mlxQuantize: selectedMlxQuantize } : {}),
@@ -1292,6 +1341,22 @@ export function VideoStudio() {
               workflow="video"
             />
           )}
+
+          {/* Style Catalog axis (sc-13136): a searchable, grouped single-select over the style
+              catalog, wrapped onto the outgoing prompt at build time (Style:/Description:). Hidden for
+              promptless image-conditioned models, which send no text prompt to style. Mirrors the
+              Image Studio's Style row; "None" resets to pass-through. */}
+          {promptless ? null : (
+            <div className="style-row">
+              <span className="style-row-label">Style</span>
+              <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
+            </div>
+          )}
+
+          {/* sc-13136: the EXACT composed prompt (Style:/Description: wrap + preset fold) the run will
+              send once a style is active — recomputed from the same base the submit uses so it can
+              never drift. Hidden when no style applies. */}
+          <StyledPromptPreview active={styleApplied} composedPrompt={composedStylePrompt} />
 
           <div className="motion-row">
             <span className="motion-row-label">Motion:</span>

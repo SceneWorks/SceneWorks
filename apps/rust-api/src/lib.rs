@@ -207,6 +207,8 @@ use prompt_batches::{
     create_prompt_batch, delete_prompt_batch, duplicate_prompt_batch, get_prompt_batch,
     list_prompt_batches, update_prompt_batch,
 };
+mod styles;
+use styles::list_styles;
 mod credentials;
 use credentials::{delete_credential, list_credentials, set_credential};
 mod preferences;
@@ -1274,6 +1276,7 @@ pub(crate) fn create_app_with_state(
                 .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
         )
         .route("/api/v1/control-overlays", get(list_control_overlays))
+        .route("/api/v1/styles", get(list_styles))
         .route("/api/v1/loras", get(list_loras))
         .route(
             "/api/v1/loras/:lora_id",
