@@ -253,7 +253,7 @@ def test_z_image_turbo_manifest_has_mlx_block():
 
 
 def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
-    """sc-12126: never regress the measured q8/bf16 peaks to estimates."""
+    """sc-12126/sc-13108: never regress the directly measured standard-tier peaks."""
     manifest = _load_builtin_models_manifest()
     krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
     measured_tiers = {
@@ -261,9 +261,9 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
     }
 
     assert measured_tiers == {
-        "q4": 26.4,
-        "q8": 35.9,
-        "bf16": 55.6,
+        "q4": 25.7,
+        "q8": 35.2,
+        "bf16": 47.2,
     }
 
 
