@@ -4097,3 +4097,226 @@ async fn an_image_request_naming_no_size_renders_the_models_own_declared_resolut
         "a caller's own size must not be replaced by the model's default: {body}"
     );
 }
+
+// --- sc-13134: server-side Style fold (headless/MCP parity with the web composer) -----------
+
+/// Write the minimal builtin manifests a Style-fold image job needs into `<config>/manifests`:
+/// a single image model, empty user models, and a small Style catalog carrying one group with one
+/// sub-style. Returns nothing — the caller builds the app from the same temp dir.
+fn write_style_test_manifests(config_dir: &std::path::Path) {
+    let manifests = config_dir.join("manifests");
+    std::fs::create_dir_all(&manifests).expect("manifest dir creates");
+    std::fs::write(
+        manifests.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "img-model",
+              "name": "Img Model",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/img", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "loraCompatibility": { "families": ["z-image"] },
+              "ui": { "label": "Img" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        manifests.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    // A tiny Style catalog shaped exactly like the shipped builtin.styles.jsonc: one group
+    // (its `description` is the group's "overall" style text) with one sub-style (`prompt`).
+    std::fs::write(
+        manifests.join("builtin.styles.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "source": "documents/style.txt",
+          "promptTemplate": "Style: {style}\nDescription: {description}",
+          "groups": [
+            {
+              "id": "test-anime",
+              "name": "Test Anime",
+              "description": "broad test anime look",
+              "styles": [
+                { "id": "test-ghibli", "name": "Test Ghibli", "prompt": "gentle hand-painted" }
+              ]
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin styles writes");
+}
+
+#[tokio::test]
+async fn styled_image_job_folds_style_server_side_from_style_id() {
+    // Headless/MCP parity (sc-13134): a client that sends a `styleId` + a RAW prompt gets the
+    // exact `Style:`/`Description:` composition the web composer produces — including the
+    // directive-collision splice (a user `Setting:` line stays a top-level sibling, the free text
+    // folds into Description). This is the whole point of the story: the same styled prompt whether
+    // the fold happens on the web or on the server.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_style_test_manifests(&temp_dir.path().join("config"));
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Styled Job Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    // Sub-style id → its `prompt` ("gentle hand-painted"); the user's `Setting:` directive is kept
+    // as a sibling and "a fox" becomes the Description — byte-identical to composeStyledPrompt.
+    let (status, styled) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "a fox\nSetting: snowy field",
+            "model": "img-model",
+            "count": 1,
+            "width": 1024,
+            "height": 1024,
+            "styleId": "test-ghibli"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "styled job created: {styled:?}"
+    );
+    assert_eq!(
+        styled["payload"]["prompt"],
+        "Style: gentle hand-painted\nSetting: snowy field\nDescription: a fox",
+        "server-side fold must match the web composer output"
+    );
+
+    // A GROUP id resolves to that group's `description` (the "overall" style), sc-13171 parity.
+    let (status, group_styled) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "a fox",
+            "model": "img-model",
+            "count": 1,
+            "width": 1024,
+            "height": 1024,
+            "styleId": "test-anime"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{group_styled:?}");
+    assert_eq!(
+        group_styled["payload"]["prompt"],
+        "Style: broad test anime look\nDescription: a fox"
+    );
+
+    // An unknown styleId is a clean 400, not a silent no-op.
+    let (status, err) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "a fox",
+            "model": "img-model",
+            "count": 1,
+            "width": 1024,
+            "height": 1024,
+            "styleId": "no-such-style"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err:?}");
+}
+
+#[tokio::test]
+async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
+    // The web app composes the styled prompt CLIENT-side and sends it verbatim plus
+    // presetPromptResolvedClientSide (mirroring the preset skip). The server must take the prompt
+    // as-is and NOT re-fold — even when a `styleId` rides along (the studio records it for replay).
+    // Otherwise a web-submitted "Style: …\nDescription: …" would be double-wrapped.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_style_test_manifests(&temp_dir.path().join("config"));
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Client Styled Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let already_composed = "Style: gentle hand-painted\nDescription: a fox";
+    let (status, verbatim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": already_composed,
+            "model": "img-model",
+            "count": 1,
+            "width": 1024,
+            "height": 1024,
+            // styleId-with-flag: the web records the picked id but has already composed the prompt.
+            "styleId": "test-ghibli",
+            "presetPromptResolvedClientSide": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{verbatim:?}");
+    assert_eq!(
+        verbatim["payload"]["prompt"], already_composed,
+        "a client-composed styled prompt must be taken verbatim, never double-folded"
+    );
+}
+
+#[tokio::test]
+async fn styles_endpoint_serves_the_builtin_catalog() {
+    // GET /api/v1/styles gives headless/MCP clients the same catalog the web reads: the grouped
+    // Style picker data they need to choose a styleId.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_style_test_manifests(&temp_dir.path().join("config"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, catalog) = request(app.clone(), "GET", "/api/v1/styles", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{catalog:?}");
+    assert_eq!(catalog["schemaVersion"], 1);
+    assert_eq!(catalog["groups"][0]["id"], "test-anime");
+    assert_eq!(catalog["groups"][0]["styles"][0]["id"], "test-ghibli");
+    assert_eq!(
+        catalog["groups"][0]["styles"][0]["prompt"],
+        "gentle hand-painted"
+    );
+}
