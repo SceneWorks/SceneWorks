@@ -3532,6 +3532,12 @@ fn model_mac_support_hides_torch_only_models_keeps_mlx_models() {
     let z_image = model_mac_support("z_image_turbo", "image");
     assert!(z_image.supported);
     assert!(z_image.reason.is_none());
+    // Base (undistilled, full-CFG) Z-Image is MLX-routed on macOS too (real `z_image` MODEL_TABLE
+    // engine + `ZImageBaseControl`), so it must NOT be hidden behind "Not available on Mac" — the
+    // sc-8320/sc-8251 wiring gap this fix closes.
+    let z_image_base = model_mac_support("z_image", "image");
+    assert!(z_image_base.supported);
+    assert!(z_image_base.reason.is_none());
     // Chroma (epic 3531 / sc-3843) is now MLX-routed — all three variants stay in the picker
     // and no longer report an `mlx_unsupported` port-epic gap.
     for id in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
@@ -3564,6 +3570,13 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     let z_image_edit = model_mac_support("z_image_edit", "image");
     assert!(z_image_edit.supported);
     assert!(z_image_edit.features.edit);
+    // Base Z-Image: pose (base Fun-Controlnet-Union) + reference (generic img2img-init) are MLX, so both
+    // are enabled — but the base has NO `edit_image` checkpoint (that's Turbo-weights-only), so `edit`
+    // must stay FALSE. This discriminates the base arm from Turbo's (which enables edit).
+    let z_image_base = model_mac_support("z_image", "image");
+    assert!(z_image_base.features.pose);
+    assert!(z_image_base.features.reference);
+    assert!(!z_image_base.features.edit);
     // FLUX.1 reference (XLabs IP-Adapter) is ported to MLX (epic 3621) → reference enabled on
     // both variants; edit_image stays off (no FLUX.1 edit on any platform — future Kontext).
     let flux = model_mac_support("flux_dev", "image");

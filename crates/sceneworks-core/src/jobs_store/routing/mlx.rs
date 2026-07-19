@@ -49,6 +49,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
     }
     match model {
         "z_image_turbo" | "z_image_edit" => z_image_mlx_eligible(payload),
+        "z_image" => z_image_base_mlx_eligible(payload),
         "flux_schnell" | "flux_dev" => flux_mlx_eligible(payload),
         "qwen_image" => qwen_mlx_eligible(payload),
         "qwen_image_edit"
@@ -313,6 +314,19 @@ pub(crate) fn z_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
             .is_some_and(|id| !id.trim().is_empty());
     }
     true
+}
+
+/// Base (non-distilled, full-CFG) Z-Image (`z_image`) MLX-routing conditions (epic 8236). Distinct from
+/// [`z_image_mlx_eligible`] because the base has NO dedicated `edit_image` checkpoint — that path is
+/// Turbo-weights-only (`z_image_turbo` edit mode / the `z_image_edit` model). On macOS the base engine
+/// serves plain text-to-image (MODEL_TABLE `z_image`, shift-6.0 / ~50-step / real CFG), reference-guided
+/// img2img-init (`referenceAssetId` + `advanced.strength`, the generic `Conditioning::Reference` path —
+/// NOT `mode=edit_image`), and strict pose/canny/depth control (`ImageRoute::ZImageBaseControl`), all
+/// in-process. So every non-`edit_image` job is eligible; an `edit_image` mode has no base path and stays
+/// off MLX (defensive — the base UI never offers edit; base `z_image` has no `edit_image` capability).
+/// Third-party LyCORIS applies on the core MLX loader (epic 3641), so a LoRA never forces torch.
+pub(crate) fn z_image_base_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 
 /// Chroma (epic 3531, sc-3843) MLX-routing conditions. Chroma is **text-to-image only**
