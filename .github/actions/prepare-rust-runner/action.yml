@@ -1,9 +1,10 @@
 name: Prepare Rust toolchain on self-hosted runner
 description: >
   Make the self-hosted Windows/CUDA runner build against the REAL rustup toolchain
-  bin (the actual cargo/rustc/clippy binaries + their sibling DLLs) instead of the
-  fragile %USERPROFILE%\.cargo\bin rustup proxies, and fail loudly with an actionable
-  message if no usable toolchain is installed. See sc-13166.
+  bin for the repo's PINNED channel (the actual cargo/rustc/clippy binaries + their
+  sibling DLLs) instead of the fragile %USERPROFILE%\.cargo\bin rustup proxies, and
+  fail loudly with an actionable message if no usable toolchain is installed. See
+  sc-13166.
 
 # WHY THIS EXISTS (sc-13166)
 # --------------------------
@@ -49,28 +50,64 @@ runs:
         $cargoHome  = if ($env:CARGO_HOME)  { $env:CARGO_HOME }  else { Join-Path $env:USERPROFILE '.cargo' }
         $toolchainsDir = Join-Path $rustupHome 'toolchains'
 
-        # Resolve the real toolchain bin. Prefer the default toolchain rustup recorded
-        # in settings.toml (what the proxy would dispatch `stable` to); fall back to the
-        # most-recently-written installed toolchain that actually has a real cargo.exe.
-        $binDir = $null
-        $settings = Join-Path $rustupHome 'settings.toml'
-        if (Test-Path $settings) {
-          $m = Select-String -Path $settings -Pattern '^\s*default_toolchain\s*=\s*"(.+?)"' -ErrorAction SilentlyContinue |
+        # The channel this repo PINS (rust-toolchain.toml at the workspace root). CI must
+        # build exactly this toolchain, not whatever the box default happens to be: this box
+        # carries both a version-pinned '1.96.0' default AND a 'stable' toolchain, and the
+        # repo pins channel="stable", so resolving the box default would silently build a
+        # different rustc/clippy than every other lane and could redden clippy on a lint
+        # delta that has nothing to do with the PR.
+        $repoChannel = $null
+        if (Test-Path 'rust-toolchain.toml') {
+          $cm = Select-String -Path 'rust-toolchain.toml' -Pattern '^\s*channel\s*=\s*"(.+?)"' -ErrorAction SilentlyContinue |
             Select-Object -First 1
-          if ($m) {
-            $cand = Join-Path (Join-Path $toolchainsDir $m.Matches[0].Groups[1].Value) 'bin'
-            if (Test-Path (Join-Path $cand 'cargo.exe')) { $binDir = $cand }
+          if ($cm) { $repoChannel = $cm.Matches[0].Groups[1].Value }
+        }
+        Write-Host "Repo-pinned toolchain channel: $repoChannel"
+
+        $binDir = $null
+
+        # 1) Authoritative: ask the real rustup.exe. It is a real ~12.8 MB binary (NOT one of
+        #    the fragile proxy symlinks), so it launches under the runner service token and
+        #    resolves this repo's rust-toolchain.toml exactly the way an in-repo cargo would.
+        $rustupExe = Join-Path $cargoHome 'bin\rustup.exe'
+        if (Test-Path $rustupExe) {
+          $ri = Get-Item $rustupExe -Force
+          if (-not ($ri.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $ri.Length -gt 0) {
+            try {
+              $cargoPath = (& $rustupExe which cargo | Out-String).Trim()
+              if ($LASTEXITCODE -eq 0 -and $cargoPath -and (Test-Path $cargoPath)) {
+                $binDir = Split-Path -Parent $cargoPath
+              }
+            } catch { }
           }
         }
+
+        # 2) Fallback for the dangling-shim state (rustup.exe itself deleted): resolve by
+        #    directory, still honoring the pin — prefer the toolchain matching the pinned
+        #    channel, then the recorded default, then the newest installed one. First with a
+        #    real cargo.exe wins.
         if (-not $binDir -and (Test-Path $toolchainsDir)) {
-          $binDir = Get-ChildItem $toolchainsDir -Directory |
+          $cands = New-Object System.Collections.Generic.List[string]
+          if ($repoChannel) {
+            Get-ChildItem $toolchainsDir -Directory |
+              Where-Object { $_.Name -eq $repoChannel -or $_.Name -like "$repoChannel-*" } |
+              Sort-Object LastWriteTime -Descending |
+              ForEach-Object { $cands.Add((Join-Path $_.FullName 'bin')) }
+          }
+          $settings = Join-Path $rustupHome 'settings.toml'
+          if (Test-Path $settings) {
+            $dm = Select-String -Path $settings -Pattern '^\s*default_toolchain\s*=\s*"(.+?)"' -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($dm) { $cands.Add((Join-Path (Join-Path $toolchainsDir $dm.Matches[0].Groups[1].Value) 'bin')) }
+          }
+          Get-ChildItem $toolchainsDir -Directory |
             Sort-Object LastWriteTime -Descending |
-            ForEach-Object { Join-Path $_.FullName 'bin' } |
-            Where-Object { Test-Path (Join-Path $_ 'cargo.exe') } |
-            Select-Object -First 1
+            ForEach-Object { $cands.Add((Join-Path $_.FullName 'bin')) }
+          $binDir = $cands | Where-Object { Test-Path (Join-Path $_ 'cargo.exe') } | Select-Object -First 1
         }
-        if (-not $binDir) {
-          Write-Host "::error title=Rust toolchain missing on candle runner::No installed rustup toolchain with a real cargo.exe under '$toolchainsDir'. Reinstall Rust on the self-hosted cuda box: run rustup-init (https://win.rustup.rs) then 'rustup toolchain install stable' (sc-13166)."
+
+        if (-not $binDir -or -not (Test-Path (Join-Path $binDir 'cargo.exe'))) {
+          Write-Host "::error title=Rust toolchain missing on candle runner::No installed rustup toolchain with a real cargo.exe under '$toolchainsDir' (repo pins channel '$repoChannel'). Reinstall Rust on the self-hosted cuda box: run rustup-init (https://win.rustup.rs) then 'rustup toolchain install $repoChannel' (sc-13166)."
           exit 1
         }
 
