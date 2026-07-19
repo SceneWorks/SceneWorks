@@ -3,6 +3,8 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./main.jsx";
 import { withImageStudioContext, FakeEventSource, response, settle } from "./main.testSupport.jsx";
+import { styleTextForId } from "./data/styleCatalog.js";
+import { composeStyledPrompt } from "./styleComposer.js";
 
 describe("SceneWorks app shell", () => {
   let container;
@@ -263,6 +265,120 @@ describe("SceneWorks app shell", () => {
         guidanceScale: 2.5,
       }),
     });
+  });
+
+  it("replays a STYLED recipe: re-selects the style, recomposes the identical prompt, no double-wrap (sc-13132)", async () => {
+    const createdJobs = [];
+    const imagePayloads = [];
+    const STYLE_ID = "ghibli-style";
+    const RAW_PROMPT = "a fox by lantern light";
+    // The prompt the ORIGINAL styled generate produced (the composer runs client-side). The recipe
+    // records this verbatim in `prompt`, plus the styleId + raw prompt under rawAdapterSettings.
+    const composedPrompt = composeStyledPrompt({ styleText: styleTextForId(STYLE_ID), userPrompt: RAW_PROMPT });
+    const generatedAsset = {
+      id: "asset-styled",
+      projectId: "project-1",
+      generationSetId: "genset-styled",
+      type: "image",
+      displayName: "Styled still",
+      file: { path: "assets/images/styled.png", mimeType: "image/png" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+      generationSet: {
+        recipe: {
+          mode: "text_to_image",
+          model: "z_image_turbo",
+          prompt: composedPrompt,
+          negativePrompt: "",
+          seed: 42,
+          loras: [],
+          normalizedSettings: { width: 1024, height: 1024, count: 1 },
+          rawAdapterSettings: { styleId: STYLE_ID, stylePrompt: RAW_PROMPT },
+        },
+      },
+      recipe: { prompt: composedPrompt },
+    };
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/assets")) {
+        return Promise.resolve(response([generatedAsset]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(
+          response([
+            {
+              id: "z_image_turbo",
+              name: "Z-Image",
+              type: "image",
+              family: "z-image",
+              limits: { resolutions: ["1024x1024", "1536x1024"] },
+            },
+          ]),
+        );
+      }
+      if (path.endsWith("/image/jobs") && options.method === "POST") {
+        const payload = JSON.parse(options.body);
+        imagePayloads.push(payload);
+        const job = {
+          id: "image-job-styled",
+          type: "image_generate",
+          status: "queued",
+          stage: "queued",
+          progress: 0,
+          elapsedSeconds: 0,
+          projectId: "project-1",
+          projectName: "Noir",
+          payload,
+        };
+        createdJobs.unshift(job);
+        return Promise.resolve(response(job));
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(response(createdJobs));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Assets").click();
+    });
+    await settle();
+    await act(async () => {
+      document.body.querySelector(".asset-tile").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    });
+    await settle();
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use this recipe").click();
+    });
+    await settle();
+    await act(async () => {
+      document.body.querySelector(".image-studio form").requestSubmit();
+    });
+    await settle();
+
+    // The re-run reproduces the IDENTICAL composed prompt — the picker was re-selected (else the
+    // prompt would be the bare RAW prompt) AND the box held the RAW prompt (else recomposing the
+    // already-composed prompt would nest a second `Style:` block).
+    expect(imagePayloads[0].prompt).toBe(composedPrompt);
+    expect(imagePayloads[0].prompt.match(/^Style:/gm)?.length ?? 0).toBe(1);
+    // The style id round-trips onto the fresh recipe so the NEXT replay stays reproducible too.
+    expect(imagePayloads[0].advanced.styleId).toBe(STYLE_ID);
+    expect(imagePayloads[0].advanced.stylePrompt).toBe(RAW_PROMPT);
+    expect(imagePayloads[0].presetPromptResolvedClientSide).toBe(true);
   });
 
   it("shows completed image batch items before the whole job finishes", async () => {

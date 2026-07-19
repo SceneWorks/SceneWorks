@@ -45,13 +45,29 @@ export default [
     },
   },
   {
-    // Test files run under Vitest (jsdom) with node + vitest globals.
-    files: ["src/**/*.test.{js,jsx}", "src/**/*.spec.{js,jsx}"],
+    // Test files run under Vitest (jsdom) with node + vitest globals. Covers both the app tests
+    // under src/ and the script tests under scripts/ (e.g. generate-style-thumbnails.test.js).
+    files: [
+      "src/**/*.test.{js,jsx}",
+      "src/**/*.spec.{js,jsx}",
+      "scripts/**/*.test.{js,mjs}",
+      "scripts/**/*.spec.{js,mjs}",
+    ],
     languageOptions: {
       globals: {
         ...globals.browser,
         ...globals.node,
         ...globals.vitest,
+      },
+    },
+  },
+  {
+    // Build/codegen scripts run under Node (e.g. scripts/generate-styles.mjs).
+    files: ["scripts/**/*.{js,mjs}"],
+    languageOptions: {
+      sourceType: "module",
+      globals: {
+        ...globals.node,
       },
     },
   },

@@ -853,6 +853,114 @@ button:focus-visible {
   color: var(--accent-strong);
 }
 
+/* ---------- Style Catalog picker (sc-13130) ---------- */
+/* Reuses the .compact-selector pill + menu; adds a search box, group headers, and a taller,
+   scrollable menu suited to the 278-entry catalog. */
+.style-picker-menu {
+  max-height: 420px;
+  min-width: 260px;
+}
+
+.style-picker-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.style-picker-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 18%, transparent);
+}
+
+.style-picker-group {
+  display: grid;
+  gap: 2px;
+}
+
+.style-picker-group-label {
+  margin: 6px 0 2px;
+  padding: 0 10px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* ---------- Two-level (group → style) cascade (sc-13171) ---------- */
+.style-picker-level {
+  display: grid;
+  gap: 2px;
+}
+
+.style-picker-groups {
+  display: grid;
+  gap: 2px;
+}
+
+/* Group navigation rows carry the same item chrome but push a forward chevron to the far edge. */
+.style-picker-group-nav {
+  justify-content: space-between;
+}
+
+.style-picker-group-nav .chev-next {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+  transform: rotate(-90deg);
+}
+
+/* Level-2 header: a back-to-groups button + the current group name breadcrumb. */
+.style-picker-crumb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 4px;
+  padding: 0 2px;
+}
+
+.style-picker-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+[data-theme="dark"] .style-picker-back {
+  color: var(--accent);
+}
+
+.style-picker-back:hover {
+  background: var(--surface-hover);
+}
+
+.style-picker-back .chev-back {
+  width: 14px;
+  height: 14px;
+  transform: rotate(90deg);
+}
+
+.style-picker-crumb {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
 .project-list {
   display: grid;
   gap: 4px;
@@ -2611,6 +2719,22 @@ label {
 }
 
 .suggestion-row-label {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-right: 4px;
+}
+
+/* Style Catalog axis row (sc-13130): a labelled row holding the StylePicker, spaced like the
+   suggestion row directly above it. */
+.style-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.style-row-label {
   font-size: 12.5px;
   color: var(--text-muted);
   margin-right: 4px;
@@ -7498,6 +7622,28 @@ details[open] > summary.lora-scope-group-heading::before,
 .preset-stack-prompt .token {
   color: var(--text-faint);
   font-style: italic;
+}
+
+/* sc-13131 — Live style-composed prompt preview. Reuses the preset-stack preview idiom but
+   preserves the Style:/Description: line breaks so the composition stays legible. */
+.styled-prompt-preview .preset-stack-prompt p {
+  white-space: pre-wrap;
+}
+
+/* sc-13133 — Composed-prompt budget readout under the style preview: a live "N / 4000" count that
+   flips to a danger warning when the composition would exceed the backend cap (the blocking Generate
+   error surfaces separately in the validation summary). */
+.styled-prompt-budget {
+  margin: 0;
+  font: 500 11.5px/1.4 var(--font-sans, inherit);
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.styled-prompt-budget.over {
+  color: var(--danger);
+  font-weight: 600;
+  text-align: left;
 }
 
 .preset-stack-extras {

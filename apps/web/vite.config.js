@@ -21,6 +21,17 @@ const pkg = JSON.parse(
 // build resolves these via rollup and isn't gated by this.)
 const licensesDir = fileURLToPath(new URL("../desktop/licenses", import.meta.url));
 
+// The style-catalog drift-guard test (src/data/styleCatalog.test.js) imports the
+// authored documents/style.txt as ?raw to re-derive styles.json. That dir is at
+// the repo root, outside the web project root, so allow it like licensesDir.
+const documentsDir = fileURLToPath(new URL("../../documents", import.meta.url));
+
+// The same drift-guard test also imports the backend Style manifest
+// (config/manifests/builtin.styles.jsonc, sc-13134) as ?raw to assert it stays a
+// mechanical derivation of style.txt. config/ is at the repo root, outside the web
+// project root, so allow it like documentsDir.
+const configDir = fileURLToPath(new URL("../../config", import.meta.url));
+
 export default defineConfig({
   // Generate the pre-paint /theme-init.js from src/accents.js at dev/build time
   // (single source of truth for the accent-id list). See vite-plugin-theme-init.js.
@@ -47,7 +58,7 @@ export default defineConfig({
     fs: {
       // Keep the default workspace-root allowance and add the desktop license
       // corpus the Licenses screen imports from.
-      allow: [searchForWorkspaceRoot(process.cwd()), licensesDir],
+      allow: [searchForWorkspaceRoot(process.cwd()), licensesDir, documentsDir, configDir],
     },
   },
   build: {
