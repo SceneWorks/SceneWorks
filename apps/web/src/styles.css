@@ -5896,14 +5896,34 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .model-tier-row {
   display: grid;
-  /* label | size | install-state badge | per-tier delete (sc-12024). The 4th column is `auto`,
-     so a not-installed row (which renders an empty spacer instead of a button) collapses it. */
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  /* Two lines so the tier label never collides with the size/status/action cluster in a narrow
+     model card (cards are as small as 302px — see `.models-card-grid`). Line 1 is the tier
+     checkbox + label; line 2 carries the on-disk size, the install-state badge, and the per-tier
+     action (delete/fix or the empty spacer on a not-installed row, sc-12024). The action column is
+     `1fr` with `justify-self: end`, pinning it to the row's trailing edge. */
+  grid-template-columns: auto auto 1fr;
+  grid-template-areas:
+    "select select select"
+    "size   status action";
   align-items: center;
-  gap: 10px;
+  column-gap: 10px;
+  row-gap: 8px;
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
+}
+
+.model-tier-row > .status-badge {
+  grid-area: status;
+}
+
+/* All three trailing variants (delete button, fix button, or the not-installed spacer) share the
+   one action cell so the row's second line stays a stable size | status | action triple. */
+.model-tier-row > .model-tier-delete,
+.model-tier-row > .model-tier-fix,
+.model-tier-row > .model-tier-delete-spacer {
+  grid-area: action;
+  justify-self: end;
 }
 
 /* Compact per-tier delete button (sc-12024): reclaims one installed tier's disk. Inherits
@@ -5950,9 +5970,13 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 .model-tier-select {
+  grid-area: select;
   display: flex;
   align-items: center;
   gap: 8px;
+  /* Lets the flex label shrink and wrap inside its grid cell instead of overflowing it and
+     painting over the size/badge columns (the pre-fix collision on narrow cards). */
+  min-width: 0;
   cursor: pointer;
 }
 
@@ -5963,7 +5987,9 @@ details[open] > summary.lora-scope-group-heading::before,
 .model-tier-label {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
   font-size: 13px;
 }
 
@@ -5993,6 +6019,7 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 .model-tier-size {
+  grid-area: size;
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-muted);
