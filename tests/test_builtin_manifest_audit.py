@@ -209,6 +209,61 @@ def test_schema_rejects_unknown_model_type():
     assert any("hologram" in error.message or "enum" in error.message for error in errors)
 
 
+# The seeded audio catalog (sc-13402, epic 13400). Each id is a live candle-audio
+# provider registered in `crates/audio/candle-audio-catalog`; the second element is
+# the `audio` capability sub-block key that MUST be populated for the Audio Studio to
+# build its pickers/mode gates without probing the backend.
+_SEEDED_AUDIO_MODELS = {
+    "kokoro_82m": "voices",
+    "moss_sfx_v2": "sampleRates",
+    "acestep_v15_turbo": "editModes",
+    "openvoice_v2": "conditioning",
+    "chatterbox_ve": "conditioning",
+}
+
+
+def test_builtin_manifest_ships_the_seeded_audio_models():
+    """sc-13402: the five live audio providers (Kokoro, MOSS-SFX, ACE-Step,
+    OpenVoice V2, Chatterbox-VE) are seeded as `type: "audio"` entries, each
+    carrying a populated `audio` capability sub-block (not just the schema-legal
+    shape proven by sc-13401, but the ACTUAL shipped entries). Kokoro is the
+    recommended Speech model."""
+    manifest = _load_builtin_models_manifest()
+    by_id = {m.get("id"): m for m in manifest["models"]}
+
+    for model_id, required_cap_key in _SEEDED_AUDIO_MODELS.items():
+        entry = by_id.get(model_id)
+        assert entry is not None, f"seeded audio model {model_id} is missing from the manifest"
+        assert entry.get("type") == "audio", f"{model_id} must be type:audio"
+        audio = entry.get("audio")
+        assert isinstance(audio, dict) and audio, f"{model_id} must carry a populated `audio` block"
+        assert required_cap_key in audio, (
+            f"{model_id}.audio must advertise `{required_cap_key}` (populated from backend "
+            f"Capabilities, not an empty stub)"
+        )
+        # Every audio entry must be installable/downloadable like image/video models.
+        downloads = entry.get("downloads") or []
+        assert downloads and downloads[0].get("repo"), (
+            f"{model_id} must define a download entry with a repo (install/download parity)"
+        )
+        assert entry.get("paths", {}).get("model"), f"{model_id} must define paths.model"
+
+    # Kokoro's real voice surface: the 28 English packs the pinned snapshot ships,
+    # each an object with an `id` (discriminates against an empty/placeholder list).
+    kokoro_voices = by_id["kokoro_82m"]["audio"]["voices"]
+    assert len(kokoro_voices) == 28, "Kokoro advertises its 28 shipped English voices"
+    assert all(isinstance(v, dict) and v.get("id") for v in kokoro_voices)
+    assert by_id["kokoro_82m"].get("recommended") is True, "Kokoro is the recommended Speech model"
+
+    # ACE-Step's real edit surface (Conditioning::AudioEdit → repaint task modes).
+    assert set(by_id["acestep_v15_turbo"]["audio"]["editModes"]) == {
+        "inpaint",
+        "repaint",
+        "extend",
+    }
+    assert "AudioEdit" in by_id["acestep_v15_turbo"]["audio"]["conditioning"]
+
+
 def _duplicate_default_downloads(manifest: dict) -> list[str]:
     """Return model/platform pairs with ambiguous primary download selection."""
     ambiguous: list[str] = []
