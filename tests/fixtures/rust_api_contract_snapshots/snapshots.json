@@ -2049,7 +2049,8 @@
       },
       "triggerWords": [
         "style"
-      ]
+      ],
+      "updateAvailable": false
     }
   ],
   "malformed json error response": {
