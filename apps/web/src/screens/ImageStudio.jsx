@@ -167,7 +167,7 @@ import {
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { StylePicker } from "../components/StylePicker.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
-import { STYLE_GROUPS, styleTextForId } from "../data/styleCatalog.js";
+import { STYLE_GROUPS, styleHintForId, styleTextForId } from "../data/styleCatalog.js";
 import {
   GUIDANCE_METHOD_LABELS,
   SAMPLER_LABELS,
@@ -415,7 +415,15 @@ export function ImageStudio() {
     // Editing the idea clears a stale auto-expand error (sc-6501).
     setSubmitError("");
   };
-  const suggestions = mode === "character_image" ? characterSuggestions : sceneSuggestions;
+  // sc-13366: when a style is selected, replace the generic scene/character suggestion pills with a
+  // single hint pill carrying that style's tailored subject prompt (styleThumbnailPrompts.json) — a
+  // strong, style-fitting starting point. Falls back to the normal suggestions with no style.
+  const styleHint = styleHintForId(styleId);
+  const suggestions = styleHint
+    ? [styleHint]
+    : mode === "character_image"
+      ? characterSuggestions
+      : sceneSuggestions;
   const [count, setCount] = useState(saved.count ?? 4);
 
   // Batch Prompt Processing (epic 9952). Batch mode is orthogonal to the T2I/Edit/

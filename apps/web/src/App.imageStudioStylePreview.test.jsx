@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { withImageStudioContext, settle } from "./main.testSupport.jsx";
-import { STYLE_GROUPS } from "./data/styleCatalog.js";
+import { STYLE_GROUPS, styleHintForId } from "./data/styleCatalog.js";
 
 // sc-13131 — End-to-end wiring guard for the live Style preview. Renders the real ImageStudio,
 // types a prompt, picks a style through the actual StylePicker, and asserts that the on-screen
@@ -135,6 +135,29 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
     const submittedPrompt = await submitAndReadPayloadPrompt();
     // The DoD: what the user SEES is exactly what is SENT.
     expect(shown).toBe(submittedPrompt);
+  });
+
+  it("swaps the suggestion pills for a single tailored style hint when a style is selected (sc-13366)", async () => {
+    await renderStudio();
+    // No style yet → the usual multi-pill scene-suggestion row.
+    const before = [...document.body.querySelectorAll(".suggestion-row .suggestion")];
+    expect(before.length).toBeGreaterThan(1);
+
+    await selectStyle(firstStyle.name);
+
+    // Style selected → exactly ONE pill, carrying that style's tailored subject prompt.
+    const after = [...document.body.querySelectorAll(".suggestion-row .suggestion")];
+    expect(after).toHaveLength(1);
+    const hint = styleHintForId(firstStyle.id);
+    expect(hint).toEqual(expect.any(String));
+    expect(after[0].textContent).toContain(hint);
+
+    // Clicking the hint fills the prompt box (same as any suggestion chip).
+    await act(async () => {
+      after[0].click();
+    });
+    await settle();
+    expect(document.body.querySelector('textarea[aria-label="Prompt"]').value).toBe(hint);
   });
 
   it("blocks a styled batch before submit and identifies every over-cap resolved item", async () => {
