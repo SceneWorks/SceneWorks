@@ -1414,7 +1414,7 @@ export function ModelManagerScreen() {
     // Built-in LoRAs with a Hugging Face source can be fetched on demand (sc-5944) —
     // user LoRAs are installed via the import form, so they get no Download affordance.
     const hfSource = (lora.source?.provider ?? lora.provider) === "huggingface";
-    const canDownload = Boolean(onDownloadLora) && lora.scope === "builtin" && !installed && hfSource;
+    const canDownload = Boolean(onDownloadLora) && lora.scope === "builtin" && (!installed || lora.updateAvailable) && hfSource;
     const downloadJob = loraDownloadJobsFor(lora).find((job) => !terminalStatuses.has(job.status));
     const keywords = Array.isArray(lora.triggerWords) ? lora.triggerWords : [];
     const notes = typeof lora.notes === "string" ? lora.notes : "";
@@ -1440,12 +1440,15 @@ export function ModelManagerScreen() {
             unusable
           </span>
         ) : (
-          <span className={statusClass}>{statusText}</span>
+          <>
+            <span className={statusClass}>{statusText}</span>
+            {lora.updateAvailable ? <span className="status-badge warning">update available</span> : null}
+          </>
         )}
         <span className="lora-row-actions">
           {canDownload ? (
             <button disabled={Boolean(downloadJob)} onClick={() => onDownloadLora(lora)} type="button">
-              {downloadJob ? downloadJob.status : "Download"}
+              {downloadJob ? downloadJob.status : lora.updateAvailable ? "Update" : "Download"}
             </button>
           ) : null}
           {canEdit && !isEditing ? (

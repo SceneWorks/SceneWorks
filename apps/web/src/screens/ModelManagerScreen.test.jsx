@@ -777,6 +777,35 @@ describe("ModelManagerScreen type-grouped layout", () => {
     expect(createLoraDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "ltx_ic" }));
   });
 
+  it("shows and runs the update action for an installed stale built-in LoRA", async () => {
+    const createLoraDownloadJob = vi.fn();
+    await render({
+      models: MODELS,
+      createLoraDownloadJob,
+      loras: [
+        {
+          id: "krea2_identity_edit",
+          name: "Krea identity edit",
+          family: "krea_2",
+          scope: "builtin",
+          installState: "installed",
+          updateAvailable: true,
+          source: { provider: "huggingface", repo: "SceneWorks/krea-edit", file: "v1.2.safetensors" },
+        },
+      ],
+    });
+    await selectTab(container, "LoRAs");
+    expect(builtinSection().textContent).toContain("update available");
+    const updateButton = [...builtinSection().querySelectorAll(".lora-row-actions button")].find(
+      (button) => button.textContent === "Update",
+    );
+    expect(updateButton).toBeTruthy();
+    await click(updateButton);
+    expect(createLoraDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "krea2_identity_edit", updateAvailable: true }),
+    );
+  });
+
   it("shows progress and disables the button while a built-in LoRA download runs", async () => {
     await render({
       models: MODELS,

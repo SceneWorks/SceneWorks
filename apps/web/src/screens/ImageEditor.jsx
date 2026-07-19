@@ -862,11 +862,19 @@ export function ImageEditor() {
   useEffect(() => {
     if (!editLoraRequiredMissing) setEditLoraDownloadRequested(false);
   }, [editLoraRequiredMissing]);
-  const requestEditLoraDownload = useCallback(() => {
+  const requestEditLoraDownload = useCallback(async () => {
     if (!editLora) return;
     setEditLoraDownloadRequested(true);
-    createLoraDownloadJob?.(editLora);
+    try {
+      const job = await createLoraDownloadJob?.(editLora);
+      if (!job) setEditLoraDownloadRequested(false);
+    } catch {
+      setEditLoraDownloadRequested(false);
+    }
   }, [editLora, createLoraDownloadJob]);
+  useEffect(() => {
+    if (!editLora?.updateAvailable) setEditLoraDownloadRequested(false);
+  }, [editLora?.updateAvailable]);
   // The manual LoRA picker hides the managed edit LoRA (it's applied automatically), so it can't be
   // double-shown or accidentally toggled — mirrors the Studio's pickerCompatibleLoras.
   const pickerCompatibleLoras = managedEditLoraId
@@ -3115,6 +3123,19 @@ export function ImageEditor() {
           editLoraInstalled ? (
             <div className="ie-section">
               <p className="ie-note">✨ {editLora.name} is applied automatically for editing.</p>
+              {editLora.updateAvailable ? (
+                <>
+                  <p className="ie-note">An update is available. You can keep editing with the installed version.</p>
+                  <button
+                    className="ie-btn block"
+                    disabled={editLoraDownloadRequested}
+                    onClick={requestEditLoraDownload}
+                    type="button"
+                  >
+                    {editLoraDownloadRequested ? "Updating…" : `Update ${editLora.name}`}
+                  </button>
+                </>
+              ) : null}
               {/* Identity strength (sc-11798): the managed edit LoRA is hidden from the manual
                   picker, so expose its apply weight here — threaded into buildEditJobBody's
                   editLoraWeight → the payload edit-LoRA `weight`. Higher = stronger conditioning. */}

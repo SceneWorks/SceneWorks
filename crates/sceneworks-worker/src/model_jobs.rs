@@ -426,6 +426,29 @@ pub(crate) async fn run_lora_download_job(
         &mut progress,
     )
     .await?;
+    let resolved_revision = tokio::fs::read_to_string(repo_dir.join("refs").join(revision))
+        .await
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| revision.to_owned());
+    let resolved_files = snapshot
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let receipt_dir = settings.data_dir.join("loras").join(safe_download_dir(
+        optional_payload_string(&job.payload, "loraId").unwrap_or(repo),
+    ));
+    write_model_download_receipt(
+        &receipt_dir,
+        &job.payload,
+        repo,
+        &job.id,
+        &resolved_files,
+        Some(&resolved_revision),
+    )
+    .await?;
     let cache_path = huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_dir);
 
     complete_hf_cache_download(
