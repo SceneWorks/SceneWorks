@@ -500,6 +500,20 @@ function ModelTierDownloadPanel({
                 >
                   {deletingItem === `variant:${model.id}:${tier}` ? "Deleting" : "Delete"}
                 </button>
+              ) : incomplete ? (
+                // A torn tier repairs by re-downloading that same tier (sc-13383). One-click Fix wires
+                // straight through the tier install path — no separate select-then-download step — and
+                // disables while a repair job for this tier is already in flight (its status shows in the
+                // badge above and on the button).
+                <button
+                  type="button"
+                  className="model-tier-fix"
+                  disabled={Boolean(activeJob) || licenseAckRequired}
+                  title={incompleteHint}
+                  onClick={() => onDownloadVariant(model, tier)}
+                >
+                  {activeJob ? activeJob.status : "Fix"}
+                </button>
               ) : (
                 <span className="model-tier-delete-spacer" aria-hidden="true" />
               )}

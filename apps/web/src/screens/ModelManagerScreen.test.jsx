@@ -97,6 +97,32 @@ const SD3_5_MODEL = {
   ui: { description: "Gated SD3.5 Large model." },
 };
 
+// A quant-matrix model whose q8 tier is TORN (sc-13383): its files are partly present, so the API
+// reports installState "missing" + cacheState "incomplete" with the missing weights named. The
+// complete q4/bf16 siblings keep the MODEL installed, so only the q8 tier row offers repair.
+const TORN_TIER_MODEL = {
+  id: "z_image_turbo",
+  name: "Z-Image-Turbo",
+  type: "image",
+  family: "z-image",
+  installState: "installed",
+  downloadable: true,
+  hasVariantMatrix: true,
+  variants: [
+    { variant: "bf16", installed: true, installState: "installed", cacheState: "complete", downloadSizeBytes: 20538406851 },
+    {
+      variant: "q8",
+      installed: false,
+      installState: "missing",
+      cacheState: "incomplete",
+      downloadSizeBytes: 10998523666,
+      missingRequiredFiles: ["q8/transformer/config.json", "q8/transformer/<weights>", "q8/vae/<weights>"],
+    },
+    { variant: "q4", installed: true, installState: "installed", cacheState: "complete", downloadSizeBytes: 5909406487 },
+  ],
+  ui: { description: "Open model." },
+};
+
 describe("ModelManagerScreen gated-model notice", () => {
   let container;
   let root;
@@ -309,6 +335,27 @@ describe("ModelManagerScreen gated-model notice", () => {
       (button) => button.textContent.startsWith("Download"),
     );
     expect(downloadButton.disabled).toBe(false);
+  });
+
+  it("offers a one-click Fix on a torn tier that repairs by re-downloading it (sc-13383)", async () => {
+    await render([TORN_TIER_MODEL]);
+    const tierRows = [...container.querySelectorAll(".model-tier-row")];
+    const q8Row = tierRows.find((row) => row.textContent.includes("Q8"));
+    expect(q8Row, "q8 tier row renders").toBeTruthy();
+    // The torn tier reads incomplete (not the false "installed" it used to show).
+    expect(q8Row.querySelector(".status-badge.incomplete")).toBeTruthy();
+    const fixButton = [...q8Row.querySelectorAll("button")].find((button) => button.textContent === "Fix");
+    expect(fixButton, "torn tier renders a Fix button").toBeTruthy();
+    expect(fixButton.disabled).toBe(false);
+    // A COMPLETE sibling tier (q4) must NOT show Fix — only the torn one does.
+    const q4Row = tierRows.find((row) => row.textContent.includes("Q4"));
+    expect([...q4Row.querySelectorAll("button")].some((button) => button.textContent === "Fix")).toBe(false);
+    // One click repairs by queuing a download of exactly the q8 tier.
+    await click(fixButton);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "z_image_turbo" }),
+      { variant: "q8" },
+    );
   });
 });
 

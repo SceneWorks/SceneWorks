@@ -5920,6 +5920,29 @@ details[open] > summary.lora-scope-group-heading::before,
   display: block;
 }
 
+/* One-click repair for a torn tier (sc-13383): re-downloads that tier. Soft-accent mirror of the
+   compact `.model-tier-delete`, so it reads as the call-to-action on an `incomplete` row. */
+.model-tier-fix {
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+  border: 1px solid color-mix(in oklch, var(--accent) 45%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--accent) 12%, var(--surface));
+  color: color-mix(in oklch, var(--accent) 80%, var(--text));
+}
+
+.model-tier-fix:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--accent) 20%, var(--surface));
+  color: var(--accent);
+}
+
+.model-tier-fix:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 /* The RAM-suggested tier: highlighted so the recommended default reads at a glance. */
 .model-tier-row.suggested {
   border-color: var(--accent, var(--border));
