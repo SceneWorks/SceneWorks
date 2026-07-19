@@ -2,10 +2,16 @@
 //
 // There is no UI to do this except 286 manual Image Studio runs (8 group-level "overall"
 // styles + 278 sub-styles). This script drives the local rust-api to generate one image per
-// style id from a SINGLE shared reference prompt + fixed seed (so the STYLE is the only
-// variable), downscales each result to a small square thumb via macOS `sips`, and writes
-// `<out>/<id>.png`. It is resumable (skips ids whose thumb already exists) and never aborts
-// the whole batch on a single failure.
+// style id from a fixed seed (so the STYLE is the only variable), downscales each result to a
+// small square thumb via macOS `sips`, and writes `<out>/<id>.png`. It is resumable (skips ids
+// whose thumb already exists) and never aborts the whole batch on a single failure.
+//
+// Reference-prompt (subject) resolution per style id (referencePromptForId):
+//   (a) an explicit --prompt flag → that text for ALL ids (global override), else
+//   (b) the PER-STYLE tailored subject from styleThumbnailPrompts.json (the default), else
+//   (c) the built-in fallback (referencePromptFallback, "a red fox in a snowy forest").
+// The per-style subjects give each thumb a subject that flatters its style instead of forcing
+// one fox onto all 286; --prompt remains the escape hatch to render every style from one subject.
 //
 // The outgoing `prompt` is composed CLIENT-SIDE (composeStyledPrompt + styleTextForId), NOT
 // by sending a `styleId` to the API — so the script works on any API build, current or older,
@@ -49,6 +55,11 @@ const require = createRequire(import.meta.url);
 const CATALOG = require("../src/data/styles.json");
 export const STYLE_GROUPS = CATALOG.groups;
 
+// Per-style tailored thumbnail SUBJECT prompts, keyed by style id (sc-13135). Loaded through the
+// same createRequire() shim as styles.json so plain Node reads the JSON natively. `prompts[id]` is
+// the default reference prompt for each id; `referencePromptFallback` covers any id not present.
+export const THUMBNAIL_PROMPTS = require("../src/data/styleThumbnailPrompts.json");
+
 const STYLE_TEXT_BY_ID = new Map();
 for (const group of STYLE_GROUPS) {
   STYLE_TEXT_BY_ID.set(group.id, group.description);
@@ -82,7 +93,11 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8000;
 
 const DEFAULTS = Object.freeze({
+  // Global fallback subject; per-style prompts (styleThumbnailPrompts.json) are the real default,
+  // and referencePromptForId only uses this raw value when --prompt is set explicitly.
   prompt: "a red fox in a snowy forest",
+  // Set true only when the user passes --prompt (global override); see referencePromptForId.
+  promptExplicit: false,
   model: "z_image_turbo",
   seed: 20240719,
   size: 1024,
@@ -128,6 +143,25 @@ export function enumerateStyleIds() {
  */
 export function composeThumbnailPrompt(id, referencePrompt) {
   return composeStyledPrompt({ styleText: styleTextForId(id), userPrompt: referencePrompt });
+}
+
+/**
+ * Resolve the reference (subject) prompt for one style id (sc-13135). Precedence:
+ *   (a) an EXPLICIT --prompt flag (args.promptExplicit) → args.prompt for every id, else
+ *   (b) the per-style tailored subject promptMap.prompts[id] if present, else
+ *   (c) the fallback promptMap.referencePromptFallback (or the built-in DEFAULTS.prompt).
+ * Pure — no I/O; promptMap is injected (defaults to the bundled THUMBNAIL_PROMPTS) so it is
+ * unit-testable. The result is fed to composeThumbnailPrompt, which wraps it in the style text.
+ */
+export function referencePromptForId(id, args = {}, promptMap = THUMBNAIL_PROMPTS) {
+  if (args.promptExplicit) {
+    return args.prompt;
+  }
+  const perStyle = promptMap?.prompts?.[id];
+  if (typeof perStyle === "string" && perStyle.trim() !== "") {
+    return perStyle;
+  }
+  return promptMap?.referencePromptFallback ?? DEFAULTS.prompt;
 }
 
 /**
@@ -220,6 +254,9 @@ export function parseArgs(argv, env = process.env) {
     switch (arg) {
       case "--prompt":
         opts.prompt = next();
+        // Mark that the user set --prompt explicitly so referencePromptForId treats it as a
+        // GLOBAL override over the per-style prompts (opts.prompt keeps its default otherwise).
+        opts.promptExplicit = true;
         break;
       case "--model":
         opts.model = next();
@@ -387,7 +424,7 @@ function resizeToThumb(fullPath, thumbOut, thumbPx) {
  * The full-res PNG is written to a temp path, resized, then discarded (unless --keep-full).
  */
 async function generateOne(opts, id) {
-  const prompt = composeThumbnailPrompt(id, opts.prompt);
+  const prompt = composeThumbnailPrompt(id, referencePromptForId(id, opts));
   const payload = buildJobPayload({
     prompt,
     model: opts.model,
@@ -434,7 +471,8 @@ function printHelp() {
       "generate-style-thumbnails — one preview thumbnail per style (sc-13135)",
       "",
       "Flags:",
-      "  --prompt <text>     reference prompt (default: \"a red fox in a snowy forest\")",
+      "  --prompt <text>     GLOBAL reference-prompt override for every id (default: per-style",
+      "                      subjects from styleThumbnailPrompts.json; fallback \"a red fox in a snowy forest\")",
       "  --model <id>        gen model (default: z_image_turbo; krea_2_turbo = tuned look, ~20GB dl)",
       "  --seed <int>        fixed seed shared across styles (default: 20240719)",
       "  --size <px>         native gen size, sent as width+height (default: 1024)",
@@ -467,9 +505,15 @@ async function main() {
 
   if (opts.dryRun) {
     console.log(`DRY RUN — ${ids.length} id(s), no network calls, no files written.`);
-    console.log(`target base: ${opts.base}\n`);
+    console.log(`target base: ${opts.base}`);
+    console.log(
+      opts.promptExplicit
+        ? `reference: --prompt override "${opts.prompt}" applied to ALL ids\n`
+        : "reference: per-style prompts (styleThumbnailPrompts.json), fallback for unknown ids\n",
+    );
     ids.forEach((id, i) => {
-      const prompt = composeThumbnailPrompt(id, opts.prompt);
+      const reference = referencePromptForId(id, opts);
+      const prompt = composeThumbnailPrompt(id, reference);
       const payload = buildJobPayload({
         prompt,
         model: opts.model,
@@ -478,6 +522,7 @@ async function main() {
         projectId: opts.project ?? "<auto-created-at-runtime>",
       });
       console.log(`[${i + 1}/${ids.length}] ${id} → ${thumbnailPath(opts.out, id)}`);
+      console.log(`  reference: ${JSON.stringify(reference)}`);
       console.log(`  payload: ${JSON.stringify(payload)}`);
       console.log(`  prompt:  ${JSON.stringify(prompt)}\n`);
     });
