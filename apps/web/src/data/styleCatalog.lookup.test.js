@@ -35,4 +35,28 @@ describe("styleCatalog runtime lookup", () => {
       expect(styleTextForId(id)).toBeTruthy();
     }
   });
+
+  // sc-13171: a GROUP id is now a first-class, selectable style — the two-level picker stores it
+  // when the user picks a group's "overall" style. styleTextForId must resolve it to the group's
+  // `description`, and findStyleById must expose enough for the breadcrumb.
+  it("resolves a GROUP id to its description as the group-level style text", () => {
+    for (const group of catalog.groups) {
+      expect(styleTextForId(group.id)).toBe(group.description);
+      const entry = findStyleById(group.id);
+      expect(entry).toMatchObject({ id: group.id, name: group.name, prompt: group.description, isGroup: true });
+    }
+  });
+
+  // The single stored `styleId` must resolve unambiguously to exactly ONE style, so group ids and
+  // sub-style ids share one global id-space and must never collide. (styleCatalog.js also enforces
+  // this at module load; this pins it on the shipped data.)
+  it("keeps group ids globally unique from every sub-style id", () => {
+    const groupIds = catalog.groups.map((group) => group.id);
+    const subStyleIds = new Set(catalog.groups.flatMap((group) => group.styles.map((s) => s.id)));
+    const collisions = groupIds.filter((id) => subStyleIds.has(id));
+    expect(collisions).toEqual([]);
+    // Combined id-space is fully unique too.
+    const combined = [...groupIds, ...subStyleIds];
+    expect(new Set(combined).size).toBe(combined.length);
+  });
 });

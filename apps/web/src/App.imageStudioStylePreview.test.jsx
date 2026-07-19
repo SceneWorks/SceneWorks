@@ -70,9 +70,26 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
     await settle();
   }
 
+  // sc-13171: the picker is a two-level cascade — open it, drill into the style's group, then pick
+  // the sub-style. We resolve the owning group from the shipped catalog so the flow mirrors a user.
+  // The menu opens at level 1 (group list), or jumps straight to level 2 when a style is already
+  // selected (the studio saved-state persists styleId), so normalize back to level 1 first.
   async function selectStyle(name) {
+    const owningGroup = STYLE_GROUPS.find((group) => group.styles.some((style) => style.name === name));
     await act(async () => {
       document.body.querySelector('button[aria-label="Style"]').click();
+    });
+    await settle();
+    const back = document.body.querySelector(".style-picker-back");
+    if (back) {
+      await act(async () => {
+        back.click();
+      });
+      await settle();
+    }
+    const groupNav = document.body.querySelector(`button[title="Browse ${owningGroup.name} styles"]`);
+    await act(async () => {
+      groupNav.click();
     });
     await settle();
     const option = [...document.body.querySelectorAll('[role="option"]')].find(

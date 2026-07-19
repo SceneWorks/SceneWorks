@@ -2494,7 +2494,6 @@ export function ImageStudio() {
               buildJobRequest so it can never drift from the payload. Hidden when no style applies. */}
           <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} />
 
-
           {/* Prompt tools (UI-refinement 1b; restructured sc-10195): a framed strip of up to THREE
               distinct tiles, one panel open at a time (all free-text only — structured models excluded).
               1) "Image reference" — img2img reference-guided generation (a picked image + strength slider

@@ -13,11 +13,15 @@ function setInputValue(el, value) {
   el.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
-// sc-13130: the Style Catalog picker — searchable, grouped, single-select, clearable to "None".
+// sc-13171: the Style Catalog picker is now a TWO-LEVEL cascade — pick a group, then a style within
+// it. The group's own "overall" style is the first (selectable) option inside the group and is
+// stored as the GROUP id. "None" (pass-through) and the single value/onSelect(styleId) contract are
+// preserved from the sc-13130 flat picker.
 const GROUPS = [
   {
     id: "anime-style",
     name: "Anime Style",
+    description: "broad anime look",
     styles: [
       { id: "ghibli-style", name: "Ghibli Style", prompt: "gentle watercolor animation" },
       { id: "shonen-style", name: "Shonen Style", prompt: "bold action lines" },
@@ -26,11 +30,12 @@ const GROUPS = [
   {
     id: "photography",
     name: "Photography",
+    description: "broad photographic look",
     styles: [{ id: "film-noir", name: "Film Noir", prompt: "high-contrast monochrome" }],
   },
 ];
 
-describe("StylePicker (sc-13130)", () => {
+describe("StylePicker (sc-13171 two-level)", () => {
   let container;
   let root;
 
@@ -55,10 +60,12 @@ describe("StylePicker (sc-13130)", () => {
 
   const pill = () => container.querySelector(".compact-selector-pill");
   const openMenu = async () => act(async () => pill().click());
-  const optionButtons = () =>
-    [...container.querySelectorAll('.style-picker-menu [role="option"]')];
-  const groupLabels = () =>
-    [...container.querySelectorAll(".style-picker-group-label")].map((el) => el.textContent);
+  const optionButtons = () => [...container.querySelectorAll('.style-picker-menu [role="option"]')];
+  const groupNavs = () => [...container.querySelectorAll(".style-picker-group-nav")];
+  const clickText = async (nodes, text) => {
+    const el = nodes.find((b) => b.textContent.includes(text));
+    await act(async () => el.click());
+  };
 
   it("shows 'None' pass-through on the closed pill when nothing is selected", async () => {
     await render();
@@ -66,34 +73,121 @@ describe("StylePicker (sc-13130)", () => {
     expect(pill().getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("reflects the selected style's name on the pill", async () => {
+  it("shows a group › style breadcrumb on the pill for a sub-style selection", async () => {
     await render({ selectedId: "ghibli-style" });
     expect(pill().textContent).toContain("Ghibli Style");
+    expect(pill().textContent).toContain("Anime Style › Ghibli Style");
   });
 
-  it("renders group headers and every style as an option when opened", async () => {
+  it("shows a group — general breadcrumb on the pill for a group-level selection", async () => {
+    await render({ selectedId: "anime-style" });
+    expect(pill().textContent).toContain("Anime Style (overall)");
+    expect(pill().textContent).toContain("Anime Style — general");
+  });
+
+  it("level 1: shows None plus one nav row per group (no sub-styles yet)", async () => {
     await render();
     await openMenu();
     expect(pill().getAttribute("aria-expanded")).toBe("true");
-    expect(groupLabels()).toEqual(["Anime Style", "Photography"]);
-    const labels = optionButtons().map((b) => b.textContent);
-    // "None" + the three catalog styles.
-    expect(labels.some((t) => t.includes("None"))).toBe(true);
-    expect(labels.some((t) => t.includes("Ghibli Style"))).toBe(true);
-    expect(labels.some((t) => t.includes("Shonen Style"))).toBe(true);
-    expect(labels.some((t) => t.includes("Film Noir"))).toBe(true);
+    const navLabels = groupNavs().map((b) => b.textContent);
+    expect(navLabels.some((t) => t.includes("Anime Style"))).toBe(true);
+    expect(navLabels.some((t) => t.includes("Photography"))).toBe(true);
+    // Sub-styles are NOT shown at level 1.
+    expect(container.textContent).not.toContain("Ghibli Style");
+    // Only "None" is a selectable option at level 1.
+    expect(optionButtons().map((b) => b.textContent)).toEqual([
+      expect.stringContaining("None"),
+    ]);
   });
 
-  it("filters styles by name via the search box (and drops empty groups)", async () => {
+  it("level 2: entering a group reveals its 'overall' first, then its sub-styles", async () => {
+    await render();
+    await openMenu();
+    await clickText(groupNavs(), "Anime Style");
+    const labels = optionButtons().map((b) => b.textContent);
+    // First option is the group-level "overall"; then the sub-styles.
+    expect(labels[0]).toContain("Anime Style (overall)");
+    expect(labels.some((t) => t.includes("Ghibli Style"))).toBe(true);
+    expect(labels.some((t) => t.includes("Shonen Style"))).toBe(true);
+    // Photography's style is NOT present — we scoped to one group.
+    expect(labels.some((t) => t.includes("Film Noir"))).toBe(false);
+    // Breadcrumb header names the group.
+    expect(container.querySelector(".style-picker-crumb").textContent).toBe("Anime Style");
+  });
+
+  it("selects a group's 'overall' style using the GROUP id", async () => {
+    const onSelect = vi.fn();
+    await render({ onSelect });
+    await openMenu();
+    await clickText(groupNavs(), "Anime Style");
+    await clickText(optionButtons(), "Anime Style (overall)");
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith("anime-style");
+    expect(container.querySelector(".style-picker-menu")).toBeNull();
+  });
+
+  it("single-selects a sub-style by id and closes the menu", async () => {
+    const onSelect = vi.fn();
+    await render({ onSelect });
+    await openMenu();
+    await clickText(groupNavs(), "Anime Style");
+    await clickText(optionButtons(), "Shonen Style");
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith("shonen-style");
+    expect(container.querySelector(".style-picker-menu")).toBeNull();
+  });
+
+  it("has a back control that returns from a group to the group list", async () => {
+    await render();
+    await openMenu();
+    await clickText(groupNavs(), "Anime Style");
+    expect(container.querySelector(".style-picker-crumb-row")).toBeTruthy();
+    const back = container.querySelector(".style-picker-back");
+    await act(async () => back.click());
+    // Back at level 1: group navs visible again, no crumb header.
+    expect(container.querySelector(".style-picker-crumb-row")).toBeNull();
+    expect(groupNavs().length).toBe(2);
+  });
+
+  it("opens directly into the selected style's group for easy change", async () => {
+    await render({ selectedId: "ghibli-style" });
+    await openMenu();
+    // Jumps straight to level 2 of Anime Style; the active option is marked.
+    expect(container.querySelector(".style-picker-crumb").textContent).toBe("Anime Style");
+    const active = optionButtons().find((b) => b.getAttribute("aria-selected") === "true");
+    expect(active.textContent).toContain("Ghibli Style");
+  });
+
+  it("clears to None (null) via the None option at level 1", async () => {
+    const onSelect = vi.fn();
+    // selectedId null so we open at level 1 where None lives.
+    await render({ onSelect });
+    await openMenu();
+    await clickText(optionButtons(), "None");
+    expect(onSelect).toHaveBeenCalledWith(null);
+  });
+
+  it("global search jumps across all groups, including group 'overall' entries", async () => {
     await render();
     await openMenu();
     const search = container.querySelector(".style-picker-search");
     await act(async () => setInputValue(search, "noir"));
-    // Only Photography survives; Anime Style group header is gone.
-    expect(groupLabels()).toEqual(["Photography"]);
     const labels = optionButtons().map((b) => b.textContent);
     expect(labels.some((t) => t.includes("Film Noir"))).toBe(true);
     expect(labels.some((t) => t.includes("Ghibli"))).toBe(false);
+    // The result row shows its owning group as a breadcrumb subtitle.
+    const noir = optionButtons().find((b) => b.textContent.includes("Film Noir"));
+    expect(noir.textContent).toContain("Photography");
+  });
+
+  it("search matches a group's 'overall' entry and selects the GROUP id", async () => {
+    const onSelect = vi.fn();
+    await render({ onSelect });
+    await openMenu();
+    const search = container.querySelector(".style-picker-search");
+    await act(async () => setInputValue(search, "overall"));
+    await clickText(optionButtons(), "Anime Style (overall)");
+    expect(onSelect).toHaveBeenCalledWith("anime-style");
   });
 
   it("shows an empty state when nothing matches the search", async () => {
@@ -102,36 +196,6 @@ describe("StylePicker (sc-13130)", () => {
     const search = container.querySelector(".style-picker-search");
     await act(async () => setInputValue(search, "zzzznope"));
     expect(container.querySelector(".compact-selector-empty")).toBeTruthy();
-    // "None" is still offered even with no matches.
-    expect(optionButtons().some((b) => b.textContent.includes("None"))).toBe(true);
-  });
-
-  it("single-selects a style by id and closes the menu", async () => {
-    const onSelect = vi.fn();
-    await render({ onSelect });
-    await openMenu();
-    const shonen = optionButtons().find((b) => b.textContent.includes("Shonen Style"));
-    await act(async () => shonen.click());
-    expect(onSelect).toHaveBeenCalledTimes(1);
-    expect(onSelect).toHaveBeenCalledWith("shonen-style");
-    // Menu closed after selection.
-    expect(container.querySelector(".style-picker-menu")).toBeNull();
-  });
-
-  it("clears to None (null) via the None option", async () => {
-    const onSelect = vi.fn();
-    await render({ selectedId: "ghibli-style", onSelect });
-    await openMenu();
-    const none = optionButtons().find((b) => b.textContent.includes("None"));
-    await act(async () => none.click());
-    expect(onSelect).toHaveBeenCalledWith(null);
-  });
-
-  it("marks the active option with aria-selected", async () => {
-    await render({ selectedId: "film-noir" });
-    await openMenu();
-    const active = optionButtons().find((b) => b.getAttribute("aria-selected") === "true");
-    expect(active.textContent).toContain("Film Noir");
   });
 
   it("is keyboard-usable: focuses search on open and closes on Escape", async () => {
@@ -145,9 +209,9 @@ describe("StylePicker (sc-13130)", () => {
     expect(pill().getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("handles the full shipped catalog (8 groups) without error", async () => {
+  it("handles the full shipped catalog (8 groups) at level 1", async () => {
     await render({ groups: STYLE_GROUPS });
     await openMenu();
-    expect(groupLabels()).toHaveLength(8);
+    expect(groupNavs()).toHaveLength(8);
   });
 });

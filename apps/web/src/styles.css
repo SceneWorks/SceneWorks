@@ -896,6 +896,71 @@ button:focus-visible {
   color: var(--text-muted);
 }
 
+/* ---------- Two-level (group → style) cascade (sc-13171) ---------- */
+.style-picker-level {
+  display: grid;
+  gap: 2px;
+}
+
+.style-picker-groups {
+  display: grid;
+  gap: 2px;
+}
+
+/* Group navigation rows carry the same item chrome but push a forward chevron to the far edge. */
+.style-picker-group-nav {
+  justify-content: space-between;
+}
+
+.style-picker-group-nav .chev-next {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+  transform: rotate(-90deg);
+}
+
+/* Level-2 header: a back-to-groups button + the current group name breadcrumb. */
+.style-picker-crumb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 4px;
+  padding: 0 2px;
+}
+
+.style-picker-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+[data-theme="dark"] .style-picker-back {
+  color: var(--accent);
+}
+
+.style-picker-back:hover {
+  background: var(--surface-hover);
+}
+
+.style-picker-back .chev-back {
+  width: 14px;
+  height: 14px;
+  transform: rotate(90deg);
+}
+
+.style-picker-crumb {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
 .project-list {
   display: grid;
   gap: 4px;
