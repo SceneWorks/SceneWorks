@@ -19,6 +19,16 @@
 // Notes on --model: the default `z_image_turbo` is a fast, always-available model. Passing
 // `--model krea_2_turbo` gives the tuned "reference look" the picker was designed around, but
 // that model needs a ~20GB manual download first (it is not provisioned by default).
+//
+// Targeting a non-default rust-api: pass `--host <h>` and/or `--port <n>` to compose the base
+// URL, or `--base <url>` to override it wholesale. `--host`/`--port` default to the SAME env
+// vars rust-api reads (apps/rust-api/src/server.rs) — `SCENEWORKS_API_HOST` and
+// `SCENEWORKS_API_PORT` — so a server configured via those env vars is targeted automatically.
+// Resolution order for the base URL:
+//   1. --base <url>                          (verbatim; trailing slash trimmed; wins over all)
+//   2. http://{host}:{port} where
+//        host = --host  | SCENEWORKS_API_HOST | 127.0.0.1
+//        port = --port  | SCENEWORKS_API_PORT | 8000
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -66,13 +76,22 @@ const REPO_ROOT = (() => {
 
 const SIPS_BIN = "/usr/bin/sips";
 
+// Base-URL composition defaults. These mirror the env vars rust-api itself reads
+// (apps/rust-api/src/server.rs): SCENEWORKS_API_HOST / SCENEWORKS_API_PORT.
+const DEFAULT_HOST = "127.0.0.1";
+const DEFAULT_PORT = 8000;
+
 const DEFAULTS = Object.freeze({
   prompt: "a red fox in a snowy forest",
   model: "z_image_turbo",
   seed: 20240719,
   size: 1024,
   thumb: 128,
-  base: "http://127.0.0.1:8000",
+  // base is resolved from --base / --host / --port / env in parseArgs (see resolveBaseUrl); the
+  // raw flag values below start unset so "not provided" is distinguishable from an explicit value.
+  base: undefined,
+  host: undefined,
+  port: undefined,
   out: resolve(REPO_ROOT, "apps/web/public/style-thumbs"),
   project: null,
   keepFull: null,
@@ -145,10 +164,41 @@ export function shouldSkip(path, force) {
 }
 
 /**
- * Parse `--flag value` / `--bool` argv into a resolved options object (DEFAULTS overlaid with
- * overrides). Unknown flags throw so a typo fails loud instead of silently no-op'ing.
+ * Validate a port value (from --port or SCENEWORKS_API_PORT) as a positive integer, throwing a
+ * clear error otherwise. `source` names the origin so the message points at the right knob.
  */
-export function parseArgs(argv) {
+export function parsePort(raw, source) {
+  const str = String(raw).trim();
+  const n = Number.parseInt(str, 10);
+  if (!/^\d+$/.test(str) || !Number.isInteger(n) || n <= 0) {
+    throw new Error(`${source} expects a positive integer port, got "${raw}"`);
+  }
+  return n;
+}
+
+/**
+ * Resolve the rust-api base URL from parsed flags + env. Order (exact):
+ *   1. `base` (from --base) → used verbatim (trailing slash already trimmed).
+ *   2. else `http://{host}:{port}` with host = --host | SCENEWORKS_API_HOST | 127.0.0.1
+ *      and port = --port | SCENEWORKS_API_PORT | 8000.
+ * env is injected (not read from process.env directly) so callers/tests stay pure.
+ */
+export function resolveBaseUrl({ base, host, port } = {}, env = {}) {
+  if (base != null) {
+    return String(base).replace(/\/+$/, "");
+  }
+  const h = host ?? env.SCENEWORKS_API_HOST ?? DEFAULT_HOST;
+  const rawPort = port ?? env.SCENEWORKS_API_PORT ?? DEFAULT_PORT;
+  const p = parsePort(rawPort, port != null ? "--port" : "SCENEWORKS_API_PORT");
+  return `http://${h}:${p}`;
+}
+
+/**
+ * Parse `--flag value` / `--bool` argv into a resolved options object (DEFAULTS overlaid with
+ * overrides). Unknown flags throw so a typo fails loud instead of silently no-op'ing. `env` is
+ * injected so base-URL resolution (resolveBaseUrl) is testable without mutating process.env.
+ */
+export function parseArgs(argv, env = process.env) {
   const opts = { ...DEFAULTS };
   const toInt = (flag, raw) => {
     const n = Number.parseInt(raw, 10);
@@ -189,6 +239,12 @@ export function parseArgs(argv) {
       case "--base":
         opts.base = next().replace(/\/+$/, "");
         break;
+      case "--host":
+        opts.host = next();
+        break;
+      case "--port":
+        opts.port = parsePort(next(), "--port");
+        break;
       case "--out":
         opts.out = next();
         break;
@@ -215,6 +271,8 @@ export function parseArgs(argv) {
         throw new Error(`Unknown flag: ${arg}`);
     }
   }
+  // Collapse --base / --host / --port / env into the single base URL the rest of the script uses.
+  opts.base = resolveBaseUrl({ base: opts.base, host: opts.host, port: opts.port }, env);
   return opts;
 }
 
@@ -382,7 +440,9 @@ function printHelp() {
       "  --size <px>         native gen size, sent as width+height (default: 1024)",
       "  --thumb <px>        final downscaled square size (default: 128)",
       "  --project <id>      target project (omit → auto-create a scratch project)",
-      "  --base <url>        rust-api base (default: http://127.0.0.1:8000)",
+      "  --base <url>        rust-api base URL, verbatim (overrides --host/--port and env)",
+      "  --host <h>          rust-api host (default: $SCENEWORKS_API_HOST or 127.0.0.1)",
+      "  --port <n>          rust-api port (default: $SCENEWORKS_API_PORT or 8000)",
       "  --out <dir>         thumbnail output dir (default: apps/web/public/style-thumbs)",
       "  --keep-full <dir>   also keep native-res PNGs here (default: discard after resize)",
       "  --limit <n>         only process the first N ids (testing)",
@@ -406,7 +466,8 @@ async function main() {
   }
 
   if (opts.dryRun) {
-    console.log(`DRY RUN — ${ids.length} id(s), no network calls, no files written.\n`);
+    console.log(`DRY RUN — ${ids.length} id(s), no network calls, no files written.`);
+    console.log(`target base: ${opts.base}\n`);
     ids.forEach((id, i) => {
       const prompt = composeThumbnailPrompt(id, opts.prompt);
       const payload = buildJobPayload({

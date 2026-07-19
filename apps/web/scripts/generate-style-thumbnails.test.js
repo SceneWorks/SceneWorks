@@ -165,3 +165,58 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["--bogus"])).toThrow(/Unknown flag/);
   });
 });
+
+describe("parseArgs base-URL resolution", () => {
+  // Empty env is injected so these assertions never depend on the real process.env.
+  const EMPTY = {};
+
+  it("defaults to http://127.0.0.1:8000 with no flags and empty env", () => {
+    expect(parseArgs([], EMPTY).base).toBe("http://127.0.0.1:8000");
+  });
+
+  it("--port composes onto the default host", () => {
+    expect(parseArgs(["--port", "8787"], EMPTY).base).toBe("http://127.0.0.1:8787");
+  });
+
+  it("--host + --port compose the full URL", () => {
+    expect(parseArgs(["--host", "192.168.1.50", "--port", "8787"], EMPTY).base).toBe(
+      "http://192.168.1.50:8787",
+    );
+  });
+
+  it("uses SCENEWORKS_API_PORT from injected env when no --port flag", () => {
+    expect(parseArgs([], { SCENEWORKS_API_PORT: "8787" }).base).toBe("http://127.0.0.1:8787");
+  });
+
+  it("uses SCENEWORKS_API_HOST from injected env when no --host flag", () => {
+    expect(parseArgs([], { SCENEWORKS_API_HOST: "10.0.0.9" }).base).toBe("http://10.0.0.9:8000");
+  });
+
+  it("--port flag overrides SCENEWORKS_API_PORT from env", () => {
+    expect(parseArgs(["--port", "9001"], { SCENEWORKS_API_PORT: "8787" }).base).toBe(
+      "http://127.0.0.1:9001",
+    );
+  });
+
+  it("--base overrides host, port, and env entirely", () => {
+    expect(
+      parseArgs(["--base", "http://lan.example:5555", "--host", "192.168.1.50", "--port", "8787"], {
+        SCENEWORKS_API_PORT: "8787",
+        SCENEWORKS_API_HOST: "10.0.0.9",
+      }).base,
+    ).toBe("http://lan.example:5555");
+  });
+
+  it("trims a trailing slash from --base so URL joins don't double-slash", () => {
+    expect(parseArgs(["--base", "http://127.0.0.1:8000/"], EMPTY).base).toBe("http://127.0.0.1:8000");
+  });
+
+  it("throws on a non-numeric --port", () => {
+    expect(() => parseArgs(["--port", "abc"], EMPTY)).toThrow(/positive integer port/);
+  });
+
+  it("throws on a zero / negative --port", () => {
+    expect(() => parseArgs(["--port", "0"], EMPTY)).toThrow(/positive integer port/);
+    expect(() => parseArgs(["--port", "-5"], EMPTY)).toThrow(/positive integer port/);
+  });
+});
