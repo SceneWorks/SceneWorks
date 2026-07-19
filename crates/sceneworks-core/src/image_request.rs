@@ -123,6 +123,12 @@ pub struct ImageRequest {
     pub width: u32,
     pub height: u32,
     pub style_preset: String,
+    /// The Style-catalog id the caller selected (sc-13134), a group id or a sub-style id, or
+    /// `None`. Dedicated field over the dead `style_preset`: the API resolves it to the catalog
+    /// style text and folds it into `prompt` (the `Style:`/`Description:` splice) before the
+    /// worker sees the payload, so the worker mainly records it for lineage/replay. The web sends
+    /// the already-composed prompt and omits this top-level id, so a re-parse never double-folds.
+    pub style_id: Option<String>,
     /// LoRA specs, passed through verbatim (shape resolved per family).
     pub loras: Vec<Value>,
     pub character_id: Option<String>,
@@ -180,6 +186,7 @@ impl ImageRequest {
                 MAX_DIMENSION,
             ),
             style_preset: nonempty_string_or(payload, "stylePreset", DEFAULT_STYLE_PRESET),
+            style_id: optional_id(payload, "styleId"),
             loras: array_or_empty(payload, "loras"),
             character_id: optional_id(payload, "characterId"),
             character_look_id: optional_id(payload, "characterLookId"),
@@ -247,6 +254,7 @@ mod tests {
         assert_eq!(request.width, 1024);
         assert_eq!(request.height, 1024);
         assert_eq!(request.style_preset, "cinematic");
+        assert!(request.style_id.is_none());
         assert_eq!(request.fit_mode, "crop");
         assert_eq!(request.prompt, "");
         assert!(request.seed.is_none());
@@ -273,6 +281,19 @@ mod tests {
             "projectId": "p", "upscale": "yes please"
         })));
         assert!(bad.upscale.is_disabled());
+    }
+
+    #[test]
+    fn parses_style_id_when_present() {
+        let request = ImageRequest::from_payload(&payload(json!({
+            "projectId": "p", "styleId": "ghibli-style"
+        })));
+        assert_eq!(request.style_id.as_deref(), Some("ghibli-style"));
+
+        // A blank id is treated as absent (optional_id trims/filters empties).
+        let blank =
+            ImageRequest::from_payload(&payload(json!({ "projectId": "p", "styleId": "  " })));
+        assert!(blank.style_id.is_none());
     }
 
     #[test]

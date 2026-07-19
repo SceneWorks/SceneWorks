@@ -22,6 +22,7 @@ pub mod project_store;
 pub mod session_log;
 pub mod slug;
 pub mod store_util;
+pub mod style_composer;
 pub mod time;
 pub mod training;
 pub mod training_store;

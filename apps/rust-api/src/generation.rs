@@ -23,6 +23,12 @@ pub(crate) async fn create_image_job(
     // job-create instead of 2–3× (sc-8819, F-017).
     let catalogs = JobCatalogSnapshot::default();
     apply_recipe_preset_to_image_payload(&state, &payload, &mut job_payload, &catalogs).await?;
+    // Style-catalog fold (sc-13134): a headless/MCP client that sends a `styleId` + raw prompt gets
+    // the SAME `Style:`/`Description:` composition the web app does. Runs AFTER the preset fold so it
+    // wraps the preset-composed prompt exactly as the web's composeStyledPrompt is the LAST wrap; a
+    // no-op for a web request (which sends the already-composed prompt + presetPromptResolvedClientSide
+    // and no top-level styleId), so a web-composed prompt is never double-folded.
+    crate::styles::apply_style_to_image_payload(&state, &payload, &mut job_payload).await?;
     // Ideogram 4 headless/API parity (sc-6519, fully async per sc-9120): a plain-text Ideogram 4 job
     // needs its prompt expanded into a rich JSON caption via the magic-prompt utility model — the same
     // separate prompt_refine job the web runs (sc-6501) — or it stochastically renders the safety-filter
