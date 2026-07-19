@@ -124,6 +124,9 @@ pub(crate) const MLX_MEMORY_CAP_ENV: &str = "SCENEWORKS_MLX_MEMORY_CAP_GB";
 /// RESOLUTION > 1024² grows the VAE-decode transient past 14 GiB — all four points are 1024², so 18 is
 /// a 1024²-worst-case; a higher-res campaign is a follow-up.
 const HEADROOM_GB: f64 = 18.0;
+/// Lens dense/bf16's measured 1024² activation transient. Its gpt-oss encoder is the only current
+/// MLX family whose architecture-bound transient exceeds the generic calibration (sc-11924).
+const LENS_DENSE_HEADROOM_GB: f64 = 29.88;
 
 /// Reserve (GiB) kept free for macOS + the SceneWorks app + other apps when the WEIGHTS-FIT FLOOR
 /// (sc-12179, GitHub #1544) admits a model whose predicted PEAK exceeds the budget. Deliberately
@@ -172,8 +175,13 @@ pub(crate) fn resolve_budget(real_total_gb: Option<f64>, cap: Option<f64>) -> Op
 
 /// Predicted whole-model peak (GiB) = summed component weight bytes + [`HEADROOM_GB`]. `None` when
 /// `weight_bytes == 0` (nothing measured ⇒ no signal ⇒ never block).
+#[cfg(test)]
 pub(crate) fn predicted_peak_gb(weight_bytes: u64) -> Option<f64> {
-    (weight_bytes > 0).then(|| weight_bytes as f64 / BYTES_PER_GIB + HEADROOM_GB)
+    predicted_peak_gb_with_headroom(weight_bytes, HEADROOM_GB)
+}
+
+fn predicted_peak_gb_with_headroom(weight_bytes: u64, headroom_gb: f64) -> Option<f64> {
+    (weight_bytes > 0).then(|| weight_bytes as f64 / BYTES_PER_GIB + headroom_gb)
 }
 
 /// Decide whether the predicted peak fits the budget. Missing either input ⇒ `Unknown` (never
@@ -199,13 +207,22 @@ pub(crate) fn fit_decision(needed_gb: Option<f64>, budget: Option<MemoryBudget>)
 /// `None` when nothing was measured (`total == 0`). When the text encoders are unmeasured
 /// (`te_bytes == 0`) this equals the resident peak — no claimed saving, so the second-stage overflow
 /// check then rejects exactly as the resident gate would (the safe fallback).
+#[cfg(test)]
 pub(crate) fn predicted_sequential_peak_gb(total_bytes: u64, te_bytes: u64) -> Option<f64> {
+    predicted_sequential_peak_gb_with_headroom(total_bytes, te_bytes, HEADROOM_GB)
+}
+
+fn predicted_sequential_peak_gb_with_headroom(
+    total_bytes: u64,
+    te_bytes: u64,
+    headroom_gb: f64,
+) -> Option<f64> {
     if total_bytes == 0 {
         return None;
     }
     let rest_bytes = total_bytes.saturating_sub(te_bytes);
     let staged_max = te_bytes.max(rest_bytes);
-    Some(staged_max as f64 / BYTES_PER_GIB + HEADROOM_GB)
+    Some(staged_max as f64 / BYTES_PER_GIB + headroom_gb)
 }
 
 /// Second-stage gate for a [`FitDecision::Offload`] (sc-10839): sequential residency was selected
@@ -532,13 +549,36 @@ pub(crate) enum ResidencyOutcome {
 /// (possibly emulated) budget, and whether the provider stages components, choose Resident /
 /// Sequential / Reject (sc-10839). No IO, no globals — the live [`apply_residency_policy`] resolves
 /// those and delegates here.
+#[cfg(test)]
 pub(crate) fn decide_residency(
     total_bytes: u64,
     te_bytes: u64,
     budget: Option<MemoryBudget>,
     sequential_capable: bool,
 ) -> ResidencyOutcome {
-    let base = decide_residency_by_peak(total_bytes, te_bytes, budget, sequential_capable);
+    decide_residency_with_headroom(
+        total_bytes,
+        te_bytes,
+        budget,
+        sequential_capable,
+        HEADROOM_GB,
+    )
+}
+
+fn decide_residency_with_headroom(
+    total_bytes: u64,
+    te_bytes: u64,
+    budget: Option<MemoryBudget>,
+    sequential_capable: bool,
+    headroom_gb: f64,
+) -> ResidencyOutcome {
+    let base = decide_residency_by_peak_with_headroom(
+        total_bytes,
+        te_bytes,
+        budget,
+        sequential_capable,
+        headroom_gb,
+    );
     // Weights-fit floor (sc-12179): a would-be reject is downgraded to a (best-effort) load when the
     // resident weights actually fit — the peak predictor's pageable transient must not categorically
     // exclude a small Mac. Any non-reject outcome stands as-is.
@@ -556,13 +596,33 @@ pub(crate) fn decide_residency(
 /// rejection message's `needed`/`staged` numbers, but it rejects too aggressively on small Macs
 /// because the flat headroom bundles a pageable 1024² activation transient (sc-12179); the caller
 /// folds in [`weights_fit_floor`] before honoring a reject.
+#[cfg(test)]
 fn decide_residency_by_peak(
     total_bytes: u64,
     te_bytes: u64,
     budget: Option<MemoryBudget>,
     sequential_capable: bool,
 ) -> ResidencyOutcome {
-    let resident = fit_decision(predicted_peak_gb(total_bytes), budget);
+    decide_residency_by_peak_with_headroom(
+        total_bytes,
+        te_bytes,
+        budget,
+        sequential_capable,
+        HEADROOM_GB,
+    )
+}
+
+fn decide_residency_by_peak_with_headroom(
+    total_bytes: u64,
+    te_bytes: u64,
+    budget: Option<MemoryBudget>,
+    sequential_capable: bool,
+    headroom_gb: f64,
+) -> ResidencyOutcome {
+    let resident = fit_decision(
+        predicted_peak_gb_with_headroom(total_bytes, headroom_gb),
+        budget,
+    );
     match resolve_offload(resident, sequential_capable) {
         FitDecision::Fits | FitDecision::Unknown => ResidencyOutcome::Resident,
         FitDecision::Offload {
@@ -570,7 +630,8 @@ fn decide_residency_by_peak(
             available_gb,
         } => {
             // Second stage: reject if even the staged max-single-component peak won't fit.
-            let staged = predicted_sequential_peak_gb(total_bytes, te_bytes);
+            let staged =
+                predicted_sequential_peak_gb_with_headroom(total_bytes, te_bytes, headroom_gb);
             match sequential_overflow_gb(staged, budget) {
                 Some(_) => ResidencyOutcome::Reject {
                     needed_gb,
@@ -654,7 +715,7 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
     match decide_residency_for_spec(engine_id, &spec) {
         ResidencyOutcome::Resident => Ok(spec),
         ResidencyOutcome::Sequential => {
-            let (total_bytes, te_bytes) = spec_component_bytes(engine_id, &spec);
+            let (total_bytes, te_bytes, _) = spec_component_bytes(engine_id, &spec);
             tracing::info!(
                 event = "mlx_sequential_residency_selected",
                 engine = %engine_id,
@@ -676,17 +737,27 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
 /// the `text_encoder*` subdir scan (which reads ZERO for boogu `mllm/`, bernini flat `t5_encoder`,
 /// anima `text_encoders/`, etc.), and folding a separate `spec.control` (qwen_image_control's VACE
 /// branch) into the HEAVY side so the staged split `rest = total − te` counts it on the DiT side.
-fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64) {
-    let footprint_te = crate::inference_runtime::media()
+fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64, f64) {
+    let footprint = crate::inference_runtime::media()
         .footprint(engine_id, spec)
         .ok()
-        .flatten()
-        .map(|fp| fp.text_encoder);
+        .flatten();
+    let footprint_te = footprint.map(|fp| fp.text_encoder);
+    let mut headroom_gb = HEADROOM_GB;
     let (mut total_bytes, te_bytes) = match &spec.weights {
-        WeightsSource::Dir(dir) => (
-            sum_safetensors_bytes(dir),
-            resolve_text_encoder_bytes(footprint_te, dir),
-        ),
+        WeightsSource::Dir(dir) => {
+            let mut total = sum_safetensors_bytes(dir);
+            let te = resolve_text_encoder_bytes(footprint_te, dir);
+            if matches!(engine_id, "lens" | "lens_turbo") {
+                let disk_te = sum_safetensors_bytes(&dir.join("text_encoder"));
+                let materialized_expansion = te.saturating_sub(disk_te);
+                total = total.saturating_add(materialized_expansion);
+                if spec.quantize.is_none() && packed_quant_bits(dir, "text_encoder").is_none() {
+                    headroom_gb = LENS_DENSE_HEADROOM_GB;
+                }
+            }
+            (total, te)
+        }
         // A single-file source has no diffusers component tree; honor a footprint TE if the provider
         // somehow computed one, else 0 (resident-or-reject only).
         WeightsSource::File(file) => (
@@ -697,7 +768,16 @@ fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64) {
     if let Some(control) = &spec.control {
         total_bytes += weights_source_bytes(control);
     }
-    (total_bytes, te_bytes)
+    (total_bytes, te_bytes, headroom_gb)
+}
+
+fn packed_quant_bits(root: &std::path::Path, component: &str) -> Option<i64> {
+    let config = std::fs::read(root.join(component).join("config.json")).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&config)
+        .ok()?
+        .get("quantization")?
+        .get("bits")?
+        .as_i64()
 }
 
 /// The residency outcome (Resident / Sequential / Reject) a `spec` would take against this machine's
@@ -707,12 +787,13 @@ fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64) {
 /// gate uses, so the seam's downtier choice and the cache's admission never disagree.
 pub(crate) fn decide_residency_for_spec(engine_id: &str, spec: &LoadSpec) -> ResidencyOutcome {
     let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
-    let (total_bytes, te_bytes) = spec_component_bytes(engine_id, spec);
-    decide_residency(
+    let (total_bytes, te_bytes, headroom_gb) = spec_component_bytes(engine_id, spec);
+    decide_residency_with_headroom(
         total_bytes,
         te_bytes,
         budget,
         engine_supports_sequential(engine_id),
+        headroom_gb,
     )
 }
 
@@ -800,6 +881,51 @@ mod tests {
         assert_eq!(predicted_peak_gb(bytes), Some(20.0 + HEADROOM_GB));
         // No measurable weights ⇒ no signal.
         assert_eq!(predicted_peak_gb(0), None);
+    }
+
+    #[test]
+    fn lens_dense_calibration_covers_the_measured_full_peak_without_blanket_inflation() {
+        let gib = BYTES_PER_GIB;
+        let lens_materialized = (45.67 * gib).ceil() as u64;
+        let lens_peak = predicted_peak_gb_with_headroom(lens_materialized, LENS_DENSE_HEADROOM_GB)
+            .expect("lens signal");
+        assert!(lens_peak >= 75.55, "{lens_peak} GiB must cover 75.55 GiB");
+
+        // A bf16-on-disk family keeps the generic calculation; no global dense-tier multiplier.
+        let ordinary_bf16 = (28.43 * gib).ceil() as u64;
+        let ordinary_peak = predicted_peak_gb(ordinary_bf16).expect("ordinary signal");
+        assert!((ordinary_peak - 46.43).abs() < 1e-6);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn lens_provider_footprint_expands_only_the_dense_turnkey() {
+        let root = std::env::temp_dir().join(format!(
+            "mlx_fit_gate_sc11924_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        for (component, bytes) in [("text_encoder", 13), ("transformer", 11), ("vae", 3)] {
+            let dir = root.join(component);
+            std::fs::create_dir_all(&dir).expect("component dir");
+            std::fs::write(dir.join("model.safetensors"), vec![0; bytes]).expect("fixture");
+        }
+        let spec = LoadSpec::new(WeightsSource::Dir(root.clone()));
+        let (dense_total, dense_te, dense_headroom) = spec_component_bytes("lens_turbo", &spec);
+        let expected_te = (30.07 * BYTES_PER_GIB).ceil() as u64;
+        assert_eq!(dense_te, expected_te);
+        assert_eq!(dense_total, expected_te + 14);
+        assert_eq!(dense_headroom, LENS_DENSE_HEADROOM_GB);
+
+        std::fs::write(
+            root.join("text_encoder").join("config.json"),
+            r#"{"quantization":{"bits":8,"group_size":64}}"#,
+        )
+        .expect("packed marker");
+        let (packed_total, packed_te, packed_headroom) = spec_component_bytes("lens_turbo", &spec);
+        assert_eq!((packed_total, packed_te), (27, 13));
+        assert_eq!(packed_headroom, HEADROOM_GB);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
