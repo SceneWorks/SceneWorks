@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { buildImageJobRequest } from "./imageJobRequest.js";
 import { composeStyledPrompt } from "./styleComposer.js";
+import { styleTextForId } from "./data/styleCatalog.js";
 
 // sc-13130: the Style Catalog composer is applied as the LAST wrap on the outgoing `prompt` inside
 // buildImageJobRequest. These tests pin (a) identity when no style is selected, (b) exact
@@ -131,5 +132,83 @@ describe("buildImageJobRequest — Style Catalog fold (sc-13130)", () => {
     );
     expect(req.prompt).toBe(caption);
     expect(req.presetPromptResolvedClientSide).toBeUndefined();
+  });
+});
+
+// sc-13132: the recipe must reproduce the SAME style composition on replay. The picked style id and
+// the RAW pre-style prompt ride `advanced` (→ the asset's rawAdapterSettings, cloned verbatim by the
+// worker, no backend change). These tests pin (a) that both are recorded only when a style is
+// applied, (b) that the id round-trips for a sub-style id AND a group id, and (c) the load-bearing
+// guarantee: replaying the recorded fields recomposes the IDENTICAL prompt with no double-wrap.
+describe("buildImageJobRequest — Style Catalog recipe round-trip (sc-13132)", () => {
+  const SUBSTYLE_ID = "ghibli-style"; // a sub-style id in styles.json
+  const GROUP_ID = "anime-style"; // a group id (the group's generic "overall" style, sc-13171)
+
+  it("no style selected → advanced records neither styleId nor stylePrompt", () => {
+    const req = buildImageJobRequest(baseState({ styleText: null, styleId: null }));
+    expect(req.advanced.styleId).toBeUndefined();
+    expect(req.advanced.stylePrompt).toBeUndefined();
+  });
+
+  it("style applied → advanced records the picked styleId and the RAW pre-style prompt", () => {
+    const req = buildImageJobRequest(
+      baseState({ styleText: STYLE_TEXT, styleId: SUBSTYLE_ID, promptToSend: "a fox in the snow" }),
+    );
+    expect(req.advanced.styleId).toBe(SUBSTYLE_ID);
+    // The stored prompt is the RAW (pre-style) prompt, NOT the composed top-level prompt.
+    expect(req.advanced.stylePrompt).toBe("a fox in the snow");
+    expect(req.advanced.stylePrompt).not.toBe(req.prompt);
+  });
+
+  it("a style with no user prose still round-trips exactly (stylePrompt = \"\")", () => {
+    const req = buildImageJobRequest(
+      baseState({ styleText: STYLE_TEXT, styleId: SUBSTYLE_ID, promptToSend: "" }),
+    );
+    expect(req.advanced.styleId).toBe(SUBSTYLE_ID);
+    expect(req.advanced.stylePrompt).toBe("");
+  });
+
+  // Simulate the studio: resolve the picked id → styleText (ImageStudio's styleTextForId bridge),
+  // build the job, then REPLAY by reading the recorded advanced.{styleId, stylePrompt} exactly as
+  // the rehydrate effect does, and rebuild. Asserts the composed prompt is bit-identical and never
+  // double-wrapped, for BOTH a sub-style id and a group id.
+  for (const styleId of [SUBSTYLE_ID, GROUP_ID]) {
+    it(`replay of a recorded recipe (${styleId}) recomposes the identical prompt — no double-wrap`, () => {
+      const RAW = "a fox in the snow";
+      const styleText = styleTextForId(styleId);
+      expect(typeof styleText).toBe("string"); // guards a stale test id
+
+      // Original generate.
+      const original = buildImageJobRequest(
+        baseState({ styleText, styleId, promptToSend: RAW }),
+      );
+      // The recipe records these two facts (advanced → rawAdapterSettings).
+      const recorded = { styleId: original.advanced.styleId, stylePrompt: original.advanced.stylePrompt };
+      expect(recorded.styleId).toBe(styleId);
+      expect(recorded.stylePrompt).toBe(RAW);
+
+      // Replay: the rehydrate effect re-selects the picker (recorded.styleId) and seeds the box with
+      // the RAW prompt (recorded.stylePrompt); the next submit resolves styleText from the id again.
+      const replay = buildImageJobRequest(
+        baseState({ styleText: styleTextForId(recorded.styleId), styleId: recorded.styleId, promptToSend: recorded.stylePrompt }),
+      );
+      expect(replay.prompt).toBe(original.prompt);
+      // Exactly one Style: block — the composer did not wrap an already-composed prompt.
+      expect(replay.prompt.match(/^Style:/gm)?.length ?? 0).toBe(1);
+    });
+  }
+
+  it("proves the trap the raw-prompt storage avoids: recomposing over the COMPOSED prompt double-wraps", () => {
+    const RAW = "a fox in the snow";
+    const composed = buildImageJobRequest(
+      baseState({ styleText: STYLE_TEXT, styleId: SUBSTYLE_ID, promptToSend: RAW }),
+    ).prompt;
+    // If replay had (wrongly) seeded the box with the COMPOSED prompt while keeping the style
+    // applied, the composer would merge a second copy of the style into the Style: block.
+    const doubleWrapped = buildImageJobRequest(
+      baseState({ styleText: STYLE_TEXT, styleId: SUBSTYLE_ID, promptToSend: composed }),
+    ).prompt;
+    expect(doubleWrapped).not.toBe(composed);
+    expect(doubleWrapped.startsWith(`Style: ${STYLE_TEXT}, ${STYLE_TEXT}`)).toBe(true);
   });
 });

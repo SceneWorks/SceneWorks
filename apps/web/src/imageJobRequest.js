@@ -44,6 +44,10 @@ export function buildImageJobRequest(state) {
     // or null/"" when no style is selected. The caller resolves this from the selected style id; the
     // builder needs the text (not the id) because the composer wraps prose, not a catalog reference.
     styleText,
+    // sc-13132: the OPAQUE style id (a group id or a sub-style id) the user picked, or null. The text
+    // (styleText) drives composition; the id is what the recipe records so replay can re-select the
+    // exact Style picker entry (styleText alone can't be resolved back to a picker selection).
+    styleId,
     characterId,
     characterLookId,
     multiReference,
@@ -228,6 +232,12 @@ export function buildImageJobRequest(state) {
       controlPassthroughId,
       effectiveControlScale,
       controlOverlayId,
+      // sc-13132: record the picked style id + the RAW pre-style prompt in `advanced` (→
+      // rawAdapterSettings) ONLY when a style is applied, so replay restores the picker + recomposes
+      // the identical prompt without double-wrapping. `promptToSend` is the pre-style userPrompt the
+      // composer wrapped above, so it is exactly the input that reproduces `composedPrompt`.
+      styleId: styleApplied ? styleId : undefined,
+      styleUserPrompt: styleApplied ? promptToSend : undefined,
     }),
   };
 }
