@@ -37,6 +37,8 @@ import json
 import re
 from pathlib import Path
 
+import jsonschema
+
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "config" / "manifests" / "builtin.models.jsonc"
 SCHEMA_PATH = ROOT / "packages" / "schemas" / "model-manifest.schema.json"
@@ -89,6 +91,69 @@ def _strip_jsonc_comments(body: str) -> str:
 def _load_builtin_models_manifest() -> dict:
     raw = MANIFEST_PATH.read_text(encoding="utf-8")
     return json.loads(_strip_jsonc_comments(raw))
+
+
+def test_builtin_models_manifest_satisfies_authoring_schema():
+    """sc-12338: the builtin catalog's $schema is an enforced CI contract."""
+    manifest = _load_builtin_models_manifest()
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator.check_schema(schema)
+    errors = sorted(
+        jsonschema.Draft202012Validator(schema).iter_errors(manifest),
+        key=lambda error: list(error.absolute_path),
+    )
+    assert not errors, "builtin.models.jsonc violates model-manifest.schema.json:\n" + "\n".join(
+        f"- {'.'.join(map(str, error.absolute_path)) or '<root>'}: {error.message}"
+        for error in errors
+    )
+
+
+def test_builtin_schema_rejects_an_unknown_closed_model_key():
+    """Mutation guard: a typo/decorative builtin key must make the CI gate fail."""
+    manifest = _load_builtin_models_manifest()
+    manifest["models"][0]["recommendded"] = True
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
+    assert any("recommendded" in error.message for error in errors)
+
+
+def _duplicate_default_downloads(manifest: dict) -> list[str]:
+    """Return model/platform pairs with ambiguous primary download selection."""
+    ambiguous: list[str] = []
+    for model in manifest["models"]:
+        downloads = model.get("downloads", [])
+        for platform in ("macos", "windows", "linux"):
+            defaults = [
+                download
+                for download in downloads
+                if download.get("default") is True
+                and download.get("coRequisite") is not True
+                and (
+                    "platforms" not in download
+                    or platform in download.get("platforms", [])
+                )
+            ]
+            if len(defaults) > 1:
+                ambiguous.append(f"{model['id']}:{platform}")
+    return ambiguous
+
+
+def test_builtin_download_defaults_are_unique_per_platform():
+    """A model may have one primary default per OS, never two applicable defaults."""
+    assert not _duplicate_default_downloads(_load_builtin_models_manifest())
+
+
+def test_download_default_guard_rejects_an_ambiguous_platform_mutation():
+    """Mutation guard for the platform-aware replacement of schema maxContains."""
+    manifest = _load_builtin_models_manifest()
+    model = next(model for model in manifest["models"] if model["id"] == "wan_2_2")
+    windows_download = next(
+        download
+        for download in model["downloads"]
+        if download.get("variant") == "q8" and "windows" in download.get("platforms", [])
+    )
+    windows_download["default"] = True
+    assert _duplicate_default_downloads(manifest) == ["wan_2_2:windows", "wan_2_2:linux"]
 
 
 def test_manifest_constraint_contract_registry_is_complete_and_live():
