@@ -1987,3 +1987,78 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
     expect(payload.advanced.controlScale).toBe(0.75);
   });
 });
+
+// Persistent studio screens now snapshot loadedBatchId, so a restart restores a batch that is
+// still "loaded" — Save is stuck on "Update" with no path back to a blank batch. "New batch"
+// unlinks and clears the authoring fields; the cleared state must also persist to the snapshot.
+describe("Image Studio batch — New batch clears a restored loaded batch", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const batchSaveButton = () =>
+    [...document.body.querySelectorAll(".batch-save .batch-btn")].find((b) => /Save|Update/.test(b.textContent));
+
+  it("restores a loaded batch as Update, then New batch clears it back to a fresh Save", async () => {
+    const savedBatch = { id: "batch-1", name: "Turnaround", scope: "global", prompts: ["a", "b"], variables: [], lastValues: {} };
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        mode: "text_to_image",
+        model: "z_image_turbo",
+        batchMode: true,
+        batchName: "Turnaround",
+        batchPromptsText: "a\nb",
+        loadedBatchId: "batch-1",
+      }),
+    );
+
+    await render(
+      baseContext({
+        promptBatches: [savedBatch],
+        createPromptBatch: vi.fn(async () => ({ id: "new" })),
+        updatePromptBatch: vi.fn(async () => ({ id: "batch-1" })),
+        deletePromptBatch: vi.fn(),
+      }),
+    );
+
+    // Restored linked-to-a-saved-batch state: name + prompts filled, Save reads Update.
+    expect(document.body.querySelector(".batch-name").value).toBe("Turnaround");
+    expect(document.body.querySelector(".batch-prompts").value).toBe("a\nb");
+    expect(batchSaveButton().textContent).toContain("Update");
+
+    // Click New batch → unlink + clear the authoring fields, Save flips back to Save.
+    await click(document.body.querySelector(".batch-new-link"));
+
+    expect(document.body.querySelector(".batch-name").value).toBe("");
+    expect(document.body.querySelector(".batch-prompts").value).toBe("");
+    expect(batchSaveButton().textContent).toContain("Save");
+    expect(document.body.querySelector(".batch-new-link")).toBeNull();
+
+    // The cleared state persists so a subsequent restart stays fresh, not re-linked.
+    const snap = JSON.parse(window.localStorage.getItem("sceneworks-studio-image-project_1") || "{}");
+    expect(snap.loadedBatchId ?? null).toBeNull();
+    expect(snap.batchName).toBe("");
+  });
+});

@@ -414,6 +414,18 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         adapter_label: "mlx_sensenova",
     },
     ModelRow {
+        // Infographic-V3 (epic 13095): tensor-identical checkpoint refresh of the base NEO-unify model
+        // (config.json + 1,116 tensor keys byte-identical to V2, verified), so it rides the SAME engine
+        // (`engine_id: "sensenova_u1_8b"`) with no engine change — only a distinct SceneWorks quant-matrix
+        // re-host. Same defaults as the base. Coexists with V2 (new id; V2 stays loadable).
+        sceneworks_id: "sensenova_u1_8b_infographic_v3",
+        engine_id: "sensenova_u1_8b",
+        default_repo: "SceneWorks/sensenova-u1-8b-infographic-v3-mlx",
+        default_steps: 50,
+        default_guidance: 4.0,
+        adapter_label: "mlx_sensenova",
+    },
+    ModelRow {
         sceneworks_id: "sensenova_u1_8b_fast",
         engine_id: "sensenova_u1_8b_fast",
         // sc-8775: SceneWorks MLX quant-matrix re-host of the *distilled* variant — q4/q8/bf16 packed
@@ -434,6 +446,18 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         sceneworks_id: "sensenova_u1_8b_infographic_v2_fast",
         engine_id: "sensenova_u1_8b_fast",
         default_repo: "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
+        default_steps: 8,
+        default_guidance: 1.0,
+        adapter_label: "mlx_sensenova",
+    },
+    ModelRow {
+        // Infographic-V3 8-step distilled variant (epic 13095): the V1 distill LoRA is expected to merge
+        // onto V3 as cleanly as onto V2 (tensor-identical gen-path targets — verified in the re-host, S3).
+        // Same pre-merged + packed layout as the base fast (distill_merged.json marker → load_fast skip),
+        // so it rides the SAME `sensenova_u1_8b_fast` engine id — only the re-host repo differs.
+        sceneworks_id: "sensenova_u1_8b_infographic_v3_fast",
+        engine_id: "sensenova_u1_8b_fast",
+        default_repo: "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx",
         default_steps: 8,
         default_guidance: 1.0,
         adapter_label: "mlx_sensenova",
@@ -1485,8 +1509,10 @@ mod tests {
         "lens_turbo",
         "sensenova_u1_8b",
         "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v3",
         "sensenova_u1_8b_fast",
         "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3_fast",
         "flux_schnell",
         "flux_dev",
         "ideogram_4",
