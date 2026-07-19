@@ -2786,7 +2786,7 @@ label {
    scopes. */
 .document-studio .studio-form {
   display: grid;
-  gap: var(--gap-4);
+  gap: 16px;
 }
 
 .document-studio .field {
@@ -2823,6 +2823,509 @@ label {
 
 .document-studio .studio-form > .primary-action {
   justify-self: start;
+  min-height: 44px;
+}
+
+/* Document Studio — "Guided Compose" (1a) redesign (Document Studio usability).
+   Quick-start scaffolds, a brief-tips card, starter chips, a reorderable storyboard
+   with the reference-guidance slider, all on the shared tokens/chrome. */
+
+/* Quick-starts row (replaces the flat document-type control). */
+.doc-quickstarts {
+  display: grid;
+  gap: 8px;
+}
+
+.doc-quickstarts-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.doc-quickstarts-note {
+  font-weight: 500;
+  color: var(--text-faint);
+}
+
+.doc-quickstart-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.doc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out);
+}
+
+.doc-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.doc-chip-blank {
+  border-style: dashed;
+  border-color: var(--border-strong);
+}
+
+.doc-chip-blank:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.doc-chip.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.doc-quickstart-more {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* Prompt + brief-tips two-column grid. */
+.doc-compose-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.doc-prompt-field textarea {
+  width: 100%;
+  min-height: 132px;
+  resize: vertical;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 11px 12px;
+  color: var(--text);
+  font: 400 13.5px/1.55 var(--font-ui);
+}
+
+.doc-tips {
+  display: grid;
+  gap: 8px;
+  padding: 13px 15px;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.doc-tips-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.doc-tips-title svg {
+  color: var(--accent-strong);
+}
+
+.doc-tips-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.doc-tips-list li {
+  display: flex;
+  gap: 8px;
+}
+
+.doc-tips-num {
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+/* Starters row (full-width). */
+.doc-starters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+}
+
+.doc-starters-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-faint);
+  margin-right: 2px;
+}
+
+.doc-starter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: var(--r-pill);
+  border: 1px dashed var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out);
+}
+
+.doc-starter-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.doc-starter-plus {
+  font-weight: 700;
+}
+
+/* Storyboard block. */
+.doc-storyboard {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.doc-storyboard-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.doc-storyboard-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.doc-storyboard-note {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
+.doc-storyboard-count {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.doc-storyboard-explainer {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 11px 13px;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.doc-storyboard-eye {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--accent-strong);
+}
+
+.doc-storyboard-explainer-body {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.doc-storyboard-explainer-body strong {
+  color: var(--text);
+}
+
+.doc-storyboard-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.doc-storyboard-examples-lead {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.doc-storyboard-example {
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.doc-filmstrip {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.doc-frame {
+  flex: 0 0 168px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.doc-frame-thumb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 104px;
+  padding: 0;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: repeating-linear-gradient(
+    45deg,
+    color-mix(in oklch, var(--accent) 14%, var(--surface)) 0 8px,
+    var(--surface) 8px 16px
+  );
+  color: var(--text-faint);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color var(--t-fast) var(--ease-out);
+}
+
+.doc-frame-thumb:hover {
+  border-color: var(--accent);
+}
+
+.doc-frame-thumb.has-image {
+  background: var(--surface);
+}
+
+.doc-frame-thumb.drag-over {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+/* AssetThumbnail puts this class on the <img>/<span> itself, so size + cover it directly. */
+.doc-frame-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.doc-frame-placeholder {
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.doc-frame-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  z-index: 1;
+}
+
+.doc-frame-handle {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1;
+  cursor: grab;
+  z-index: 1;
+}
+
+.doc-frame-thumb.has-image .doc-frame-handle {
+  color: var(--paper, #fff);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+.doc-frame-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.doc-frame-caption {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  font: 500 12px/1 var(--font-ui);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.doc-frame-remove {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out);
+}
+
+.doc-frame-remove:hover {
+  color: var(--danger, oklch(0.7 0.16 20));
+  border-color: var(--border);
+}
+
+.doc-frame-add {
+  flex: 0 0 120px;
+  align-self: flex-start;
+  height: 104px;
+  border-radius: var(--r-sm);
+  border: 1px dashed var(--border-strong);
+  background: var(--surface);
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out);
+}
+
+.doc-frame-add:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.doc-storyboard-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 2px 0;
+}
+
+/* Reference-guidance slider (image CFG for the reference frames). */
+.doc-refguidance {
+  display: grid;
+  gap: 9px;
+}
+
+.doc-refguidance-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.doc-refguidance-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.doc-refguidance-note {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
+.doc-refguidance-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  padding: 2px 9px;
+  border-radius: var(--r-pill);
+}
+
+.doc-refguidance-slider {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.doc-refguidance-ends {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.doc-refguidance-hint {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-faint);
+}
+
+/* Advanced disclosure — keep the GPU select compact like the design. */
+.document-studio .doc-advanced-gpu {
+  display: grid;
+  gap: 6px;
+  max-width: 220px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+/* System prompt reads as a mono config field in the design. */
+.document-studio .document-system-prompt textarea {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+@media (max-width: 720px) {
+  .doc-compose-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* The document reader is single-column — override ImageStudio's results+rail grid. */
