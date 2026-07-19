@@ -119,7 +119,12 @@ import {
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
-import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
+import {
+  batchPromptBudgetMessage,
+  batchPromptBudgetOverages,
+  imageBatchValidation,
+  imageGenerateValidation,
+} from "../imageStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import {
@@ -2084,6 +2089,19 @@ export function ImageStudio() {
     if (!resolved.length) {
       return;
     }
+    const promptBudgetOverages = batchPromptBudgetOverages(
+      stylePreviewActive && !structuredPromptModel
+        ? resolved.map(({ prompt: resolvedPrompt }) => {
+            const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
+            return buildBatchJobRequest(cleanPrompt).prompt;
+          })
+        : [],
+    );
+    if (promptBudgetOverages.length) {
+      setBatchError(batchPromptBudgetMessage(promptBudgetOverages));
+      setBatchConfirmPending(false);
+      return;
+    }
     if (dimensionsInvalid) {
       setBatchError("Width and height must each be between 256 and 4096.");
       return;
@@ -2180,6 +2198,9 @@ export function ImageStudio() {
   // auto-write a caption per resolved prompt (sc-9980).
   const batchStructuredExpandBlocked =
     structuredPromptModel && (magicModelMissing || typeof magicPrompt !== "function");
+  const activeStyleText = styleTextForId(styleId);
+  const stylePreviewActive =
+    !structuredPromptModel && typeof activeStyleText === "string" && activeStyleText.trim() !== "";
   // One summary per CTA (epic 10644): the button's `disabled` and the message it owes the
   // user come from the same issue list and cannot drift. Two independent rule sets — the
   // batch's problems must never disable single-image Generate. The drafts gather the
@@ -2195,7 +2216,14 @@ export function ImageStudio() {
       minDimension: MIN_IMAGE_DIMENSION,
       maxDimension: MAX_IMAGE_DIMENSION,
     }),
-    [activeProject, batchStructuredExpandBlocked, batchTotal, batchMissingKeys, batchGroupIssues, batchResolutionIssues],
+    [
+      activeProject,
+      batchStructuredExpandBlocked,
+      batchTotal,
+      batchMissingKeys,
+      batchGroupIssues,
+      batchResolutionIssues,
+    ],
   );
   // sc-13131 / sc-13133: the live composed-prompt preview for the selected Style Catalog entry, and
   // the budget the composed string spends against the backend cap. ANTI-DRIFT: we do NOT re-derive
@@ -2207,9 +2235,6 @@ export function ImageStudio() {
   // free-text models with a style actually selected: the style-row is hidden for structured-caption
   // models (which serialize a caption the composer can't wrap), and a null/empty styleText is a
   // pass-through with nothing extra to preview and no style-composition budget to guard.
-  const activeStyleText = styleTextForId(styleId);
-  const stylePreviewActive =
-    !structuredPromptModel && typeof activeStyleText === "string" && activeStyleText.trim() !== "";
   const styledPreviewPrompt = stylePreviewActive ? buildJobRequest({ promptToSend: prompt }).prompt : null;
   const generateDraft = useMemo(
     () => ({

@@ -20,6 +20,7 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
 
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
     container = document.createElement("div");
     document.body.appendChild(container);
     createImageJob = vi.fn(() => Promise.resolve({ id: "image-job-1" }));
@@ -134,6 +135,28 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
     const submittedPrompt = await submitAndReadPayloadPrompt();
     // The DoD: what the user SEES is exactly what is SENT.
     expect(shown).toBe(submittedPrompt);
+  });
+
+  it("blocks a styled batch before submit and identifies every over-cap resolved item", async () => {
+    const longPrompt = "x".repeat(3500);
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project-1",
+      JSON.stringify({ batchMode: true, batchPromptsText: `${longPrompt}\nshort\n${longPrompt}` }),
+    );
+    await renderStudio();
+    await selectStyle(firstStyle.name);
+
+    const run = [...document.body.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch"));
+    await act(async () => {
+      run.click();
+    });
+    await settle();
+
+    expect(createImageJob).not.toHaveBeenCalled();
+    const warning = [...document.body.querySelectorAll(".batch-warning")].find((node) =>
+      node.textContent.includes("character limit"),
+    );
+    expect(warning?.textContent).toMatch(/^Batch prompts 1 \(\d+\/4000\), 3 \(\d+\/4000\) exceed/);
   });
 
   it("updates live as the prompt changes, staying equal to the payload", async () => {

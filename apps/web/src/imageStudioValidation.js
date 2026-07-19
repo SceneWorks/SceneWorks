@@ -12,6 +12,20 @@ import { presetLoraIssues } from "./generationValidation.js";
 import { promptBudget } from "./styleComposer.js";
 import { issue } from "./validation/issues.js";
 
+export function batchPromptBudgetOverages(composedPrompts = []) {
+  return composedPrompts.flatMap((prompt, index) => {
+    const budget = promptBudget(prompt);
+    return budget.over ? [{ item: index + 1, ...budget }] : [];
+  });
+}
+
+export function batchPromptBudgetMessage(overages = []) {
+  const items = overages.map(({ item, length, max }) => `${item} (${length}/${max})`).join(", ");
+  return `Batch prompt${overages.length === 1 ? "" : "s"} ${items} exceed${
+    overages.length === 1 ? "s" : ""
+  } the character limit — shorten the prompt or pick a shorter style.`;
+}
+
 // Single-image Generate. The conditions whose message already has a home stay OUT of
 // here and remain plain gates in the button's `disabled` expression:
 //   - a structured caption's field errors are listed inside StructuredPromptBuilder;
@@ -95,6 +109,7 @@ export function imageBatchValidation({
   missingKeys = [],
   groupIssues = [],
   resolutionIssues = [],
+  promptBudgetOverages = [],
   minDimension,
   maxDimension,
 } = {}) {
@@ -126,6 +141,9 @@ export function imageBatchValidation({
     issues.push(
       issue.error(null, `A prompt’s [${res.width}×${res.height}] size is out of range — each side must be ${minDimension}–${maxDimension}.`),
     );
+  }
+  if (promptBudgetOverages.length) {
+    issues.push(issue.error(null, batchPromptBudgetMessage(promptBudgetOverages)));
   }
   if (batchTotal === 0) {
     issues.push(issue.requirement("prompts", "Add at least one prompt to run a batch."));

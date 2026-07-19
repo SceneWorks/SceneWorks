@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { summarize } from "./validation/issues.js";
-import { imageBatchValidation, imageGenerateValidation } from "./imageStudioValidation.js";
+import {
+  batchPromptBudgetOverages,
+  imageBatchValidation,
+  imageGenerateValidation,
+} from "./imageStudioValidation.js";
 import { composeStyledPrompt, PROMPT_MAX_CHARS } from "./styleComposer.js";
 
 // The two Image Studio CTA gates in the app-wide vocabulary (epic 10649). The kinds are the
@@ -174,6 +178,7 @@ describe("imageBatchValidation", () => {
     missingKeys: [],
     groupIssues: [],
     resolutionIssues: [],
+    promptBudgetOverages: [],
     minDimension: 256,
     maxDimension: 4096,
   };
@@ -199,6 +204,41 @@ describe("imageBatchValidation", () => {
   it("surfaces an out-of-range resolution with the offending size", () => {
     const summary = summarize(imageBatchValidation({ ...whole, resolutionIssues: [{ width: 5000, height: 300 }] }));
     expect(summary.surfaced[0].message).toBe("A prompt’s [5000×300] size is out of range — each side must be 256–4096.");
+  });
+
+  it("blocks at 4001 Unicode scalars, allows 4000, and identifies every offending resolved item", () => {
+    const composedPrompts = [
+      "😀".repeat(PROMPT_MAX_CHARS),
+      "a".repeat(PROMPT_MAX_CHARS + 1),
+      "ok",
+      "😀".repeat(PROMPT_MAX_CHARS + 2),
+    ];
+    const overages = batchPromptBudgetOverages(composedPrompts);
+    expect(overages).toEqual([
+      { item: 2, length: 4001, max: 4000, remaining: -1, over: true },
+      { item: 4, length: 4002, max: 4000, remaining: -2, over: true },
+    ]);
+
+    const summary = summarize(imageBatchValidation({ ...whole, promptBudgetOverages: overages }));
+    expect(summary.ready).toBe(false);
+    expect(summary.surfaced[0].message).toBe(
+      "Batch prompts 2 (4001/4000), 4 (4002/4000) exceed the character limit — shorten the prompt or pick a shorter style.",
+    );
+  });
+
+  it("catches a batch item whose short raw prompt only exceeds the cap after style composition", () => {
+    const rawPrompt = "a fox";
+    const composedPrompt = composeStyledPrompt({
+      styleText: "x".repeat(PROMPT_MAX_CHARS),
+      userPrompt: rawPrompt,
+    });
+    expect([...rawPrompt].length).toBeLessThan(PROMPT_MAX_CHARS);
+    expect([...composedPrompt].length).toBeGreaterThan(PROMPT_MAX_CHARS);
+
+    const overages = batchPromptBudgetOverages([composedPrompt]);
+    expect(overages).toHaveLength(1);
+    expect(overages[0]).toMatchObject({ item: 1, length: [...composedPrompt].length, max: PROMPT_MAX_CHARS });
+    expect(summarize(imageBatchValidation({ ...whole, promptBudgetOverages: overages })).ready).toBe(false);
   });
 
   // The batch panel renders surfaced[0]; the rules must push in the same priority order the
