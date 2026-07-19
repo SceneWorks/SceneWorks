@@ -2190,6 +2190,7 @@
       "ui": {
         "label": "User"
       },
+      "updateAvailable": false,
       "variants": [
         {
           "cacheState": "missing",
@@ -2251,6 +2252,7 @@
       "ui": {
         "label": "Z-Image"
       },
+      "updateAvailable": false,
       "variants": []
     }
   ],
