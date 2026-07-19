@@ -117,6 +117,98 @@ def test_builtin_schema_rejects_an_unknown_closed_model_key():
     assert any("recommendded" in error.message for error in errors)
 
 
+def _sample_audio_model_entry() -> dict:
+    """A representative `type: "audio"` entry exercising every field of the new
+    `audio` capability sub-block (sc-13401, epic 13400). Not a shipped model —
+    real audio entries land in sc-13402 — so it lives in the test, not the
+    builtin manifest.
+    """
+    return {
+        "id": "sample_audio_speech",
+        "name": "Sample Audio Speech",
+        "type": "audio",
+        "audio": {
+            "voices": [
+                {
+                    "id": "af_heart",
+                    "label": "Heart",
+                    "gender": "female",
+                    "accent": "american",
+                    "language": "en-US",
+                },
+                {"id": "bm_george", "gender": "male", "accent": "british"},
+            ],
+            "languages": ["en-US", "en-GB"],
+            "sampleRates": [24000, 48000],
+            "maxDurationSecs": 30.0,
+            "editModes": ["extend", "inpaint", "cover"],
+            "supportsMultiSpeaker": True,
+            "conditioning": ["AudioEdit", "ReferenceAudio", "VoiceEmbedding"],
+        },
+    }
+
+
+def test_schema_accepts_audio_type_and_audio_sub_block():
+    """sc-13401: a `type: "audio"` entry with a populated `audio` sub-block
+    validates against the authoring schema (the new sibling of mlx/candle)."""
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator.check_schema(schema)
+    manifest = {"schemaVersion": 1, "models": [_sample_audio_model_entry()]}
+    errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
+    assert not errors, "sample audio entry must satisfy the schema:\n" + "\n".join(
+        f"- {'.'.join(map(str, error.absolute_path)) or '<root>'}: {error.message}"
+        for error in errors
+    )
+
+
+def test_schema_rejects_unknown_field_under_audio_sub_block():
+    """Mutation guard: the `audio` block is additionalProperties:false, so a typo
+    / undeclared field under it must fail validation."""
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    entry = _sample_audio_model_entry()
+    entry["audio"]["bogusField"] = True
+    manifest = {"schemaVersion": 1, "models": [entry]}
+    errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
+    assert any("bogusField" in error.message for error in errors), (
+        "an unknown key under `audio` must be rejected by additionalProperties:false"
+    )
+
+
+def test_schema_rejects_audio_voice_without_id():
+    """A voice object requires `id` so the picker always has a backend key."""
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    entry = _sample_audio_model_entry()
+    entry["audio"]["voices"] = [{"label": "No Id", "gender": "female"}]
+    manifest = {"schemaVersion": 1, "models": [entry]}
+    errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
+    # Discriminate on the jsonschema error's shape, not a substring of its
+    # message: a loose `"id" in error.message` incidentally matches unrelated
+    # errors (e.g. a type-enum error listing "video", which contains "id"), so
+    # it could false-green under a full schema revert. Pin the `required`
+    # keyword, its `["id"]` value, and the path at the voice item instead — this
+    # only holds while the voice object's `required: ["id"]` is present.
+    assert any(
+        error.validator == "required"
+        and error.validator_value == ["id"]
+        and list(error.absolute_path) == ["models", 0, "audio", "voices", 0]
+        for error in errors
+    ), (
+        "a voice entry without `id` must be rejected by the voice object's "
+        "required:['id'] (a `required` error at models/0/audio/voices/0)"
+    )
+
+
+def test_schema_rejects_unknown_model_type():
+    """Negative control: the `type` enum still rejects an out-of-set value even
+    after `audio` was added, so the enum is not accidentally open."""
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    entry = _sample_audio_model_entry()
+    entry["type"] = "hologram"
+    manifest = {"schemaVersion": 1, "models": [entry]}
+    errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
+    assert any("hologram" in error.message or "enum" in error.message for error in errors)
+
+
 def _duplicate_default_downloads(manifest: dict) -> list[str]:
     """Return model/platform pairs with ambiguous primary download selection."""
     ambiguous: list[str] = []
