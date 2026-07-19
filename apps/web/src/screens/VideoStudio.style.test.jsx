@@ -193,3 +193,111 @@ describe("VideoStudio — Style Catalog integration (sc-13136)", () => {
     expect(payload.advanced.styleId).toBeUndefined();
   });
 });
+
+// sc-13136 — the recipe REPLAY/rehydrate side of the Style axis (matching Image Studio's
+// imageJobRequest.style.test.js replay cases). A recorded video recipe carries the picked style id
+// and the RAW pre-style prompt on `rawAdapterSettings.{styleId, stylePrompt}`. On replay the
+// VideoStudio effect (VideoStudio.jsx ~L710-713) re-selects the picker to that id and seeds the box
+// with the RAW prompt — so the very next submit recomposes the byte-identical Style:/Description:
+// prompt with EXACTLY ONE Style: block (no double-wrap). These tests drive a real replay through
+// context.studioLaunch and assert the outgoing job, for a sub-style id AND a group id, plus the
+// hardening case where the id is present but the raw prompt was not recorded.
+describe("VideoStudio — Style Catalog recipe replay (sc-13136)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const RAW = "Camera drifts over a quiet harbor at dawn";
+  // A recorded recipe as the viewer's "Use this recipe" hands it to the studio: the composed
+  // top-level `prompt` plus the round-trip facts on rawAdapterSettings.
+  const replayLaunch = (rawAdapterSettings, composedPrompt) => ({
+    view: "Video",
+    id: `replay-${Math.random()}`,
+    recipe: {
+      mode: "text_to_video",
+      prompt: composedPrompt,
+      normalizedSettings: {},
+      rawAdapterSettings,
+    },
+  });
+
+  // Both a sub-style id and a group id must round-trip. styleTextForId resolves each; the guard
+  // fails loudly if the catalog renames out from under the test.
+  for (const [label, styleId] of [
+    ["sub-style id", SUBSTYLE.id],
+    ["group id", STYLE_GROUPS[0].id],
+  ]) {
+    it(`replay of a recorded recipe (${label}) recomposes the identical prompt — no double-wrap`, async () => {
+      const styleText = styleTextForId(styleId);
+      expect(typeof styleText).toBe("string"); // guards a stale catalog id
+      const composedOriginal = composeStyledPrompt({ styleText, userPrompt: RAW });
+      // Sanity: the "original" carries exactly one Style: block to begin with.
+      expect(composedOriginal.match(/^Style:/gm)?.length ?? 0).toBe(1);
+
+      const context = baseContext({
+        // The recipe recorded the RAW pre-style prompt, NOT the composed one.
+        studioLaunch: replayLaunch({ styleId, stylePrompt: RAW }, composedOriginal),
+      });
+      await render(context);
+
+      await click(buttonWithText(container, "Render clip"));
+      expect(context.createVideoJob).toHaveBeenCalledTimes(1);
+      const payload = context.createVideoJob.mock.calls[0][0];
+
+      // The next submit recomposes the byte-identical prompt…
+      expect(payload.prompt).toBe(composedOriginal);
+      // …with EXACTLY one Style: block — the composer did not wrap an already-composed prompt.
+      expect(payload.prompt.match(/^Style:/gm)?.length ?? 0).toBe(1);
+      // The picker was re-selected and the round-trip fields ride advanced again (still RAW).
+      expect(payload.presetPromptResolvedClientSide).toBe(true);
+      expect(payload.advanced.styleId).toBe(styleId);
+      expect(payload.advanced.stylePrompt).toBe(RAW);
+    });
+  }
+
+  it("hardening: styleId present but stylePrompt missing → selection cleared, composed prompt used as-is (no double-wrap)", async () => {
+    const styleText = styleTextForId(SUBSTYLE.id);
+    const composedOriginal = composeStyledPrompt({ styleText, userPrompt: RAW });
+
+    const context = baseContext({
+      // styleId recorded, but the raw pre-style prompt was NOT — the effect must clear the
+      // selection and fall back to recipe.prompt rather than re-composing over the composed prompt.
+      studioLaunch: replayLaunch({ styleId: SUBSTYLE.id }, composedOriginal),
+    });
+    await render(context);
+
+    // The picker was cleared, so no live preview is rendered.
+    expect(container.querySelector('[data-testid="styled-prompt-preview"]')).toBeNull();
+
+    await click(buttonWithText(container, "Render clip"));
+    const payload = context.createVideoJob.mock.calls[0][0];
+    // The composed recipe prompt passes through untouched — one Style: block, not two.
+    expect(payload.prompt).toBe(composedOriginal);
+    expect(payload.prompt.match(/^Style:/gm)?.length ?? 0).toBe(1);
+    // No style applied on submit, so neither the client flag nor the round-trip fields are set.
+    expect(payload.presetPromptResolvedClientSide).toBeUndefined();
+    expect(payload.advanced.styleId).toBeUndefined();
+    expect(payload.advanced.stylePrompt).toBeUndefined();
+  });
+});
