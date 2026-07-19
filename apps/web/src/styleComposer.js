@@ -54,7 +54,11 @@ const DIRECTIVE_LINE_RE = /^\s*([A-Z][A-Za-z]*(?:\s+[A-Za-z]+){0,2}):(?:[ \t]+(.
  */
 export function parseDirectiveLines(text) {
   const source = String(text ?? "");
-  return source.split("\n").map((raw) => {
+  // Normalize newlines before classifying so CRLF (\r\n) and lone-CR (\r) line breaks split the
+  // same as LF. Splitting on "\n" alone would keep a trailing "\r" on every non-final CRLF line,
+  // which fails the anchored DIRECTIVE_LINE_RE, misclassifies the line as prose, and leaks a
+  // literal "\r" into the composed Description.
+  return source.split(/\r\n?|\n/).map((raw) => {
     const match = DIRECTIVE_LINE_RE.exec(raw);
     if (match) {
       const key = match[1];

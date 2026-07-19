@@ -50,6 +50,37 @@ describe("composeStyledPrompt", () => {
       want: "Style: oil painting\nDescription: Note: this is a plain sentence",
     },
     {
+      // Discriminates the LINE-ANCHOR (^) rule for a RECOGNIZED key: "Lighting" appears
+      // mid-line, so it must stay prose and fold into Description, never become a sibling
+      // directive. Fails if the `^` anchor is dropped from DIRECTIVE_LINE_RE.
+      name: "recognized key mid-line is NOT a directive (stays prose)",
+      styleText: "oil painting",
+      userPrompt: "a photo with dramatic Lighting: soft",
+      want: "Style: oil painting\nDescription: a photo with dramatic Lighting: soft",
+    },
+    {
+      // Same anchor rule with "Setting" preceded by a word on the same line.
+      name: "recognized key after leading word is NOT a directive (stays prose)",
+      styleText: "oil painting",
+      userPrompt: "The Setting: was perfect",
+      want: "Style: oil painting\nDescription: The Setting: was perfect",
+    },
+    {
+      // CRLF (\r\n) line breaks must classify recognized keys as directives (issue 1). A
+      // trailing "\r" on the non-final lines would break the anchored regex and leak into
+      // Description. Fails if the newline normalization in parseDirectiveLines is reverted.
+      name: "CRLF directive lines classify correctly, no stray carriage return",
+      styleText: "noir",
+      userPrompt: "Setting: alley\r\nAngle: low\r\nsomething",
+      want: "Style: noir\nSetting: alley\nAngle: low\nDescription: something",
+    },
+    {
+      name: "CRLF prose-then-directive splices cleanly",
+      styleText: "noir",
+      userPrompt: "a detective\r\nSetting: a foggy alley",
+      want: "Style: noir\nSetting: a foggy alley\nDescription: a detective",
+    },
+    {
       name: "foreign directive preserved as sibling, remainder → Description",
       styleText: "noir",
       userPrompt: "a detective in the rain\nSetting: a foggy alley",
@@ -176,5 +207,30 @@ describe("parseDirectiveLines", () => {
   it("does not treat an unrecognized capitalized key as a directive", () => {
     const parsed = parseDirectiveLines("Note: hello");
     expect(parsed[0].type).toBe("prose");
+  });
+
+  it("does not treat a RECOGNIZED key mid-line as a directive (line-anchor)", () => {
+    // "Lighting" is recognized but not at line start → must stay prose. This discriminates the
+    // `^` anchor: with the anchor removed the regex would match mid-line and misclassify.
+    const parsed = parseDirectiveLines("a photo with dramatic Lighting: soft");
+    expect(parsed).toEqual([
+      {
+        type: "prose",
+        key: null,
+        content: "a photo with dramatic Lighting: soft",
+        raw: "a photo with dramatic Lighting: soft",
+      },
+    ]);
+  });
+
+  it("classifies CRLF-separated directive lines without a trailing carriage return", () => {
+    // Non-final CRLF lines would carry a trailing "\r" if newlines were split on "\n" only,
+    // failing the anchored regex and leaking "\r" into content. This pins issue 1.
+    const parsed = parseDirectiveLines("Setting: alley\r\nAngle: low\r\nsomething");
+    expect(parsed).toEqual([
+      { type: "directive", key: "Setting", content: "alley", raw: "Setting: alley" },
+      { type: "directive", key: "Angle", content: "low", raw: "Angle: low" },
+      { type: "prose", key: null, content: "something", raw: "something" },
+    ]);
   });
 });
