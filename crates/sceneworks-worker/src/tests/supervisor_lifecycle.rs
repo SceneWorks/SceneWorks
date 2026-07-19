@@ -506,6 +506,7 @@ async fn writes_hf_download_receipt_with_resolved_manifest_and_variant() {
         "owner/model",
         "job-2",
         &["q4/model.safetensors".to_owned(), "config.json".to_owned()],
+        Some("abc123"),
     )
     .await
     .expect("receipt writes");
@@ -519,4 +520,5 @@ async fn writes_hf_download_receipt_with_resolved_manifest_and_variant() {
     assert_eq!(receipt["variant"], "q4");
     assert_eq!(receipt["manifestFiles"], json!(["q4/*.safetensors", "config.json"]));
     assert_eq!(receipt["resolvedFiles"], json!(["q4/model.safetensors", "config.json"]));
+    assert_eq!(receipt["snapshotRevision"], "abc123");
 }

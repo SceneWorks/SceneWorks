@@ -60,7 +60,8 @@ use super::media_jobs::{mask_rollup_state, segment_assembly_frames, SegmentClip,
 use super::model_jobs::{
     check_downloaded_model_family, derived_tokenizer_overlay,
     downloaded_model_detection_io_error_is_inconclusive, finalize_converted_dir,
-    overlay_derived_tokenizer, validate_hf_download_inputs, DownloadFamilyCheck,
+    huggingface_receipt_weights_dir, overlay_derived_tokenizer, validate_hf_download_inputs,
+    DownloadFamilyCheck,
 };
 // `terminating_signal` is only exercised by a `#[cfg(unix)]` test (signal-death
 // attribution is uncatchable and only observable on Unix), so gate the import to

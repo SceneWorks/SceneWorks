@@ -129,6 +129,7 @@ pub(crate) async fn write_model_download_receipt(
     repo: &str,
     job_id: &str,
     resolved_files: &[String],
+    snapshot_revision: Option<&str>,
 ) -> WorkerResult<()> {
     tokio::fs::create_dir_all(target_dir).await?;
     let receipt = json!({
@@ -139,6 +140,7 @@ pub(crate) async fn write_model_download_receipt(
         "variant": payload.get("variant").cloned().unwrap_or_else(|| Value::String("default".to_owned())),
         "manifestFiles": payload.get("files").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
         "resolvedFiles": resolved_files,
+        "snapshotRevision": snapshot_revision,
         "jobId": job_id,
         "completedAt": now_rfc3339(),
     });

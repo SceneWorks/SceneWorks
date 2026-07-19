@@ -195,7 +195,7 @@ pub(crate) async fn run_model_download_job(
         snapshot.total_bytes(),
         progress_report_interval(settings),
     );
-    download_snapshot_into_cache(
+    let snapshot_revision = download_snapshot_into_cache(
         &DownloadContext {
             api,
             client: http_client,
@@ -210,7 +210,7 @@ pub(crate) async fn run_model_download_job(
         &mut progress,
     )
     .await?;
-    let cache_path = huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_dir);
+    let cache_path = huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_dir.clone());
     // Some upstreams (Kolors sc-4764, Qwen-Image sc-6570) ship no fast `tokenizer.json`; overlay the
     // derived one so the in-process Rust generator/trainer can construct. No-op for every other repo.
     overlay_derived_tokenizer(api, settings, http_client, &job.id, repo, &cache_path).await?;
@@ -222,7 +222,15 @@ pub(crate) async fn run_model_download_job(
         .iter()
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
-    write_model_download_receipt(&target_dir, &job.payload, repo, &job.id, &resolved_files).await?;
+    write_model_download_receipt(
+        &target_dir,
+        &job.payload,
+        repo,
+        &job.id,
+        &resolved_files,
+        Some(&snapshot_revision),
+    )
+    .await?;
 
     if !reconcile_downloaded_model_family(api, job, &cache_path).await? {
         return Ok(());
@@ -1580,6 +1588,130 @@ pub(crate) fn huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<Pa
     #[cfg(windows)]
     materialize_snapshot_hardlinks(&dir);
     Some(dir)
+}
+
+/// Resolve the exact snapshot/tier recorded by a completed model-download receipt.
+///
+/// A manifest may rename files after an install.  In that case the catalog deliberately keeps the
+/// install usable (sc-13076), and generation must use the receipt's *entire* resolved file set rather
+/// than combining files from the receipt with current-manifest names.  A receipt is accepted only
+/// when every recorded file exists in one snapshot directory; a torn set returns `None` atomically.
+/// `model_id` narrows primary-model receipts, while the repo-wide fallback also covers co-requisite
+/// downloads whose marker directory is not known to the loader.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(crate) fn huggingface_receipt_weights_dir(
+    data_dir: &Path,
+    repo: &str,
+    model_id: Option<&str>,
+    variant: Option<&str>,
+) -> Option<PathBuf> {
+    let models_dir = data_dir.join("models");
+    let mut markers = Vec::new();
+    markers.push(
+        models_dir
+            .join(safe_download_dir(repo))
+            .join(INSTALL_MARKER),
+    );
+    if let Some(model_id) = model_id {
+        markers.push(
+            models_dir
+                .join(safe_download_dir(model_id))
+                .join(INSTALL_MARKER),
+        );
+    }
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        markers.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path().join(INSTALL_MARKER)),
+        );
+    }
+    markers.sort();
+    markers.dedup();
+
+    for marker in markers {
+        let Ok(bytes) = std::fs::read(marker) else {
+            continue;
+        };
+        let Ok(top) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        let receipts = top
+            .get("receipts")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_else(|| vec![top]);
+        for receipt in receipts {
+            if receipt.get("repo").and_then(Value::as_str) != Some(repo) {
+                continue;
+            }
+            if let Some(model_id) = model_id {
+                if receipt
+                    .get("modelId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id != model_id)
+                {
+                    continue;
+                }
+            }
+            if let Some(variant) = variant {
+                if receipt.get("variant").and_then(Value::as_str) != Some(variant) {
+                    continue;
+                }
+            }
+            let files = receipt
+                .get("resolvedFiles")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            if files.is_empty() {
+                continue;
+            }
+            let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
+            let snapshots = repo_dir.join("snapshots");
+            let Ok(snapshot_entries) = std::fs::read_dir(&snapshots) else {
+                continue;
+            };
+            let recorded_revision = receipt
+                .get("snapshotRevision")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|revision| !revision.is_empty());
+            let matching = snapshot_entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|snapshot| {
+                    snapshot.is_dir() && files.iter().all(|file| snapshot.join(file).is_file())
+                })
+                .filter(|snapshot| {
+                    recorded_revision.map_or(true, |revision| {
+                        snapshot.file_name().and_then(|name| name.to_str()) == Some(revision)
+                    })
+                })
+                .collect::<Vec<_>>();
+            // Schema-v2 receipts written before snapshotRevision are accepted only when their exact
+            // file set identifies one revision unambiguously. Never guess by filesystem order.
+            if recorded_revision.is_none() && matching.len() != 1 {
+                continue;
+            }
+            if let Some(snapshot) = matching.into_iter().next() {
+                // Tier receipts are self-contained below a tier directory.  Only descend when every
+                // file belongs to that same recorded tier; otherwise return the snapshot root for a
+                // single-variant/whole-repo install.
+                if let Some(variant) = receipt.get("variant").and_then(Value::as_str) {
+                    let tier = snapshot.join(variant);
+                    let prefix = format!("{variant}/");
+                    if files.iter().all(|file| file.starts_with(&prefix)) && tier.is_dir() {
+                        return Some(tier);
+                    }
+                }
+                return Some(snapshot);
+            }
+        }
+    }
+    None
 }
 
 fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathBuf> {
