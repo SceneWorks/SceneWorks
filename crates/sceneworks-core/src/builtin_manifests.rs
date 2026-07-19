@@ -148,6 +148,42 @@ mod tests {
     }
 
     #[test]
+    fn every_builtin_model_prompt_guide_exists_in_the_web_app() {
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let models = manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array");
+        let prompt_guides_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/web/public/prompt-guides");
+        let mut checked = 0;
+
+        for model in models {
+            let Some(guide_path) = model["ui"]["promptGuide"]["path"].as_str() else {
+                continue;
+            };
+            let relative_path = guide_path
+                .strip_prefix("/prompt-guides/")
+                .unwrap_or_else(|| panic!("{guide_path} is not rooted under /prompt-guides/"));
+            let model_id = model["id"].as_str().unwrap_or("<missing model id>");
+
+            // Both production consumers fetch this URL. A missing file silently empties the
+            // guide modal and makes prompt refinement proceed without its declared guide text.
+            assert!(
+                prompt_guides_dir.join(relative_path).is_file(),
+                "{model_id} ui.promptGuide.path does not resolve to a web asset: {guide_path}"
+            );
+            checked += 1;
+        }
+
+        assert!(
+            checked > 0,
+            "builtin models declare at least one prompt guide"
+        );
+    }
+
+    #[test]
     fn seeds_every_manifest_into_a_fresh_dir() {
         let temp = tempfile::tempdir().expect("temp dir");
         seed_builtin_manifests(temp.path(), SeedMode::IfMissing).expect("seeding succeeds");

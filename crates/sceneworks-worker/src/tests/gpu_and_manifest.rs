@@ -649,30 +649,66 @@ fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
          measured rendering, so wall-rejecting it would be the sc-12179 regression"
     );
 
-    // Both A14B models carry blocks too, so THEIR gate is live. They are `measured: false` —
-    // sibling-scaled, because the candle A14B does not render at any advertised geometry (sc-12434:
-    // 832x480 OOMs a 96 GB card before step 1; the 1280x720 default is engine-rejected, sc-12433). The
-    // gate refusing them everywhere is the TRUE answer until chunking lands, and it turns a ~30 GiB
-    // download + ~100 s load + OOM into an instant refusal.
-    for id in ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"] {
+    // Both A14B models now carry a MEASURED q4 block (sc-12631, post epic sc-12732): the candle engine
+    // renders one 14B expert at a time (`OffloadPolicy::Sequential`, forced by
+    // `video_jobs::candle_wan_offload_policy`), so its measured USED_MEM_HIGH q4 peak at the 1280x720
+    // Lightning default is ~22 GiB — it FITS a 32 GB RTX 5090, the inverse of the old ~386 GiB OOM-floor
+    // that refused everything. Per the handoff, q8 + bf16 are DEFERRED (conservative bounds — q8 at its
+    // nvidia-smi pool high-water pending a ≤32 GB validation, bf16 derived), so they stay refused on a
+    // 32 GB card and the block is honestly `measured: false`.
+    let card48 = apply_vram_cap(None, Some(48.0));
+    let card32 = apply_vram_cap(None, Some(32.0)); // an RTX 5090 — epic sc-12732's small-card target
+    let card16 = apply_vram_cap(None, Some(16.0));
+    for (id, q4_peak, q8_bound) in [
+        ("wan_2_2_t2v_14b", 22.13, 34.4),
+        ("wan_2_2_i2v_14b", 22.20, 35.6),
+    ] {
         let model = builtin_model_entry(id);
         let a14b = model.as_object().expect("a14b entry object");
+        let q4 = predicted_peak_gb(a14b, "q4").expect("a14b q4 measured");
+        let q8 = predicted_peak_gb(a14b, "q8").expect("a14b q8 carried");
+        let bf16 = predicted_peak_gb(a14b, "bf16").expect("a14b bf16 carried");
+        assert!((q4 - (q4_peak + 2.0)).abs() < 1e-6, "{id} q4 {q4_peak} + 2 headroom, got {q4}");
+        assert!((q8 - (q8_bound + 2.0)).abs() < 1e-6, "{id} q8 {q8_bound} (pool bound) + 2, got {q8}");
+        assert!((bf16 - 58.0).abs() < 1e-6, "{id} bf16 56 (derived) + 2 headroom, got {bf16}");
+        assert!(q4 < q8 && q8 < bf16, "{id}: heavier tier ⇒ heavier peak");
+        assert!(q4 < 32.0, "{id}: the measured q4 default now fits a 32 GB card, not >96");
+        assert!(q8 > 32.0 && bf16 > 32.0, "{id}: q8/bf16 deferred — must stay above a 32 GB card");
+
+        // The live gate. q4 (the default) is ADMITTED on the 96 GB box it was measured rendering on
+        // (wall-rejecting it would be the sc-12179 regression) AND on a 32 GB RTX 5090 — the point of the
+        // rework — but REFUSED on a 16 GB card too small for even the offloaded peak, before the OOM.
         assert!(
-            a14b.get("candle").and_then(Value::as_object).is_some(),
-            "{id} candle block present (absent ⇒ the floor admits it on a small card and it OOMs)"
+            wan_video_fit_error(id, a14b, "q4", 0, "0", card96).is_none(),
+            "{id} q4 (~{q4} GB) must fit the 96 GB dev box it was measured on"
         );
-        let peak = predicted_peak_gb(a14b, "q4").expect("a14b q4 peak carried");
         assert!(
-            peak > 96.0,
-            "{id} q4 must not appear to fit ANY existing GPU — sc-12434 proved 832x480 OOMs a 96 GB \
-             card before step 1, got {peak}"
+            wan_video_fit_error(id, a14b, "q4", 0, "0", card32).is_none(),
+            "{id} q4 (~{q4} GB) must now fit a 32 GB RTX 5090 — the epic sc-12732 target"
         );
         assert!(
-            wan_video_fit_error(id, a14b, "q4", 0, "0", card96).is_some(),
-            "{id} must be refused even on the 96 GB dev box"
+            wan_video_fit_error(id, a14b, "q4", 0, "0", card16).is_some(),
+            "{id} q4 (~{q4} GB) cannot fit a 16 GB card — refuse before the load"
+        );
+        // q8 + bf16 are DEFERRED: refused on a 32 GB card (their conservative bounds exceed it), though
+        // q8 still admits a 48 GB card — an untested tier must not be admitted on an unvalidated number.
+        assert!(
+            wan_video_fit_error(id, a14b, "q8", 0, "0", card32).is_some(),
+            "{id} q8 (~{q8} GB pool bound) must stay refused on a 32 GB card pending a ≤32 GB validation"
+        );
+        assert!(
+            wan_video_fit_error(id, a14b, "q8", 0, "0", card48).is_none(),
+            "{id} q8's conservative bound still fits a 48 GB card"
+        );
+        assert!(
+            wan_video_fit_error(id, a14b, "bf16", 0, "0", card32).is_some(),
+            "{id} bf16 (derived ~58 GB) must stay refused on a 32 GB card until measured"
         );
     }
-    eprintln!("wan candle blocks: 5090 → refused, 96 GB → q4 admitted, A14B → refused everywhere ✓");
+    eprintln!(
+        "wan candle blocks: 5B 5090→refused/96→admitted; A14B q4 measured → 32 GB admitted, 16 GB \
+         refused; q8/bf16 deferred → 32 GB refused ✓"
+    );
 }
 
 /// sc-12130/sc-12131: the shipped Krea base block feeds both stages of the generic Candle gate. This

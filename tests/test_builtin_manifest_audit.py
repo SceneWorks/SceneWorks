@@ -289,26 +289,43 @@ def test_wan_2_2_candle_vram_tiers_match_measured_peaks():
     assert candle["minMemoryGb"] == 48
 
 
-def test_wan_a14b_candle_vram_tiers_are_flagged_estimated():
-    """sc-12402/sc-12434: the A14B blocks are ESTIMATED and must stay flagged as such.
+def test_wan_a14b_candle_q4_measured_admits_32gb_q8_bf16_deferred():
+    """sc-12631 (post epic sc-12732): the A14B q4 candle peak is MEASURED and admits a 32 GB card.
 
-    The candle A14B does not render at ANY advertised geometry (sc-12434: 832x480 OOMs a 96 GB
-    card before step 1; the 1280x720 default is engine-rejected -- sc-12433), so there is no peak
-    to measure. The blocks exist so the fit gate REFUSES the model instead of admitting it into a
-    ~28 GiB download + ~100 s load + OOM. `measured: false` is the flag to re-measure once sc-12434
-    ports attention chunking -- if that ever flips to true without new numbers, this is the tripwire.
+    After the sequential-offload / expert-swap / bf16-TE / free-aware-tiling / finer-sdpa rework, the
+    A14B renders one 14B expert at a time and its measured `USED_MEM_HIGH` q4 peak at the 1280x720/81f/
+    4-step Lightning default is ~22 GiB -- it fits a 32 GB RTX 5090, not the ~386 GiB OOM-floor these
+    blocks used to carry. This is the inverse of the old `..._are_flagged_estimated` tripwire (which
+    asserted every tier exceeds a 96 GB card). (The raw 22 GiB q4 peak physically fits a 24 GB card too,
+    but the gate's 2 GB headroom targets ~26 GB free, so a 24 GB card is refused -- the safe direction.)
+
+    Per the sc-12732 handoff ("admit q4 now, re-measure q8/bf16 before admitting"), q8 and bf16 are
+    DEFERRED, so the block stays `measured: false`. q8's live USED_MEM_HIGH peak was ~28 GiB but its
+    nvidia-smi pool high-water (which cudarc never frees) was ~34-36 GiB and the small-card footprint is
+    unvalidated, so q8 is gated at that conservative pool bound (refused on 32 GB); bf16 is DERIVED (56).
+    Asserting q8/bf16 stay above a 32 GB card stops either regressing to a fits-small-card number before
+    it is validated/measured. Flipping to `measured: true` is a <=32 GB-validation + bf16-stage follow-up.
     """
     manifest = _load_builtin_models_manifest()
-    for model_id in ("wan_2_2_t2v_14b", "wan_2_2_i2v_14b"):
+    expected = {
+        "wan_2_2_t2v_14b": {"q4": 22.13, "q8": 34.4, "bf16": 56.0},
+        "wan_2_2_i2v_14b": {"q4": 22.20, "q8": 35.6, "bf16": 56.0},
+    }
+    for model_id, tiers in expected.items():
         entry = next(m for m in manifest["models"] if m["id"] == model_id)
         candle = entry["candle"]
-        assert candle["measured"] is False, f"{model_id}: A14B numbers are derived, not measured"
-        # Every tier must exceed any GPU that exists, so the gate refuses on all hardware.
-        for tier, peak in candle["vramGbByTier"].items():
-            assert peak > 96, (
-                f"{model_id} {tier} must not appear to fit a 96 GB card -- sc-12434 proved the "
-                f"lightest tier OOMs one before step 1, got {peak}"
-            )
+        # q8/bf16 are deferred (conservative bounds), so the block is honestly flagged estimated.
+        assert candle["measured"] is False, f"{model_id}: q8/bf16 deferred, so measured stays false"
+        assert candle["vramGbByTier"] == tiers, (
+            f"{model_id}: the measured q4 peak (and the conservative q8/bf16 bounds) must not regress, "
+            f"got {candle['vramGbByTier']}"
+        )
+        assert candle["minMemoryGb"] == 24, f"{model_id}: minMemoryGb should gate q4 (~22 + 2)"
+        # The DEFAULT (q4) tier now fits a 32 GB card -- where the old ~388 floor refused every GPU.
+        assert tiers["q4"] + 2 < 32, f"{model_id}: q4 (+headroom) must fit a 32 GB card, got {tiers['q4']}"
+        # q8 + bf16 stay refused on a 32 GB card until validated/measured (deferred, the safe direction).
+        assert tiers["q8"] + 2 > 32, f"{model_id}: q8's conservative bound must not admit a 32 GB card"
+        assert tiers["bf16"] + 2 > 32, f"{model_id}: the derived bf16 bound must not admit a 32 GB card"
 
 
 def test_sdxl_manifest_has_mlx_block():
