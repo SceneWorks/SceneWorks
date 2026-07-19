@@ -2052,14 +2052,14 @@
       },
       // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
       // 1024²/10-step via the candle-gen nvidia-smi peak monitor: q4 packed overall-peak 38.5 GB (the
-      // two-DiT Ideogram path). minMemoryGb 46 gates the DEFAULT (q4) tier and covers it with headroom;
-      // q8 ESTIMATED (~44 GB). bf16 (sc-9650, off-Mac dense tier) MEASURED ~80 GB overall-peak (RTX PRO
-      // 6000, 1024²/48-step — the two dense-bf16 DiTs dominate); a 96 GB-card tier, small cards see it
-      // gated by its `vramGbByTier` ceiling.
+      // two-DiT Ideogram path). sc-13108 directly re-measured every tier on the pinned bf16-TE build,
+      // exclusive RTX PRO 6000 Blackwell sm_120, 1024²/48-step seed 42: q4 38.5, q8 55.3, bf16 74.1 GB.
+      // The prior q8 estimate (44 GB) underpredicted by 11.3 GB; these observed overall peaks now gate
+      // the exact installed tier. minMemoryGb 46 gates the DEFAULT (q4) tier with headroom.
       "candle": {
         "minMemoryGb": 46,
-        "vramGbByTier": { "q4": 38.5, "q8": 44.0, "bf16": 80.0 },
-        "measured": false
+        "vramGbByTier": { "q4": 38.5, "q8": 55.3, "bf16": 74.1 },
+        "measured": true
       },
       // Ideogram Non-Commercial Model Agreement (gated): accept the license at the source repo and
       // add a Hugging Face token under Settings → Service credentials before downloading. NOTE: the
@@ -2206,14 +2206,14 @@
         "repo": "SceneWorks/ideogram-4-mlx"
       },
       // candle/CUDA VRAM gate (sc-9654). Turbo is CFG-free single-DiT, so it runs LIGHTER than the two-DiT
-      // base: bf16 MEASURED ~46 GB overall-peak on an RTX PRO 6000 (sm_120, 1024²/8-step) vs the base's ~80
-      // GB. q4/q8 ESTIMATED below the base's (24/28 vs base 38.5/44 — the MLX active floor is ~24 GiB Q4),
-      // pending a candle measurement. bf16 is a large-card tier; small cards see it gated by its
-      // `vramGbByTier` ceiling. minMemoryGb 30 gates the default (q4) tier with headroom.
+      // base. sc-13108 directly measured every tier on the pinned bf16-TE build, exclusive RTX PRO 6000
+      // Blackwell sm_120, 1024²/8-step seed 42: q4 33.5, q8 43.9, bf16 56.3 GB. The old q4/q8 estimates
+      // (24/28) were unsafe by 9.5/15.9 GB; the prior bf16 claim (46) was also 10.3 GB low. Gate only on
+      // these observed overall peaks. minMemoryGb 30 remains the broad model-availability floor.
       "candle": {
         "minMemoryGb": 30,
-        "vramGbByTier": { "q4": 24.0, "q8": 28.0, "bf16": 46.0 },
-        "measured": false
+        "vramGbByTier": { "q4": 33.5, "q8": 43.9, "bf16": 56.3 },
+        "measured": true
       },
       "gated": true,
       "credentialHost": "huggingface.co",
@@ -2322,14 +2322,13 @@
         "quantize": 8,
         "repo": "SceneWorks/boogu-image-mlx"
       },
-      // candle/CUDA VRAM gate (sc-9094, epic 9083) — ESTIMATED (measured:false): the Boogu Turbo q4
-      // sibling MEASURED 32.7 GB @1024² on candle/CUDA; Base runs the same DiT with more steps + a
-      // heavier schedule, so q4 is scaled to ~38 GB (mlx Base Q8 ~35.5 vs Turbo close-in-size). Tracked
-      // for a Base measurement. minMemoryGb 44 with headroom.
+      // Direct sc-13108 CUDA probes on RTX PRO 6000 Blackwell, exclusive GPU, 1024², seed 42,
+      // native 50-step Base path: q4 31.68 GB and bf16 54.40 GB from a 0.02 GB baseline.
+      // minMemoryGb 44 preserves the existing packed-tier headroom.
       "candle": {
         "minMemoryGb": 44,
-        "vramGbByTier": { "q4": 38.0, "bf16": 52.0 },
-        "measured": false
+        "vramGbByTier": { "q4": 31.7, "bf16": 54.4 },
+        "measured": true
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Base",
       "ui": {
@@ -2424,14 +2423,13 @@
         "quantize": 8,
         "repo": "SceneWorks/boogu-image-mlx"
       },
-      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
-      // 1024²/8-step via the candle-gen nvidia-smi peak monitor: q4 packed (group-32, sc-9410) overall
-      // peak 32.7 GB. minMemoryGb 40 covers it with headroom; bf16 ESTIMATED (~48 GB) pending
-      // measurement.
+      // Direct sc-13108 CUDA probes on RTX PRO 6000 Blackwell, exclusive GPU, 1024², seed 42,
+      // native 4-step Turbo path: q4 31.58 GB and bf16 54.46 GB from a 0.02 GB baseline.
+      // minMemoryGb 40 preserves the existing packed-tier headroom.
       "candle": {
         "minMemoryGb": 40,
-        "vramGbByTier": { "q4": 32.7, "bf16": 48.0 },
-        "measured": false
+        "vramGbByTier": { "q4": 31.6, "bf16": 54.5 },
+        "measured": true
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo",
       "ui": {
@@ -2694,14 +2692,13 @@
       },
       // candle/CUDA VRAM gate (sc-9094/sc-12131, epic 9083 → epic 10765) — MEASURED on an RTX PRO
       // 6000 (Blackwell sm_120) at 1024²/8-step with the rendered-device two-process probe. Resident
-      // peaks are q4 26.4, q8 35.9, bf16 55.6 GB. Sequential residency encodes/drops Qwen3-VL before
-      // loading the DiT and peaks at q4 22.7, q8 29.5, bf16 39.8 GB; every resident/sequential pair was
-      // byte-identical. minMemoryGb 32 covers the common q4 resident lane with headroom. INT8-ConvRot
-      // remains an unmeasured non-shipping estimate and defers to resident.
+      // peaks are q4 25.7, q8 35.2, bf16 47.2 GB. Sequential residency encodes/drops Qwen3-VL before
+      // loading the DiT and peaks at q4 21.9, q8 29.4, bf16 39.4 GB; every resident/sequential pair was
+      // byte-identical. minMemoryGb 32 covers the common q4 resident lane with headroom.
       "candle": {
         "minMemoryGb": 32,
         // sc-12425: the INT8-ConvRot tier's RESIDENT VRAM ceiling, now MEASURED (sc-12381) — 42.9 GB
-        // overall-peak on an exclusive sm_120 at 1024²/8-step, the same shape q4's 26.4 was taken at.
+        // overall-peak on an exclusive sm_120 at 1024²/8-step, the same shape used for the standard tiers.
         // This is the TE-CO-RESIDENT peak; the tier's efficient footprint is `sequentialPeakGb` (28.6).
         //
         // It replaces sc-9300's estimate of 31.0, which was wrong by 11.9 GB. That estimate blamed "the
@@ -2730,19 +2727,17 @@
         // pinned build, exclusive sm_120, 1024²/8-step seed 42: steady 29.76 → 21.5 GB, overall-peak
         // 42.9 → 34.7 GB — a constant 8.2 GB shift = the 15.6 → 7.4 GB dense TE reduction, landing
         // int8-convrot right next to q8 as the sc-12425 note predicted ("once the TE drops the two tiers
-        // match"). q4/q8/bf16 also now run the bf16 TE and carry ~8.2 GB less RESIDENT, but stay at their
-        // (still-safe, now-conservative) f32-TE figures pending their OWN direct re-measure — a derived
-        // subtraction is unsafe for a fit-gate (resident↔sequential don't compose arithmetically; an
-        // under-prediction OOMs). sc-12828 follow-up re-measures q4/q8/bf16 + ideogram/boogu directly.
-        "vramGbByTier": { "q4": 26.4, "q8": 35.9, "bf16": 55.6, "int8-convrot": 34.7 },
+        // match").
+        // sc-13108 directly re-measured the standard tiers on the pinned bf16-TE build, exclusive
+        // RTX PRO 6000 Blackwell sm_120, 1024²/8-step seed 42. Resident/sequential raw pixels were
+        // byte-identical per tier. q4/q8 fall only 0.7 GB because their TEs are packed; the dense bf16
+        // tier realizes the full win (55.6 → 47.2 GB). These are measured peaks, not derived shifts.
+        "vramGbByTier": { "q4": 25.7, "q8": 35.2, "bf16": 47.2, "int8-convrot": 34.7 },
         // sc-12131 / sc-10856 second-stage gate: measured largest working set after the text phase has
-        // been dropped. `int8-convrot` = 28.6 GB (sc-12425, measured sm_120 1024²/8-step, byte-identical
-        // pixels resident vs sequential) — it lands next to q8's 29.5 because the int8 DiT is the same
-        // size as q8's, so once the shared 15.6 GB f32 Qwen3-VL TE drops the two tiers cost the same. Its
-        // RESIDENT peak (`vramGbByTier` above, 42.9) is higher than q8's 35.9 ONLY because ConvRot holds
-        // that f32 TE co-resident; sequential residency (the pinned rev honors ConvRot's offload policy)
-        // erases the gap. So on a card too small for 42.9 the worker falls back to this 28.6.
-        "sequentialPeakGb": { "q4": 22.7, "q8": 29.5, "bf16": 39.8, "int8-convrot": 28.6 },
+        // been dropped. sc-13108 directly measured q4/q8/bf16 at 21.9/29.4/39.4 GB; sc-12425 measured
+        // int8-convrot at 28.6 GB with resident/sequential byte-identical pixels. The int8 and q8 DiTs
+        // remain close in size once their text encoders are dropped, so their sequential peaks converge.
+        "sequentialPeakGb": { "q4": 21.9, "q8": 29.4, "bf16": 39.4, "int8-convrot": 28.6 },
         "measured": true,
         // Pose-ControlNet lane VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The control lane loads
         // the base at the installed tier PLUS the trained ~6.6 GB bf16 control branch, so its render peak

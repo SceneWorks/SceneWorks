@@ -742,14 +742,14 @@ fn krea_candle_block_drives_the_registry_and_second_stage_gate() {
     let q4_resident = predicted_peak_gb(entry, "q4").expect("q4 resident peak");
     let q4_sequential =
         predicted_sequential_peak_gb(entry, "q4").expect("q4 sequential peak");
-    assert!((q4_resident - 28.4).abs() < 1e-6);
-    assert!((q4_sequential - 24.7).abs() < 1e-6);
-    assert!((predicted_sequential_peak_gb(entry, "q8").unwrap() - 31.5).abs() < 1e-6);
-    assert!((predicted_sequential_peak_gb(entry, "bf16").unwrap() - 41.8).abs() < 1e-6);
+    assert!((q4_resident - 27.7).abs() < 1e-6);
+    assert!((q4_sequential - 23.9).abs() < 1e-6);
+    assert!((predicted_sequential_peak_gb(entry, "q8").unwrap() - 31.4).abs() < 1e-6);
+    assert!((predicted_sequential_peak_gb(entry, "bf16").unwrap() - 41.4).abs() < 1e-6);
     // sc-12425: int8-convrot has a measured sequential peak (28.6 + 2.0 headroom = 30.6). It was `None`
     // while the ConvRot lane was pinned Resident; the runtime now honors ConvRot sequential residency
     // (inference PR #67, in the pinned rev d64af1dd) so it drops the 15.6 GB f32 TE like every other
-    // Turbo request. 30.6 sits next to q8's 31.5 — once the shared TE drops, the same-size int8 DiT costs
+    // Turbo request. 30.6 sits next to q8's 31.4 — once the shared TE drops, the same-size int8 DiT costs
     // the same as q8. The lockstep is satisfied: this row and the runtime that honors it are pinned
     // together (a future pin bump BELOW #67 would re-break it — the runtime would run the 42.9 resident
     // peak while the worker predicts 30.6).
@@ -768,7 +768,7 @@ fn krea_candle_block_drives_the_registry_and_second_stage_gate() {
     let card12 = apply_vram_cap(None, Some(12.0));
     assert_eq!(
         sequential_overflow_gb(Some(q4_sequential), card12),
-        Some(24.7)
+        Some(23.9)
     );
 }
 
