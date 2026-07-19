@@ -181,8 +181,20 @@ def test_schema_rejects_audio_voice_without_id():
     entry["audio"]["voices"] = [{"label": "No Id", "gender": "female"}]
     manifest = {"schemaVersion": 1, "models": [entry]}
     errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
-    assert any("id" in error.message for error in errors), (
-        "a voice entry without `id` must be rejected (required within the voice object)"
+    # Discriminate on the jsonschema error's shape, not a substring of its
+    # message: a loose `"id" in error.message` incidentally matches unrelated
+    # errors (e.g. a type-enum error listing "video", which contains "id"), so
+    # it could false-green under a full schema revert. Pin the `required`
+    # keyword, its `["id"]` value, and the path at the voice item instead — this
+    # only holds while the voice object's `required: ["id"]` is present.
+    assert any(
+        error.validator == "required"
+        and error.validator_value == ["id"]
+        and list(error.absolute_path) == ["models", 0, "audio", "voices", 0]
+        for error in errors
+    ), (
+        "a voice entry without `id` must be rejected by the voice object's "
+        "required:['id'] (a `required` error at models/0/audio/voices/0)"
     )
 
 
