@@ -535,9 +535,15 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // MLX-routed families (grows one family story at a time as each lands real generation in
     // `sceneworks-worker::image_jobs`). CANDLE: SDXL sc-3678, the four families sc-5096.
     ModelCaps::new("z_image_turbo", true, true, false, false, false),
-    // Base (non-distilled, full-CFG) Z-Image (epic 8236, sc-8379 control + sc-8679 txt2img): candle-only
-    // (no MLX row) — the base sibling of `z_image_turbo` on the candle `z_image_diffusers` family.
-    ModelCaps::new("z_image", false, true, false, false, false),
+    // Base (non-distilled, full-CFG) Z-Image (epic 8236, sc-8379 control + sc-8679 txt2img). MLX-routed
+    // on macOS AND candle-routed off-Mac. The worker registers a real `z_image` MLX engine (MODEL_TABLE:
+    // shift-6.0 / ~50-step / real CFG, `mlx_z_image` adapter) plus base strict-control on Mac
+    // (`ImageRoute::ZImageBaseControl`, `WIRED_MLX_POSE_FAMILIES`), and the manifest carries a full `mlx`
+    // block — so a Mac generates base Z-Image in-process just like Turbo. The prior `mlx_routed: false`
+    // here was a wiring gap left by sc-8320/sc-8251 (the base MLX engine + control landed, but this row
+    // and `image_request_mlx_eligible` were never updated), so `model_mac_support` hid the model behind
+    // "Not available on Mac (MLX only)" even though the Mac worker fully supports it.
+    ModelCaps::new("z_image", true, true, false, false, false),
     // `z_image_edit` (epic 3529 / sc-3923): MLX-only edit id on Turbo weights.
     ModelCaps::new("z_image_edit", true, false, false, false, false),
     ModelCaps::new("flux_schnell", true, true, false, false, false),
@@ -1013,6 +1019,7 @@ mod tests {
 
     const EXPECTED_MLX_ROUTED_MODELS: &[&str] = &[
         "z_image_turbo",
+        "z_image",
         "z_image_edit",
         "flux_schnell",
         "flux_dev",

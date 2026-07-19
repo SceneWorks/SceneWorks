@@ -1307,6 +1307,25 @@ fn receipt_file_sets(managed_path: &FsPath, repo: &str) -> Vec<ReceiptFileSet> {
         .collect()
 }
 
+/// Whether a snapshot the receipt's files resolve into is an actually LOADABLE install (not merely a
+/// set of files that exist). A backfill (sc-13076) records whatever was on disk, so an interrupted
+/// download left a torn tier — its `model_index.json` + a stray config present, but the
+/// transformer/vae weights missing — whose recorded files all exist yet cannot load. When the
+/// receipt/tier files form a diffusers tier subdir (`["<tier>/*"]`, or a receipt whose files share one
+/// leading dir), require that subdir to pass the same per-component weight check the cache-health path
+/// uses. A non-diffusers set (no `<tier>/model_index.json`, or a flat single-variant filter) keeps the
+/// prior file-existence contract.
+fn snapshot_tier_is_loadable(snapshot: &FsPath, files: &[String]) -> bool {
+    match tier_subdir_name(files) {
+        Some(tier) => {
+            let tier_dir = snapshot.join(&tier);
+            !path_is_readable_file(&tier_dir.join("model_index.json"))
+                || diffusers_snapshot_health(&tier_dir).installed
+        }
+        None => true,
+    }
+}
+
 fn receipt_files_present(data_dir: &FsPath, repo: &str, receipt: &ReceiptFileSet) -> bool {
     !receipt.files.is_empty()
         && huggingface_repo_cache_path(data_dir, repo)
@@ -1319,6 +1338,9 @@ fn receipt_files_present(data_dir: &FsPath, repo: &str, receipt: &ReceiptFileSet
                             .iter()
                             .all(|file| snapshot.join(file).is_file())
                     })
+                    // A torn tier's recorded files all exist but the install can't load — it must not
+                    // count as a "usable stale" install that keeps the model falsely installed.
+                    .filter(|snapshot| snapshot_tier_is_loadable(snapshot, &receipt.files))
                     .collect::<Vec<_>>();
                 receipt
                     .revision
@@ -1354,6 +1376,12 @@ fn backfill_current_receipt(
             let snapshot = crate::huggingface_snapshot_dirs(&root).into_iter().find(|snapshot| {
                 files.iter().all(|pattern| snapshot_contains_pattern(snapshot, pattern))
             })?;
+            // Never manufacture a receipt for a torn tier: a `<tier>/*` glob matches as soon as one
+            // metadata file exists, so backfilling it would record a "complete" install that cannot
+            // load. Require the tier to actually hold its weights before preserving it (sc-13076).
+            if !snapshot_tier_is_loadable(&snapshot, &files) {
+                return None;
+            }
             let resolved = snapshot_files(&snapshot).into_iter()
                 .filter(|file| allow_pattern_matches(file, &files)).collect::<Vec<_>>();
             (!resolved.is_empty()).then(|| json!({
@@ -2611,11 +2639,40 @@ pub(crate) fn huggingface_cache_health(
     HuggingFaceCacheHealth::missing(best_missing)
 }
 
+/// If every pattern in a tier's `files` filter is confined to ONE leading directory — the standard
+/// quant-tier layout `["q8/*"]` → `q8` (also `["bf16/*"]`, `["q4/*"]`) — return that directory.
+/// `None` for a flat single-variant filter (`["*.safetensors"]`, whose leading component is itself a
+/// glob) or patterns that span multiple top-level dirs; those are not a tier subdir and keep the
+/// coarse glob check.
+fn tier_subdir_name(files: &[String]) -> Option<String> {
+    let mut tier: Option<&str> = None;
+    for pattern in files {
+        let (head, rest) = pattern.split_once('/')?;
+        if head.is_empty() || rest.is_empty() || pattern_contains_glob(head) {
+            return None;
+        }
+        match tier {
+            None => tier = Some(head),
+            Some(existing) if existing == head => {}
+            Some(_) => return None,
+        }
+    }
+    tier.map(str::to_owned)
+}
+
+/// The tier a `<dir>/*` whole-subdir glob names (`"q8/*"` → `"q8"`). `None` for any other pattern —
+/// a specific file (`"q8/turbo_lora.safetensors"`) or a non-tier glob — so the coarse presence check
+/// stays authoritative for explicit files.
+fn whole_subdir_glob_tier(pattern: &str) -> Option<&str> {
+    let (head, rest) = pattern.split_once('/')?;
+    (rest == "*" && !head.is_empty() && !pattern_contains_glob(head)).then_some(head)
+}
+
 fn huggingface_filtered_cache_health(
     snapshots: &[PathBuf],
     files: &[String],
 ) -> HuggingFaceCacheHealth {
-    let missing = files
+    let mut missing = files
         .iter()
         .filter(|pattern| {
             !snapshots
@@ -2624,11 +2681,45 @@ fn huggingface_filtered_cache_health(
         })
         .cloned()
         .collect::<Vec<_>>();
+    // Whether the COARSE check found none of the filter's patterns present — the "cleanly absent
+    // tier" signal, captured before the tier-completeness augmentation below can add entries.
+    let coarse_all_absent = missing.len() == files.len();
+
+    // A `<tier>/*` whole-subdir glob is satisfied as soon as a SINGLE file under `<tier>/` exists, so
+    // the coarse check never notices missing weights INSIDE the tier: a torn download (its
+    // `model_index.json` + a config or two present, but the transformer/vae weights gone) reported a
+    // green "Installed" badge, then failed to load at generation (`No such file or directory`). When a
+    // whole-subdir tier is a diffusers pipeline (has `<tier>/model_index.json`), fold its missing
+    // weight-bearing components — the SAME per-component check the non-tiered path uses — into
+    // `missing`, scoped under the tier. Additional explicit patterns (e.g. a `<tier>/lora.safetensors`
+    // co-requisite) are left to the coarse check above, so this never masks an explicitly-listed file.
+    // A cleanly-absent tier (no `<tier>/model_index.json` present) adds nothing and stays MISSING, not
+    // a repairable "incomplete" — so a valid single-quant install raises no spurious repair prompt
+    // (sc-9907/sc-9909).
+    for pattern in files {
+        let Some(tier) = whole_subdir_glob_tier(pattern) else {
+            continue;
+        };
+        let Some(tier_dir) = snapshots
+            .iter()
+            .map(|snapshot| snapshot.join(tier))
+            .find(|dir| path_is_readable_file(&dir.join("model_index.json")))
+        else {
+            continue;
+        };
+        for component in diffusers_snapshot_health(&tier_dir).missing_files {
+            let scoped = format!("{tier}/{component}");
+            if !missing.contains(&scoped) {
+                missing.push(scoped);
+            }
+        }
+    }
+
     if missing.is_empty() {
-        // Every expected file/pattern is present — fully installed.
+        // Every expected file/pattern is present AND (for a diffusers tier) its weights are on disk.
         HuggingFaceCacheHealth::installed()
-    } else if missing.len() == files.len() {
-        // NONE of this filter's expected files are present: the tier is cleanly absent, not torn.
+    } else if coarse_all_absent {
+        // NONE of this filter's expected patterns are present: the tier is cleanly absent, not torn.
         // A quant-matrix model keeps every tier in ONE shared repo cache (bf16/, q8/, q4/ subdirs),
         // so downloading one tier populates the repo snapshot the OTHER tiers' filters also probe.
         // Reporting a not-downloaded tier as `incomplete` is what surfaced a false "Cached files are
@@ -2641,8 +2732,8 @@ fn huggingface_filtered_cache_health(
             missing_files: missing,
         }
     } else {
-        // Some — but not all — expected files are present: a genuinely torn download a re-fetch
-        // should repair.
+        // Some expected files present but not all — an explicit file is absent, or a diffusers tier is
+        // torn (weights missing). A re-fetch repairs it.
         HuggingFaceCacheHealth::missing(missing)
     }
 }
@@ -3429,6 +3520,126 @@ mod variant_install_tests {
         assert_eq!(
             by_variant("q8").footprint.get("peakMemoryBytes"),
             Some(&Value::Null)
+        );
+    }
+
+    /// Seed one quant tier as a diffusers pipeline snapshot: always a `model_index.json` +
+    /// weightless scheduler/tokenizer configs; the transformer/vae/text_encoder weights only when
+    /// `complete`. A `complete: false` tier mirrors a torn download (interrupted, or weights pruned)
+    /// — its files satisfy the coarse `<tier>/*` glob but it cannot load.
+    fn seed_diffusers_tier(data_dir: &FsPath, repo: &str, tier: &str, complete: bool) {
+        let cache = huggingface_repo_cache_path(data_dir, repo).expect("cache path");
+        let root = cache.join("snapshots").join("abc123").join(tier);
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        write(
+            "model_index.json",
+            r#"{
+                "_class_name": "ZImagePipeline",
+                "transformer": ["diffusers", "ZImageTransformer2DModel"],
+                "vae": ["diffusers", "AutoencoderKL"],
+                "text_encoder": ["transformers", "Qwen3Model"],
+                "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
+                "tokenizer": ["transformers", "Qwen2Tokenizer"]
+            }"#,
+        );
+        // Weightless components ship only config, present in a torn tier too (this is what makes the
+        // coarse glob match and wrongly report "installed").
+        write("scheduler/scheduler_config.json", "{}");
+        write("tokenizer/tokenizer_config.json", "{}");
+        write("text_encoder/config.json", "{}");
+        if complete {
+            write("transformer/config.json", "{}");
+            write("transformer/model.safetensors", "weights");
+            write("vae/config.json", "{}");
+            write("vae/model.safetensors", "weights");
+            write("text_encoder/model.safetensors", "weights");
+        }
+    }
+
+    /// The regression this fix closes: a torn diffusers tier (its `model_index.json` + a config or two
+    /// present, but the transformer/vae weights missing) satisfied the coarse `<tier>/*` glob and so
+    /// reported a green "Installed" badge — then failed to load at generation with `No such file or
+    /// directory`. A tier must read installed only when its weight-bearing components actually hold
+    /// weights; an absent tier stays a clean "missing", not a repairable "incomplete".
+    #[test]
+    fn torn_diffusers_tier_reads_incomplete_not_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "SceneWorks/matrix";
+        let model = quant_matrix_model(repo);
+
+        // q4 complete (loads), q8 torn (metadata only — the transformer weights never arrived),
+        // bf16 never fetched.
+        seed_diffusers_tier(data_dir, repo, "q4", true);
+        seed_diffusers_tier(data_dir, repo, "q8", false);
+
+        let states = model_variant_states(&model, data_dir);
+        let by_variant = |name: &str| states.iter().find(|s| s.variant == name).unwrap();
+
+        assert!(
+            by_variant("q4").installed,
+            "complete q4 tier must read installed"
+        );
+        assert!(
+            !by_variant("q8").installed,
+            "torn q8 tier must NOT read installed just because its metadata files match the glob"
+        );
+        assert!(
+            by_variant("q8").cache_incomplete,
+            "a torn (half-present) tier is a repairable incomplete, not a clean missing"
+        );
+        assert!(
+            !by_variant("bf16").installed && !by_variant("bf16").cache_incomplete,
+            "a never-fetched tier stays a clean missing (no spurious repair prompt — sc-9907)"
+        );
+
+        // Model-level state aggregates: q4 is complete, so the model is installed overall — the torn
+        // q8 must not drag the whole model to incomplete (sc-9907), but it also must not itself count.
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(state.installed, "model installed via the complete q4 tier");
+    }
+
+    /// A model whose ONLY on-disk tier is torn must read NOT installed at the model level — including
+    /// via the "usable stale" receipt path (sc-13076 backfilled a receipt for whatever was on disk,
+    /// so a metadata-only tier produced a receipt whose files all exist yet cannot load).
+    #[test]
+    fn model_with_only_a_torn_tier_is_not_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "SceneWorks/matrix";
+        let model = quant_matrix_model(repo);
+
+        // Only q8 present, and torn. Plus a backfilled receipt recording its (weightless) files as if
+        // complete — exactly the shape found on the reporter's disk.
+        seed_diffusers_tier(data_dir, repo, "q8", false);
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(
+            managed.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec(&json!({
+                "repo": repo,
+                "receipts": [{
+                    "repo": repo, "modelId": "matrix_model", "variant": "q8",
+                    "manifestFiles": ["q8/*"],
+                    "resolvedFiles": [
+                        "q8/model_index.json", "q8/scheduler/scheduler_config.json",
+                        "q8/tokenizer/tokenizer_config.json", "q8/text_encoder/config.json"
+                    ],
+                    "backfilled": true
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            !state.installed,
+            "a torn-only install must not read installed via the usable-stale receipt path"
         );
     }
 
