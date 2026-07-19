@@ -3989,11 +3989,11 @@ struct VideoGenInput {
     /// snapshot; `None` on every other job.
     comfyui: Option<ComfyuiWanExperts>,
     /// Residency policy for the load (sc-12631). Defaults to [`OffloadPolicy::Resident`] — the historical
-    /// video behavior (every component held for the whole run). The candle A14B path flips this to
-    /// [`OffloadPolicy::Sequential`] so the two 14B experts are swapped one-resident-at-a-time and the
-    /// measured `candle.vramGbByTier` peak (the SEQUENTIAL working set) is the one actually loaded; see
-    /// `candle_wan_offload_policy`. Left `Resident` on the MLX (macOS) path and the 5B, which the
-    /// manifest still sizes resident.
+    /// video behavior (every component held for the whole run). The candle A14B (two 14B experts swapped
+    /// one-resident-at-a-time) and the dense 5B (TE/VAE flushed off-GPU around the denoise, sc-13175) flip
+    /// this to [`OffloadPolicy::Sequential`] so the measured `candle.vramGbByTier` peak (the SEQUENTIAL
+    /// working set) is the one actually loaded; see `candle_wan_offload_policy`. Left `Resident` on the
+    /// MLX (macOS) path and the resident-only candle video engines (`ltx`/`svd`).
     offload_policy: OffloadPolicy,
 }
 
@@ -5467,14 +5467,17 @@ fn mochi_vram_preflight(
 /// load actually takes this path — [`video_load_spec`] threads it onto the `LoadSpec`, and
 /// `apply_residency_policy` never downgrades a `Sequential` set here.
 ///
-/// The dense TI2V-5B stays [`OffloadPolicy::Resident`]: its `candle.vramGbByTier` (46.1 GiB q4,
-/// sc-12631 PR #1598) is the RESIDENT peak, so offloading it would mismatch its sized number. Re-dropping
-/// the 5B onto the offload path the engine already wired (sc-12757) is a tracked follow-up. `ltx`/`svd`
-/// carry no offload lifecycle and stay resident.
+/// The dense TI2V-5B now renders [`OffloadPolicy::Sequential`] too (sc-13175). It has a single dense
+/// transformer (no expert swap), but its resident peak was dominated by the UMT5 TE + z48 VAE held
+/// alongside the DiT for the whole run, so the engine flushes TE/VAE off-GPU around the denoise
+/// (sc-12757, `render_sequential`) and the model is now sized by its MEASURED sequential
+/// `candle.vramGbByTier` peak (see the `wan_2_2` candle block) instead of the ~46 GiB RESIDENT peak
+/// sc-12631 (PR #1598) shipped — so a ~24 GB card can run the 5B where the resident gate needed ~48.
+/// `ltx`/`svd` carry no offload lifecycle and stay resident.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_wan_offload_policy(engine_id: &str) -> OffloadPolicy {
     match engine_id {
-        "wan2_2_t2v_14b" | "wan2_2_i2v_14b" => OffloadPolicy::Sequential,
+        "wan2_2_ti2v_5b" | "wan2_2_t2v_14b" | "wan2_2_i2v_14b" => OffloadPolicy::Sequential,
         _ => OffloadPolicy::Resident,
     }
 }
@@ -17442,20 +17445,22 @@ mod tests {
         );
     }
 
-    /// sc-12631: the candle A14B (T2V + I2V) loads with `OffloadPolicy::Sequential` so its two 14B
-    /// experts swap one-resident-at-a-time — the residency its MEASURED `candle.vramGbByTier` peak was
-    /// taken under, and the coupling that makes the gate's admission number truthful. The dense 5B and
-    /// the non-wan video engines stay `Resident`. Both halves are pinned: the policy predicate AND that
-    /// `video_load_spec` actually threads it onto the `LoadSpec` (a decoupled predicate that never
-    /// reached the spec would silently OOM the A14B on the resident path the gate did not size for).
+    /// sc-12631 / sc-13175: the candle Wan engines the manifest sizes by a MEASURED sequential
+    /// `candle.vramGbByTier` peak load with `OffloadPolicy::Sequential` — the A14B (T2V + I2V) so its two
+    /// 14B experts swap one-resident-at-a-time, and the dense TI2V-5B (sc-13175) so its UMT5 TE + z48 VAE
+    /// are flushed off-GPU around the denoise. That residency is the coupling that makes the gate's
+    /// admission number truthful. `ltx`/`svd` carry no offload lifecycle and stay `Resident`. Both halves
+    /// are pinned: the policy predicate AND that `video_load_spec` actually threads it onto the `LoadSpec`
+    /// (a decoupled predicate that never reached the spec would silently OOM on the resident path the gate
+    /// did not size for).
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
-    fn candle_a14b_loads_sequential_every_other_video_engine_resident() {
-        for id in ["wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
+    fn candle_wan_sequential_engines_offload_others_resident() {
+        for id in ["wan2_2_ti2v_5b", "wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
             assert_eq!(
                 candle_wan_offload_policy(id),
                 OffloadPolicy::Sequential,
-                "{id} must offload (both 14B experts cannot be co-resident)"
+                "{id} must offload (sized by its measured sequential peak, not the resident load)"
             );
             // Mirror `generate_candle_video_using`, which sets the input's policy from the predicate;
             // this pins that `video_load_spec` then threads it onto the `LoadSpec` (the coupling that
@@ -17471,9 +17476,8 @@ mod tests {
                 "{id}: video_load_spec must thread Sequential onto the LoadSpec"
             );
         }
-        // The dense 5B is sized RESIDENT in the manifest (46.1 GiB q4), and ltx/svd carry no offload
-        // lifecycle — forcing them sequential would mismatch their sized peak / be a no-op that misleads.
-        for id in ["wan2_2_ti2v_5b", "ltx_2_3_distilled", "svd_xt"] {
+        // ltx/svd carry no offload lifecycle — forcing them sequential would be a no-op that misleads.
+        for id in ["ltx_2_3_distilled", "svd_xt"] {
             assert_eq!(
                 candle_wan_offload_policy(id),
                 OffloadPolicy::Resident,

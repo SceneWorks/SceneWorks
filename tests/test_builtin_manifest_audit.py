@@ -268,12 +268,18 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
 
 
 def test_wan_2_2_candle_vram_tiers_match_measured_peaks():
-    """sc-12402/sc-12631: never regress the measured 5B peaks to estimates.
+    """sc-13175: never regress the measured 5B SEQUENTIAL peaks (or slide back to the resident ones).
 
-    Measured on an idle RTX PRO 6000 at wan_2_2's own shipped default (832x480, 121 frames,
-    20 steps, CFG on) -- the schema's "video = default frames". The peak is the DENOISE
-    (weights-dominated after sc-12434 chunked the sdpa); the z48 vae22 decode adds 0.0 GB, which
-    is what makes these card-independent despite the decode tiler budgeting off total VRAM.
+    Re-dropped onto the sequential-offload path (sc-12757 flushes the UMT5 TE + z48 VAE off-GPU around
+    the dense denoise), so these SUPERSEDE the resident numbers sc-12631 shipped (q4 46.1 / q8 48.7 /
+    bf16 54.0, minMemoryGb 48). Measured on an idle RTX PRO 6000 at wan_2_2's own shipped default
+    (832x480, 121 frames, 20 steps, CFG on, CANDLE_GEN_OFFLOAD=sequential), each tier in its own process.
+    The peak is the tier-blind denoise attention transient, not the weights -- so q4 and q8 land on the
+    SAME pool high-water and only the dense bf16 DiT is heavier; the z48 vae22 decode is the lower phase,
+    which makes these card-independent. The numbers are the nvidia-smi POOL high-water (the real max
+    device footprint, since cudarc never frees the pool), NOT the lower USED_MEM_HIGH concurrent-live
+    (10.61/10.61/11.67 GiB) -- gating at the pool bound is the conservative answer to the sc-13174
+    pool-vs-USED_MEM_HIGH caveat, so all three ship `measured: true` with no small-card packdown assumption.
     """
     manifest = _load_builtin_models_manifest()
     wan = next(model for model in manifest["models"] if model["id"] == "wan_2_2")
@@ -281,12 +287,15 @@ def test_wan_2_2_candle_vram_tiers_match_measured_peaks():
 
     assert candle["measured"] is True
     assert {tier: candle["vramGbByTier"][tier] for tier in ("q4", "q8", "bf16")} == {
-        "q4": 46.1,
-        "q8": 48.7,
-        "bf16": 54.0,
+        "q4": 12.1,
+        "q8": 12.1,
+        "bf16": 14.5,
     }
-    # minMemoryGb gates the default/lightest (q4) tier + the fit gate's 2 GB headroom.
-    assert candle["minMemoryGb"] == 48
+    # minMemoryGb gates the default/lightest (q4) tier + the fit gate's 2 GB headroom (12.1 + ~2).
+    assert candle["minMemoryGb"] == 14
+    # The re-drop's whole point: the heaviest tier's peak + the gate's 2 GB headroom still clears a 24 GB
+    # card (the resident 46.1 needed ~48). If this regresses, the 5B silently walls off the card it targets.
+    assert candle["vramGbByTier"]["bf16"] + 2 < 24
 
 
 def test_wan_a14b_candle_q4_measured_admits_32gb_q8_bf16_deferred():

@@ -368,16 +368,16 @@ fn mochi_too_big_error(
 // **Wan** rather than a guess:
 //
 //  1. **The engines this FLOOR still gates hold all components resident for the whole run.** ltx / svd /
-//     mochi and the dense TI2V-5B declare `supports_sequential_offload: false` (candle-gen-ltx /
-//     -svd / -mochi) or are sized by a RESIDENT `candle.vramGbByTier` (the 5B, 46.1 GiB q4), so
-//     `resolve_offload` is a no-op for them and Σweights is a genuine LOWER BOUND. **The A14B T2V/I2V are
-//     the exception as of sc-12631 / epic sc-12732:** the candle engine now stages TE → high-expert →
-//     low-expert → VAE **one-resident-at-a-time** (`render_sequential`, `supports_sequential_offload:
-//     true`) — only ONE 14B expert is live at a time, not both — so it is sized by its MEASURED sequential
-//     `candle.vramGbByTier` peak and this floor never gates it (`wan_video_fit_error` takes the measured
-//     branch), while its load is forced `OffloadPolicy::Sequential`
-//     (`video_jobs::candle_wan_offload_policy`) so the sized peak is the one actually loaded. The floor
-//     stays the fallback for a Wan tier that was never measured.
+//     mochi declare `supports_sequential_offload: false` (candle-gen-ltx / -svd / -mochi), so
+//     `resolve_offload` is a no-op for them and Σweights is a genuine LOWER BOUND. **The Wan A14B T2V/I2V
+//     and the dense TI2V-5B are the exception as of sc-12631 / epic sc-12732 (5B: sc-13175):** the candle
+//     engine stages components **one-resident-at-a-time** (`render_sequential`,
+//     `supports_sequential_offload: true`) — the A14B swaps TE → high-expert → low-expert → VAE (only ONE
+//     14B expert live at a time, not both), the 5B flushes its TE + z48 VAE off-GPU around the dense
+//     denoise (sc-12757) — so each is sized by its MEASURED sequential `candle.vramGbByTier` peak and this
+//     floor never gates it (`wan_video_fit_error` takes the measured branch), while its load is forced
+//     `OffloadPolicy::Sequential` (`video_jobs::candle_wan_offload_policy`) so the sized peak is the one
+//     actually loaded. The floor stays the fallback for a Wan tier that was never measured.
 //  2. **There is no host paging on CUDA.** Weights that do not fit VRAM cannot be demand-paged the way
 //     MLX's unified pool swaps, so Σweights is a genuine LOWER BOUND on the job's need. This is the
 //     asymmetry that makes the weights floor safe HERE but not on MLX: `mlx_fit_gate::weights_fit_floor`
@@ -413,9 +413,12 @@ fn mochi_too_big_error(
 // declares `total_size` 57,153,966,336 = 53.2 GiB for ONE 14B expert — HALVE on load, while the UMT5 TE
 // DOUBLES (bf16 10.58 → f32 21.16 GiB) on EVERY tier. Measured error vs the real device set:
 //
-//   * packed q4/q8 — floor UNDER-counts by ~9-11 GiB (the f32 TE). Safe direction: it just admits, the
-//     pre-gate status quo. (It is also nowhere near the real peak: the 5B q4's floor is 18.13 GiB and its
-//     MEASURED peak is 46.1 GB — the denoise (now sc-12434-chunked) + f32 TE/VAE, not the weights, is the ceiling.)
+//   * packed q4/q8 — floor UNDER-counts the co-resident set by the transient it omits. Safe direction:
+//     it just admits, the pre-gate status quo. For the sequential-offload Wan engines the relationship
+//     even INVERTS: the 5B's on-disk q4 floor is 18.15 GiB, but its MEASURED SEQUENTIAL peak is only
+//     ~12.1 GB pool high-water / 10.61 GiB USED_MEM_HIGH (sc-13175 — the denoise transient, with the bf16
+//     TE + z48 VAE flushed off-GPU), so there the floor OVER-counts and the measured `candle.vramGbByTier`
+//     block must win (it does; see below).
 //   * dense bf16 — floor OVER-counts by ~44 GiB (117.5 GiB summed vs a ~75 GiB device set), which
 //     wall-rejects a 96 GB card that would render. That is the sc-12179 class this gate's note claims
 //     cannot arise here; it can, on this one tier.
@@ -1350,13 +1353,13 @@ mod tests {
     // The MEASURED per-tier peak supersedes the floor (sc-12402).
     // -----------------------------------------------------------------------------------------
 
-    /// The shipped `wan_2_2` candle block — MEASURED on an idle RTX PRO 6000 Blackwell (sc-12402; re-measured sc-12631 post-chunking) at
-    /// the model's shipped 832x480 / 121-frame / 20-step default. Real numbers, so these tests prove the
-    /// REAL jobs are admitted/refused rather than that arithmetic is arithmetic.
-    ///
-    /// The q8 − q4 delta (48.7 − 46.1 = 2.6 GB) is the q8-vs-q4 DiT quant delta,
-    /// which is the coherence check on the campaign: everything else in the peak is tier-independent
-    /// (the f32 UMT5 TE + the f32 VAE + the now-chunked denoise attention).
+    /// The 5B's FORMER RESIDENT candle block (q4 46.1 / q8 48.7 / bf16 54.0), as sc-12402/sc-12631 shipped
+    /// it. sc-13175 RE-DROPPED the live `wan_2_2` onto sequential offload, so the shipped block is now the
+    /// ~10-12 GiB sequential peak (gated ≤24 GB) — see `gpu_and_manifest::wan_candle_blocks_drive_the_video_fit_gate_and_reject`
+    /// and `test_builtin_manifest_audit::test_wan_2_2_candle_vram_tiers_match_measured_peaks` for the live
+    /// numbers. This synthetic fixture is RETAINED because the gate paths below need a measured peak that
+    /// EXCEEDS both the on-disk weights floor and a consumer card — a shape no live candle video model has
+    /// once its TE + VAE offload — so it stays a hard-coded resident-scale example, NOT a live-manifest read.
     fn wan_5b_entry() -> JsonObject {
         obj(json!({
             "candle": {
@@ -1367,13 +1370,14 @@ mod tests {
         }))
     }
 
-    /// THE story (sc-12402): a tier the weights FLOOR admits, and that then CUDA-OOMs, is now refused.
+    /// The gate path sc-12402 was built for: a tier the weights FLOOR admits, but whose real peak OOMs, is
+    /// refused. Exercised with the 5B's FORMER RESIDENT shape (`wan_5b_entry`) — post-sc-13175 the live 5B
+    /// offloads and this under-count case no longer describes it, but the gate arithmetic it pins is the same.
     ///
-    /// The 5B q4's floor is 16.13 GiB of on-disk weights + 2 = ~18 GB, so an RTX 5090 (32 GB) is
-    /// ADMITTED by the floor — and the job dies in the denoise, because the MEASURED peak is 46.1 GB (the
-    /// now-chunked attention + f32 TE/VAE, not the weights alone: `transformer.rs`). The floor under-counts
-    /// by ~2.4x, which is not a tuning error but a category error — it counts weights and the peak is
-    /// not weights.
+    /// That resident q4's floor is 16.13 GiB of on-disk weights + 2 = ~18 GB, so an RTX 5090 (32 GB) is
+    /// ADMITTED by the floor — and the job would die in the denoise, because the resident peak is 46.1 GB
+    /// (attention + co-resident TE/VAE, not the weights alone). The floor under-counts by ~2.4x, which is
+    /// not a tuning error but a category error — it counts weights and the peak is not weights.
     ///
     /// Kills the mutations a compile alone would not:
     ///   * dropping the `predicted_peak_gb` branch (⇒ back to the floor) ⇒ the 5090 ADMITS;
@@ -1428,17 +1432,17 @@ mod tests {
     fn measured_peak_admits_a_tier_that_fits_the_card() {
         let entry = wan_5b_entry();
         const WAN_5B_Q4_DISK_BYTES: u64 = 17_315_750_512;
-        // The dev box: 96 GB. q4's measured 46.1 + 2 = 48.1 ≤ 95.6 ⇒ ADMIT (and it really does render —
-        // this exact configuration is the sc-12631 re-measurement).
+        // The dev box: 96 GB. q4's peak 46.1 + 2 = 48.1 ≤ 95.6 ⇒ ADMIT (the former resident shape rendered
+        // there; `wan_5b_entry`).
         let card96 = apply_vram_cap(None, Some(95.6));
         assert!(
             wan_video_fit_error("wan_2_2", &entry, "q4", WAN_5B_Q4_DISK_BYTES, "0", card96)
                 .is_none(),
-            "the measured q4 job renders on this card — the gate must not wall-reject it"
+            "the q4 job renders on this card — the gate must not wall-reject it"
         );
         // Same model, different tier ⇒ opposite verdict on a card sized BETWEEN the tiers: a card with
         // 52 GB free admits q4 (48.1) and q8 (50.7) but refuses bf16 (54.0 + 2 = 56.0 > 52). The gate
-        // reads the TIER, not the model — the 5B's ladder spans only ~8 GB (everything but the DiT is
+        // reads the TIER, not the model — this resident ladder spans only ~8 GB (everything but the DiT is
         // tier-independent), so the tiers land close but the gate still splits them.
         let card52 = apply_vram_cap(None, Some(52.0));
         assert!(
