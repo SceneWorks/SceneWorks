@@ -129,7 +129,7 @@
         "properties": {
           "id": { "type": "string", "minLength": 1 },
           "name": { "type": "string", "minLength": 1 },
-          "type": { "type": "string", "enum": ["image", "video", "utility"] },
+          "type": { "type": "string", "enum": ["image", "video", "audio", "utility"] },
           "family": { "type": "string" },
           "adapter": { "type": "string" },
           "capabilities": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
@@ -462,6 +462,79 @@
                 "$ref": "#/$defs/samplerLimits",
                 "x-sceneworks-allow-undeclared": true,
                 "description": "Per-backend candle/CUDA capability override, read by samplerOptionsFromModel(model, \"candle\"). The top-level limits.samplers/schedulers describe the default lane; this narrows/broadens them for the candle path."
+              }
+            }
+          },
+          "audio": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Audio-generation capability metadata (epic 13400, sc-13401) — a per-entry sibling of the mlx/candle backend blocks. It advertises what an audio model (Audio Studio's Speech / Music / SFX / VoiceClone tabs) supports so the studio can build its pickers and mode gates without probing the backend. Populated from the backend Capabilities (epic 12833). Chosen as a dedicated sub-block rather than limits/defaults because those are resolution-shaped and additionalProperties:false, so they would reject audio-shaped fields. Every property is OPTIONAL: a model advertises only the surfaces it actually supports (a bare Speech model may declare only voices/languages, while a full VoiceClone model adds editModes/conditioning).",
+            "properties": {
+              "voices": {
+                "type": "array",
+                "uniqueItems": true,
+                "description": "Selectable speaker voices, as objects so the Audio Studio picker can group by gender / accent / language. Only `id` is required; the optional fields drive grouping and display. Omit entirely for models with no fixed voice set (e.g. a music or SFX model, or a clone-from-reference model).",
+                "items": {
+                  "type": "object",
+                  "required": ["id"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Backend voice identifier passed through to the generate job."
+                    },
+                    "label": {
+                      "type": "string",
+                      "description": "Human-readable picker label. Falls back to `id` when absent."
+                    },
+                    "gender": {
+                      "type": "string",
+                      "description": "Advisory grouping key for the picker (e.g. \"female\", \"male\", \"neutral\"). Free-form; not a backend gate."
+                    },
+                    "accent": {
+                      "type": "string",
+                      "description": "Advisory grouping key for the picker (e.g. \"american\", \"british\"). Free-form; not a backend gate."
+                    },
+                    "language": {
+                      "type": "string",
+                      "description": "Primary language tag this voice speaks (e.g. \"en-US\"). Advisory grouping key; a subset of the model-level `languages` list."
+                    }
+                  }
+                }
+              },
+              "languages": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": { "type": "string" },
+                "description": "Supported language / locale tags (e.g. \"en-US\", \"en-GB\"). Advisory menu the Audio Studio surfaces; the backend owns actual synthesis support."
+              },
+              "sampleRates": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": { "type": "integer", "minimum": 1 },
+                "description": "Output sample rates in Hz the model can render (e.g. 24000, 48000). Advisory picker menu."
+              },
+              "maxDurationSecs": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "Longest clip (seconds) the model can generate in one request. Advisory UI ceiling; backend enforcement is owned by the audio adapter."
+              },
+              "editModes": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": { "type": "string" },
+                "description": "Supported audio edit operations (e.g. \"extend\", \"inpaint\", \"cover\"). Present only for models with an editing surface; absent for pure text-to-audio models."
+              },
+              "supportsMultiSpeaker": {
+                "type": "boolean",
+                "description": "Whether the model can render a multi-speaker turn/dialogue in a single request. Absent/false means single-speaker only."
+              },
+              "conditioning": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": { "type": "string" },
+                "description": "Extra conditioning inputs the model accepts (e.g. \"AudioEdit\", \"ReferenceAudio\", \"VoiceEmbedding\"). Drives which reference/upload controls the Audio Studio exposes."
               }
             }
           },
