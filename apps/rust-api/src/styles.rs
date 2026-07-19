@@ -200,7 +200,10 @@ mod tests {
         // The result is still a caption and the discriminator is untouched.
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(sceneworks_core::ideogram_caption::is_caption(&parsed));
-        let style = parsed.get("style_description").and_then(Value::as_object).unwrap();
+        let style = parsed
+            .get("style_description")
+            .and_then(Value::as_object)
+            .unwrap();
         assert!(style.contains_key("photo"));
         assert!(!style.contains_key("art_style"));
     }

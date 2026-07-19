@@ -91,8 +91,7 @@ pub fn merge_style_into_caption(value: &Value, style_text: &str) -> Value {
         .unwrap_or("");
     let merged = merge_aesthetics_text(existing_aesthetics, style);
     let mut style_obj = existing_style.unwrap_or_default();
-    let has_discriminator =
-        style_obj.contains_key("photo") || style_obj.contains_key("art_style");
+    let has_discriminator = style_obj.contains_key("photo") || style_obj.contains_key("art_style");
     style_obj.insert("aesthetics".to_owned(), Value::String(merged));
     if !has_discriminator {
         style_obj.insert("photo".to_owned(), Value::String(String::new()));
@@ -329,10 +328,16 @@ mod tests {
             }),
             "muted grain",
         );
-        let style = photo.get("style_description").and_then(Value::as_object).unwrap();
+        let style = photo
+            .get("style_description")
+            .and_then(Value::as_object)
+            .unwrap();
         assert!(style.contains_key("photo"));
         assert!(!style.contains_key("art_style"));
-        assert_eq!(style.get("aesthetics").and_then(Value::as_str), Some("muted grain"));
+        assert_eq!(
+            style.get("aesthetics").and_then(Value::as_str),
+            Some("muted grain")
+        );
 
         let art = merge_style_into_caption(
             &json!({
@@ -341,7 +346,10 @@ mod tests {
             }),
             "muted grain",
         );
-        let style = art.get("style_description").and_then(Value::as_object).unwrap();
+        let style = art
+            .get("style_description")
+            .and_then(Value::as_object)
+            .unwrap();
         assert!(style.contains_key("art_style"));
         assert!(!style.contains_key("photo"));
     }
@@ -377,7 +385,9 @@ mod tests {
         // Serializes in canonical photo order with the seeded discriminator present.
         let out = serialize_caption(&injected, false);
         assert!(
-            out.contains(r#""style_description": {"aesthetics": "gentle hand-painted", "photo": ""}"#),
+            out.contains(
+                r#""style_description": {"aesthetics": "gentle hand-painted", "photo": ""}"#
+            ),
             "unexpected serialization: {out}"
         );
     }
@@ -408,7 +418,10 @@ mod tests {
         let caption = json!({"compositional_deconstruction": {"background": "x", "elements": []}});
         assert_eq!(merge_style_into_caption(&caption, ""), caption);
         assert_eq!(merge_style_into_caption(&caption, "   "), caption);
-        assert_eq!(merge_style_into_caption(&json!("plain"), "x"), json!("plain"));
+        assert_eq!(
+            merge_style_into_caption(&json!("plain"), "x"),
+            json!("plain")
+        );
     }
 
     /// The shared cross-language golden fixtures — the SAME file `apps/web/src/ideogramCaption.test.js`
@@ -426,9 +439,16 @@ mod tests {
             .get("cases")
             .and_then(Value::as_array)
             .expect("fixtures carry a `cases` array");
-        assert!(cases.len() >= 5, "expected a non-trivial fixture set, got {}", cases.len());
+        assert!(
+            cases.len() >= 5,
+            "expected a non-trivial fixture set, got {}",
+            cases.len()
+        );
         for case in cases {
-            let name = case.get("name").and_then(Value::as_str).unwrap_or("<unnamed>");
+            let name = case
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("<unnamed>");
             let caption = case.get("caption").expect("fixture caption");
             let style_text = case.get("styleText").and_then(Value::as_str).unwrap_or("");
             let expected = case
