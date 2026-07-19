@@ -1836,6 +1836,66 @@ mod tests {
         );
     }
 
+    fn builtin_caption_style(model_id: &str) -> Option<String> {
+        use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+        use sceneworks_core::jsonc::strip_jsonc_comments;
+
+        let raw = BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .expect("builtin.models.jsonc present");
+        let manifest: Value =
+            serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parse");
+        manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some(model_id))
+            .unwrap_or_else(|| panic!("{model_id} present in builtin.models.jsonc"))["captionStyle"]
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn builtin_booru_model_declarations_select_the_tags_asset() {
+        for model_id in [
+            "anima_base",
+            "anima_aesthetic",
+            "anima_turbo",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ] {
+            let declared_style = builtin_caption_style(model_id);
+            let style = DescribeStyle::from_payload(declared_style.as_deref());
+            let (system, user) = build_image_describe_messages(style, false);
+            assert_eq!(style, DescribeStyle::Tags, "{model_id} selects tags");
+            assert!(
+                system.contains("comma-separated"),
+                "{model_id} loads the booru tag-list system prompt"
+            );
+            assert!(
+                user.to_lowercase().contains("tag"),
+                "{model_id} loads the tagging user prompt"
+            );
+        }
+
+        let prose_entry = serde_json::json!({ "captionStyle": "prose" });
+        for declared_style in [
+            builtin_caption_style("sdxl").as_deref(),
+            prose_entry["captionStyle"].as_str(),
+        ] {
+            let style = DescribeStyle::from_payload(declared_style);
+            let (system, _) = build_image_describe_messages(style, false);
+            assert_eq!(style, DescribeStyle::Prose);
+            assert!(
+                system.contains("natural-language description"),
+                "absent and explicit prose select the prose asset"
+            );
+            assert!(!system.contains("comma-separated booru"));
+        }
+    }
+
     // ── sc-8595 (epic 8588): multi-image "mood board" synthesis variants ──
 
     #[test]
@@ -2546,18 +2606,19 @@ mod tests {
         );
     }
 
-    /// Real-weight image-DESCRIBE smoke (sc-8204, epic 8203): the prose sibling of
+    /// Real-weight image-DESCRIBE smoke (sc-8204, sc-12337, epic 8203): the tags sibling of
     /// `image_caption_examines_reference_image`. Examines a reference image and emits a PLAIN-TEXT
     /// description through the SAME mlx-llm vision engine — but with NO output constraint, so resolution
     /// runs on architecture `can_load` ALONE (the sc-8204 risk gate, pinned weightlessly by
     /// `unconstrained_resolution_selects_a_provider_for_qwen3_vl_snapshot`). The cleaned reply must be a
-    /// non-empty paragraph that is NOT JSON. `#[ignore]` — the weights live outside CI; run on a Mac:
+    /// non-empty booru tag list that is NOT JSON. `#[ignore]` — the weights live outside CI; run on a Mac:
     ///   VISION_CAPTION_SNAPSHOT=<snapshot dir> IMAGE_CAPTION_REF=<image path> \
-    ///   cargo test -p sceneworks-worker --lib -- --ignored image_describe_examines_reference --nocapture
+    ///   cargo test -p sceneworks-worker --lib -- --ignored \
+    ///     illustrious_image_describe_emits_tags_for_reference_image --nocapture
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "real-weight (sc-8209): needs a vision model snapshot + reference image; set VISION_CAPTION_SNAPSHOT + IMAGE_CAPTION_REF"]
-    fn image_describe_examines_reference_image() {
+    fn illustrious_image_describe_emits_tags_for_reference_image() {
         use gen_core::core_llm::{
             Content, LoadSpec, Message, ModelRequirements, Role, Sampling, StreamEvent,
             TextLlmRequest,
@@ -2570,7 +2631,10 @@ mod tests {
 
         let image =
             load_caption_image_ref(std::path::Path::new(&ref_path)).expect("decode ref image");
-        let (system, user) = build_image_describe_messages(DescribeStyle::Prose, false);
+        let declared_style = builtin_caption_style("illustrious_xl_v1");
+        let style = DescribeStyle::from_payload(declared_style.as_deref());
+        assert_eq!(style, DescribeStyle::Tags, "Illustrious declares tags");
+        let (system, user) = build_image_describe_messages(style, false);
         let request = TextLlmRequest {
             messages: vec![
                 Message::system(system),
@@ -2607,16 +2671,17 @@ mod tests {
 
         let mut sink = |_event: StreamEvent| {};
         let output = describer.generate(&request, &mut sink).expect("generate");
-        let prose = clean_refine_output(&output.text);
-        eprintln!("image-describe prose:\n{prose}");
+        let tags = clean_refine_output(&output.text);
+        eprintln!("Illustrious image-describe tags:\n{tags}");
 
+        assert!(!tags.is_empty(), "describe reply is a non-empty tag list");
         assert!(
-            !prose.is_empty(),
-            "describe reply is a non-empty description"
+            serde_json::from_str::<Value>(&tags).is_err(),
+            "describe reply is plain tags, not a JSON object"
         );
         assert!(
-            serde_json::from_str::<Value>(&prose).is_err(),
-            "describe reply is plain prose, not a JSON object"
+            tags.contains(','),
+            "Illustrious describe reply uses a comma-separated booru tag list: {tags}"
         );
     }
 
