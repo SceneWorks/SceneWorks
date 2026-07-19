@@ -2692,14 +2692,13 @@
       },
       // candle/CUDA VRAM gate (sc-9094/sc-12131, epic 9083 → epic 10765) — MEASURED on an RTX PRO
       // 6000 (Blackwell sm_120) at 1024²/8-step with the rendered-device two-process probe. Resident
-      // peaks are q4 26.4, q8 35.9, bf16 55.6 GB. Sequential residency encodes/drops Qwen3-VL before
-      // loading the DiT and peaks at q4 22.7, q8 29.5, bf16 39.8 GB; every resident/sequential pair was
-      // byte-identical. minMemoryGb 32 covers the common q4 resident lane with headroom. INT8-ConvRot
-      // remains an unmeasured non-shipping estimate and defers to resident.
+      // peaks are q4 25.7, q8 35.2, bf16 47.2 GB. Sequential residency encodes/drops Qwen3-VL before
+      // loading the DiT and peaks at q4 21.9, q8 29.4, bf16 39.4 GB; every resident/sequential pair was
+      // byte-identical. minMemoryGb 32 covers the common q4 resident lane with headroom.
       "candle": {
         "minMemoryGb": 32,
         // sc-12425: the INT8-ConvRot tier's RESIDENT VRAM ceiling, now MEASURED (sc-12381) — 42.9 GB
-        // overall-peak on an exclusive sm_120 at 1024²/8-step, the same shape q4's 26.4 was taken at.
+        // overall-peak on an exclusive sm_120 at 1024²/8-step, the same shape used for the standard tiers.
         // This is the TE-CO-RESIDENT peak; the tier's efficient footprint is `sequentialPeakGb` (28.6).
         //
         // It replaces sc-9300's estimate of 31.0, which was wrong by 11.9 GB. That estimate blamed "the
