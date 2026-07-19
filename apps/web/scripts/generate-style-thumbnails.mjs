@@ -116,7 +116,7 @@ export function composeThumbnailPrompt(id, referencePrompt) {
  * blanket default is 4). width == height == size. A fixed seed keeps the noise identical across
  * every style so the style text is the only variable.
  */
-export function buildJobPayload({ id, prompt, model, seed, size, projectId, count = 1 }) {
+export function buildJobPayload({ prompt, model, seed, size, projectId, count = 1 }) {
   return {
     projectId,
     prompt,
@@ -125,9 +125,12 @@ export function buildJobPayload({ id, prompt, model, seed, size, projectId, coun
     width: size,
     height: size,
     seed,
-    // Retained for provenance / debugging; the API ignores unknown fields and we compose the
-    // prompt ourselves, so this never changes what is generated.
-    styleId: id,
+    // We compose the styled prompt CLIENT-SIDE, so we must NOT also send a `styleId`: the
+    // rust-api (sc-13134) folds styleId server-side whenever presetPromptResolvedClientSide is
+    // falsy, which would run compose_styled_prompt AGAIN over an already-composed prompt and
+    // DOUBLE the style. `styleId` is a recognized DTO field — it is NOT ignored. So we omit it
+    // and set the flag, exactly like apps/web/src/imageJobRequest.js does. (sc-13135)
+    presetPromptResolvedClientSide: true,
   };
 }
 
@@ -328,7 +331,6 @@ function resizeToThumb(fullPath, thumbOut, thumbPx) {
 async function generateOne(opts, id) {
   const prompt = composeThumbnailPrompt(id, opts.prompt);
   const payload = buildJobPayload({
-    id,
     prompt,
     model: opts.model,
     seed: opts.seed,
@@ -408,7 +410,6 @@ async function main() {
     ids.forEach((id, i) => {
       const prompt = composeThumbnailPrompt(id, opts.prompt);
       const payload = buildJobPayload({
-        id,
         prompt,
         model: opts.model,
         seed: opts.seed,

@@ -79,6 +79,25 @@ describe("buildJobPayload", () => {
     expect(payload.projectId).toBe("proj-123");
     expect(payload.prompt).toBe(prompt);
   });
+
+  // sc-13135 blocker: the prompt is composed CLIENT-SIDE, so the payload must NOT carry a
+  // `styleId` (a recognized rust-api DTO field, sc-13134) AND must set
+  // presetPromptResolvedClientSide:true. If both are not enforced, the server folds styleId a
+  // second time over the already-styled prompt and DOUBLES the style. This test fails if anyone
+  // re-adds styleId or drops the flag.
+  it("never sends styleId and always sets presetPromptResolvedClientSide:true", () => {
+    const payload = buildJobPayload({
+      id: "ghibli-style",
+      prompt: composeThumbnailPrompt("ghibli-style", REF),
+      model: "z_image_turbo",
+      seed: 20240719,
+      size: 1024,
+      projectId: "proj-123",
+    });
+    expect(Object.prototype.hasOwnProperty.call(payload, "styleId")).toBe(false);
+    expect(payload.styleId).toBeUndefined();
+    expect(payload.presetPromptResolvedClientSide).toBe(true);
+  });
 });
 
 describe("thumbnailPath", () => {
