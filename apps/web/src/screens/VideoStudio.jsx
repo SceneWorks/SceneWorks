@@ -1344,21 +1344,8 @@ export function VideoStudio() {
             />
           )}
 
-          {/* Style Catalog axis (sc-13136): a searchable, grouped single-select over the style
-              catalog, wrapped onto the outgoing prompt at build time (Style:/Description:). Hidden for
-              promptless image-conditioned models, which send no text prompt to style. Mirrors the
-              Image Studio's Style row; "None" resets to pass-through. */}
-          {promptless ? null : (
-            <div className="style-row">
-              <span className="style-row-label">Style</span>
-              <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
-            </div>
-          )}
-
-          {/* sc-13136: the EXACT composed prompt (Style:/Description: wrap + preset fold) the run will
-              send once a style is active — recomputed from the same base the submit uses so it can
-              never drift. Hidden when no style applies. */}
-          <StyledPromptPreview active={styleApplied} composedPrompt={composedStylePrompt} />
+          {/* Style Catalog picker + its composed-prompt preview moved into the Style axis row of the
+              settings bar (sc-13135) — see the .settings-bar-style-axis block below. */}
 
           <div className="motion-row">
             <span className="motion-row-label">Motion:</span>
@@ -1609,26 +1596,37 @@ export function VideoStudio() {
                 </div>
               </label>
             </div>
-            <div className="settings-bar-styles">
-              <span className="settings-bar-label">Style preset</span>
-              <div className="preset-chips">
-                <button
-                  className={!selectedPreset ? "preset-chip active" : "preset-chip"}
-                  onClick={() => setSelectedPresetId(noPresetId)}
-                  type="button"
-                >
-                  None
-                </button>
-                {availablePresets.map((preset) => (
+            {/* Style axis (sc-13135): the Style Catalog picker leads this row (hidden for promptless
+                image-conditioned models), followed by the model's Style presets — mirrors the Image
+                Studio. The catalog wraps the outgoing prompt (Style:/Description:); "None" resets. */}
+            <div className="settings-bar-styles settings-bar-style-axis">
+              {promptless ? null : (
+                <div className="style-axis-field style-axis-catalog">
+                  <span className="settings-bar-label">Style</span>
+                  <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
+                </div>
+              )}
+              <div className="style-axis-field style-axis-presets">
+                <span className="settings-bar-label">Style preset</span>
+                <div className="preset-chips">
                   <button
-                    className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
-                    key={preset.id}
-                    onClick={() => setSelectedPresetId(preset.id)}
+                    className={!selectedPreset ? "preset-chip active" : "preset-chip"}
+                    onClick={() => setSelectedPresetId(noPresetId)}
                     type="button"
                   >
-                    {preset.name ?? preset.id}
+                    None
                   </button>
-                ))}
+                  {availablePresets.map((preset) => (
+                    <button
+                      className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
+                      key={preset.id}
+                      onClick={() => setSelectedPresetId(preset.id)}
+                      type="button"
+                    >
+                      {preset.name ?? preset.id}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
             {availableGeneralPresets.length ? (
@@ -1649,6 +1647,11 @@ export function VideoStudio() {
               </div>
             ) : null}
           </div>
+
+          {/* sc-13136: the EXACT composed prompt the run will send once a style is active — recomputed
+              from the same base the submit uses so it can never drift. Sits under the Style axis row.
+              Hidden when no style applies. */}
+          <StyledPromptPreview active={styleApplied} composedPrompt={composedStylePrompt} />
 
           <PresetGuidanceStrip
             selectedPreset={selectedPreset}
