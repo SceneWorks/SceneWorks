@@ -152,7 +152,11 @@ pub(crate) async fn write_model_download_receipt(
             .unwrap_or_default(),
         Err(_) => Vec::new(),
     };
-    receipts.retain(|existing| existing.get("variant") != receipt.get("variant"));
+    receipts.retain(|existing| {
+        existing.get("repo") != receipt.get("repo")
+            || existing.get("modelId") != receipt.get("modelId")
+            || existing.get("variant") != receipt.get("variant")
+    });
     receipts.push(receipt.clone());
     let mut marker = receipt;
     marker

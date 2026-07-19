@@ -1267,16 +1267,19 @@ struct ModelCatalogEntryState {
     update_available: bool,
 }
 
-fn receipt_file_sets(managed_path: &FsPath, repo: &str) -> Vec<Vec<String>> {
+#[derive(Debug, PartialEq)]
+struct ReceiptFileSet {
+    files: Vec<String>,
+    revision: Option<String>,
+}
+
+fn receipt_file_sets(managed_path: &FsPath, repo: &str) -> Vec<ReceiptFileSet> {
     let Ok(bytes) = std::fs::read(managed_path.join(".sceneworks-download-complete.json")) else {
         return Vec::new();
     };
     let Ok(receipt) = serde_json::from_slice::<Value>(&bytes) else {
         return Vec::new();
     };
-    if receipt.get("repo").and_then(Value::as_str) != Some(repo) {
-        return Vec::new();
-    }
     let entries = receipt
         .get("receipts")
         .and_then(Value::as_array)
@@ -1285,6 +1288,9 @@ fn receipt_file_sets(managed_path: &FsPath, repo: &str) -> Vec<Vec<String>> {
     entries
         .into_iter()
         .filter_map(|entry| {
+            if entry.get("repo").and_then(Value::as_str) != Some(repo) {
+                return None;
+            }
             let files = entry
                 .get("resolvedFiles")?
                 .as_array()?
@@ -1292,18 +1298,36 @@ fn receipt_file_sets(managed_path: &FsPath, repo: &str) -> Vec<Vec<String>> {
                 .filter_map(Value::as_str)
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            (!files.is_empty()).then_some(files)
+            let revision = entry
+                .get("snapshotRevision")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            (!files.is_empty()).then_some(ReceiptFileSet { files, revision })
         })
         .collect()
 }
 
-fn receipt_files_present(data_dir: &FsPath, repo: &str, files: &[String]) -> bool {
-    !files.is_empty()
+fn receipt_files_present(data_dir: &FsPath, repo: &str, receipt: &ReceiptFileSet) -> bool {
+    !receipt.files.is_empty()
         && huggingface_repo_cache_path(data_dir, repo)
             .map(|root| {
-                crate::huggingface_snapshot_dirs(&root)
-                    .iter()
-                    .any(|snapshot| files.iter().all(|file| snapshot.join(file).is_file()))
+                let matches = crate::huggingface_snapshot_dirs(&root)
+                    .into_iter()
+                    .filter(|snapshot| {
+                        receipt
+                            .files
+                            .iter()
+                            .all(|file| snapshot.join(file).is_file())
+                    })
+                    .collect::<Vec<_>>();
+                receipt
+                    .revision
+                    .as_deref()
+                    .map_or(matches.len() == 1, |revision| {
+                        matches.iter().any(|snapshot| {
+                            snapshot.file_name().and_then(|v| v.to_str()) == Some(revision)
+                        })
+                    })
             })
             .unwrap_or(false)
 }
@@ -1362,6 +1386,76 @@ mod download_receipt_tests {
     use super::*;
 
     #[test]
+    fn multi_repo_marker_filters_nested_receipts_by_requested_repo() {
+        let temp = tempfile::tempdir().unwrap();
+        let managed = temp.path().join("models/owner--primary");
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(managed.join(".sceneworks-download-complete.json"), serde_json::to_vec(&json!({
+            "repo": "owner/corequisite",
+            "receipts": [
+                {"repo":"owner/primary", "resolvedFiles":["model.safetensors"], "snapshotRevision":"primary-rev"},
+                {"repo":"owner/corequisite", "resolvedFiles":["encoder.safetensors"], "snapshotRevision":"dependency-rev"}
+            ]
+        })).unwrap()).unwrap();
+
+        let primary = receipt_file_sets(&managed, "owner/primary");
+        assert_eq!(
+            primary,
+            vec![ReceiptFileSet {
+                files: vec!["model.safetensors".to_owned()],
+                revision: Some("primary-rev".to_owned())
+            }]
+        );
+        let dependency = receipt_file_sets(&managed, "owner/corequisite");
+        assert_eq!(
+            dependency,
+            vec![ReceiptFileSet {
+                files: vec!["encoder.safetensors".to_owned()],
+                revision: Some("dependency-rev".to_owned())
+            }]
+        );
+    }
+
+    #[test]
+    fn complete_pre_receipt_install_is_backfilled_and_protected_after_rename() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/backfill";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("old.safetensors"), b"weights").unwrap();
+        let original = json!({"id":"backfill-model", "downloads":[{"provider":"huggingface", "repo":repo, "files":["old.safetensors"]}]});
+
+        let initial = install_state_for(
+            model_download_context(&original).unwrap(),
+            &original,
+            data_dir,
+        );
+        assert!(initial.installed);
+        let marker = data_dir
+            .join("models")
+            .join(safe_download_dir(repo))
+            .join(".sceneworks-download-complete.json");
+        let receipt: Value = serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
+        assert_eq!(receipt["resolvedFiles"], json!(["old.safetensors"]));
+        assert_eq!(receipt["backfilled"], true);
+
+        let renamed = json!({"id":"backfill-model", "downloads":[{"provider":"huggingface", "repo":repo, "files":["new.safetensors"]}]});
+        let protected = install_state_for(
+            model_download_context(&renamed).unwrap(),
+            &renamed,
+            data_dir,
+        );
+        assert!(
+            protected.installed,
+            "backfilled exact old set remains usable"
+        );
+        assert!(protected.update_available, "rename is offered as an update");
+    }
+
+    #[test]
     fn receipt_remains_usable_when_current_manifest_file_changes() {
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();
@@ -1383,11 +1477,20 @@ mod download_receipt_tests {
         .unwrap();
 
         let files = receipt_file_sets(&managed, repo);
-        assert_eq!(files, vec![vec!["old.safetensors".to_owned()]]);
+        assert_eq!(files[0].files, vec!["old.safetensors".to_owned()]);
         assert!(receipt_files_present(data_dir, repo, &files[0]));
         assert!(!huggingface_cache_health(&cache, &["new.safetensors".to_owned()]).installed);
 
+        let ambiguous = cache.join("snapshots/rev-b");
+        std::fs::create_dir_all(&ambiguous).unwrap();
+        std::fs::write(ambiguous.join("old.safetensors"), b"other weights").unwrap();
+        assert!(
+            !receipt_files_present(data_dir, repo, &files[0]),
+            "legacy receipt must identify one snapshot"
+        );
+
         std::fs::remove_file(snapshot.join("old.safetensors")).unwrap();
+        std::fs::remove_file(ambiguous.join("old.safetensors")).unwrap();
         assert!(
             !receipt_files_present(data_dir, repo, &files[0]),
             "torn stale install is missing"
@@ -1572,7 +1675,7 @@ fn install_state_for(
         let stale_files_present = !cache_installed
             && receipt_file_sets
                 .iter()
-                .any(|files| receipt_files_present(data_dir, &download_context.repo, files));
+                .any(|receipt| receipt_files_present(data_dir, &download_context.repo, receipt));
         let breaking_update = model
             .get("breaking")
             .and_then(Value::as_bool)
