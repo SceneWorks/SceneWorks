@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildImageJobRequest } from "./imageJobRequest.js";
+import { serializeCaption } from "./ideogramCaption.js";
 
 // sc-11219 (F-031): the batch job-request builder used to be a hand-copied twin of the single
 // Generate payload that had DRIFTED — the batch copy dropped the top-level `referenceAssetId`
@@ -150,5 +151,77 @@ describe("buildImageJobRequest", () => {
     );
     expect(request.referenceAssetId).toBe("character-ref");
     expect(request.advanced).not.toHaveProperty("strength");
+  });
+});
+
+// sc-13224: the Style axis applied to a structured JSON-caption model (Ideogram 4). The style is
+// merged into `style_description.aesthetics` and the caption re-serialized — NOT wrapped in prose.
+describe("buildImageJobRequest — Style axis on a structured caption model", () => {
+  const CAPTION = {
+    style_description: { aesthetics: "moody", lighting: "low key", photo: "f/1.8" },
+    compositional_deconstruction: { background: "an alley", elements: [] },
+  };
+
+  function structuredStyleState(overrides = {}) {
+    return img2imgPidState({
+      model: "ideogram_4",
+      supportsImg2img: false,
+      img2imgReferenceAssetId: null,
+      sendStructured: true,
+      submitCaption: CAPTION,
+      submitBackend: null,
+      promptToSend: serializeCaption(CAPTION),
+      submitIntent: "an alley",
+      styleId: "cinematic-style",
+      styleText: "cinematic watercolor",
+      ...overrides,
+    });
+  }
+
+  it("merges the style into style_description.aesthetics and re-serializes (user words first)", () => {
+    const request = buildImageJobRequest(structuredStyleState());
+    expect(request.prompt).toBe(
+      serializeCaption({
+        style_description: {
+          aesthetics: "moody. cinematic watercolor",
+          lighting: "low key",
+          photo: "f/1.8",
+        },
+        compositional_deconstruction: { background: "an alley", elements: [] },
+      }),
+    );
+  });
+
+  it("sets presetPromptResolvedClientSide so the server does not double-inject", () => {
+    const request = buildImageJobRequest(structuredStyleState());
+    expect(request.presetPromptResolvedClientSide).toBe(true);
+  });
+
+  it("records styleId (and an empty stylePrompt) in advanced for replay", () => {
+    const request = buildImageJobRequest(structuredStyleState());
+    expect(request.advanced.styleId).toBe("cinematic-style");
+    expect(request.advanced.stylePrompt).toBe("");
+    // The recipe caption stays the PRE-injection caption so replay re-injects once, not twice.
+    expect(request.advanced.structuredPrompt.caption).toEqual(CAPTION);
+  });
+
+  it("sends the caption unchanged when no style is selected", () => {
+    const request = buildImageJobRequest(structuredStyleState({ styleId: null, styleText: "" }));
+    expect(request.prompt).toBe(serializeCaption(CAPTION));
+    expect(request.advanced).not.toHaveProperty("styleId");
+    expect(request.presetPromptResolvedClientSide).toBeUndefined();
+  });
+
+  it("leaves the prose (non-structured) style path unchanged", () => {
+    const request = buildImageJobRequest(
+      img2imgPidState({
+        model: "krea-2-turbo",
+        promptToSend: "a fox in the snow",
+        styleId: "cinematic-style",
+        styleText: "cinematic watercolor",
+      }),
+    );
+    expect(request.prompt).toBe("Style: cinematic watercolor\nDescription: a fox in the snow");
+    expect(request.presetPromptResolvedClientSide).toBe(true);
   });
 });

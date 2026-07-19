@@ -9452,6 +9452,30 @@ fn resolve_mochi_model_dir(settings: &Settings, request: &VideoRequest) -> Worke
             return Ok(root);
         }
     }
+    let requested_variant = mochi_tier_order(request).first().copied();
+    let receipt_dir = crate::model_jobs::huggingface_receipt_weights_dir(
+        &settings.data_dir,
+        MOCHI_REPO,
+        Some(&request.model),
+        requested_variant,
+    );
+    if let Some(receipt_dir) = receipt_dir {
+        // A receipt tier is already the exact, atomic file set selected at install time.  Do not run
+        // it through the current-manifest fallback order (or self-heal it with newly named files).
+        let receipt_root = receipt_dir.parent();
+        let shared_receipt = crate::model_jobs::huggingface_receipt_weights_dir(
+            &settings.data_dir,
+            MOCHI_REPO,
+            Some(&request.model),
+            Some("default"),
+        );
+        if mochi_tier_dir_is_complete(&receipt_dir)
+            && shared_receipt.as_deref() == receipt_root
+            && receipt_root.is_some_and(mochi_shared_is_complete)
+        {
+            return Ok(receipt_dir);
+        }
+    }
     if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, MOCHI_REPO) {
         if let Some(dir) = mochi_tier_subdir(&root, order) {
             return Ok(dir);
@@ -9549,6 +9573,26 @@ async fn ensure_mochi_tier_present(
     job: &JobSnapshot,
     tier: &str,
 ) -> WorkerResult<()> {
+    let tier_receipt = crate::model_jobs::huggingface_receipt_weights_dir(
+        &settings.data_dir,
+        MOCHI_REPO,
+        None,
+        Some(tier),
+    );
+    let shared_receipt = crate::model_jobs::huggingface_receipt_weights_dir(
+        &settings.data_dir,
+        MOCHI_REPO,
+        None,
+        Some("default"),
+    );
+    if let (Some(tier_dir), Some(shared_root)) = (tier_receipt, shared_receipt) {
+        if tier_dir.parent() == Some(shared_root.as_path())
+            && mochi_tier_dir_is_complete(&tier_dir)
+            && mochi_shared_is_complete(&shared_root)
+        {
+            return Ok(());
+        }
+    }
     let Some(root) = huggingface_snapshot_dir(&settings.data_dir, MOCHI_REPO) else {
         return Ok(());
     };
@@ -11353,6 +11397,67 @@ mod tests {
             "prompt": "a calico kitten",
             "advanced": advanced,
         }))
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn mochi_receipts_are_atomic_across_tier_and_shared_corequisite() {
+        let data = tempfile::tempdir().unwrap();
+        let hub = data.path().join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let repo_cache = hub.join("models--SceneWorks--mochi-1-mlx");
+        let installed = repo_cache.join("snapshots/installed");
+        let newer = repo_cache.join("snapshots/newer");
+        for root in [&installed, &newer] {
+            std::fs::create_dir_all(root.join("q4/transformer")).unwrap();
+            std::fs::write(root.join("q4/transformer/model.safetensors"), b"x").unwrap();
+            std::fs::write(root.join("q4/split_model.json"), b"{}").unwrap();
+            for component in ["text_encoder", "tokenizer", "vae"] {
+                std::fs::create_dir_all(root.join(component)).unwrap();
+                std::fs::write(root.join(component).join("receipt-file"), b"x").unwrap();
+            }
+        }
+        std::fs::create_dir_all(repo_cache.join("refs")).unwrap();
+        std::fs::write(repo_cache.join("refs/main"), b"newer").unwrap();
+        let marker = data
+            .path()
+            .join("models")
+            .join(safe_download_dir(MOCHI_REPO));
+        std::fs::create_dir_all(&marker).unwrap();
+        let receipt = |variant: &str, revision: &str, files: Value| {
+            json!({
+                "repo": MOCHI_REPO, "modelId": "mochi_1", "variant": variant,
+                "snapshotRevision": revision, "resolvedFiles": files
+            })
+        };
+        let write_receipts = |tier_revision: &str, shared_revision: &str| {
+            std::fs::write(marker.join(INSTALL_MARKER), serde_json::to_vec(&json!({
+                "repo": MOCHI_REPO,
+                "receipts": [
+                    receipt("q4", tier_revision, json!(["q4/split_model.json", "q4/transformer/model.safetensors"])),
+                    receipt("default", shared_revision, json!(["text_encoder/receipt-file", "tokenizer/receipt-file", "vae/receipt-file"]))
+                ]
+            })).unwrap()).unwrap();
+        };
+        let settings = Settings {
+            data_dir: data.path().to_path_buf(),
+            ..Settings::from_env()
+        };
+        let request = mochi_request(json!({ "mlxQuantize": 4 }));
+
+        write_receipts("installed", "installed");
+        assert_eq!(
+            resolve_mochi_model_dir(&settings, &request).unwrap(),
+            installed.join("q4")
+        );
+        write_receipts("installed", "newer");
+        assert_ne!(
+            resolve_mochi_model_dir(&settings, &request).unwrap(),
+            installed.join("q4")
+        );
     }
 
     /// `advanced.mlxQuantize` selects WHICH TIER DIR to load — the story's "selecting q4/q8/bf16

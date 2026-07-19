@@ -41,10 +41,11 @@ export function imageGenerateValidation({
   characterId,
   editSourceMissing = false,
   editLoraMissing = false,
-  // sc-13133: the COMPOSED outgoing prompt (Style:/Description: wrap + preset fold) and whether a
-  // Style Catalog entry is active. `composedPrompt` is the exact string that will be sent — the same
-  // buildJobRequest output the live preview shows — so the cap is measured on IT, not the raw prompt
-  // field: a ~700–900 char style wrapped around a long-but-under-cap prompt can compose past 4000.
+  // sc-13133 / sc-13224: the COMPOSED outgoing prompt and whether a Style Catalog entry is active.
+  // `composedPrompt` is the exact string that will be sent — the Style:/Description: composition for a
+  // prose model, or the style-injected re-serialized caption for a structured model — so the cap is
+  // measured on IT, not the raw prompt field: a ~700–900 char style wrapped around a long-but-under-cap
+  // prompt, or merged into a caption, can push past 4000.
   styleActive = false,
   composedPrompt = "",
   presetMissing = [],
@@ -65,12 +66,14 @@ export function imageGenerateValidation({
   } else if (!prompt?.trim()) {
     issues.push(issue.requirement("prompt", "Write a prompt"));
   }
-  // Composed-prompt budget guard (sc-13133). ONLY when a style is active: styleless behavior is
-  // unchanged (the raw prompt keeps whatever gating it had — the backend still bounds it, but the
-  // studio doesn't pre-flag it). An error, not a silent requirement: nothing else on the form
-  // explains why Generate is dead, and we must warn rather than let the run reach the backend's
-  // reject. The message names the actual numbers and the two ways out.
-  if (styleActive && !structuredActive) {
+  // Composed-prompt budget guard (sc-13133 / sc-13224). ONLY when a style is active: styleless
+  // behavior is unchanged (the raw prompt keeps whatever gating it had — the backend still bounds it,
+  // but the studio doesn't pre-flag it). Applies to BOTH prose and structured models now that the
+  // Style axis merges into a structured caption too (sc-13224): `composedPrompt` is the exact string
+  // sent in either case, and injecting a style can push a caption over the cap. An error, not a silent
+  // requirement: nothing else on the form explains why Generate is dead. The message names the actual
+  // numbers and the two ways out.
+  if (styleActive && composedPrompt) {
     const budget = promptBudget(composedPrompt);
     if (budget.over) {
       issues.push(

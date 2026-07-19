@@ -1,0 +1,142 @@
+{
+  "description": "sc-13224 cross-language golden fixtures for Style-axis injection into an Ideogram JSON caption. Consumed by BOTH apps/web/src/ideogramCaption.test.js (injectStyleIntoCaption + serializeCaption) AND crates/sceneworks-core/src/ideogram_caption.rs (merge_style_into_caption + serialize_caption(_, false)) so the client inject and the server fold produce a byte-identical serialized caption. `expectedCaption` is the serialized result. An empty `styleText` means no style selected (identity). Add a case here to pin new behavior in both languages at once.",
+  "cases": [
+    {
+      "name": "photo block, no aesthetics key -> set aesthetics",
+      "caption": {
+        "high_level_description": "a fox in the snow",
+        "style_description": {
+          "lighting": "golden hour",
+          "photo": "f/2.8",
+          "medium": "DSLR"
+        },
+        "compositional_deconstruction": {
+          "background": "a snowy forest",
+          "elements": []
+        }
+      },
+      "styleText": "cinematic watercolor",
+      "expectedCaption": "{\"high_level_description\": \"a fox in the snow\", \"style_description\": {\"aesthetics\": \"cinematic watercolor\", \"lighting\": \"golden hour\", \"photo\": \"f/2.8\", \"medium\": \"DSLR\"}, \"compositional_deconstruction\": {\"background\": \"a snowy forest\", \"elements\": []}}",
+      "expectedValid": true
+    },
+    {
+      "name": "photo block, empty-string aesthetics -> set aesthetics",
+      "caption": {
+        "style_description": {
+          "aesthetics": "",
+          "lighting": "soft",
+          "photo": "f/4"
+        },
+        "compositional_deconstruction": {
+          "background": "a beach",
+          "elements": []
+        }
+      },
+      "styleText": "muted film grain",
+      "expectedCaption": "{\"style_description\": {\"aesthetics\": \"muted film grain\", \"lighting\": \"soft\", \"photo\": \"f/4\"}, \"compositional_deconstruction\": {\"background\": \"a beach\", \"elements\": []}}",
+      "expectedValid": true
+    },
+    {
+      "name": "photo block, prefilled aesthetics (no end punctuation) -> merge, user words first",
+      "caption": {
+        "style_description": {
+          "aesthetics": "moody and dim",
+          "lighting": "low key",
+          "photo": "f/1.8"
+        },
+        "compositional_deconstruction": {
+          "background": "an alley",
+          "elements": []
+        }
+      },
+      "styleText": "cinematic watercolor",
+      "expectedCaption": "{\"style_description\": {\"aesthetics\": \"moody and dim. cinematic watercolor\", \"lighting\": \"low key\", \"photo\": \"f/1.8\"}, \"compositional_deconstruction\": {\"background\": \"an alley\", \"elements\": []}}",
+      "expectedValid": true
+    },
+    {
+      "name": "art_style block, prefilled aesthetics ending with period -> merge with single space",
+      "caption": {
+        "style_description": {
+          "aesthetics": "Soft and dreamy.",
+          "lighting": "diffuse",
+          "medium": "paint",
+          "art_style": "watercolor"
+        },
+        "compositional_deconstruction": {
+          "background": "a meadow",
+          "elements": []
+        }
+      },
+      "styleText": "bold ink linework",
+      "expectedCaption": "{\"style_description\": {\"aesthetics\": \"Soft and dreamy. bold ink linework\", \"lighting\": \"diffuse\", \"medium\": \"paint\", \"art_style\": \"watercolor\"}, \"compositional_deconstruction\": {\"background\": \"a meadow\", \"elements\": []}}",
+      "expectedValid": true
+    },
+    {
+      "name": "non-photo (art_style) block, absent aesthetics -> set as first key",
+      "caption": {
+        "style_description": {
+          "medium": "pencil",
+          "art_style": "sketch"
+        },
+        "compositional_deconstruction": {
+          "background": "a studio",
+          "elements": []
+        }
+      },
+      "styleText": "vibrant pop art",
+      "expectedCaption": "{\"style_description\": {\"aesthetics\": \"vibrant pop art\", \"medium\": \"pencil\", \"art_style\": \"sketch\"}, \"compositional_deconstruction\": {\"background\": \"a studio\", \"elements\": []}}",
+      "expectedValid": true
+    },
+    {
+      "name": "no style_description at all -> created with seeded photo discriminator + aesthetics (VALID)",
+      "caption": {
+        "high_level_description": "a red fox",
+        "compositional_deconstruction": {
+          "background": "snow",
+          "elements": [
+            {
+              "type": "obj",
+              "desc": "a red fox"
+            }
+          ]
+        }
+      },
+      "styleText": "gentle hand-painted",
+      "expectedCaption": "{\"high_level_description\": \"a red fox\", \"style_description\": {\"aesthetics\": \"gentle hand-painted\", \"photo\": \"\"}, \"compositional_deconstruction\": {\"background\": \"snow\", \"elements\": [{\"type\": \"obj\", \"desc\": \"a red fox\"}]}}",
+      "expectedValid": true
+    },
+    {
+      "name": "style block present but missing both discriminators -> seed photo, becomes VALID",
+      "caption": {
+        "style_description": {
+          "lighting": "soft",
+          "medium": "DSLR"
+        },
+        "compositional_deconstruction": {
+          "background": "a beach",
+          "elements": []
+        }
+      },
+      "styleText": "muted film grain",
+      "expectedCaption": "{\"style_description\": {\"aesthetics\": \"muted film grain\", \"lighting\": \"soft\", \"photo\": \"\", \"medium\": \"DSLR\"}, \"compositional_deconstruction\": {\"background\": \"a beach\", \"elements\": []}}",
+      "expectedValid": true
+    },
+    {
+      "name": "empty styleText -> caption unchanged (identity)",
+      "caption": {
+        "style_description": {
+          "aesthetics": "moody",
+          "lighting": "low key",
+          "photo": "f/1.8"
+        },
+        "compositional_deconstruction": {
+          "background": "an alley",
+          "elements": []
+        }
+      },
+      "styleText": "",
+      "expectedCaption": "{\"style_description\": {\"aesthetics\": \"moody\", \"lighting\": \"low key\", \"photo\": \"f/1.8\"}, \"compositional_deconstruction\": {\"background\": \"an alley\", \"elements\": []}}",
+      "expectedValid": true
+    }
+  ]
+}

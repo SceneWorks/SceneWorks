@@ -3,12 +3,20 @@ import { describe, expect, it } from "vitest";
 import { buildImageJobRequest } from "./imageJobRequest.js";
 import { composeStyledPrompt } from "./styleComposer.js";
 import { styleTextForId } from "./data/styleCatalog.js";
+import {
+  injectStyleIntoCaption,
+  parseCaption,
+  serializeCaption,
+} from "./ideogramCaption.js";
 
-// sc-13130: the Style Catalog composer is applied as the LAST wrap on the outgoing `prompt` inside
+// sc-13130 / sc-13224: the Style Catalog is applied as the LAST wrap on the outgoing `prompt` inside
 // buildImageJobRequest. These tests pin (a) identity when no style is selected, (b) exact
-// composeStyledPrompt output when a style IS selected — using the preset-composed prompt the caller
-// threads in as `promptToSend` for the `userPrompt` — plus the client-authoritative flag, and
-// (c) that structured JSON-caption models never get the composer.
+// composeStyledPrompt output for PROSE models when a style IS selected — using the preset-composed
+// prompt the caller threads in as `promptToSend` for the `userPrompt` — plus the client-authoritative
+// flag, and (c) that STRUCTURED JSON-caption models get the caption injection (into
+// style_description.aesthetics), never the prose composer — and only when the prompt is actually a
+// valid caption that gets transformed (a non-caption structured prompt passes through with no flag,
+// so the server's own fold can still handle it and the style is never silently dropped).
 
 // A minimal but complete studio state for a plain text-to-image model. Only the fields the style
 // fold touches matter here; the rest are defaults so the builder's other guards stay inert.
@@ -125,13 +133,52 @@ describe("buildImageJobRequest — Style Catalog fold (sc-13130)", () => {
     expect(req.presetPromptResolvedClientSide).toBe(true);
   });
 
-  it("structured JSON-caption models never get the composer (prompt passes through)", () => {
-    const caption = '{"scene":"a fox"}';
+  it("structured model with a VALID caption → style injected into aesthetics, prose composer NOT used, flag set", () => {
+    // A structurally-valid caption (has the required compositional_deconstruction section).
+    const caption = '{"compositional_deconstruction": {"background": "a snowy forest", "elements": []}}';
     const req = buildImageJobRequest(
-      baseState({ sendStructured: true, promptToSend: caption, styleText: STYLE_TEXT }),
+      baseState({
+        sendStructured: true,
+        promptToSend: caption,
+        styleText: STYLE_TEXT,
+        styleId: "ghibli-style",
+      }),
     );
-    expect(req.prompt).toBe(caption);
+
+    // The outgoing prompt is the caption with the style merged into style_description.aesthetics —
+    // exactly what injectStyleIntoCaption + serializeCaption produce (NOT the prose Style:/Description:
+    // wrap, which would be wrong for a JSON-caption model).
+    const expected = serializeCaption(
+      injectStyleIntoCaption(parseCaption(caption).caption, STYLE_TEXT),
+    );
+    expect(req.prompt).toBe(expected);
+    expect(req.prompt).not.toBe(caption); // the caption was actually transformed
+    expect(req.prompt.startsWith("Style:")).toBe(false); // no prose composer
+    expect(req.prompt).toContain(STYLE_TEXT); // style folded into aesthetics
+
+    // An injection actually happened, so the client is authoritative and records the picker id.
+    expect(req.presetPromptResolvedClientSide).toBe(true);
+    expect(req.advanced.styleId).toBe("ghibli-style");
+    // For structured injection the raw prompt lives in the caption blob, so stylePrompt is "".
+    expect(req.advanced.stylePrompt).toBe("");
+  });
+
+  it("structured model with a NON-caption prompt → passed through unchanged, no flag/styleId (server can still fold)", () => {
+    // `{"scene":"a fox"}` is JSON but not a caption (no compositional_deconstruction). The injection
+    // no-ops, so the prompt must be left untouched AND the client-authoritative flag/styleId must NOT
+    // be set — otherwise the server would skip its own fold and the style would be silently dropped.
+    const notACaption = '{"scene":"a fox"}';
+    const req = buildImageJobRequest(
+      baseState({
+        sendStructured: true,
+        promptToSend: notACaption,
+        styleText: STYLE_TEXT,
+        styleId: "ghibli-style",
+      }),
+    );
+    expect(req.prompt).toBe(notACaption);
     expect(req.presetPromptResolvedClientSide).toBeUndefined();
+    expect(req.advanced.styleId).toBeUndefined();
   });
 });
 

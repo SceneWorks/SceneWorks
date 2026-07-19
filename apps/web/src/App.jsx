@@ -39,6 +39,7 @@ import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { ScreenActiveContext } from "./context/ScreenActiveContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
+import { generationModelsForType } from "./modelEligibility.js";
 import { isAccentId } from "./accents.js";
 import { writeDefaultGenerationQuality } from "./generationQuality.js";
 import {
@@ -811,15 +812,11 @@ export function App() {
   // loaders are sc-10668+), so they must not be offered as a generation target.
   // Manifest models never set `usable`, so they are unaffected.
   const imageModels = useMemo(() => {
-    const items = models.filter(
-      (model) => model.type === "image" && model.installState !== "missing" && model.usable !== false,
-    );
+    const items = generationModelsForType(models, "image");
     return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "image");
   }, [models]);
   const videoModels = useMemo(() => {
-    const items = models.filter(
-      (model) => model.type === "video" && model.installState !== "missing" && model.usable !== false,
-    );
+    const items = generationModelsForType(models, "video");
     return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "video");
   }, [models]);
   const selectedAsset = useMemo(

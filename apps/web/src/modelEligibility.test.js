@@ -4,6 +4,7 @@ import {
   angleModelUsable,
   characterModelUsable,
   documentModelUsable,
+  generationModelsForType,
   downloadOffersFor,
   hasUsableModelFor,
   imageModelUsable,
@@ -46,13 +47,44 @@ describe("modelEligibility predicates", () => {
     expect(characterModelUsable({ ui: {} }, caps)).toBe(false);
   });
 
-  it("hasUsableModelFor counts present (installed/incomplete) models, not missing ones", () => {
+  it("hasUsableModelFor counts complete models, not missing or torn ones", () => {
     const installed = { id: "b", type: "image", capabilities: ["text_to_image"], installState: "installed" };
     const incomplete = { id: "c", type: "image", capabilities: ["text_to_image"], installState: "incomplete" };
     const missing = { id: "a", type: "image", capabilities: ["text_to_image"], installState: "missing" };
     expect(hasUsableModelFor([missing, installed], imageModelUsable, caps)).toBe(true);
-    expect(hasUsableModelFor([incomplete], imageModelUsable, caps)).toBe(true);
+    expect(hasUsableModelFor([incomplete], imageModelUsable, caps)).toBe(false);
     expect(hasUsableModelFor([missing], imageModelUsable, caps)).toBe(false);
+  });
+
+  it("generation pickers retain usable stale models and exclude missing or torn models", () => {
+    const models = [
+      { id: "stale-image", type: "image", installState: "installed", updateAvailable: true },
+      { id: "torn-image", type: "image", installState: "incomplete" },
+      { id: "missing-image", type: "image", installState: "missing" },
+      { id: "stale-video", type: "video", installState: "installed", updateAvailable: true },
+    ];
+    expect(generationModelsForType(models, "image").map((model) => model.id)).toEqual(["stale-image"]);
+    expect(generationModelsForType(models, "video").map((model) => model.id)).toEqual(["stale-video"]);
+  });
+
+  it.each([
+    ["installed current", "installed", false, true],
+    ["installed usable-stale", "installed", true, true],
+    ["missing", "missing", false, false],
+    ["torn/incomplete", "incomplete", false, false],
+  ])("screen gates classify %s consistently in every Studio mode", (_label, installState, updateAvailable, expected) => {
+    const cases = [
+      [{ id: "image", type: "image", capabilities: ["text_to_image"], installState, updateAvailable }, imageModelUsable],
+      [{ id: "video", type: "video", capabilities: ["text_to_video"], installState, updateAvailable }, videoModelUsable],
+      [{ id: "document", type: "image", capabilities: ["interleave"], installState, updateAvailable }, documentModelUsable],
+      [{ id: "angle", ui: { viewAngles: [{ id: "front" }] }, installState, updateAvailable }, angleModelUsable],
+      [{ id: "pose", ui: { poseLibrary: true }, installState, updateAvailable }, poseModelUsable],
+      [{ id: "character", ui: { poseLibrary: true }, installState, updateAvailable }, characterModelUsable],
+      [{ id: VISION_CAPTION_MODEL_ID, type: "utility", macOnly: false, installState, updateAvailable }, visionCaptionModelUsable],
+    ];
+    for (const [model, predicate] of cases) {
+      expect(hasUsableModelFor([model], predicate, caps), `${model.id} gate`).toBe(expected);
+    }
   });
 
   // SD3.5 surfacing + eligibility/gating (epic 7841 / sc-7873). The three native MLX variants are

@@ -5,6 +5,7 @@ import { AssetThumbnail } from "../components/assetMedia.jsx";
 import { DocumentView } from "../components/DocumentView.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
+import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import {
@@ -179,6 +180,7 @@ export function DocumentStudio() {
     [jobs],
   );
   const [model, setModel] = useState("");
+  const selectedModel = interleaveModels.find((item) => item.id === model) ?? interleaveModels[0] ?? null;
   const [prompt, setPrompt] = useState("");
   const [quickStart, setQuickStart] = useState(null);
   // Ordered, reorderable storyboard of reference frames. Replaces the flat multi-select:
@@ -578,13 +580,15 @@ export function DocumentStudio() {
           <div className="settings-bar-row">
             <label className="settings-field settings-field-model">
               Model
+              <StudioUpdateBadge item={selectedModel} />
               <select onChange={(event) => setModel(event.target.value)} value={model}>
                 {interleaveModels.map((item) => (
                   <option key={item.id} value={item.id}>
-                    {item.name ?? item.id}
+                    {updateOptionLabel(item)}
                   </option>
                 ))}
               </select>
+              <StudioUpdateNotice item={selectedModel} onUpdate={createModelDownloadJob} />
             </label>
             <label className="settings-field settings-field-aspect">
               Size

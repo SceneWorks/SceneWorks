@@ -2143,6 +2143,30 @@ label {
   color: var(--text-faint);
 }
 
+/* Style axis row (sc-13135): the Style Catalog picker and the model's Style presets share one row —
+   catalog first, presets filling the remaining width and wrapping under it on narrow viewports. */
+.settings-bar-style-axis {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px 20px;
+  align-items: flex-start;
+}
+
+.style-axis-field {
+  display: grid;
+  gap: 7px;
+  align-content: start;
+}
+
+.style-axis-catalog {
+  flex: 0 0 auto;
+}
+
+.style-axis-presets {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
 .refine-control {
   display: grid;
   gap: 8px;
@@ -2726,20 +2750,6 @@ label {
 
 /* Style Catalog axis row (sc-13130): a labelled row holding the StylePicker, spaced like the
    suggestion row directly above it. */
-.style-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  margin-top: 8px;
-}
-
-.style-row-label {
-  font-size: 12.5px;
-  color: var(--text-muted);
-  margin-right: 4px;
-}
-
 .suggestion {
   display: inline-flex;
   align-items: center;
@@ -5449,6 +5459,32 @@ input.dataset-name-input.boxed:focus {
 }
 
 /* ---------- Model + LoRA panels ---------- */
+.studio-update-badge {
+  display: inline-flex;
+  margin-left: 0.4rem;
+  padding: 0.08rem 0.38rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-size: 0.68rem;
+  font-weight: 650;
+}
+
+.studio-update-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.35rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: 0.45rem;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+
+.studio-update-notice-actions { display: inline-flex; gap: 0.3rem; flex-shrink: 0; }
 /* Model catalog is a single-column list of expandable rows (UI-refinement 1c), the same
    rhythm as the LoRA rows — no longer a dense card grid. */
 .model-grid {

@@ -60,7 +60,8 @@ use super::media_jobs::{mask_rollup_state, segment_assembly_frames, SegmentClip,
 use super::model_jobs::{
     check_downloaded_model_family, derived_tokenizer_overlay,
     downloaded_model_detection_io_error_is_inconclusive, finalize_converted_dir,
-    overlay_derived_tokenizer, validate_hf_download_inputs, DownloadFamilyCheck,
+    huggingface_receipt_weights_dir, overlay_derived_tokenizer, validate_hf_download_inputs,
+    DownloadFamilyCheck,
 };
 // `terminating_signal` is only exercised by a `#[cfg(unix)]` test (signal-death
 // attribution is uncatchable and only observable on Unix), so gate the import to
@@ -77,10 +78,10 @@ use super::{
     copy_lora_source, fresh_asset_id, import_lora_source_file_as, import_lora_source_path,
     normalize_app_managed_cache_path, now_rfc3339, parse_credentials_env,
     resolve_model_convert_output, resolve_model_import_target, safe_download_dir,
-    safe_project_path, value_f64, wan_moe_pair_filenames, write_model_install_marker,
-    CredentialScheme, IdleHeartbeat, JsonObject, SafetensorsHeaderError, Settings,
-    WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
-    DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+    safe_project_path, value_f64, wan_moe_pair_filenames, write_model_download_receipt,
+    write_model_install_marker, CredentialScheme, IdleHeartbeat, JsonObject,
+    SafetensorsHeaderError, Settings, WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES,
+    DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
 };
 
 // HF-CLI input validation, downloaded-model family detection, atomic converted-dir finalize, and the

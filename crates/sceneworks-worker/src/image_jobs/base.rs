@@ -579,6 +579,41 @@ fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
         .to_owned()
 }
 
+/// Receipt variant selected by this request.  Prefer an explicit quant request; otherwise use the
+/// manifest's default selectable download (or its only selectable download).  Co-requisites are
+/// intentionally excluded because each repo resolves its own receipt independently.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn requested_receipt_variant(request: &ImageRequest) -> Option<String> {
+    if let Some(bits) = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|value| value.as_i64().or_else(|| value.as_str()?.trim().parse().ok()))
+    {
+        return Some(if bits <= 0 {
+            "bf16"
+        } else if bits > 4 {
+            "q8"
+        } else {
+            "q4"
+        }
+        .to_owned());
+    }
+    let selectable = request
+        .model_manifest_entry
+        .get("downloads")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter(|entry| entry.get("coRequisite").and_then(Value::as_bool) != Some(true))
+        .collect::<Vec<_>>();
+    selectable
+        .iter()
+        .copied()
+        .find(|entry| entry.get("default").and_then(Value::as_bool) == Some(true))
+        .or_else(|| (selectable.len() == 1).then_some(selectable[0]))
+        .and_then(|entry| entry.get("variant").and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
 /// The separate `SceneWorks/ideogram-4` repo that hosts Ideogram 4's bf16 tree under `bf16/`, the
 /// selectable full-precision tier (sc-8513). The `q4/`/`q8/` packed turnkey lives in
 /// `SceneWorks/ideogram-4-mlx`; bf16 is resolved from THIS repo rather than duplicated. sc-9650 wires it
@@ -644,7 +679,27 @@ pub(crate) fn resolve_weights_dir(
     let Some(model) = mlx_model(&request.model) else {
         return Ok(None);
     };
-    let snapshot = huggingface_snapshot_dir(&settings.data_dir, &model_repo(request, &model));
+    let repo = model_repo(request, &model);
+    let receipt_variant = requested_receipt_variant(request);
+    let receipt_snapshot = crate::model_jobs::huggingface_receipt_weights_dir(
+        &settings.data_dir,
+        &repo,
+        Some(&request.model),
+        receipt_variant.as_deref(),
+    );
+    let snapshot = receipt_snapshot
+        .clone()
+        .or_else(|| huggingface_snapshot_dir(&settings.data_dir, &repo));
+    // A tier receipt already resolves to the exact self-contained tier directory.  Returning it
+    // before the family pickers prevents a second `q4/q8/bf16` descent and, more importantly, keeps
+    // all load inputs on the receipt side of the all-receipt-or-all-current boundary.
+    if receipt_snapshot
+        .as_deref()
+        .and_then(tier_key_from_resolved_dir)
+        .is_some()
+    {
+        return Ok(receipt_snapshot);
+    }
     // Ideogram 4 ships a turnkey with packed `q4/` (default) + `q8/` self-contained subdirs; point
     // the engine at the chosen quant's subdir rather than the repo root (epic 4725 / sc-5992),
     // mirroring the LTX bundle pattern. The packed weights auto-detect their quant on load. The
@@ -8400,4 +8455,3 @@ mod text_style_gain_gate_tests {
         assert_eq!(resolve_text_style_gain(&undeclared), None);
     }
 }
-
