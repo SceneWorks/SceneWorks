@@ -1,6 +1,28 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icons.jsx";
 
+// sc-13135 — Per-style preview thumbnails. Each style id maps to `<base>/<id>.png`, generated
+// locally by scripts/generate-style-thumbnails.mjs into public/style-thumbs/ (git-ignored, so they
+// may be absent at runtime). Thumbs are purely DECORATIVE (alt="" — the visible name is the label);
+// a missing/404 image collapses to the neutral placeholder slot so the row never shows a broken
+// image and layout never jumps. The base path is a prop (default below) purely for testability.
+const STYLE_THUMB_BASE = "/style-thumbs";
+
+// A fixed-size square slot holding one style's thumbnail. Renders the <img> only until it either
+// errors (onError) or has no id; in both cases the slot falls back to its placeholder background so
+// the surrounding name stands alone. Callers key this by id so a changed id gets fresh error state.
+function StyleThumb({ id, basePath = STYLE_THUMB_BASE, mini = false }) {
+  const [failed, setFailed] = useState(false);
+  const className = mini ? "style-picker-thumb style-picker-thumb-mini" : "style-picker-thumb";
+  return (
+    <span className={className} aria-hidden="true">
+      {id && !failed ? (
+        <img alt="" loading="lazy" onError={() => setFailed(true)} src={`${basePath}/${id}.png`} />
+      ) : null}
+    </span>
+  );
+}
+
 // sc-13130 / sc-13171 — Style Catalog picker for the Image Studio. A TWO-LEVEL cascade over the
 // 278-entry style catalog (styles.json): first pick one of the 8 top-level groups, then pick a
 // style within that group. Each group also carries its own top-level "overall" style (the group's
@@ -19,7 +41,14 @@ import { Icon } from "./Icons.jsx";
 // Modeled on CompactSelector (the app's pill+menu switcher): outside-click + Escape close, a pill
 // trigger with aria-expanded, and role="listbox"/role="option" items — plus the group cascade,
 // breadcrumb, and search this catalog needs.
-export function StylePicker({ groups = [], selectedId = null, onSelect, label = "Style", disabled = false }) {
+export function StylePicker({
+  groups = [],
+  selectedId = null,
+  onSelect,
+  label = "Style",
+  disabled = false,
+  thumbBasePath = STYLE_THUMB_BASE,
+}) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   // Which group's styles are shown (level 2). null → the group list (level 1). Search overrides.
@@ -130,7 +159,10 @@ export function StylePicker({ groups = [], selectedId = null, onSelect, label = 
     setOpen(false);
   }
 
-  function renderOption({ id, strong, sub, active, key }) {
+  function renderOption({ id, strong, sub, active, key, thumbId }) {
+    // thumbId defaults to the option's own id (a sub-style id, or a group id for an "overall" row);
+    // "None" passes id=null → a neutral placeholder slot with no <img>.
+    const previewId = thumbId === undefined ? id : thumbId;
     return (
       <button
         aria-selected={active}
@@ -141,6 +173,7 @@ export function StylePicker({ groups = [], selectedId = null, onSelect, label = 
         title={strong}
         type="button"
       >
+        <StyleThumb basePath={thumbBasePath} id={previewId} key={`thumb-${previewId ?? "none"}`} />
         <span className="compact-selector-label">
           <strong>{strong}</strong>
           {sub ? <span>{sub}</span> : null}
@@ -169,6 +202,9 @@ export function StylePicker({ groups = [], selectedId = null, onSelect, label = 
         title={selection.crumb ?? "None"}
         type="button"
       >
+        {selectedId ? (
+          <StyleThumb basePath={thumbBasePath} id={selectedId} key={`pill-${selectedId}`} mini />
+        ) : null}
         <span className="compact-selector-meta">
           <strong>{selection.leafLabel}</strong>
           <span>{selection.crumb ?? "No style — pass-through"}</span>
@@ -258,6 +294,7 @@ export function StylePicker({ groups = [], selectedId = null, onSelect, label = 
                       title={`Browse ${group.name} styles`}
                       type="button"
                     >
+                      <StyleThumb basePath={thumbBasePath} id={group.id} key={`nav-${group.id}`} />
                       <span className="compact-selector-label">
                         <strong>{group.name}</strong>
                         <span>{group.styles.length} styles</span>

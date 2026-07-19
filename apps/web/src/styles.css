@@ -902,6 +902,34 @@ button:focus-visible {
   gap: 2px;
 }
 
+/* Per-style preview thumbnail (sc-13135). A fixed square slot to the left of each row's name and a
+   mini variant on the selected pill. The placeholder gradient shows through when the <img> is
+   absent or 404s, so a missing thumb degrades to name-only WITHOUT shifting layout. */
+.style-picker-thumb {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border-radius: 6px;
+  background:
+    repeating-linear-gradient(45deg, color-mix(in oklch, var(--accent) 24%, transparent) 0 4px, transparent 4px 8px),
+    color-mix(in oklch, var(--warm) 18%, var(--surface));
+}
+
+.style-picker-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.style-picker-thumb-mini {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+}
+
 .style-picker-groups {
   display: grid;
   gap: 2px;

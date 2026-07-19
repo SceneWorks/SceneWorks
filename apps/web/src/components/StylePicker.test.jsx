@@ -214,4 +214,90 @@ describe("StylePicker (sc-13171 two-level)", () => {
     await openMenu();
     expect(groupNavs()).toHaveLength(8);
   });
+
+  // sc-13135 — per-style preview thumbnails with a graceful name-only fallback when an image is
+  // missing/404s. jsdom never actually loads images, so we assert structure + the onError fallback,
+  // never pixels.
+  describe("style thumbnails", () => {
+    const imgIn = (el) => el.querySelector("img");
+
+    it("level 1: each group nav row shows its group thumbnail; None has no img", async () => {
+      await render();
+      await openMenu();
+      for (const nav of groupNavs()) {
+        const img = imgIn(nav);
+        expect(img).toBeTruthy();
+        // The group id is the file stem — Anime Style → anime-style.png, etc.
+        expect(img.getAttribute("src")).toMatch(/\/style-thumbs\/[a-z0-9-]+\.png$/);
+      }
+      const none = optionButtons().find((b) => b.textContent.includes("None"));
+      expect(imgIn(none)).toBeNull();
+    });
+
+    it("group nav src ends with that group's own id", async () => {
+      await render();
+      await openMenu();
+      const anime = groupNavs().find((b) => b.textContent.includes("Anime Style"));
+      expect(imgIn(anime).getAttribute("src")).toBe("/style-thumbs/anime-style.png");
+    });
+
+    it("level 2: the 'overall' row uses the GROUP id and sub-styles use their own id", async () => {
+      await render();
+      await openMenu();
+      await clickText(groupNavs(), "Anime Style");
+      const overall = optionButtons().find((b) => b.textContent.includes("Anime Style (overall)"));
+      expect(imgIn(overall).getAttribute("src")).toBe("/style-thumbs/anime-style.png");
+      const ghibli = optionButtons().find((b) => b.textContent.includes("Ghibli Style"));
+      expect(imgIn(ghibli).getAttribute("src")).toBe("/style-thumbs/ghibli-style.png");
+    });
+
+    it("thumbnails are decorative (alt='') and lazy-loaded", async () => {
+      await render();
+      await openMenu();
+      await clickText(groupNavs(), "Anime Style");
+      const ghibli = optionButtons().find((b) => b.textContent.includes("Ghibli Style"));
+      const img = imgIn(ghibli);
+      expect(img.getAttribute("alt")).toBe("");
+      expect(img.getAttribute("loading")).toBe("lazy");
+    });
+
+    it("selected pill shows a mini thumbnail of the current style", async () => {
+      await render({ selectedId: "ghibli-style" });
+      const img = imgIn(pill());
+      expect(img).toBeTruthy();
+      expect(img.getAttribute("src")).toBe("/style-thumbs/ghibli-style.png");
+    });
+
+    it("selected pill uses the GROUP id for a group-level 'overall' selection", async () => {
+      await render({ selectedId: "anime-style" });
+      expect(imgIn(pill()).getAttribute("src")).toBe("/style-thumbs/anime-style.png");
+    });
+
+    it("pill has no thumbnail when nothing is selected (None)", async () => {
+      await render();
+      expect(imgIn(pill())).toBeNull();
+    });
+
+    it("falls back to name-only when a thumbnail fails to load; the option stays selectable", async () => {
+      const onSelect = vi.fn();
+      await render({ onSelect });
+      await openMenu();
+      await clickText(groupNavs(), "Anime Style");
+      let ghibli = optionButtons().find((b) => b.textContent.includes("Ghibli Style"));
+      const img = imgIn(ghibli);
+      // Fire the image's error → the <img> is removed, but the name still renders.
+      await act(async () => img.dispatchEvent(new Event("error")));
+      ghibli = optionButtons().find((b) => b.textContent.includes("Ghibli Style"));
+      expect(imgIn(ghibli)).toBeNull();
+      expect(ghibli.textContent).toContain("Ghibli Style");
+      // Still selectable after the fallback.
+      await act(async () => ghibli.click());
+      expect(onSelect).toHaveBeenCalledWith("ghibli-style");
+    });
+
+    it("respects a custom thumbBasePath prop", async () => {
+      await render({ selectedId: "ghibli-style", thumbBasePath: "/custom/thumbs" });
+      expect(imgIn(pill()).getAttribute("src")).toBe("/custom/thumbs/ghibli-style.png");
+    });
+  });
 });
