@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sceneworks.local/schemas/model-manifest.schema.json",
   "title": "SceneWorks Model Manifest",
+  "description": "Authoring schema for the model catalog. Constraint-shaped properties carry x-sceneworks-contract: binding means authoritative backend behavior (rejection unless the property's description explicitly names deterministic normalization), advisory means UI/selection guidance that is deliberately not a backend gate, and descriptive means factual metadata. tests/test_builtin_manifest_audit.py treats these annotations as the gated contract registry (sc-12304).",
   "type": "object",
   "required": ["schemaVersion", "models"],
   "$defs": {
@@ -76,19 +77,25 @@
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/samplerKey" }
+          "items": { "$ref": "#/$defs/samplerKey" },
+          "x-sceneworks-contract": "advisory",
+          "x-sceneworks-readers": [{ "path": "apps/web/src/samplerOptions.js", "anchor": "limits?.samplers" }]
         },
         "schedulers": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/schedulerKey" }
+          "items": { "$ref": "#/$defs/schedulerKey" },
+          "x-sceneworks-contract": "advisory",
+          "x-sceneworks-readers": [{ "path": "apps/web/src/samplerOptions.js", "anchor": "limits?.schedulers" }]
         },
         "guidanceMethods": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/guidanceMethodKey" }
+          "items": { "$ref": "#/$defs/guidanceMethodKey" },
+          "x-sceneworks-contract": "advisory",
+          "x-sceneworks-readers": [{ "path": "apps/web/src/samplerOptions.js", "anchor": "limits?.guidanceMethods" }]
         }
       }
     }
@@ -115,25 +122,81 @@
           },
           "limits": {
             "type": "object",
-            "description": "Per-model capability lists. Sampler / scheduler / guidance arrays gate the Image / Video Studio dropdowns; omit them to hide the controls.",
+            "description": "Per-model constraints and capability menus. Each property is explicitly classified; never infer enforcement from the word limits.",
             "properties": {
+              "resolutions": {
+                "type": "array", "items": { "type": "string" },
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ImageStudio.jsx", "anchor": "selectedModel?.limits?.resolutions" }],
+                "description": "UI/recipe resolution menu. Runtime geometry is governed by the binding stride and pixel constraints."
+              },
+              "count": {
+                "type": "array", "items": { "type": "integer", "minimum": 1 },
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-reader-exemption": "sc-12335 owns the deliberate limits.count UI-reader decision",
+                "description": "Image Studio batch-size menu; deliberately not a backend rejection gate (sc-12335)."
+              },
+              "durations": {
+                "type": "array", "items": { "type": "number", "exclusiveMinimum": 0 },
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/VideoStudio.jsx", "anchor": "selectedModel?.limits?.durations" }],
+                "description": "UI duration menu. The binding hardMaxDuration ceiling owns backend rejection."
+              },
+              "fps": {
+                "type": "array", "items": { "type": "integer", "minimum": 1 },
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn allowed_fps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = fps_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs.rs", "anchor": "fps_limit_error(&request.model, request.fps" }],
+                "description": "Allowed render frame rates; API and worker reject off-menu requests."
+              },
+              "hardMaxDuration": {
+                "type": "number", "exclusiveMinimum": 0,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn hard_max_duration" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = duration_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs.rs", "anchor": "if let Some(message) = duration_limit_error(" }],
+                "description": "Hard clip-duration ceiling in seconds; API and worker reject rather than clamp."
+              },
+              "maxPixels": {
+                "type": "integer", "minimum": 1,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "fn max_pixels_of(" }, { "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "match max_pixels_of(model_manifest_entry)" }],
+                "description": "Maximum rendered pixel area; core fits requested geometry within this ceiling."
+              },
+              "requiresDimensionsMultipleOf": {
+                "type": "integer", "minimum": 1,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "fn dimension_multiple_of(" }, { "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "let multiple = dimension_multiple_of(model_manifest_entry)" }],
+                "description": "Required render-dimension stride; core normalizes geometry to this value."
+              },
+              "recommendedMaxDuration": {
+                "type": "number", "exclusiveMinimum": 0,
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/VideoStudio.jsx", "anchor": "selectedModel.limits.recommendedMaxDuration" }],
+                "description": "Non-blocking UI recommendation; intentionally not enforced."
+              },
               "samplers": {
                 "type": "array",
                 "minItems": 1,
                 "uniqueItems": true,
-                "items": { "$ref": "#/$defs/samplerKey" }
+                "items": { "$ref": "#/$defs/samplerKey" },
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/samplerOptions.js", "anchor": "limits?.samplers" }]
               },
               "schedulers": {
                 "type": "array",
                 "minItems": 1,
                 "uniqueItems": true,
-                "items": { "$ref": "#/$defs/schedulerKey" }
+                "items": { "$ref": "#/$defs/schedulerKey" },
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/samplerOptions.js", "anchor": "limits?.schedulers" }]
               },
               "guidanceMethods": {
                 "type": "array",
                 "minItems": 1,
                 "uniqueItems": true,
-                "items": { "$ref": "#/$defs/guidanceMethodKey" }
+                "items": { "$ref": "#/$defs/guidanceMethodKey" },
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "apps/web/src/samplerOptions.js", "anchor": "limits?.guidanceMethods" }],
+                "description": "Supported backend-neutral guidance menu shape; no builtin model currently needs it."
               }
             }
           },
@@ -179,6 +242,8 @@
               "minMemoryGb": {
                 "type": "integer",
                 "minimum": 1,
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "model.mlx?.minMemoryGb" }],
                 "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
               },
               "repo": {
@@ -218,6 +283,8 @@
               "minMemoryGb": {
                 "type": "integer",
                 "minimum": 1,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate.rs", "anchor": "candle.get(\"minMemoryGb\").and_then(json_f64)" }],
                 "description": "Minimum GPU VRAM (GB) to run this model on the candle/CUDA lane — the measured overall-peak of the DEFAULT (lightest, typically q4) hosted tier, plus headroom. This gates the default tier only, matching the established MLX default-tier-gating convention; heavier hosted tiers (q8 / bf16) can exceed this value, and their per-tier measured ceilings live in vramGbByTier. Retires the epic 7982 SD3.5 'minMemoryGb under measured peak' follow-up: this is a real measured CUDA number, not the inherited unified-memory mlx value."
               },
               "vramGbByTier": {
@@ -271,6 +338,7 @@
               },
               "limits": {
                 "$ref": "#/$defs/samplerLimits",
+                "x-sceneworks-allow-undeclared": true,
                 "description": "Per-backend candle/CUDA capability override, read by samplerOptionsFromModel(model, \"candle\"). The top-level limits.samplers/schedulers describe the default lane; this narrows/broadens them for the candle path."
               }
             }

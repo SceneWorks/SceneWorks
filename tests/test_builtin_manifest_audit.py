@@ -39,6 +39,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "config" / "manifests" / "builtin.models.jsonc"
+SCHEMA_PATH = ROOT / "packages" / "schemas" / "model-manifest.schema.json"
 
 
 def _strip_jsonc_comments(body: str) -> str:
@@ -88,6 +89,80 @@ def _strip_jsonc_comments(body: str) -> str:
 def _load_builtin_models_manifest() -> dict:
     raw = MANIFEST_PATH.read_text(encoding="utf-8")
     return json.loads(_strip_jsonc_comments(raw))
+
+
+def test_manifest_constraint_contract_registry_is_complete_and_live():
+    """sc-12304: constraint declarations may not silently become decoration.
+
+    The schema is the author-facing registry; this test makes its custom contract
+    annotations a CI gate. It checks both directions (manifest -> registry and
+    registry -> manifest), and binding entries must name production readers that
+    contain the exact key. Advisory/descriptive entries are explicitly allowed not
+    to reject requests, which is materially different from an accidental dead key.
+    """
+    manifest = _load_builtin_models_manifest()
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    model_properties = schema["properties"]["models"]["items"]["properties"]
+
+    declared: set[str] = set()
+    for model in manifest["models"]:
+        declared.update(f"limits.{key}" for key in model.get("limits", {}))
+        for backend in ("mlx", "candle"):
+            block = model.get(backend, {})
+            if "minMemoryGb" in block:
+                declared.add(f"{backend}.minMemoryGb")
+            declared.update(f"{backend}.limits.{key}" for key in block.get("limits", {}))
+
+    limits_properties = model_properties["limits"]["properties"]
+    registry = {f"limits.{key}": value for key, value in limits_properties.items()}
+    for backend in ("mlx", "candle"):
+        backend_properties = model_properties[backend]["properties"]
+        if "minMemoryGb" in backend_properties:
+            registry[f"{backend}.minMemoryGb"] = backend_properties["minMemoryGb"]
+        backend_limits = backend_properties.get("limits", {})
+        if "$ref" in backend_limits:
+            sampler_properties = schema["$defs"]["samplerLimits"]["properties"]
+            for key, value in sampler_properties.items():
+                registry[f"{backend}.limits.{key}"] = value
+
+    allowed_undeclared = {
+        path
+        for path, contract in registry.items()
+        if contract.get("x-sceneworks-allow-undeclared")
+        or (
+            path.startswith("candle.limits.")
+            and model_properties["candle"]["properties"]["limits"].get(
+                "x-sceneworks-allow-undeclared"
+            )
+        )
+    }
+    assert declared <= set(registry) and set(registry) - declared <= allowed_undeclared, (
+        "constraint contract drift: every declared constraint must be registered, "
+        "and every registry entry must be exercised by the builtin manifest; "
+        f"unregistered={sorted(declared - set(registry))}, "
+        f"undeclared={sorted(set(registry) - declared)}"
+    )
+
+    allowed_classes = {"binding", "advisory", "descriptive"}
+    for path, contract in registry.items():
+        classification = contract.get("x-sceneworks-contract")
+        assert classification in allowed_classes, f"{path}: missing/invalid contract classification"
+        readers = contract.get("x-sceneworks-readers", [])
+        exemption = contract.get("x-sceneworks-reader-exemption")
+        assert readers or exemption, (
+            f"{path}: every contract needs anchored production readers or an explicit tracked exemption"
+        )
+        if exemption:
+            assert re.search(r"\bsc-\d+\b", exemption), (
+                f"{path}: reader exemption must cite a tracked Shortcut story"
+            )
+        for reader in readers:
+            assert set(reader) == {"path", "anchor"}, f"{path}: malformed reader metadata"
+            reader_path = ROOT / reader["path"]
+            assert reader_path.is_file(), f"{path}: reader does not exist: {reader['path']}"
+            assert reader["anchor"] in reader_path.read_text(encoding="utf-8"), (
+                f"{path}: reader {reader['path']} no longer contains anchor {reader['anchor']!r}"
+            )
 
 
 def _manifest_brace_walker():
