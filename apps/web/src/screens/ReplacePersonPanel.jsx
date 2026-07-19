@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE_URL, withMediaTicket } from "../api.js";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
+import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
 
 const MASK_STATE_COPY = {
   active: "Per-frame segmentation masks generated for tracked frames.",
@@ -446,6 +447,7 @@ export function ReplacePersonPanel({
   model,
   setModel,
   personReadiness = {},
+  createModelDownloadJob,
 }) {
   // The replacement backend = the replace-capable video models. The user picks one here (it drives
   // the job's `model`); SCAIL-2 (scail2_14b) is the native cross-identity engine, the others inpaint
@@ -454,6 +456,7 @@ export function ReplacePersonPanel({
     () => videoModels.filter((item) => item.capabilities?.includes("replace_person")),
     [videoModels],
   );
+  const selectedReplacementModel = replacementModels.find((item) => item.id === model) ?? replacementModels[0] ?? null;
   // Default-open: only gate when readiness explicitly reports a backend missing.
   const detectReady = personReadiness?.detect?.ready !== false;
   const trackReady = personReadiness?.track?.ready !== false;
@@ -588,15 +591,18 @@ export function ReplacePersonPanel({
       {replacementModels.length > 1 && setModel ? (
         <label>
           Replacement engine
+          <StudioUpdateBadge item={selectedReplacementModel} />
           <select onChange={(event) => setModel(event.target.value)} value={model}>
             {replacementModels.map((item) => (
               <option key={item.id} value={item.id}>
-                {item.name}
+                {updateOptionLabel(item)}
               </option>
             ))}
           </select>
         </label>
       ) : null}
+      {replacementModels.length === 1 ? <StudioUpdateBadge item={selectedReplacementModel} /> : null}
+      <StudioUpdateNotice item={selectedReplacementModel} onUpdate={createModelDownloadJob} />
 
       {model === "scail2_14b" ? (
         <div className="guidance-strip">

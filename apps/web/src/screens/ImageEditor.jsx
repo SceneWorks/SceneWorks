@@ -39,6 +39,7 @@ import {
   snapshotLayers,
 } from "../imageLayers.js";
 import { CurveEditor } from "../components/CurveEditor.jsx";
+import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
 // Pure job builders + model/engine helpers (sc-6112) — extracted to a konva-free module
 // so the Library batch flow can reuse them; imported for internal use and re-exported
 // below to keep this module's public surface (and its tests) unchanged.
@@ -838,6 +839,7 @@ export function ImageEditor() {
 
   // The chosen edit model + whether it accepts an inpaint mask (gates the mask tool).
   const selectedEditModel = editModels.find((model) => model.id === editModel) ?? null;
+  const selectedDetailModel = detailModels.find((model) => model.id === detailModel) ?? null;
   const canMask = modelIsInpaintCapable(selectedEditModel);
   // Style/subject LoRAs for the AI Edit tool (sc-10254). Same family-gated selection +
   // serialization the studios use (useLoraSelection → serializeLora), threaded top-level
@@ -2789,10 +2791,12 @@ export function ImageEditor() {
               <select className="ie-select" onChange={(event) => setDetailModel(event.target.value)} value={detailModel}>
                 {detailModels.map((model) => (
                   <option key={model.id} value={model.id}>
-                    {model.label ?? model.id}
+                    {updateOptionLabel(model)}
                   </option>
                 ))}
               </select>
+              <StudioUpdateBadge item={selectedDetailModel} />
+              <StudioUpdateNotice item={selectedDetailModel} onUpdate={createModelDownloadJob} />
             </div>
             <div className="ie-section">
               <div className="ie-sec-title">Refinement</div>
@@ -3051,11 +3055,12 @@ export function ImageEditor() {
             .map((lora) => (
               <div className="ie-lora" key={lora.id}>
                 <div className="ie-lora-top">
-                  <span className="ie-lora-name">{lora.name ?? lora.id}</span>
+                  <span className="ie-lora-name">{lora.name ?? lora.id}<StudioUpdateBadge item={lora} /></span>
                   <button className="ie-btn icon sm ghost" onClick={() => toggleLora(lora)} title="Remove" type="button">
                     ✕
                   </button>
                 </div>
+                <StudioUpdateNotice item={lora} kind="LoRA" onUpdate={createLoraDownloadJob} />
                 <LoraKeywordSummary lora={lora} />
                 <div className="ie-field">
                   <div className="ie-field-top">
@@ -3099,10 +3104,12 @@ export function ImageEditor() {
           <select className="ie-select" onChange={(event) => setEditModel(event.target.value)} value={editModel}>
             {editModels.map((model) => (
               <option key={model.id} value={model.id}>
-                {model.label ?? model.id}
+                {updateOptionLabel(model)}
               </option>
             ))}
           </select>
+          <StudioUpdateBadge item={selectedEditModel} />
+          <StudioUpdateNotice item={selectedEditModel} onUpdate={createModelDownloadJob} />
           <div className="ie-field">
             <div className="ie-field-top">
               <span className="ie-field-label">Instruction</span>
@@ -3123,19 +3130,8 @@ export function ImageEditor() {
           editLoraInstalled ? (
             <div className="ie-section">
               <p className="ie-note">✨ {editLora.name} is applied automatically for editing.</p>
-              {editLora.updateAvailable ? (
-                <>
-                  <p className="ie-note">An update is available. You can keep editing with the installed version.</p>
-                  <button
-                    className="ie-btn block"
-                    disabled={editLoraDownloadRequested}
-                    onClick={requestEditLoraDownload}
-                    type="button"
-                  >
-                    {editLoraDownloadRequested ? "Updating…" : `Update ${editLora.name}`}
-                  </button>
-                </>
-              ) : null}
+              <StudioUpdateBadge item={editLora} />
+              <StudioUpdateNotice item={editLora} kind="LoRA" onUpdate={requestEditLoraDownload} />
               {/* Identity strength (sc-11798): the managed edit LoRA is hidden from the manual
                   picker, so expose its apply weight here — threaded into buildEditJobBody's
                   editLoraWeight → the payload edit-LoRA `weight`. Higher = stronger conditioning. */}
@@ -3568,10 +3564,12 @@ export function ImageEditor() {
               <select className="ie-select" onChange={(event) => setEditModel(event.target.value)} value={editModel}>
                 {editModels.map((model) => (
                   <option key={model.id} value={model.id}>
-                    {model.label ?? model.id}
+                    {updateOptionLabel(model)}
                   </option>
                 ))}
               </select>
+              <StudioUpdateBadge item={selectedEditModel} />
+              <StudioUpdateNotice item={selectedEditModel} onUpdate={createModelDownloadJob} />
               <input
                 className="ie-input"
                 onChange={(event) => setEditPrompt(event.target.value)}

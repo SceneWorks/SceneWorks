@@ -3,6 +3,7 @@ import { Icon } from "../Icons.jsx";
 import { LoraPickerSection } from "../../screens/generationStudio.jsx";
 import { tierLabel } from "../../quantTier.js";
 import { MOTIONS } from "./editorUtils.js";
+import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../StudioUpdateNotice.jsx";
 
 // The right-hand generation-settings rail (design 2a, epic 12798). Presentational: it
 // renders the controls owned by useEditorGeneration (`gen`) plus the contextual header
@@ -58,13 +59,15 @@ export function GenerationRail({ gen, header, contextActions = [], onGenerate, g
           </div>
           <label className="ve-field">
             <span className="ve-field-label">Video model</span>
+            <StudioUpdateBadge item={gen.selectedModel} />
             <select className="ve-select" onChange={(e) => gen.setModel(e.target.value)} value={gen.model}>
               {gen.videoModels.map((item) => (
                 <option key={item.id} value={item.id}>
-                  {item.name ?? item.id}
+                  {updateOptionLabel(item)}
                 </option>
               ))}
             </select>
+            <StudioUpdateNotice item={gen.selectedModel} onUpdate={gen.createModelDownloadJob} />
           </label>
           <div className="ve-seg" role="radiogroup" aria-label="Quality">
             {gen.qualityChoices.map(([value, label]) => (
@@ -184,6 +187,7 @@ export function GenerationRail({ gen, header, contextActions = [], onGenerate, g
             showIncompatibleLoras={studio.showIncompatibleLoras}
             toggleLora={studio.toggleLora}
             userSelectedLoraCount={studio.userSelectedLoraCount}
+            onUpdateLora={gen.createLoraDownloadJob}
           />
         </div>
 

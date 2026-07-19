@@ -148,6 +148,7 @@ export function CharacterStudio() {
     compareFaceLikeness,
     createImageJob,
     createModelDownloadJob,
+    createLoraDownloadJob,
     importAsset,
     imageLocalJobs,
     jobAction,
@@ -766,6 +767,7 @@ export function CharacterStudio() {
 
               <CharacterLoras
                 detachCharacterLora={detachCharacterLora}
+                createLoraDownloadJob={createLoraDownloadJob}
                 loraEdits={loraEdits}
                 loraId={loraId}
                 loras={loras}
@@ -838,6 +840,8 @@ export function CharacterStudio() {
                 assets={assets}
                 catalog={models}
                 createImageJob={createImageJob}
+                createModelDownloadJob={createModelDownloadJob}
+                createLoraDownloadJob={createLoraDownloadJob}
                 imageLocalJobs={imageLocalJobs}
                 importAsset={importAsset}
                 latestAssets={latestAssets}
@@ -878,6 +882,8 @@ export function CharacterStudio() {
                 assets={assets}
                 catalog={models}
                 createImageJob={createImageJob}
+                createModelDownloadJob={createModelDownloadJob}
+                createLoraDownloadJob={createLoraDownloadJob}
                 imageLocalJobs={imageLocalJobs}
                 importAsset={importAsset}
                 latestAssets={latestAssets}
@@ -906,6 +912,7 @@ export function CharacterStudio() {
               <CharacterTest
                 addCharacterReference={addCharacterReference}
                 createCharacterTestJob={createCharacterTestJob}
+                createModelDownloadJob={createModelDownloadJob}
                 deleteAsset={deleteAsset}
                 imageModels={imageModels}
                 latestAssets={latestAssets}
