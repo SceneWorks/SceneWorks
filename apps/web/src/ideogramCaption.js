@@ -214,6 +214,68 @@ export function parseCaption(text) {
   }
 }
 
+// True when `value` is a structured caption — a JSON object carrying the
+// `compositional_deconstruction` object the model's `CaptionVerifier` requires. The exact twin of
+// the Rust `sceneworks_core::ideogram_caption::is_caption`; only checks for the required section
+// (not the full schema) so an already-structured prompt is recognized without needless re-expansion.
+export function isCaption(value) {
+  return (
+    value != null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    value.compositional_deconstruction != null &&
+    typeof value.compositional_deconstruction === "object" &&
+    !Array.isArray(value.compositional_deconstruction)
+  );
+}
+
+// ----- Style Catalog injection into a caption (sc-13224) --------------------
+//
+// The Style axis (epic 13129/sc-13130) folds a catalog style into a PROSE prompt via the
+// `Style:`/`Description:` composer. Structured JSON-caption models (Ideogram 4) don't take prose —
+// their prompt is a caption. Instead of skipping the Style axis for them, we merge the selected
+// catalog style text into `style_description.aesthetics`: the ONE field present in BOTH the photo
+// and non-photo style variants, so injecting it never touches the `photo`/`art_style` discriminator
+// and (aesthetics being the first key in both canonical orders) never drifts key order. The join
+// rule is byte-identical to the Rust twin `sceneworks_core::ideogram_caption::merge_aesthetics_text`
+// so the client-side inject and the server-side fold produce the same caption.
+
+// Merge a catalog style into an existing `aesthetics` value: the user's words come FIRST, then the
+// catalog style, joined so the result reads as prose. Empty/absent `existing` → just the style.
+export function mergeAestheticsText(existing, styleText) {
+  const style = typeof styleText === "string" ? styleText.trim() : "";
+  const base = typeof existing === "string" ? existing.trimEnd() : "";
+  if (!style) return base;
+  if (!base) return style;
+  const endsWithSentence = /[.!?]$/.test(base);
+  return `${base}${endsWithSentence ? " " : ". "}${style}`;
+}
+
+// Return a NEW caption with the catalog `styleText` merged into `style_description.aesthetics`
+// (never mutating the input). A no-op that returns the caption unchanged when `styleText` is
+// empty/whitespace or `caption` is not an object. When `style_description` is absent it is created
+// carrying only `aesthetics` (the caller's caption normally already has a style block with a
+// discriminator; a from-scratch block deliberately does not invent a `photo`/`art_style`).
+export function injectStyleIntoCaption(caption, styleText) {
+  const style = typeof styleText === "string" ? styleText.trim() : "";
+  if (!style || caption == null || typeof caption !== "object" || Array.isArray(caption)) {
+    return caption;
+  }
+  const existingStyle =
+    caption.style_description != null &&
+    typeof caption.style_description === "object" &&
+    !Array.isArray(caption.style_description)
+      ? caption.style_description
+      : null;
+  const existingAesthetics =
+    existingStyle && typeof existingStyle.aesthetics === "string" ? existingStyle.aesthetics : "";
+  const merged = mergeAestheticsText(existingAesthetics, style);
+  const style_description = existingStyle
+    ? { ...existingStyle, aesthetics: merged }
+    : { aesthetics: merged };
+  return { ...caption, style_description };
+}
+
 // Turn a magic-prompt model reply (sc-5997) into a schema-clean caption: parse it,
 // drop the non-schema top-level `aspect_ratio` key the prompt emits, and (by default,
 // matching the reference) strip per-element bboxes — the model's box guesses are

@@ -36,6 +36,7 @@ import {
 } from "../promptSeed.js";
 import {
   emptyCaption,
+  injectStyleIntoCaption,
   orderCaption,
   parseMagicPromptCaption,
   parseVisionCaption,
@@ -2199,8 +2200,17 @@ export function ImageStudio() {
   const batchStructuredExpandBlocked =
     structuredPromptModel && (magicModelMissing || typeof magicPrompt !== "function");
   const activeStyleText = styleTextForId(styleId);
-  const stylePreviewActive =
-    !structuredPromptModel && typeof activeStyleText === "string" && activeStyleText.trim() !== "";
+  const styleSelected = typeof activeStyleText === "string" && activeStyleText.trim() !== "";
+  const stylePreviewActive = !structuredPromptModel && styleSelected;
+  // sc-13224: structured JSON-caption models apply the Style axis by merging into the caption's
+  // `style_description.aesthetics` (see imageJobRequest.js), so the outgoing prompt is the injected,
+  // re-serialized caption. Compute it here so the budget guard measures the ACTUAL string sent (the
+  // caption grows against the 4000-char cap once a style is merged in). Only when a structured model
+  // is in caption mode with a style selected; a null/empty style is a pass-through.
+  const structuredStyleActive = structuredActive && styleSelected;
+  const structuredStyledPrompt = structuredStyleActive
+    ? serializeCaption(injectStyleIntoCaption(caption, activeStyleText))
+    : null;
   // One summary per CTA (epic 10644): the button's `disabled` and the message it owes the
   // user come from the same issue list and cannot drift. Two independent rule sets — the
   // batch's problems must never disable single-image Generate. The drafts gather the
@@ -2242,10 +2252,12 @@ export function ImageStudio() {
       structuredActive,
       captionHasContent,
       prompt,
-      // sc-13133: measure the COMPOSED outgoing prompt against the cap, but only when a style is
-      // active (styleless behavior unchanged). `styledPreviewPrompt` is the exact string submitted.
-      styleActive: stylePreviewActive,
-      composedPrompt: styledPreviewPrompt ?? "",
+      // sc-13133 / sc-13224: measure the COMPOSED outgoing prompt against the cap, but only when a
+      // style is active (styleless behavior unchanged). For prose that is the Style:/Description:
+      // composition; for a structured model it is the style-injected, re-serialized caption. Either
+      // string is exactly what the run submits, so the cap is measured on IT.
+      styleActive: stylePreviewActive || structuredStyleActive,
+      composedPrompt: styledPreviewPrompt ?? structuredStyledPrompt ?? "",
       mode,
       characterId,
       // Edit needs a source (single) or ≥1 reference (multiReference); a required edit LoRA must be
@@ -2265,7 +2277,9 @@ export function ImageStudio() {
       captionHasContent,
       prompt,
       stylePreviewActive,
+      structuredStyleActive,
       styledPreviewPrompt,
+      structuredStyledPrompt,
       mode,
       characterId,
       multiReference,
@@ -2525,17 +2539,16 @@ export function ImageStudio() {
             </div>
           )}
 
-          {/* Style Catalog axis (sc-13130): a searchable, grouped single-select over the 278-style
-              catalog, applied to the outgoing prompt at build time (Style:/Description: composition).
-              Free-text only — structured JSON-caption models serialize a caption the composer can't
-              wrap. "None" resets to pass-through. NB: this is the Style Catalog, distinct from Krea's
-              numeric "text style" (textStyleGain) slider in the advanced section. */}
-          {structuredPromptModel ? null : (
-            <div className="style-row">
-              <span className="style-row-label">Style</span>
-              <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
-            </div>
-          )}
+          {/* Style Catalog axis (sc-13130 / sc-13224): a searchable, grouped single-select over the
+              278-style catalog. For free-text models it composes the outgoing prompt at build time
+              (Style:/Description:); for structured JSON-caption models (Ideogram 4) it merges the
+              selected style into the caption's `style_description.aesthetics` (sc-13224). Shown for
+              BOTH so the Style axis applies everywhere. "None" resets to pass-through. NB: this is the
+              Style Catalog, distinct from Krea's numeric "text style" (textStyleGain) slider. */}
+          <div className="style-row">
+            <span className="style-row-label">Style</span>
+            <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
+          </div>
 
           {/* sc-13131: the EXACT composed prompt (Style:/Description:, preserved sibling directives,
               and the own-`Style:` MERGE) the run will send once a style is active — reuses

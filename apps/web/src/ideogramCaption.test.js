@@ -4,10 +4,13 @@ import {
   buildStructuredPromptRecipe,
   clampBboxValue,
   emptyCaption,
+  injectStyleIntoCaption,
+  isCaption,
   isValidBbox,
   isValidHexColor,
   makeObjElement,
   makeTextElement,
+  mergeAestheticsText,
   normalizeHexColor,
   orderCaption,
   parseCaption,
@@ -22,6 +25,7 @@ import {
   verifyCaption,
   verifyRaw,
 } from "./ideogramCaption.js";
+import styleInjectionFixturesRaw from "../../../documents/ideogram-style-injection.fixtures.json?raw";
 
 // The validated reference render's caption, byte-identical to the engine's
 // `mlx-gen-ideogram/tests/common/mod.rs` CAPTION_JSON — which is itself
@@ -540,4 +544,93 @@ describe("factories + recipe storage", () => {
     expect(serializeCaption(orderCaption(scrambled))).toBe(FOX_JSON);
     expect(serializeCaption(orderCaption(scrambled))).toBe(recipe.runtimePrompt);
   });
+});
+
+describe("mergeAestheticsText — Style-axis join rule (sc-13224)", () => {
+  it("returns just the style when there is no existing aesthetics", () => {
+    expect(mergeAestheticsText("", "cinematic watercolor")).toBe("cinematic watercolor");
+    expect(mergeAestheticsText(null, "cinematic watercolor")).toBe("cinematic watercolor");
+    expect(mergeAestheticsText("   ", "cinematic watercolor")).toBe("cinematic watercolor");
+  });
+
+  it("appends the style after existing (user words first), inserting '. ' when unpunctuated", () => {
+    expect(mergeAestheticsText("moody and dim", "cinematic watercolor")).toBe(
+      "moody and dim. cinematic watercolor",
+    );
+  });
+
+  it("keeps a single space when existing already ends in sentence punctuation", () => {
+    expect(mergeAestheticsText("Soft and dreamy.", "bold ink")).toBe("Soft and dreamy. bold ink");
+    expect(mergeAestheticsText("Loud!", "bold ink")).toBe("Loud! bold ink");
+    expect(mergeAestheticsText("What?", "bold ink")).toBe("What? bold ink");
+  });
+
+  it("is a no-op returning the trimmed existing when the style is empty", () => {
+    expect(mergeAestheticsText("moody", "")).toBe("moody");
+    expect(mergeAestheticsText("moody", "   ")).toBe("moody");
+  });
+});
+
+describe("injectStyleIntoCaption — Style-axis into a caption (sc-13224)", () => {
+  it("does not mutate the input caption", () => {
+    const caption = {
+      style_description: { aesthetics: "moody", photo: "f/2" },
+      compositional_deconstruction: { background: "x", elements: [] },
+    };
+    const frozen = JSON.stringify(caption);
+    injectStyleIntoCaption(caption, "cinematic");
+    expect(JSON.stringify(caption)).toBe(frozen);
+  });
+
+  it("returns the caption unchanged for an empty style", () => {
+    const caption = {
+      style_description: { aesthetics: "moody", photo: "f/2" },
+      compositional_deconstruction: { background: "x", elements: [] },
+    };
+    expect(injectStyleIntoCaption(caption, "")).toBe(caption);
+    expect(injectStyleIntoCaption(caption, "   ")).toBe(caption);
+  });
+
+  it("never flips the photo/art_style discriminator", () => {
+    const photo = injectStyleIntoCaption(
+      {
+        style_description: { aesthetics: "", lighting: "soft", photo: "f/4" },
+        compositional_deconstruction: { background: "x", elements: [] },
+      },
+      "muted grain",
+    );
+    expect("photo" in photo.style_description).toBe(true);
+    expect("art_style" in photo.style_description).toBe(false);
+
+    const art = injectStyleIntoCaption(
+      {
+        style_description: { medium: "paint", art_style: "watercolor" },
+        compositional_deconstruction: { background: "x", elements: [] },
+      },
+      "muted grain",
+    );
+    expect("art_style" in art.style_description).toBe(true);
+    expect("photo" in art.style_description).toBe(false);
+  });
+});
+
+describe("injectStyleIntoCaption golden fixtures (cross-language parity with the Rust twin)", () => {
+  const fixtures = JSON.parse(styleInjectionFixturesRaw);
+
+  it("carries a non-trivial, self-describing fixture set", () => {
+    expect(Array.isArray(fixtures.cases)).toBe(true);
+    expect(fixtures.cases.length).toBeGreaterThanOrEqual(5);
+  });
+
+  for (const testCase of fixtures.cases) {
+    it(`serializes byte-for-byte: ${testCase.name}`, () => {
+      const injected = injectStyleIntoCaption(testCase.caption, testCase.styleText);
+      expect(serializeCaption(injected)).toBe(testCase.expectedCaption);
+      // The result is always a caption (the required composition section is untouched)...
+      expect(isCaption(injected)).toBe(true);
+      // ...and full-schema validity matches the fixture's recorded expectation (an aesthetics-only
+      // block created from scratch carries no discriminator, so that one edge is expectedValid=false).
+      expect(validateCaption(injected).ok).toBe(testCase.expectedValid);
+    });
+  }
 });
