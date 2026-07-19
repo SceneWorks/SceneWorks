@@ -155,15 +155,34 @@ describe("imageGenerateValidation", () => {
       expect(summary.surfaced[0].message).toContain("shorten your prompt or pick a shorter style");
     });
 
-    it("does not add the budget error on a structured model even if styleActive is set", () => {
-      // Structured-caption models serialize a JSON caption the composer never wraps; the style
-      // guard must stay out of their gate.
+    // sc-13224: structured-caption models now DO apply the Style axis (the style is merged into the
+    // caption's aesthetics), so the composed caption can push past the cap and the guard must fire.
+    it("fires the budget error on a structured model when the injected caption exceeds the cap", () => {
+      const overCaption = JSON.stringify({
+        style_description: { aesthetics: "x".repeat(PROMPT_MAX_CHARS), photo: "f/2" },
+        compositional_deconstruction: { background: "an alley", elements: [] },
+      });
+      expect([...overCaption].length).toBeGreaterThan(PROMPT_MAX_CHARS);
       const issues = imageGenerateValidation({
         ...whole,
         structuredActive: true,
         captionHasContent: true,
         styleActive: true,
-        composedPrompt: overComposed,
+        composedPrompt: overCaption,
+      });
+      const summary = summarize(issues);
+      expect(summary.ready).toBe(false);
+      expect(summary.surfaced.some((i) => i.kind === "error" && i.message.includes("/"))).toBe(true);
+    });
+
+    it("stays out of a structured model's gate when no style is active (empty composedPrompt)", () => {
+      // styleless structured behavior is unchanged: no style selected → no composed prompt → no guard.
+      const issues = imageGenerateValidation({
+        ...whole,
+        structuredActive: true,
+        captionHasContent: true,
+        styleActive: false,
+        composedPrompt: "",
       });
       expect(summarize(issues).surfaced).toEqual([]);
     });

@@ -13900,6 +13900,34 @@ details[open] > summary.lora-scope-group-heading::before,
   font-variant-numeric: tabular-nums;
   word-break: break-word;
 }
+/* Detail expands inline directly under its selected row: full-bleed, flush,
+   no rounded corners or side borders so it reads as part of that row. */
+.stats-detail-row > td {
+  padding: 0;
+  background: var(--surface-2);
+}
+.stats-detail-row .stats-detail {
+  margin: 0;
+  border-left: none;
+  border-right: none;
+  border-radius: 0;
+}
+.stats-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin: 14px 0 4px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.stats-page-info {
+  font-variant-numeric: tabular-nums;
+}
+.stats-page-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 .stats-charts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));

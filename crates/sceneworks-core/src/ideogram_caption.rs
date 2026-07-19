@@ -43,6 +43,63 @@ pub fn is_caption(value: &Value) -> bool {
     })
 }
 
+/// Merge a catalog style into an existing `aesthetics` value (sc-13224): the user's words come
+/// FIRST, then the catalog style, joined so the result reads as prose. Empty/absent `existing`
+/// yields just the style. Byte-identical to the web twin `mergeAestheticsText` in
+/// `apps/web/src/ideogramCaption.js`, pinned by the shared `documents/ideogram-style-injection.fixtures.json`.
+pub fn merge_aesthetics_text(existing: &str, style_text: &str) -> String {
+    let style = style_text.trim();
+    let base = existing.trim_end();
+    if style.is_empty() {
+        return base.to_owned();
+    }
+    if base.is_empty() {
+        return style.to_owned();
+    }
+    let ends_sentence = matches!(base.chars().last(), Some('.' | '!' | '?'));
+    format!("{base}{}{style}", if ends_sentence { " " } else { ". " })
+}
+
+/// Return a NEW caption value with the catalog `style_text` merged into `style_description.aesthetics`
+/// (sc-13224) — the Style-axis parity for structured JSON-caption models. `aesthetics` exists in both
+/// the photo and non-photo style variants, so injecting it never touches an existing `photo`/`art_style`
+/// discriminator and (being the first key in both canonical orders) never drifts key order. A no-op
+/// clone when `style_text` is empty/whitespace or `value` is not a JSON object. When `style_description`
+/// is absent it is created, and when an existing style block carries NEITHER `photo` nor `art_style` we
+/// seed a default `photo: ""` discriminator (matching the builder's own `setStyleEnabled` default) so
+/// the result is a VALID photo-caption style block rather than an `aesthetics`-only block that the
+/// verifier rejects (it requires exactly one discriminator). We never infer photo-vs-art from the
+/// text — `photo` is simply the safe default when there is no discriminator to preserve. A style block
+/// that already has a discriminator is left untouched. The twin of the web's `injectStyleIntoCaption`.
+pub fn merge_style_into_caption(value: &Value, style_text: &str) -> Value {
+    let style = style_text.trim();
+    let Some(obj) = value.as_object() else {
+        return value.clone();
+    };
+    if style.is_empty() {
+        return value.clone();
+    }
+    let mut out = obj.clone();
+    let existing_style = out
+        .get("style_description")
+        .and_then(Value::as_object)
+        .cloned();
+    let existing_aesthetics = existing_style
+        .as_ref()
+        .and_then(|style_obj| style_obj.get("aesthetics"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let merged = merge_aesthetics_text(existing_aesthetics, style);
+    let mut style_obj = existing_style.unwrap_or_default();
+    let has_discriminator = style_obj.contains_key("photo") || style_obj.contains_key("art_style");
+    style_obj.insert("aesthetics".to_owned(), Value::String(merged));
+    if !has_discriminator {
+        style_obj.insert("photo".to_owned(), Value::String(String::new()));
+    }
+    out.insert("style_description".to_owned(), Value::Object(style_obj));
+    Value::Object(out)
+}
+
 /// Clean + canonicalize a magic-prompt reply for the engine (the web's `parseMagicPromptCaption` +
 /// `serializeCaption`): `None` unless `value` is a structured caption; otherwise the canonical-order
 /// string with non-schema keys dropped (the stray top-level `aspect_ratio`) and element bboxes
@@ -239,6 +296,174 @@ mod tests {
         });
         let out = serialize_caption(&caption, false);
         assert!(out.contains(r#""bbox": [100, 100, 200, 200]"#));
+    }
+
+    #[test]
+    fn merge_aesthetics_text_join_rule() {
+        // No existing → just the style.
+        assert_eq!(merge_aesthetics_text("", "cinematic"), "cinematic");
+        assert_eq!(merge_aesthetics_text("   ", "cinematic"), "cinematic");
+        // Existing without end punctuation → "user words. style" (user first).
+        assert_eq!(
+            merge_aesthetics_text("moody and dim", "cinematic"),
+            "moody and dim. cinematic"
+        );
+        // Existing already ending in sentence punctuation → single space.
+        assert_eq!(
+            merge_aesthetics_text("Soft and dreamy.", "bold ink"),
+            "Soft and dreamy. bold ink"
+        );
+        assert_eq!(merge_aesthetics_text("Loud!", "bold"), "Loud! bold");
+        assert_eq!(merge_aesthetics_text("What?", "bold"), "What? bold");
+        // Empty style → trimmed existing unchanged.
+        assert_eq!(merge_aesthetics_text("moody", "  "), "moody");
+    }
+
+    #[test]
+    fn merge_style_into_caption_never_flips_the_discriminator() {
+        let photo = merge_style_into_caption(
+            &json!({
+                "style_description": {"aesthetics": "", "lighting": "soft", "photo": "f/4"},
+                "compositional_deconstruction": {"background": "x", "elements": []}
+            }),
+            "muted grain",
+        );
+        let style = photo
+            .get("style_description")
+            .and_then(Value::as_object)
+            .unwrap();
+        assert!(style.contains_key("photo"));
+        assert!(!style.contains_key("art_style"));
+        assert_eq!(
+            style.get("aesthetics").and_then(Value::as_str),
+            Some("muted grain")
+        );
+
+        let art = merge_style_into_caption(
+            &json!({
+                "style_description": {"medium": "paint", "art_style": "watercolor"},
+                "compositional_deconstruction": {"background": "x", "elements": []}
+            }),
+            "muted grain",
+        );
+        let style = art
+            .get("style_description")
+            .and_then(Value::as_object)
+            .unwrap();
+        assert!(style.contains_key("art_style"));
+        assert!(!style.contains_key("photo"));
+    }
+
+    #[test]
+    fn merge_style_into_caption_seeds_photo_when_no_style_description() {
+        // Primary flow (the BLOCKER fix): a caption with NO style_description (the user never opened
+        // the optional style section) must still yield a VALID caption. There is no discriminator to
+        // preserve, so a default `photo: ""` is seeded — matching the builder's setStyleEnabled
+        // default and the web `injectStyleIntoCaption` — giving a valid photo-caption style block
+        // (the verifier requires exactly one of photo/art_style) rather than an aesthetics-only block.
+        let injected = merge_style_into_caption(
+            &json!({
+                "high_level_description": "a red fox",
+                "compositional_deconstruction": {
+                    "background": "snow",
+                    "elements": [{"type": "obj", "desc": "a red fox"}]
+                }
+            }),
+            "gentle hand-painted",
+        );
+        assert!(is_caption(&injected), "still a structured caption");
+        let style = injected
+            .get("style_description")
+            .and_then(Value::as_object)
+            .expect("style_description was created");
+        assert_eq!(style.get("photo").and_then(Value::as_str), Some(""));
+        assert!(!style.contains_key("art_style"));
+        assert_eq!(
+            style.get("aesthetics").and_then(Value::as_str),
+            Some("gentle hand-painted")
+        );
+        // Serializes in canonical photo order with the seeded discriminator present.
+        let out = serialize_caption(&injected, false);
+        assert!(
+            out.contains(
+                r#""style_description": {"aesthetics": "gentle hand-painted", "photo": ""}"#
+            ),
+            "unexpected serialization: {out}"
+        );
+    }
+
+    #[test]
+    fn merge_style_into_caption_seeds_photo_when_style_block_has_no_discriminator() {
+        // A style block present but carrying NEITHER photo nor art_style is the other reachable
+        // invalid path: seed photo there too, without disturbing the user's other style keys.
+        let injected = merge_style_into_caption(
+            &json!({
+                "style_description": {"lighting": "soft", "medium": "DSLR"},
+                "compositional_deconstruction": {"background": "a beach", "elements": []}
+            }),
+            "muted film grain",
+        );
+        let style = injected
+            .get("style_description")
+            .and_then(Value::as_object)
+            .unwrap();
+        assert_eq!(style.get("photo").and_then(Value::as_str), Some(""));
+        assert!(!style.contains_key("art_style"));
+        assert_eq!(style.get("lighting").and_then(Value::as_str), Some("soft"));
+        assert_eq!(style.get("medium").and_then(Value::as_str), Some("DSLR"));
+    }
+
+    #[test]
+    fn merge_style_into_caption_is_noop_for_empty_style_or_non_object() {
+        let caption = json!({"compositional_deconstruction": {"background": "x", "elements": []}});
+        assert_eq!(merge_style_into_caption(&caption, ""), caption);
+        assert_eq!(merge_style_into_caption(&caption, "   "), caption);
+        assert_eq!(
+            merge_style_into_caption(&json!("plain"), "x"),
+            json!("plain")
+        );
+    }
+
+    /// The shared cross-language golden fixtures — the SAME file `apps/web/src/ideogramCaption.test.js`
+    /// reads. Embedding it here proves the Rust `merge_style_into_caption` + `serialize_caption(_, false)`
+    /// emits the byte-identical serialized caption the web's `injectStyleIntoCaption` + `serializeCaption`
+    /// produces, so the client inject and the server fold can never drift.
+    const STYLE_INJECTION_FIXTURES: &str =
+        include_str!("../../../documents/ideogram-style-injection.fixtures.json");
+
+    #[test]
+    fn style_injection_golden_fixtures_match_the_web() {
+        let root: Value =
+            serde_json::from_str(STYLE_INJECTION_FIXTURES).expect("fixtures parse as JSON");
+        let cases = root
+            .get("cases")
+            .and_then(Value::as_array)
+            .expect("fixtures carry a `cases` array");
+        assert!(
+            cases.len() >= 5,
+            "expected a non-trivial fixture set, got {}",
+            cases.len()
+        );
+        for case in cases {
+            let name = case
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("<unnamed>");
+            let caption = case.get("caption").expect("fixture caption");
+            let style_text = case.get("styleText").and_then(Value::as_str).unwrap_or("");
+            let expected = case
+                .get("expectedCaption")
+                .and_then(Value::as_str)
+                .expect("fixture expectedCaption is a string");
+            let injected = merge_style_into_caption(caption, style_text);
+            assert_eq!(
+                serialize_caption(&injected, false),
+                expected,
+                "golden fixture mismatch: {name}"
+            );
+            // The result is always a caption (the composition section is untouched).
+            assert!(is_caption(&injected), "not a caption: {name}");
+        }
     }
 
     #[test]

@@ -33,6 +33,20 @@ export const INTERLEAVE_RESOLUTION_OPTIONS = [
 ];
 export const DEFAULT_INTERLEAVE_RESOLUTION = "2048x1152";
 
+// Reference strength for grounded (it2i) interleave — drives advanced.imageGuidanceScale,
+// which the worker maps to the engine's img_cfg_scale (a CFG weight, not clamped by the
+// backend). 1.0 is the upstream/edit baseline (references are full context, text CFG steers
+// relative to them); higher holds the output tighter to the reference images, lower is more
+// prompt-driven. The engine's own guidance is edit ≈ 1.0, character/identity ≈ 1.5. Range is
+// deliberately tightened to the useful band (0.5–2.5) rather than Character Studio's wider
+// 0.5–4.0 — past ~2.5 an image-CFG weight buys oversaturation, not adherence. Only meaningful
+// when references are attached, so Document Studio only surfaces the slider (and sends the
+// field) then.
+export const DEFAULT_INTERLEAVE_IMAGE_GUIDANCE = 1.0;
+export const INTERLEAVE_IMAGE_GUIDANCE_MIN = 0.5;
+export const INTERLEAVE_IMAGE_GUIDANCE_MAX = 2.5;
+export const INTERLEAVE_IMAGE_GUIDANCE_STEP = 0.1;
+
 // Catalog id of the prompt-refinement / magic-prompt LLM (sc-5605 / sc-6550, builtin.models.jsonc):
 // one coherent Anubis-8B serves BOTH the free-text "Refine my prompt" rewrite AND Ideogram 4's
 // magic-prompt (plain idea -> structured JSON caption) — the sc-6550 bake-off found the old 3B / plain

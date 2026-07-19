@@ -6337,35 +6337,48 @@
           "schedulers": ["default"]
         }
       },
-      // candle/CUDA VRAM gate (sc-12402, epic 1788; RE-MEASURED sc-12631 after sc-12434 landed) --
+      // candle/CUDA VRAM gate — RE-DROPPED onto the sequential-offload path (sc-13175), which SUPERSEDES
+      // the RESIDENT numbers sc-12631 shipped (q4 46.1 / q8 48.7 / bf16 54.0, minMemoryGb 48). The engine
+      // already wired dense component offload for the 5B (sc-12757: flush the UMT5 TE + z48 VAE off-GPU
+      // around the denoise), so `video_jobs::candle_wan_offload_policy` now forces `OffloadPolicy::Sequential`
+      // for `wan2_2_ti2v_5b` and these are that SEQUENTIAL peak — the residency the load actually takes.
+      //
       // MEASURED on an idle RTX PRO 6000 (Blackwell sm_120) via the candle-gen-wan VramProbe harness
-      // (candle-gen-wan/tests/vram_probe.rs), at this model's OWN shipped default -- 832x480, 121
-      // frames (5s @ 24fps), 20 steps, CFG on. Each tier measured in its own process (cudarc's caching
-      // allocator never returns pages, so a second tier in-process re-reports the first's high-water).
+      // (candle-gen-wan/tests/vram_probe.rs) at this model's OWN shipped default — 832x480, 121 frames
+      // (5s @ 24fps), 20 steps, CFG on — with `CANDLE_GEN_OFFLOAD=sequential`. Each tier in its own process
+      // (cudarc's caching allocator never returns pages, so a second tier in-process re-reports the first's
+      // high-water). Renders coherent (middle-frame std 75–78, matching the sc-12757 parity datum 75.6).
       //
-      // THE PEAK IS THE DENOISE, NOT THE DECODE. sc-12434 ported the sc-6217 query-row chunking into
-      // candle-gen-wan's sdpa, so the attention no longer materializes the full [B,H,S,S] block: the
-      // ~55 GB attention transient that dominated the pre-chunking peak (q4 was 86.3 GB) collapsed,
-      // dropping q4 to 46.1 GB. The z48 vae22 decode still contributes 0.0 GB (it reuses the pool the
-      // denoise freed): `pre-decode 46.1 GB | decode adds 0.0`, so the number stays card-independent
-      // even though `auto_tiling_budgeted_wan22` budgets off TOTAL VRAM.
+      // THE PEAK IS THE DENOISE, NOT THE DECODE, and it is now DiT-only resident: sequential offload holds
+      // just the DiT + the tier-blind chunked-sdpa attention transient during denoise (the bf16 UMT5 TE,
+      // sc-12778, is dropped before it; the z48 VAE is loaded only for decode). The z48 vae22 decode is the
+      // LOWER phase (8.32 GiB, tier-blind), so the reported ceiling is card-independent. q4 and q8, each
+      // measured in its OWN process, land on the SAME 12.1 GB pool high-water: the peak is the attention
+      // transient, not the weights, so their DiT code-size delta shows up only in STEADY residency
+      // (pre-decode nvidia-smi 4.9 → 7.1 GB) and never reaches the pool-block-quantized watermark. Only the
+      // dense bf16 DiT lifts it (14.5 GB).
       //
-      // Post-chunking the peak is WEIGHTS-dominated, not attention: the UMT5 TE still loads f32 (10.58
-      // GiB on disk -> 21.16 GiB resident), the z48 VAE loads f32, and the DiT rides on top with the
-      // chunked attention now a bounded transient. The quant ladder is still just the DiT delta:
-      // q8 - q4 = 2.6 GB, bf16 - q4 = 7.9 GB (~1 GB above the ~6.9 GB the dense fp32 DiT halving predicts);
-      // TE + VAE + chunked attention are tier-blind, so the whole ladder spans ~8 GB. The still-resident
-      // f32 TE + both experts + no component offload is the next lever (sc-12730 -- run the 14B, and
-      // shrink this 5B further, on a 24 GB card).
+      // vramGbByTier here is the nvidia-smi POOL high-water (base-10 GB) — the real max device footprint,
+      // since cudarc never frees the pool back to the driver — NOT the lower driver-mempool USED_MEM_HIGH
+      // (`CU_MEMPOOL_ATTR_USED_MEM_HIGH`, sc-12818: 10.61 / 10.61 / 11.67 GiB concurrent-live). Gating at the
+      // POOL high-water is the disciplined answer to the sc-13174 pool-vs-USED_MEM_HIGH caveat: it needs NO
+      // assumption that the pool packs down under memory pressure on a small card (the assumption that made
+      // the A14B defer q8/bf16 as `measured: false`), so all three 5B tiers ship honestly `measured: true`.
+      // It is still far under the target — q4/q8 admit a 16 GB card (12.1 + 2 = 14.1) and bf16 a 24 GB one
+      // (14.5 + 2 = 16.5), where the resident gate needed ~48. (The decode's free-aware `WAN_VAE_BUDGET_GIB`
+      // was pinned during measurement because its auto path reads MIN free across ALL GPUs and a co-tenant
+      // GPU poisons it; the decode is not the peak, so the budget only moves decode tiling, never this ceiling.)
       //
-      // minMemoryGb 48 gates the DEFAULT/lightest (q4) tier (46.1 + the gate's 2 GB headroom). NOTE the
-      // resolver prefers q8 when installed (sc-10726) even though downloads[] marks q4 default; the two
-      // tiers differ by 2.6 GB, so gating the lighter one is the safe read. No `sequentialPeakGb`: every
-      // candle video engine declares `supports_sequential_offload: false` (candle-gen-wan lib.rs:417),
-      // so `resolve_offload` is a no-op and that key would be dead data.
+      // minMemoryGb 14 gates the DEFAULT/lightest (q4) tier (12.1 + the gate's 2 GB headroom); the per-tier
+      // `wan_video_fit_error` (`vramGbByTier + 2`) is the real admission decision, so bf16 is still refused
+      // below ~16.5 GB. The resolver prefers q8 when installed (sc-10726); q4 and q8 are identical, so
+      // gating either is the same read. This model loads SEQUENTIAL, not resident — the gate is only truthful
+      // because the load is coupled to it (pinned by the
+      // `wan_candle_blocks_drive_the_video_fit_gate_and_reject` and
+      // `candle_wan_sequential_engines_offload_others_resident` tripwires).
       "candle": {
-        "minMemoryGb": 48,
-        "vramGbByTier": { "q4": 46.1, "q8": 48.7, "bf16": 54.0 },
+        "minMemoryGb": 14,
+        "vramGbByTier": { "q4": 12.1, "q8": 12.1, "bf16": 14.5 },
         "measured": true
       },
       "ui": {

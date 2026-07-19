@@ -5,8 +5,12 @@ import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import {
+  DEFAULT_INTERLEAVE_IMAGE_GUIDANCE,
   DEFAULT_INTERLEAVE_RESOLUTION,
   DEFAULT_INTERLEAVE_SYSTEM_MESSAGE,
+  INTERLEAVE_IMAGE_GUIDANCE_MAX,
+  INTERLEAVE_IMAGE_GUIDANCE_MIN,
+  INTERLEAVE_IMAGE_GUIDANCE_STEP,
   INTERLEAVE_RESOLUTION_OPTIONS,
 } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
@@ -77,6 +81,7 @@ export function DocumentStudio() {
   const [model, setModel] = useState("");
   const [prompt, setPrompt] = useState("");
   const [sourceAssetIds, setSourceAssetIds] = useState([]);
+  const [imageGuidance, setImageGuidance] = useState(DEFAULT_INTERLEAVE_IMAGE_GUIDANCE);
   const [maxImages, setMaxImages] = useState(MAX_IMAGES_DEFAULT);
   const [resolution, setResolution] = useState(DEFAULT_INTERLEAVE_RESOLUTION);
   const [systemMessage, setSystemMessage] = useState(DEFAULT_INTERLEAVE_SYSTEM_MESSAGE);
@@ -108,6 +113,18 @@ export function DocumentStudio() {
     setSubmitting(true);
     const [width, height] = resolution.split("x").map((value) => Number(value));
     const trimmedSystem = systemMessage.trim();
+    const advanced = {};
+    // Only send the system prompt when edited; blank/default lets the worker use
+    // its own _INTERLEAVE_SYSTEM_MESSAGE.
+    if (trimmedSystem && trimmedSystem !== DEFAULT_INTERLEAVE_SYSTEM_MESSAGE) {
+      advanced.systemMessage = trimmedSystem;
+    }
+    // Reference strength only bites when the model is grounding on reference images
+    // (advanced.imageGuidanceScale → engine img_cfg_scale). Omit it otherwise so an
+    // un-referenced run stays on the worker's plain-generation defaults.
+    if (sourceAssetIds.length > 0) {
+      advanced.imageGuidanceScale = imageGuidance;
+    }
     const job = await createInterleaveJob({
       prompt: prompt.trim(),
       model: model || undefined,
@@ -115,12 +132,7 @@ export function DocumentStudio() {
       width,
       height,
       sourceAssetIds,
-      // Only send the system prompt when edited; blank/default lets the worker use
-      // its own _INTERLEAVE_SYSTEM_MESSAGE.
-      advanced:
-        trimmedSystem && trimmedSystem !== DEFAULT_INTERLEAVE_SYSTEM_MESSAGE
-          ? { systemMessage: trimmedSystem }
-          : {},
+      advanced,
     });
     setSubmitting(false);
     if (job) {
@@ -213,6 +225,27 @@ export function DocumentStudio() {
           onChange={setSourceAssetIds}
           values={sourceAssetIds}
         />
+
+        {sourceAssetIds.length > 0 ? (
+          <label className="field">
+            <span>Reference strength</span>
+            <small>
+              How closely the generated images follow your references. Higher holds tighter to
+              them (identity/composition); lower is more prompt-driven. 1.0 is a neutral edit.
+            </small>
+            <div className="reference-strength">
+              <input
+                max={INTERLEAVE_IMAGE_GUIDANCE_MAX}
+                min={INTERLEAVE_IMAGE_GUIDANCE_MIN}
+                onChange={(event) => setImageGuidance(Number(event.target.value))}
+                step={INTERLEAVE_IMAGE_GUIDANCE_STEP}
+                type="range"
+                value={imageGuidance}
+              />
+              <span>{imageGuidance.toFixed(2)}</span>
+            </div>
+          </label>
+        ) : null}
 
         <label className="field document-system-prompt">
           <span>System prompt</span>
