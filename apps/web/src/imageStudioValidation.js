@@ -9,7 +9,22 @@
 // of their inputs, so the requirement/error split is unit-testable.
 
 import { presetLoraIssues } from "./generationValidation.js";
+import { promptBudget } from "./styleComposer.js";
 import { issue } from "./validation/issues.js";
+
+export function batchPromptBudgetOverages(composedPrompts = []) {
+  return composedPrompts.flatMap((prompt, index) => {
+    const budget = promptBudget(prompt);
+    return budget.over ? [{ item: index + 1, ...budget }] : [];
+  });
+}
+
+export function batchPromptBudgetMessage(overages = []) {
+  const items = overages.map(({ item, length, max }) => `${item} (${length}/${max})`).join(", ");
+  return `Batch prompt${overages.length === 1 ? "" : "s"} ${items} exceed${
+    overages.length === 1 ? "s" : ""
+  } the character limit — shorten the prompt or pick a shorter style.`;
+}
 
 // Single-image Generate. The conditions whose message already has a home stay OUT of
 // here and remain plain gates in the button's `disabled` expression:
@@ -26,6 +41,13 @@ export function imageGenerateValidation({
   characterId,
   editSourceMissing = false,
   editLoraMissing = false,
+  // sc-13133 / sc-13224: the COMPOSED outgoing prompt and whether a Style Catalog entry is active.
+  // `composedPrompt` is the exact string that will be sent — the Style:/Description: composition for a
+  // prose model, or the style-injected re-serialized caption for a structured model — so the cap is
+  // measured on IT, not the raw prompt field: a ~700–900 char style wrapped around a long-but-under-cap
+  // prompt, or merged into a caption, can push past 4000.
+  styleActive = false,
+  composedPrompt = "",
   presetMissing = [],
   presetIncompatible = [],
   loraIncompatible = [],
@@ -43,6 +65,24 @@ export function imageGenerateValidation({
     }
   } else if (!prompt?.trim()) {
     issues.push(issue.requirement("prompt", "Write a prompt"));
+  }
+  // Composed-prompt budget guard (sc-13133 / sc-13224). ONLY when a style is active: styleless
+  // behavior is unchanged (the raw prompt keeps whatever gating it had — the backend still bounds it,
+  // but the studio doesn't pre-flag it). Applies to BOTH prose and structured models now that the
+  // Style axis merges into a structured caption too (sc-13224): `composedPrompt` is the exact string
+  // sent in either case, and injecting a style can push a caption over the cap. An error, not a silent
+  // requirement: nothing else on the form explains why Generate is dead. The message names the actual
+  // numbers and the two ways out.
+  if (styleActive && composedPrompt) {
+    const budget = promptBudget(composedPrompt);
+    if (budget.over) {
+      issues.push(
+        issue.error(
+          null,
+          `Prompt with this style is ${budget.length}/${budget.max} characters — shorten your prompt or pick a shorter style.`,
+        ),
+      );
+    }
   }
   if (mode === "character_image" && !characterId) {
     issues.push(issue.requirement("character", "Choose a character"));
@@ -72,6 +112,7 @@ export function imageBatchValidation({
   missingKeys = [],
   groupIssues = [],
   resolutionIssues = [],
+  promptBudgetOverages = [],
   minDimension,
   maxDimension,
 } = {}) {
@@ -103,6 +144,9 @@ export function imageBatchValidation({
     issues.push(
       issue.error(null, `A prompt’s [${res.width}×${res.height}] size is out of range — each side must be ${minDimension}–${maxDimension}.`),
     );
+  }
+  if (promptBudgetOverages.length) {
+    issues.push(issue.error(null, batchPromptBudgetMessage(promptBudgetOverages)));
   }
   if (batchTotal === 0) {
     issues.push(issue.requirement("prompts", "Add at least one prompt to run a batch."));

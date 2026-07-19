@@ -11,6 +11,53 @@ fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn job_weight_resolution_uses_receipt_after_manifest_filename_change() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let repo = "SceneWorks/z-image-turbo-mlx";
+    let revision = "installed-revision";
+    let snapshot = hub
+        .join("models--SceneWorks--z-image-turbo-mlx")
+        .join("snapshots")
+        .join(revision);
+    for file in [
+        "q4/transformer/old-1.safetensors",
+        "q4/transformer/old-2.safetensors",
+        "q4/model_index.json",
+    ] {
+        let path = snapshot.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"installed").unwrap();
+    }
+    let marker = root.path().join("models").join(safe_download_dir(repo));
+    std::fs::create_dir_all(&marker).unwrap();
+    std::fs::write(marker.join(INSTALL_MARKER), serde_json::to_vec(&json!({
+        "repo": repo, "modelId": "z_image_turbo", "variant": "q4",
+        "snapshotRevision": revision,
+        "manifestFiles": ["q4/transformer/old-*.safetensors", "q4/model_index.json"],
+        "resolvedFiles": ["q4/transformer/old-1.safetensors", "q4/transformer/old-2.safetensors", "q4/model_index.json"]
+    })).unwrap()).unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    // This is the job-time manifest snapshot after a catalog bump: only the new names are declared.
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "advanced": {"mlxQuantize": 4},
+        "modelManifestEntry": {
+            "repo": repo, "mlx": {"standardTierLayout": true},
+            "downloads": [{"variant": "q4", "default": true, "files": ["q4/transformer/new.safetensors", "q4/model_index.json"]}]
+        }
+    }));
+
+    assert_eq!(
+        resolve_weights_dir(&req, &settings).unwrap(),
+        Some(snapshot.join("q4"))
+    );
+}
+
 #[test]
 fn render_and_save_writes_png_and_contract_fact() {
     let dir = tempfile::tempdir().unwrap();

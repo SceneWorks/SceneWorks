@@ -571,19 +571,21 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
     );
 }
 
-/// sc-12402: the shipped Wan `candle` blocks drive the candle VIDEO fit gate end-to-end against the
-/// SHIPPED manifest bytes — both halves of the story's acceptance: a real over-budget tier REFUSED, and
-/// a tier that fits ADMITTED.
+/// sc-12402 / sc-13175: the shipped Wan `candle` blocks drive the candle VIDEO fit gate end-to-end
+/// against the SHIPPED manifest bytes — both halves of the story's acceptance: a card too small REFUSED,
+/// and the tier/card that fits ADMITTED.
 ///
 /// The video sibling of [`flux2_candle_blocks_drive_the_fit_gate_and_reject`], and it exists for the
-/// same reason: this guards the DATA half. Dropping `wan_2_2`'s `vramGbByTier` makes
-/// `wan_video_fit_error` fall back to the sc-12344 weights FLOOR, which reads 18.13 GiB against a real
-/// 46.1 GB peak — so the gate would silently go back to admitting a 32 GB card and OOMing mid-denoise.
-/// That regression is invisible without this test: the gate still "works", it just gates on a number
-/// that is 2.4x wrong.
+/// same reason: this guards the DATA half. Dropping `wan_2_2`'s `vramGbByTier` makes `wan_video_fit_error`
+/// fall back to the sc-12344 weights FLOOR — the SUM of the on-disk transformer + TE + VAE (~18.15 GiB
+/// q4). Since the 5B was re-dropped onto sequential offload (sc-13175), that floor now OVER-counts the
+/// ~12 GB sequential peak (the TE + z48 VAE are flushed off-GPU, not co-resident), so losing the block
+/// would wall-reject the ~16 GB cards the offload path exists to serve (a 24 GB card the floor still
+/// admits) — the sc-12179 regression, invisible without this test (the gate still "works", it just gates
+/// on a number ~4 GiB too high).
 ///
-/// Numbers are MEASURED on an idle RTX PRO 6000 at each model's own shipped default geometry
-/// (sc-12402; see the manifest comment for the harness + the A/B proving they are card-independent).
+/// Numbers are MEASURED on an idle RTX PRO 6000 at wan_2_2's shipped default (832x480, 121f, 20 steps),
+/// `CANDLE_GEN_OFFLOAD=sequential`; vramGbByTier is the nvidia-smi POOL high-water, see the manifest comment.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
@@ -594,60 +596,71 @@ fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
     assert!(
         entry.get("candle").and_then(Value::as_object).is_some(),
         "wan_2_2 candle block present (absent ⇒ the video gate falls back to the weights floor, which \
-         under-counts the real peak by 2.4x and admits a card that OOMs)"
+         OVER-counts the sequential peak by ~4 GiB and wall-rejects the ~16 GB cards the re-drop serves)"
     );
 
-    // Measured (sc-12402; re-measured sc-12631 post-chunking): each tier + gate 2 GB headroom.
+    // Measured (sc-13175, sequential offload — the nvidia-smi POOL high-water): each tier + 2 GB headroom.
     let q4 = predicted_peak_gb(entry, "q4").expect("q4 peak measured");
     let q8 = predicted_peak_gb(entry, "q8").expect("q8 peak measured");
     let bf16 = predicted_peak_gb(entry, "bf16").expect("bf16 peak measured");
-    assert!((q4 - 48.1).abs() < 1e-6, "q4 46.1 + 2 headroom, got {q4}");
-    assert!((q8 - 50.7).abs() < 1e-6, "q8 48.7 + 2 headroom, got {q8}");
-    assert!((bf16 - 56.0).abs() < 1e-6, "bf16 54.0 + 2 headroom, got {bf16}");
-    // The tier ladder is monotonic, and SHALLOW: every term but the DiT is tier-independent (the f32
-    // UMT5 TE, the f32 z48 VAE, and the tier-blind attention). q8 − q4 is essentially the DiT quant delta.
-    assert!(q4 < q8 && q8 < bf16, "heavier tier ⇒ heavier peak");
+    assert!((q4 - 14.1).abs() < 1e-6, "q4 12.1 + 2 headroom, got {q4}");
+    assert!((q8 - 14.1).abs() < 1e-6, "q8 12.1 + 2 headroom, got {q8}");
+    assert!((bf16 - 16.5).abs() < 1e-6, "bf16 14.5 + 2 headroom, got {bf16}");
+    // Under sequential offload the peak is the tier-blind denoise attention transient, NOT the weights,
+    // so q4 and q8 (each measured in its own process) land on the SAME pool high-water — their code-size
+    // delta shows only in steady residency — and only the dense bf16 DiT lifts the peak. The ladder is
+    // non-strict and tiny (~2.4 GB q4→bf16) — where the RESIDENT ladder spanned ~8 GB, because there the
+    // still-resident TE + VAE dwarfed the DiT delta.
+    assert!(q4 <= q8 && q8 < bf16, "q4 == q8 <= bf16 (denoise-transient peak; only dense bf16 heavier)");
     assert!(
-        (q8 - q4 - 2.6).abs() < 0.05,
-        "q8 − q4 must stay the ~2.6 GB q8/q4 DiT quant delta, got {}",
+        (q8 - q4).abs() < 1e-6,
+        "q4 and q8 are the same denoise-transient peak under offload, got a {} GB gap",
         q8 - q4
     );
-    // The whole q4→bf16 ladder is under 8 GB. If this ever widens dramatically, the block was
-    // re-measured against a different geometry (or a chunked attention landed — sc-12434) and every
-    // number here needs revisiting rather than patching.
     assert!(
-        bf16 - q4 < 10.0,
-        "the 5B ladder spans ~7.9 GB because only the DiT is tier-dependent, got {}",
+        bf16 - q4 < 3.0,
+        "the sequential 5B ladder spans ~2.4 GB (only the DiT is tier-dependent once TE/VAE offload), got {}",
         bf16 - q4
     );
 
-    // The on-disk weights floor for the shipped q4 tier (`estimatedSizeBytes`), for the A/B below.
+    // The on-disk weights floor for the shipped q4 tier (`estimatedSizeBytes`), for the A/B below. It now
+    // OVER-counts the offloaded peak (18.15 > 14.1), so the block must WIN — see the doc comment.
     const WAN_5B_Q4_DISK_BYTES: u64 = 17_338_835_457;
 
-    // THE story: an RTX 5090 (32 GB) — the biggest consumer NVIDIA card — is REFUSED before the load +
-    // denoise, where the weights floor admitted it and let it OOM.
-    let rtx_5090 = apply_vram_cap(None, Some(32.0));
-    let message = wan_video_fit_error(
-        "wan_2_2",
-        entry,
-        "q4",
-        WAN_5B_Q4_DISK_BYTES,
-        "0",
-        rtx_5090,
-    )
-    .expect("the measured 46.1 GB peak cannot fit a 32 GB card — refuse before the OOM")
-    .to_string();
-    assert!(message.contains("wan_2_2"), "names the model: {message}");
-    assert!(message.contains("q4"), "names the sized tier: {message}");
-
-    // …and the SAME job is ADMITTED on the 96 GB card it was measured rendering on. A gate that
-    // refuses everything would satisfy the assert above and be worthless.
+    // THE re-drop's story (sc-13175): a 24 GB card — the epic sc-12732 target — is now ADMITTED before the
+    // load, where the RESIDENT 46.1 peak sc-12631 shipped refused it and needed ~48. Sequential fits it
+    // with room to spare, and even clears a 16 GB card.
+    let card24 = apply_vram_cap(None, Some(24.0));
+    assert!(
+        wan_video_fit_error("wan_2_2", entry, "q4", WAN_5B_Q4_DISK_BYTES, "0", card24).is_none(),
+        "the 5B's sequential q4 peak (~14 GB) must fit a 24 GB card — the whole point of the re-drop"
+    );
+    let card16 = apply_vram_cap(None, Some(16.0));
+    assert!(
+        wan_video_fit_error("wan_2_2", entry, "q4", WAN_5B_Q4_DISK_BYTES, "0", card16).is_none(),
+        "the sequential q4 peak also clears a 16 GB card"
+    );
+    // …but the gate reads the TIER: the heavier dense bf16 (16.5 GB need) is REFUSED on that same 16 GB
+    // card, so the conservative bf16 pool bound is load-bearing, not decoration.
+    assert!(
+        wan_video_fit_error("wan_2_2", entry, "bf16", WAN_5B_Q4_DISK_BYTES, "0", card16).is_some(),
+        "bf16's 14.5 + 2 = 16.5 GB need overflows a 16 GB card — the gate splits the tiers"
+    );
+    // …and, of course, the 96 GB dev box it was measured on (also reused by the A14B block below).
     let card96 = apply_vram_cap(None, Some(95.6));
     assert!(
         wan_video_fit_error("wan_2_2", entry, "q4", WAN_5B_Q4_DISK_BYTES, "0", card96).is_none(),
-        "q4's measured 48.1 GB need fits a 95.6 GB card — it is the exact configuration sc-12402 \
-         measured rendering, so wall-rejecting it would be the sc-12179 regression"
+        "the sequential q4 peak fits the 96 GB box it was measured on — wall-rejecting it would regress"
     );
+
+    // …but the gate is NOT vacuous: a 12 GB card is still too small for even the offloaded q4 peak +
+    // headroom (14.1 > 12), so it is REFUSED before the OOM, and the message names the model + sized tier.
+    let card12 = apply_vram_cap(None, Some(12.0));
+    let message = wan_video_fit_error("wan_2_2", entry, "q4", WAN_5B_Q4_DISK_BYTES, "0", card12)
+        .expect("the ~14 GB sequential q4 peak cannot fit a 12 GB card — refuse before the OOM")
+        .to_string();
+    assert!(message.contains("wan_2_2"), "names the model: {message}");
+    assert!(message.contains("q4"), "names the sized tier: {message}");
 
     // Both A14B models now carry a FULLY-MEASURED candle block (sc-13174, completing sc-12631): the candle
     // engine renders one 14B expert at a time (`OffloadPolicy::Sequential`, forced by
@@ -658,7 +671,7 @@ fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
     // replacing the old derived 56) admits a 48 GB card but stays refused on 32.
     let card48 = apply_vram_cap(None, Some(48.0));
     let card32 = apply_vram_cap(None, Some(32.0)); // an RTX 5090 — epic sc-12732's small-card target
-    let card16 = apply_vram_cap(None, Some(16.0));
+    // card16 is already bound above (the 5B section) and reused here.
     for (id, q4_peak, q8_peak, bf16_peak) in [
         ("wan_2_2_t2v_14b", 22.13, 27.95, 38.56),
         ("wan_2_2_i2v_14b", 22.20, 28.02, 38.62),

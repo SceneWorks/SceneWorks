@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import {
   Bar,
@@ -268,25 +268,39 @@ function StatsCharts({ rows }) {
   );
 }
 
+const PAGE_SIZE = 100;
+
 export function StatsScreen() {
   const { token } = useAppStatic();
   const { rows, loading, error, refresh } = useGenerationMetrics({ token });
   const [filters, setFilters] = useState({ type: "", model: "", quant: "", status: "" });
   const [sort, setSort] = useState({ key: "createdAt", dir: "desc" });
   const [selectedId, setSelectedId] = useState(null);
+  const [page, setPage] = useState(1);
 
   const options = useMemo(() => deriveFilterOptions(rows), [rows]);
   const filtered = useMemo(() => filterRows(rows, filters), [rows, filters]);
   const sorted = useMemo(() => sortRows(filtered, sort), [filtered, sort]);
   const kpis = useMemo(() => computeKpis(filtered), [filtered]);
-  const selected = useMemo(
-    () => sorted.find((r) => r.jobId === selectedId) ?? null,
-    [sorted, selectedId],
+
+  const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  // Clamp when the row count shrinks (e.g. a filter drops the current page away).
+  useEffect(() => {
+    setPage((prev) => Math.min(prev, totalPages));
+  }, [totalPages]);
+  const pageStart = (page - 1) * PAGE_SIZE;
+  const pageRows = useMemo(
+    () => sorted.slice(pageStart, pageStart + PAGE_SIZE),
+    [sorted, pageStart],
   );
 
-  const setFilter = (key, value) => setFilters((prev) => ({ ...prev, [key]: value }));
+  const setFilter = (key, value) => {
+    setFilters((prev) => ({ ...prev, [key]: value }));
+    setPage(1);
+  };
   const toggleSort = (key) => {
     if (!key) return;
+    setPage(1);
     setSort((prev) =>
       prev.key === key
         ? { key, dir: prev.dir === "asc" ? "desc" : "asc" }
@@ -374,24 +388,32 @@ export function StatsScreen() {
             </tr>
           </thead>
           <tbody>
-            {sorted.map((r) => (
-              <tr
-                key={r.jobId}
-                className={r.jobId === selectedId ? "selected" : ""}
-                onClick={() => setSelectedId(r.jobId)}
-              >
-                {COLUMNS.map((col) => (
-                  <td key={col.label} className={col.numeric ? "num mono" : ""}>
-                    {col.key === "status" ? (
-                      <span className={`stats-pill stats-pill-${statusTone(r.status)}`}>
-                        {r.status ?? "—"}
-                      </span>
-                    ) : (
-                      col.get(r)
-                    )}
-                  </td>
-                ))}
-              </tr>
+            {pageRows.map((r) => (
+              <React.Fragment key={r.jobId}>
+                <tr
+                  className={r.jobId === selectedId ? "selected" : ""}
+                  onClick={() => setSelectedId((prev) => (prev === r.jobId ? null : r.jobId))}
+                >
+                  {COLUMNS.map((col) => (
+                    <td key={col.label} className={col.numeric ? "num mono" : ""}>
+                      {col.key === "status" ? (
+                        <span className={`stats-pill stats-pill-${statusTone(r.status)}`}>
+                          {r.status ?? "—"}
+                        </span>
+                      ) : (
+                        col.get(r)
+                      )}
+                    </td>
+                  ))}
+                </tr>
+                {r.jobId === selectedId ? (
+                  <tr className="stats-detail-row">
+                    <td colSpan={COLUMNS.length}>
+                      <RunDetail row={r} onClose={() => setSelectedId(null)} />
+                    </td>
+                  </tr>
+                ) : null}
+              </React.Fragment>
             ))}
             {!sorted.length && !loading ? (
               <tr>
@@ -404,7 +426,29 @@ export function StatsScreen() {
         </table>
       </div>
 
-      {selected ? <RunDetail row={selected} onClose={() => setSelectedId(null)} /> : null}
+      {totalPages > 1 ? (
+        <div className="stats-pagination">
+          <button
+            type="button"
+            className="stats-page-btn"
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page <= 1}
+          >
+            Previous
+          </button>
+          <span className="stats-page-info">
+            {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, sorted.length)} of {sorted.length}
+          </span>
+          <button
+            type="button"
+            className="stats-page-btn"
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            disabled={page >= totalPages}
+          >
+            Next
+          </button>
+        </div>
+      ) : null}
     </section>
   );
 }

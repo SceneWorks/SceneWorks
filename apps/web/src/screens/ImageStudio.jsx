@@ -9,6 +9,7 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
+import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
 import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
 import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
 import BatchPromptPanel from "../components/BatchPromptPanel.jsx";
@@ -36,6 +37,7 @@ import {
 } from "../promptSeed.js";
 import {
   emptyCaption,
+  injectStyleIntoCaption,
   orderCaption,
   parseMagicPromptCaption,
   parseVisionCaption,
@@ -119,7 +121,12 @@ import {
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
-import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
+import {
+  batchPromptBudgetMessage,
+  batchPromptBudgetOverages,
+  imageBatchValidation,
+  imageGenerateValidation,
+} from "../imageStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import {
@@ -158,6 +165,9 @@ import {
   useUpscaleEngineFallback,
 } from "../upscaleEngines.js";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
+import { StylePicker } from "../components/StylePicker.jsx";
+import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
+import { STYLE_GROUPS, styleTextForId } from "../data/styleCatalog.js";
 import {
   GUIDANCE_METHOD_LABELS,
   SAMPLER_LABELS,
@@ -380,6 +390,11 @@ export function ImageStudio() {
   const [characterSuggestions] = useState(() => pickSuggestions(4, CHARACTER_SUGGESTION_POOL));
   const [mode, setMode] = useState(() => normalizeImageMode(saved.mode));
   const [prompt, setPrompt] = useState(saved.prompt ?? DEFAULT_SCENE_PROMPT);
+  // sc-13130: the Style Catalog selection, an entry id from styles.json (or null for "None" /
+  // pass-through). Lives next to `prompt` and persists via the same studio saved-state mechanism.
+  // Kept as a bare id (not the full entry) so the sc-13132 recipe/replay rehydration can extend
+  // it cleanly; the payload fold resolves the id → prompt text via styleTextForId at build time.
+  const [styleId, setStyleId] = useState(saved.styleId ?? null);
   // True once the user types or picks a suggestion, so the character-mode default
   // prompt never clobbers their own wording. A restored prompt counts as edited so
   // re-entering character mode doesn't overwrite it.
@@ -1505,6 +1520,18 @@ export function ImageStudio() {
     // path when the blob is absent/invalid (older assets, non-structured models).
     const structuredRecipe = rawSettings.structuredPrompt;
     const restoredCaption = structuredRecipe?.caption ?? null;
+    // Style Catalog round-trip (sc-13132): re-select the Style picker to the recorded style id (a
+    // group id or a sub-style id) — but ONLY when the raw pre-style prompt was also recorded, so
+    // submit can recompose from it. A styleless recipe, or a partial one carrying a styleId with
+    // no stylePrompt, clears any stale selection so its already-composed recipe.prompt is never
+    // re-wrapped. Since sc-13224 (structured captions ARE styled), these branches CAN overlap for a
+    // structured styled recipe: both restoredCaption and hasRawStylePrompt may be truthy. That is
+    // correct — restoredStyleId is restored just below, and the structured-caption branch takes
+    // precedence, restoring the PRE-injection caption so submit re-injects the style exactly once.
+    const restoredStyleId = rawSettings.styleId ?? null;
+    const hasRawStylePrompt =
+      restoredStyleId != null && typeof rawSettings.stylePrompt === "string";
+    setStyleId(hasRawStylePrompt ? restoredStyleId : null);
     if (restoredCaption && validateCaption(restoredCaption).ok) {
       setCaption(orderCaption(restoredCaption));
       setPromptMode("form");
@@ -1512,6 +1539,12 @@ export function ImageStudio() {
       // The intent (original idea) seeds the plain box; the serialized caption is
       // authoritative for generation and is rebuilt from `caption` on submit.
       setPrompt(String(structuredRecipe.intent ?? ""));
+    } else if (hasRawStylePrompt) {
+      // Styled recipe (sc-13132): seed the box with the RAW pre-style prompt, NOT the composed
+      // `recipe.prompt`. With the picker re-selected above, submit recomposes the identical
+      // `Style:`/`Description:` prompt — recording the raw prompt is what prevents a double-wrap
+      // (composing over the already-composed prompt would nest a second `Style:` block).
+      setPrompt(rawSettings.stylePrompt);
     } else {
       setPrompt(String(recipe.prompt ?? ""));
     }
@@ -1770,6 +1803,7 @@ export function ImageStudio() {
   useStudioSettingsWriter("image", activeProject?.id ?? null, {
     mode,
     prompt,
+    styleId,
     structuredCaption: caption,
     promptMode,
     magicPromptBackend,
@@ -1966,6 +2000,14 @@ export function ImageStudio() {
       height,
       recipePresetId: selectedPreset?.id ?? null,
       presetPromptResolvedClientSide: foldPrompt,
+      // sc-13130: the selected Style Catalog entry's prompt text (or null for None). The pure
+      // builder applies composeStyledPrompt as the LAST wrap — after the preset fold above has
+      // produced `promptToSend` — so the style's `Style:` block wraps the already-preset-composed
+      // user prompt as `Description:`. Null → pass-through (prompt sent unchanged). Structured
+      // caption models ignore it (the builder skips composition when sendStructured is true).
+      styleText: styleTextForId(styleId),
+      // sc-13132: the opaque style id travels with the recipe so replay can re-select the picker.
+      styleId,
       characterId,
       characterLookId,
       multiReference,
@@ -2049,6 +2091,19 @@ export function ImageStudio() {
     }
     const resolved = expandBatch(batchPrompts, batchVariables);
     if (!resolved.length) {
+      return;
+    }
+    const promptBudgetOverages = batchPromptBudgetOverages(
+      stylePreviewActive && !structuredPromptModel
+        ? resolved.map(({ prompt: resolvedPrompt }) => {
+            const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
+            return buildBatchJobRequest(cleanPrompt).prompt;
+          })
+        : [],
+    );
+    if (promptBudgetOverages.length) {
+      setBatchError(batchPromptBudgetMessage(promptBudgetOverages));
+      setBatchConfirmPending(false);
       return;
     }
     if (dimensionsInvalid) {
@@ -2147,6 +2202,18 @@ export function ImageStudio() {
   // auto-write a caption per resolved prompt (sc-9980).
   const batchStructuredExpandBlocked =
     structuredPromptModel && (magicModelMissing || typeof magicPrompt !== "function");
+  const activeStyleText = styleTextForId(styleId);
+  const styleSelected = typeof activeStyleText === "string" && activeStyleText.trim() !== "";
+  const stylePreviewActive = !structuredPromptModel && styleSelected;
+  // sc-13224: structured JSON-caption models apply the Style axis by merging into the caption's
+  // `style_description.aesthetics` (see imageJobRequest.js), so the outgoing prompt is the injected,
+  // re-serialized caption. Compute it here so the budget guard measures the ACTUAL string sent (the
+  // caption grows against the 4000-char cap once a style is merged in). Only when a structured model
+  // is in caption mode with a style selected; a null/empty style is a pass-through.
+  const structuredStyleActive = structuredActive && styleSelected;
+  const structuredStyledPrompt = structuredStyleActive
+    ? serializeCaption(injectStyleIntoCaption(caption, activeStyleText))
+    : null;
   // One summary per CTA (epic 10644): the button's `disabled` and the message it owes the
   // user come from the same issue list and cannot drift. Two independent rule sets — the
   // batch's problems must never disable single-image Generate. The drafts gather the
@@ -2162,14 +2229,39 @@ export function ImageStudio() {
       minDimension: MIN_IMAGE_DIMENSION,
       maxDimension: MAX_IMAGE_DIMENSION,
     }),
-    [activeProject, batchStructuredExpandBlocked, batchTotal, batchMissingKeys, batchGroupIssues, batchResolutionIssues],
+    [
+      activeProject,
+      batchStructuredExpandBlocked,
+      batchTotal,
+      batchMissingKeys,
+      batchGroupIssues,
+      batchResolutionIssues,
+    ],
   );
+  // sc-13131 / sc-13133: the live composed-prompt preview for the selected Style Catalog entry, and
+  // the budget the composed string spends against the backend cap. ANTI-DRIFT: we do NOT re-derive
+  // the composition here — we run the SAME buildJobRequest the single Generate submit calls (with the
+  // live prompt as promptToSend) and read its `.prompt`, so the previewed/measured string is
+  // byte-for-byte the prompt that will be sent (preset stack folds into the prompt FIRST, the style's
+  // Style:/Description: wrap is applied LAST — see imageJobRequest.js). It recomputes every render, so
+  // it tracks the prompt text, the selected style, and the active preset stack live. Only active for
+  // free-text models with a style actually selected: structured-caption models (Ideogram) merge the
+  // style into the caption's `aesthetics` instead (sc-13224), so there's no Style:/Description: prose
+  // to preview, and a null/empty styleText is a pass-through with nothing extra to preview and no
+  // style-composition budget to guard.
+  const styledPreviewPrompt = stylePreviewActive ? buildJobRequest({ promptToSend: prompt }).prompt : null;
   const generateDraft = useMemo(
     () => ({
       activeProject,
       structuredActive,
       captionHasContent,
       prompt,
+      // sc-13133 / sc-13224: measure the COMPOSED outgoing prompt against the cap, but only when a
+      // style is active (styleless behavior unchanged). For prose that is the Style:/Description:
+      // composition; for a structured model it is the style-injected, re-serialized caption. Either
+      // string is exactly what the run submits, so the cap is measured on IT.
+      styleActive: stylePreviewActive || structuredStyleActive,
+      composedPrompt: styledPreviewPrompt ?? structuredStyledPrompt ?? "",
       mode,
       characterId,
       // Edit needs a source (single) or ≥1 reference (multiReference); a required edit LoRA must be
@@ -2188,6 +2280,10 @@ export function ImageStudio() {
       structuredActive,
       captionHasContent,
       prompt,
+      stylePreviewActive,
+      structuredStyleActive,
+      styledPreviewPrompt,
+      structuredStyledPrompt,
       mode,
       characterId,
       multiReference,
@@ -2446,6 +2542,9 @@ export function ImageStudio() {
               ))}
             </div>
           )}
+
+          {/* Style Catalog picker + its composed-prompt preview moved into the Style axis row of the
+              settings bar (sc-13135) — see the .settings-bar-style-axis block below. */}
 
           {/* Prompt tools (UI-refinement 1b; restructured sc-10195): a framed strip of up to THREE
               distinct tiles, one panel open at a time (all free-text only — structured models excluded).
@@ -2934,13 +3033,15 @@ export function ImageStudio() {
             <div className="settings-bar-row">
               <label className="settings-field settings-field-model">
                 Model
+                <StudioUpdateBadge item={selectedModel} />
                 <select onChange={(event) => setModel(event.target.value)} value={model}>
                   {pickerModels.map((item) => (
                     <option key={item.id} value={item.id}>
-                      {item.name}
+                      {updateOptionLabel(item)}
                     </option>
                   ))}
                 </select>
+                <StudioUpdateNotice item={selectedModel} onUpdate={createModelDownloadJob} />
               </label>
               <label className="settings-field settings-field-aspect">
                 Aspect
@@ -2955,26 +3056,37 @@ export function ImageStudio() {
                 <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
               </label>
             </div>
-            <div className="settings-bar-styles">
-              <span className="settings-bar-label">Style preset</span>
-              <div className="preset-chips">
-                <button
-                  className={!selectedPreset ? "preset-chip active" : "preset-chip"}
-                  onClick={() => setSelectedPresetId(noPresetId)}
-                  type="button"
-                >
-                  None
-                </button>
-                {availablePresets.map((preset) => (
+            {/* Style axis (sc-13135): the Style Catalog picker sits FIRST in this row, followed by the
+                model's Style presets — both are style controls, so they share one row instead of the
+                catalog picker floating in a standalone row under the composer. The Style Catalog
+                composes the prompt (free-text) or merges into the caption (Ideogram, sc-13224); "None"
+                resets to pass-through. NB: distinct from Krea's numeric "text style" (textStyleGain). */}
+            <div className="settings-bar-styles settings-bar-style-axis">
+              <div className="style-axis-field style-axis-catalog">
+                <span className="settings-bar-label">Style</span>
+                <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
+              </div>
+              <div className="style-axis-field style-axis-presets">
+                <span className="settings-bar-label">Style preset</span>
+                <div className="preset-chips">
                   <button
-                    className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
-                    key={preset.id}
-                    onClick={() => setSelectedPresetId(preset.id)}
+                    className={!selectedPreset ? "preset-chip active" : "preset-chip"}
+                    onClick={() => setSelectedPresetId(noPresetId)}
                     type="button"
                   >
-                    {preset.name ?? preset.id}
+                    None
                   </button>
-                ))}
+                  {availablePresets.map((preset) => (
+                    <button
+                      className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
+                      key={preset.id}
+                      onClick={() => setSelectedPresetId(preset.id)}
+                      type="button"
+                    >
+                      {preset.name ?? preset.id}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
             {availableGeneralPresets.length ? (
@@ -2995,6 +3107,12 @@ export function ImageStudio() {
               </div>
             ) : null}
           </div>
+
+          {/* sc-13131: the EXACT composed prompt (Style:/Description:, preserved sibling directives,
+              and the own-`Style:` MERGE) the run will send once a style is active — reuses
+              buildJobRequest so it can never drift from the payload. Sits under the Style axis row.
+              Hidden when no style applies. */}
+          <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} />
 
           {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
 
@@ -3315,6 +3433,7 @@ export function ImageStudio() {
                 effectiveLoraWeight={effectiveLoraWeight}
                 setLoraWeight={setLoraWeight}
                 loraEmptyMessage={loraEmptyMessage}
+                onUpdateLora={createLoraDownloadJob}
               />
               {/* Save-as-preset folds into Advanced with the rest of the power-user
                   knobs (UI-refinement 2b). */}

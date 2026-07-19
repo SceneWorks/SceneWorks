@@ -877,7 +877,7 @@ pub(crate) async fn download_snapshot_into_cache(
     revision: &str,
     snapshot: &HuggingFaceSnapshot,
     progress: &mut DownloadProgress<'_>,
-) -> WorkerResult<()> {
+) -> WorkerResult<String> {
     let blobs_dir = repo_dir.join("blobs");
     tokio::fs::create_dir_all(&blobs_dir).await?;
     // A no-redirect client so the metadata HEAD reads huggingface.co's headers
@@ -949,7 +949,7 @@ pub(crate) async fn download_snapshot_into_cache(
             tokio::fs::copy(blobs_dir.join(etag), &link).await?;
         }
     }
-    Ok(())
+    Ok(commit)
 }
 
 fn header_value(response: &reqwest::Response, name: &str) -> Option<String> {

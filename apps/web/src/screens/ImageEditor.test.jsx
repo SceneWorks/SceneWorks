@@ -862,6 +862,9 @@ describe("detail job", () => {
     expect(
       tileControlNetInstalled([{ id: TILE_CONTROLNET_MODEL_ID, installState: "missing" }]),
     ).toBe(false);
+    expect(
+      tileControlNetInstalled([{ id: TILE_CONTROLNET_MODEL_ID, installState: "incomplete" }]),
+    ).toBe(false);
     // Present and installed → ready.
     expect(
       tileControlNetInstalled([{ id: TILE_CONTROLNET_MODEL_ID, installState: "installed" }]),

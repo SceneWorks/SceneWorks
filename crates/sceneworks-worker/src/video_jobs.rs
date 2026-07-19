@@ -3989,11 +3989,11 @@ struct VideoGenInput {
     /// snapshot; `None` on every other job.
     comfyui: Option<ComfyuiWanExperts>,
     /// Residency policy for the load (sc-12631). Defaults to [`OffloadPolicy::Resident`] — the historical
-    /// video behavior (every component held for the whole run). The candle A14B path flips this to
-    /// [`OffloadPolicy::Sequential`] so the two 14B experts are swapped one-resident-at-a-time and the
-    /// measured `candle.vramGbByTier` peak (the SEQUENTIAL working set) is the one actually loaded; see
-    /// `candle_wan_offload_policy`. Left `Resident` on the MLX (macOS) path and the 5B, which the
-    /// manifest still sizes resident.
+    /// video behavior (every component held for the whole run). The candle A14B (two 14B experts swapped
+    /// one-resident-at-a-time) and the dense 5B (TE/VAE flushed off-GPU around the denoise, sc-13175) flip
+    /// this to [`OffloadPolicy::Sequential`] so the measured `candle.vramGbByTier` peak (the SEQUENTIAL
+    /// working set) is the one actually loaded; see `candle_wan_offload_policy`. Left `Resident` on the
+    /// MLX (macOS) path and the resident-only candle video engines (`ltx`/`svd`).
     offload_policy: OffloadPolicy,
 }
 
@@ -5467,14 +5467,17 @@ fn mochi_vram_preflight(
 /// load actually takes this path — [`video_load_spec`] threads it onto the `LoadSpec`, and
 /// `apply_residency_policy` never downgrades a `Sequential` set here.
 ///
-/// The dense TI2V-5B stays [`OffloadPolicy::Resident`]: its `candle.vramGbByTier` (46.1 GiB q4,
-/// sc-12631 PR #1598) is the RESIDENT peak, so offloading it would mismatch its sized number. Re-dropping
-/// the 5B onto the offload path the engine already wired (sc-12757) is a tracked follow-up. `ltx`/`svd`
-/// carry no offload lifecycle and stay resident.
+/// The dense TI2V-5B now renders [`OffloadPolicy::Sequential`] too (sc-13175). It has a single dense
+/// transformer (no expert swap), but its resident peak was dominated by the UMT5 TE + z48 VAE held
+/// alongside the DiT for the whole run, so the engine flushes TE/VAE off-GPU around the denoise
+/// (sc-12757, `render_sequential`) and the model is now sized by its MEASURED sequential
+/// `candle.vramGbByTier` peak (see the `wan_2_2` candle block) instead of the ~46 GiB RESIDENT peak
+/// sc-12631 (PR #1598) shipped — so a ~24 GB card can run the 5B where the resident gate needed ~48.
+/// `ltx`/`svd` carry no offload lifecycle and stay resident.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_wan_offload_policy(engine_id: &str) -> OffloadPolicy {
     match engine_id {
-        "wan2_2_t2v_14b" | "wan2_2_i2v_14b" => OffloadPolicy::Sequential,
+        "wan2_2_ti2v_5b" | "wan2_2_t2v_14b" | "wan2_2_i2v_14b" => OffloadPolicy::Sequential,
         _ => OffloadPolicy::Resident,
     }
 }
@@ -9449,6 +9452,30 @@ fn resolve_mochi_model_dir(settings: &Settings, request: &VideoRequest) -> Worke
             return Ok(root);
         }
     }
+    let requested_variant = mochi_tier_order(request).first().copied();
+    let receipt_dir = crate::model_jobs::huggingface_receipt_weights_dir(
+        &settings.data_dir,
+        MOCHI_REPO,
+        Some(&request.model),
+        requested_variant,
+    );
+    if let Some(receipt_dir) = receipt_dir {
+        // A receipt tier is already the exact, atomic file set selected at install time.  Do not run
+        // it through the current-manifest fallback order (or self-heal it with newly named files).
+        let receipt_root = receipt_dir.parent();
+        let shared_receipt = crate::model_jobs::huggingface_receipt_weights_dir(
+            &settings.data_dir,
+            MOCHI_REPO,
+            Some(&request.model),
+            Some("default"),
+        );
+        if mochi_tier_dir_is_complete(&receipt_dir)
+            && shared_receipt.as_deref() == receipt_root
+            && receipt_root.is_some_and(mochi_shared_is_complete)
+        {
+            return Ok(receipt_dir);
+        }
+    }
     if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, MOCHI_REPO) {
         if let Some(dir) = mochi_tier_subdir(&root, order) {
             return Ok(dir);
@@ -9546,6 +9573,26 @@ async fn ensure_mochi_tier_present(
     job: &JobSnapshot,
     tier: &str,
 ) -> WorkerResult<()> {
+    let tier_receipt = crate::model_jobs::huggingface_receipt_weights_dir(
+        &settings.data_dir,
+        MOCHI_REPO,
+        None,
+        Some(tier),
+    );
+    let shared_receipt = crate::model_jobs::huggingface_receipt_weights_dir(
+        &settings.data_dir,
+        MOCHI_REPO,
+        None,
+        Some("default"),
+    );
+    if let (Some(tier_dir), Some(shared_root)) = (tier_receipt, shared_receipt) {
+        if tier_dir.parent() == Some(shared_root.as_path())
+            && mochi_tier_dir_is_complete(&tier_dir)
+            && mochi_shared_is_complete(&shared_root)
+        {
+            return Ok(());
+        }
+    }
     let Some(root) = huggingface_snapshot_dir(&settings.data_dir, MOCHI_REPO) else {
         return Ok(());
     };
@@ -11350,6 +11397,67 @@ mod tests {
             "prompt": "a calico kitten",
             "advanced": advanced,
         }))
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn mochi_receipts_are_atomic_across_tier_and_shared_corequisite() {
+        let data = tempfile::tempdir().unwrap();
+        let hub = data.path().join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let repo_cache = hub.join("models--SceneWorks--mochi-1-mlx");
+        let installed = repo_cache.join("snapshots/installed");
+        let newer = repo_cache.join("snapshots/newer");
+        for root in [&installed, &newer] {
+            std::fs::create_dir_all(root.join("q4/transformer")).unwrap();
+            std::fs::write(root.join("q4/transformer/model.safetensors"), b"x").unwrap();
+            std::fs::write(root.join("q4/split_model.json"), b"{}").unwrap();
+            for component in ["text_encoder", "tokenizer", "vae"] {
+                std::fs::create_dir_all(root.join(component)).unwrap();
+                std::fs::write(root.join(component).join("receipt-file"), b"x").unwrap();
+            }
+        }
+        std::fs::create_dir_all(repo_cache.join("refs")).unwrap();
+        std::fs::write(repo_cache.join("refs/main"), b"newer").unwrap();
+        let marker = data
+            .path()
+            .join("models")
+            .join(safe_download_dir(MOCHI_REPO));
+        std::fs::create_dir_all(&marker).unwrap();
+        let receipt = |variant: &str, revision: &str, files: Value| {
+            json!({
+                "repo": MOCHI_REPO, "modelId": "mochi_1", "variant": variant,
+                "snapshotRevision": revision, "resolvedFiles": files
+            })
+        };
+        let write_receipts = |tier_revision: &str, shared_revision: &str| {
+            std::fs::write(marker.join(INSTALL_MARKER), serde_json::to_vec(&json!({
+                "repo": MOCHI_REPO,
+                "receipts": [
+                    receipt("q4", tier_revision, json!(["q4/split_model.json", "q4/transformer/model.safetensors"])),
+                    receipt("default", shared_revision, json!(["text_encoder/receipt-file", "tokenizer/receipt-file", "vae/receipt-file"]))
+                ]
+            })).unwrap()).unwrap();
+        };
+        let settings = Settings {
+            data_dir: data.path().to_path_buf(),
+            ..Settings::from_env()
+        };
+        let request = mochi_request(json!({ "mlxQuantize": 4 }));
+
+        write_receipts("installed", "installed");
+        assert_eq!(
+            resolve_mochi_model_dir(&settings, &request).unwrap(),
+            installed.join("q4")
+        );
+        write_receipts("installed", "newer");
+        assert_ne!(
+            resolve_mochi_model_dir(&settings, &request).unwrap(),
+            installed.join("q4")
+        );
     }
 
     /// `advanced.mlxQuantize` selects WHICH TIER DIR to load — the story's "selecting q4/q8/bf16
@@ -17442,20 +17550,22 @@ mod tests {
         );
     }
 
-    /// sc-12631: the candle A14B (T2V + I2V) loads with `OffloadPolicy::Sequential` so its two 14B
-    /// experts swap one-resident-at-a-time — the residency its MEASURED `candle.vramGbByTier` peak was
-    /// taken under, and the coupling that makes the gate's admission number truthful. The dense 5B and
-    /// the non-wan video engines stay `Resident`. Both halves are pinned: the policy predicate AND that
-    /// `video_load_spec` actually threads it onto the `LoadSpec` (a decoupled predicate that never
-    /// reached the spec would silently OOM the A14B on the resident path the gate did not size for).
+    /// sc-12631 / sc-13175: the candle Wan engines the manifest sizes by a MEASURED sequential
+    /// `candle.vramGbByTier` peak load with `OffloadPolicy::Sequential` — the A14B (T2V + I2V) so its two
+    /// 14B experts swap one-resident-at-a-time, and the dense TI2V-5B (sc-13175) so its UMT5 TE + z48 VAE
+    /// are flushed off-GPU around the denoise. That residency is the coupling that makes the gate's
+    /// admission number truthful. `ltx`/`svd` carry no offload lifecycle and stay `Resident`. Both halves
+    /// are pinned: the policy predicate AND that `video_load_spec` actually threads it onto the `LoadSpec`
+    /// (a decoupled predicate that never reached the spec would silently OOM on the resident path the gate
+    /// did not size for).
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
-    fn candle_a14b_loads_sequential_every_other_video_engine_resident() {
-        for id in ["wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
+    fn candle_wan_sequential_engines_offload_others_resident() {
+        for id in ["wan2_2_ti2v_5b", "wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
             assert_eq!(
                 candle_wan_offload_policy(id),
                 OffloadPolicy::Sequential,
-                "{id} must offload (both 14B experts cannot be co-resident)"
+                "{id} must offload (sized by its measured sequential peak, not the resident load)"
             );
             // Mirror `generate_candle_video_using`, which sets the input's policy from the predicate;
             // this pins that `video_load_spec` then threads it onto the `LoadSpec` (the coupling that
@@ -17471,9 +17581,8 @@ mod tests {
                 "{id}: video_load_spec must thread Sequential onto the LoadSpec"
             );
         }
-        // The dense 5B is sized RESIDENT in the manifest (46.1 GiB q4), and ltx/svd carry no offload
-        // lifecycle — forcing them sequential would mismatch their sized peak / be a no-op that misleads.
-        for id in ["wan2_2_ti2v_5b", "ltx_2_3_distilled", "svd_xt"] {
+        // ltx/svd carry no offload lifecycle — forcing them sequential would be a no-op that misleads.
+        for id in ["ltx_2_3_distilled", "svd_xt"] {
             assert_eq!(
                 candle_wan_offload_policy(id),
                 OffloadPolicy::Resident,

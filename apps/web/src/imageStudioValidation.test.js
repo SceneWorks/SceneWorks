@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { summarize } from "./validation/issues.js";
-import { imageBatchValidation, imageGenerateValidation } from "./imageStudioValidation.js";
+import {
+  batchPromptBudgetOverages,
+  imageBatchValidation,
+  imageGenerateValidation,
+} from "./imageStudioValidation.js";
+import { composeStyledPrompt, PROMPT_MAX_CHARS } from "./styleComposer.js";
 
 // The two Image Studio CTA gates in the app-wide vocabulary (epic 10649). The kinds are the
 // contract: a requirement blocks in silence (the empty field shows it), an error blocks and
@@ -103,6 +108,85 @@ describe("imageGenerateValidation", () => {
     expect(summary.surfaced).toHaveLength(1);
     expect(summary.surfaced[0].message).toContain("loraA");
   });
+
+  // Composed-prompt budget guard (sc-13133). The cap is measured on the COMPOSED outgoing prompt,
+  // not the raw prompt field, and only when a style is active — styleless behavior is unchanged.
+  describe("composed-prompt budget (sc-13133)", () => {
+    // A raw prompt that is itself well UNDER the cap, but a style long enough that the composed
+    // Style:/Description: string runs OVER it. The whole point of the guard.
+    const rawPrompt = "a fox in the snow"; // 17 chars — nowhere near the cap on its own
+    const longStyle = "x".repeat(PROMPT_MAX_CHARS); // composed will exceed the cap by the wrapper + prompt
+    const overComposed = composeStyledPrompt({ styleText: longStyle, userPrompt: rawPrompt });
+
+    it("styleless is unchanged: an over-cap composedPrompt is ignored when no style is active", () => {
+      // Even handed an over-cap string, a styleless draft must not sprout a new error — the raw
+      // prompt keeps whatever gating it had (the backend still bounds it).
+      const issues = imageGenerateValidation({ ...whole, styleActive: false, composedPrompt: overComposed });
+      expect(summarize(issues).surfaced).toEqual([]);
+      expect(summarize(issues).ready).toBe(true);
+    });
+
+    it("under budget with a style active surfaces no error", () => {
+      const underComposed = composeStyledPrompt({ styleText: "cinematic watercolor", userPrompt: rawPrompt });
+      expect([...underComposed].length).toBeLessThanOrEqual(PROMPT_MAX_CHARS);
+      const issues = imageGenerateValidation({ ...whole, styleActive: true, composedPrompt: underComposed });
+      expect(summarize(issues).surfaced).toEqual([]);
+      expect(summarize(issues).ready).toBe(true);
+    });
+
+    // DISCRIMINATION: raw prompt < cap, composed > cap → the guard MUST fire. A guard that measured
+    // the raw `prompt` field (17 chars) instead of the composed string would let this through — this
+    // test fails that mutation.
+    it("blocks and surfaces an error when the COMPOSED prompt exceeds the cap (raw prompt is short)", () => {
+      expect([...rawPrompt].length).toBeLessThan(PROMPT_MAX_CHARS); // raw is well under
+      expect([...overComposed].length).toBeGreaterThan(PROMPT_MAX_CHARS); // composed is over
+      const issues = imageGenerateValidation({
+        ...whole,
+        prompt: rawPrompt,
+        styleActive: true,
+        composedPrompt: overComposed,
+      });
+      const summary = summarize(issues);
+      expect(summary.ready).toBe(false);
+      expect(summary.surfaced).toHaveLength(1);
+      expect(summary.surfaced[0].kind).toBe("error");
+      // The message names the real numbers and the two ways out — no raw internals.
+      expect(summary.surfaced[0].message).toContain(`${[...overComposed].length}/${PROMPT_MAX_CHARS}`);
+      expect(summary.surfaced[0].message).toContain("shorten your prompt or pick a shorter style");
+    });
+
+    // sc-13224: structured-caption models now DO apply the Style axis (the style is merged into the
+    // caption's aesthetics), so the composed caption can push past the cap and the guard must fire.
+    it("fires the budget error on a structured model when the injected caption exceeds the cap", () => {
+      const overCaption = JSON.stringify({
+        style_description: { aesthetics: "x".repeat(PROMPT_MAX_CHARS), photo: "f/2" },
+        compositional_deconstruction: { background: "an alley", elements: [] },
+      });
+      expect([...overCaption].length).toBeGreaterThan(PROMPT_MAX_CHARS);
+      const issues = imageGenerateValidation({
+        ...whole,
+        structuredActive: true,
+        captionHasContent: true,
+        styleActive: true,
+        composedPrompt: overCaption,
+      });
+      const summary = summarize(issues);
+      expect(summary.ready).toBe(false);
+      expect(summary.surfaced.some((i) => i.kind === "error" && i.message.includes("/"))).toBe(true);
+    });
+
+    it("stays out of a structured model's gate when no style is active (empty composedPrompt)", () => {
+      // styleless structured behavior is unchanged: no style selected → no composed prompt → no guard.
+      const issues = imageGenerateValidation({
+        ...whole,
+        structuredActive: true,
+        captionHasContent: true,
+        styleActive: false,
+        composedPrompt: "",
+      });
+      expect(summarize(issues).surfaced).toEqual([]);
+    });
+  });
 });
 
 describe("imageBatchValidation", () => {
@@ -113,6 +197,7 @@ describe("imageBatchValidation", () => {
     missingKeys: [],
     groupIssues: [],
     resolutionIssues: [],
+    promptBudgetOverages: [],
     minDimension: 256,
     maxDimension: 4096,
   };
@@ -138,6 +223,41 @@ describe("imageBatchValidation", () => {
   it("surfaces an out-of-range resolution with the offending size", () => {
     const summary = summarize(imageBatchValidation({ ...whole, resolutionIssues: [{ width: 5000, height: 300 }] }));
     expect(summary.surfaced[0].message).toBe("A prompt’s [5000×300] size is out of range — each side must be 256–4096.");
+  });
+
+  it("blocks at 4001 Unicode scalars, allows 4000, and identifies every offending resolved item", () => {
+    const composedPrompts = [
+      "😀".repeat(PROMPT_MAX_CHARS),
+      "a".repeat(PROMPT_MAX_CHARS + 1),
+      "ok",
+      "😀".repeat(PROMPT_MAX_CHARS + 2),
+    ];
+    const overages = batchPromptBudgetOverages(composedPrompts);
+    expect(overages).toEqual([
+      { item: 2, length: 4001, max: 4000, remaining: -1, over: true },
+      { item: 4, length: 4002, max: 4000, remaining: -2, over: true },
+    ]);
+
+    const summary = summarize(imageBatchValidation({ ...whole, promptBudgetOverages: overages }));
+    expect(summary.ready).toBe(false);
+    expect(summary.surfaced[0].message).toBe(
+      "Batch prompts 2 (4001/4000), 4 (4002/4000) exceed the character limit — shorten the prompt or pick a shorter style.",
+    );
+  });
+
+  it("catches a batch item whose short raw prompt only exceeds the cap after style composition", () => {
+    const rawPrompt = "a fox";
+    const composedPrompt = composeStyledPrompt({
+      styleText: "x".repeat(PROMPT_MAX_CHARS),
+      userPrompt: rawPrompt,
+    });
+    expect([...rawPrompt].length).toBeLessThan(PROMPT_MAX_CHARS);
+    expect([...composedPrompt].length).toBeGreaterThan(PROMPT_MAX_CHARS);
+
+    const overages = batchPromptBudgetOverages([composedPrompt]);
+    expect(overages).toHaveLength(1);
+    expect(overages[0]).toMatchObject({ item: 1, length: [...composedPrompt].length, max: PROMPT_MAX_CHARS });
+    expect(summarize(imageBatchValidation({ ...whole, promptBudgetOverages: overages })).ready).toBe(false);
   });
 
   // The batch panel renders surfaced[0]; the rules must push in the same priority order the

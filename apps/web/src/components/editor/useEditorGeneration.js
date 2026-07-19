@@ -40,6 +40,8 @@ export function useEditorGeneration({ context }) {
     characters = [],
     recentVideoAssets = [],
     createPreset,
+    createModelDownloadJob,
+    createLoraDownloadJob,
   } = context;
 
   const projectId = activeProject?.id ?? null;
@@ -278,6 +280,8 @@ export function useEditorGeneration({ context }) {
     studio,
     selectedModel,
     videoModels,
+    createModelDownloadJob,
+    createLoraDownloadJob,
     // scalar controls
     model,
     setModel,

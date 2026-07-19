@@ -853,6 +853,114 @@ button:focus-visible {
   color: var(--accent-strong);
 }
 
+/* ---------- Style Catalog picker (sc-13130) ---------- */
+/* Reuses the .compact-selector pill + menu; adds a search box, group headers, and a taller,
+   scrollable menu suited to the 278-entry catalog. */
+.style-picker-menu {
+  max-height: 420px;
+  min-width: 260px;
+}
+
+.style-picker-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.style-picker-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 18%, transparent);
+}
+
+.style-picker-group {
+  display: grid;
+  gap: 2px;
+}
+
+.style-picker-group-label {
+  margin: 6px 0 2px;
+  padding: 0 10px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* ---------- Two-level (group → style) cascade (sc-13171) ---------- */
+.style-picker-level {
+  display: grid;
+  gap: 2px;
+}
+
+.style-picker-groups {
+  display: grid;
+  gap: 2px;
+}
+
+/* Group navigation rows carry the same item chrome but push a forward chevron to the far edge. */
+.style-picker-group-nav {
+  justify-content: space-between;
+}
+
+.style-picker-group-nav .chev-next {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+  transform: rotate(-90deg);
+}
+
+/* Level-2 header: a back-to-groups button + the current group name breadcrumb. */
+.style-picker-crumb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 4px;
+  padding: 0 2px;
+}
+
+.style-picker-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+[data-theme="dark"] .style-picker-back {
+  color: var(--accent);
+}
+
+.style-picker-back:hover {
+  background: var(--surface-hover);
+}
+
+.style-picker-back .chev-back {
+  width: 14px;
+  height: 14px;
+  transform: rotate(90deg);
+}
+
+.style-picker-crumb {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
 .project-list {
   display: grid;
   gap: 4px;
@@ -2035,6 +2143,30 @@ label {
   color: var(--text-faint);
 }
 
+/* Style axis row (sc-13135): the Style Catalog picker and the model's Style presets share one row —
+   catalog first, presets filling the remaining width and wrapping under it on narrow viewports. */
+.settings-bar-style-axis {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px 20px;
+  align-items: flex-start;
+}
+
+.style-axis-field {
+  display: grid;
+  gap: 7px;
+  align-content: start;
+}
+
+.style-axis-catalog {
+  flex: 0 0 auto;
+}
+
+.style-axis-presets {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
 .refine-control {
   display: grid;
   gap: 8px;
@@ -2616,6 +2748,8 @@ label {
   margin-right: 4px;
 }
 
+/* Style Catalog axis row (sc-13130): a labelled row holding the StylePicker, spaced like the
+   suggestion row directly above it. */
 .suggestion {
   display: inline-flex;
   align-items: center;
@@ -2662,7 +2796,7 @@ label {
    scopes. */
 .document-studio .studio-form {
   display: grid;
-  gap: var(--gap-4);
+  gap: 16px;
 }
 
 .document-studio .field {
@@ -2699,6 +2833,509 @@ label {
 
 .document-studio .studio-form > .primary-action {
   justify-self: start;
+  min-height: 44px;
+}
+
+/* Document Studio — "Guided Compose" (1a) redesign (Document Studio usability).
+   Quick-start scaffolds, a brief-tips card, starter chips, a reorderable storyboard
+   with the reference-guidance slider, all on the shared tokens/chrome. */
+
+/* Quick-starts row (replaces the flat document-type control). */
+.doc-quickstarts {
+  display: grid;
+  gap: 8px;
+}
+
+.doc-quickstarts-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.doc-quickstarts-note {
+  font-weight: 500;
+  color: var(--text-faint);
+}
+
+.doc-quickstart-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.doc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out);
+}
+
+.doc-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.doc-chip-blank {
+  border-style: dashed;
+  border-color: var(--border-strong);
+}
+
+.doc-chip-blank:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.doc-chip.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.doc-quickstart-more {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* Prompt + brief-tips two-column grid. */
+.doc-compose-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.doc-prompt-field textarea {
+  width: 100%;
+  min-height: 132px;
+  resize: vertical;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 11px 12px;
+  color: var(--text);
+  font: 400 13.5px/1.55 var(--font-ui);
+}
+
+.doc-tips {
+  display: grid;
+  gap: 8px;
+  padding: 13px 15px;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.doc-tips-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.doc-tips-title svg {
+  color: var(--accent-strong);
+}
+
+.doc-tips-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.doc-tips-list li {
+  display: flex;
+  gap: 8px;
+}
+
+.doc-tips-num {
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+/* Starters row (full-width). */
+.doc-starters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+}
+
+.doc-starters-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-faint);
+  margin-right: 2px;
+}
+
+.doc-starter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: var(--r-pill);
+  border: 1px dashed var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out);
+}
+
+.doc-starter-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.doc-starter-plus {
+  font-weight: 700;
+}
+
+/* Storyboard block. */
+.doc-storyboard {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.doc-storyboard-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.doc-storyboard-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.doc-storyboard-note {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
+.doc-storyboard-count {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.doc-storyboard-explainer {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 11px 13px;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.doc-storyboard-eye {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--accent-strong);
+}
+
+.doc-storyboard-explainer-body {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.doc-storyboard-explainer-body strong {
+  color: var(--text);
+}
+
+.doc-storyboard-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.doc-storyboard-examples-lead {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.doc-storyboard-example {
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.doc-filmstrip {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.doc-frame {
+  flex: 0 0 168px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.doc-frame-thumb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 104px;
+  padding: 0;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: repeating-linear-gradient(
+    45deg,
+    color-mix(in oklch, var(--accent) 14%, var(--surface)) 0 8px,
+    var(--surface) 8px 16px
+  );
+  color: var(--text-faint);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color var(--t-fast) var(--ease-out);
+}
+
+.doc-frame-thumb:hover {
+  border-color: var(--accent);
+}
+
+.doc-frame-thumb.has-image {
+  background: var(--surface);
+}
+
+.doc-frame-thumb.drag-over {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+/* AssetThumbnail puts this class on the <img>/<span> itself, so size + cover it directly. */
+.doc-frame-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.doc-frame-placeholder {
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.doc-frame-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  z-index: 1;
+}
+
+.doc-frame-handle {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1;
+  cursor: grab;
+  z-index: 1;
+}
+
+.doc-frame-thumb.has-image .doc-frame-handle {
+  color: var(--paper, #fff);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+.doc-frame-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.doc-frame-caption {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  font: 500 12px/1 var(--font-ui);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.doc-frame-remove {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out);
+}
+
+.doc-frame-remove:hover {
+  color: var(--danger, oklch(0.7 0.16 20));
+  border-color: var(--border);
+}
+
+.doc-frame-add {
+  flex: 0 0 120px;
+  align-self: flex-start;
+  height: 104px;
+  border-radius: var(--r-sm);
+  border: 1px dashed var(--border-strong);
+  background: var(--surface);
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out);
+}
+
+.doc-frame-add:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.doc-storyboard-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 2px 0;
+}
+
+/* Reference-guidance slider (image CFG for the reference frames). */
+.doc-refguidance {
+  display: grid;
+  gap: 9px;
+}
+
+.doc-refguidance-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.doc-refguidance-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.doc-refguidance-note {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
+.doc-refguidance-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  padding: 2px 9px;
+  border-radius: var(--r-pill);
+}
+
+.doc-refguidance-slider {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.doc-refguidance-ends {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.doc-refguidance-hint {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-faint);
+}
+
+/* Advanced disclosure — keep the GPU select compact like the design. */
+.document-studio .doc-advanced-gpu {
+  display: grid;
+  gap: 6px;
+  max-width: 220px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+/* System prompt reads as a mono config field in the design. */
+.document-studio .document-system-prompt textarea {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+@media (max-width: 720px) {
+  .doc-compose-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* The document reader is single-column — override ImageStudio's results+rail grid. */
@@ -4822,6 +5459,32 @@ input.dataset-name-input.boxed:focus {
 }
 
 /* ---------- Model + LoRA panels ---------- */
+.studio-update-badge {
+  display: inline-flex;
+  margin-left: 0.4rem;
+  padding: 0.08rem 0.38rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-size: 0.68rem;
+  font-weight: 650;
+}
+
+.studio-update-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.35rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: 0.45rem;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+
+.studio-update-notice-actions { display: inline-flex; gap: 0.3rem; flex-shrink: 0; }
 /* Model catalog is a single-column list of expandable rows (UI-refinement 1c), the same
    rhythm as the LoRA rows — no longer a dense card grid. */
 .model-grid {
@@ -7472,6 +8135,28 @@ details[open] > summary.lora-scope-group-heading::before,
 .preset-stack-prompt .token {
   color: var(--text-faint);
   font-style: italic;
+}
+
+/* sc-13131 — Live style-composed prompt preview. Reuses the preset-stack preview idiom but
+   preserves the Style:/Description: line breaks so the composition stays legible. */
+.styled-prompt-preview .preset-stack-prompt p {
+  white-space: pre-wrap;
+}
+
+/* sc-13133 — Composed-prompt budget readout under the style preview: a live "N / 4000" count that
+   flips to a danger warning when the composition would exceed the backend cap (the blocking Generate
+   error surfaces separately in the validation summary). */
+.styled-prompt-budget {
+  margin: 0;
+  font: 500 11.5px/1.4 var(--font-sans, inherit);
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.styled-prompt-budget.over {
+  color: var(--danger);
+  font-weight: 600;
+  text-align: left;
 }
 
 .preset-stack-extras {
@@ -13753,6 +14438,34 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--text);
   font-variant-numeric: tabular-nums;
   word-break: break-word;
+}
+/* Detail expands inline directly under its selected row: full-bleed, flush,
+   no rounded corners or side borders so it reads as part of that row. */
+.stats-detail-row > td {
+  padding: 0;
+  background: var(--surface-2);
+}
+.stats-detail-row .stats-detail {
+  margin: 0;
+  border-left: none;
+  border-right: none;
+  border-radius: 0;
+}
+.stats-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin: 14px 0 4px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.stats-page-info {
+  font-variant-numeric: tabular-nums;
+}
+.stats-page-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .stats-charts {
   display: grid;

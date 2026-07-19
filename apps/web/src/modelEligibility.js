@@ -138,15 +138,29 @@ export function characterModelUsable(model, caps) {
   return angleModelUsable(model, caps) || poseModelUsable(model, caps);
 }
 
-// Does the user have ≥1 present (installed or incomplete) model usable on this screen?
+export function modelInstallComplete(model) {
+  return model?.installState !== "missing" && model?.installState !== "incomplete";
+}
+
+export function generationModelsForType(models, type) {
+  return (models ?? []).filter(
+    (model) => model?.type === type && modelInstallComplete(model) && model?.usable !== false,
+  );
+}
+
+// Does the user have ≥1 complete model usable on this screen?
 // Matches what the Studios' pickers actually offer (they source from models with
 // installState !== "missing"), so a screen is never gated while its picker still shows a
-// model. Only a fully-missing catalog gates the screen.
+// model. Missing and torn/incomplete installs gate the screen; usable stale installs are reported
+// as installed with updateAvailable and therefore stay available.
 export function hasUsableModelFor(models, predicate, caps) {
   // `usable !== false` keeps the screen-gate in lockstep with the pickers, which
   // exclude not-yet-runnable external base models (sc-10667).
   return (models ?? []).some(
-    (model) => model?.installState !== "missing" && model?.usable !== false && predicate(model, caps),
+    (model) =>
+      modelInstallComplete(model) &&
+      model?.usable !== false &&
+      predicate(model, caps),
   );
 }
 

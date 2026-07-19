@@ -8,6 +8,7 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { LoraPickerField, useLoraSelection } from "../components/LoraPickerField.jsx";
+import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
 import { CharacterAdvancedOptions, useCharacterAdvancedOptions } from "../components/CharacterAdvancedOptions.jsx";
 import { KeypointCollectionField } from "../components/KeypointCollectionField.jsx";
 import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
@@ -265,7 +266,9 @@ export function CharacterLoras({
   setLoraEdit,
   setLoraId,
   submitLora,
+  createLoraDownloadJob,
 }) {
+  const selectedCatalogLora = loras.find((item) => item.id === loraId) ?? null;
   return (
     <section className="character-section">
       <div className="section-heading">
@@ -277,10 +280,12 @@ export function CharacterLoras({
           <option value="">Attach imported LoRA</option>
           {loras.map((lora) => (
             <option key={lora.id} value={lora.id}>
-              {lora.name}
+              {updateOptionLabel(lora)}
             </option>
           ))}
         </select>
+        <StudioUpdateBadge item={selectedCatalogLora} />
+        <StudioUpdateNotice item={selectedCatalogLora} kind="LoRA" onUpdate={createLoraDownloadJob} />
         <button disabled={!loraId} type="submit">
           Attach
         </button>
@@ -288,12 +293,14 @@ export function CharacterLoras({
       <div className="lora-editor-list">
         {(selectedCharacter.loras ?? []).map((link) => {
           const edit = loraEdits[link.id] ?? editableLora(link);
+          const catalogLora = loras.find((item) => item.id === link.id) ?? link;
           return (
             <article className="lora-editor" key={link.id}>
               <div className="lora-editor-head">
-                <strong>{link.name}</strong>
+                <strong>{link.name}<StudioUpdateBadge item={catalogLora} /></strong>
                 <span>{link.copiedIntoProject ? "Project copy" : link.scope}</span>
               </div>
+              <StudioUpdateNotice item={catalogLora} kind="LoRA" onUpdate={createLoraDownloadJob} />
               <div className="control-grid compact-controls">
                 <label>
                   Name
@@ -357,6 +364,7 @@ export function CharacterTest({
   testPrompt,
   testResolution,
   updateAssetStatus,
+  createModelDownloadJob,
 }) {
   const [showOutputs, setShowOutputs] = React.useState(false);
   const [viewMode, setViewMode] = React.useState("active");
@@ -399,10 +407,14 @@ export function CharacterTest({
           </label>
           <label>
             Model
+            {(() => {
+              const selected = imageModels.find((item) => item.id === testModel) ?? imageModels[0] ?? null;
+              return <><StudioUpdateBadge item={selected} /><StudioUpdateNotice item={selected} onUpdate={createModelDownloadJob} /></>;
+            })()}
             <select onChange={(event) => setTestModel(event.target.value)} value={testModel}>
               {imageModels.map((model) => (
                 <option key={model.id} value={model.id}>
-                  {model.name}
+                  {updateOptionLabel(model)}
                 </option>
               ))}
             </select>
@@ -515,6 +527,8 @@ export function CharacterGenerationPanel({
   onOpenQueue,
   onPreview,
   onRetry,
+  createModelDownloadJob,
+  createLoraDownloadJob,
 }) {
   // sc-2003: multi-backbone picker. `models` is the full list of capable backbones
   // (manifest order); `model` is the resolved default (kept for back-compat with the
@@ -547,7 +561,7 @@ export function CharacterGenerationPanel({
   const fileInputRef = React.useRef(null);
   const characterId = selectedCharacter?.id;
   // Mode-specific controls (JSX) + advanced payload + readiness/labels.
-  const controller = mode.useController({ activeModel, loraSelection });
+  const controller = mode.useController({ activeModel, loraSelection, createLoraDownloadJob });
 
   // Keep the picked reference valid without clobbering the user's choice. A refetch
   // (e.g. the panel's own upload flow via addCharacterReference) hands a fresh
@@ -655,18 +669,21 @@ export function CharacterGenerationPanel({
       {availableModels.length > 1 ? (
         <label>
           Backbone
+          <StudioUpdateBadge item={activeModel} />
           <select
             onChange={(event) => setSelectedModelId(event.target.value)}
             value={selectedModelId}
           >
             {availableModels.map((backbone) => (
               <option key={backbone.id} value={backbone.id}>
-                {backbone.name}
+                {updateOptionLabel(backbone)}
               </option>
             ))}
           </select>
         </label>
       ) : null}
+      {availableModels.length === 1 ? <StudioUpdateBadge item={activeModel} /> : null}
+      <StudioUpdateNotice item={activeModel} onUpdate={createModelDownloadJob} />
       {approvedReferences.length ? (
         <div className="reference-thumb-row">
           {approvedReferences.map((reference) => (
@@ -752,7 +769,7 @@ export function CharacterGenerationPanel({
 
 // Angle-set mode controller: KeypointCollection override (InstantID only) + the
 // angleSet flag. One reference -> all of the backbone's view angles in one batch job.
-function useAngleController({ activeModel, loraSelection }) {
+function useAngleController({ activeModel, loraSelection, createLoraDownloadJob }) {
   const angleCount = activeModel?.ui?.viewAngles?.length ?? 0;
   // Key Point Library override (sc-4435/sc-4450): only InstantID consumes the angle
   // kps collection (the landmark-ControlNet family — `identityStructure`); the
@@ -777,7 +794,7 @@ function useAngleController({ activeModel, loraSelection }) {
   return {
     controls: (
       <>
-        <LoraPickerField selection={loraSelection} />
+        <LoraPickerField selection={loraSelection} onUpdateLora={createLoraDownloadJob} />
         {supportsKpsCollections ? (
           <KeypointCollectionField value={keypointCollectionId} onChange={onPickCollection} />
         ) : null}
@@ -1214,7 +1231,7 @@ export function CharacterDatasets({
 // wardrobe/hair consistency. An OpenPose ControlNet drives the pose; a face-restoration
 // pass re-imposes identity at the small full-body face size. Shares
 // CharacterGenerationPanel with the angle set (sc-4195).
-function usePoseController({ activeModel, loraSelection }) {
+function usePoseController({ activeModel, loraSelection, createLoraDownloadJob }) {
   // User-created poses join the built-in library in both the picker and the
   // id→keypoints resolver used to build the job, so saved poses can generate.
   const loadUserPoses = useUserPoseLoader();
@@ -1276,7 +1293,7 @@ function usePoseController({ activeModel, loraSelection }) {
             </p>
           </div>
         ) : null}
-        <LoraPickerField selection={loraSelection} />
+        <LoraPickerField selection={loraSelection} onUpdateLora={createLoraDownloadJob} />
       </>
     ),
     advancedExtras: {

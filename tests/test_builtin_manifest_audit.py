@@ -37,8 +37,11 @@ import json
 import re
 from pathlib import Path
 
+import jsonschema
+
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "config" / "manifests" / "builtin.models.jsonc"
+SCHEMA_PATH = ROOT / "packages" / "schemas" / "model-manifest.schema.json"
 
 
 def _strip_jsonc_comments(body: str) -> str:
@@ -88,6 +91,143 @@ def _strip_jsonc_comments(body: str) -> str:
 def _load_builtin_models_manifest() -> dict:
     raw = MANIFEST_PATH.read_text(encoding="utf-8")
     return json.loads(_strip_jsonc_comments(raw))
+
+
+def test_builtin_models_manifest_satisfies_authoring_schema():
+    """sc-12338: the builtin catalog's $schema is an enforced CI contract."""
+    manifest = _load_builtin_models_manifest()
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator.check_schema(schema)
+    errors = sorted(
+        jsonschema.Draft202012Validator(schema).iter_errors(manifest),
+        key=lambda error: list(error.absolute_path),
+    )
+    assert not errors, "builtin.models.jsonc violates model-manifest.schema.json:\n" + "\n".join(
+        f"- {'.'.join(map(str, error.absolute_path)) or '<root>'}: {error.message}"
+        for error in errors
+    )
+
+
+def test_builtin_schema_rejects_an_unknown_closed_model_key():
+    """Mutation guard: a typo/decorative builtin key must make the CI gate fail."""
+    manifest = _load_builtin_models_manifest()
+    manifest["models"][0]["recommendded"] = True
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
+    assert any("recommendded" in error.message for error in errors)
+
+
+def _duplicate_default_downloads(manifest: dict) -> list[str]:
+    """Return model/platform pairs with ambiguous primary download selection."""
+    ambiguous: list[str] = []
+    for model in manifest["models"]:
+        downloads = model.get("downloads", [])
+        for platform in ("macos", "windows", "linux"):
+            defaults = [
+                download
+                for download in downloads
+                if download.get("default") is True
+                and download.get("coRequisite") is not True
+                and (
+                    "platforms" not in download
+                    or platform in download.get("platforms", [])
+                )
+            ]
+            if len(defaults) > 1:
+                ambiguous.append(f"{model['id']}:{platform}")
+    return ambiguous
+
+
+def test_builtin_download_defaults_are_unique_per_platform():
+    """A model may have one primary default per OS, never two applicable defaults."""
+    assert not _duplicate_default_downloads(_load_builtin_models_manifest())
+
+
+def test_download_default_guard_rejects_an_ambiguous_platform_mutation():
+    """Mutation guard for the platform-aware replacement of schema maxContains."""
+    manifest = _load_builtin_models_manifest()
+    model = next(model for model in manifest["models"] if model["id"] == "wan_2_2")
+    windows_download = next(
+        download
+        for download in model["downloads"]
+        if download.get("variant") == "q8" and "windows" in download.get("platforms", [])
+    )
+    windows_download["default"] = True
+    assert _duplicate_default_downloads(manifest) == ["wan_2_2:windows", "wan_2_2:linux"]
+
+
+def test_manifest_constraint_contract_registry_is_complete_and_live():
+    """sc-12304: constraint declarations may not silently become decoration.
+
+    The schema is the author-facing registry; this test makes its custom contract
+    annotations a CI gate. It checks both directions (manifest -> registry and
+    registry -> manifest), and binding entries must name production readers that
+    contain the exact key. Advisory/descriptive entries are explicitly allowed not
+    to reject requests, which is materially different from an accidental dead key.
+    """
+    manifest = _load_builtin_models_manifest()
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    model_properties = schema["properties"]["models"]["items"]["properties"]
+
+    declared: set[str] = set()
+    for model in manifest["models"]:
+        declared.update(f"limits.{key}" for key in model.get("limits", {}))
+        for backend in ("mlx", "candle"):
+            block = model.get(backend, {})
+            if "minMemoryGb" in block:
+                declared.add(f"{backend}.minMemoryGb")
+            declared.update(f"{backend}.limits.{key}" for key in block.get("limits", {}))
+
+    limits_properties = model_properties["limits"]["properties"]
+    registry = {f"limits.{key}": value for key, value in limits_properties.items()}
+    for backend in ("mlx", "candle"):
+        backend_properties = model_properties[backend]["properties"]
+        if "minMemoryGb" in backend_properties:
+            registry[f"{backend}.minMemoryGb"] = backend_properties["minMemoryGb"]
+        backend_limits = backend_properties.get("limits", {})
+        if "$ref" in backend_limits:
+            sampler_properties = schema["$defs"]["samplerLimits"]["properties"]
+            for key, value in sampler_properties.items():
+                registry[f"{backend}.limits.{key}"] = value
+
+    allowed_undeclared = {
+        path
+        for path, contract in registry.items()
+        if contract.get("x-sceneworks-allow-undeclared")
+        or (
+            path.startswith("candle.limits.")
+            and model_properties["candle"]["properties"]["limits"].get(
+                "x-sceneworks-allow-undeclared"
+            )
+        )
+    }
+    assert declared <= set(registry) and set(registry) - declared <= allowed_undeclared, (
+        "constraint contract drift: every declared constraint must be registered, "
+        "and every registry entry must be exercised by the builtin manifest; "
+        f"unregistered={sorted(declared - set(registry))}, "
+        f"undeclared={sorted(set(registry) - declared)}"
+    )
+
+    allowed_classes = {"binding", "advisory", "descriptive"}
+    for path, contract in registry.items():
+        classification = contract.get("x-sceneworks-contract")
+        assert classification in allowed_classes, f"{path}: missing/invalid contract classification"
+        readers = contract.get("x-sceneworks-readers", [])
+        exemption = contract.get("x-sceneworks-reader-exemption")
+        assert readers or exemption, (
+            f"{path}: every contract needs anchored production readers or an explicit tracked exemption"
+        )
+        if exemption:
+            assert re.search(r"\bsc-\d+\b", exemption), (
+                f"{path}: reader exemption must cite a tracked Shortcut story"
+            )
+        for reader in readers:
+            assert set(reader) == {"path", "anchor"}, f"{path}: malformed reader metadata"
+            reader_path = ROOT / reader["path"]
+            assert reader_path.is_file(), f"{path}: reader does not exist: {reader['path']}"
+            assert reader["anchor"] in reader_path.read_text(encoding="utf-8"), (
+                f"{path}: reader {reader['path']} no longer contains anchor {reader['anchor']!r}"
+            )
 
 
 def _manifest_brace_walker():
@@ -268,12 +408,18 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
 
 
 def test_wan_2_2_candle_vram_tiers_match_measured_peaks():
-    """sc-12402/sc-12631: never regress the measured 5B peaks to estimates.
+    """sc-13175: never regress the measured 5B SEQUENTIAL peaks (or slide back to the resident ones).
 
-    Measured on an idle RTX PRO 6000 at wan_2_2's own shipped default (832x480, 121 frames,
-    20 steps, CFG on) -- the schema's "video = default frames". The peak is the DENOISE
-    (weights-dominated after sc-12434 chunked the sdpa); the z48 vae22 decode adds 0.0 GB, which
-    is what makes these card-independent despite the decode tiler budgeting off total VRAM.
+    Re-dropped onto the sequential-offload path (sc-12757 flushes the UMT5 TE + z48 VAE off-GPU around
+    the dense denoise), so these SUPERSEDE the resident numbers sc-12631 shipped (q4 46.1 / q8 48.7 /
+    bf16 54.0, minMemoryGb 48). Measured on an idle RTX PRO 6000 at wan_2_2's own shipped default
+    (832x480, 121 frames, 20 steps, CFG on, CANDLE_GEN_OFFLOAD=sequential), each tier in its own process.
+    The peak is the tier-blind denoise attention transient, not the weights -- so q4 and q8 land on the
+    SAME pool high-water and only the dense bf16 DiT is heavier; the z48 vae22 decode is the lower phase,
+    which makes these card-independent. The numbers are the nvidia-smi POOL high-water (the real max
+    device footprint, since cudarc never frees the pool), NOT the lower USED_MEM_HIGH concurrent-live
+    (10.61/10.61/11.67 GiB) -- gating at the pool bound is the conservative answer to the sc-13174
+    pool-vs-USED_MEM_HIGH caveat, so all three ship `measured: true` with no small-card packdown assumption.
     """
     manifest = _load_builtin_models_manifest()
     wan = next(model for model in manifest["models"] if model["id"] == "wan_2_2")
@@ -281,12 +427,15 @@ def test_wan_2_2_candle_vram_tiers_match_measured_peaks():
 
     assert candle["measured"] is True
     assert {tier: candle["vramGbByTier"][tier] for tier in ("q4", "q8", "bf16")} == {
-        "q4": 46.1,
-        "q8": 48.7,
-        "bf16": 54.0,
+        "q4": 12.1,
+        "q8": 12.1,
+        "bf16": 14.5,
     }
-    # minMemoryGb gates the default/lightest (q4) tier + the fit gate's 2 GB headroom.
-    assert candle["minMemoryGb"] == 48
+    # minMemoryGb gates the default/lightest (q4) tier + the fit gate's 2 GB headroom (12.1 + ~2).
+    assert candle["minMemoryGb"] == 14
+    # The re-drop's whole point: the heaviest tier's peak + the gate's 2 GB headroom still clears a 24 GB
+    # card (the resident 46.1 needed ~48). If this regresses, the 5B silently walls off the card it targets.
+    assert candle["vramGbByTier"]["bf16"] + 2 < 24
 
 
 def test_wan_a14b_candle_all_tiers_measured_q8_admits_32gb():

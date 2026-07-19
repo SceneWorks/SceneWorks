@@ -43,6 +43,34 @@ export const Icon = {
   Folder: (p) => <I {...p} d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />,
   Book: (p) => <I {...p} d="M5 4h11a2 2 0 012 2v14H7a2 2 0 00-2 2zM5 4v16M9 8h6M9 12h5" />,
   Info: (p) => <I {...p} d="M12 3a9 9 0 100 18 9 9 0 000-18zM12 8h.01M11 12h1v5h1" />,
+  // Document Studio quick-start glyphs (design handoff 1a) — a spread of document
+  // shapes the compose form can scaffold from. Blank/Guide are page variants,
+  // Storyboard/Comic are panel grids, Poster/AdPage/Bars/Lookbook their own marks.
+  Blank: (p) => <I {...p} d="M5 4h11a2 2 0 012 2v14H7a2 2 0 00-2 2z" />,
+  Guide: (p) => <I {...p} d="M5 4h11a2 2 0 012 2v14H7a2 2 0 00-2 2zM9 8h6M9 12h5" />,
+  Storyboard: (p) => <I {...p} d="M3 5h18v14H3zM9 5v14M15 5v14" />,
+  Poster: (p) => <I {...p} d="M6 3h12v18H6zM9 8h6M10 17h4" />,
+  AdPage: (p) => <I {...p} d="M4 5h16v10H4zM8 19h8M12 15v4" />,
+  Bars: (p) => <I {...p} d="M4 20V4M4 20h16M8 16v-5M13 16V8M18 16v-3" />,
+  Comic: (p) => <I {...p} d="M3 5h8v6H3zM13 5h8v6h-8zM3 13h8v6H3zM13 13h8v6h-8z" />,
+  Lookbook: (p) => <I {...p} d="M4 4h16v16H4zM4 14l4-4 4 4 3-3 5 5" />,
+  Eye: ({ size = 18, ...p }) => (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height={size}
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.7"
+      viewBox="0 0 24 24"
+      width={size}
+      {...p}
+    >
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  ),
   ChevDown: (p) => <I {...p} d="M6 9l6 6 6-6" />,
   Sliders: (p) => <I {...p} d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h14M18 18h2M14 4v4M6 10v4M16 16v4" />,
   Play: (p) => <I {...p} fill d="M7 4l13 8-13 8z" />,

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/styles.schema.json",
+  "title": "SceneWorks Style Catalog Manifest",
+  "description": "The built-in Style catalog served at GET /api/v1/styles and folded server-side into a prompt carrying a styleId (sc-13134). This manifest is a mechanical derivation of documents/style.txt via apps/web/scripts/generate-styles.mjs and MUST NOT be hand-edited; the styleCatalog.test.js drift guard fails CI if it diverges from styles.json.",
+  "type": "object",
+  "required": ["schemaVersion", "groups"],
+  "additionalProperties": true,
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "source": {
+      "type": "string",
+      "description": "The authored file this catalog is derived from (documents/style.txt)."
+    },
+    "promptTemplate": {
+      "type": "string",
+      "description": "The two-field composition template the client and server both apply: \"Style: {style}\\nDescription: {description}\"."
+    },
+    "groups": {
+      "type": "array",
+      "description": "Top-level style groups. A group's `id` may itself be selected as a style (the group's `description` is used as the style text); every sub-style `id` is globally unique across all groups so a stored styleId resolves unambiguously.",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "description", "styles"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "name": { "type": "string", "minLength": 1 },
+          "description": { "type": "string", "minLength": 1 },
+          "styles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "name", "prompt"],
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+                "name": { "type": "string", "minLength": 1 },
+                "prompt": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

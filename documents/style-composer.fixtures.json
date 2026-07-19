@@ -1,0 +1,149 @@
+{
+  "description": "sc-13134 cross-language golden fixtures for the Style composer (Style:/Description: directive-collision splice). Consumed by BOTH apps/web/src/styleComposer.test.js (composeStyledPrompt) AND crates/sceneworks-core/src/style_composer.rs (compose_styled_prompt) so the JS composer and its Rust port produce byte-identical `expected` output. A null `styleText` means no style was selected (identity pass-through). Add a case here to pin new behavior in both languages at once.",
+  "cases": [
+    {
+      "name": "no style selected -> passthrough unchanged",
+      "styleText": "",
+      "userPrompt": "a fox in the snow",
+      "expected": "a fox in the snow"
+    },
+    {
+      "name": "null styleText behaves as no style -> passthrough",
+      "styleText": null,
+      "userPrompt": "a fox in the snow",
+      "expected": "a fox in the snow"
+    },
+    {
+      "name": "whitespace-only styleText behaves as no style -> passthrough",
+      "styleText": "   \n\t ",
+      "userPrompt": "a fox in the snow",
+      "expected": "a fox in the snow"
+    },
+    {
+      "name": "clean prompt -> basic Style/Description",
+      "styleText": "cinematic watercolor",
+      "userPrompt": "a fox in the snow",
+      "expected": "Style: cinematic watercolor\nDescription: a fox in the snow"
+    },
+    {
+      "name": "mid-sentence colon is NOT a directive",
+      "styleText": "oil painting",
+      "userPrompt": "a portrait: dramatic lighting on her face",
+      "expected": "Style: oil painting\nDescription: a portrait: dramatic lighting on her face"
+    },
+    {
+      "name": "lowercase line-start colon is NOT a directive",
+      "styleText": "oil painting",
+      "userPrompt": "style: not really a directive",
+      "expected": "Style: oil painting\nDescription: style: not really a directive"
+    },
+    {
+      "name": "unrecognized capitalized key is NOT a directive (folds into Description)",
+      "styleText": "oil painting",
+      "userPrompt": "Note: this is a plain sentence",
+      "expected": "Style: oil painting\nDescription: Note: this is a plain sentence"
+    },
+    {
+      "name": "recognized key mid-line is NOT a directive (stays prose)",
+      "styleText": "oil painting",
+      "userPrompt": "a photo with dramatic Lighting: soft",
+      "expected": "Style: oil painting\nDescription: a photo with dramatic Lighting: soft"
+    },
+    {
+      "name": "recognized key after leading word is NOT a directive (stays prose)",
+      "styleText": "oil painting",
+      "userPrompt": "The Setting: was perfect",
+      "expected": "Style: oil painting\nDescription: The Setting: was perfect"
+    },
+    {
+      "name": "CRLF directive lines classify correctly, no stray carriage return",
+      "styleText": "noir",
+      "userPrompt": "Setting: alley\r\nAngle: low\r\nsomething",
+      "expected": "Style: noir\nSetting: alley\nAngle: low\nDescription: something"
+    },
+    {
+      "name": "CRLF prose-then-directive splices cleanly",
+      "styleText": "noir",
+      "userPrompt": "a detective\r\nSetting: a foggy alley",
+      "expected": "Style: noir\nSetting: a foggy alley\nDescription: a detective"
+    },
+    {
+      "name": "foreign directive preserved as sibling, remainder -> Description",
+      "styleText": "noir",
+      "userPrompt": "a detective in the rain\nSetting: a foggy alley",
+      "expected": "Style: noir\nSetting: a foggy alley\nDescription: a detective in the rain"
+    },
+    {
+      "name": "multiple foreign directives preserved as siblings in order",
+      "styleText": "noir",
+      "userPrompt": "a detective\nSetting: a foggy alley\nAngle: low angle\nLighting: single streetlamp",
+      "expected": "Style: noir\nSetting: a foggy alley\nAngle: low angle\nLighting: single streetlamp\nDescription: a detective"
+    },
+    {
+      "name": "own Style line merges - catalog first, user words appended after comma",
+      "styleText": "oil painting",
+      "userPrompt": "Style: loose brushwork\na castle on a hill",
+      "expected": "Style: oil painting, loose brushwork\nDescription: a castle on a hill"
+    },
+    {
+      "name": "own Style line merges alongside other foreign directives",
+      "styleText": "noir",
+      "userPrompt": "Style: high contrast\nSetting: alley\na detective",
+      "expected": "Style: noir, high contrast\nSetting: alley\nDescription: a detective"
+    },
+    {
+      "name": "empty userPrompt with a style -> Style only, no Description",
+      "styleText": "cinematic",
+      "userPrompt": "",
+      "expected": "Style: cinematic"
+    },
+    {
+      "name": "whitespace-only userPrompt with a style -> Style only, no Description",
+      "styleText": "cinematic",
+      "userPrompt": "   \n  \t",
+      "expected": "Style: cinematic"
+    },
+    {
+      "name": "styleText is trimmed before templating",
+      "styleText": "  cinematic watercolor  ",
+      "userPrompt": "a fox",
+      "expected": "Style: cinematic watercolor\nDescription: a fox"
+    },
+    {
+      "name": "unicode content is preserved in Description",
+      "styleText": "浮世絵",
+      "userPrompt": "富士山と桜、朝の光",
+      "expected": "Style: 浮世絵\nDescription: 富士山と桜、朝の光"
+    },
+    {
+      "name": "unicode prose alongside a foreign directive",
+      "styleText": "浮世絵",
+      "userPrompt": "富士山と桜\nSetting: 早朝",
+      "expected": "Style: 浮世絵\nSetting: 早朝\nDescription: 富士山と桜"
+    },
+    {
+      "name": "leading whitespace before a directive key still detects it",
+      "styleText": "noir",
+      "userPrompt": "a detective\n   Angle: low",
+      "expected": "Style: noir\nAngle: low\nDescription: a detective"
+    },
+    {
+      "name": "directive-only prompt (no prose) -> Style + siblings, no Description",
+      "styleText": "noir",
+      "userPrompt": "Setting: alley\nAngle: low",
+      "expected": "Style: noir\nSetting: alley\nAngle: low"
+    },
+    {
+      "name": "own bare Style line (no user words) does not append a trailing comma",
+      "styleText": "oil painting",
+      "userPrompt": "Style:\na castle",
+      "expected": "Style: oil painting\nDescription: a castle"
+    },
+    {
+      "name": "multi-line prose remainder is preserved across lines",
+      "styleText": "noir",
+      "userPrompt": "a detective\nunder a streetlamp\nSetting: alley",
+      "expected": "Style: noir\nSetting: alley\nDescription: a detective\nunder a streetlamp"
+    }
+  ]
+}

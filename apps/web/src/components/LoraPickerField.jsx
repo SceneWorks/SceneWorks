@@ -1,5 +1,6 @@
 import React from "react";
 import { LoraKeywordSummary } from "./LoraKeywordSummary.jsx";
+import { StudioUpdateBadge, StudioUpdateNotice } from "./StudioUpdateNotice.jsx";
 import {
   LORA_WEIGHT_MAX,
   LORA_WEIGHT_MIN,
@@ -73,7 +74,7 @@ export function useLoraSelection(loras, model) {
 
 // Presentational picker driven by a useLoraSelection() result. Renders nothing when
 // the active backbone has no compatible LoRAs (the feature is optional — no clutter).
-export function LoraPickerField({ selection, label = "Style LoRAs (optional)" }) {
+export function LoraPickerField({ selection, label = "Style LoRAs (optional)", onUpdateLora }) {
   const { compatibleLoras, selectedLoraIds, toggleLora, weightFor, setWeight } = selection;
   if (!compatibleLoras.length) {
     return null;
@@ -91,13 +92,16 @@ export function LoraPickerField({ selection, label = "Style LoRAs (optional)" })
               <label className={checked ? "lora-choice active" : "lora-choice"}>
                 <input checked={checked} onChange={() => toggleLora(lora)} type="checkbox" />
                 <span>
-                  <strong>{lora.name ?? lora.id}</strong>
+                  <strong>{lora.name ?? lora.id}<StudioUpdateBadge item={lora} /></strong>
                   <small>
                     {lora.scope ?? "global"} {lora.family ? `| ${lora.family}` : ""}
                   </small>
                 </span>
               </label>
               <LoraKeywordSummary lora={lora} />
+              {checked ? (
+                <StudioUpdateNotice item={lora} kind="LoRA" onUpdate={onUpdateLora} />
+              ) : null}
               {checked ? (
                 <div className="lora-weight-row">
                   <span>Weight</span>

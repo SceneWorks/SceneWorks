@@ -90,63 +90,16 @@ jobs:
       CUDA_COMPUTE_CAP: "120"
       CARGO_NET_OFFLINE: "true"
     steps:
-      # sc-13166: fail LOUDLY if this self-hosted runner's rustup shims are broken,
-      # instead of at `cargo fetch` with a cryptic error that reads like a PR failure.
-      # The rust proxies in %USERPROFILE%\.cargo\bin (cargo.exe, rustc.exe, ...) are
-      # 0-byte symlinks to rustup.exe; if rustup.exe is deleted they go dangling and
-      # the next cargo invocation dies ~15s in with the Windows ERROR_NO_ASSOCIATION
-      # ("No application is associated with the specified file for this operation") —
-      # which turned every PR red and forced admin-override merges. This runs as the
-      # job's FIRST step (before checkout — it needs no repo) so a broken toolchain
-      # fails in ~1s with an actionable message + remediation pointer. Validated on
-      # the box against a real dangling-symlink repro (healthy -> exit 0; dangling or
-      # missing cargo.exe -> exit 1 + ::error::).
-      - name: Verify Rust toolchain on runner (pre-flight, sc-13166)
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $cargo = Get-Command cargo.exe -CommandType Application -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-          if (-not $cargo) {
-            Write-Host "::error title=Rust toolchain missing on candle runner::cargo.exe is not on PATH on the self-hosted Windows candle runner. Reinstall rustup so %USERPROFILE%\.cargo\bin\cargo.exe resolves (sc-13166)."
-            exit 1
-          }
-          Write-Host "cargo.exe -> $($cargo.Source)"
-          $out = $null
-          try {
-            # No 2>&1 here: under Stop, merging a native command's stderr wraps it in a
-            # terminating NativeCommandError (PS 5.1). A genuinely un-launchable cargo.exe
-            # still throws before any output, so the catch below still fires; a cargo that
-            # runs but errors is caught by the $LASTEXITCODE check.
-            $out = (& $cargo.Source --version | Out-String).Trim()
-          } catch {
-            # Collapse the multi-line PS error so it stays on one GitHub ::error:: line.
-            $why = ($_.Exception.Message -replace '\s+', ' ').Trim()
-            Write-Host "::error title=Rust toolchain broken on candle runner::Could not execute '$($cargo.Source)' ($why). This is the sc-13166 dangling-rustup-shim failure (ERROR_NO_ASSOCIATION). Restore the toolchain so the shims are real copies of rustup.exe, not dangling symlinks: re-run rustup-init, or 'rustup toolchain install stable --force'."
-            exit 1
-          }
-          if ($LASTEXITCODE -ne 0 -or $out -notmatch '^cargo\s') {
-            $outLine = ($out -replace '\s+', ' ').Trim()
-            Write-Host "::error title=Rust toolchain broken on candle runner::'$($cargo.Source) --version' failed (exit=$LASTEXITCODE) output='$outLine'. See sc-13166: restore the rustup shims as real copies of rustup.exe."
-            exit 1
-          }
-          Write-Host "OK: $out"
-          # rustup is what the shims proxy through; surface its state too. Best-effort and
-          # NEVER fatal: cargo is already confirmed healthy above, so drop back to Continue
-          # (a stderr line from `rustup show` under Stop+2>&1 would otherwise promote to a
-          # terminating NativeCommandError and flake a HEALTHY run red — the opposite of
-          # this step's purpose), guard it, and exit 0 explicitly.
-          $ErrorActionPreference = 'Continue'
-          $rustup = Get-Command rustup.exe -CommandType Application -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-          if ($rustup) {
-            try { (& $rustup.Source show 2>&1 | Out-String).Trim() | Write-Host }
-            catch { Write-Host "rustup show failed (non-fatal): $($_.Exception.Message)" }
-          } else {
-            Write-Host "::warning::rustup.exe not found on PATH (the cargo/rustc shims proxy through it); the toolchain may be fragile (sc-13166)."
-          }
-          exit 0
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # sc-13166: point this lane at the REAL rustup toolchain bin and prepend it to
+      # PATH, so cargo/rustc/clippy never dispatch through the fragile
+      # %USERPROFILE%\.cargo\bin proxies (0-byte symlinks -> rustup.exe that go dangling
+      # when rustup self-updates or its rustup.exe is deleted, or that fail to launch as
+      # symlinks in the runner's Windows-service context — both surface as the cryptic
+      # Windows ERROR_NO_ASSOCIATION at `cargo fetch` and turned every PR red, forcing
+      # admin-override merges). The action fails loudly with an actionable message if no
+      # usable toolchain is installed. See .github/actions/prepare-rust-runner.
+      - uses: ./.github/actions/prepare-rust-runner
       - name: Fetch the private inference release
         env:
           CARGO_NET_OFFLINE: "false"

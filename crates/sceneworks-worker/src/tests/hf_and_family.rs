@@ -512,6 +512,112 @@ fn huggingface_cache_paths_follow_hub_layout() {
 }
 
 #[test]
+fn stale_receipt_resolves_exact_old_quant_tier_after_manifest_rename() {
+    let root = tempdir().expect("temp dir creates");
+    let hub = root.path().join("hub");
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", hub.to_str().expect("utf-8 hub")),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    let repo = "owner/model";
+    let snapshot = super::huggingface_repo_cache_path(root.path(), repo)
+        .expect("cache path")
+        .join("snapshots/old-revision");
+    for file in ["q4/transformer/old-1.safetensors", "q4/transformer/old-2.safetensors", "q4/config.json"] {
+        let path = snapshot.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"old").unwrap();
+    }
+    let marker = root.path().join("models").join(safe_download_dir(repo));
+    std::fs::create_dir_all(&marker).unwrap();
+    std::fs::write(
+        marker.join(INSTALL_MARKER),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "model-id", "variant": "q4",
+            "snapshotRevision": "old-revision",
+            "manifestFiles": ["q4/transformer/old-*.safetensors", "q4/config.json"],
+            "resolvedFiles": ["q4/transformer/old-1.safetensors", "q4/transformer/old-2.safetensors", "q4/config.json"]
+        })).unwrap(),
+    ).unwrap();
+
+    let resolved = huggingface_receipt_weights_dir(root.path(), repo, Some("model-id"), Some("q4"));
+    assert_eq!(resolved, Some(snapshot.join("q4")));
+    assert!(!snapshot.join("q4/transformer/new-name.safetensors").exists());
+}
+
+#[test]
+fn stale_receipt_never_resolves_a_mixed_file_set() {
+    let root = tempdir().expect("temp dir creates");
+    let hub = root.path().join("hub");
+    let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+    let repo = "owner/mixed";
+    let repo_cache = super::huggingface_repo_cache_path(root.path(), repo).unwrap();
+    let old = repo_cache.join("snapshots/old");
+    let current = repo_cache.join("snapshots/current");
+    std::fs::create_dir_all(old.join("q8")).unwrap();
+    std::fs::create_dir_all(current.join("q8")).unwrap();
+    std::fs::write(old.join("q8/a.safetensors"), b"a").unwrap();
+    std::fs::write(current.join("q8/b.safetensors"), b"b").unwrap();
+    let marker = root.path().join("models").join(safe_download_dir(repo));
+    std::fs::create_dir_all(&marker).unwrap();
+    std::fs::write(marker.join(INSTALL_MARKER), serde_json::to_vec(&json!({
+        "repo": repo, "modelId": "mixed", "variant": "q8",
+        "resolvedFiles": ["q8/a.safetensors", "q8/b.safetensors"]
+    })).unwrap()).unwrap();
+
+    assert_eq!(huggingface_receipt_weights_dir(root.path(), repo, Some("mixed"), Some("q8")), None);
+}
+
+#[test]
+fn stale_single_variant_receipt_resolves_snapshot_root() {
+    let root = tempdir().expect("temp dir creates");
+    let hub = root.path().join("hub");
+    let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+    let repo = "owner/single";
+    let snapshot = super::huggingface_repo_cache_path(root.path(), repo)
+        .unwrap()
+        .join("snapshots/installed");
+    std::fs::create_dir_all(snapshot.join("transformer")).unwrap();
+    std::fs::write(snapshot.join("transformer/old.safetensors"), b"old").unwrap();
+    std::fs::write(snapshot.join("config.json"), b"{}").unwrap();
+    let marker = root.path().join("models").join(safe_download_dir(repo));
+    std::fs::create_dir_all(&marker).unwrap();
+    std::fs::write(marker.join(INSTALL_MARKER), serde_json::to_vec(&json!({
+        "repo": repo, "modelId": "single", "variant": "default",
+        "resolvedFiles": ["transformer/old.safetensors", "config.json"]
+    })).unwrap()).unwrap();
+
+    assert_eq!(
+        huggingface_receipt_weights_dir(root.path(), repo, Some("single"), Some("default")),
+        Some(snapshot)
+    );
+}
+
+#[test]
+fn receipt_revision_disambiguates_snapshots_with_identical_filenames() {
+    let root = tempdir().unwrap();
+    let hub = root.path().join("hub");
+    let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+    let repo = "owner/revisions";
+    let cache = super::huggingface_repo_cache_path(root.path(), repo).unwrap();
+    for (revision, bytes) in [("installed", b"old".as_slice()), ("newer", b"new".as_slice())] {
+        let file = cache.join("snapshots").join(revision).join("model.safetensors");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, bytes).unwrap();
+    }
+    let marker = root.path().join("models").join(safe_download_dir(repo));
+    std::fs::create_dir_all(&marker).unwrap();
+    std::fs::write(marker.join(INSTALL_MARKER), serde_json::to_vec(&json!({
+        "repo": repo, "modelId": "revisions", "variant": "default",
+        "snapshotRevision": "installed", "resolvedFiles": ["model.safetensors"]
+    })).unwrap()).unwrap();
+
+    let resolved = huggingface_receipt_weights_dir(root.path(), repo, Some("revisions"), Some("default")).unwrap();
+    assert_eq!(std::fs::read(resolved.join("model.safetensors")).unwrap(), b"old");
+}
+
+#[test]
 fn repo_slug_functions_match_cross_language_contract() {
     // story 1667: safe_download_dir is the worker-only repo->dir slug op pinned
     // by the shared repo_slugs.json contract. (safe_repo_dir_name moved to
@@ -533,4 +639,3 @@ fn repo_slug_functions_match_cross_language_contract() {
         );
     }
 }
-
