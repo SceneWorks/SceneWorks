@@ -1315,6 +1315,28 @@ describe("ModelManagerScreen convert-at-install Update button", () => {
     expect(mlxButtons().some((button) => button.textContent === "MLX ready")).toBe(true);
     expect(createModelDownloadJob).not.toHaveBeenCalled();
   });
+
+  it("shows and runs the update action for a usable stale non-converted model", async () => {
+    await render([
+      convertModel({
+        id: "stale_image",
+        type: "image",
+        updateAvailable: true,
+        mlxConversionState: undefined,
+        mlxInstallState: undefined,
+        mlx: undefined,
+      }),
+    ]);
+    await selectTab(container, "Image Models");
+    const card = [...container.querySelectorAll(".model-card")].find((item) =>
+      item.textContent.includes("LTX-2.3 10Eros"),
+    );
+    expect(card?.textContent).toContain("update available");
+    expect(card?.textContent).toContain("installed version remains usable");
+    const updateButton = [...card.querySelectorAll("button")].find((button) => button.textContent === "Update");
+    await click(updateButton);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "stale_image" }));
+  });
 });
 
 // sc-12068: the whole-model and whole-LoRA delete buttons confirm through the desktop-safe

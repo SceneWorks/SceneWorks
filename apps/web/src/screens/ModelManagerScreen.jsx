@@ -1167,6 +1167,7 @@ export function ModelManagerScreen() {
           </span>
           <span className="model-card-status">
             <span className={statusClass}>{statusText}</span>
+            {model.updateAvailable ? <span className="status-badge warning">update available</span> : null}
             {unassociated ? (
               <span className="status-badge warning" title="Set this model's family in user.models.jsonc before using it for generation.">
                 needs family
@@ -1297,6 +1298,9 @@ export function ModelManagerScreen() {
             deletingItem={deletingItem}
           />
         ) : null}
+        {model.updateAvailable && !mlxState ? (
+          <p className="inline-warning">A newer model download is available; the installed version remains usable.</p>
+        ) : null}
         <div className="model-card-footer">
           <span className="model-card-size">{downloadSize}</span>
           <div className="model-card-footer-actions">
@@ -1321,7 +1325,7 @@ export function ModelManagerScreen() {
             ) : (
               <button
                 className="model-card-primary"
-                disabled={(installed && !incomplete) || !model.downloadable || Boolean(downloadJob) || licenseAckRequired}
+                disabled={(installed && !incomplete && !model.updateAvailable) || !model.downloadable || Boolean(downloadJob) || licenseAckRequired}
                 title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
                 onClick={() =>
                   failedDownload
@@ -1336,6 +1340,8 @@ export function ModelManagerScreen() {
                       ? "Resume Download"
                       : incomplete
                         ? "Fix"
+                        : model.updateAvailable
+                          ? "Update"
                         : installed
                           ? "Ready"
                           : model.downloadSizeLabel

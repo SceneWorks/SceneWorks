@@ -217,7 +217,12 @@ pub(crate) async fn run_model_download_job(
     // A lightweight install marker stays in the app store (parity with the CLI
     // path's marker_dir) so the catalog's data/models pointer and bookkeeping
     // remain intact; the weights themselves live only in the shared HF cache.
-    write_model_install_marker(&target_dir, &job.payload, repo, &job.id).await?;
+    let resolved_files = snapshot
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    write_model_download_receipt(&target_dir, &job.payload, repo, &job.id, &resolved_files).await?;
 
     if !reconcile_downloaded_model_family(api, job, &cache_path).await? {
         return Ok(());

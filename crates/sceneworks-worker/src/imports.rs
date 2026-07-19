@@ -120,6 +120,48 @@ pub(crate) async fn write_model_install_marker(
     Ok(())
 }
 
+/// Write the versioned HF-cache install receipt. Unlike the legacy marker this records the exact
+/// resolved snapshot files, so a later manifest change can distinguish a still-usable install from
+/// a torn download.
+pub(crate) async fn write_model_download_receipt(
+    target_dir: &Path,
+    payload: &JsonObject,
+    repo: &str,
+    job_id: &str,
+    resolved_files: &[String],
+) -> WorkerResult<()> {
+    tokio::fs::create_dir_all(target_dir).await?;
+    let receipt = json!({
+        "schemaVersion": 2,
+        "repo": repo,
+        "modelId": payload.get("modelId").cloned().unwrap_or(Value::Null),
+        "modelName": payload.get("modelName").cloned().unwrap_or(Value::Null),
+        "variant": payload.get("variant").cloned().unwrap_or_else(|| Value::String("default".to_owned())),
+        "manifestFiles": payload.get("files").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+        "resolvedFiles": resolved_files,
+        "jobId": job_id,
+        "completedAt": now_rfc3339(),
+    });
+    let marker_path = target_dir.join(INSTALL_MARKER);
+    let mut receipts = match tokio::fs::read(&marker_path).await {
+        Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|value| value.get("receipts").and_then(Value::as_array).cloned())
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    receipts.retain(|existing| existing.get("variant") != receipt.get("variant"));
+    receipts.push(receipt.clone());
+    let mut marker = receipt;
+    marker
+        .as_object_mut()
+        .expect("receipt is an object")
+        .insert("receipts".to_owned(), Value::Array(receipts));
+    let bytes = serde_json::to_vec_pretty(&marker)?;
+    tokio::fs::write(marker_path, bytes).await?;
+    Ok(())
+}
+
 pub(crate) async fn write_lora_install_marker(
     target_dir: &Path,
     payload: &JsonObject,

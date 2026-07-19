@@ -77,10 +77,10 @@ use super::{
     copy_lora_source, fresh_asset_id, import_lora_source_file_as, import_lora_source_path,
     normalize_app_managed_cache_path, now_rfc3339, parse_credentials_env,
     resolve_model_convert_output, resolve_model_import_target, safe_download_dir,
-    safe_project_path, value_f64, wan_moe_pair_filenames, write_model_install_marker,
-    CredentialScheme, IdleHeartbeat, JsonObject, SafetensorsHeaderError, Settings,
-    WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
-    DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+    safe_project_path, value_f64, wan_moe_pair_filenames, write_model_download_receipt,
+    write_model_install_marker, CredentialScheme, IdleHeartbeat, JsonObject,
+    SafetensorsHeaderError, Settings, WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES,
+    DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
 };
 
 // HF-CLI input validation, downloaded-model family detection, atomic converted-dir finalize, and the

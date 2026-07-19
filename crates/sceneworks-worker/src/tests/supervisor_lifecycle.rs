@@ -490,3 +490,33 @@ async fn writes_model_install_marker_with_expected_keys() {
     assert_eq!(marker["jobId"], "job-1");
     assert!(marker["completedAt"].as_str().is_some());
 }
+
+#[tokio::test]
+async fn writes_hf_download_receipt_with_resolved_manifest_and_variant() {
+    let temp = tempdir().expect("tempdir creates");
+    let mut payload = serde_json::Map::new();
+    payload.insert("modelId".to_owned(), json!("base-model"));
+    payload.insert("modelName".to_owned(), json!("Base Model"));
+    payload.insert("variant".to_owned(), json!("q4"));
+    payload.insert("files".to_owned(), json!(["q4/*.safetensors", "config.json"]));
+
+    write_model_download_receipt(
+        temp.path(),
+        &payload,
+        "owner/model",
+        "job-2",
+        &["q4/model.safetensors".to_owned(), "config.json".to_owned()],
+    )
+    .await
+    .expect("receipt writes");
+
+    let receipt: serde_json::Value = serde_json::from_slice(
+        &tokio::fs::read(temp.path().join(INSTALL_MARKER)).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["schemaVersion"], 2);
+    assert_eq!(receipt["repo"], "owner/model");
+    assert_eq!(receipt["variant"], "q4");
+    assert_eq!(receipt["manifestFiles"], json!(["q4/*.safetensors", "config.json"]));
+    assert_eq!(receipt["resolvedFiles"], json!(["q4/model.safetensors", "config.json"]));
+}
