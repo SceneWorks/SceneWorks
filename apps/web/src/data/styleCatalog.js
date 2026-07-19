@@ -8,6 +8,9 @@
 // the selection state can stay a single string id (clean for saved-state + the sc-13132 recipe
 // rehydration follow-on) while the payload fold still gets the prompt text it needs.
 import catalog from "./styles.json";
+// sc-13366: the per-style tailored subject prompts (also used to generate the preview thumbnails,
+// sc-13135). Surfaced in the Image Studio as a single per-style "Try:" hint when a style is selected.
+import thumbnailPrompts from "./styleThumbnailPrompts.json";
 
 // The 8 authored groups, each `{ id, name, description, styles: [{ id, name, prompt }] }`.
 export const STYLE_GROUPS = catalog.groups;
@@ -71,4 +74,18 @@ export function findStyleById(id) {
  */
 export function styleTextForId(id) {
   return findStyleById(id)?.prompt ?? null;
+}
+
+/**
+ * The tailored subject prompt for a style id (the same prompt used to generate that style's preview
+ * thumbnail — styleThumbnailPrompts.json, sc-13135), or null when the id is empty/unmapped. The
+ * Image Studio surfaces this as a single per-style "Try:" hint (sc-13366): a strong, style-fitting
+ * starting prompt. Resolves both sub-style ids and group ids (the map covers all 286 catalog ids).
+ */
+export function styleHintForId(id) {
+  if (!id) {
+    return null;
+  }
+  const hint = thumbnailPrompts.prompts?.[id];
+  return typeof hint === "string" && hint.trim() ? hint : null;
 }

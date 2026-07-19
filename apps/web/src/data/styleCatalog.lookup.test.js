@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import catalog from "./styles.json";
-import { STYLE_GROUPS, findStyleById, styleTextForId } from "./styleCatalog.js";
+import thumbnailPrompts from "./styleThumbnailPrompts.json";
+import { STYLE_GROUPS, findStyleById, styleHintForId, styleTextForId } from "./styleCatalog.js";
 
 // sc-13130: the runtime lookup that bridges the studio's `styleId` selection to the free-text
 // `prompt` the composer consumes. (Catalog-vs-source drift is guarded separately in
@@ -58,5 +59,28 @@ describe("styleCatalog runtime lookup", () => {
     // Combined id-space is fully unique too.
     const combined = [...groupIds, ...subStyleIds];
     expect(new Set(combined).size).toBe(combined.length);
+  });
+
+  // sc-13366: styleHintForId surfaces the per-style tailored prompt as the Image Studio "Try:" hint.
+  it("returns the tailored thumbnail prompt for a sub-style id AND a group id", () => {
+    const subId = catalog.groups[0].styles[0].id;
+    expect(styleHintForId(subId)).toBe(thumbnailPrompts.prompts[subId]);
+    expect(styleHintForId(subId)).toEqual(expect.any(String));
+    const groupId = catalog.groups[0].id;
+    expect(styleHintForId(groupId)).toBe(thumbnailPrompts.prompts[groupId]);
+  });
+
+  it("returns null hint for null / empty / unknown ids", () => {
+    expect(styleHintForId(null)).toBeNull();
+    expect(styleHintForId("")).toBeNull();
+    expect(styleHintForId(undefined)).toBeNull();
+    expect(styleHintForId("not-a-real-style-id")).toBeNull();
+  });
+
+  it("has a tailored hint for every catalog id (map covers the whole catalog)", () => {
+    const ids = [...catalog.groups.map((g) => g.id), ...catalog.groups.flatMap((g) => g.styles.map((s) => s.id))];
+    for (const id of ids) {
+      expect(styleHintForId(id)).toBeTruthy();
+    }
   });
 });
