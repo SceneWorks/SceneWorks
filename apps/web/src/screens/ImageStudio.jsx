@@ -159,6 +159,7 @@ import {
 } from "../upscaleEngines.js";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { StylePicker } from "../components/StylePicker.jsx";
+import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { STYLE_GROUPS, styleTextForId } from "../data/styleCatalog.js";
 import {
   GUIDANCE_METHOD_LABELS,
@@ -2226,6 +2227,21 @@ export function ImageStudio() {
     (structuredActive && !captionValidation?.ok) ||
     Boolean(macActiveModeBlock);
 
+  // sc-13131: live composed-prompt preview for the selected Style Catalog entry. ANTI-DRIFT: we do
+  // NOT re-derive the composition here — we run the SAME buildJobRequest the single Generate submit
+  // calls (with the live prompt as promptToSend) and read its `.prompt`, so the previewed string is
+  // byte-for-byte the prompt that will be sent (preset stack folds into the prompt FIRST, the
+  // style's Style:/Description: wrap is applied LAST — see imageJobRequest.js). It recomputes every
+  // render, so it tracks the prompt text, the selected style, and the active preset stack live.
+  // Only shown for free-text models with a style actually selected: the style-row is already hidden
+  // for structured-caption models (which serialize a caption the composer can't wrap and where the
+  // builder skips style composition), and a null/empty styleText is a pass-through with nothing
+  // extra to preview.
+  const activeStyleText = styleTextForId(styleId);
+  const stylePreviewActive =
+    !structuredPromptModel && typeof activeStyleText === "string" && activeStyleText.trim() !== "";
+  const styledPreviewPrompt = stylePreviewActive ? buildJobRequest({ promptToSend: prompt }).prompt : null;
+
   return (
     <ModelAvailabilityGate
       ready={modelReady}
@@ -2472,6 +2488,12 @@ export function ImageStudio() {
               <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
             </div>
           )}
+
+          {/* sc-13131: the EXACT composed prompt (Style:/Description:, preserved sibling directives,
+              and the own-`Style:` MERGE) the run will send once a style is active — reuses
+              buildJobRequest so it can never drift from the payload. Hidden when no style applies. */}
+          <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} />
+
 
           {/* Prompt tools (UI-refinement 1b; restructured sc-10195): a framed strip of up to THREE
               distinct tiles, one panel open at a time (all free-text only — structured models excluded).
