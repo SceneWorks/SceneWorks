@@ -2542,21 +2542,8 @@ export function ImageStudio() {
             </div>
           )}
 
-          {/* Style Catalog axis (sc-13130 / sc-13224): a searchable, grouped single-select over the
-              278-style catalog. For free-text models it composes the outgoing prompt at build time
-              (Style:/Description:); for structured JSON-caption models (Ideogram 4) it merges the
-              selected style into the caption's `style_description.aesthetics` (sc-13224). Shown for
-              BOTH so the Style axis applies everywhere. "None" resets to pass-through. NB: this is the
-              Style Catalog, distinct from Krea's numeric "text style" (textStyleGain) slider. */}
-          <div className="style-row">
-            <span className="style-row-label">Style</span>
-            <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
-          </div>
-
-          {/* sc-13131: the EXACT composed prompt (Style:/Description:, preserved sibling directives,
-              and the own-`Style:` MERGE) the run will send once a style is active — reuses
-              buildJobRequest so it can never drift from the payload. Hidden when no style applies. */}
-          <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} />
+          {/* Style Catalog picker + its composed-prompt preview moved into the Style axis row of the
+              settings bar (sc-13135) — see the .settings-bar-style-axis block below. */}
 
           {/* Prompt tools (UI-refinement 1b; restructured sc-10195): a framed strip of up to THREE
               distinct tiles, one panel open at a time (all free-text only — structured models excluded).
@@ -3068,26 +3055,37 @@ export function ImageStudio() {
                 <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
               </label>
             </div>
-            <div className="settings-bar-styles">
-              <span className="settings-bar-label">Style preset</span>
-              <div className="preset-chips">
-                <button
-                  className={!selectedPreset ? "preset-chip active" : "preset-chip"}
-                  onClick={() => setSelectedPresetId(noPresetId)}
-                  type="button"
-                >
-                  None
-                </button>
-                {availablePresets.map((preset) => (
+            {/* Style axis (sc-13135): the Style Catalog picker sits FIRST in this row, followed by the
+                model's Style presets — both are style controls, so they share one row instead of the
+                catalog picker floating in a standalone row under the composer. The Style Catalog
+                composes the prompt (free-text) or merges into the caption (Ideogram, sc-13224); "None"
+                resets to pass-through. NB: distinct from Krea's numeric "text style" (textStyleGain). */}
+            <div className="settings-bar-styles settings-bar-style-axis">
+              <div className="style-axis-field style-axis-catalog">
+                <span className="settings-bar-label">Style</span>
+                <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
+              </div>
+              <div className="style-axis-field style-axis-presets">
+                <span className="settings-bar-label">Style preset</span>
+                <div className="preset-chips">
                   <button
-                    className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
-                    key={preset.id}
-                    onClick={() => setSelectedPresetId(preset.id)}
+                    className={!selectedPreset ? "preset-chip active" : "preset-chip"}
+                    onClick={() => setSelectedPresetId(noPresetId)}
                     type="button"
                   >
-                    {preset.name ?? preset.id}
+                    None
                   </button>
-                ))}
+                  {availablePresets.map((preset) => (
+                    <button
+                      className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
+                      key={preset.id}
+                      onClick={() => setSelectedPresetId(preset.id)}
+                      type="button"
+                    >
+                      {preset.name ?? preset.id}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
             {availableGeneralPresets.length ? (
@@ -3108,6 +3106,12 @@ export function ImageStudio() {
               </div>
             ) : null}
           </div>
+
+          {/* sc-13131: the EXACT composed prompt (Style:/Description:, preserved sibling directives,
+              and the own-`Style:` MERGE) the run will send once a style is active — reuses
+              buildJobRequest so it can never drift from the payload. Sits under the Style axis row.
+              Hidden when no style applies. */}
+          <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} />
 
           {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
 
