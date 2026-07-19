@@ -4680,6 +4680,7 @@
       "type": "image",
       "adapter": "mlx_anima",
       "capabilities": ["text_to_image"],
+      "captionStyle": "tags",
       "macOnly": false,
       "nonCommercial": true,
       "gated": false,
@@ -4800,6 +4801,7 @@
       "type": "image",
       "adapter": "mlx_anima",
       "capabilities": ["text_to_image"],
+      "captionStyle": "tags",
       "macOnly": false,
       "nonCommercial": true,
       "gated": false,
@@ -4891,6 +4893,7 @@
       "type": "image",
       "adapter": "mlx_anima",
       "capabilities": ["text_to_image"],
+      "captionStyle": "tags",
       "macOnly": false,
       "nonCommercial": true,
       "gated": false,
@@ -5320,6 +5323,7 @@
       // dual CLIP-L + OpenCLIP-bigG, eps-pred, VAE scaling_factor 0.13025 — so it reuses the `sdxl`
       // engine and the whole sdxl-family LoRA/LoKr stack unchanged (epic 10609).
       "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image", "style_variations"],
+      "captionStyle": "tags",
       "downloads": [
         // SceneWorks turnkey re-host (sc-10611). Upstream OnomaAIResearch/Illustrious-XL-v1.0 ships a
         // SINGLE-FILE LDM checkpoint, which neither mlx-gen-sdxl nor candle-gen-sdxl can read — it is
@@ -5412,6 +5416,7 @@
       // architecture, and it ships no checkpoint metadata at all — `prediction_type: epsilon` was
       // read off the conversion, not the file (epic 10609).
       "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image", "style_variations"],
+      "captionStyle": "tags",
       "downloads": [
         // SceneWorks turnkey re-host (sc-10612). As with v1.0, upstream ships a single-file LDM
         // checkpoint converted offline by `scripts/build_sdxl_turnkey.py`. v2.0 additionally carries a
