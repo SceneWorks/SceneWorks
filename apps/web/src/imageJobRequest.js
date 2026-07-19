@@ -2,6 +2,7 @@ import { buildImageJobAdvanced } from "./imageJobAdvanced.js";
 import { effectiveFitMode } from "./components/FitModeControl.jsx";
 import { upscaleEngineHasSoftness } from "./upscaleEngines.js";
 import { composeStyledPrompt } from "./styleComposer.js";
+import { injectStyleIntoCaption, isCaption, parseCaption, serializeCaption } from "./ideogramCaption.js";
 
 // sc-11219 (F-031): single pure builder for the Image Studio job request, shared by both the
 // single "Generate" submit and the batch run. It used to be duplicated — `submit()` held the
@@ -101,16 +102,40 @@ export function buildImageJobRequest(state) {
     controlOverlayId,
   } = state;
 
-  // sc-13130: apply the Style Catalog composer as the LAST wrap on the outgoing prompt. By the
-  // time we get here `promptToSend` is already the preset-composed, user-facing prompt (the
-  // ImageStudio per-call fold runs composePreset first), so composeStyledPrompt wraps that as the
-  // `Description:` block under the selected style's `Style:` block. It is a no-op when no style is
-  // selected (empty styleText → returns promptToSend unchanged) and is skipped for structured
-  // JSON-caption models, where `promptToSend` is a serialized caption, not prose the composer can
-  // wrap. When a style IS applied client-side we set presetPromptResolvedClientSide truthy so the
-  // server leaves the composed prompt alone (there is no server-side style fold in v1).
-  const styleApplied = !sendStructured && typeof styleText === "string" && styleText.trim() !== "";
-  const composedPrompt = styleApplied ? composeStyledPrompt({ styleText, userPrompt: promptToSend }) : promptToSend;
+  // sc-13130 / sc-13224: apply the Style Catalog as the LAST wrap on the outgoing prompt. It is a
+  // no-op when no style is selected (empty styleText → promptToSend unchanged). There are two
+  // application paths depending on the model:
+  //  - PROSE models (sc-13130): composeStyledPrompt wraps the already-preset-composed prompt as the
+  //    `Description:` block under the selected style's `Style:` block.
+  //  - STRUCTURED JSON-caption models (Ideogram 4, sc-13224): `promptToSend` is a serialized caption,
+  //    not prose. Instead of skipping the Style axis, parse the caption and MERGE the style text into
+  //    `style_description.aesthetics` (the field common to both photo/non-photo variants, so the
+  //    discriminator and key order are preserved), then re-serialize. If the prompt somehow isn't a
+  //    caption, fall through unchanged.
+  // Either way, when a style IS applied client-side we set presetPromptResolvedClientSide truthy so
+  // the server leaves the composed prompt alone (the server's own fold is for headless clients).
+  //
+  // For STRUCTURED models the client-authoritative flag must reflect whether an injection ACTUALLY
+  // happened: a structured prompt that isn't a valid caption falls through unchanged, so setting the
+  // flag (and recording styleId) there would tell the server to skip its own fold on a prompt the
+  // client never transformed — silently dropping the style. So `structuredInjected` is computed
+  // INSIDE the isCaption branch and gates `styleApplied`; a non-caption structured prompt is passed
+  // through with no flag/styleId so the server can still handle it.
+  const hasStyle = typeof styleText === "string" && styleText.trim() !== "";
+  const proseStyleApplied = !sendStructured && hasStyle;
+  const structuredStyleSelected = sendStructured && hasStyle;
+  let composedPrompt = promptToSend;
+  let structuredInjected = false;
+  if (proseStyleApplied) {
+    composedPrompt = composeStyledPrompt({ styleText, userPrompt: promptToSend });
+  } else if (structuredStyleSelected) {
+    const { caption } = parseCaption(promptToSend);
+    if (isCaption(caption)) {
+      composedPrompt = serializeCaption(injectStyleIntoCaption(caption, styleText));
+      structuredInjected = true;
+    }
+  }
+  const styleApplied = proseStyleApplied || structuredInjected;
 
   return {
     mode,
@@ -232,12 +257,17 @@ export function buildImageJobRequest(state) {
       controlPassthroughId,
       effectiveControlScale,
       controlOverlayId,
-      // sc-13132: record the picked style id + the RAW pre-style prompt in `advanced` (→
-      // rawAdapterSettings) ONLY when a style is applied, so replay restores the picker + recomposes
-      // the identical prompt without double-wrapping. `promptToSend` is the pre-style userPrompt the
-      // composer wrapped above, so it is exactly the input that reproduces `composedPrompt`.
+      // sc-13132 / sc-13224: record the picked style id + the RAW pre-style prompt in `advanced` (→
+      // rawAdapterSettings) ONLY when a style is applied, so replay restores the picker + reproduces
+      // the identical prompt without double-injecting.
+      //  - PROSE: `promptToSend` is the pre-style userPrompt the composer wrapped, so it is exactly
+      //    the input that reproduces `composedPrompt` on re-submit.
+      //  - STRUCTURED: the pre-injection caption is already persisted under `structuredPrompt.caption`
+      //    (submitCaption), and replay re-serializes + re-injects from THAT. `stylePrompt` only needs
+      //    to be a string so the round-trip re-selects the picker (see ImageStudio replay), so we
+      //    store "" — the raw prompt lives in the caption blob, not here.
       styleId: styleApplied ? styleId : undefined,
-      styleUserPrompt: styleApplied ? promptToSend : undefined,
+      styleUserPrompt: styleApplied ? (structuredInjected ? "" : promptToSend) : undefined,
     }),
   };
 }
