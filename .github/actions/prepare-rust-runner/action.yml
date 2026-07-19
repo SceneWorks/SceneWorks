@@ -1,0 +1,118 @@
+name: Prepare Rust toolchain on self-hosted runner
+description: >
+  Make the self-hosted Windows/CUDA runner build against the REAL rustup toolchain
+  bin (the actual cargo/rustc/clippy binaries + their sibling DLLs) instead of the
+  fragile %USERPROFILE%\.cargo\bin rustup proxies, and fail loudly with an actionable
+  message if no usable toolchain is installed. See sc-13166.
+
+# WHY THIS EXISTS (sc-13166)
+# --------------------------
+# rustup's Windows proxies in %USERPROFILE%\.cargo\bin (cargo.exe, rustc.exe,
+# clippy-driver.exe, ... 13 of them) are 0-byte SYMLINKS to rustup.exe (rustup
+# dispatches by argv[0]). On this box that indirection is a recurring single point
+# of failure with TWO distinct failure modes, both of which turn the self-hosted
+# lanes red with a cryptic error that reads like a PR-code failure:
+#
+#   1. DANGLING shim: rustup self-updates and Defender (or something) deletes
+#      rustup.exe; every proxy now points at nothing, so `cargo` dies with the
+#      Windows ERROR_NO_ASSOCIATION ("No application is associated with the
+#      specified file for this operation"). Seen with rustup.exe entirely absent.
+#   2. SYMLINK-in-service-context: even when rustup.exe is present, launching a
+#      *symlinked* .exe from the runner's Windows-service token throws the same
+#      ERROR_NO_ASSOCIATION. An interactive Git Bash follows the symlink fine, so a
+#      green interactive `cargo --version` does NOT mean the runner is healthy.
+#
+# The earlier sc-13166 mitigation (rewrite the proxies as real copies of rustup.exe)
+# does not survive a rustup self-update, which recreates the symlinks — so the lane
+# kept going red "after a while" and forced admin-override merges.
+#
+# The real toolchain under %USERPROFILE%\.rustup\toolchains\<tc>\bin is immune to
+# both modes: those are the REAL cargo/rustc/clippy binaries (not symlinks, not
+# rustup proxies), sitting next to the rustc_driver / std DLLs they load. So this
+# action resolves that bin dir, verifies its cargo actually launches, and prepends
+# it to PATH for the rest of the job. The lane then never dispatches through
+# .cargo\bin at all, and neither failure mode can touch it. (We deliberately do NOT
+# try to "heal" .cargo\bin by copying the toolchain binaries in: rustc.exe/
+# clippy-driver.exe/rustdoc.exe are thin launchers that load rustc_driver-*.dll /
+# std-*.dll from their OWN directory, so a copy without those DLLs would break — and
+# re-symlinking is the very thing that fails in the service context.)
+runs:
+  using: composite
+  steps:
+    - name: Select & verify the real Rust toolchain bin (sc-13166)
+      shell: powershell
+      run: |
+        $ErrorActionPreference = 'Stop'
+
+        # rustup's homes are overridable by env; honor them, else the rustup defaults.
+        $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
+        $cargoHome  = if ($env:CARGO_HOME)  { $env:CARGO_HOME }  else { Join-Path $env:USERPROFILE '.cargo' }
+        $toolchainsDir = Join-Path $rustupHome 'toolchains'
+
+        # Resolve the real toolchain bin. Prefer the default toolchain rustup recorded
+        # in settings.toml (what the proxy would dispatch `stable` to); fall back to the
+        # most-recently-written installed toolchain that actually has a real cargo.exe.
+        $binDir = $null
+        $settings = Join-Path $rustupHome 'settings.toml'
+        if (Test-Path $settings) {
+          $m = Select-String -Path $settings -Pattern '^\s*default_toolchain\s*=\s*"(.+?)"' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($m) {
+            $cand = Join-Path (Join-Path $toolchainsDir $m.Matches[0].Groups[1].Value) 'bin'
+            if (Test-Path (Join-Path $cand 'cargo.exe')) { $binDir = $cand }
+          }
+        }
+        if (-not $binDir -and (Test-Path $toolchainsDir)) {
+          $binDir = Get-ChildItem $toolchainsDir -Directory |
+            Sort-Object LastWriteTime -Descending |
+            ForEach-Object { Join-Path $_.FullName 'bin' } |
+            Where-Object { Test-Path (Join-Path $_ 'cargo.exe') } |
+            Select-Object -First 1
+        }
+        if (-not $binDir) {
+          Write-Host "::error title=Rust toolchain missing on candle runner::No installed rustup toolchain with a real cargo.exe under '$toolchainsDir'. Reinstall Rust on the self-hosted cuda box: run rustup-init (https://win.rustup.rs) then 'rustup toolchain install stable' (sc-13166)."
+          exit 1
+        }
+
+        $cargo = Join-Path $binDir 'cargo.exe'
+        Write-Host "Real toolchain cargo: $cargo"
+
+        # Verify it launches. This is a REAL binary (not a rustup proxy symlink), so it
+        # cannot hit the dangling-shim / symlink-in-service-context ERROR_NO_ASSOCIATION
+        # that kills %USERPROFILE%\.cargo\bin\cargo.exe. No `2>&1` on the native call:
+        # under Stop, merging a native command's stderr wraps it in a terminating
+        # NativeCommandError (PS 5.1) and would flake a healthy run.
+        $out = $null
+        try {
+          $out = (& $cargo --version | Out-String).Trim()
+        } catch {
+          $why = ($_.Exception.Message -replace '\s+', ' ').Trim()
+          Write-Host "::error title=Rust toolchain broken on candle runner::Could not execute '$cargo' ($why). Reinstall the toolchain on the box: 'rustup toolchain install stable --force' (sc-13166)."
+          exit 1
+        }
+        if ($LASTEXITCODE -ne 0 -or $out -notmatch '^cargo\s') {
+          $outLine = ($out -replace '\s+', ' ').Trim()
+          Write-Host "::error title=Rust toolchain broken on candle runner::'$cargo --version' failed (exit=$LASTEXITCODE) output='$outLine'. See sc-13166: reinstall the pinned toolchain."
+          exit 1
+        }
+        Write-Host "OK: $out"
+
+        # Prepend the real toolchain bin so every later step's cargo/rustc/clippy resolves
+        # here FIRST, ahead of the fragile .cargo\bin proxies. $GITHUB_PATH prepends, and
+        # the entry survives the `call vcvars64.bat` cmd steps (vcvars only appends).
+        Add-Content -Path $env:GITHUB_PATH -Value $binDir
+
+        # Informational only (never fatal): surface a broken .cargo\bin so the box's
+        # INTERACTIVE cargo (used by dev + sibling sessions) gets repaired too. CI itself
+        # is already immune via the PATH prepend above.
+        $ErrorActionPreference = 'Continue'
+        $proxyCargo = Join-Path $cargoHome 'bin\cargo.exe'
+        if (Test-Path $proxyCargo) {
+          $i = Get-Item $proxyCargo -Force
+          if (($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $i.Length -eq 0) {
+            Write-Host "::warning title=Fragile .cargo\bin on candle runner::'$proxyCargo' is a $([int]$i.Length)-byte reparse point (rustup proxy). This CI lane is unaffected (it uses '$binDir'), but interactive 'cargo' on the box is broken until rustup is reinstalled + Defender excludes .cargo/.rustup (sc-13166)."
+          }
+        } else {
+          Write-Host "::warning title=Fragile .cargo\bin on candle runner::'$proxyCargo' is missing (rustup was deleted). This CI lane is unaffected (it uses '$binDir'), but interactive 'cargo' on the box is broken until rustup is reinstalled (sc-13166)."
+        }
+        exit 0
