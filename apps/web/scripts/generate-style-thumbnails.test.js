@@ -5,13 +5,16 @@
 import { describe, expect, it } from "vitest";
 
 import { composeStyledPrompt } from "../src/styleComposer.js";
+import stylesCatalog from "../src/data/styles.json";
 import { styleTextForId } from "../src/data/styleCatalog.js";
+import thumbnailPrompts from "../src/data/styleThumbnailPrompts.json";
 
 import {
   buildJobPayload,
   composeThumbnailPrompt,
   enumerateStyleIds,
   parseArgs,
+  referencePromptForId,
   shouldSkip,
   STYLE_GROUPS,
   thumbnailPath,
@@ -36,6 +39,73 @@ describe("enumerateStyleIds", () => {
     for (const sid of subIds) {
       expect(ids).toContain(sid);
     }
+  });
+});
+
+describe("styleThumbnailPrompts.json coverage", () => {
+  // Drift guard (sc-13135): the per-style prompt map must cover EXACTLY the catalog id set —
+  // every group id + every sub-style id, no missing, no orphan — so no thumbnail silently falls
+  // back to the fox and no dead prompt lingers after a style is removed.
+  it("has a prompt for exactly the 286 catalog ids (8 groups + 278 sub-styles), all non-empty", () => {
+    const catalogIds = new Set();
+    for (const g of stylesCatalog.groups) {
+      catalogIds.add(g.id);
+      for (const s of g.styles) {
+        catalogIds.add(s.id);
+      }
+    }
+    expect(catalogIds.size).toBe(286);
+
+    const promptIds = new Set(Object.keys(thumbnailPrompts.prompts));
+    expect(promptIds.size).toBe(286);
+
+    const missing = [...catalogIds].filter((id) => !promptIds.has(id));
+    const orphan = [...promptIds].filter((id) => !catalogIds.has(id));
+    expect(missing).toEqual([]);
+    expect(orphan).toEqual([]);
+
+    for (const [id, value] of Object.entries(thumbnailPrompts.prompts)) {
+      expect(typeof value, `prompt for ${id}`).toBe("string");
+      expect(value.trim().length, `prompt for ${id}`).toBeGreaterThan(0);
+    }
+  });
+
+  it("declares the version + a non-empty referencePromptFallback", () => {
+    expect(thumbnailPrompts.version).toBe(1);
+    expect(typeof thumbnailPrompts.referencePromptFallback).toBe("string");
+    expect(thumbnailPrompts.referencePromptFallback.trim().length).toBeGreaterThan(0);
+  });
+});
+
+describe("referencePromptForId", () => {
+  it("uses the per-style tailored prompt for a known id when --prompt is not set", () => {
+    const args = parseArgs([]); // promptExplicit === false
+    const expected = thumbnailPrompts.prompts["ghibli-style"];
+    expect(typeof expected).toBe("string");
+    expect(referencePromptForId("ghibli-style", args)).toBe(expected);
+  });
+
+  it("falls back to referencePromptFallback for an id NOT in the map", () => {
+    const args = parseArgs([]);
+    const map = { referencePromptFallback: "FALLBACK-SUBJECT", prompts: {} };
+    expect(referencePromptForId("no-such-style-id", args, map)).toBe("FALLBACK-SUBJECT");
+  });
+
+  it("an explicit --prompt overrides the per-style prompt for EVERY id", () => {
+    const args = parseArgs(["--prompt", "a lone lighthouse"]);
+    expect(args.promptExplicit).toBe(true);
+    for (const id of enumerateStyleIds()) {
+      expect(referencePromptForId(id, args)).toBe("a lone lighthouse");
+    }
+  });
+
+  it("does NOT treat the default prompt as an override (per-style still wins)", () => {
+    const args = parseArgs([]);
+    expect(args.promptExplicit).toBe(false);
+    // ghibli-style has a tailored prompt distinct from the fox default.
+    const perStyle = referencePromptForId("ghibli-style", args);
+    expect(perStyle).toBe(thumbnailPrompts.prompts["ghibli-style"]);
+    expect(perStyle).not.toBe(REF);
   });
 });
 
