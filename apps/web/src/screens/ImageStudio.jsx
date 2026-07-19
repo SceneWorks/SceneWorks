@@ -1514,12 +1514,15 @@ export function ImageStudio() {
     const structuredRecipe = rawSettings.structuredPrompt;
     const restoredCaption = structuredRecipe?.caption ?? null;
     // Style Catalog round-trip (sc-13132): re-select the Style picker to the recorded style id (a
-    // group id or a sub-style id). Always set it — a recipe without a style clears any stale
-    // selection carried over from prior studio state, so a styleless replay never re-wraps its
-    // prompt. A styled recipe is never a structured one (the composer is skipped for structured
-    // models), so these two branches never overlap.
+    // group id or a sub-style id) — but ONLY when the raw pre-style prompt was also recorded, so
+    // submit can recompose from it. A styleless recipe, or a partial one carrying a styleId with
+    // no stylePrompt, clears any stale selection so its already-composed recipe.prompt is never
+    // re-wrapped. A styled recipe is never a structured one (the composer is skipped for
+    // structured models), so these branches never overlap.
     const restoredStyleId = rawSettings.styleId ?? null;
-    setStyleId(restoredStyleId);
+    const hasRawStylePrompt =
+      restoredStyleId != null && typeof rawSettings.stylePrompt === "string";
+    setStyleId(hasRawStylePrompt ? restoredStyleId : null);
     if (restoredCaption && validateCaption(restoredCaption).ok) {
       setCaption(orderCaption(restoredCaption));
       setPromptMode("form");
@@ -1527,7 +1530,7 @@ export function ImageStudio() {
       // The intent (original idea) seeds the plain box; the serialized caption is
       // authoritative for generation and is rebuilt from `caption` on submit.
       setPrompt(String(structuredRecipe.intent ?? ""));
-    } else if (restoredStyleId != null && typeof rawSettings.stylePrompt === "string") {
+    } else if (hasRawStylePrompt) {
       // Styled recipe (sc-13132): seed the box with the RAW pre-style prompt, NOT the composed
       // `recipe.prompt`. With the picker re-selected above, submit recomposes the identical
       // `Style:`/`Description:` prompt — recording the raw prompt is what prevents a double-wrap
