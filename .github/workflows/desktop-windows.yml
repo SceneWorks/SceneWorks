@@ -139,6 +139,13 @@ jobs:
       CARGO_NET_OFFLINE: "true"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # sc-13166: same self-hosted cuda box as windows-candle.yml — point this lane at
+      # the real rustup toolchain bin (prepended to PATH) so it never dispatches through
+      # the fragile %USERPROFILE%\.cargo\bin proxies that go dangling on rustup
+      # self-update/deletion and fail with ERROR_NO_ASSOCIATION. package-windows is
+      # main + dispatch only, so this failure reddens `main` rather than PRs, but the
+      # remedy is identical. See .github/actions/prepare-rust-runner.
+      - uses: ./.github/actions/prepare-rust-runner
       - name: Fetch the private inference release
         env:
           CARGO_NET_OFFLINE: "false"
