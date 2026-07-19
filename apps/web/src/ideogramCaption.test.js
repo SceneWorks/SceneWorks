@@ -612,6 +612,44 @@ describe("injectStyleIntoCaption — Style-axis into a caption (sc-13224)", () =
     expect("art_style" in art.style_description).toBe(true);
     expect("photo" in art.style_description).toBe(false);
   });
+
+  // Primary flow (the BLOCKER fix): a user builds a scene but never opens the optional style
+  // section, so the caption has NO style_description; selecting a catalog style must still yield a
+  // VALID caption. Injection seeds a default `photo: ""` discriminator (matching the builder's
+  // setStyleEnabled default) so the from-scratch block is a valid photo-caption style, not an
+  // aesthetics-only block the verifier would reject on its way to the engine.
+  it("injecting into a caption with NO style_description yields a VALID caption", () => {
+    const caption = {
+      high_level_description: "a red fox",
+      compositional_deconstruction: {
+        background: "snow",
+        elements: [{ type: "obj", desc: "a red fox" }],
+      },
+    };
+    const injected = injectStyleIntoCaption(caption, "gentle hand-painted");
+    // Still a structured caption...
+    expect(isCaption(injected)).toBe(true);
+    // ...with a seeded photo discriminator and the style folded into aesthetics...
+    expect(injected.style_description.photo).toBe("");
+    expect("art_style" in injected.style_description).toBe(false);
+    expect(injected.style_description.aesthetics).toBe("gentle hand-painted");
+    // ...and it PASSES full-schema validation (verifyStyle requires exactly one discriminator).
+    expect(validateCaption(injected).ok).toBe(true);
+  });
+
+  // A style block present but carrying NEITHER discriminator is the other reachable invalid path:
+  // seed `photo` there too so it becomes valid without disturbing the user's other style keys.
+  it("seeds a discriminator when the style block has neither photo nor art_style", () => {
+    const caption = {
+      style_description: { lighting: "soft", medium: "DSLR" },
+      compositional_deconstruction: { background: "a beach", elements: [] },
+    };
+    const injected = injectStyleIntoCaption(caption, "muted film grain");
+    expect(injected.style_description.photo).toBe("");
+    expect(injected.style_description.lighting).toBe("soft");
+    expect(injected.style_description.medium).toBe("DSLR");
+    expect(validateCaption(injected).ok).toBe(true);
+  });
 });
 
 describe("injectStyleIntoCaption golden fixtures (cross-language parity with the Rust twin)", () => {
@@ -628,8 +666,9 @@ describe("injectStyleIntoCaption golden fixtures (cross-language parity with the
       expect(serializeCaption(injected)).toBe(testCase.expectedCaption);
       // The result is always a caption (the required composition section is untouched)...
       expect(isCaption(injected)).toBe(true);
-      // ...and full-schema validity matches the fixture's recorded expectation (an aesthetics-only
-      // block created from scratch carries no discriminator, so that one edge is expectedValid=false).
+      // ...and full-schema validity matches the fixture's recorded expectation. Every injected
+      // caption is now VALID: a from-scratch or discriminator-less style block is seeded with a
+      // default `photo: ""` so it satisfies the verifier's exactly-one-discriminator rule.
       expect(validateCaption(injected).ok).toBe(testCase.expectedValid);
     });
   }

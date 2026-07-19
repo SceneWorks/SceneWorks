@@ -253,9 +253,13 @@ export function mergeAestheticsText(existing, styleText) {
 
 // Return a NEW caption with the catalog `styleText` merged into `style_description.aesthetics`
 // (never mutating the input). A no-op that returns the caption unchanged when `styleText` is
-// empty/whitespace or `caption` is not an object. When `style_description` is absent it is created
-// carrying only `aesthetics` (the caller's caption normally already has a style block with a
-// discriminator; a from-scratch block deliberately does not invent a `photo`/`art_style`).
+// empty/whitespace or `caption` is not an object. When `style_description` is absent it is created,
+// and when an existing style block carries NEITHER `photo` nor `art_style`, we seed a default
+// `photo: ""` discriminator — matching the builder's own `setStyleEnabled` default — so the result
+// is a VALID photo-caption style block (`verifyStyle` requires exactly one discriminator) rather
+// than an `aesthetics`-only block that would fail validation on its way to the engine. We never
+// infer photo-vs-art from the style text; `photo` is simply the safe default when there is no
+// discriminator to preserve. A style block that already has a discriminator is left untouched.
 export function injectStyleIntoCaption(caption, styleText) {
   const style = typeof styleText === "string" ? styleText.trim() : "";
   if (!style || caption == null || typeof caption !== "object" || Array.isArray(caption)) {
@@ -270,9 +274,15 @@ export function injectStyleIntoCaption(caption, styleText) {
   const existingAesthetics =
     existingStyle && typeof existingStyle.aesthetics === "string" ? existingStyle.aesthetics : "";
   const merged = mergeAestheticsText(existingAesthetics, style);
-  const style_description = existingStyle
-    ? { ...existingStyle, aesthetics: merged }
-    : { aesthetics: merged };
+  let style_description;
+  if (existingStyle) {
+    style_description = { ...existingStyle, aesthetics: merged };
+    if (!("photo" in existingStyle) && !("art_style" in existingStyle)) {
+      style_description.photo = "";
+    }
+  } else {
+    style_description = { aesthetics: merged, photo: "" };
+  }
   return { ...caption, style_description };
 }
 

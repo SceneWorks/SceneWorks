@@ -62,11 +62,15 @@ pub fn merge_aesthetics_text(existing: &str, style_text: &str) -> String {
 
 /// Return a NEW caption value with the catalog `style_text` merged into `style_description.aesthetics`
 /// (sc-13224) — the Style-axis parity for structured JSON-caption models. `aesthetics` exists in both
-/// the photo and non-photo style variants, so injecting it never touches the `photo`/`art_style`
+/// the photo and non-photo style variants, so injecting it never touches an existing `photo`/`art_style`
 /// discriminator and (being the first key in both canonical orders) never drifts key order. A no-op
-/// clone when `style_text` is empty/whitespace or `value` is not a JSON object. When
-/// `style_description` is absent it is created carrying only `aesthetics` (a from-scratch block
-/// deliberately does not invent a discriminator). The twin of the web's `injectStyleIntoCaption`.
+/// clone when `style_text` is empty/whitespace or `value` is not a JSON object. When `style_description`
+/// is absent it is created, and when an existing style block carries NEITHER `photo` nor `art_style` we
+/// seed a default `photo: ""` discriminator (matching the builder's own `setStyleEnabled` default) so
+/// the result is a VALID photo-caption style block rather than an `aesthetics`-only block that the
+/// verifier rejects (it requires exactly one discriminator). We never infer photo-vs-art from the
+/// text — `photo` is simply the safe default when there is no discriminator to preserve. A style block
+/// that already has a discriminator is left untouched. The twin of the web's `injectStyleIntoCaption`.
 pub fn merge_style_into_caption(value: &Value, style_text: &str) -> Value {
     let style = style_text.trim();
     let Some(obj) = value.as_object() else {
@@ -87,11 +91,13 @@ pub fn merge_style_into_caption(value: &Value, style_text: &str) -> Value {
         .unwrap_or("");
     let merged = merge_aesthetics_text(existing_aesthetics, style);
     let mut style_obj = existing_style.unwrap_or_default();
+    let has_discriminator =
+        style_obj.contains_key("photo") || style_obj.contains_key("art_style");
     style_obj.insert("aesthetics".to_owned(), Value::String(merged));
-    out.insert(
-        "style_description".to_owned(),
-        Value::Object(style_obj),
-    );
+    if !has_discriminator {
+        style_obj.insert("photo".to_owned(), Value::String(String::new()));
+    }
+    out.insert("style_description".to_owned(), Value::Object(style_obj));
     Value::Object(out)
 }
 
@@ -338,6 +344,63 @@ mod tests {
         let style = art.get("style_description").and_then(Value::as_object).unwrap();
         assert!(style.contains_key("art_style"));
         assert!(!style.contains_key("photo"));
+    }
+
+    #[test]
+    fn merge_style_into_caption_seeds_photo_when_no_style_description() {
+        // Primary flow (the BLOCKER fix): a caption with NO style_description (the user never opened
+        // the optional style section) must still yield a VALID caption. There is no discriminator to
+        // preserve, so a default `photo: ""` is seeded — matching the builder's setStyleEnabled
+        // default and the web `injectStyleIntoCaption` — giving a valid photo-caption style block
+        // (the verifier requires exactly one of photo/art_style) rather than an aesthetics-only block.
+        let injected = merge_style_into_caption(
+            &json!({
+                "high_level_description": "a red fox",
+                "compositional_deconstruction": {
+                    "background": "snow",
+                    "elements": [{"type": "obj", "desc": "a red fox"}]
+                }
+            }),
+            "gentle hand-painted",
+        );
+        assert!(is_caption(&injected), "still a structured caption");
+        let style = injected
+            .get("style_description")
+            .and_then(Value::as_object)
+            .expect("style_description was created");
+        assert_eq!(style.get("photo").and_then(Value::as_str), Some(""));
+        assert!(!style.contains_key("art_style"));
+        assert_eq!(
+            style.get("aesthetics").and_then(Value::as_str),
+            Some("gentle hand-painted")
+        );
+        // Serializes in canonical photo order with the seeded discriminator present.
+        let out = serialize_caption(&injected, false);
+        assert!(
+            out.contains(r#""style_description": {"aesthetics": "gentle hand-painted", "photo": ""}"#),
+            "unexpected serialization: {out}"
+        );
+    }
+
+    #[test]
+    fn merge_style_into_caption_seeds_photo_when_style_block_has_no_discriminator() {
+        // A style block present but carrying NEITHER photo nor art_style is the other reachable
+        // invalid path: seed photo there too, without disturbing the user's other style keys.
+        let injected = merge_style_into_caption(
+            &json!({
+                "style_description": {"lighting": "soft", "medium": "DSLR"},
+                "compositional_deconstruction": {"background": "a beach", "elements": []}
+            }),
+            "muted film grain",
+        );
+        let style = injected
+            .get("style_description")
+            .and_then(Value::as_object)
+            .unwrap();
+        assert_eq!(style.get("photo").and_then(Value::as_str), Some(""));
+        assert!(!style.contains_key("art_style"));
+        assert_eq!(style.get("lighting").and_then(Value::as_str), Some("soft"));
+        assert_eq!(style.get("medium").and_then(Value::as_str), Some("DSLR"));
     }
 
     #[test]

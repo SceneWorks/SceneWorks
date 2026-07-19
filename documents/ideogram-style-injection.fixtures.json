@@ -88,7 +88,7 @@
       "expectedValid": true
     },
     {
-      "name": "no style_description at all -> created carrying only aesthetics",
+      "name": "no style_description at all -> created with seeded photo discriminator + aesthetics (VALID)",
       "caption": {
         "high_level_description": "a red fox",
         "compositional_deconstruction": {
@@ -102,8 +102,24 @@
         }
       },
       "styleText": "gentle hand-painted",
-      "expectedCaption": "{\"high_level_description\": \"a red fox\", \"style_description\": {\"aesthetics\": \"gentle hand-painted\"}, \"compositional_deconstruction\": {\"background\": \"snow\", \"elements\": [{\"type\": \"obj\", \"desc\": \"a red fox\"}]}}",
-      "expectedValid": false
+      "expectedCaption": "{\"high_level_description\": \"a red fox\", \"style_description\": {\"aesthetics\": \"gentle hand-painted\", \"photo\": \"\"}, \"compositional_deconstruction\": {\"background\": \"snow\", \"elements\": [{\"type\": \"obj\", \"desc\": \"a red fox\"}]}}",
+      "expectedValid": true
+    },
+    {
+      "name": "style block present but missing both discriminators -> seed photo, becomes VALID",
+      "caption": {
+        "style_description": {
+          "lighting": "soft",
+          "medium": "DSLR"
+        },
+        "compositional_deconstruction": {
+          "background": "a beach",
+          "elements": []
+        }
+      },
+      "styleText": "muted film grain",
+      "expectedCaption": "{\"style_description\": {\"aesthetics\": \"muted film grain\", \"lighting\": \"soft\", \"photo\": \"\", \"medium\": \"DSLR\"}, \"compositional_deconstruction\": {\"background\": \"a beach\", \"elements\": []}}",
+      "expectedValid": true
     },
     {
       "name": "empty styleText -> caption unchanged (identity)",

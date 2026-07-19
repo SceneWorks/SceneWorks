@@ -114,19 +114,28 @@ export function buildImageJobRequest(state) {
   //    caption, fall through unchanged.
   // Either way, when a style IS applied client-side we set presetPromptResolvedClientSide truthy so
   // the server leaves the composed prompt alone (the server's own fold is for headless clients).
+  //
+  // For STRUCTURED models the client-authoritative flag must reflect whether an injection ACTUALLY
+  // happened: a structured prompt that isn't a valid caption falls through unchanged, so setting the
+  // flag (and recording styleId) there would tell the server to skip its own fold on a prompt the
+  // client never transformed — silently dropping the style. So `structuredInjected` is computed
+  // INSIDE the isCaption branch and gates `styleApplied`; a non-caption structured prompt is passed
+  // through with no flag/styleId so the server can still handle it.
   const hasStyle = typeof styleText === "string" && styleText.trim() !== "";
   const proseStyleApplied = !sendStructured && hasStyle;
-  const structuredStyleApplied = sendStructured && hasStyle;
-  const styleApplied = proseStyleApplied || structuredStyleApplied;
+  const structuredStyleSelected = sendStructured && hasStyle;
   let composedPrompt = promptToSend;
+  let structuredInjected = false;
   if (proseStyleApplied) {
     composedPrompt = composeStyledPrompt({ styleText, userPrompt: promptToSend });
-  } else if (structuredStyleApplied) {
+  } else if (structuredStyleSelected) {
     const { caption } = parseCaption(promptToSend);
     if (isCaption(caption)) {
       composedPrompt = serializeCaption(injectStyleIntoCaption(caption, styleText));
+      structuredInjected = true;
     }
   }
+  const styleApplied = proseStyleApplied || structuredInjected;
 
   return {
     mode,
@@ -258,7 +267,7 @@ export function buildImageJobRequest(state) {
       //    to be a string so the round-trip re-selects the picker (see ImageStudio replay), so we
       //    store "" — the raw prompt lives in the caption blob, not here.
       styleId: styleApplied ? styleId : undefined,
-      styleUserPrompt: styleApplied ? (structuredStyleApplied ? "" : promptToSend) : undefined,
+      styleUserPrompt: styleApplied ? (structuredInjected ? "" : promptToSend) : undefined,
     }),
   };
 }
