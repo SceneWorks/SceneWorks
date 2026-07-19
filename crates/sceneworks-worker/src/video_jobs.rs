@@ -54,7 +54,7 @@ use crate::image_jobs::{classify_adapter, load_reference_image, lora_path};
 ))]
 use gen_core::{
     AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Generator,
-    LoadPhase, LoadSpec, Precision, Progress, Quant, WeightsSource,
+    LoadPhase, LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
 };
 // MLX-only contract types (LoRA classification, MoE experts) — the candle video lane uses none of these.
 #[cfg(target_os = "macos")]
@@ -3988,6 +3988,13 @@ struct VideoGenInput {
     /// takes the bespoke uncached load path (`load_from_comfyui_experts`) instead of the registry
     /// snapshot; `None` on every other job.
     comfyui: Option<ComfyuiWanExperts>,
+    /// Residency policy for the load (sc-12631). Defaults to [`OffloadPolicy::Resident`] — the historical
+    /// video behavior (every component held for the whole run). The candle A14B path flips this to
+    /// [`OffloadPolicy::Sequential`] so the two 14B experts are swapped one-resident-at-a-time and the
+    /// measured `candle.vramGbByTier` peak (the SEQUENTIAL working set) is the one actually loaded; see
+    /// `candle_wan_offload_policy`. Left `Resident` on the MLX (macOS) path and the 5B, which the
+    /// manifest still sizes resident.
+    offload_policy: OffloadPolicy,
 }
 
 #[cfg(any(
@@ -4027,6 +4034,7 @@ impl Default for VideoGenInput {
             softness: None,
             text_encoder_dir: None,
             comfyui: None,
+            offload_policy: OffloadPolicy::Resident,
         }
     }
 }
@@ -4053,8 +4061,11 @@ fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
         // LTX's external Gemma-3 text encoder rides the spec (sc-8827); `None` ⇒ the provider's
         // `$LTX_GEMMA_DIR` / `<root>/text_encoder` fallback.
         text_encoder: input.text_encoder_dir.clone().map(WeightsSource::Dir),
-        // Video providers have not wired sequential residency (sc-10821) — stays Resident.
-        offload_policy: Default::default(),
+        // Residency policy (sc-12631). `Resident` for every path historically; the candle A14B flips it
+        // to `Sequential` (`generate_candle_video_using` → `candle_wan_offload_policy`) so the two
+        // 14B experts swap one-at-a-time and the load matches the SEQUENTIAL peak the manifest gate sized.
+        // `apply_residency_policy` (the MLX cache seam) never downgrades a `Sequential` set here.
+        offload_policy: input.offload_policy,
     }
 }
 
@@ -4125,6 +4136,8 @@ fn run_loaded_video_generation(
         GenerationOutput::Images(_) => Err(WorkerError::Engine(
             "video model returned images, expected video frames".to_owned(),
         )),
+        // `GenerationOutput::Audio` arrived with the candle-audio lane (sc-12834); no video engine
+        // produces it, so it is as much an engine contract violation here as `Images`.
         GenerationOutput::Audio(_) => Err(WorkerError::Engine(
             "video model returned audio, expected video frames".to_owned(),
         )),
@@ -5445,6 +5458,27 @@ fn mochi_vram_preflight(
     }
 }
 
+/// The residency policy the candle load takes for `engine_id` (sc-12631, epic sc-12732). The A14B
+/// T2V/I2V render with [`OffloadPolicy::Sequential`]: their two 14B MoE experts cannot be co-resident on
+/// a target card, so the engine stages TE → high-expert → low-expert → VAE one-resident-at-a-time
+/// (`candle-gen-wan` `render_sequential`). That is the residency the model's measured
+/// `candle.vramGbByTier` peak was taken under (22.1 GiB @ q4 / 1280×720, vs a resident load that OOMs a
+/// 96 GB card), so [`crate::vram_gate::wan_video_fit_error`]'s admission number is only truthful when the
+/// load actually takes this path — [`video_load_spec`] threads it onto the `LoadSpec`, and
+/// `apply_residency_policy` never downgrades a `Sequential` set here.
+///
+/// The dense TI2V-5B stays [`OffloadPolicy::Resident`]: its `candle.vramGbByTier` (46.1 GiB q4,
+/// sc-12631 PR #1598) is the RESIDENT peak, so offloading it would mismatch its sized number. Re-dropping
+/// the 5B onto the offload path the engine already wired (sc-12757) is a tracked follow-up. `ltx`/`svd`
+/// carry no offload lifecycle and stay resident.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_offload_policy(engine_id: &str) -> OffloadPolicy {
+    match engine_id {
+        "wan2_2_t2v_14b" | "wan2_2_i2v_14b" => OffloadPolicy::Sequential,
+        _ => OffloadPolicy::Resident,
+    }
+}
+
 /// Live pre-flight Wan VRAM admission check for the candle lane — the non-Mochi half of this lane's
 /// gate, and the seam [`generate_candle_video`] calls before the load + denoise.
 ///
@@ -5800,6 +5834,10 @@ async fn generate_candle_video_using(
         seed: resolve_video_seed(request) as u64,
         // ltx's Gemma-3 encoder dir rides the LoadSpec (sc-8827); `None` for wan (bundled TE).
         text_encoder_dir: ltx_gemma_dir,
+        // The candle A14B renders with sequential component offload + MoE expert-swap (sc-12631): the
+        // residency the measured `candle.vramGbByTier` peak was taken under, so the gate's admission
+        // number is only truthful when the load actually takes it. `Resident` for the 5B + ltx + svd.
+        offload_policy: candle_wan_offload_policy(engine_id),
         ..VideoGenInput::default()
     };
     let raw_settings = candle_video_raw_settings(request, &repo);
@@ -17402,6 +17440,56 @@ mod tests {
             matches!(video_load_spec(&with_te).text_encoder, Some(WeightsSource::Dir(ref p)) if *p == gemma),
             "text_encoder_dir rides LoadSpec::text_encoder as a Dir source"
         );
+    }
+
+    /// sc-12631: the candle A14B (T2V + I2V) loads with `OffloadPolicy::Sequential` so its two 14B
+    /// experts swap one-resident-at-a-time — the residency its MEASURED `candle.vramGbByTier` peak was
+    /// taken under, and the coupling that makes the gate's admission number truthful. The dense 5B and
+    /// the non-wan video engines stay `Resident`. Both halves are pinned: the policy predicate AND that
+    /// `video_load_spec` actually threads it onto the `LoadSpec` (a decoupled predicate that never
+    /// reached the spec would silently OOM the A14B on the resident path the gate did not size for).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn candle_a14b_loads_sequential_every_other_video_engine_resident() {
+        for id in ["wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
+            assert_eq!(
+                candle_wan_offload_policy(id),
+                OffloadPolicy::Sequential,
+                "{id} must offload (both 14B experts cannot be co-resident)"
+            );
+            // Mirror `generate_candle_video_using`, which sets the input's policy from the predicate;
+            // this pins that `video_load_spec` then threads it onto the `LoadSpec` (the coupling that
+            // makes the sequential-peak gate truthful).
+            let input = VideoGenInput {
+                engine_id: id,
+                offload_policy: candle_wan_offload_policy(id),
+                ..VideoGenInput::default()
+            };
+            assert_eq!(
+                video_load_spec(&input).offload_policy,
+                OffloadPolicy::Sequential,
+                "{id}: video_load_spec must thread Sequential onto the LoadSpec"
+            );
+        }
+        // The dense 5B is sized RESIDENT in the manifest (46.1 GiB q4), and ltx/svd carry no offload
+        // lifecycle — forcing them sequential would mismatch their sized peak / be a no-op that misleads.
+        for id in ["wan2_2_ti2v_5b", "ltx_2_3_distilled", "svd_xt"] {
+            assert_eq!(
+                candle_wan_offload_policy(id),
+                OffloadPolicy::Resident,
+                "{id} must stay resident"
+            );
+            let input = VideoGenInput {
+                engine_id: id,
+                offload_policy: candle_wan_offload_policy(id),
+                ..VideoGenInput::default()
+            };
+            assert_eq!(
+                video_load_spec(&input).offload_policy,
+                OffloadPolicy::Resident,
+                "{id}: video_load_spec must keep Resident"
+            );
+        }
     }
 
     /// Q8 opt-in detection (sc-5679): `advanced.mlxQuantize: 8` (int or string) → true; absent / Q4

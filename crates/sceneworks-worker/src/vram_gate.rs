@@ -367,15 +367,17 @@ fn mochi_too_big_error(
 // bytes of the components the loader actually reads. Three facts make that a sound admission check for
 // **Wan** rather than a guess:
 //
-//  1. **Every candle video engine holds all components resident for the whole run.** All six declare
-//     `supports_sequential_offload: false` (candle-gen-wan lib.rs:417 / wan14b.rs:727 / model_vace.rs:387,
-//     candle-gen-ltx lib.rs:527, candle-gen-svd lib.rs:183, candle-gen-mochi lib.rs:115, at the pinned
-//     `runtime-2026.07.6`), which `video_load_spec`'s "video providers have not wired sequential
-//     residency (sc-10821)" states in-tree. So `resolve_offload(TooBig, false)` is a no-op here and NO
-//     sequential-peak second stage applies — the `candle.sequentialPeakGb` this gate would otherwise
-//     need does not enter the decision at all. In particular the A14B MoE holds **BOTH** experts
-//     co-resident (`Components { high: Arc<_>, low: Arc<_> }`, wan14b.rs:337-343): the denoise picks an
-//     expert per step, it does not swap them out.
+//  1. **The engines this FLOOR still gates hold all components resident for the whole run.** ltx / svd /
+//     mochi and the dense TI2V-5B declare `supports_sequential_offload: false` (candle-gen-ltx /
+//     -svd / -mochi) or are sized by a RESIDENT `candle.vramGbByTier` (the 5B, 46.1 GiB q4), so
+//     `resolve_offload` is a no-op for them and Σweights is a genuine LOWER BOUND. **The A14B T2V/I2V are
+//     the exception as of sc-12631 / epic sc-12732:** the candle engine now stages TE → high-expert →
+//     low-expert → VAE **one-resident-at-a-time** (`render_sequential`, `supports_sequential_offload:
+//     true`) — only ONE 14B expert is live at a time, not both — so it is sized by its MEASURED sequential
+//     `candle.vramGbByTier` peak and this floor never gates it (`wan_video_fit_error` takes the measured
+//     branch), while its load is forced `OffloadPolicy::Sequential`
+//     (`video_jobs::candle_wan_offload_policy`) so the sized peak is the one actually loaded. The floor
+//     stays the fallback for a Wan tier that was never measured.
 //  2. **There is no host paging on CUDA.** Weights that do not fit VRAM cannot be demand-paged the way
 //     MLX's unified pool swaps, so Σweights is a genuine LOWER BOUND on the job's need. This is the
 //     asymmetry that makes the weights floor safe HERE but not on MLX: `mlx_fit_gate::weights_fit_floor`
@@ -392,9 +394,10 @@ fn mochi_too_big_error(
 // ⚠️ **The manifest's `footprint.peakMemoryBytes` for these models is an MLX measurement and MUST NOT be
 // reused here.** `wan_2_2_t2v_14b`'s recorded 24.5 GiB peak sits BELOW its own `diskSizeBytes` because,
 // as that manifest comment says, "A14B is MoE — only ONE 14B expert is resident at a time, not both".
-// That is true of the MLX engine (measured on a 128 GB Mac, sc-10049/epic 10043) and FALSE of the candle
-// one, which co-locates both experts per (1). Sizing the candle lane off that number would under-predict
-// by a whole expert (~28 GiB at bf16).
+// The candle A14B now ALSO holds one expert at a time (sc-12733, per (1)), but that number is still an
+// MLX measurement at a different geometry/dtype and must not be reused: the candle lane is sized by its
+// own MEASURED sequential `candle.vramGbByTier` (sc-12631). (Before sc-12732 the candle engine co-located
+// both experts, which is why the pre-rework floor under-predicted it by a whole ~28 GiB bf16 expert.)
 //
 // ## This is a FLOOR — it under-predicts, deliberately — and it is now the FALLBACK, not the gate
 // It counts weights only: no activation transient, no VAE decode, no attention working set. A MARGINAL
@@ -589,9 +592,9 @@ fn video_peak_too_big_error(
     gpu_id: &str,
 ) -> WorkerError {
     WorkerError::InvalidPayload(format!(
-        "{model_label} needs ~{needed} GB of VRAM to render at its {tier_key} tier (measured peak: \
-         every component held resident for the whole run — this engine does not stage components — \
-         plus the denoise and VAE-decode transient) but GPU {gpu_id} has ~{available} GB available. \
+        "{model_label} needs ~{needed} GB of VRAM to render at its {tier_key} tier (the measured peak of \
+         the whole render — the resident weights plus the denoise and VAE-decode transient, at whatever \
+         component residency the engine uses) but GPU {gpu_id} has ~{available} GB available. \
          Select a smaller quant tier, or run on a GPU with more VRAM.",
         needed = needed_gb.round() as i64,
         available = available_gb.round() as i64,
