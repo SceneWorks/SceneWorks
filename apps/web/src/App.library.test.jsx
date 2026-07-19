@@ -1187,6 +1187,10 @@ describe("SceneWorks app shell", () => {
     expect(payload.height).toBe(1152);
     // Unedited system prompt is not sent (worker uses its own default).
     expect(payload.advanced?.systemMessage).toBeUndefined();
+    // No reference images attached, so no reference-strength slider and no image-guidance
+    // field (the run stays on the worker's plain-generation defaults).
+    expect(container.textContent).not.toContain("Reference strength");
+    expect(payload.advanced?.imageGuidanceScale).toBeUndefined();
 
     // Submitting stacks the run in the studio rather than routing to the Queue.
     await settle();
@@ -1195,6 +1199,85 @@ describe("SceneWorks app shell", () => {
       expect.objectContaining({ id: "job-il-new" }),
     );
     expect(setActiveView).not.toHaveBeenCalledWith("Queue");
+  });
+
+  it("DocumentStudio surfaces reference strength once references are attached and sends imageGuidanceScale", async () => {
+    const createInterleaveJob = vi.fn(() =>
+      Promise.resolve({ id: "job-il-ref", type: "image_interleave", status: "queued" }),
+    );
+    const imageAsset = {
+      id: "img-ref-1",
+      type: "image",
+      displayName: "Hero shot",
+      projectId: "project-1",
+      file: { path: "assets/images/hero.png" },
+      url: "/api/v1/projects/project-1/files/assets/images/hero.png",
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [imageAsset],
+            createInterleaveJob,
+            documentLocalJobs: [],
+            gpuOptions: ["auto"],
+            imageModels: [
+              { id: "sensenova_u1_8b", name: "SenseNova-U1 8B", type: "image", capabilities: ["text_to_image", "interleave"] },
+            ],
+            jobAction: () => {},
+            rememberLocalGenerationJob: () => {},
+            setActiveView: () => {},
+            requestedGpu: "auto",
+            setRequestedGpu: () => {},
+          },
+          <DocumentStudio />,
+        ),
+      );
+    });
+    await settle();
+
+    // No references yet → the reference-strength slider is hidden.
+    expect(container.textContent).not.toContain("Reference strength");
+
+    // Attach a reference image through the picker: open it, pick the card, confirm.
+    await act(async () => {
+      [...document.body.querySelectorAll(".asset-picker-head button")]
+        .find((button) => button.textContent === "Add reference images")
+        .click();
+    });
+    await settle();
+    await act(async () => {
+      document.body.querySelector(".asset-picker-card").click();
+    });
+    await act(async () => {
+      [...document.body.querySelectorAll("button")]
+        .find((button) => button.textContent === "Use Selection")
+        .click();
+    });
+    await settle();
+
+    // The slider now appears, defaulting to the neutral 1.00 baseline.
+    expect(container.textContent).toContain("Reference strength");
+    const slider = document.body.querySelector("input[type='range']");
+    expect(slider).not.toBeNull();
+    expect(slider.value).toBe("1");
+
+    // Dial the reference strength up toward the character/identity regime and submit.
+    await changeField(slider, "1.5");
+    await changeField(document.body.querySelector("textarea"), "A brand lookbook grounded in the hero shot");
+    await act(async () => {
+      [...document.body.querySelectorAll("button")]
+        .find((button) => button.textContent.includes("Compose document"))
+        .closest("form")
+        .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(createInterleaveJob).toHaveBeenCalledTimes(1);
+    const payload = createInterleaveJob.mock.calls[0][0];
+    expect(payload.sourceAssetIds).toEqual(["img-ref-1"]);
+    expect(payload.advanced.imageGuidanceScale).toBe(1.5);
   });
 
   it("DocumentStudio stacks a queued compose run beneath the active document", async () => {
