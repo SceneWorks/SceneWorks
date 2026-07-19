@@ -7,6 +7,11 @@ import {
   PROMPT_MAX_CHARS,
   STYLE_DIRECTIVE_KEYS,
 } from "./styleComposer.js";
+// sc-13134 cross-language golden fixtures. The SAME file drives the Rust port's parity test
+// (crates/sceneworks-core/src/style_composer.rs), so a headless/MCP server-side fold and this
+// client composer stay byte-identical. Imported as ?raw (documents/ is on vite's server.fs.allow)
+// and JSON.parsed so both languages read the exact same bytes.
+import composerFixturesRaw from "../../../documents/style-composer.fixtures.json?raw";
 
 // sc-13129: the style composer wraps an already-preset-folded userPrompt in a Style/Description
 // template, splicing around any directive lines the user typed. These pin the exact composed
@@ -176,6 +181,26 @@ describe("composeStyledPrompt", () => {
     const userPrompt = "a fox";
     expect(composeStyledPrompt({ styleText: "", userPrompt })).toBe(userPrompt);
   });
+});
+
+// sc-13134: the shared golden fixtures assert this JS composer produces the exact `expected`
+// output for every case. The Rust port reads the same file and asserts the same expecteds, so
+// the server-side fold a headless/MCP client gets is byte-for-byte identical to the web path.
+describe("composeStyledPrompt golden fixtures (cross-language parity with the Rust port)", () => {
+  const { cases } = JSON.parse(composerFixturesRaw);
+
+  it("ships a non-trivial fixture set", () => {
+    // A guard against an empty/renamed fixtures file silently passing the loop below.
+    expect(cases.length).toBeGreaterThanOrEqual(20);
+  });
+
+  for (const { name, styleText, userPrompt, expected } of cases) {
+    it(name, () => {
+      // A null styleText in the fixtures models "no style selected" (undefined in the app).
+      const resolvedStyleText = styleText === null ? undefined : styleText;
+      expect(composeStyledPrompt({ styleText: resolvedStyleText, userPrompt })).toBe(expected);
+    });
+  }
 });
 
 describe("STYLE_DIRECTIVE_KEYS", () => {

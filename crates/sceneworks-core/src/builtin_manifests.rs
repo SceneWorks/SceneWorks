@@ -33,6 +33,13 @@ pub const BUILTIN_MANIFESTS: &[(&str, &str)] = &[
         include_str!("../../../config/manifests/builtin.recipe-presets.jsonc"),
     ),
     (
+        // The Style catalog served at GET /api/v1/styles and folded server-side into a prompt
+        // carrying a styleId (sc-13134). A mechanical derivation of documents/style.txt — never
+        // hand-edited; regenerate via `npm run gen:styles` (apps/web).
+        "builtin.styles.jsonc",
+        include_str!("../../../config/manifests/builtin.styles.jsonc"),
+    ),
+    (
         "builtin.control_overlays.jsonc",
         include_str!("../../../config/manifests/builtin.control_overlays.jsonc"),
     ),
@@ -110,6 +117,34 @@ mod tests {
             crate::jsonc::reject_duplicate_keys(&stripped)
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
         }
+    }
+
+    #[test]
+    fn styles_manifest_parses_to_a_populated_catalog() {
+        // The Style catalog the API serves + folds (sc-13134) is embedded here; a broken/empty
+        // seed would leave GET /api/v1/styles and the server-side fold silently non-functional.
+        // The JS drift guard (styleCatalog.test.js) proves it derives from style.txt; this is the
+        // Rust-side backstop that the embedded copy parses and carries the shipped groups.
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.styles.jsonc"));
+        let catalog: serde_json::Value =
+            serde_json::from_str(&stripped).expect("styles manifest parses as JSON");
+        assert_eq!(
+            catalog
+                .get("schemaVersion")
+                .and_then(serde_json::Value::as_i64),
+            Some(1)
+        );
+        let groups = catalog
+            .get("groups")
+            .and_then(serde_json::Value::as_array)
+            .expect("styles manifest carries a groups array");
+        assert_eq!(groups.len(), 8, "the eight authored top-level groups ship");
+        let total_styles: usize = groups
+            .iter()
+            .filter_map(|group| group.get("styles").and_then(serde_json::Value::as_array))
+            .map(Vec::len)
+            .sum();
+        assert_eq!(total_styles, 278, "the shipped sub-style count");
     }
 
     #[test]
