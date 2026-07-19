@@ -17,9 +17,11 @@
         "dpmpp_sde",
         "uni_pc",
         "lcm",
-        "ddim"
+        "ddim",
+        "er_sde",
+        "dpmpp_2m_sde"
       ],
-      "description": "Sampler (integration method) from the unified curated framework (epic 7114, decision 2), honored by the native mlx-gen / candle-gen engines. Names match gen-core's Solver registry exactly. \"default\" = the engine's native sampler (no swap). Supersedes the epic-1753 diffusers vocabulary (dpmpp -> dpmpp_2m, unipc -> uni_pc, + euler_ancestral / dpmpp_sde / lcm / ddim)."
+      "description": "Sampler (integration method) advertised by shipped model backends. The unified gen-core names are joined by backend-specific ER-SDE and DPM++ 2M SDE values used by current catalog entries. \"default\" preserves the engine's native sampler."
     },
     "schedulerKey": {
       "type": "string",
@@ -31,9 +33,11 @@
         "exponential",
         "sgm_uniform",
         "beta",
-        "ddim_uniform"
+        "ddim_uniform",
+        "shift",
+        "beta57"
       ],
-      "description": "Sigma schedule from the unified curated framework (epic 7114, decision 2). Names match gen-core's Scheduler registry exactly. \"default\" preserves the engine's native schedule. The epic-1753 \"shift\" pseudo-scheduler is gone — the per-generation time shift is the orthogonal defaults.schedulerShift / advanced.schedulerShift knob, not a scheduler choice."
+      "description": "Sigma schedule advertised by shipped model backends. \"default\" preserves the engine's native schedule; shift and beta57 remain valid for current backend-specific catalog entries."
     },
     "guidanceMethodKey": {
       "type": "string",
@@ -47,13 +51,14 @@
     },
     "quantVariantKey": {
       "type": "string",
-      "enum": ["bf16", "q8", "q4"],
-      "description": "Quantization tier of a downloadable model variant (epic 8506, sc-8508). `bf16` = dense full-precision, `q8` / `q4` = pre-quantized packed tiers. Matches the SceneWorks quant-matrix turnkey subdir names resolved by the worker's standard_tier_subdir. Maps to advanced.mlxQuantize at generation time (bf16 <=> 0/none, q8 <=> 8, q4 <=> 4)."
+      "enum": ["bf16", "q8", "q4", "int8-convrot", "training"],
+      "description": "Download variant identifier. bf16/q8/q4 are standard quant-matrix tiers; int8-convrot is Krea's hosted ConvRot tier; training selects the dedicated Lens training artifact."
     },
     "variantFootprint": {
       "type": "object",
       "description": "Footprint metadata for one downloadable model variant (sc-8508). `diskSizeBytes` is required; the measured-memory fields are OPTIONAL and nullable so a later story (sc-8516) can populate real resident/peak numbers without a schema change. The RAM-suggestion engine (sc-8509/8516) is out of scope here — this only declares the fields it will consume.",
       "required": ["diskSizeBytes"],
+      "additionalProperties": false,
       "properties": {
         "diskSizeBytes": {
           "type": ["integer", "string"],
@@ -69,8 +74,20 @@
         }
       }
     },
+    "numericControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string" },
+        "default": { "type": "number" },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "step": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
     "samplerLimits": {
       "type": "object",
+      "additionalProperties": false,
       "description": "Per-model sampler / scheduler / guidance capability lists used to gate Image / Video Studio dropdowns. Omit the keys entirely to disable the controls; include single-element [\"default\"] arrays for sealed adapters so the manifest is still self-describing.",
       "properties": {
         "samplers": {
@@ -101,16 +118,57 @@
     }
   },
   "properties": {
+    "$schema": { "type": "string" },
     "schemaVersion": { "type": "integer", "minimum": 1 },
     "models": {
       "type": "array",
       "items": {
         "type": "object",
+        "required": ["id", "name", "type"],
+        "additionalProperties": false,
         "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "type": { "type": "string", "enum": ["image", "video", "utility"] },
+          "family": { "type": "string" },
+          "adapter": { "type": "string" },
+          "capabilities": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "recommended": { "type": "boolean" },
+          "autoDownload": { "type": "boolean" },
+          "macOnly": { "type": "boolean" },
+          "gated": { "type": "boolean" },
+          "credentialHost": { "type": "string" },
+          "licenseUrl": { "type": "string", "format": "uri" },
+          "nonCommercial": { "type": "boolean" },
+          "promptless": { "type": "boolean" },
+          "structuredPrompt": { "type": "boolean" },
+          "minMemoryGb": { "type": "integer", "minimum": 1 },
+          "paths": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": { "model": { "type": "string" } }
+          },
+          "loraCompatibility": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "families": { "type": "array", "items": { "type": "string" } },
+              "types": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "quantization": { "type": "object" },
           "defaults": {
             "type": "object",
+            "additionalProperties": false,
             "description": "Model defaults surfaced as form initial values in the studios. Sampler / scheduler defaults are read by the UI (the worker just honors whatever rides on advanced).",
             "properties": {
+              "count": { "type": "integer", "minimum": 1 },
+              "duration": { "type": "number", "exclusiveMinimum": 0 },
+              "fps": { "type": "integer", "minimum": 1 },
+              "guidanceScale": { "type": "number" },
+              "quality": { "type": "string" },
+              "resolution": { "type": "string", "pattern": "^[0-9]+x[0-9]+$" },
+              "steps": { "type": "integer", "minimum": 1 },
               "sampler": { "$ref": "#/$defs/samplerKey" },
               "scheduler": { "$ref": "#/$defs/schedulerKey" },
               "schedulerShift": {
@@ -122,6 +180,7 @@
           },
           "limits": {
             "type": "object",
+            "additionalProperties": false,
             "description": "Per-model constraints and capability menus. Each property is explicitly classified; never infer enforcement from the word limits.",
             "properties": {
               "resolutions": {
@@ -202,12 +261,58 @@
           },
           "ui": {
             "type": "object",
+            "additionalProperties": false,
             "description": "Display metadata for model catalog and studio surfaces.",
             "properties": {
+              "label": { "type": "string" },
+              "description": { "type": "string" },
+              "durationHint": { "type": "string" },
+              "promptHint": { "type": "string" },
+              "defaultPrompt": { "type": "string" },
+              "defaultNegativePrompt": { "type": "string" },
+              "recommendedFor": { "type": "array", "items": { "type": "string" } },
+              "controlModes": { "type": "array", "items": { "type": "string" } },
+              "viewAngles": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["id", "label"],
+                  "additionalProperties": false,
+                  "properties": { "id": { "type": "string" }, "label": { "type": "string" } }
+                }
+              },
+              "img2img": { "type": "boolean" },
+              "multiReference": { "type": "boolean" },
+              "poseLibrary": { "type": "boolean" },
+              "poseControlScale": { "type": "boolean" },
+              "controlOverlay": { "type": "boolean" },
+              "precisionToggle": { "type": "boolean" },
+              "promptEnhance": { "type": "boolean" },
+              "hideReferenceStrength": { "type": "boolean" },
+              "referenceStrengthDefault": { "type": "number" },
+              "controlScale": { "$ref": "#/$defs/numericControl" },
+              "identityStructure": { "$ref": "#/$defs/numericControl" },
+              "img2imgStrength": { "$ref": "#/$defs/numericControl" },
+              "textStyleGain": { "$ref": "#/$defs/numericControl" },
+              "variationStrength": { "$ref": "#/$defs/numericControl" },
+              "editReferences": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "secondaryHint": { "type": "string" },
+                  "secondaryLabel": { "type": "string" }
+                }
+              },
+              "pid": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": { "checkpointId": { "type": "string" } }
+              },
               "promptGuide": {
                 "type": "object",
                 "description": "Static Markdown prompt guide shown near prompt entry for this model.",
                 "required": ["title", "path"],
+                "additionalProperties": false,
                 "properties": {
                   "title": {
                     "type": "string",
@@ -225,6 +330,7 @@
                     "items": {
                       "type": "object",
                       "required": ["label", "url"],
+                      "additionalProperties": false,
                       "properties": {
                         "label": { "type": "string", "minLength": 1 },
                         "url": { "type": "string", "format": "uri" }
@@ -237,8 +343,22 @@
           },
           "mlx": {
             "type": "object",
+            "additionalProperties": false,
             "description": "macOS/Apple-Silicon MLX variant metadata (desktop only). Surfaced by the Model Manager to show MLX availability, conversion status, and the minimum unified-memory tier. Inference repos/paths are owned by the Python MlxVideoAdapter; these mirror them for catalog display.",
             "properties": {
+              "quantize": { "type": "integer", "minimum": 1 },
+              "minQualityTier": { "type": "string" },
+              "converter": { "type": "string" },
+              "convertSourceFile": { "type": "string" },
+              "convertBaseRepo": { "type": "string" },
+              "autoDistillLora": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "stage1Strength": { "type": "number" },
+                  "stage2Strength": { "type": "number" }
+                }
+              },
               "minMemoryGb": {
                 "type": "integer",
                 "minimum": 1,
@@ -278,6 +398,7 @@
           },
           "candle": {
             "type": "object",
+            "additionalProperties": false,
             "description": "candle/CUDA (Windows/Linux) variant metadata — the discrete-VRAM sibling of the mlx block (epic 9083, sc-9094). CUDA cards do NOT share system RAM the way Apple unified memory does, so the candle lane needs its OWN measured VRAM gate: the mlx.minMemoryGb (unified-memory OS peak on a Mac) does not describe the VRAM a discrete GPU must hold. Populated from the candle-gen VramProbe harness (sc-9094) at 1024² (video = default frames).",
             "properties": {
               "minMemoryGb": {
@@ -303,6 +424,7 @@
               },
               "control": {
                 "type": "object",
+                "additionalProperties": false,
                 "description": "Pose-ControlNet lane VRAM fit ladder numbers (sc-11754, epic 8459 → epic 10765), keyed by BASE quant tier. Present only for a model with a bespoke trained control branch (Krea 2 Turbo). The control lane loads the base at the installed tier PLUS the ~6.6 GB bf16 control branch, so its render peak exceeds the txt2img vramGbByTier and needs its own numbers; the worker's krea_control_fit gate reads these vs live/capped free VRAM and engages the cheapest sufficient rung only when constrained.",
                 "properties": {
                   "peakGbByTier": {
@@ -345,19 +467,11 @@
           },
           "downloads": {
             "type": "array",
-            "description": "Download entries are usually PICK-ONE alternates for the same model: at most one may be marked default: true (else the first supported entry is used); a quant matrix (epic 8506, sc-8508) lists each tier (bf16 / Q8 / Q4) as a separate same-repo entry distinguished by `files`/`variant`; OS alternates are distinguished by `platforms`. Entries flagged `coRequisite: true` are the exception — FETCH-ALL dependencies (e.g. a decoder checkpoint plus its shared caption encoder) that install alongside the primary and gate its install state (sc-9696).",
-            "contains": {
-              "type": "object",
-              "properties": {
-                "default": { "const": true }
-              },
-              "required": ["default"]
-            },
-            "minContains": 0,
-            "maxContains": 1,
+            "description": "Download entries are usually PICK-ONE alternates for the same model: at most one applicable non-co-requisite may be marked default: true per OS (else the first supported entry is used). tests/test_builtin_manifest_audit.py enforces that platform-aware invariant because JSON Schema cannot compare overlapping platform sets. A quant matrix (epic 8506, sc-8508) lists each tier as a separate same-repo entry distinguished by files/variant; OS alternates are distinguished by platforms. Entries flagged coRequisite: true are FETCH-ALL dependencies installed alongside the primary (sc-9696).",
             "items": {
               "type": "object",
               "required": ["provider", "repo"],
+              "additionalProperties": false,
               "properties": {
                 "provider": {
                   "type": "string",
@@ -391,6 +505,11 @@
                   "type": "array",
                   "items": { "type": "string" },
                   "description": "Optional allow-list of provider file patterns included in the download."
+                },
+                "platforms": {
+                  "type": "array",
+                  "items": { "type": "string", "enum": ["macos", "linux", "windows"] },
+                  "uniqueItems": true
                 }
               }
             }
@@ -409,5 +528,6 @@
         }
       }
     }
-  }
+  },
+  "additionalProperties": false
 }
