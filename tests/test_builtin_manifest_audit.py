@@ -289,43 +289,54 @@ def test_wan_2_2_candle_vram_tiers_match_measured_peaks():
     assert candle["minMemoryGb"] == 48
 
 
-def test_wan_a14b_candle_q4_measured_admits_32gb_q8_bf16_deferred():
-    """sc-12631 (post epic sc-12732): the A14B q4 candle peak is MEASURED and admits a 32 GB card.
+def test_wan_a14b_candle_all_tiers_measured_q8_admits_32gb():
+    """sc-13174 (completing sc-12631): the A14B q4/q8/bf16 candle peaks are ALL MEASURED, and q8 now
+    admits a 32 GB card.
 
-    After the sequential-offload / expert-swap / bf16-TE / free-aware-tiling / finer-sdpa rework, the
-    A14B renders one 14B expert at a time and its measured `USED_MEM_HIGH` q4 peak at the 1280x720/81f/
-    4-step Lightning default is ~22 GiB -- it fits a 32 GB RTX 5090, not the ~386 GiB OOM-floor these
-    blocks used to carry. This is the inverse of the old `..._are_flagged_estimated` tripwire (which
-    asserted every tier exceeds a 96 GB card). (The raw 22 GiB q4 peak physically fits a 24 GB card too,
-    but the gate's 2 GB headroom targets ~26 GB free, so a 24 GB card is refused -- the safe direction.)
-
-    Per the sc-12732 handoff ("admit q4 now, re-measure q8/bf16 before admitting"), q8 and bf16 are
-    DEFERRED, so the block stays `measured: false`. q8's live USED_MEM_HIGH peak was ~28 GiB but its
-    nvidia-smi pool high-water (which cudarc never frees) was ~34-36 GiB and the small-card footprint is
-    unvalidated, so q8 is gated at that conservative pool bound (refused on 32 GB); bf16 is DERIVED (56).
-    Asserting q8/bf16 stay above a 32 GB card stops either regressing to a fits-small-card number before
-    it is validated/measured. Flipping to `measured: true` is a <=32 GB-validation + bf16-stage follow-up.
+    After the sequential-offload / expert-swap / bf16-TE / free-aware-tiling / finer-sdpa rework (epic
+    sc-12732), the A14B renders one 14B expert at a time. Its measured `USED_MEM_HIGH` peaks at the
+    1280x720/81f/4-step Lightning default are ~22 (q4) / ~28 (q8) / ~39 (bf16) GiB -- not the ~386 GiB
+    OOM-floor these blocks used to carry. sc-12631 shipped q4 measured but DEFERRED q8/bf16; sc-13174
+    completes them:
+      * q8's live peak is ~28 GiB, but its nvidia-smi pool high-water (~34-36, which cudarc never frees)
+        left it unproven whether a <=32 GB card packs down to the live peak. A GPU-memory-balloon
+        emulation (64 GiB balloon -> ~31 GiB free) reproduced the SAME ~28 live peak at full GPU util with
+        no spill, so q8 is gated at its live peak and now ADMITS a 32 GB RTX 5090 -- the epic goal.
+      * bf16 was staged (dense fp32 diffusers, after downloading the missing transformer_2 shards) and
+        measured at ~39 GiB (one bf16 expert + activations), REPLACING the old conservative derived 56
+        bound: the real number admits a 48 GB card but stays refused on 32.
+    Pinning the exact values (not just measured:true) mutation-checks the flip -- ripping a tier out or
+    regressing q8 back to its pool bound goes RED here. This is the inverse of the sc-12631
+    `..._q4_measured_admits_32gb_q8_bf16_deferred` tripwire it replaces.
     """
     manifest = _load_builtin_models_manifest()
     expected = {
-        "wan_2_2_t2v_14b": {"q4": 22.13, "q8": 34.4, "bf16": 56.0},
-        "wan_2_2_i2v_14b": {"q4": 22.20, "q8": 35.6, "bf16": 56.0},
+        "wan_2_2_t2v_14b": {"q4": 22.13, "q8": 27.95, "bf16": 38.56},
+        "wan_2_2_i2v_14b": {"q4": 22.20, "q8": 28.02, "bf16": 38.62},
     }
     for model_id, tiers in expected.items():
         entry = next(m for m in manifest["models"] if m["id"] == model_id)
         candle = entry["candle"]
-        # q8/bf16 are deferred (conservative bounds), so the block is honestly flagged estimated.
-        assert candle["measured"] is False, f"{model_id}: q8/bf16 deferred, so measured stays false"
+        # q4/q8/bf16 are all measured now, so the block is honestly measured:true.
+        assert candle["measured"] is True, f"{model_id}: q8+bf16 now measured, so measured flips to true"
         assert candle["vramGbByTier"] == tiers, (
-            f"{model_id}: the measured q4 peak (and the conservative q8/bf16 bounds) must not regress, "
-            f"got {candle['vramGbByTier']}"
+            f"{model_id}: the measured q4/q8/bf16 peaks must not regress, got {candle['vramGbByTier']}"
         )
         assert candle["minMemoryGb"] == 24, f"{model_id}: minMemoryGb should gate q4 (~22 + 2)"
-        # The DEFAULT (q4) tier now fits a 32 GB card -- where the old ~388 floor refused every GPU.
+        # q4 AND q8 now fit a 32 GB card (each + the fit gate's 2 GB headroom); bf16 does not.
         assert tiers["q4"] + 2 < 32, f"{model_id}: q4 (+headroom) must fit a 32 GB card, got {tiers['q4']}"
-        # q8 + bf16 stay refused on a 32 GB card until validated/measured (deferred, the safe direction).
-        assert tiers["q8"] + 2 > 32, f"{model_id}: q8's conservative bound must not admit a 32 GB card"
-        assert tiers["bf16"] + 2 > 32, f"{model_id}: the derived bf16 bound must not admit a 32 GB card"
+        assert tiers["q8"] + 2 < 32, (
+            f"{model_id}: q8 (+headroom) now fits a 32 GB card after the <=32 GB balloon validation, "
+            f"got {tiers['q8']}"
+        )
+        # bf16 stays refused on a 32 GB card, but its measured peak now admits a 48 GB card (the derived
+        # 56 bound refused 48).
+        assert tiers["bf16"] + 2 > 32, f"{model_id}: bf16 must stay refused on a 32 GB card, got {tiers['bf16']}"
+        assert tiers["bf16"] + 2 <= 48, (
+            f"{model_id}: the measured bf16 peak must now admit a 48 GB card, got {tiers['bf16']}"
+        )
+        # Heavier tier => heavier peak (ordering sanity).
+        assert tiers["q4"] < tiers["q8"] < tiers["bf16"], f"{model_id}: heavier tier => heavier peak"
 
 
 def test_sdxl_manifest_has_mlx_block():
