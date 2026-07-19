@@ -1523,8 +1523,10 @@ export function ImageStudio() {
     // group id or a sub-style id) — but ONLY when the raw pre-style prompt was also recorded, so
     // submit can recompose from it. A styleless recipe, or a partial one carrying a styleId with
     // no stylePrompt, clears any stale selection so its already-composed recipe.prompt is never
-    // re-wrapped. A styled recipe is never a structured one (the composer is skipped for
-    // structured models), so these branches never overlap.
+    // re-wrapped. Since sc-13224 (structured captions ARE styled), these branches CAN overlap for a
+    // structured styled recipe: both restoredCaption and hasRawStylePrompt may be truthy. That is
+    // correct — restoredStyleId is restored just below, and the structured-caption branch takes
+    // precedence, restoring the PRE-injection caption so submit re-injects the style exactly once.
     const restoredStyleId = rawSettings.styleId ?? null;
     const hasRawStylePrompt =
       restoredStyleId != null && typeof rawSettings.stylePrompt === "string";
