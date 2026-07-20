@@ -8785,12 +8785,13 @@ fn build_video_clip_conditioning(
 }
 
 /// Resolve an asset id to its on-disk media file path (the source clip mp4), mirroring the asset
-/// lookup in [`load_reference_image`] but returning the path for ffmpeg frame extraction (the
+/// lookup in `load_reference_image` but returning the path for ffmpeg frame extraction (the
 /// Rust equivalent of the torch `source_asset_media_path`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+///
+/// Deliberately NOT gated to the macOS/candle video lanes (unlike its original callers): the audio
+/// edit lane (`audio_jobs::build_audio_edit`, sc-13410) resolves its source clip through this on
+/// every platform and feature combination, so gating it broke the Linux-no-candle "neither" build
+/// (E0425 on main). Everything it touches (`ProjectStore`, `safe_project_path`) is backend-neutral.
 pub(crate) fn resolve_clip_media_path(
     settings: &Settings,
     project_id: &str,

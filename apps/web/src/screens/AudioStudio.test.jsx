@@ -682,7 +682,6 @@ describe("AudioStudio Music generation (sc-13410)", () => {
     await act(async () => {});
   }
 
-  const generateButton = (root) => buttonWithText(root, "Generate");
   const advancedFieldByLabel = (root, label) =>
     [...root.querySelectorAll(".advanced-panel label")].find((el) =>
       el.textContent.trim().startsWith(label),
