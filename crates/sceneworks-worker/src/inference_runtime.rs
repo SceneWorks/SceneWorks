@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 #[cfg(all(test, target_os = "macos"))]
 use gen_core::core_llm::TextLlmRegistration;
 use gen_core::core_llm::{LoadSpec as TextLoadSpec, ModelRequirements, TextLlm, TextLlmRegistry};
-use gen_core::{AudioTransform, Generator, LoadSpec, ProviderRegistry};
+use gen_core::{AudioTransform, Generator, LoadSpec, ProviderRegistry, VoiceEmbedder};
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -138,6 +138,27 @@ pub(crate) fn load_audio_transform(
             )
         })?
         .load_audio_transform(id, spec)
+}
+
+/// Load an audio **voice embedder** (a speaker-encoder, e.g. `chatterbox_ve`) by id from the runtime's
+/// candle audio registry (sc-13517). It maps a reference audio clip to a raw 256-d speaker-identity
+/// vector — the identity twin of `load_image_embedder`. Errors clearly when this build ships no audio
+/// lane so the register-a-voice flow turns it into a loud failure rather than a silent no-op. Unlike
+/// the clone Generator's `Conditioning::ReferenceAudio` path (which the provider re-embeds internally),
+/// this seam exposes the embedding directly for the saved-voice registry's near-duplicate detection.
+pub(crate) fn load_voice_embedder(
+    id: &str,
+    spec: &LoadSpec,
+) -> gen_core::Result<Box<dyn VoiceEmbedder>> {
+    audio()
+        .ok_or_else(|| {
+            gen_core::Error::Msg(
+                "no audio lane is linked in this runtime build (the candle audio registry is \
+                 unavailable)"
+                    .to_owned(),
+            )
+        })?
+        .load_voice_embedder(id, spec)
 }
 
 pub(crate) fn text() -> &'static TextLlmRegistry {

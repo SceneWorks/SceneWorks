@@ -1094,6 +1094,135 @@ describe("AudioStudio Voice Clone generation (sc-13411)", () => {
   });
 });
 
+describe("AudioStudio register-a-voice (sc-13517)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <AudioStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const setInput = async (el, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+  };
+  const nameInput = () => container.querySelector(".register-voice-row input");
+  const saveButton = () => buttonWithText(container, "Save voice");
+
+  // A reference clip is a persisted selection, restored from the studio snapshot at mount.
+  const seedReference = () =>
+    window.localStorage.setItem(
+      "sceneworks-studio-audio-project_1",
+      JSON.stringify({ referenceAudioAssetId: "ref-voice-1" }),
+    );
+  const referenceAsset = { id: "ref-voice-1", type: "audio", displayName: "My reference voice" };
+
+  it("surfaces saved voices in the Voice Clone tab and selecting one sets the reference", async () => {
+    const savedVoices = [
+      { id: "voice_a", name: "Narrator", referenceAudioAssetId: "ref-voice-1" },
+      { id: "voice_b", name: "Villain", referenceAudioAssetId: "ref-voice-2" },
+    ];
+    await render(baseContext({ assets: [referenceAsset], savedVoices, createSavedVoice: vi.fn() }));
+    await click(modeTab(container, "Voice Clone"));
+
+    const chips = [...container.querySelectorAll(".saved-voice-chip")];
+    expect(chips.map((c) => c.querySelector(".saved-voice-select").textContent.trim())).toEqual([
+      "Narrator",
+      "Villain",
+    ]);
+    // None selected initially (no reference restored in this render).
+    const narratorSelect = chips[0].querySelector(".saved-voice-select");
+    await click(narratorSelect);
+    expect(narratorSelect.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("registers a voice and shows a near-duplicate WARNING when the backend flags one", async () => {
+    seedReference();
+    const createSavedVoice = vi.fn(async ({ name }) => ({
+      id: "voice_new",
+      name,
+      referenceAudioAssetId: "ref-voice-1",
+      nearDuplicate: { id: "voice_a", name: "Narrator", similarity: 0.97 },
+    }));
+    await render(baseContext({ assets: [referenceAsset], savedVoices: [], createSavedVoice }));
+    await click(modeTab(container, "Voice Clone"));
+
+    // Save is disabled until a name is typed.
+    expect(saveButton().disabled).toBe(true);
+    await setInput(nameInput(), "Narrator 2");
+    expect(saveButton().disabled).toBe(false);
+    await click(saveButton());
+
+    expect(createSavedVoice).toHaveBeenCalledWith({
+      name: "Narrator 2",
+      referenceAudioAssetId: "ref-voice-1",
+    });
+    const warning = container.querySelector(".inline-warning");
+    expect(warning).not.toBeNull();
+    expect(warning.textContent).toContain("Narrator");
+    expect(warning.textContent).toContain("97%");
+  });
+
+  it("registers a distinct voice with NO warning (info notice only)", async () => {
+    seedReference();
+    const createSavedVoice = vi.fn(async ({ name }) => ({
+      id: "voice_new",
+      name,
+      referenceAudioAssetId: "ref-voice-1",
+      nearDuplicate: null,
+    }));
+    await render(baseContext({ assets: [referenceAsset], savedVoices: [], createSavedVoice }));
+    await click(modeTab(container, "Voice Clone"));
+    await setInput(nameInput(), "Brand New Voice");
+    await click(saveButton());
+
+    expect(createSavedVoice).toHaveBeenCalledOnce();
+    expect(container.querySelector(".inline-warning")).toBeNull();
+    const notice = container.querySelector(".register-voice p[role='status']");
+    expect(notice.textContent).toContain("Brand New Voice");
+  });
+
+  it("deletes a saved voice via its delete affordance", async () => {
+    const savedVoices = [{ id: "voice_a", name: "Narrator", referenceAudioAssetId: "ref-voice-1" }];
+    const deleteSavedVoice = vi.fn(async () => ({ id: "voice_a", status: "deleted" }));
+    await render(
+      baseContext({
+        assets: [referenceAsset],
+        savedVoices,
+        createSavedVoice: vi.fn(),
+        deleteSavedVoice,
+      }),
+    );
+    await click(modeTab(container, "Voice Clone"));
+    await click(container.querySelector(".saved-voice-delete"));
+    expect(deleteSavedVoice).toHaveBeenCalledWith("voice_a");
+  });
+});
+
 describe("Audio nav registration (sc-13407)", () => {
   it("registers Audio in KEEP_ALIVE_VIEWS", () => {
     expect(KEEP_ALIVE_VIEWS.has("Audio")).toBe(true);

@@ -77,6 +77,8 @@ use uuid::Uuid;
 
 mod auth;
 use auth::{access_control, cors_layer, is_authorized, AuthThrottle};
+mod saved_voices;
+use saved_voices::{create_saved_voice, delete_saved_voice, list_saved_voices};
 mod characters;
 use characters::{
     add_character_reference, archive_character, attach_character_lora, create_character,
@@ -159,9 +161,9 @@ use dto::{
     LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest, LorasQuery, MetricsQuery,
     ModelConvertRequest, ModelDownloadRequest, ModelImportRequest, PersonDetectionJobRequest,
     PersonTrackCorrectionsRequest, PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery,
-    PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery, TimelineCreateRequest,
-    TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VerifyResponse,
-    VideoJobRequest, VqaJobRequest,
+    PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery,
+    SavedVoiceCreateRequest, TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest,
+    TrainingCaptionJobRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 use manifest::{
@@ -1128,6 +1130,14 @@ pub(crate) fn create_app_with_state(
         .route(
             "/api/v1/projects/:project_id/files/*relative_path",
             get(get_project_file),
+        )
+        .route(
+            "/api/v1/projects/:project_id/voices",
+            get(list_saved_voices).post(create_saved_voice),
+        )
+        .route(
+            "/api/v1/projects/:project_id/voices/:voice_id",
+            delete(delete_saved_voice),
         )
         .route(
             "/api/v1/projects/:project_id/characters",

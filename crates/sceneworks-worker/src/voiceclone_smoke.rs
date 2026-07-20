@@ -420,6 +420,201 @@ fn native_voiceclone_chatterbox_smoke() {
     );
 }
 
+/// sc-13517 END-TO-END DoD: prove the "register a voice" feature drives a real cloned voiceover.
+///
+///   1. **Register (embed + store)** — embed a reference clip through the PUBLIC
+///      `voice_register::embed_reference_clip` (the exact seam the rust-api calls on register), then
+///      persist the saved voice through `SavedVoiceStore` — a real 256-d Chatterbox-VE embedding lands
+///      in a real project.db.
+///   2. **Near-duplicate consumer** — re-register the SAME clip: the store flags it as a near-duplicate
+///      (cosine ≥ threshold). Register a spectrally-DISTINCT clip: NOT flagged. This is the embedding's
+///      genuine consumer.
+///   3. **Render through the saved voice** — load `chatterbox_tts` and render the script with the saved
+///      voice's reference clip as `Conditioning::ReferenceAudio` (the referenceAudioAssetId → clone path
+///      the Studio drives when a saved voice is picked). Writes a real, audible cloned WAV.
+///
+/// Writes `saved_voice_reference.wav`, `distinct_reference.wav`, `saved_voice_cloned_voiceover.wav`, and
+/// `summary.json` to `$SAVED_VOICE_DOD_OUT` (default `/tmp/saved_voice_dod`). `#[ignore]`d real-weight
+/// smoke — run by hand on an Apple-Silicon Mac with the Chatterbox Clone-TTS model installed.
+#[test]
+#[ignore = "real-weight end-to-end DoD: needs the cached ResembleAI/chatterbox model"]
+fn saved_voice_register_render_dod() {
+    use sceneworks_core::voice_store::{
+        SavedVoiceCreateInput, SavedVoiceStore, DEFAULT_VOICE_DEDUP_THRESHOLD,
+    };
+
+    // The register embed path resolves ve.safetensors from the HF cache; point it at the OS hub cache.
+    if std::env::var_os("HF_HOME").is_none() {
+        if let Some(home) = sceneworks_core::hf_home::os_huggingface_home() {
+            std::env::set_var("HF_HOME", home);
+        }
+    }
+    let data_dir = std::env::temp_dir();
+    let chatterbox_dir = resolve_dir("VOICECLONE_CHATTERBOX_DIR", "ResembleAI/chatterbox", None);
+
+    let out_dir = PathBuf::from(env_or("SAVED_VOICE_DOD_OUT", "/tmp/saved_voice_dod"));
+    std::fs::create_dir_all(&out_dir).expect("out dir");
+    let project_dir = out_dir.join("project");
+    std::fs::create_dir_all(&project_dir).expect("project dir");
+
+    // The library audio assets a saved voice points to.
+    let reference = synthetic_reference();
+    let reference_wav = out_dir.join("saved_voice_reference.wav");
+    dump_wav(&reference, &reference_wav);
+    let distinct = distinct_reference();
+    let distinct_wav = out_dir.join("distinct_reference.wav");
+    dump_wav(&distinct, &distinct_wav);
+
+    // ── (a) REGISTER: real embed via the API's embed path + persist through the store ──
+    let emb_reference =
+        crate::voice_register::embed_reference_clip(&data_dir, &reference_wav).expect("embed ref");
+    assert_eq!(
+        emb_reference.len(),
+        256,
+        "Chatterbox-VE embedding is 256-dim"
+    );
+    let store = SavedVoiceStore::new(&project_dir);
+    let (narrator, dup_first) = store
+        .create_saved_voice(
+            "project_dod",
+            SavedVoiceCreateInput {
+                name: "Narrator".to_owned(),
+                reference_audio_asset_id: "asset_reference".to_owned(),
+                embedding: emb_reference.clone(),
+            },
+            DEFAULT_VOICE_DEDUP_THRESHOLD,
+        )
+        .expect("register Narrator");
+    assert!(dup_first.is_none(), "first registration can't duplicate");
+    let narrator_id = narrator["id"].as_str().expect("voice id").to_owned();
+
+    // ── (b) DEDUP consumer: the SAME clip warns; a DISTINCT clip does not ──
+    let emb_reference_again =
+        crate::voice_register::embed_reference_clip(&data_dir, &reference_wav)
+            .expect("re-embed ref");
+    let (_dup_voice, dup_hit) = store
+        .create_saved_voice(
+            "project_dod",
+            SavedVoiceCreateInput {
+                name: "Narrator (again)".to_owned(),
+                reference_audio_asset_id: "asset_reference_dup".to_owned(),
+                embedding: emb_reference_again,
+            },
+            DEFAULT_VOICE_DEDUP_THRESHOLD,
+        )
+        .expect("register duplicate");
+    let dup_hit = dup_hit.expect("re-registering the same clip must flag a near-duplicate");
+    assert_eq!(dup_hit.name, "Narrator");
+
+    let emb_distinct = crate::voice_register::embed_reference_clip(&data_dir, &distinct_wav)
+        .expect("embed distinct");
+    let (_distinct_voice, distinct_hit) = store
+        .create_saved_voice(
+            "project_dod",
+            SavedVoiceCreateInput {
+                name: "Villain".to_owned(),
+                reference_audio_asset_id: "asset_distinct".to_owned(),
+                embedding: emb_distinct.clone(),
+            },
+            DEFAULT_VOICE_DEDUP_THRESHOLD,
+        )
+        .expect("register distinct");
+    assert!(
+        distinct_hit.is_none(),
+        "a distinct speaker must NOT be flagged"
+    );
+    assert_eq!(
+        store.list_saved_voices("project_dod").expect("list").len(),
+        3
+    );
+
+    // ── (c) RENDER: the saved voice's reference clip → chatterbox_tts clone (the Studio's path) ──
+    let seed = 12_345u64;
+    let generator = runtime_macos::catalog()
+        .expect("runtime catalog")
+        .audio()
+        .expect("audio lane")
+        .load(
+            "chatterbox_tts",
+            &LoadSpec::new(WeightsSource::Dir(chatterbox_dir.clone())),
+        )
+        .expect("load chatterbox_tts generator");
+    let mut on_progress = |_p: Progress| {};
+    let clone = match generator
+        .generate(
+            &native_clone_request(NATIVE_CLONE_SCRIPT, reference.clone(), seed),
+            &mut on_progress,
+        )
+        .expect("clone generate")
+    {
+        GenerationOutput::Audio(track) => track,
+        other => panic!("expected audio, got {other:?}"),
+    };
+    let clone_peak = peak(&clone.samples);
+    assert!(clone_peak > 1e-2, "cloned voiceover is (near-)silent");
+    assert_eq!(clone.sample_rate, 24_000, "clone must be 24 kHz");
+    let clone_wav = out_dir.join("saved_voice_cloned_voiceover.wav");
+    dump_wav(&clone, &clone_wav);
+
+    // Objective evidence the rendered clone tracks the saved voice's reference (not the distinct one).
+    let emb_clone =
+        crate::voice_register::embed_reference_clip(&data_dir, &clone_wav).expect("embed clone");
+    let sim_clone_reference = cosine(&emb_clone, &emb_reference);
+    let sim_clone_distinct = cosine(&emb_clone, &emb_distinct);
+
+    let summary = serde_json::json!({
+        "story": "sc-13517",
+        "register": {
+            "narratorId": narrator_id,
+            "embeddingDim": emb_reference.len(),
+            "firstRegistrationDuplicate": null,
+        },
+        "dedupConsumer": {
+            "threshold": DEFAULT_VOICE_DEDUP_THRESHOLD,
+            "sameClipReRegisterFlagged": { "id": dup_hit.id, "name": dup_hit.name, "similarity": dup_hit.similarity },
+            "distinctClipFlagged": false,
+        },
+        "clonedVoiceover": {
+            "wav": clone_wav.display().to_string(),
+            "samples": clone.samples.len(),
+            "sampleRate": clone.sample_rate,
+            "peak": clone_peak,
+            "cosineCloneReference": sim_clone_reference,
+            "cosineCloneDistinct": sim_clone_distinct,
+        },
+        "artifacts": {
+            "referenceWav": reference_wav.display().to_string(),
+            "distinctWav": distinct_wav.display().to_string(),
+            "clonedWav": clone_wav.display().to_string(),
+        },
+    });
+    let summary_path = out_dir.join("summary.json");
+    std::fs::write(
+        &summary_path,
+        serde_json::to_string_pretty(&summary).unwrap(),
+    )
+    .expect("write summary");
+
+    eprintln!("[saved-voice-dod] out dir: {}", out_dir.display());
+    eprintln!(
+        "[saved-voice-dod] dedup: same-clip re-register flagged '{}' @ {:.4}; distinct NOT flagged",
+        dup_hit.name, dup_hit.similarity
+    );
+    eprintln!(
+        "[saved-voice-dod] cloned voiceover: {} samples @ {} Hz peak {clone_peak:.4} → {}",
+        clone.samples.len(),
+        clone.sample_rate,
+        clone_wav.display()
+    );
+    eprintln!(
+        "[saved-voice-dod] clone tracks reference: cosine clone↔ref {sim_clone_reference:.4} vs clone↔distinct {sim_clone_distinct:.4}"
+    );
+    assert!(
+        sim_clone_reference > sim_clone_distinct,
+        "the cloned voiceover must track the saved voice's reference more than a distinct clip"
+    );
+}
+
 // ── sc-13541: offline install-parity DoD ─────────────────────────────────────────────────────────
 // The chatterbox_tts provider resolves two companion weights at generate() time via pinned-SHA
 // `hf_get_pinned` fetches (candle_audio_chatterbox_ve + candle-audio-chatterbox/src/perth.rs at the
@@ -508,6 +703,80 @@ fn synthetic_reference() -> gen_core::AudioTrack {
         channels: 1,
         stems: Vec::new(),
     }
+}
+
+/// A spectrally-distinct synthetic clip (higher fundamental, different harmonic mix + envelope) so its
+/// Chatterbox-VE embedding differs from [`synthetic_reference`]'s — used by the sc-13517 embed-path
+/// smoke to prove the speaker vector discriminates.
+fn distinct_reference() -> gen_core::AudioTrack {
+    let sample_rate = 24_000u32;
+    let secs = 4.0f32;
+    let n = (sample_rate as f32 * secs) as usize;
+    let mut samples = Vec::with_capacity(n);
+    let mut seed = 0x7f4a_1122u32;
+    for i in 0..n {
+        let t = i as f32 / sample_rate as f32;
+        let vibrato = 1.0 + 0.03 * (2.0 * std::f32::consts::PI * 7.0 * t).sin();
+        let f0 = 320.0 * vibrato;
+        let mut s = 0.5 * (2.0 * std::f32::consts::PI * f0 * t).sin();
+        s += 0.35 * (2.0 * std::f32::consts::PI * 1.5 * f0 * t).sin();
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let noise = (seed >> 9) as f32 / (1u32 << 23) as f32 - 0.5;
+        s += 0.12 * noise;
+        let env = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * 0.9 * t).cos();
+        samples.push(0.8 * env * s);
+    }
+    gen_core::AudioTrack {
+        samples,
+        sample_rate,
+        channels: 1,
+        stems: Vec::new(),
+    }
+}
+
+/// sc-13517 embed-path smoke: the PUBLIC `voice_register::embed_reference_clip` (what the rust-api
+/// calls to register a voice) resolves the cached Chatterbox-VE weights, decodes a WAV, and returns a
+/// 256-d speaker vector. Deterministic: the SAME clip self-embeds to cosine ~1.0, while a
+/// spectrally-distinct clip scores lower — objective evidence the embedding (the registry's dedup
+/// identity) discriminates. Run by hand on a Mac with the Chatterbox Clone-TTS model installed.
+#[test]
+#[ignore = "real-weight audio smoke: needs the cached ResembleAI/chatterbox ve.safetensors"]
+fn voice_register_embed_path_smoke() {
+    // Point HF cache resolution at the OS hub cache so embed_reference_clip's data_dir-based
+    // resolution finds the installed snapshot regardless of the (unused) data dir passed below.
+    if std::env::var_os("HF_HOME").is_none() {
+        if let Some(home) = sceneworks_core::hf_home::os_huggingface_home() {
+            std::env::set_var("HF_HOME", home);
+        }
+    }
+    let data_dir = std::env::temp_dir();
+
+    let tmp = std::env::temp_dir().join(format!("sw-voice-register-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).expect("temp dir");
+    let ref_a = tmp.join("ref_a.wav");
+    let ref_b = tmp.join("ref_b.wav");
+    dump_wav(&synthetic_reference(), &ref_a);
+    dump_wav(&distinct_reference(), &ref_b);
+
+    let emb_a1 =
+        crate::voice_register::embed_reference_clip(&data_dir, &ref_a).expect("embed clip a");
+    let emb_a2 =
+        crate::voice_register::embed_reference_clip(&data_dir, &ref_a).expect("re-embed clip a");
+    let emb_b =
+        crate::voice_register::embed_reference_clip(&data_dir, &ref_b).expect("embed clip b");
+
+    assert_eq!(emb_a1.len(), 256, "Chatterbox-VE embedding is 256-dim");
+    let self_sim = cosine(&emb_a1, &emb_a2);
+    let cross_sim = cosine(&emb_a1, &emb_b);
+    eprintln!("voice_register embed smoke: self={self_sim:.4} cross={cross_sim:.4}");
+    assert!(
+        self_sim > 0.999,
+        "the same clip must self-embed to ~1.0 (got {self_sim})"
+    );
+    assert!(
+        cross_sim < self_sim,
+        "a spectrally-distinct clip must score below the self-similarity (self {self_sim}, cross {cross_sim})"
+    );
 }
 
 /// Sorted names directly under `dir` (empty when `dir` is absent) — a cheap fingerprint for asserting

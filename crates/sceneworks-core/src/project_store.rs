@@ -1066,6 +1066,61 @@ impl ProjectStore {
         Ok(assets)
     }
 
+    /// List the project's saved voices (Voice Clone registry, sc-13517).
+    pub fn list_saved_voices(&self, project_id: &str) -> ProjectStoreResult<Vec<Value>> {
+        let project_path = self.find_project_path(project_id)?;
+        crate::voice_store::SavedVoiceStore::new(project_path).list_saved_voices(project_id)
+    }
+
+    /// Register a saved voice; returns the hydrated voice plus any near-duplicate hit (sc-13517).
+    pub fn create_saved_voice(
+        &self,
+        project_id: &str,
+        input: crate::voice_store::SavedVoiceCreateInput,
+        dedup_threshold: f32,
+    ) -> ProjectStoreResult<(Value, Option<crate::voice_store::SavedVoiceDuplicate>)> {
+        let project_path = self.find_project_path(project_id)?;
+        crate::voice_store::SavedVoiceStore::new(project_path).create_saved_voice(
+            project_id,
+            input,
+            dedup_threshold,
+        )
+    }
+
+    /// Delete a saved voice (sc-13517).
+    pub fn delete_saved_voice(
+        &self,
+        project_id: &str,
+        voice_id: &str,
+    ) -> ProjectStoreResult<crate::voice_store::SavedVoiceMutationResult> {
+        let project_path = self.find_project_path(project_id)?;
+        crate::voice_store::SavedVoiceStore::new(project_path)
+            .delete_saved_voice(project_id, voice_id)
+    }
+
+    /// Resolve a library asset id to its absolute media file path, guarded against path traversal.
+    /// Used by the saved-voice register flow to hand the reference clip to the worker embed path
+    /// (sc-13517). Mirrors `get_asset`'s resolution but returns the on-disk path rather than the JSON.
+    pub fn resolve_asset_media_path(
+        &self,
+        project_id: &str,
+        asset_id: &str,
+    ) -> ProjectStoreResult<PathBuf> {
+        let project_path = self.find_project_path(project_id)?;
+        let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
+        let asset = normalize_asset(project_id, &project_path, &sidecar_path)?;
+        let media_rel = asset
+            .pointer("/file/path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if media_rel.is_empty() || !is_safe_relative_path(media_rel) {
+            return Err(ProjectStoreError::BadRequest(
+                "Asset media path must be project-relative".to_owned(),
+            ));
+        }
+        Ok(project_path.join(media_rel))
+    }
+
     pub fn list_characters(
         &self,
         project_id: &str,
@@ -2664,7 +2719,12 @@ struct ReindexCounts {
 /// `ensure_project_db_ready`, which now heals inline-upscaled asset sidecars that
 /// were missing their fold lineage (`extra.upscaledFromAssetId` / `lineage`), so
 /// existing upscale pairs collapse in the Library on next open.
-const PROJECT_SCHEMA_VERSION: i64 = 4;
+///
+/// v5: sc-13517 — added the `saved_voices` table (Voice Clone "register a voice"
+/// registry). The bump lets existing DBs pick up the new table through the gated
+/// migration; the table is DB-authoritative (no sidecar), so the reindex the bump
+/// triggers — which only clears the sidecar-rebuilt tables — leaves it intact.
+const PROJECT_SCHEMA_VERSION: i64 = 5;
 
 fn project_schema_version(connection: &Connection) -> ProjectStoreResult<i64> {
     Ok(connection.query_row("pragma user_version", [], |row| row.get(0))?)
@@ -2722,6 +2782,7 @@ pub fn apply_project_migrations(connection: &Connection) -> ProjectStoreResult<(
     ensure_column(connection, "assets", "origin", "text")?;
     apply_character_migrations(connection)?;
     apply_training_dataset_migrations(connection)?;
+    crate::voice_store::apply_voice_migrations(connection)?;
     // Pragma assignment cannot be parameterized; the version is a trusted const.
     connection.execute_batch(&format!("pragma user_version = {PROJECT_SCHEMA_VERSION}"))?;
     Ok(())
@@ -4765,7 +4826,7 @@ mod tests {
     /// alongside a deliberate schema change — and when you do, you MUST bump
     /// `PROJECT_SCHEMA_VERSION` so the `user_version=` line below changes too.
     const EXPECTED_PROJECT_DB_SCHEMA: &str = concat!(
-        "user_version=4\n",
+        "user_version=5\n",
         "table assets: id TEXT notnull=0 default=NULL pk=1, type TEXT notnull=1 default=NULL pk=0, display_name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, generation_set_id TEXT notnull=0 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, favorite INTEGER notnull=1 default=0 pk=0, rating INTEGER notnull=1 default=0 pk=0, rejected INTEGER notnull=1 default=0 pk=0, trashed INTEGER notnull=1 default=0 pk=0, sidecar_path TEXT notnull=0 default=NULL pk=0, origin TEXT notnull=0 default=NULL pk=0\n",
         "table character_looks: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, description TEXT notnull=1 default='' pk=0, approved_reference_ids TEXT notnull=1 default='[]' pk=0, recipe_settings TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "table character_loras: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, lora_id TEXT notnull=0 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, source_path TEXT notnull=0 default=NULL pk=0, project_path TEXT notnull=0 default=NULL pk=0, copied_into_project INTEGER notnull=1 default=0 pk=0, category TEXT notnull=1 default='character' pk=0, scope TEXT notnull=1 default='project' pk=0, trigger_words TEXT notnull=1 default='[]' pk=0, default_weight REAL notnull=1 default=1.0 pk=0, compatibility TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
@@ -4773,6 +4834,7 @@ mod tests {
         "table characters: id TEXT notnull=0 default=NULL pk=1, project_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, type TEXT notnull=1 default=NULL pk=0, description TEXT notnull=1 default='' pk=0, sidecar_path TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0, archived INTEGER notnull=1 default=0 pk=0\n",
         "table generation_sets: id TEXT notnull=0 default=NULL pk=1, mode TEXT notnull=1 default=NULL pk=0, model TEXT notnull=1 default=NULL pk=0, prompt TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, job_id TEXT notnull=0 default=NULL pk=0\n",
         "table project_metadata: key TEXT notnull=0 default=NULL pk=1, value TEXT notnull=1 default=NULL pk=0\n",
+        "table saved_voices: id TEXT notnull=0 default=NULL pk=1, project_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, reference_audio_asset_id TEXT notnull=1 default=NULL pk=0, embedding TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0\n",
         "table timelines: id TEXT notnull=0 default=NULL pk=1, name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, aspect_ratio TEXT notnull=1 default=NULL pk=0, width INTEGER notnull=1 default=NULL pk=0, height INTEGER notnull=1 default=NULL pk=0, fps INTEGER notnull=1 default=NULL pk=0, duration REAL notnull=1 default=0 pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "table training_datasets: id TEXT notnull=0 default=NULL pk=1, project_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, modality TEXT notnull=1 default=NULL pk=0, status TEXT notnull=1 default=NULL pk=0, version INTEGER notnull=1 default=NULL pk=0, item_count INTEGER notnull=1 default=0 pk=0, character_id TEXT notnull=0 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "index idx_training_datasets_project_updated on training_datasets",

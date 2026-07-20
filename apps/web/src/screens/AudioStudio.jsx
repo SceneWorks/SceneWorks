@@ -160,6 +160,9 @@ export function AudioStudio() {
     setActiveView,
     setPreviewAsset,
     macCapabilities,
+    savedVoices = [],
+    createSavedVoice,
+    deleteSavedVoice,
   } = useAppContext();
 
   // Last-used settings for this workspace, restored on mount. The component is keyed by workspace in
@@ -204,6 +207,11 @@ export function AudioStudio() {
   // OpenVoice conversion strength (τ), empty ⇒ the converter default (0.3).
   const [referenceAudioAssetId, setReferenceAudioAssetId] = useState(saved.referenceAudioAssetId ?? "");
   const [matchStrength, setMatchStrength] = useState(saved.matchStrength ?? "");
+  // Register-a-voice affordance (sc-13517): a name for the saved voice built from the currently
+  // selected reference clip, an in-flight guard, and the post-register notice (dedup warning / info).
+  const [savedVoiceName, setSavedVoiceName] = useState("");
+  const [registeringVoice, setRegisteringVoice] = useState(false);
+  const [savedVoiceNotice, setSavedVoiceNotice] = useState(null);
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   // Guards a Speech run in flight so a second submit (double-click / ⌘↵) can't double-enqueue
   // (mirrors VideoStudio's `submitting`). Cleared in submit's finally.
@@ -296,6 +304,65 @@ export function AudioStudio() {
   // VideoStudio's `videoAssets` (type-scoped so the picker only offers real audio; the picker itself
   // runs with categories hidden since its `all/image/video` tabs carry no audio bucket).
   const audioAssets = useMemo(() => assets.filter((asset) => asset?.type === "audio"), [assets]);
+
+  // Saved voices (sc-13517): a saved voice is "selected" when the reference clip in play is the one
+  // it points to. Picking a saved voice just sets referenceAudioAssetId, which the existing pipeline
+  // routes to native chatterbox_tts / OpenVoice fallback — no new generation wiring.
+  const selectedSavedVoiceId = useMemo(() => {
+    if (!referenceAudioAssetId) return "";
+    const match = savedVoices.find(
+      (voice) => voice?.referenceAudioAssetId === referenceAudioAssetId,
+    );
+    return match?.id ?? "";
+  }, [savedVoices, referenceAudioAssetId]);
+
+  const canRegisterVoice =
+    Boolean(createSavedVoice) &&
+    referenceAudioAssetId.length > 0 &&
+    savedVoiceName.trim().length > 0 &&
+    !registeringVoice;
+
+  async function handleRegisterVoice() {
+    if (!canRegisterVoice) return;
+    setRegisteringVoice(true);
+    setSavedVoiceNotice(null);
+    try {
+      const created = await createSavedVoice({
+        name: savedVoiceName.trim(),
+        referenceAudioAssetId,
+      });
+      // A null result means the register failed — the error is surfaced by the app-level banner.
+      if (!created) return;
+      setSavedVoiceName("");
+      const duplicate = created.nearDuplicate;
+      if (duplicate) {
+        setSavedVoiceNotice({
+          tone: "warning",
+          message: `Saved “${created.name}”, but it looks very similar to “${duplicate.name}” (${Math.round(
+            duplicate.similarity * 100,
+          )}% match) — you may already have this voice registered.`,
+        });
+      } else {
+        setSavedVoiceNotice({
+          tone: "info",
+          message: `Saved “${created.name}” to this project’s voices.`,
+        });
+      }
+    } finally {
+      setRegisteringVoice(false);
+    }
+  }
+
+  function handleSelectSavedVoice(voice) {
+    setReferenceAudioAssetId(voice.referenceAudioAssetId);
+    setSavedVoiceNotice(null);
+  }
+
+  async function handleDeleteSavedVoice(voice) {
+    if (!deleteSavedVoice) return;
+    await deleteSavedVoice(voice.id);
+    setSavedVoiceNotice(null);
+  }
 
   // Generate is guarded (never a silent no-op): a run needs a wired mode, a non-empty prompt, an
   // installed model, and no run already in flight. The empty-prompt guard is the DoD's "disable on
@@ -780,6 +847,77 @@ export function AudioStudio() {
                   showCategories={false}
                   value={referenceAudioAssetId}
                 />
+                {savedVoices.length > 0 ? (
+                  <div className="saved-voices" role="group" aria-label="Saved voices">
+                    <span className="field-label">Saved voices</span>
+                    <div className="preset-chips saved-voices-chips">
+                      {savedVoices.map((voice) => (
+                        <span
+                          key={voice.id}
+                          className={`preset-chip saved-voice-chip${
+                            selectedSavedVoiceId === voice.id ? " is-selected" : ""
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            className="saved-voice-select"
+                            aria-pressed={selectedSavedVoiceId === voice.id}
+                            onClick={() => handleSelectSavedVoice(voice)}
+                          >
+                            {voice.name}
+                          </button>
+                          <button
+                            type="button"
+                            className="saved-voice-delete"
+                            aria-label={`Delete saved voice ${voice.name}`}
+                            title="Delete saved voice"
+                            onClick={() => handleDeleteSavedVoice(voice)}
+                          >
+                            <Icon.Trash />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {createSavedVoice ? (
+                  <div className="register-voice">
+                    <label className="settings-field">
+                      Save this reference as a voice
+                      <div className="register-voice-row">
+                        <input
+                          onChange={(event) => setSavedVoiceName(event.target.value)}
+                          placeholder="Voice name (e.g. Narrator)"
+                          type="text"
+                          value={savedVoiceName}
+                        />
+                        <button
+                          className="secondary-action register-voice-save"
+                          disabled={!canRegisterVoice}
+                          onClick={handleRegisterVoice}
+                          type="button"
+                        >
+                          <Icon.Save />
+                          {registeringVoice ? "Saving…" : "Save voice"}
+                        </button>
+                      </div>
+                      <span className="field-hint" role="note">
+                        Registers the selected reference clip as a reusable named voice. We compute its
+                        speaker fingerprint and warn if it closely matches a voice you already saved.
+                      </span>
+                    </label>
+                    {savedVoiceNotice ? (
+                      <p
+                        className={
+                          savedVoiceNotice.tone === "warning" ? "inline-warning" : "field-hint"
+                        }
+                        role="status"
+                      >
+                        {savedVoiceNotice.message}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
                 {showMatchStrength ? (
                   <label className="settings-field settings-field-match-strength">
                     Match strength
