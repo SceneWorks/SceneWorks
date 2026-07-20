@@ -5576,6 +5576,22 @@ input.dataset-name-input.boxed:focus {
   white-space: nowrap;
 }
 
+/* Audio capability chips (sc-13406): the audio-type card's at-a-glance capabilities,
+   derived from the model's `audio` sub-block (voice count, languages, edit modes,
+   multi-speaker). Same pill as the generic capability chip, given a subtle accent tint
+   so the audio surface reads distinctly. Reuses the rec-chip's proven accent tokens, so
+   it holds in both light and dark. Must follow `.model-capabilities .chip` (equal
+   specificity) to win on source order. */
+.model-audio-capabilities .chip {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-color: transparent;
+}
+
+[data-theme="dark"] .model-audio-capabilities .chip {
+  color: var(--accent);
+}
+
 .lora-family-groups {
   display: grid;
   gap: var(--gap-3);
