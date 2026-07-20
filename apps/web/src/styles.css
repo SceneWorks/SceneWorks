@@ -4113,6 +4113,37 @@ label {
   font-weight: 600;
 }
 
+/* Left group of the results head — the title plus the capability-driven streaming badge (sc-13675),
+   kept together so the head's space-between keeps the ⌘↵ hint on the right. */
+.review-panel-head-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Streaming affordance (sc-13675): revealed in the audio results head only when the selected model
+   advertises audio.supportsStreaming. Reuses the audio capability chip's accent tokens so it reads
+   distinctly and holds in both light and dark. */
+.streaming-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border: 1px solid transparent;
+  white-space: nowrap;
+  align-self: center;
+}
+
+[data-theme="dark"] .streaming-badge {
+  color: var(--accent);
+}
+
 .kbd-hint {
   display: inline-flex;
   align-items: center;

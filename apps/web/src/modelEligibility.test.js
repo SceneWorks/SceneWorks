@@ -233,9 +233,17 @@ describe("audio model eligibility (sc-13403)", () => {
       conditioning: ["VoiceEmbedding", "ReferenceAudio"],
     },
   };
+  // Streaming TTS (sc-13675): NO voice bank — it serves "speech" via audio.supportsStreaming, and
+  // must stay OFF "sfx" (the residual generator) despite advertising sampleRates.
+  const mossTtsRealtime = {
+    id: "moss_tts_realtime",
+    type: "audio",
+    audio: { languages: ["en", "zh"], sampleRates: [24000], maxDurationSecs: 2400, supportsStreaming: true },
+  };
 
   const seeded = [
     ["Kokoro-82M", kokoro, "speech"],
+    ["MOSS-TTS-Realtime (streaming)", mossTtsRealtime, "speech"],
     ["MOSS-SoundEffect-v2", moss, "sfx"],
     ["ACE-Step v1.5 Turbo", acestep, "music"],
     ["OpenVoice V2", openvoice, "voiceclone"],
@@ -260,6 +268,20 @@ describe("audio model eligibility (sc-13403)", () => {
     // MOSS is the residual generator (sfx) — not music, because it advertises no editModes.
     expect(audioModelServesMode(moss, "music")).toBe(false);
     expect(audioModelServesMode(moss, "sfx")).toBe(true);
+  });
+
+  it("MOSS-TTS-Realtime serves speech via supportsStreaming (no voice bank) and NOT sfx", () => {
+    // The streaming TTS has no voices — the streaming capability is its speech signal (sc-13675).
+    expect(audioModelServesMode(mossTtsRealtime, "speech")).toBe(true);
+    // It must NOT leak into the residual sfx bucket even though it advertises sampleRates.
+    expect(audioModelServesMode(mossTtsRealtime, "sfx")).toBe(false);
+    expect(audioModelServesMode(mossTtsRealtime, "music")).toBe(false);
+    expect(audioModelServesMode(mossTtsRealtime, "voiceclone")).toBe(false);
+    // And a plain (non-streaming) voiceless generator with the SAME sample-rate block stays sfx —
+    // proving the classifier keys on the streaming flag, not on the absence of voices alone.
+    const plainSfx = { id: "x", type: "audio", audio: { sampleRates: [24000], languages: ["en"] } };
+    expect(audioModelServesMode(plainSfx, "speech")).toBe(false);
+    expect(audioModelServesMode(plainSfx, "sfx")).toBe(true);
   });
 
   it("audioModelServesMode is empty-block / unknown-mode safe", () => {
@@ -290,8 +312,8 @@ describe("audio model eligibility (sc-13403)", () => {
     ];
     expect(generationModelsForType(liveCatalog, "audio").map((m) => m.id)).toEqual(["kokoro_82m", "acestep_v15_turbo"]);
 
-    // Fallback mirror: the constants.js audio entries resolve the same five models, and each still
-    // maps to its correct capability-driven mode (proves the fallback carries the discriminating fields).
+    // Fallback mirror: the constants.js audio entries resolve the same models, and each still maps to
+    // its correct capability-driven mode (proves the fallback carries the discriminating fields).
     const fallbackAudio = generationModelsForType(fallbackModels, "audio");
     expect(fallbackAudio.map((m) => m.id).sort()).toEqual(
       [
@@ -300,11 +322,13 @@ describe("audio model eligibility (sc-13403)", () => {
         "chatterbox_ve",
         "kokoro_82m",
         "moss_sfx_v2",
+        "moss_tts_realtime",
         "openvoice_v2",
       ].sort(),
     );
     const expectedMode = {
       kokoro_82m: "speech",
+      moss_tts_realtime: "speech",
       moss_sfx_v2: "sfx",
       acestep_v15_turbo: "music",
       openvoice_v2: "voiceclone",

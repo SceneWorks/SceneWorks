@@ -79,7 +79,10 @@ export function videoModelUsable(model, caps) {
 // Audio Studio — capability-driven per-mode eligibility, derived from the model's `audio`
 // sub-block (mirrors how videoModelServesMode reads video capabilities; no hardcoded ids).
 // Each seeded model maps to exactly one mode and fails the other three:
-//   * speech     — ships a voice bank (audio.voices[] non-empty). → Kokoro-82M.
+//   * speech     — a text-to-speech model: it either ships a voice bank (audio.voices[] non-empty →
+//                  Kokoro-82M) OR advertises streaming (audio.supportsStreaming → MOSS-TTS-Realtime,
+//                  sc-13675). A streaming TTS has no fixed voice list (it speaks in its own voice), so
+//                  the streaming capability is its speech signal — never a hardcoded id.
 //   * music      — advertises audio-editing ops (audio.editModes[]: inpaint/repaint/extend). → ACE-Step.
 //   * voiceclone — conditions on a reference / speaker-identity embedding
 //                  (audio.conditioning ⊇ ReferenceAudio | VoiceEmbedding). → OpenVoice V2, Chatterbox-VE.
@@ -91,6 +94,12 @@ function audioBlock(model) {
 
 function audioHasVoices(audio) {
   return Array.isArray(audio?.voices) && audio.voices.length > 0;
+}
+
+// A streaming TTS (backend Capabilities.supports_streaming, sc-13675). Its own speech signal: a
+// streaming text-to-speech model has no fixed voice bank, so it serves Speech on this flag instead.
+function audioSupportsStreaming(audio) {
+  return audio?.supportsStreaming === true;
 }
 
 function audioHasEditModes(audio) {
@@ -113,7 +122,7 @@ export function audioModelServesMode(model, mode) {
     return false;
   }
   if (mode === "speech") {
-    return audioHasVoices(audio);
+    return audioHasVoices(audio) || audioSupportsStreaming(audio);
   }
   if (mode === "music") {
     return audioHasEditModes(audio);
@@ -125,6 +134,7 @@ export function audioModelServesMode(model, mode) {
     return (
       audioGenerates(audio) &&
       !audioHasVoices(audio) &&
+      !audioSupportsStreaming(audio) &&
       !audioHasEditModes(audio) &&
       !audioHasVoiceCloneConditioning(audio)
     );

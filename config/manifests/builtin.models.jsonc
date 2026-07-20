@@ -8682,6 +8682,118 @@
       }
     },
     {
+      // MOSS-TTS-Realtime (sc-13675, epic 13400 E2) — the audio lane's first STREAMING TTS model:
+      // a Qwen3-1.7B autoregressive backbone + CSM-style local/depth transformer that emits 16 RVQ
+      // speech-codebook frames one block at a time, decoded to 24 kHz PCM by the separate
+      // MOSS-Audio-Tokenizer codec. Its `audio.supportsStreaming` mirrors the backend Capabilities
+      // (candle-audio-moss-tts-realtime descriptor: supports_streaming = true) — the single flag the
+      // Audio Studio reads to reveal incremental/progressive results (never a hardcoded id). It ships
+      // NO fixed voice bank (audio.voices absent), so it serves the Speech mode via the streaming
+      // signal rather than a voice list (modelEligibility.audioModelServesMode). Apache-2.0.
+      //
+      // Two pinned-revision downloads (the sc-13541 co-requisite pattern). The AR checkpoint is the
+      // primary; the ~7.1 GB MOSS-Audio-Tokenizer codec is a `coRequisite` the provider resolves at
+      // generate time via resolve_pinned_codec_snapshot() -> hf_get_pinned(OpenMOSS-Team/
+      // MOSS-Audio-Tokenizer @ 3cd226ba…). hf_get_pinned reads snapshots/<sha>/ and refuses a
+      // branch/tag, so a plain main-branch fetch would land in the wrong snapshot and offline
+      // generation would fail — both entries pin the exact 40-hex SHA the runtime resolves. The AR
+      // primary is pinned too because AR and codec are a MATCHED PAIR (the AR's 16-codebook RVQ frames
+      // are decoded by this exact codec revision); pinning both keeps a fresh install reproducible.
+      "id": "moss_tts_realtime",
+      "name": "MOSS-TTS-Realtime (Streaming Speech)",
+      "family": "moss_tts_realtime",
+      "type": "audio",
+      "macOnly": false,
+      "audio": {
+        "languages": [
+          "en",
+          "zh"
+        ],
+        "sampleRates": [
+          24000
+        ],
+        "maxDurationSecs": 2400,
+        "supportsMultiSpeaker": false,
+        "supportsStreaming": true
+      },
+      "downloads": [
+        {
+          // Primary: the AR backbone + local transformer (~4.66 GB single-file model.safetensors) plus
+          // the Qwen tokenizer. Pinned to the matched-pair revision the provider was ported against.
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-TTS-Realtime",
+          "revision": "6acbc7f161a0db71c291f2d0aaa9eee59334cab2",
+          "files": [
+            "config.json",
+            "model.safetensors",
+            "tokenizer.json",
+            "tokenizer_config.json"
+          ],
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "estimatedSizeBytes": 4675362142,
+          "footprint": {
+            "diskSizeBytes": 4675362142
+          }
+        },
+        {
+          // Co-requisite (sc-13675): the MOSS-Audio-Tokenizer codec — the separate ~7.1 GB RLFQ
+          // streaming codec (RVQ codes -> 24 kHz waveform) the provider resolves at generate time via
+          // resolve_pinned_codec_snapshot() -> hf_get_pinned(OpenMOSS-Team/MOSS-Audio-Tokenizer @
+          // 3cd226ba…, config.json + model.safetensors.index.json + the 2 shards). `revision` MUST be
+          // the full 40-hex SHA the resolver pins; predownloading it at that rev makes offline
+          // generation self-contained. Apache-2.0.
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-Audio-Tokenizer",
+          "revision": "3cd226ba2947efa357ef453bcad111b6eafba782",
+          "coRequisite": true,
+          "files": [
+            "config.json",
+            "model.safetensors.index.json",
+            "model-00001-of-00002.safetensors",
+            "model-00002-of-00002.safetensors"
+          ],
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "estimatedSizeBytes": 7098616442,
+          "footprint": {
+            "diskSizeBytes": 7098616442
+          }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-TTS-Realtime"
+      },
+      "candle": {
+        "minMemoryGb": 14,
+        "measured": false
+      },
+      "licenseUrl": "https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Realtime",
+      "ui": {
+        "label": "MOSS-TTS-Realtime (Streaming)",
+        "description": "MOSS-TTS-Realtime-1.7B streaming text-to-speech (Qwen3-1.7B autoregressive backbone + CSM-style local transformer, decoded by the MOSS-Audio-Tokenizer codec). Streams speech in incremental PCM chunks as it renders — the first audio arrives well before the full clip finishes. 24 kHz mono, English + Chinese. Candle-native on every platform (CPU / Accelerate). Apache-2.0.",
+        "recommendedFor": [
+          "speech"
+        ],
+        "promptGuide": {
+          "title": "MOSS-TTS-Realtime Guide",
+          "path": "/prompt-guides/moss-tts-realtime.md",
+          "sources": [
+            {
+              "label": "MOSS-TTS-Realtime (Hugging Face)",
+              "url": "https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Realtime"
+            }
+          ]
+        }
+      }
+    },
+    {
       "id": "openvoice_v2",
       "name": "OpenVoice V2 (Voice Conversion)",
       "family": "openvoice",

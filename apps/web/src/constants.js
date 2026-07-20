@@ -767,11 +767,12 @@ export const fallbackModels = [
       promptGuide: { title: "Wan2.2 VACE-Fun Prompt Guide", path: "/prompt-guides/wan-2-2-t2v-14b.md" },
     },
   },
-  // Audio models (epic 13400 A2/A3) — this mirrors the five `type:"audio"` catalog entries so the
+  // Audio models (epic 13400 A2/A3) — this mirrors the `type:"audio"` catalog entries so the
   // Audio Studio still has a model list when the live catalog (/api/v1/models) is unavailable. Each
   // entry carries only the `audio` capability fields the UI / eligibility predicates read: `voices`
-  // (speech), `editModes` (music), `conditioning` (voiceclone), and `sampleRates` (generation). See
-  // modelEligibility.js `audioModelServesMode` for the capability→mode mapping.
+  // (speech), `supportsStreaming` (streaming speech, sc-13675), `editModes` (music), `conditioning`
+  // (voiceclone), and `sampleRates` (generation). See modelEligibility.js `audioModelServesMode` for
+  // the capability→mode mapping.
   {
     id: "kokoro_82m",
     name: "Kokoro 82M (Speech)",
@@ -795,6 +796,27 @@ export const fallbackModels = [
       label: "Kokoro 82M",
       description:
         "Kokoro-82M text-to-speech (StyleTTS2 lineage) — the recommended Speech model. English voices (American + British), 24 kHz mono, up to ~30 s per clip. Candle-native on every platform. Apache-2.0.",
+    },
+  },
+  {
+    id: "moss_tts_realtime",
+    name: "MOSS-TTS-Realtime (Streaming Speech)",
+    type: "audio",
+    macOnly: false,
+    // supportsStreaming (backend Capabilities.supports_streaming, sc-13675) → serves the "speech" mode
+    // via the streaming signal rather than a voice bank: it ships NO fixed voices (a language-driven
+    // TTS), so audioModelServesMode reads supportsStreaming to keep it on Speech and off SFX.
+    audio: {
+      languages: ["en", "zh"],
+      sampleRates: [24000],
+      maxDurationSecs: 2400,
+      supportsMultiSpeaker: false,
+      supportsStreaming: true,
+    },
+    ui: {
+      label: "MOSS-TTS-Realtime (Streaming)",
+      description:
+        "MOSS-TTS-Realtime-1.7B streaming text-to-speech — streams speech in incremental chunks as it renders, so the first audio arrives before the clip finishes. 24 kHz mono, English + Chinese. Candle-native on every platform. Apache-2.0.",
     },
   },
   {
