@@ -27,6 +27,9 @@ name: Windows Candle worker
 # 14.51, sc-3676). The runner reuses its `_work` target dir, so candle compiles
 # once and is incremental across runs. The real-weight GPU smokes stay `#[ignore]`d
 # (the ~logic tests run driver-free); add `-- --ignored` by hand for a GPU pass.
+# Exception: `cuda_quant_smoke` (sc-13510) is weightless and fast, so it runs
+# un-ignored here — it exercises the patched candle-kernels quant kernels on the
+# real GPU every time this lane fires.
 #
 # Runner prerequisites: Windows 11 + NVIDIA driver, CUDA Toolkit 12.9, VS2022
 # BuildTools (MSVC 14.44), a Rust toolchain, registered with the `cuda` label.

@@ -47,3 +47,19 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = "warn"
+
+# Vendored multi-arch CUDA kernel override (sc-7544 / sc-13510). candle-kernels compiles the
+# GGUF quant/moe kernels into a static `libmoe.a` of SASS with ONE `-gencode` derived from
+# CUDA_COMPUTE_CAP — at the cap=80 packaging baseline that is an Ampere-only cubin with no PTX,
+# so on Blackwell (sm_120) every quantized matmul silently returns zeros. The inference repo
+# vendors candle-kernels with a multi-arch fatbin build.rs (sm_80 + sm_90 + sm_120 SASS +
+# compute_120 PTX; see crates/media/candle-gen/vendor/candle-kernels/VENDORED.md there), but a
+# Cargo `[patch]` only takes effect in the TOP-LEVEL workspace — inference's own patch does not
+# apply when SceneWorks builds the graph, which is how the sc-7544 fix silently dropped out at
+# the candle-gen -> inference cutover. This patch re-applies it for every SceneWorks build.
+#
+# The rev MUST stay in lockstep with the inference pins in crates/sceneworks-worker/Cargo.toml
+# (scripts/bump-inference.mjs rewrites both; crates/sceneworks-worker/tests/
+# candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
+[patch."https://github.com/huggingface/candle"]
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "d68b8b45" }
