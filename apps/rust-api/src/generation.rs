@@ -653,6 +653,59 @@ pub(crate) async fn create_video_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
+/// `POST /api/v1/audio/jobs` — the SceneWorks Audio Studio job path (epic 13400 / sc-13404), the
+/// audio analogue of [`create_video_job`]. Validates the request, resolves + injects the model's
+/// merged manifest entry (so the worker never re-parses the jsonc, exactly as the image/video routes
+/// do — sc-1653/sc-12300), asserts the model is an `audio`-type model, and enqueues an
+/// `audio_generate` job. The worker builds the `GenerationRequest { audio: Some(AudioParams{..}) }`
+/// from this payload and dispatches it through the runtime's candle audio registry to the
+/// `Modality::Audio` generator.
+///
+/// Deliberately simpler than the video route: audio has no recipe-preset / LoRA / duration-fps
+/// resolution — its knobs (`voice` / `language` / `targetDurationSecs`) go straight through to the
+/// worker's `AudioParams`, and the model's declared duration/voice/language surface is enforced by
+/// the shared gen-core validation floor at generate time.
+pub(crate) async fn create_audio_job(
+    State(state): State<AppState>,
+    ApiJson(payload): ApiJson<AudioJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_audio_job(&payload)?;
+    let requested_gpu = payload.requested_gpu.clone();
+    let project_id = Some(payload.project_id.clone());
+    let project_name = payload.project_name.clone();
+    let mut job_payload = to_json_object(&payload)?;
+    job_payload.remove("requestedGpu");
+    // Resolve the model manifest entry here so the audio worker never re-parses the jsonc — Rust owns
+    // manifest parsing/merging (story 1653), mirroring create_image_job / create_video_job. Keyed off
+    // the request model (audio has no preset that could replace it, so payload.model is authoritative).
+    let model_id = payload.model.clone();
+    let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    // The audio route only serves `type: audio` models. An unknown id resolves to `{}` (no type), and
+    // a mis-typed id (an image/video model posted here) is rejected up front rather than failing deep
+    // in the worker's audio lane with an opaque "no generator registered" — the typed-route contract
+    // (a door per media kind). The seeded audio models all declare `type: audio` (sc-13402).
+    let entry_type = model_manifest_entry
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if entry_type != "audio" {
+        return Err(ApiError::bad_request(format!(
+            "Model {model_id} is not an audio model (type: \"audio\" required)"
+        )));
+    }
+    job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
+    let job = create_generation_job(
+        state,
+        JobType::AudioGenerate,
+        project_id,
+        project_name,
+        job_payload,
+        requested_gpu,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
 /// A resolved `duration` in the payload's `ContractNumber` (= `serde_json::Number`) shape: an
 /// integral value stays integral.
 ///
@@ -701,6 +754,10 @@ pub(crate) fn typed_generation_route(job_type: &JobType) -> Option<&'static str>
         | JobType::VideoExtend
         | JobType::VideoBridge
         | JobType::PersonReplace => Some("/api/v1/video/jobs"),
+        // The audio route resolves + injects the model's manifest entry (sc-13404), so — like the
+        // image/video routes — an `audio_generate` job enqueued raw through the generic
+        // `POST /api/v1/jobs` would reach the worker without its entry. One door per generation kind.
+        JobType::AudioGenerate => Some("/api/v1/audio/jobs"),
         _ => None,
     }
 }

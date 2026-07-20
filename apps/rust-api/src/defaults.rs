@@ -126,6 +126,13 @@ pub(crate) fn default_video_model() -> String {
     "ltx_2_3".to_owned()
 }
 
+/// The default audio model a `POST /api/v1/audio/jobs` resolves when the caller names none
+/// (SceneWorks Audio Studio, epic 13400 / sc-13404). Kokoro-82M is the recommended Speech model
+/// (`recommended: true` in the seeded manifest), 24 kHz mono TTS, Candle-native on every platform.
+pub(crate) fn default_audio_model() -> String {
+    "kokoro_82m".to_owned()
+}
+
 // No `default_video_duration` either, and for a sharper reason than fps: the blanket 6.0 that used
 // to live here is past the `hardMaxDuration` of 7 of the 10 shipped video models, so once sc-12297
 // began enforcing that cap, this default made the API reject its own duration-less requests

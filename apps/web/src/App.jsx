@@ -55,6 +55,7 @@ import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
 import {
   buildLocalJobStack,
   isActiveWorker,
+  isAudioGenerationJob,
   isImageGenerationJob,
   isInterleaveJob,
   isPlaceholderOnlyGpuWorker,
@@ -390,7 +391,7 @@ export function App() {
   // once here, stays mounted (hidden) across navigation so its state survives.
   const [visitedKeepAliveViews, setVisitedKeepAliveViews] = useState(() => new Set());
   const [jobs, setJobs] = useState([]);
-  const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [], document: [] });
+  const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [], audio: [], document: [] });
   const [workers, setWorkers] = useState([]);
   const [queueSummary, setQueueSummary] = useState(null);
   // Mac UI gating (sc-3486): inert until the capabilities endpoint reports macGatingActive.
@@ -662,6 +663,37 @@ export function App() {
     [token, activeProject, requestedGpu],
   );
 
+  // SceneWorks Audio Studio (epic 13400 / sc-13404): the audio analogue of createVideoJob. POSTs to
+  // the typed /api/v1/audio/jobs endpoint, which resolves + injects the model's manifest entry and
+  // enqueues an `audio_generate` job the worker routes to the candle audio lane. `payload` carries
+  // { modelId → model, prompt, voice, language, targetDurationSecs, seed }.
+  const createAudioJob = useCallback(
+    async (payload) => {
+      if (!activeProject) {
+        setError("Create or open a project first.");
+        return null;
+      }
+      try {
+        const job = await apiFetch("/api/v1/audio/jobs", token, {
+          method: "POST",
+          body: JSON.stringify({
+            ...payload,
+            projectId: activeProject.id,
+            projectName: activeProject.name,
+            requestedGpu,
+          }),
+        });
+        setJobs((items) => upsertJobNewest(items, job));
+        setError("");
+        return job;
+      } catch (err) {
+        setError(err.message);
+        return null;
+      }
+    },
+    [token, activeProject, requestedGpu],
+  );
+
   const {
     characters,
     setCharacters,
@@ -894,6 +926,10 @@ export function App() {
   const videoLocalJobs = useMemo(
     () => buildLocalJobStack(localGenerationJobIds.video, jobs, activeProject?.id, isVideoGenerationJob),
     [activeProject?.id, jobs, localGenerationJobIds.video],
+  );
+  const audioLocalJobs = useMemo(
+    () => buildLocalJobStack(localGenerationJobIds.audio, jobs, activeProject?.id, isAudioGenerationJob),
+    [activeProject?.id, jobs, localGenerationJobIds.audio],
   );
   const documentLocalJobs = useMemo(
     () => buildLocalJobStack(localGenerationJobIds.document, jobs, activeProject?.id, isInterleaveJob),
@@ -2174,6 +2210,7 @@ export function App() {
     filteredJobs,
     imageLocalJobs,
     videoLocalJobs,
+    audioLocalJobs,
     documentLocalJobs,
     // Workers / GPU (high-churn — new identity per worker SSE tick)
     visibleWorkers,
@@ -2181,7 +2218,7 @@ export function App() {
     personReadiness,
     gpuOptions,
   }), [
-    jobs, filteredJobs, imageLocalJobs, videoLocalJobs, documentLocalJobs,
+    jobs, filteredJobs, imageLocalJobs, videoLocalJobs, audioLocalJobs, documentLocalJobs,
     visibleWorkers, workersById, personReadiness, gpuOptions,
   ]);
 
@@ -2235,6 +2272,7 @@ export function App() {
     createVideoJob,
     createVideoUpscaleJob,
     createImageJob,
+    createAudioJob,
     refinePrompt,
     magicPrompt,
     imageCaption,
@@ -2361,7 +2399,7 @@ export function App() {
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobAction, clearCompletedJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects,
-    createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
+    createVideoJob, createVideoUpscaleJob, createImageJob, createAudioJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, studioLaunch,
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
     rememberLocalGenerationJob, personTracks, createPersonDetectionJob,

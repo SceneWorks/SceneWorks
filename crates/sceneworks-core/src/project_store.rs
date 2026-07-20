@@ -3676,6 +3676,7 @@ fn build_generated_asset_sidecar(
         });
     let (file, recipe, lineage) = match media_type.as_str() {
         "video" => build_video_sidecar_parts(job_id, fact),
+        "audio" => build_audio_sidecar_parts(job_id, fact),
         "document" => build_document_sidecar_parts(job_id, fact),
         _ => build_image_sidecar_parts(job_id, fact),
     };
@@ -3878,6 +3879,65 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         "replacementMode": get("replacementMode"),
         "sourceTimestamp": Value::Null,
         "timeline": fact.get("timelineContext").cloned().unwrap_or_else(|| json!({})),
+        "jobId": job_id,
+    });
+    (file, recipe, lineage)
+}
+
+/// `(file, recipe, lineage)` for a generated audio asset (SceneWorks Audio Studio, epic 13400 /
+/// sc-13404) — the audio twin of [`build_video_sidecar_parts`]. The worker writes a WAV (via
+/// `write_wav_pcm16`) and reports the measured `duration`/`sampleRate`/`channels` off the produced
+/// `AudioTrack`, so the `file` block is honest about what is on disk; the recipe's
+/// `normalizedSettings` round-trips the ASK (voice / language / targetDuration) so "re-run this
+/// generation" can rebuild the payload. A pure-audio asset has no width/height (unlike an image or
+/// video), so those are null.
+fn build_audio_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value) {
+    let get = |key: &str| fact.get(key).cloned().unwrap_or(Value::Null);
+    let parents = fact
+        .get("parents")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| match fact.get("sourceAssetId").and_then(Value::as_str) {
+            Some(source) => vec![Value::String(source.to_owned())],
+            None => Vec::new(),
+        });
+    let file = json!({
+        "path": get("mediaPath"),
+        "mimeType": get("mimeType"),
+        "width": Value::Null,
+        "height": Value::Null,
+        // MEASURED off the produced AudioTrack (the WAV on disk), mirroring the video file block's
+        // encoded facts. `duration` is the clip's real running time in seconds; `sampleRate` and
+        // `channels` describe the PCM the worker wrote.
+        "duration": get("duration"),
+        "fps": Value::Null,
+        "sampleRate": get("sampleRate"),
+        "channels": get("channels"),
+    });
+    let recipe = json!({
+        "mode": get("mode"),
+        "model": get("model"),
+        "adapter": get("adapter"),
+        "prompt": get("prompt"),
+        "negativePrompt": get("negativePrompt"),
+        "seed": get("seed"),
+        "loras": fact.get("loras").cloned().unwrap_or_else(|| json!([])),
+        // The REPLAY record: the audio knobs the user picked (voice / language / requested
+        // duration) so a re-run rebuilds the same request. `sampleRate` records the rate actually
+        // produced (Kokoro's native 24 kHz today).
+        "normalizedSettings": {
+            "voice": get("voice"),
+            "language": get("language"),
+            "targetDurationSecs": get("targetDurationSecs"),
+            "sampleRate": get("sampleRate"),
+            "family": get("family"),
+        },
+        "rawAdapterSettings": fact.get("rawAdapterSettings").cloned().unwrap_or_else(|| json!({})),
+    });
+    let lineage = json!({
+        "parents": parents,
+        "sourceAssetId": get("sourceAssetId"),
+        "sourceTimestamp": Value::Null,
         "jobId": job_id,
     });
     (file, recipe, lineage)
@@ -5829,6 +5889,57 @@ mod tests {
         let asset = build_generated_asset_sidecar("project-1", "job-1", "genset_y", &fact);
         assert_eq!(asset["type"], json!("video"));
         assert_eq!(asset["file"]["mimeType"], json!("video/mp4"));
+    }
+
+    /// sc-13404: an audio fact assembles a `type: "audio"` asset whose `file` block carries the
+    /// measured duration/sampleRate/channels (no width/height/fps) and whose recipe round-trips the
+    /// requested voice/language. Mirrors the video-type derivation test.
+    #[test]
+    fn build_generated_asset_sidecar_assembles_audio() {
+        let fact = json!({
+            "type": "audio",
+            "assetId": "asset_a",
+            "mediaPath": "assets/audios/genset_z/hello.wav",
+            "mimeType": "audio/wav",
+            "duration": 3.25,
+            "sampleRate": 24_000,
+            "channels": 1,
+            "family": "kokoro",
+            "displayName": "Hello from SceneWorks audio.",
+            "model": "kokoro_82m",
+            "adapter": "kokoro",
+            "prompt": "Hello from SceneWorks audio.",
+            "voice": "af_heart",
+            "language": "en-US",
+            "targetDurationSecs": 3.0,
+            "seed": 42,
+        });
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset_z", &fact);
+        assert_eq!(asset["type"], json!("audio"));
+        // Origin is derived to the Audio Studio, not the image_studio catch-all.
+        assert_eq!(asset["origin"], json!("audio_studio"));
+        // File block: measured audio facts, no width/height/fps.
+        assert_eq!(asset["file"]["mimeType"], json!("audio/wav"));
+        assert_eq!(asset["file"]["duration"], json!(3.25));
+        assert_eq!(asset["file"]["sampleRate"], json!(24_000));
+        assert_eq!(asset["file"]["channels"], json!(1));
+        assert_eq!(asset["file"]["width"], Value::Null);
+        assert_eq!(asset["file"]["fps"], Value::Null);
+        // Recipe replays the requested knobs.
+        assert_eq!(asset["recipe"]["model"], json!("kokoro_82m"));
+        assert_eq!(
+            asset["recipe"]["normalizedSettings"]["voice"],
+            json!("af_heart")
+        );
+        assert_eq!(
+            asset["recipe"]["normalizedSettings"]["language"],
+            json!("en-US")
+        );
+        assert_eq!(
+            asset["recipe"]["normalizedSettings"]["targetDurationSecs"],
+            json!(3.0)
+        );
+        assert_eq!(asset["lineage"]["jobId"], json!("job-1"));
     }
 
     #[test]

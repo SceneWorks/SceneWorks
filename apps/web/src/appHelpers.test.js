@@ -6,6 +6,7 @@ import {
   generatedResultAssetCount,
   hasCapability,
   isActiveWorker,
+  isAudioGenerationJob,
   isImageGenerationJob,
   isInterleaveJob,
   isPlaceholderOnlyGpuWorker,
@@ -48,10 +49,14 @@ describe("worker classification", () => {
 });
 
 describe("job classification + notices", () => {
-  it("classifies image / video / interleave jobs", () => {
+  it("classifies image / video / audio / interleave jobs", () => {
     expect(isImageGenerationJob({ type: "image_generate" })).toBe(true);
     expect(isImageGenerationJob({ type: "video_generate" })).toBe(false);
     expect(isVideoGenerationJob({ type: "video_bridge" })).toBe(true);
+    // SceneWorks Audio Studio (sc-13404): the audio-generation job type.
+    expect(isAudioGenerationJob({ type: "audio_generate" })).toBe(true);
+    expect(isAudioGenerationJob({ type: "video_generate" })).toBe(false);
+    expect(isVideoGenerationJob({ type: "audio_generate" })).toBe(false);
     expect(isInterleaveJob({ type: "image_interleave" })).toBe(true);
     expect(isInterleaveJob({ type: "image_generate" })).toBe(false);
   });
@@ -134,6 +139,21 @@ describe("buildLocalJobStack", () => {
   it("returns an empty stack when there is no active project", () => {
     const jobs = [{ id: "a", type: "image_generate", projectId: "p1", status: "running", createdAt: "2026-01-01T00:00:00Z" }];
     expect(buildLocalJobStack([], jobs, null, isGen)).toEqual([]);
+  });
+
+  it("builds the audio local-job lane from audio_generate jobs only (sc-13404)", () => {
+    // The `audio` lane (rememberLocalGenerationJob('audio', job)) filters with isAudioGenerationJob,
+    // so a co-resident image/video job in the same project never leaks into the audio stack.
+    const jobs = [
+      { id: "speak", type: "audio_generate", projectId: "p1", status: "running", createdAt: "2026-01-03T00:00:00Z" },
+      { id: "pic", type: "image_generate", projectId: "p1", status: "running", createdAt: "2026-01-04T00:00:00Z" },
+      { id: "clip", type: "video_generate", projectId: "p1", status: "running", createdAt: "2026-01-05T00:00:00Z" },
+    ];
+    const stack = buildLocalJobStack(["speak"], jobs, "p1", isAudioGenerationJob);
+    const ids = stack.map((job) => job.id);
+    expect(ids).toContain("speak");
+    expect(ids).not.toContain("pic");
+    expect(ids).not.toContain("clip");
   });
 });
 

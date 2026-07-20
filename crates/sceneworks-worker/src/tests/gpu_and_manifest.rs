@@ -310,6 +310,11 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         WorkerCapability::VideoUpscale,
         WorkerCapability::PersonDetect,
         WorkerCapability::PersonTrack,
+        // sc-13404: pure audio synthesis (Kokoro TTS) — the `runtime-macos` bundle ships the candle
+        // audio lane default-on (`catalog().audio()`), so mlx_gpu advertises `audio_generate` when the
+        // lane is linked (it always is on Mac). Advertised explicitly like the other carve-outs (the
+        // audio generators live in a separate registry from the media graph registry_capabilities reads).
+        WorkerCapability::AudioGenerate,
     ]
     .into_iter()
     .collect();

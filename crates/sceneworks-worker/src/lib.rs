@@ -146,6 +146,12 @@ mod sensenova_jobs;
 use sensenova_jobs::*;
 mod video_jobs;
 use video_jobs::*;
+// Pure audio generation — the SceneWorks Audio Studio job path (epic 13400 / sc-13404). Compiled on
+// every platform (the dispatch arm is uniform); the actual candle audio lane is resolved through
+// `inference_runtime::load_audio`, which errors clearly on a build that ships no audio registry (a
+// non-native desktop worker never advertises `audio_generate`, so the arm is unreachable there).
+mod audio_jobs;
+use audio_jobs::*;
 // Replace-person mask pipeline (epic 3040, sc-3521): cross-platform mask rasterization /
 // resample / stored-seg-mask load, so the mask-port-vs-Python parity test runs on the
 // Linux CI lane. Its masks are consumed only by the macOS Wan-VACE path in `video_jobs`,
@@ -1251,6 +1257,15 @@ async fn run_utility_job(
             JobType::PersonReplace => run_video_generate_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Person replacement failed.", error)),
+            // Pure audio synthesis (SceneWorks Audio Studio, epic 13400 / sc-13404): Kokoro TTS (and
+            // future SFX/music) served in-process by the runtime's candle audio lane
+            // (`inference_runtime::load_audio` → `catalog().audio()`). Advertised only by a worker
+            // that links the audio registry (the macOS mlx worker, whose `runtime-macos` bundle ships
+            // it default-on); a worker without the lane never advertises `audio_generate`, so this arm
+            // is unreachable there and the job stays queued for a capable worker.
+            JobType::AudioGenerate => run_audio_generate_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Audio generation failed.", error)),
             // Native MLX LoRA/LoKr training (epic 3039, sc-3043/3049), served in-process
             // by the linked mlx-gen engine on the macOS Apple-Silicon GPU worker. The API
             // routes only MLX-native families here (jobs_store::training_job_is_mlx_eligible);

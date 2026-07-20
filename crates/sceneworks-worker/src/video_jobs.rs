@@ -125,11 +125,13 @@ struct RgbFrame {
     pixels: Vec<u8>,
 }
 
-/// Interleaved PCM audio — the engine's `AudioTrack` (LTX-2.3 synchronized audio).
-struct AudioTrack {
-    samples: Vec<f32>,
-    sample_rate: u32,
-    channels: u16,
+/// Interleaved PCM audio — the engine's `AudioTrack` (LTX-2.3 synchronized audio). `pub(crate)` so
+/// the pure-audio job path (`audio_jobs`, sc-13404) reuses the same shape + the `write_wav_pcm16`
+/// writer below for its Kokoro output rather than duplicating the WAV plumbing.
+pub(crate) struct AudioTrack {
+    pub(crate) samples: Vec<f32>,
+    pub(crate) sample_rate: u32,
+    pub(crate) channels: u16,
 }
 
 /// The native (MLX) video engine a `run_video_generate_job` request routes to — the routing DECISION,
@@ -1126,8 +1128,9 @@ async fn encode_inner(
 }
 
 /// Peak-normalize the f32 PCM to 16-bit and write a canonical WAV. Silence (peak 0)
-/// stays silent rather than dividing by zero.
-fn write_wav_pcm16(audio: &AudioTrack, path: &Path) -> WorkerResult<()> {
+/// stays silent rather than dividing by zero. `pub(crate)` so the pure-audio job path reuses it
+/// (sc-13404).
+pub(crate) fn write_wav_pcm16(audio: &AudioTrack, path: &Path) -> WorkerResult<()> {
     let peak = audio
         .samples
         .iter()

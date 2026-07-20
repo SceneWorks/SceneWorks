@@ -875,6 +875,43 @@ pub(crate) struct VideoJobRequest {
     pub(crate) advanced: JsonObject,
 }
 
+/// A `POST /api/v1/audio/jobs` request (SceneWorks Audio Studio, epic 13400 / sc-13404). The audio
+/// analogue of [`VideoJobRequest`]: `prompt` is the script text, and the typed audio knobs (`voice`
+/// / `language` / `targetDurationSecs`) map to the worker-side [`gen_core::AudioParams`] sub-block a
+/// `Modality::Audio` generator reads. Every audio knob is optional — an omitted voice/language
+/// falls back to the model's default (Kokoro's `af_heart`, `en`), and an omitted duration lets the
+/// model synthesize its natural length. `Serialize` too so the whole request round-trips into the
+/// job payload the worker claims (mirroring how the video request is `to_json_object`'d).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AudioJobRequest {
+    pub(crate) project_id: String,
+    #[serde(default)]
+    pub(crate) project_name: Option<String>,
+    pub(crate) prompt: String,
+    #[serde(default = "default_audio_model")]
+    pub(crate) model: String,
+    /// Voice / speaker id (e.g. Kokoro's `af_heart`). `None` ⇒ the model's default voice. Gated
+    /// against the model's advertised `audio.voices` by the worker's shared validation floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) voice: Option<String>,
+    /// Language code in the manifest's BCP-47 display casing (e.g. `"en-US"`). The worker lowercases
+    /// it to what the Generator accepts (`en` / `en-us` / `en-gb`) — the language-casing seam
+    /// (sc-13404). `None` ⇒ the model derives the accent from the voice id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) language: Option<String>,
+    /// Requested clip length in seconds. `None` ⇒ the model's natural length. Range-checked against
+    /// the model's advertised `audio.maxDurationSecs` by the worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) target_duration_secs: Option<f32>,
+    #[serde(default)]
+    pub(crate) seed: Option<i64>,
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    #[serde(default)]
+    pub(crate) advanced: JsonObject,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModelDownloadRequest {

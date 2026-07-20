@@ -58,6 +58,45 @@ pub(crate) fn media() -> &'static ProviderRegistry {
     }
 }
 
+/// The runtime's dedicated **candle audio** provider registry (SceneWorks Audio Studio, epic 13400 /
+/// sc-13404), or `None` when this build ships no audio lane. Audio is candle-native on every platform
+/// and rides a separate registry from [`media`] (the mlx media graph on macOS): the `runtime-macos`
+/// bundle carries it default-on (`default = ["media", "audio"]`, sc-12835), so the macOS GPU worker
+/// links it without any feature wiring here. The non-native desktop build has no catalog at all, so
+/// it returns `None` (an audio job never routes there — the capability is never advertised).
+pub(crate) fn audio() -> Option<&'static ProviderRegistry> {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        catalog().audio()
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        None
+    }
+}
+
+/// Load an audio [`Generator`] by id from the runtime's candle audio registry (sc-13404). Errors
+/// clearly when this build ships no audio lane, mirroring how [`load`] resolves a media generator —
+/// the audio worker turns this into a loud job failure rather than a silent no-op.
+pub(crate) fn load_audio(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Generator>> {
+    audio()
+        .ok_or_else(|| {
+            gen_core::Error::Msg(
+                "no audio lane is linked in this runtime build (the candle audio registry is \
+                 unavailable)"
+                    .to_owned(),
+            )
+        })?
+        .load(id, spec)
+}
+
 pub(crate) fn text() -> &'static TextLlmRegistry {
     #[cfg(any(
         target_os = "macos",

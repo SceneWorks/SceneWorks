@@ -159,6 +159,10 @@ pub(crate) fn derive_origin(mode: &str, asset_type: &str) -> &'static str {
         "upload" => "upload",
         _ => match asset_type {
             "video" => "video_studio",
+            // SceneWorks Audio Studio (epic 13400 / sc-13404) — the audio twin of video_studio, so
+            // a generated Kokoro/TTS clip surfaces with its own origin rather than the image_studio
+            // catch-all.
+            "audio" => "audio_studio",
             "document" => "document_studio",
             _ => "image_studio",
         },

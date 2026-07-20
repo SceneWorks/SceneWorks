@@ -220,6 +220,13 @@ string_enum! {
         PersonDetect => "person_detect",
         PersonTrack => "person_track",
         PersonReplace => "person_replace",
+        // Pure audio synthesis (SceneWorks Audio Studio, epic 13400; sc-13404). A candle-native
+        // text-to-audio job (Kokoro TTS today) served through the runtime's dedicated candle audio
+        // lane (`catalog().audio()`, sc-12835) — distinct from the mlx media graph the image/video
+        // job types drive. Routed to a worker advertising `WorkerCapability::AudioGenerate`; the
+        // worker builds a `GenerationRequest` with the typed `AudioParams` sub-block and dispatches
+        // it through the audio registry to the `Modality::Audio` generator.
+        AudioGenerate => "audio_generate",
         // Whole-body DWPose keypoint detection (photo -> body/hands/face) for the
         // Pose Library (epic 2282). onnxruntime-backed like person_detect; advertised
         // by the Python worker, routed via requested_gpu (not in NON_GPU_JOB_TYPES).
@@ -378,6 +385,12 @@ string_enum! {
         PersonDetect => "person_detect",
         PersonTrack => "person_track",
         PersonReplace => "person_replace",
+        // Pure audio synthesis (SceneWorks Audio Studio, epic 13400; sc-13404). Advertised by a
+        // worker that links the runtime's candle audio lane (`catalog().audio()`, sc-12835) — on
+        // macOS the mlx GPU worker, whose `runtime-macos` bundle ships the audio lane default-on
+        // (audio is candle-native on every platform). A worker without the lane never advertises it,
+        // so an `audio_generate` job stays queued rather than mis-claimed. See gpu.rs `mlx_gpu`.
+        AudioGenerate => "audio_generate",
         // Whole-body DWPose keypoint detection (Pose Library, epic 2282). Advertised
         // by the native GPU worker (MLX on macOS / candle off-Mac) when its pose
         // backend is linked; the Rust CPU utility worker never emits it. See
