@@ -2353,6 +2353,94 @@ async fn model_download_job_enqueues_co_requisite_dependencies() {
 }
 
 #[tokio::test]
+async fn model_download_job_forwards_pinned_revision_for_co_requisite() {
+    // sc-13541: a co-requisite whose weight the runtime resolves via a pinned-SHA `hf_get_pinned`
+    // (chatterbox_tts's ve/perth) must have its `revision` forwarded to the download job, so the worker
+    // fetches that exact commit into `snapshots/<sha>/` — where the resolver reads offline. The planner
+    // historically dropped `revision` and the worker defaulted to `main`, which would populate the wrong
+    // snapshot. The primary download declares NO revision and must keep the `main` default (no
+    // `revision` key), so this change is additive and can't perturb the other seeded models.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "models": [{
+                "id": "chatterbox_tts",
+                "name": "Chatterbox",
+                "type": "audio",
+                "family": "chatterbox",
+                "downloads": [
+                  { "provider": "huggingface", "repo": "ResembleAI/chatterbox", "files": ["t3_cfg.safetensors"] },
+                  { "provider": "huggingface", "repo": "ResembleAI/chatterbox", "revision": "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18", "coRequisite": true, "files": ["ve.safetensors"] },
+                  { "provider": "huggingface", "repo": "SceneWorks/perth-implicit", "revision": "80b60f9caead09b8d3b512bda0b24038f28c08ec", "coRequisite": true, "files": ["perth_implicit.safetensors"] }
+                ]
+              }]
+            }
+            "#,
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, primary) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/chatterbox_tts/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // The primary download stays on main: no `revision` key is forwarded.
+    assert_eq!(primary["payload"]["repo"], "ResembleAI/chatterbox");
+    assert!(
+        primary["payload"]
+            .get("revision")
+            .map_or(true, Value::is_null),
+        "the primary download must not carry a pinned revision (defaults to main)"
+    );
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    let download_jobs = jobs
+        .as_array()
+        .expect("jobs is an array")
+        .iter()
+        .filter(|job| job["type"] == "model_download")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        download_jobs.len(),
+        3,
+        "the primary plus its two pinned companion co-requisites each get a download job"
+    );
+    for (repo, files, sha) in [
+        (
+            "ResembleAI/chatterbox",
+            "ve.safetensors",
+            "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
+        ),
+        (
+            "SceneWorks/perth-implicit",
+            "perth_implicit.safetensors",
+            "80b60f9caead09b8d3b512bda0b24038f28c08ec",
+        ),
+    ] {
+        let job = download_jobs
+            .iter()
+            .find(|job| job["payload"]["repo"] == repo && job["payload"]["files"][0] == files)
+            .unwrap_or_else(|| panic!("a download job for the {repo} co-requisite is enqueued"));
+        assert_eq!(
+            job["payload"]["revision"], sha,
+            "the {repo} co-requisite job must forward its pinned revision so the worker fetches the \
+             exact snapshot the runtime resolver reads offline"
+        );
+    }
+}
+
+#[tokio::test]
 async fn model_catalog_gates_install_state_on_co_requisite() {
     // sc-9696: the entry is "installed" only when the primary AND every co-requisite are cached.
     // Primary present but the gemma-2-2b-it caption encoder missing → not-installed + repairable, so
@@ -3016,6 +3104,123 @@ fn builtin_manifest_registers_wan_a14b_lightning_corequisite() {
         assert!(
             lightning.get("variant").is_none(),
             "{model_id} Lightning coRequisite is not a quant tier"
+        );
+    }
+}
+
+#[test]
+fn builtin_manifest_pins_chatterbox_companion_corequisites() {
+    // sc-13541 (epic 13400 / E1 follow-up): the chatterbox_tts generator resolves two companion
+    // weights at generate() time via pinned-SHA `hf_get_pinned` fetches, NOT from its snapshot dir —
+    // the ve.safetensors speaker embedder (ResembleAI/chatterbox @ 5bb1f6ee…) and the PerTh
+    // watermarker (SceneWorks/perth-implicit @ 80b60f9c…; generate() ALWAYS watermarks, so a missing
+    // PerTh weight is a hard error). Both must install as `coRequisite` downloads pinned to the EXACT
+    // full 40-hex commit SHA the resolver uses: `hf_get_pinned` refuses a branch/tag/short SHA and
+    // reads `models--<org>--<name>/snapshots/<sha>/`, so a main-branch predownload lands in the wrong
+    // snapshot and offline generation fails. This test guards both the presence AND the exact pinned
+    // revisions (a SHA drift here silently reintroduces the offline gap this story closed).
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../config/manifests/builtin.models.jsonc");
+    let raw = std::fs::read_to_string(&manifest_path).expect("read builtin.models.jsonc");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(&raw)).expect("parse builtin.models.jsonc");
+    let models = manifest["models"].as_array().expect("models array");
+    let chatterbox = models
+        .iter()
+        .find(|entry| entry["id"] == "chatterbox_tts")
+        .expect("chatterbox_tts is registered in the catalog");
+    let downloads = chatterbox["downloads"].as_array().expect("downloads array");
+
+    // The primary download (the three files the generator loads from its snapshot dir) is NOT a
+    // co-requisite and carries NO revision — it stays on `main`, unchanged by this story.
+    let primary = downloads
+        .iter()
+        .find(|download| download.get("coRequisite").and_then(Value::as_bool) != Some(true))
+        .expect("chatterbox_tts has a primary download");
+    assert_eq!(primary["repo"], "ResembleAI/chatterbox");
+    assert!(
+        primary.get("revision").is_none(),
+        "the primary chatterbox download must stay on main (no pinned revision)"
+    );
+
+    // (repo, file, expected full-SHA revision) for each companion co-requisite. The SHAs are the exact
+    // pins in the inference resolvers at the SceneWorks-pinned inference commit:
+    //   ve   -> candle_audio_chatterbox_ve::{HUB_REPO, HUB_REVISION}      (crates/audio/candle-audio-chatterbox-ve/src/model.rs)
+    //   perth-> candle_audio_chatterbox::perth::{PERTH_HUB_REPO, PERTH_HUB_REVISION} (crates/audio/candle-audio-chatterbox/src/perth.rs)
+    // This test hardcodes them (it cannot link the git-dep consts), so a drift between the manifest and
+    // the resolver still needs the offline DoD smoke (voiceclone_smoke.rs) to catch it end to end.
+    let cases = [
+        (
+            "ResembleAI/chatterbox",
+            "ve.safetensors",
+            "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
+        ),
+        (
+            "SceneWorks/perth-implicit",
+            "perth_implicit.safetensors",
+            "80b60f9caead09b8d3b512bda0b24038f28c08ec",
+        ),
+    ];
+    let co_requisites: Vec<&Value> = downloads
+        .iter()
+        .filter(|download| download.get("coRequisite").and_then(Value::as_bool) == Some(true))
+        .collect();
+    assert_eq!(
+        co_requisites.len(),
+        cases.len(),
+        "chatterbox_tts declares exactly the ve + PerTh companion co-requisites"
+    );
+    for (repo, file, sha) in cases {
+        let entry = co_requisites
+            .iter()
+            .find(|download| download["repo"] == repo && download["files"][0] == file)
+            .unwrap_or_else(|| panic!("chatterbox_tts declares the {repo} / {file} co-requisite"));
+        assert_eq!(entry["provider"], "huggingface");
+        let files: Vec<&str> = entry["files"]
+            .as_array()
+            .expect("co-requisite files array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(
+            files,
+            vec![file],
+            "{repo} co-requisite fetches exactly the one companion weight"
+        );
+        let revision = entry["revision"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{repo} co-requisite pins a revision"));
+        assert_eq!(
+            revision, sha,
+            "{repo} co-requisite must pin the exact SHA the runtime's hf_get_pinned resolves"
+        );
+        // hf_get_pinned rejects anything but a full 40-hex commit SHA, so a short/branch revision would
+        // resolve online but hard-fail offline — assert the shape the resolver requires.
+        assert_eq!(
+            revision.len(),
+            40,
+            "{repo} revision must be a full commit SHA"
+        );
+        assert!(
+            revision.chars().all(|c| c.is_ascii_hexdigit()),
+            "{repo} revision must be a hex commit SHA"
+        );
+        // A co-requisite is never a selectable quant tier, and it must be fetched on every platform the
+        // model supports (candle-native everywhere), matching the primary download's platform set.
+        assert!(
+            entry.get("variant").is_none(),
+            "{repo} co-requisite is not a quant tier"
+        );
+        let platforms: Vec<&str> = entry["platforms"]
+            .as_array()
+            .expect("co-requisite platforms array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(
+            platforms,
+            vec!["macos", "windows", "linux"],
+            "{repo} co-requisite installs on every platform"
         );
     }
 }

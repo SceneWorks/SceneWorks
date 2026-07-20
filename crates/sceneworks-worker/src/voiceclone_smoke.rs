@@ -29,8 +29,8 @@
 use std::path::{Path, PathBuf};
 
 use gen_core::{
-    AudioParams, AudioTransformRequest, CancelFlag, GenerationOutput, GenerationRequest, LoadSpec,
-    Progress, WeightsSource,
+    AudioParams, AudioTransformRequest, CancelFlag, Conditioning, GenerationOutput,
+    GenerationRequest, LoadSpec, Progress, WeightsSource,
 };
 
 use super::smoke_support::env_or;
@@ -417,5 +417,411 @@ fn native_voiceclone_chatterbox_smoke() {
         "[native-clone-smoke] PASS — clone tracks the reference by {:.4} cosine (listen: {})",
         sim_clone_ref - sim_clone_control,
         out_dir.join("native_clone.wav").display()
+    );
+}
+
+// ── sc-13541: offline install-parity DoD ─────────────────────────────────────────────────────────
+// The chatterbox_tts provider resolves two companion weights at generate() time via pinned-SHA
+// `hf_get_pinned` fetches (candle_audio_chatterbox_ve + candle-audio-chatterbox/src/perth.rs at the
+// SceneWorks-pinned inference commit). The manifest co-requisites (sc-13541) pin these EXACT SHAs.
+const CHATTERBOX_REPO: &str = "ResembleAI/chatterbox";
+const VE_REVISION: &str = "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18";
+const PERTH_REPO: &str = "SceneWorks/perth-implicit";
+const PERTH_REVISION: &str = "80b60f9caead09b8d3b512bda0b24038f28c08ec";
+
+/// Materialize one HF snapshot (`repo` @ `revision`, filtered to `files`) into the hub cache via the
+/// worker's REAL model-download executor — `HuggingFaceSnapshot::resolve` + `download_snapshot_into_cache`,
+/// the exact seam `run_model_download_job` drives for a Models-screen install. Returns the resolved
+/// commit SHA. Proving the pinned snapshots land here proves the install materializes them (sc-13541).
+async fn install_snapshot(
+    settings: &crate::Settings,
+    repo: &str,
+    revision: &str,
+    files: &[&str],
+) -> String {
+    use crate::downloads::{
+        download_snapshot_into_cache, DownloadContext, DownloadProgress, HuggingFaceSnapshot,
+    };
+    let client = crate::downloads::streaming_download_client();
+    let api = crate::ApiClient::new(settings);
+    let repo_dir = sceneworks_core::hf_home::huggingface_repo_cache_path(&settings.data_dir, repo)
+        .expect("resolve hub cache path");
+    let file_patterns: Vec<String> = files.iter().map(|f| (*f).to_owned()).collect();
+    let snapshot = HuggingFaceSnapshot::resolve(&client, settings, repo, revision, &file_patterns)
+        .await
+        .expect("resolve HF snapshot listing");
+    assert!(
+        !snapshot.files.is_empty(),
+        "{repo}@{revision} resolved zero files for {file_patterns:?}"
+    );
+    let context = DownloadContext {
+        api: &api,
+        client: &client,
+        settings,
+        job_id: "sc-13541-offline-parity",
+        cancel_message: "canceled",
+        fresh_download: false,
+    };
+    // A report interval longer than any real transfer so the in-loop progress POST never fires: this
+    // harness has no job API (the executor's heartbeat/progress are best-effort and only reached via
+    // the interval tick), and cancel polls already swallow transport errors. The download itself only
+    // talks to the HF hub, which is exactly what we are exercising.
+    let mut progress = DownloadProgress::new(
+        repo,
+        0,
+        snapshot.total_bytes(),
+        std::time::Duration::from_secs(86_400),
+    );
+    download_snapshot_into_cache(&context, &repo_dir, revision, &snapshot, &mut progress)
+        .await
+        .unwrap_or_else(|e| panic!("materialize {repo}@{revision}: {e}"))
+}
+
+/// A short, non-trivial synthetic speech-like reference clip (a vibrato'd fundamental plus two
+/// harmonics and light noise), 24 kHz mono — enough content for the provider to derive a speaker
+/// embedding + prompt tokens without pulling in a second TTS model. Clone quality is irrelevant to
+/// this DoD; the point is that generate() completes with no hub fetch.
+fn synthetic_reference() -> gen_core::AudioTrack {
+    let sample_rate = 24_000u32;
+    let secs = 4.0f32;
+    let n = (sample_rate as f32 * secs) as usize;
+    let mut samples = Vec::with_capacity(n);
+    let mut seed = 0x2b41_53c7u32;
+    for i in 0..n {
+        let t = i as f32 / sample_rate as f32;
+        let vibrato = 1.0 + 0.02 * (2.0 * std::f32::consts::PI * 5.0 * t).sin();
+        let f0 = 165.0 * vibrato;
+        let mut s = 0.6 * (2.0 * std::f32::consts::PI * f0 * t).sin();
+        s += 0.25 * (2.0 * std::f32::consts::PI * 2.0 * f0 * t).sin();
+        s += 0.15 * (2.0 * std::f32::consts::PI * 3.0 * f0 * t).sin();
+        // Cheap LCG noise for a little broadband energy.
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let noise = (seed >> 9) as f32 / (1u32 << 23) as f32 - 0.5;
+        s += 0.05 * noise;
+        // Gentle amplitude envelope so it is not a steady tone.
+        let env = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * 0.5 * t).cos();
+        samples.push(0.8 * env * s);
+    }
+    gen_core::AudioTrack {
+        samples,
+        sample_rate,
+        channels: 1,
+        stems: Vec::new(),
+    }
+}
+
+/// Sorted names directly under `dir` (empty when `dir` is absent) — a cheap fingerprint for asserting
+/// that a directory was neither added to nor removed from.
+fn dir_entry_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Fingerprint of the machine's REAL HF cache's chatterbox + perth entries (`snapshots/` and `refs/`
+/// listings). The offline DoD smoke captures this before/after to prove it never reads into or writes
+/// the real `~/.cache/huggingface` — everything must stay inside the isolated temp cache.
+fn real_cache_fingerprint(chatterbox_dir: &Path, perth_dir: &Path) -> Vec<Vec<String>> {
+    vec![
+        dir_entry_names(&chatterbox_dir.join("snapshots")),
+        dir_entry_names(&chatterbox_dir.join("refs")),
+        dir_entry_names(&perth_dir.join("snapshots")),
+        dir_entry_names(&perth_dir.join("refs")),
+    ]
+}
+
+/// sc-13541 (epic 13400 / E1 follow-up) — **offline install-parity DoD**. `#[ignore]`d; run by hand
+/// on an Apple-Silicon Mac (downloads ~3.2 GB into an ISOLATED temp HF cache):
+/// ```text
+/// cargo test -p sceneworks-worker chatterbox_offline_install_parity_smoke -- --ignored --nocapture
+/// ```
+/// Proves the acceptance criterion end to end AND that it is DISCRIMINATING — it would fail if the
+/// co-requisite install were skipped, which the first cut did NOT: that version resolved off the
+/// machine's real `~/.cache/huggingface` (which already held ve/perth), so it passed even though the
+/// install under test was never actually exercised.
+///
+/// Two facts — verified against the pinned inference rev and hf-hub 0.4.3 — drive the design:
+///   * The runtime resolver is `candle_audio::hub::hf_get_pinned` → hf-hub `Api::new()` →
+///     `Cache::default()`, which is HARD-CODED to `dirs::home_dir()/.cache/huggingface/hub` and reads
+///     NEITHER `HF_HOME` NOR `HF_ENDPOINT` (only `ApiBuilder::from_env()` reads those). On unix
+///     `dirs::home_dir()` is `$HOME`, so the ONLY lever that redirects the resolver's cache is `$HOME`.
+///     This test points `$HOME` at a fresh temp root ⇒ the resolver reads `<temp>/.cache/huggingface/
+///     hub` and the real `~/.cache/huggingface` is never touched (asserted). `HF_HOME` is set to
+///     `<temp>/.cache/huggingface` — exactly what the desktop injects (sc-1904) — so the SceneWorks
+///     downloader (`HF_HOME/hub`) writes the SAME hub the resolver reads: the DEFAULT shipped alignment.
+///   * hf-hub 0.4.3 has no `HF_HUB_OFFLINE` and `Api::new()` ignores `HF_ENDPOINT`, so the old
+///     black-hole `HF_ENDPOINT` was INERT. But both hf-hub agents are built with ureq
+///     `try_proxy_from_env(true)`, so a black-hole `ALL_PROXY`/`HTTPS_PROXY` DOES route (and fail)
+///     every resolver `download()`, while a cache HIT short-circuits before the agent is constructed.
+///     That makes "offline" deterministic and independent of the box's real connectivity.
+///
+///   1. **Isolate** — `$HOME` + `HF_HOME` at a fresh temp root; clear every other HF cache + proxy
+///      var. Assert the isolated hub starts empty and differs from the real `~/.cache/huggingface`.
+///   2. **Install** — run the REAL download executor (online) for the primary snapshot (`main`) PLUS
+///      the two pinned companion co-requisites: `ve.safetensors` @ 5bb1f6ee… and
+///      `perth_implicit.safetensors` @ 80b60f9c…. Assert each pinned `snapshots/<sha>/…` + `refs/<sha>`
+///      materialized where `hf_get_pinned` reads (the hf-hub layout `download_snapshot_into_cache`
+///      writes: `refs/<rev>` → commit, `snapshots/<commit>/<file>`).
+///   3. **Go offline, HARD** — black-hole `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (any resolver fetch
+///      now fails through a dead proxy). Load `chatterbox_tts` from the installed snapshot dir and
+///      `generate()` one clone from a `Conditioning::ReferenceAudio` → MUST SUCCEED: ve
+///      (embed_reference) and perth (always-on watermark) resolve cache-first with zero network. A
+///      success with the dead proxy set IS the "no runtime hub fetch" proof.
+///   4. **Discriminate** — with the dead proxy still set, delete ONLY the PerTh snapshot, RELOAD the
+///      generator (its lazy ve/perth caches reset) and re-render → MUST HARD-FAIL (perth cache-miss →
+///      dead proxy). Then delete the ve snapshot + `refs/<sha>` and re-render → MUST HARD-FAIL (ve
+///      cache-miss). Deleting from the ISOLATED cache breaking the render is the proof the resolver
+///      reads THAT cache, not the real one. The 3.2 GB primary snapshot is reused — nothing re-downloads.
+#[test]
+#[ignore = "real-weight offline-install-parity DoD: downloads ~3.2 GB into an ISOLATED temp HF cache; run by hand on an Apple-Silicon Mac"]
+fn chatterbox_offline_install_parity_smoke() {
+    // ── Step 1: isolate the cache the RUNTIME RESOLVER actually reads ─────────────────────────────
+    // The resolver is hf_get_pinned -> hf-hub Api::new() -> Cache::default() = dirs::home_dir()/.cache/
+    // huggingface/hub, which reads NEITHER HF_HOME NOR HF_ENDPOINT (only ApiBuilder::from_env() does)
+    // and on unix takes home_dir() from $HOME. So $HOME is the only lever that moves the resolver's
+    // cache. Point it — and, for the downloader, HF_HOME=$HOME/.cache/huggingface, the desktop's
+    // sc-1904 default — at a fresh temp root so BOTH sides share one empty, isolated hub.
+    let home_root = tempfile::tempdir().expect("temp HOME root");
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+
+    // Capture the machine's REAL hub BEFORE the override so we can prove it is never touched.
+    let real_home = std::env::var("HOME").expect("HOME must be set (we isolate against it)");
+    let real_hub = PathBuf::from(&real_home)
+        .join(".cache")
+        .join("huggingface")
+        .join("hub");
+    let real_chatterbox = real_hub.join("models--ResembleAI--chatterbox");
+    let real_perth = real_hub.join("models--SceneWorks--perth-implicit");
+    let real_before = real_cache_fingerprint(&real_chatterbox, &real_perth);
+    assert_ne!(
+        PathBuf::from(&real_home),
+        home_root.path(),
+        "the temp HOME must differ from the real home"
+    );
+
+    let hf_home = home_root.path().join(".cache").join("huggingface");
+    let hub = hf_home.join("hub");
+    // Pin the env for the whole test; EnvVars restores it on drop (Drop runs even on a panicking
+    // assert, so a leaked $HOME can't poison sibling tests). Every HF cache var except HF_HOME is
+    // cleared so neither the downloader nor the resolver can diverge to another location; proxy vars
+    // are cleared now (install must reach the real hub) and set to a black hole in step 3.
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HOME", home_root.path().to_str().expect("utf-8 HOME")),
+        ("HF_HOME", hf_home.to_str().expect("utf-8 HF_HOME")),
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HUB_OFFLINE", ""),
+        ("HF_ENDPOINT", ""),
+        ("PERTH_SNAPSHOT", ""),
+        ("ALL_PROXY", ""),
+        ("all_proxy", ""),
+        ("HTTPS_PROXY", ""),
+        ("https_proxy", ""),
+        ("HTTP_PROXY", ""),
+        ("http_proxy", ""),
+        ("NO_PROXY", ""),
+        ("no_proxy", ""),
+    ]);
+    assert!(
+        !hub.join("models--ResembleAI--chatterbox").exists()
+            && !hub.join("models--SceneWorks--perth-implicit").exists(),
+        "the DoD requires an EMPTY isolated HF cache to start"
+    );
+
+    let settings = crate::Settings {
+        api_url: "http://127.0.0.1:1".to_owned(),
+        access_token: None,
+        data_dir: data_dir.path().to_path_buf(),
+        config_dir: data_dir.path().join("config"),
+        worker_id: "sc-13541".to_owned(),
+        gpu_id: "gpu-0".to_owned(),
+        is_child_worker: false,
+        poll_seconds: 1,
+        heartbeat_seconds: 5,
+        shutdown_timeout_seconds: 1,
+        huggingface_base_url: crate::DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+        huggingface_token: std::env::var("HF_TOKEN").ok(),
+        credentials: Vec::new(),
+        max_lora_url_bytes: crate::DEFAULT_MAX_LORA_URL_BYTES,
+        max_model_url_bytes: crate::DEFAULT_MAX_MODEL_URL_BYTES,
+        allow_private_lora_urls: false,
+        utility_workers: 1,
+        backend_mlx_enabled: true,
+        backend_candle_enabled: false,
+        gpu_memory_limit_bytes: 0,
+        external_model_roots: Vec::new(),
+    };
+
+    // ── Step 2: install (the exact executor a Models-screen install runs), into the ISOLATED cache ─
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let main_commit = rt.block_on(install_snapshot(
+        &settings,
+        CHATTERBOX_REPO,
+        "main",
+        &["t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json"],
+    ));
+    rt.block_on(install_snapshot(
+        &settings,
+        CHATTERBOX_REPO,
+        VE_REVISION,
+        &["ve.safetensors"],
+    ));
+    rt.block_on(install_snapshot(
+        &settings,
+        PERTH_REPO,
+        PERTH_REVISION,
+        &["perth_implicit.safetensors"],
+    ));
+
+    // ── Assert the pinned companion snapshots landed where hf_get_pinned reads (the hf-hub layout
+    //    download_snapshot_into_cache writes: refs/<rev> -> commit + snapshots/<commit>/<file>) ────
+    let chatterbox_dir = hub.join("models--ResembleAI--chatterbox");
+    let perth_dir = hub.join("models--SceneWorks--perth-implicit");
+    let ve_snapshot = chatterbox_dir
+        .join("snapshots")
+        .join(VE_REVISION)
+        .join("ve.safetensors");
+    let ve_ref = chatterbox_dir.join("refs").join(VE_REVISION);
+    let perth_snapshot = perth_dir
+        .join("snapshots")
+        .join(PERTH_REVISION)
+        .join("perth_implicit.safetensors");
+    let perth_ref = perth_dir.join("refs").join(PERTH_REVISION);
+    assert!(
+        ve_snapshot.exists(),
+        "ve.safetensors must materialize at the pinned snapshot: {}",
+        ve_snapshot.display()
+    );
+    assert!(ve_ref.exists(), "ve refs/<sha> pointer must exist");
+    assert!(
+        perth_snapshot.exists(),
+        "perth_implicit.safetensors must materialize at the pinned snapshot: {}",
+        perth_snapshot.display()
+    );
+    assert!(perth_ref.exists(), "perth refs/<sha> pointer must exist");
+    eprintln!(
+        "[offline-parity] installed pinned snapshots into the ISOLATED hub {}:\n  {}\n  {}",
+        hub.display(),
+        ve_snapshot.display(),
+        perth_snapshot.display()
+    );
+
+    // ── Step 3: go offline, HARD — a black-hole proxy fails EVERY resolver download() (both hf-hub
+    //    agents are built with ureq try_proxy_from_env), while a cache HIT never constructs the agent.
+    //    Set AFTER install (which needed the real hub). Api::new() ignores HF_ENDPOINT, so the proxy —
+    //    not an endpoint — is the lever that actually blocks the resolver. ────────────────────────
+    std::env::set_var("ALL_PROXY", "http://127.0.0.1:1");
+    std::env::set_var("HTTPS_PROXY", "http://127.0.0.1:1");
+    std::env::set_var("HTTP_PROXY", "http://127.0.0.1:1");
+
+    let main_snapshot_dir = chatterbox_dir.join("snapshots").join(&main_commit);
+    assert!(
+        main_snapshot_dir.join("s3gen.safetensors").exists(),
+        "primary chatterbox snapshot dir must hold the generator weights"
+    );
+
+    // One offline render from the installed primary snapshot, RELOADING the generator each call: the
+    // provider caches its ve/perth embedders lazily in a Mutex on first use, so a second generate() on
+    // the SAME generator would reuse them and never re-touch the cache — the discrimination below MUST
+    // reload to force re-resolution. The primary weights load from the local DIR (no hub), so a reload
+    // never re-downloads the 3.2 GB primary.
+    let render_offline = || -> Result<gen_core::AudioTrack, String> {
+        let request = GenerationRequest {
+            prompt: "This cloned voice was rendered fully offline from a fresh install.".to_owned(),
+            seed: Some(13541),
+            conditioning: vec![Conditioning::ReferenceAudio {
+                audio: synthetic_reference(),
+                strength: None,
+            }],
+            cancel: CancelFlag::new(),
+            ..Default::default()
+        };
+        let mut on_progress = |_p: Progress| {};
+        let output = runtime_macos::catalog()
+            .map_err(|e| format!("runtime catalog: {e}"))?
+            .audio()
+            .ok_or_else(|| "audio lane missing from the runtime catalog".to_owned())?
+            .load(
+                "chatterbox_tts",
+                &LoadSpec::new(WeightsSource::Dir(main_snapshot_dir.clone())),
+            )
+            .map_err(|e| format!("load chatterbox_tts: {e}"))?
+            .generate(&request, &mut on_progress)
+            .map_err(|e| format!("generate: {e}"))?;
+        match output {
+            GenerationOutput::Audio(track) => Ok(track),
+            other => Err(format!("expected audio, got {other:?}")),
+        }
+    };
+
+    // ── Step 4a: the positive proof — ve + perth resolve cache-first, zero network ───────────────
+    let clone = render_offline().unwrap_or_else(|e| {
+        panic!(
+            "offline native clone generate MUST succeed from the installed isolated cache \
+             (ve + perth resolve cache-first with zero network; the dead proxy proves no fetch): {e}"
+        )
+    });
+    assert!(!clone.samples.is_empty(), "offline clone is empty");
+    assert!(
+        peak(&clone.samples) > 1e-3,
+        "offline clone is (near-)silent: peak {:.6}",
+        peak(&clone.samples)
+    );
+    let out_dir = PathBuf::from(env_or("VOICECLONE_OUT_DIR", "/tmp/voiceclone_smoke"));
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+    dump_wav(&clone, &out_dir.join("offline_parity_clone.wav"));
+    eprintln!(
+        "[offline-parity] step 4a PASS — offline render succeeded through a black-hole proxy: {} samples @ {} Hz (listen: {})",
+        clone.samples.len(),
+        clone.sample_rate,
+        out_dir.join("offline_parity_clone.wav").display()
+    );
+
+    // ── Step 4b: discrimination — prove the INSTALL (not the real ~/.cache) is load-bearing ──────
+    // #1: remove ONLY the PerTh snapshot (ve stays). A reload + render must reach the always-on
+    // watermark, cache-miss PerTh, and hard-fail through the dead proxy.
+    std::fs::remove_dir_all(&perth_dir).expect("remove the isolated PerTh model dir");
+    let perth_err = render_offline().expect_err(
+        "with the PerTh snapshot deleted from the ISOLATED cache the offline render MUST hard-fail — \
+         a success would mean the resolver read some OTHER cache (e.g. the real ~/.cache): a false pass",
+    );
+    assert!(
+        perth_err.contains("PerTh"),
+        "the discrimination failure must be the missing PerTh weight resolving through the dead proxy, got: {perth_err}"
+    );
+    eprintln!(
+        "[offline-parity] step 4b#1 PASS — PerTh removed ⇒ hard-fail as required: {perth_err}"
+    );
+
+    // #2: also remove the ve snapshot pointer + its refs/<sha>. A reload + render now cache-misses ve
+    // at embed_reference (the first companion the clone path touches) and hard-fails through the proxy.
+    std::fs::remove_file(&ve_snapshot).expect("remove the isolated ve.safetensors pointer");
+    std::fs::remove_file(&ve_ref).expect("remove the isolated ve refs/<sha>");
+    let ve_err = render_offline().expect_err(
+        "with the ve snapshot deleted from the ISOLATED cache the offline render MUST hard-fail",
+    );
+    assert!(
+        ve_err.contains("chatterbox_ve"),
+        "the discrimination failure must be the missing ve embedder resolving through the dead proxy, got: {ve_err}"
+    );
+    eprintln!("[offline-parity] step 4b#2 PASS — ve removed ⇒ hard-fail as required: {ve_err}");
+
+    // ── The machine's real ~/.cache/huggingface must be neither read into nor written by any of the
+    //    above: install targeted HF_HOME=<temp>/hub and the resolver's Cache::default() targeted
+    //    $HOME=<temp>. Its chatterbox/perth entries must match the pre-test fingerprint exactly. ───
+    let real_after = real_cache_fingerprint(&real_chatterbox, &real_perth);
+    assert_eq!(
+        real_before, real_after,
+        "the real ~/.cache/huggingface was modified — the test must be fully isolated under $HOME/HF_HOME=<temp>"
+    );
+    eprintln!(
+        "[offline-parity] PASS — install→offline render is self-contained in the isolated cache, is \
+         DISCRIMINATING (removing ve or perth hard-fails), and left the real {} untouched.",
+        real_hub.display()
     );
 }
