@@ -19,6 +19,15 @@ const videoAsset = {
   projectId: "p1",
 };
 
+const audioAsset = {
+  id: "aud",
+  type: "audio",
+  displayName: "line.wav",
+  origin: "audio_studio",
+  file: { path: "assets/line.wav", mimeType: "audio/wav", duration: 3, sampleRate: 24000, channels: 1 },
+  projectId: "p1",
+};
+
 function fireContextMenu(el) {
   const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
   el.dispatchEvent(event);
@@ -71,6 +80,59 @@ describe("thumbnail native context-menu suppression (sc-8731)", () => {
     expect(img).not.toBeNull();
     const event = fireContextMenu(img);
     expect(event.defaultPrevented).toBe(false);
+  });
+});
+
+// AssetMedia audio rendering (SceneWorks Audio Studio, epic 13400 A5 / sc-13405):
+// a type:audio asset renders a playable <audio> element, mirroring the <video>
+// branch — never an <audio> for image/video assets.
+describe("AssetMedia audio rendering (epic 13400 A5)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("renders a playable <audio> element for a type:audio asset", async () => {
+    await act(() => root.render(<AssetMedia asset={audioAsset} />));
+    const audio = container.querySelector("audio");
+    expect(audio).not.toBeNull();
+    expect(audio.getAttribute("src")).toContain("assets/line.wav");
+    // Audio has no poster/first-frame, so no <img> or <video> is produced.
+    expect(container.querySelector("video")).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+  });
+
+  it("does NOT render an <audio> element for image or video assets", async () => {
+    await act(() => root.render(<AssetMedia asset={imageAsset} />));
+    expect(container.querySelector("audio")).toBeNull();
+    expect(container.querySelector("img")).not.toBeNull();
+
+    await act(() => root.render(<AssetMedia asset={videoAsset} />));
+    expect(container.querySelector("audio")).toBeNull();
+    expect(container.querySelector("video")).not.toBeNull();
+  });
+
+  it("honors controls={false} so a custom transport can drive the element", async () => {
+    await act(() => root.render(<AssetMedia asset={audioAsset} controls={false} />));
+    const audio = container.querySelector("audio");
+    expect(audio).not.toBeNull();
+    expect(audio.hasAttribute("controls")).toBe(false);
+  });
+
+  it("renders an <audio> when only the mimeType marks it as audio (no type)", async () => {
+    const byMime = { id: "m", file: { path: "assets/clip.mp3", mimeType: "audio/mpeg" }, projectId: "p1" };
+    await act(() => root.render(<AssetMedia asset={byMime} />));
+    expect(container.querySelector("audio")).not.toBeNull();
   });
 });
 

@@ -226,12 +226,13 @@ function ProgressBar({ status, progress }) {
   );
 }
 
-// Thumbnails region (sc-2084). Four variants — image-grid, video-player,
-// small-row, hidden — covering Image Studio (large grid), Video Studio
-// (single player), Queue + batch (compact row), and Caption/Import (no
-// thumbnails). Interim thumbnails are emitted by image-producing workers in
-// sc-2085; until that ships interimAssets is just empty.
-const THUMBNAIL_VARIANTS = new Set(["image-grid", "video-player", "small-row", "hidden"]);
+// Thumbnails region (sc-2084). Five variants — image-grid, video-player,
+// audio-player, small-row, hidden — covering Image Studio (large grid), Video
+// Studio (single player), Audio Studio (single transport, epic 13400 A5),
+// Queue + batch (compact row), and Caption/Import (no thumbnails). Interim
+// thumbnails are emitted by image-producing workers in sc-2085; until that
+// ships interimAssets is just empty.
+const THUMBNAIL_VARIANTS = new Set(["image-grid", "video-player", "audio-player", "small-row", "hidden"]);
 
 function mergeThumbnails(finalAssets, interimAssets) {
   const finalArray = Array.isArray(finalAssets) ? finalAssets : [];
@@ -376,11 +377,183 @@ function VideoThumbnail({ assets, onThumbnailClick }) {
   );
 }
 
+// Declared clip length (seconds) from the asset's audio file block (duration +
+// sampleRate + channels, epic 13400 A5). Used to seed/label the transport before
+// the live <audio> element reports its own metadata duration, and as the fallback
+// when it never loads. `file.duration` is already in seconds (same convention the
+// video lane uses — see assetPanels' Duration row).
+export function audioAssetDurationSeconds(asset) {
+  const declared = Number(asset?.file?.duration);
+  return Number.isFinite(declared) && declared > 0 ? declared : 0;
+}
+
+// m:ss clock for the transport read-out. Clamps NaN/negative to 0:00.
+function formatClock(seconds) {
+  const total = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}:${String(secs).padStart(2, "0")}`;
+}
+
+const PlayGlyph = (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M8 5v14l11-7z" />
+  </svg>
+);
+const PauseGlyph = (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M7 5h4v14H7zM13 5h4v14h-4z" />
+  </svg>
+);
+
+// Real audio transport (epic 13400 A5, sc-13405): drives an actual <audio>
+// element (rendered by AssetMedia with native controls OFF and a ref) so the
+// custom play/pause + scrubber genuinely play and seek the clip. The total
+// duration prefers the element's reported metadata duration once loaded, falling
+// back to the asset's declared `file.duration`. All theme tokens — reads
+// correctly in light and dark with no hardcoded colors.
+function AudioTransport({ asset }) {
+  const audioRef = React.useRef(null);
+  const src = assetUrl(asset);
+  const declared = audioAssetDurationSeconds(asset);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(declared);
+
+  // A new source (or a fresh media ticket) resets the transport to the start and
+  // re-seeds the declared duration until the element reports its own.
+  useEffect(() => {
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setDuration(declared);
+  }, [src, declared]);
+
+  const seekMax = duration > 0 ? duration : 0;
+
+  const toggle = () => {
+    const el = audioRef.current;
+    if (isPlaying) {
+      el?.pause?.();
+      setIsPlaying(false);
+    } else {
+      // play() may reject (autoplay policy) or be unimplemented (jsdom); the
+      // onPlay/onPause events keep state authoritative in a real browser.
+      try {
+        const played = el?.play?.();
+        if (played && typeof played.catch === "function") {
+          played.catch(() => setIsPlaying(false));
+        }
+      } catch {
+        /* ignore — state falls back to the media events */
+      }
+      setIsPlaying(true);
+    }
+  };
+
+  const onSeek = (event) => {
+    const next = Number(event.target.value);
+    setCurrentTime(next);
+    const el = audioRef.current;
+    if (el) {
+      el.currentTime = next;
+    }
+  };
+
+  return (
+    <div className="worker-progress-card__audio">
+      <AssetMedia
+        asset={asset}
+        ref={audioRef}
+        controls={false}
+        className="worker-progress-card__audio-el"
+        onLoadedMetadata={(event) => {
+          const real = Number(event.currentTarget?.duration);
+          if (Number.isFinite(real) && real > 0) {
+            setDuration(real);
+          }
+        }}
+        onTimeUpdate={(event) => setCurrentTime(Number(event.currentTarget?.currentTime) || 0)}
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
+        onEnded={() => {
+          setIsPlaying(false);
+          setCurrentTime(0);
+        }}
+      />
+      <button
+        type="button"
+        className="worker-progress-card__audio-play"
+        aria-label={isPlaying ? "Pause" : "Play"}
+        aria-pressed={isPlaying}
+        onClick={toggle}
+      >
+        {isPlaying ? PauseGlyph : PlayGlyph}
+      </button>
+      <input
+        type="range"
+        className="worker-progress-card__audio-scrubber"
+        min={0}
+        max={seekMax}
+        step="0.01"
+        value={Math.min(currentTime, seekMax)}
+        onChange={onSeek}
+        aria-label="Seek"
+        aria-valuetext={`${formatClock(currentTime)} of ${formatClock(duration)}`}
+        disabled={seekMax === 0}
+      />
+      <span className="worker-progress-card__audio-time">
+        <span className="worker-progress-card__audio-time-current">{formatClock(currentTime)}</span>
+        <span aria-hidden="true"> / </span>
+        <span className="worker-progress-card__audio-time-total">{formatClock(duration)}</span>
+      </span>
+    </div>
+  );
+}
+
+function AudioThumbnail({ assets, onThumbnailClick }) {
+  const asset = Array.isArray(assets) ? assets[0] : null;
+  const src = asset ? assetUrl(asset) : "";
+  if (!asset || !src) {
+    return (
+      <div
+        className="worker-progress-card__thumbnails worker-progress-card__thumbnails--audio-player empty"
+        role="group"
+        aria-label="Audio output pending"
+      >
+        <span className="worker-progress-card__audio-placeholder">Generating…</span>
+      </div>
+    );
+  }
+  const interactive = !!onThumbnailClick;
+  return (
+    <div
+      className="worker-progress-card__thumbnails worker-progress-card__thumbnails--audio-player"
+      role="group"
+      aria-label="Job output"
+      onContextMenu={suppressThumbnailContextMenu}
+    >
+      <AudioTransport asset={asset} />
+      {interactive ? (
+        <button
+          type="button"
+          className="worker-progress-card__audio-open"
+          onClick={() => onThumbnailClick(asset)}
+        >
+          Open
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function ThumbnailsRegion({ variant, finalAssets, interimAssets, thumbnailGroups, onThumbnailClick, isRunning, expectedCount }) {
   if (variant === "hidden") return null;
   if (!THUMBNAIL_VARIANTS.has(variant)) return null;
   if (variant === "video-player") {
     return <VideoThumbnail assets={finalAssets} onThumbnailClick={onThumbnailClick} />;
+  }
+  if (variant === "audio-player") {
+    return <AudioThumbnail assets={finalAssets} onThumbnailClick={onThumbnailClick} />;
   }
   if (Array.isArray(thumbnailGroups) && thumbnailGroups.some((group) => Array.isArray(group?.assets) && group.assets.length)) {
     return <ThumbnailGroups groups={thumbnailGroups} variant={variant} onThumbnailClick={onThumbnailClick} />;

@@ -650,6 +650,158 @@ describe("WorkerProgressCard thumbnails", () => {
   });
 });
 
+// Audio-player variant (SceneWorks Audio Studio, epic 13400 A5 / sc-13405): a
+// completed audio job renders a real transport in the shared results zone — an
+// actual <audio> element driven by a custom play/pause control and a scrubber,
+// with the total duration derived from the asset's audio file block.
+describe("WorkerProgressCard audio-player variant (epic 13400 A5)", () => {
+  let api;
+  let playSpy;
+  let pauseSpy;
+
+  beforeEach(() => {
+    // jsdom doesn't implement media playback; stub so the transport's play/pause
+    // are observable and don't log "Not implemented".
+    playSpy = vi
+      .spyOn(window.HTMLMediaElement.prototype, "play")
+      .mockImplementation(() => Promise.resolve());
+    pauseSpy = vi.spyOn(window.HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    api?.cleanup();
+    api = null;
+    vi.restoreAllMocks();
+  });
+
+  const audioJob = {
+    id: "job-audio",
+    type: "audio_generate",
+    status: "completed",
+    progress: 1,
+    attempts: 1,
+    payload: {},
+  };
+
+  // Completed audio result asset (origin audio_studio) with the audio file block:
+  // duration (seconds) + sampleRate + channels. 65s → the read-out reads "1:05".
+  const audioAsset = {
+    id: "au-1",
+    type: "audio",
+    url: "/api/v1/files/au-1.wav",
+    origin: "audio_studio",
+    file: { path: "assets/au-1.wav", mimeType: "audio/wav", duration: 65, sampleRate: 24000, channels: 1 },
+  };
+
+  it("renders the transport (real <audio> + play control + scrubber) with the derived duration", () => {
+    api = render(
+      <WorkerProgressCard job={audioJob} thumbnailsVariant="audio-player" thumbnailAssets={[audioAsset]} />,
+      makeContext([]),
+    );
+    expect(api.container.querySelector(".worker-progress-card__thumbnails--audio-player")).not.toBeNull();
+    // A real <audio> element drives play/scrub.
+    expect(api.container.querySelector("audio")).not.toBeNull();
+    // Play/pause transport control.
+    const play = api.container.querySelector(".worker-progress-card__audio-play");
+    expect(play).not.toBeNull();
+    expect(play.getAttribute("aria-label")).toBe("Play");
+    // Scrubber (seek), its max seeded from the declared duration.
+    const scrubber = api.container.querySelector("input[type='range'].worker-progress-card__audio-scrubber");
+    expect(scrubber).not.toBeNull();
+    expect(scrubber.getAttribute("max")).toBe("65");
+    // Duration is shown/derived from the asset file block (65s → 1:05).
+    expect(api.container.querySelector(".worker-progress-card__audio-time-total").textContent).toBe("1:05");
+  });
+
+  it("toggles play/pause when the transport control is activated", () => {
+    api = render(
+      <WorkerProgressCard job={audioJob} thumbnailsVariant="audio-player" thumbnailAssets={[audioAsset]} />,
+      makeContext([]),
+    );
+    const play = api.container.querySelector(".worker-progress-card__audio-play");
+    expect(play.getAttribute("aria-pressed")).toBe("false");
+    act(() => {
+      play.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(playSpy).toHaveBeenCalledTimes(1);
+    expect(play.getAttribute("aria-label")).toBe("Pause");
+    expect(play.getAttribute("aria-pressed")).toBe("true");
+    act(() => {
+      play.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(pauseSpy).toHaveBeenCalledTimes(1);
+    expect(play.getAttribute("aria-label")).toBe("Play");
+  });
+
+  it("seeks the audio element and updates the read-out when the scrubber changes", () => {
+    api = render(
+      <WorkerProgressCard job={audioJob} thumbnailsVariant="audio-player" thumbnailAssets={[audioAsset]} />,
+      makeContext([]),
+    );
+    const audioEl = api.container.querySelector("audio");
+    // jsdom's currentTime setter is a no-op, so spy on it to prove the seek is
+    // actually written through to the media element.
+    const setCurrentTime = vi.fn();
+    Object.defineProperty(audioEl, "currentTime", { configurable: true, get: () => 0, set: setCurrentTime });
+    const scrubber = api.container.querySelector(".worker-progress-card__audio-scrubber");
+    // Use the native value setter so React's controlled-input value tracker sees a
+    // real change and fires onChange (the repo's slider-test convention).
+    const valueSetter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(scrubber), "value").set;
+    act(() => {
+      valueSetter.call(scrubber, "30");
+      scrubber.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+    expect(setCurrentTime).toHaveBeenCalledWith(30);
+    expect(api.container.querySelector(".worker-progress-card__audio-time-current").textContent).toBe("0:30");
+  });
+
+  it("shows a placeholder while the clip is still rendering (no asset yet)", () => {
+    api = render(
+      <WorkerProgressCard
+        job={{ ...audioJob, status: "running" }}
+        thumbnailsVariant="audio-player"
+        thumbnailAssets={[]}
+      />,
+      makeContext([]),
+    );
+    expect(api.container.querySelector(".worker-progress-card__audio-placeholder")).not.toBeNull();
+    expect(api.container.querySelector("audio")).toBeNull();
+  });
+
+  it("suppresses the native context menu on the audio-player transport (sc-8731)", () => {
+    api = render(
+      <WorkerProgressCard job={audioJob} thumbnailsVariant="audio-player" thumbnailAssets={[audioAsset]} />,
+      makeContext([]),
+    );
+    const wrapper = api.container.querySelector(".worker-progress-card__thumbnails--audio-player");
+    const event = new window.MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    act(() => {
+      wrapper.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("invokes onThumbnailClick from the transport's Open control", () => {
+    const onThumbnailClick = vi.fn();
+    api = render(
+      <WorkerProgressCard
+        job={audioJob}
+        thumbnailsVariant="audio-player"
+        thumbnailAssets={[audioAsset]}
+        onThumbnailClick={onThumbnailClick}
+      />,
+      makeContext([]),
+    );
+    const open = api.container.querySelector(".worker-progress-card__audio-open");
+    expect(open).not.toBeNull();
+    act(() => {
+      open.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(onThumbnailClick).toHaveBeenCalledTimes(1);
+    expect(onThumbnailClick.mock.calls[0][0].id).toBe("au-1");
+  });
+});
+
 // sc-11961 (S2): the live elapsed-seconds timer is the one piece of WorkerProgressCard
 // that runs continuously (a 1s setInterval) while an in-flight job's card is mounted.
 // Under keep-alive a studio stays mounted while backgrounded, so without gating each

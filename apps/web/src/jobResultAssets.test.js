@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveJobResultAssets, assetBatchIndex } from "./jobResultAssets.js";
+import { resolveJobResultAssets, assetBatchIndex, jobAudioResultAssets } from "./jobResultAssets.js";
 
 // Characterization tests (sc-8853): these lock in the CURRENT behavior of the
 // four resolver copies this module replaces, proving the unification is
@@ -19,6 +19,9 @@ function img(id, extra = {}) {
 }
 function vid(id, extra = {}) {
   return { id, type: "video", ...extra };
+}
+function aud(id, extra = {}) {
+  return { id, type: "audio", ...extra };
 }
 
 describe("resolveJobResultAssets — assetIds branch", () => {
@@ -150,6 +153,45 @@ describe("resolveJobResultAssets — empty / guard cases", () => {
   it("returns [] when a non-array catalog is passed", () => {
     const job = { result: { generationSetId: "g1" } };
     expect(resolveJobResultAssets(job, undefined, imageOpts)).toEqual([]);
+  });
+});
+
+// jobAudioResultAssets (epic 13400 A5, sc-13405) is the audio twin of the video
+// lane: it wraps resolveJobResultAssets(job, assets, { type: "audio" }), so the
+// shared results zone (WorkerProgressCard audio-player) plays only audio outputs.
+describe("jobAudioResultAssets", () => {
+  it("resolves only audio assets from assetIds (slot order), dropping other types", () => {
+    const catalog = [aud("a"), img("i"), vid("v")];
+    const job = { result: { assetIds: ["v", "a", "i"] } };
+    expect(jobAudioResultAssets(job, catalog).map((x) => x.id)).toEqual(["a"]);
+  });
+
+  it("falls back to the embedded audio result record before the catalog catches up", () => {
+    const job = { result: { assets: [aud("a", { origin: "audio_studio" })] } };
+    const out = jobAudioResultAssets(job, []);
+    expect(out.map((x) => x.id)).toEqual(["a"]);
+    expect(out[0].origin).toBe("audio_studio");
+  });
+
+  it("does NOT resolve a wrong-typed (image/video) job result as audio", () => {
+    const catalog = [img("i"), vid("v")];
+    const job = { result: { assetIds: ["i", "v"] } };
+    expect(jobAudioResultAssets(job, catalog)).toEqual([]);
+  });
+
+  it("keeps the generationSetId audio members in catalog order (no batch sort — audio isn't image)", () => {
+    const catalog = [
+      aud("b", { generationSetId: "g1", batchIndex: 2 }),
+      aud("a", { generationSetId: "g1", batchIndex: 0 }),
+      vid("v", { generationSetId: "g1" }),
+      img("x", { generationSetId: "g2" }),
+    ];
+    const job = { result: { generationSetId: "g1" } };
+    expect(jobAudioResultAssets(job, catalog).map((x) => x.id)).toEqual(["b", "a"]);
+  });
+
+  it("returns [] when the job has no result", () => {
+    expect(jobAudioResultAssets({}, [aud("a")])).toEqual([]);
   });
 });
 
