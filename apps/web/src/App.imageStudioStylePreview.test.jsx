@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { withImageStudioContext, settle } from "./main.testSupport.jsx";
-import { STYLE_GROUPS, styleHintForId } from "./data/styleCatalog.js";
+import { STYLE_GROUPS, styleHintForId, styleTextForId } from "./data/styleCatalog.js";
 
 // sc-13131 — End-to-end wiring guard for the live Style preview. Renders the real ImageStudio,
 // types a prompt, picks a style through the actual StylePicker, and asserts that the on-screen
@@ -34,7 +34,7 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
     vi.restoreAllMocks();
   });
 
-  async function renderStudio() {
+  async function renderStudio(model = IMAGE_MODEL) {
     root = createRoot(container);
     await act(async () => {
       root.render(
@@ -46,7 +46,7 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
           deleteAsset: () => {},
           purgeAsset: () => {},
           gpuOptions: ["auto"],
-          imageModels: [IMAGE_MODEL],
+          imageModels: [model],
           latestAssets: [],
           localJobs: [],
           loras: [],
@@ -209,5 +209,70 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
 
     const submittedPrompt = await submitAndReadPayloadPrompt();
     expect(shown).toBe(submittedPrompt);
+  });
+
+  // Booru-tag models (`captionStyle: "tags"`) take comma-separated tags, so the prose Style catalog
+  // is hidden for them. The gate is DERIVED from the model, not a state clear — which is what lets it
+  // cover a persisted/replayed styleId, the path a [model]-effect clear would miss entirely.
+  describe("tag-convention models", () => {
+    const TAG_MODEL = {
+      id: "anima_base",
+      name: "Anima",
+      type: "image",
+      family: "anima",
+      captionStyle: "tags",
+    };
+    const TAGS = "1girl, solo, pink hair, detailed background";
+    const styleAxis = () => document.body.querySelector(".style-axis-catalog");
+
+    // Seed the studio's persisted state with a style already picked, as if the user chose one on a
+    // prose model and then switched. This is the hole a picker-only gate would leave open.
+    function seedPersistedStyle() {
+      window.localStorage.setItem(
+        "sceneworks-studio-image-project-1",
+        JSON.stringify({ styleId: firstStyle.id, prompt: TAGS }),
+      );
+    }
+
+    it("hides the Style picker entirely", async () => {
+      await renderStudio(TAG_MODEL);
+      expect(styleAxis()).toBeNull();
+      expect(document.body.querySelector('button[aria-label="Style"]')).toBeNull();
+      // The rest of the style row (the model's own Style presets) is untouched.
+      expect(document.body.querySelector(".style-axis-presets")).toBeTruthy();
+    });
+
+    it("does not compose a PERSISTED style into the submitted prompt", async () => {
+      seedPersistedStyle();
+      await renderStudio(TAG_MODEL);
+      // Hidden, and — the part that matters — inert: the tags go out exactly as typed.
+      expect(styleAxis()).toBeNull();
+      expect(document.body.querySelector('[data-testid="styled-prompt-preview"]')).toBeNull();
+      const submittedPrompt = await submitAndReadPayloadPrompt();
+      expect(submittedPrompt).toBe(TAGS);
+      expect(submittedPrompt).not.toContain("Style:");
+      expect(submittedPrompt).not.toContain("Subject:");
+    });
+
+    it("the SAME persisted style still composes on a prose model (proves the gate is what suppressed it)", async () => {
+      // Discriminator for the test above: without this, a broken seed would make it pass vacuously.
+      seedPersistedStyle();
+      await renderStudio();
+      expect(styleAxis()).toBeTruthy();
+      const submittedPrompt = await submitAndReadPayloadPrompt();
+      expect(submittedPrompt).toBe(`Subject: ${TAGS}\nStyle: ${styleTextForId(firstStyle.id)}`);
+    });
+
+    it("keeps the style-hint suggestion pill off, so no prose hint leaks in", async () => {
+      // The pill swap is driven by the same gated id; a stale style would otherwise offer a prose
+      // subject prompt on a model that wants tags.
+      seedPersistedStyle();
+      await renderStudio(TAG_MODEL);
+      const hint = styleHintForId(firstStyle.id);
+      expect(hint).toEqual(expect.any(String));
+      const pills = [...document.body.querySelectorAll(".suggestion-row .suggestion")];
+      expect(pills.some((pill) => pill.textContent.includes(hint))).toBe(false);
+      expect(pills.length).toBeGreaterThan(1);
+    });
   });
 });
