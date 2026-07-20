@@ -21,7 +21,31 @@
 // `defaultTierSelection`, which honors it whenever the sticky tier is still installed and otherwise
 // falls through to the base default — so a stale/uninstalled sticky is safely ignored (clamped).
 
+import { apiFetch } from "./api.js";
+
 const STORAGE_KEY = "sceneworks-last-tier";
+
+// Persist the full `{ [screen]: { [modelId]: tier } }` map to the durable server copy (epic 10721 R1).
+// localStorage alone does NOT survive a desktop relaunch — the shell's `127.0.0.1:<port>` origin changes
+// every launch, wiping origin-keyed storage — so a pick would be forgotten each session without this.
+// Best-effort + fire-and-forget: the localStorage write already succeeded, so a failed PUT only means the
+// pick isn't durable this once. Public route, empty token — mirrors the global default-quality PUT.
+function persistToServer(map) {
+  apiFetch("/api/v1/ui-preferences", "", {
+    method: "PUT",
+    body: JSON.stringify({ perModelTier: map }),
+  }).catch(() => {});
+}
+
+// Seed the localStorage instant-paint cache from the durable server copy on launch (App.jsx, after
+// GET /api/v1/ui-preferences). Without this, `readLastTier` would miss a pick made in a previous session
+// once the desktop origin — and its localStorage — changed. Overwrites the cache with the server map,
+// which is authoritative across launches (the cache is only ever a within-session mirror of it).
+export function seedLastTiersFromServer(map) {
+  if (map && typeof map === "object") {
+    writeAll(map);
+  }
+}
 
 function readAll() {
   try {
@@ -67,4 +91,6 @@ export function writeLastTier(screen, modelId, tier) {
   }
   map[screen] = { ...perScreen, [modelId]: tier };
   writeAll(map);
+  // Mirror the pick to the durable server copy so it survives a desktop relaunch (localStorage doesn't).
+  persistToServer(map);
 }

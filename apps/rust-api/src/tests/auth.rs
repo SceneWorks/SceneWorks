@@ -287,20 +287,20 @@ async fn ui_preferences_put_open_when_no_token_configured() {
 
 #[tokio::test]
 async fn ui_preferences_default_generation_quality_round_trips_and_merges() {
-    // sc-10728: the app-wide default generation quality persists like theme/accent so it
-    // survives a desktop relaunch — the shell's per-launch 127.0.0.1:<port> origin wipes
-    // origin-keyed localStorage, so the durable copy must live server-side. GET resolves an
-    // unset value to the q8 default; PUT accepts bf16|q8|q4 and MERGES, so a theme-only
-    // write can't reset a previously-chosen quality, and an invalid value coerces to q8.
+    // sc-10728 / epic 10721 R3: the app-wide default generation quality persists like theme/accent so
+    // it survives a desktop relaunch — the shell's per-launch 127.0.0.1:<port> origin wipes origin-keyed
+    // localStorage, so the durable copy must live server-side. GET resolves an unset value to the `auto`
+    // default; PUT accepts auto|bf16|q8|q4 and MERGES, so a theme-only write can't reset a previously-
+    // chosen quality, and an invalid value coerces to `auto`.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir); // no token configured ⇒ PUT is open
     assert!(settings.access_token.is_empty());
     let app = create_app(settings).expect("app creates");
 
-    // Fresh install: GET resolves the absent value to the q8 default so the web can seed it.
+    // Fresh install: GET resolves the absent value to the `auto` default so the web can seed it.
     let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(prefs["defaultGenerationQuality"], "q8");
+    assert_eq!(prefs["defaultGenerationQuality"], "auto");
 
     // PUT a valid tier: persisted and echoed back.
     let (status, saved) = request(
@@ -332,7 +332,7 @@ async fn ui_preferences_default_generation_quality_round_trips_and_merges() {
     assert_eq!(prefs["defaultGenerationQuality"], "q4");
     assert_eq!(prefs["theme"], "dark");
 
-    // A present-but-invalid tier coerces to the q8 default (defensive; the UI never sends one).
+    // A present-but-invalid tier coerces to the `auto` default (defensive; the UI never sends one).
     let (status, saved) = request(
         app,
         "PUT",
@@ -341,7 +341,102 @@ async fn ui_preferences_default_generation_quality_round_trips_and_merges() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(saved["defaultGenerationQuality"], "q8");
+    assert_eq!(saved["defaultGenerationQuality"], "auto");
+}
+
+/// epic 10721 R3: an existing install with a stored `q8` (the old forced default, from before the
+/// `auto` option existed) is one-time migrated to `auto` on GET — but a q8 the user picks DELIBERATELY
+/// after the upgrade (which sets the migration marker via PUT) is left alone.
+#[tokio::test]
+async fn ui_preferences_migrates_a_legacy_q8_to_auto_once() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let prefs_path = settings.config_dir.join("ui-preferences.json");
+    std::fs::create_dir_all(&settings.config_dir).expect("config dir creates");
+    // Simulate a pre-Auto install: a stored q8 with no migration marker (rode along in a theme PUT).
+    std::fs::write(
+        &prefs_path,
+        r#"{"theme":"dark","defaultGenerationQuality":"q8"}"#,
+    )
+    .expect("seed legacy prefs");
+    let app = create_app(settings).expect("app creates");
+
+    // GET migrates the legacy q8 to auto and persists it.
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["defaultGenerationQuality"], "auto");
+    let on_disk = std::fs::read_to_string(&prefs_path).expect("prefs persisted");
+    assert!(
+        on_disk.contains("\"auto\""),
+        "migration is written to disk: {on_disk}"
+    );
+
+    // A DELIBERATE q8 pick after the upgrade sets the marker and sticks across a fresh GET.
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "defaultGenerationQuality": "q8" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, prefs) = request(app, "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        prefs["defaultGenerationQuality"], "q8",
+        "a deliberate post-upgrade q8 is not re-migrated"
+    );
+}
+
+/// epic 10721 R1: the per-(screen, model) tier sticky persists server-side so a user's studio pick
+/// survives a desktop relaunch (localStorage alone is wiped by the shell's per-launch origin). A PUT
+/// carrying the map replaces it wholesale (the web sends the full merged map); a PUT without it merges.
+#[tokio::test]
+async fn ui_preferences_per_model_tier_round_trips_and_merges() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+
+    // PUT a per-model tier map: persisted and echoed back.
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "perModelTier": { "image": { "sana_sprint_1600m": "bf16" } } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["perModelTier"]["image"]["sana_sprint_1600m"], "bf16");
+
+    // Survives a "relaunch": a fresh GET reads it back from disk.
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["perModelTier"]["image"]["sana_sprint_1600m"], "bf16");
+
+    // A theme-only PUT MERGES — it must not clobber the stored per-model map.
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "light" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(prefs["perModelTier"]["image"]["sana_sprint_1600m"], "bf16");
+    assert_eq!(prefs["theme"], "light");
+
+    // A new full map replaces (the web sends the merged map after adding another model's pick).
+    let (status, saved) = request(
+        app,
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "perModelTier": { "image": { "sana_sprint_1600m": "q8", "flux_dev": "q4" } } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["perModelTier"]["image"]["sana_sprint_1600m"], "q8");
+    assert_eq!(saved["perModelTier"]["image"]["flux_dev"], "q4");
 }
 
 #[test]

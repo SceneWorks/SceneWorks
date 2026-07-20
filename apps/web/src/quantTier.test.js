@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_GENERATION_QUALITY,
   GENERATION_QUALITY_TIERS,
+  allPossibleTiers,
   defaultTierSelection,
   installedTiers,
   isBelowFloor,
+  tierPickerOptions,
   isConvRotTier,
   isNvfp4Tier,
   isSelectableTier,
@@ -543,5 +545,127 @@ describe("defaultTierSelection — full precedence ladder (sc-10732)", () => {
     // installed tier (rung 4 / `tiers[0]`), proving the bottom of the ladder.
     const model = matrixModel({ tiers: ["bf16"], installed: ["bf16"], defaultTier: "none" });
     expect(defaultTierSelection(model, null)).toBe("bf16");
+  });
+});
+
+// A variant-matrix model where SOME tiers are installed, some torn (present-but-incomplete), some
+// cleanly absent — the exact mix the picker must render "all shown, only installed selectable".
+function mixedMatrixModel() {
+  return {
+    id: "z_image_turbo",
+    hasVariantMatrix: true,
+    variants: [
+      { variant: "q4", installState: "installed", cacheState: "complete" },
+      { variant: "q8", installState: "missing", cacheState: "incomplete" }, // torn: DiT present, tokenizer gone
+      { variant: "bf16", installState: "missing", cacheState: "missing" }, // never downloaded
+    ],
+  };
+}
+
+describe("allPossibleTiers — the full display set (all tiers, installed or not)", () => {
+  it("returns EVERY declared variant tier, installed or not, in display order", () => {
+    // Only q4 is installed, yet all three must be listed so the un-downloaded ones can render disabled.
+    expect(allPossibleTiers(mixedMatrixModel())).toEqual(["q4", "q8", "bf16"]);
+  });
+
+  it("differs from installedTiers, which stays the selectable (safe-to-send) subset", () => {
+    const model = mixedMatrixModel();
+    expect(installedTiers(model)).toEqual(["q4"]);
+    expect(allPossibleTiers(model)).toEqual(["q4", "q8", "bf16"]);
+  });
+
+  it("uses the richer mlxTierStates set for convert-at-install models when present", () => {
+    const model = {
+      id: "sana_sprint_1600m",
+      hasVariantMatrix: false,
+      mlxTierStates: [
+        { tier: "q4", installState: "installed", cacheState: "complete" },
+        { tier: "q8", installState: "installed", cacheState: "complete" },
+        { tier: "bf16", installState: "missing", cacheState: "missing" },
+      ],
+    };
+    expect(allPossibleTiers(model)).toEqual(["q4", "q8", "bf16"]);
+    expect(installedTiers(model)).toEqual(["q4", "q8"]);
+  });
+
+  it("falls back to the legacy installed-only mlxTiers list when no richer field exists", () => {
+    // No mlxTierStates: an un-upgraded catalog keeps today's installed-only display, no regression.
+    expect(allPossibleTiers({ id: "anima_base", hasVariantMatrix: false, mlxTiers: ["q4", "q8"] })).toEqual([
+      "q4",
+      "q8",
+    ]);
+  });
+
+  it("returns [] when the model exposes no tier information", () => {
+    expect(allPossibleTiers({ id: "boogu", hasVariantMatrix: false })).toEqual([]);
+    expect(allPossibleTiers(undefined)).toEqual([]);
+  });
+});
+
+describe("tierPickerOptions — show all, disable the un-downloaded", () => {
+  it("marks installed tiers selectable and un-installed tiers disabled", () => {
+    const options = tierPickerOptions(mixedMatrixModel());
+    expect(options.map((o) => o.tier)).toEqual(["q4", "q8", "bf16"]);
+    expect(options.map((o) => o.disabled)).toEqual([false, true, true]);
+  });
+
+  it("labels a torn (incomplete) tier distinctly from a never-downloaded one", () => {
+    const byTier = Object.fromEntries(tierPickerOptions(mixedMatrixModel()).map((o) => [o.tier, o.label]));
+    expect(byTier.q4).toBe("Q4 (smallest)"); // installed → plain label, no suffix
+    expect(byTier.q8).toBe("Q8 (balanced) — download incomplete"); // torn → re-download hint
+    expect(byTier.bf16).toBe("Full precision (bf16) — not downloaded"); // cleanly absent
+  });
+
+  it("never marks an installed tier disabled (the selectable set is installedTiers verbatim)", () => {
+    const model = matrixModel({ tiers: ["q4", "q8", "bf16"], installed: ["q4", "bf16"] });
+    const disabledInstalled = tierPickerOptions(model).filter(
+      (o) => o.disabled && installedTiers(model).includes(o.tier),
+    );
+    expect(disabledInstalled).toEqual([]);
+  });
+});
+
+describe("defaultTierSelection — capability-aware Auto base (epic 10721 R1/R3/R4)", () => {
+  // `defaultTier: "none"` mirrors the real catalog, which never emits `variant.default` — so the dead
+  // rung-2 `declared` never masks the Auto base under test.
+  it("uses options.autoTier as the base when the global quality is Auto (or unset)", () => {
+    const model = matrixModel({ installed: ["q4", "q8", "bf16"], defaultTier: "none" });
+    // Auto suggested bf16 (small model / roomy Mac) → default bf16.
+    expect(defaultTierSelection(model, null, { defaultQuality: "auto", autoTier: "bf16" })).toBe("bf16");
+    // Auto suggested q4 (heavy model / small Mac) → default q4, even though bf16 IS installed — Auto
+    // respects what fits, it doesn't just grab the highest installed.
+    expect(defaultTierSelection(model, null, { defaultQuality: "auto", autoTier: "q4" })).toBe("q4");
+    // An absent defaultQuality behaves like Auto (the new default).
+    expect(defaultTierSelection(model, null, { autoTier: "q8" })).toBe("q8");
+  });
+
+  it("an explicit global tier setting overrides Auto", () => {
+    const model = matrixModel({ installed: ["q4", "q8", "bf16"], defaultTier: "none" });
+    expect(defaultTierSelection(model, null, { defaultQuality: "q4", autoTier: "bf16" })).toBe("q4");
+  });
+
+  it("a saved sticky overrides Auto; an uninstalled sticky reverts to Auto (not q8)", () => {
+    const model = matrixModel({ tiers: ["q4", "q8", "bf16"], installed: ["q4", "bf16"], defaultTier: "none" });
+    // Saved bf16, still installed → honored over Auto's q4 suggestion.
+    expect(defaultTierSelection(model, "bf16", { defaultQuality: "auto", autoTier: "q4" })).toBe("bf16");
+    // Saved q8 no longer installed (user deleted it) → revert to Auto's q4 suggestion, NOT a flat q8.
+    expect(defaultTierSelection(model, "q8", { defaultQuality: "auto", autoTier: "q4" })).toBe("q4");
+  });
+
+  it("falls back to q8 only when Auto has no signal (autoTier null — no memory / no matrix)", () => {
+    const model = matrixModel({ installed: ["q4", "q8", "bf16"], defaultTier: "none" });
+    expect(defaultTierSelection(model, null, { defaultQuality: "auto", autoTier: null })).toBe("q8");
+  });
+
+  it("clamps the Auto suggestion to what's installed", () => {
+    // Auto suggested bf16 but it isn't downloaded → nearest installed clean tier (q8), never null.
+    const model = matrixModel({ tiers: ["q4", "q8", "bf16"], installed: ["q4", "q8"], defaultTier: "none" });
+    expect(defaultTierSelection(model, null, { defaultQuality: "auto", autoTier: "bf16" })).toBe("q8");
+  });
+
+  it("clamps the Auto suggestion UP to the model quality floor", () => {
+    // Auto suggested q4, but the model's floor is q8 → raised to q8 (floor wins over the suggestion).
+    const model = flooredConvertModel({ mlxTiers: ["q4", "q8", "bf16"], floor: "q8" });
+    expect(defaultTierSelection(model, null, { defaultQuality: "auto", autoTier: "q4" })).toBe("q8");
   });
 });

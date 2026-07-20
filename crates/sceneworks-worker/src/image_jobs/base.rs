@@ -1219,20 +1219,118 @@ fn dir_has_visible_entry(dir: &Path) -> bool {
     })
 }
 
+/// Whether `dir` holds at least one non-hidden file whose name ends with `suffix` (e.g. `.safetensors`
+/// / `.index.json`). The building block for the per-family completeness checks of turnkeys that ship
+/// no `model_index.json` (Anima / Boogu / SANA), where [`tier_components_present`] is a no-op. Hidden
+/// AppleDouble `._*` sidecars never count (SceneWorks#1333).
+fn dir_has_visible_file_ending(dir: &Path, suffix: &str) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            !sceneworks_core::lora_family::is_hidden_file(&entry.path())
+                && entry.file_name().to_string_lossy().ends_with(suffix)
+        })
+    })
+}
+
+/// Whether an Anima tier `dir` is COMPLETE and loadable (issue #850 class, generalized). Anima ships no
+/// `model_index.json`, so the shared [`tier_components_present`] guard is a no-op for it and a torn tier
+/// (DiT present, text-encoder/VAE absent) reached the loader, which then died with a raw
+/// "No such file or directory" (mlx-gen-anima `load_text_phase` / `load_vae`). A tier is complete when
+/// all three concrete inputs are present: the DiT (any visible `.safetensors` in `diffusion_models/`),
+/// the dense text encoder, and the VAE. Tokenizers are vendored into the binary, so there is no
+/// tokenizer file to check here.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn anima_tier_complete(dir: &Path) -> bool {
+    dir_has_visible_file_ending(&dir.join("diffusion_models"), ".safetensors")
+        && dir.join("text_encoders/qwen_3_06b_base.safetensors").is_file()
+        && dir.join("vae/qwen_image_vae.safetensors").is_file()
+}
+
+/// Whether a Boogu tier `dir` is COMPLETE and loadable. Boogu ships no `model_index.json`, so the shared
+/// guard is a no-op; the loader crashes FIRST on a missing `mllm/tokenizer.json`, then on an absent
+/// `mllm`/`transformer`/`vae` weight. A tier is complete when the transformer (packed single-file OR
+/// sharded index) plus its `config.json`, the Qwen3-VL `mllm/` (weights + `tokenizer.json`), and the VAE
+/// weights are all present.
+fn boogu_tier_complete(dir: &Path) -> bool {
+    let transformer = dir.join("transformer");
+    let transformer_weights = transformer
+        .join("diffusion_pytorch_model.safetensors")
+        .is_file()
+        || transformer
+            .join("diffusion_pytorch_model.safetensors.index.json")
+            .is_file();
+    transformer_weights
+        && transformer.join("config.json").is_file()
+        && dir.join("mllm/tokenizer.json").is_file()
+        && dir_has_visible_file_ending(&dir.join("mllm"), ".safetensors")
+        && dir_has_visible_file_ending(&dir.join("vae"), ".safetensors")
+}
+
+/// Whether a SANA tier `dir` is COMPLETE and loadable. The `SceneWorks/Sana_*_mlx` turnkeys ship no
+/// `model_index.json`, so the standard-tier guard is a no-op for SANA specifically (flux/qwen/etc. DO
+/// ship one and stay protected by [`tier_components_present`]); the SANA loader dies with a raw OS error
+/// on an absent Gemma text encoder or its tokenizer (mlx-gen-sana `SanaTextEncoder::from_snapshot`). A
+/// tier is complete when the Linear-DiT transformer, the DC-AE VAE, and the Gemma-2 text encoder + its
+/// tokenizer (both bundled inside `text_encoder/`) are all present.
+fn sana_tier_complete(dir: &Path) -> bool {
+    dir_has_visible_file_ending(&dir.join("transformer"), ".safetensors")
+        && dir_has_visible_file_ending(&dir.join("vae"), ".safetensors")
+        && dir.join("text_encoder/gemma-2-2b-it.safetensors").is_file()
+        && dir.join("text_encoder/tokenizer.json").is_file()
+}
+
+/// Whether the tier dir `resolve_weights_dir` resolved for `request` is COMPLETE — every component its
+/// loader reads is on disk. Used ONLY by [`mlx_weights_gap`] to turn a torn-tier load (which otherwise
+/// dies mid-generation with a raw "No such file or directory") into an actionable PRE-FLIGHT message.
+/// After the sc-12279-generalized resolvers, `resolve_weights_dir` already falls back to a complete
+/// sibling tier whenever one exists, so this only ever returns `false` when NO complete tier is
+/// installed for the model.
+///
+/// Dispatches to the SAME family completeness predicate the resolvers use. An unrecognized family falls
+/// back to [`tier_components_present`] (the `model_index.json` guard), which is `true` for a layout
+/// without one — so a dispatch miss degrades to "no extra message" (today's raw error at load), NEVER a
+/// false "incomplete" that would block a loadable tier.
+#[cfg(target_os = "macos")]
+fn resolved_tier_is_complete(request: &ImageRequest, dir: &Path) -> bool {
+    if is_anima_model(&request.model) {
+        return anima_tier_complete(dir);
+    }
+    if matches!(
+        request.model.as_str(),
+        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit"
+    ) {
+        return boogu_tier_complete(dir);
+    }
+    if matches!(request.model.as_str(), "sana_1600m" | "sana_sprint_1600m") {
+        return tier_components_present(dir) && sana_tier_complete(dir);
+    }
+    tier_components_present(dir)
+}
+
 /// Walk `chain` (a tier-name preference order) and return the first tier that is safe to load: one
-/// whose declared component tree is COMPLETE if any qualifies, else the first that merely clears
+/// that is COMPLETE (`complete` returns true) if any qualifies, else the first that merely clears
 /// `present`'s backbone probe. `None` when no tier is installed at all.
 ///
 /// The shared tail of every tier resolver (sc-12279). `present` alone accepts a tier on its backbone,
 /// so a torn tier — the transformer landed, `tokenizer/` did not — short-circuited the chain and the
 /// loader died on `tokenizer: No such file or directory` even when a complete sibling tier was
 /// installed (issue #850's symptom). Running the chain twice, rather than folding completeness into
-/// `present`, is deliberate: if [`tier_components_present`] ever misjudges a tier shape we haven't
-/// seen, pass 2 lands exactly where the pre-sc-12279 code did, so this can never strand a model that
-/// loads today. Duplicates in `chain` (the preferred tier is usually also a fallback) are harmless.
-fn pick_loadable_tier(chain: &[&str], present: &dyn Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
+/// `present`, is deliberate: if `complete` ever misjudges a tier shape we haven't seen, pass 2 lands
+/// exactly where the pre-sc-12279 code did, so this can never strand a model that loads today.
+/// Duplicates in `chain` (the preferred tier is usually also a fallback) are harmless.
+///
+/// `complete` is family-specific: the diffusers-turnkey families pass [`tier_components_present`]
+/// (reads the tier's own `model_index.json`); families with a bespoke on-disk layout and no
+/// `model_index.json` (Anima's `diffusion_models/ + text_encoders/ + vae/`, Boogu's packed subfolders,
+/// InstantID's `unet/`) pass their own predicate so the completeness half is not a silent no-op for
+/// them (the pre-generalization gap that let those families still short-circuit onto a torn tier).
+fn pick_loadable_tier(
+    chain: &[&str],
+    present: &dyn Fn(&str) -> Option<PathBuf>,
+    complete: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
     let first = |probe: &dyn Fn(&str) -> Option<PathBuf>| chain.iter().find_map(|name| probe(name));
-    if let Some(dir) = first(&|name: &str| present(name).filter(|dir| tier_components_present(dir))) {
+    if let Some(dir) = first(&|name: &str| present(name).filter(|dir| complete(dir))) {
         return Some(dir);
     }
     // No complete tier: load the torn one anyway (pre-sc-12279 behavior) but say so — the loader
@@ -1240,8 +1338,8 @@ fn pick_loadable_tier(chain: &[&str], present: &dyn Fn(&str) -> Option<PathBuf>)
     let torn = first(present)?;
     tracing::warn!(
         tier = %torn.display(),
-        "Tier is missing components its model_index.json declares, and no complete tier is \
-         installed. Loading it anyway; re-download the tier if load fails."
+        "Tier is missing components it should ship, and no complete tier is installed. Loading it \
+         anyway; re-download the tier if load fails."
     );
     Some(torn)
 }
@@ -1343,11 +1441,16 @@ fn standard_tier_subdir_gated(root: &Path, request: &ImageRequest, nvfp4_host: b
         min_quality_floor(request),
         nvfp4_requested(request) && nvfp4_host,
     );
-    // sc-12279: prefer a tier whose `model_index.json` component tree is fully on disk, so a torn
-    // tier falls through to a complete sibling instead of reaching the loader. Flat unified tiers
-    // (SenseNova-U1 MoT) ship no `model_index.json`, so `tier_components_present` passes them through
-    // and they resolve on the backbone probe exactly as before.
-    pick_loadable_tier(&[preferred, "q8", "bf16", "q4"], &present)
+    // sc-12279: prefer a tier whose component tree is fully on disk, so a torn tier falls through to a
+    // complete sibling instead of reaching the loader. Diffusers-shaped turnkeys (flux/qwen/sd3.5/…)
+    // ship a per-tier `model_index.json` that `tier_components_present` reads. SANA is the exception:
+    // its `SceneWorks/Sana_*_mlx` turnkeys ship NO `model_index.json`, so that guard is a no-op for it —
+    // fold in the concrete `sana_tier_complete` check (transformer + VAE + Gemma TE + tokenizer) so a
+    // torn SANA tier is demoted too. Flat unified tiers (SenseNova-U1 MoT) ship no `model_index.json`
+    // either but are not SANA, so they resolve on the backbone probe exactly as before.
+    let is_sana = matches!(request.model.as_str(), "sana_1600m" | "sana_sprint_1600m");
+    let complete = |dir: &Path| tier_components_present(dir) && (!is_sana || sana_tier_complete(dir));
+    pick_loadable_tier(&[preferred, "q8", "bf16", "q4"], &present, &complete)
         .unwrap_or_else(|| root.to_path_buf())
 }
 
@@ -1424,10 +1527,10 @@ fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     // lane is candle/Blackwell-only. Passing `false` keeps this resolver byte-identical to its pre-sc-11042
     // behavior; wire it here if an Anima NVFP4 tier is ever converted.
     let preferred = preferred_tier(bits, min_quality_floor(request), false);
-    present(preferred)
-        .or_else(|| present("q8"))
-        .or_else(|| present("bf16"))
-        .or_else(|| present("q4"))
+    // sc-12279 generalized: Anima ships no `model_index.json`, so route the chain through the concrete
+    // `anima_tier_complete` predicate — a torn tier (DiT present, text-encoder/VAE absent) now falls
+    // through to a complete sibling instead of reaching the loader and dying on the missing file.
+    pick_loadable_tier(&[preferred, "q8", "bf16", "q4"], &present, &anima_tier_complete)
         .unwrap_or_else(|| root.to_path_buf())
 }
 
@@ -1502,7 +1605,8 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let preferred = preferred_tier(bits, min_quality_floor(request), false);
     // sc-12279: the Ideogram turnkey ships a per-tier `model_index.json`, so the shared chain prefers
     // a tier whose declared component tree is fully on disk over a torn one.
-    pick_loadable_tier(&[preferred, "q8", "q4"], &present).unwrap_or_else(|| root.to_path_buf())
+    pick_loadable_tier(&[preferred, "q8", "q4"], &present, &tier_components_present)
+        .unwrap_or_else(|| root.to_path_buf())
 }
 
 /// The Boogu subfolder for a `mlxQuantize` request — `None` keeps the Q8 default. The FETCH-side helper
@@ -1577,10 +1681,13 @@ fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     // `nvfp4: false` (sc-11042): Boogu's `<variant>-bf16` MLX layout hosts no NVFP4 tier. Byte-identical
     // to its pre-sc-11042 behavior; wire it here if one is ever converted.
     let preferred = preferred_tier(bits, min_quality_floor(request), false);
-    present(&variant_folder(preferred))
-        .or_else(|| present(variant))
-        .or_else(|| present(&q4))
-        .or_else(|| present(&bf16))
+    // sc-12279 generalized: Boogu ships no `model_index.json`, so route the folder chain through the
+    // concrete `boogu_tier_complete` predicate — a torn tier (transformer present, `mllm/tokenizer.json`
+    // or VAE absent) now falls through to a complete sibling instead of crashing the loader on the
+    // missing tokenizer. Chain is folder names (`<variant>`, `<variant>-q4`, `<variant>-bf16`).
+    let chain = [variant_folder(preferred), variant.to_owned(), q4, bf16];
+    let chain_refs: Vec<&str> = chain.iter().map(String::as_str).collect();
+    pick_loadable_tier(&chain_refs, &present, &boogu_tier_complete)
         .unwrap_or_else(|| root.to_path_buf())
 }
 
@@ -1646,7 +1753,7 @@ fn krea_model_subdir_gated(root: &Path, request: &ImageRequest, nvfp4_host: bool
     // whose `model_index.json` component tree is fully on disk, so Raw with a torn `q8/` and a
     // complete `bf16/` training-base tier now generates off bf16 instead of dying on the absent
     // `q8/tokenizer/` (issue #850's symptom).
-    pick_loadable_tier(&[preferred, "q8", "q4", "bf16"], &present)
+    pick_loadable_tier(&[preferred, "q8", "q4", "bf16"], &present, &tier_components_present)
         .unwrap_or_else(|| root.to_path_buf())
 }
 
@@ -7554,6 +7661,171 @@ mod standard_tier_tests {
         assert!(
             tier_components_present(&root.join("bf16")),
             "a tier with no model_index.json has no component tree to check"
+        );
+    }
+
+    // ---- sc-12279 generalized to the no-`model_index.json` families (SANA / Boogu / Anima) ----
+    // These turnkeys ship no `model_index.json`, so the shared `tier_components_present` guard is a
+    // no-op for them and a torn tier used to short-circuit the chain and crash the loader on the first
+    // missing component. Each resolver now routes through a concrete per-family completeness predicate.
+
+    /// Seed a SANA MLX tier (`SceneWorks/Sana_*_mlx` layout): transformer + (when `complete`) the DC-AE
+    /// VAE and the Gemma-2 text encoder with its bundled tokenizer. No `model_index.json` (as shipped).
+    fn seed_sana_tier(root: &Path, tier: &str, complete: bool) {
+        let dir = root.join(tier);
+        std::fs::create_dir_all(dir.join("transformer")).unwrap();
+        std::fs::write(dir.join("transformer/diffusion_pytorch_model.safetensors"), b"x").unwrap();
+        if complete {
+            std::fs::create_dir_all(dir.join("vae")).unwrap();
+            std::fs::write(dir.join("vae/diffusion_pytorch_model.safetensors"), b"x").unwrap();
+            std::fs::create_dir_all(dir.join("text_encoder")).unwrap();
+            std::fs::write(dir.join("text_encoder/gemma-2-2b-it.safetensors"), b"x").unwrap();
+            std::fs::write(dir.join("text_encoder/tokenizer.json"), b"{}").unwrap();
+        }
+    }
+
+    /// A torn SANA tier (transformer only, TE/VAE absent) must fall through to a complete sibling rather
+    /// than reaching the loader, which would die on the missing Gemma text encoder. SANA ships no
+    /// `model_index.json`, so this is caught by the concrete `sana_tier_complete` check, not the no-op
+    /// `tier_components_present` guard.
+    #[test]
+    fn sana_torn_tier_falls_through_to_a_complete_sibling() {
+        let request = |bits: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "sana_1600m", "advanced": { "mlxQuantize": bits } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_sana_tier(root, "q8", false); // torn: transformer only
+        seed_sana_tier(root, "bf16", true); // complete
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!(null))),
+            root.join("bf16"),
+            "the torn q8 default must skip to the complete bf16 tier, not crash on the missing Gemma TE"
+        );
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!(8))),
+            root.join("bf16"),
+            "an explicit q8 pick is redirected too — a working render beats an os-error-2 we can avoid"
+        );
+    }
+
+    /// Regression contract: with NO complete SANA tier, the torn one still resolves (pass 2), unchanged
+    /// from before — the user gets the same loader error they would have, never a silent no-op.
+    #[test]
+    fn sana_torn_tier_is_returned_when_it_is_all_there_is() {
+        let request = ImageRequest::from_payload(
+            json!({ "model": "sana_1600m", "advanced": {} }).as_object().unwrap(),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        seed_sana_tier(tmp.path(), "q8", false);
+        assert_eq!(
+            standard_tier_subdir(tmp.path(), &request),
+            tmp.path().join("q8"),
+            "no complete tier: the torn tier still resolves, not the repo root"
+        );
+    }
+
+    /// Non-SANA standard turnkeys (flux/qwen/…) are unaffected: they DO ship `model_index.json`, so
+    /// their completeness stays `tier_components_present` — the added SANA branch never touches them.
+    #[test]
+    fn non_sana_standard_turnkey_ignores_the_sana_completeness_branch() {
+        let request = ImageRequest::from_payload(
+            json!({ "model": "flux_dev", "advanced": {} }).as_object().unwrap(),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // A flux tier with only a transformer and no text_encoder dir would FAIL sana_tier_complete, but
+        // flux is not SANA — it resolves on its backbone/model_index exactly as before.
+        seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
+        assert_eq!(standard_tier_subdir(root, &request), root.join("q8"));
+    }
+
+    /// Seed a Boogu tier folder (`<variant>` / `<variant>-q4` / `<variant>-bf16`): packed transformer +
+    /// its config, and (when `complete`) the Qwen3-VL `mllm/` with tokenizer and the VAE. No index.
+    fn seed_boogu_tier(root: &Path, folder: &str, complete: bool) {
+        let dir = root.join(folder);
+        std::fs::create_dir_all(dir.join("transformer")).unwrap();
+        std::fs::write(dir.join("transformer/diffusion_pytorch_model.safetensors"), b"x").unwrap();
+        std::fs::write(dir.join("transformer/config.json"), b"{}").unwrap();
+        if complete {
+            std::fs::create_dir_all(dir.join("mllm")).unwrap();
+            std::fs::write(dir.join("mllm/model.safetensors"), b"x").unwrap();
+            std::fs::write(dir.join("mllm/tokenizer.json"), b"{}").unwrap();
+            std::fs::create_dir_all(dir.join("vae")).unwrap();
+            std::fs::write(dir.join("vae/diffusion_pytorch_model.safetensors"), b"x").unwrap();
+        }
+    }
+
+    /// A torn Boogu tier (transformer present, `mllm/tokenizer.json` + VAE absent) must fall through to a
+    /// complete sibling rather than crash the loader on the first-read `mllm/tokenizer.json`.
+    #[test]
+    fn boogu_torn_tier_falls_through_to_a_complete_sibling() {
+        let request = ImageRequest::from_payload(
+            json!({ "model": "boogu_image", "advanced": {} }).as_object().unwrap(),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // `base` is the Q8 default folder (torn); `base-bf16` is complete.
+        seed_boogu_tier(root, "base", false);
+        seed_boogu_tier(root, "base-bf16", true);
+        assert_eq!(
+            boogu_model_subdir(root, &request),
+            root.join("base-bf16"),
+            "the torn Q8 `base/` must skip to the complete `base-bf16`, not crash on `mllm/tokenizer.json`"
+        );
+    }
+
+    /// `resolved_tier_is_complete` (the pre-flight completeness dispatcher behind the friendly
+    /// `mlx_weights_gap` message) reports a torn SANA tier as incomplete and a whole one as complete.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolved_tier_is_complete_flags_a_torn_sana_tier() {
+        let request = ImageRequest::from_payload(
+            json!({ "model": "sana_1600m", "advanced": {} }).as_object().unwrap(),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_sana_tier(root, "q8", false);
+        seed_sana_tier(root, "bf16", true);
+        assert!(!resolved_tier_is_complete(&request, &root.join("q8")));
+        assert!(resolved_tier_is_complete(&request, &root.join("bf16")));
+    }
+
+    /// Seed an Anima tier (`bf16/ q8/ q4/`, `split_files` shape): the DiT + (when `complete`) the dense
+    /// text encoder and the VAE. Tokenizers are vendored into the binary, so none is on disk. No index.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    fn seed_anima_tier(root: &Path, tier: &str, complete: bool) {
+        let dir = root.join(tier);
+        std::fs::create_dir_all(dir.join("diffusion_models")).unwrap();
+        std::fs::write(dir.join("diffusion_models/anima-base-v1.0.safetensors"), b"x").unwrap();
+        if complete {
+            std::fs::create_dir_all(dir.join("text_encoders")).unwrap();
+            std::fs::write(dir.join("text_encoders/qwen_3_06b_base.safetensors"), b"x").unwrap();
+            std::fs::create_dir_all(dir.join("vae")).unwrap();
+            std::fs::write(dir.join("vae/qwen_image_vae.safetensors"), b"x").unwrap();
+        }
+    }
+
+    /// A torn Anima tier (DiT present, text-encoder/VAE absent) must fall through to a complete sibling
+    /// rather than reaching the loader, which would die on the missing `text_encoders/…` (mlx-gen-anima).
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn anima_torn_tier_falls_through_to_a_complete_sibling() {
+        let request = ImageRequest::from_payload(
+            json!({ "model": "anima_base", "advanced": {} }).as_object().unwrap(),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_anima_tier(root, "q8", false); // torn: DiT only
+        seed_anima_tier(root, "bf16", true); // complete
+        assert_eq!(
+            anima_tier_subdir(root, &request),
+            root.join("bf16"),
+            "the torn q8 default must skip to the complete bf16 tier, not crash on the missing text encoder"
         );
     }
 

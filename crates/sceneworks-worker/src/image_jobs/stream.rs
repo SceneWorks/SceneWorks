@@ -268,7 +268,23 @@ where
 pub(crate) fn mlx_weights_gap(request: &ImageRequest, settings: &Settings) -> Option<String> {
     let model = mlx_model(&request.model)?;
     match resolve_weights_dir(request, settings) {
-        Ok(Some(_)) => return None,
+        Ok(Some(dir)) => {
+            // The resolvers fall back to a COMPLETE sibling tier whenever one exists (sc-12279
+            // generalized), so reaching here with an incomplete `dir` means NO complete tier is
+            // installed for this model — the load would die mid-generation on the first missing file.
+            // Turn that into an actionable pre-flight message naming the tier, directing the user to
+            // Model Manager or to pick an installed tier, instead of a raw "No such file or directory".
+            if !resolved_tier_is_complete(request, &dir) {
+                let tier = dir.file_name().and_then(|s| s.to_str()).unwrap_or("selected");
+                return Some(format!(
+                    "{}: the '{tier}' quant tier isn't fully installed on this machine (some weight \
+                     files are missing). Re-download or repair it in Model Manager, or pick a tier \
+                     you have already installed from the studio's Quant tier menu, then retry.",
+                    request.model,
+                ));
+            }
+            return None;
+        }
         Err(error) => return Some(error.to_string()),
         Ok(None) => {}
     }

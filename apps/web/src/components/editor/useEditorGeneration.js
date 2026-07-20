@@ -7,7 +7,12 @@ import {
   schedulerDefaultFromModel,
   schedulerShiftDefaultFromModel,
 } from "../../samplerOptions.js";
-import { installedTiers, tierQuantize } from "../../quantTier.js";
+import {
+  allPossibleTiers,
+  installedTiers,
+  tierPickerOptions,
+  tierQuantize,
+} from "../../quantTier.js";
 import { serializeLora, buildStudioPresetPayload } from "../../presetUtils.js";
 import { WAN_A14B_LIGHTNING_MODEL_IDS } from "../../constants.js";
 import { useGenerationStudio } from "../../screens/generationStudio.jsx";
@@ -108,14 +113,23 @@ export function useEditorGeneration({ context }) {
   const durationOptions = selectedModel?.limits?.durations ?? DURATION_FALLBACK;
   const samplerOptions = useMemo(() => samplerOptionsFromModel(selectedModel, null), [selectedModel]);
   const schedulerOptions = useMemo(() => schedulerOptionsFromModel(selectedModel, null), [selectedModel]);
-  const availableTiers = useMemo(
-    () => installedTiers(selectedModel, { convRotEligible: false, nvfp4Eligible: false, defaultQuality: EDITOR_DEFAULT_TIER }),
-    [selectedModel],
-  );
+  const tierPickerOpts = { convRotEligible: false, nvfp4Eligible: false, defaultQuality: EDITOR_DEFAULT_TIER };
+  const availableTiers = useMemo(() => installedTiers(selectedModel, tierPickerOpts), [selectedModel]);
+  // Full display set + option list with un-downloaded tiers disabled — same show-all/disable-unavailable
+  // rule as the studios. `availableTiers` stays the SELECTABLE set; the picker shows when there is more
+  // than one POSSIBLE tier and at least one is installed.
+  const possibleTiers = useMemo(() => allPossibleTiers(selectedModel, tierPickerOpts), [selectedModel]);
+  const tierPickerItems = useMemo(() => tierPickerOptions(selectedModel, tierPickerOpts), [selectedModel]);
+  // Only an installed tier can be selected; disabled chips are shown for discoverability, never picked.
+  const selectTier = (tier) => {
+    if (availableTiers.includes(tier)) {
+      setQuantTier(tier);
+    }
+  };
 
   const showSamplerPicker = samplerOptions.length > 1;
   const showSchedulerPicker = schedulerOptions.length > 1;
-  const showTierPicker = availableTiers.length > 1;
+  const showTierPicker = possibleTiers.length > 1 && availableTiers.length > 0;
   const showLightning = WAN_A14B_LIGHTNING_MODEL_IDS.has(model);
   const lightningActive = showLightning && lightning;
 
@@ -327,6 +341,8 @@ export function useEditorGeneration({ context }) {
     quantTier,
     setQuantTier,
     availableTiers,
+    tierPickerItems,
+    selectTier,
     showTierPicker,
     lightning,
     setLightning,

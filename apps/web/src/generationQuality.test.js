@@ -17,9 +17,11 @@ describe("generationQuality store (sc-10728)", () => {
     window.localStorage.clear();
   });
 
-  it("defaults to q8 when nothing is stored", () => {
+  it("defaults to Auto when nothing is stored (epic 10721 R3)", () => {
+    // DEFAULT_GENERATION_QUALITY stays q8 — it is the no-signal FALLBACK tier used when Auto has no
+    // capability reading — but the SETTING's default is now Auto (capability-aware).
     expect(DEFAULT_GENERATION_QUALITY).toBe("q8");
-    expect(readDefaultGenerationQuality()).toBe("q8");
+    expect(readDefaultGenerationQuality()).toBe("auto");
   });
 
   it("reads back a valid stored value", () => {
@@ -29,11 +31,11 @@ describe("generationQuality store (sc-10728)", () => {
     expect(readDefaultGenerationQuality()).toBe("q4");
   });
 
-  it("normalizes an unknown/garbage stored value back to q8", () => {
+  it("normalizes an unknown/garbage stored value back to Auto", () => {
     window.localStorage.setItem(STORAGE_KEY, "int8-convrot");
-    expect(readDefaultGenerationQuality()).toBe("q8");
+    expect(readDefaultGenerationQuality()).toBe("auto");
     window.localStorage.setItem(STORAGE_KEY, "totally-bogus");
-    expect(readDefaultGenerationQuality()).toBe("q8");
+    expect(readDefaultGenerationQuality()).toBe("auto");
   });
 
   it("persists a write and survives a simulated restart (round-trip)", () => {
@@ -44,18 +46,20 @@ describe("generationQuality store (sc-10728)", () => {
     expect(window.localStorage.getItem(STORAGE_KEY)).toBe("bf16");
   });
 
-  it("write normalizes an invalid value to q8 before persisting", () => {
-    expect(writeDefaultGenerationQuality("nonsense")).toBe("q8");
-    expect(readDefaultGenerationQuality()).toBe("q8");
+  it("write normalizes an invalid value to Auto before persisting", () => {
+    expect(writeDefaultGenerationQuality("nonsense")).toBe("auto");
+    expect(readDefaultGenerationQuality()).toBe("auto");
   });
 
-  it("normalizeGenerationQuality validates against bf16|q8|q4", () => {
+  it("normalizeGenerationQuality validates against auto|bf16|q8|q4", () => {
+    expect(normalizeGenerationQuality("auto")).toBe("auto");
     expect(normalizeGenerationQuality("bf16")).toBe("bf16");
     expect(normalizeGenerationQuality("q8")).toBe("q8");
     expect(normalizeGenerationQuality("q4")).toBe("q4");
-    expect(normalizeGenerationQuality("int8-convrot")).toBe("q8");
-    expect(normalizeGenerationQuality(null)).toBe("q8");
-    expect(normalizeGenerationQuality(undefined)).toBe("q8");
+    // Unknown / non-quality values fall back to Auto (the new default), not a flat q8.
+    expect(normalizeGenerationQuality("int8-convrot")).toBe("auto");
+    expect(normalizeGenerationQuality(null)).toBe("auto");
+    expect(normalizeGenerationQuality(undefined)).toBe("auto");
   });
 
   it("labels each tier legibly and falls back to the raw key", () => {

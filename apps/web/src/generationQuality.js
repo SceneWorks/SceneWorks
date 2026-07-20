@@ -23,10 +23,21 @@ import { DEFAULT_GENERATION_QUALITY, GENERATION_QUALITY_TIERS } from "./quantTie
 // import without also reaching into quantTier.js.
 export { DEFAULT_GENERATION_QUALITY, GENERATION_QUALITY_TIERS } from "./quantTier.js";
 
+// The capability-aware "Auto" mode (epic 10721 R3) — the DEFAULT. In Auto, each model's default tier is
+// the highest-fidelity tier that fits this machine's memory (`suggestTier`), so a small model defaults to
+// bf16 and a heavy one on a small Mac defaults to what fits — instead of a flat tier for everything. A
+// user can still pin an explicit bf16/q8/q4 globally, or override per-model in a studio (that pick is
+// saved). NOT a quant tier, so it is deliberately absent from `GENERATION_QUALITY_TIERS`.
+export const AUTO_GENERATION_QUALITY = "auto";
+
+// The Settings dropdown vocabulary, in display order: Auto first (the default), then the explicit tiers.
+export const GENERATION_QUALITY_OPTIONS = [AUTO_GENERATION_QUALITY, ...GENERATION_QUALITY_TIERS];
+
 const STORAGE_KEY = "sceneworks-default-generation-quality";
 
-// Legible Settings labels, keyed by tier. Unknown keys fall back to the raw key.
+// Legible Settings labels, keyed by value. Unknown keys fall back to the raw key.
 const LABELS = {
+  [AUTO_GENERATION_QUALITY]: "Auto (best that fits this Mac)",
   bf16: "High fidelity (bf16)",
   q8: "Balanced (Q8)",
   q4: "Fast (Q4)",
@@ -36,9 +47,13 @@ export function generationQualityLabel(value) {
   return LABELS[value] ?? value;
 }
 
-// The valid quality tier for `value`, or the q8 default when it isn't one of bf16|q8|q4.
+// The valid setting for `value` — "auto" or an explicit bf16|q8|q4 — else the "auto" default when it
+// isn't one of them. Auto is the app-wide default (epic 10721 R3): an unset/invalid preference means
+// "let the app pick the best tier that fits", not a flat q8.
 export function normalizeGenerationQuality(value) {
-  return GENERATION_QUALITY_TIERS.includes(value) ? value : DEFAULT_GENERATION_QUALITY;
+  return value === AUTO_GENERATION_QUALITY || GENERATION_QUALITY_TIERS.includes(value)
+    ? value
+    : AUTO_GENERATION_QUALITY;
 }
 
 // The global default generation quality from the instant-paint cache, or q8 when unset / invalid /
