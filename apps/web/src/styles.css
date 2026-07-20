@@ -2299,6 +2299,89 @@ label {
   box-shadow: var(--shadow-glow);
 }
 
+/* Multi-speaker segmented-script editor (sc-13676): replaces the plain prompt textarea in the
+   prompt-input-row when the selected model advertises audio.supportsMultiSpeaker. It reuses the
+   .prompt-input surface/border but stacks its turns vertically; each turn is a
+   [speaker select | text | remove] row. Reuses the shared tokens so it holds in light + dark. */
+.multi-speaker-script {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  resize: none;
+  overflow-y: auto;
+  max-height: 340px;
+}
+
+.script-segment {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.script-segment-speaker {
+  min-width: 108px;
+}
+
+.script-segment-text {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  font-size: 13.5px;
+  line-height: 1.45;
+  resize: vertical;
+  min-height: 44px;
+}
+
+.script-segment-text:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+
+.script-segment-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.script-segment-remove:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.script-segment-remove:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.script-add-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--accent-strong);
+  cursor: pointer;
+}
+
+.script-add-segment:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 .prompt-cta {
   display: inline-flex;
   align-items: center;

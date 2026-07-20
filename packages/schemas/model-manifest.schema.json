@@ -528,7 +528,12 @@
               },
               "supportsMultiSpeaker": {
                 "type": "boolean",
-                "description": "Whether the model can render a multi-speaker turn/dialogue in a single request. Absent/false means single-speaker only."
+                "description": "Whether the model can render a multi-speaker turn/dialogue in a single request (backend Capabilities.supports_multi_speaker, sc-12848). When true the Audio Studio reveals a segmented-script editor and submits an AudioParams.script; a script sent to a model that does NOT advertise this is rejected as a typed Unsupported at the gen-core floor. Absent/false means single-speaker only."
+              },
+              "maxSpeakers": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The most distinct speakers a multi-speaker model renders in one request (backend Capabilities.max_speakers, sc-12848). Consulted only when supportsMultiSpeaker is true — the Audio Studio's segmented-script editor offers at most this many speaker labels, and the gen-core floor rejects a script naming more. Absent means no advertised cap."
               },
               "supportsStreaming": {
                 "type": "boolean",

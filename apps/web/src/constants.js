@@ -770,9 +770,10 @@ export const fallbackModels = [
   // Audio models (epic 13400 A2/A3) — this mirrors the `type:"audio"` catalog entries so the
   // Audio Studio still has a model list when the live catalog (/api/v1/models) is unavailable. Each
   // entry carries only the `audio` capability fields the UI / eligibility predicates read: `voices`
-  // (speech), `supportsStreaming` (streaming speech, sc-13675), `editModes` (music), `conditioning`
-  // (voiceclone), and `sampleRates` (generation). See modelEligibility.js `audioModelServesMode` for
-  // the capability→mode mapping.
+  // (speech), `supportsStreaming` (streaming speech, sc-13675), `supportsMultiSpeaker` + `maxSpeakers`
+  // (multi-speaker dialogue speech, sc-13676), `editModes` (music), `conditioning` (voiceclone), and
+  // `sampleRates` (generation). See modelEligibility.js `audioModelServesMode` for the capability→mode
+  // mapping.
   {
     id: "kokoro_82m",
     name: "Kokoro 82M (Speech)",
@@ -817,6 +818,30 @@ export const fallbackModels = [
       label: "MOSS-TTS-Realtime (Streaming)",
       description:
         "MOSS-TTS-Realtime-1.7B streaming text-to-speech — streams speech in incremental chunks as it renders, so the first audio arrives before the clip finishes. 24 kHz mono, English + Chinese. Candle-native on every platform. Apache-2.0.",
+    },
+  },
+  {
+    id: "moss_ttsd_v05",
+    name: "MOSS-TTSD v0.5 (Multi-Speaker Dialogue)",
+    type: "audio",
+    macOnly: false,
+    // supportsMultiSpeaker (backend Capabilities.supports_multi_speaker, sc-13676) → serves the
+    // "speech" mode via the multi-speaker signal rather than a voice bank: it ships NO fixed voices
+    // (it maps opaque [S1]/[S2] labels to its own voices), so audioModelServesMode reads
+    // supportsMultiSpeaker to keep it on Speech and off SFX. maxSpeakers caps the segmented-script
+    // editor's speaker labels (read off the model, never hardcoded).
+    audio: {
+      languages: ["zh", "en", "de", "es", "fr", "ja", "it", "he", "ko", "ru", "fa", "ar", "pl", "pt", "cs", "da", "sv", "hu", "el", "tr"],
+      sampleRates: [24000],
+      maxDurationSecs: 300,
+      supportsMultiSpeaker: true,
+      maxSpeakers: 2,
+      supportsStreaming: false,
+    },
+    ui: {
+      label: "MOSS-TTSD v0.5 (Multi-Speaker)",
+      description:
+        "MOSS-TTSD-v0.5 multi-speaker / long-form dialogue text-to-speech — give it a segmented script (up to two speakers, [S1]/[S2]) and it renders the whole dialogue in one clip, each turn in its own voice. 24 kHz mono, 20 in-band languages. Candle-native on every platform. Apache-2.0.",
     },
   },
   {

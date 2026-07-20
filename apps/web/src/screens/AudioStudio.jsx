@@ -106,6 +106,41 @@ const SAMPLING_KNOB_MODES = new Set(["sfx"]);
 // Fallback target length before the model's cap is known; always clamped to maxDurationSecs.
 const DEFAULT_TARGET_DURATION_SECS = 10;
 
+// Multi-speaker / long-form dialogue (sc-13676). A model advertising audio.supportsMultiSpeaker
+// reveals a segmented-script editor: an ordered list of turns, each { speaker, text }. The number of
+// distinct speaker labels the editor offers is READ off the model's audio.maxSpeakers — never a
+// hardcoded 2. When a model sets supportsMultiSpeaker but omits maxSpeakers, fall back to this so the
+// editor still offers a sensible dialogue.
+const DEFAULT_MAX_SPEAKERS = 2;
+
+// The speaker labels a multi-speaker model offers, capped at its advertised maxSpeakers. The stored
+// value is the compact turn tag ("S1"/"S2") the backend maps to a voice; the display is friendlier.
+function speakerOptions(maxSpeakers) {
+  const cap = Number.isFinite(maxSpeakers) && maxSpeakers >= 1 ? Math.floor(maxSpeakers) : DEFAULT_MAX_SPEAKERS;
+  return Array.from({ length: cap }, (_, index) => ({
+    value: `S${index + 1}`,
+    label: `Speaker ${index + 1}`,
+  }));
+}
+
+// The starter script for a freshly-selected multi-speaker model: one empty turn per advertised
+// speaker (capped at maxSpeakers, at least one), so the editor opens ready for a two-person dialogue.
+function defaultScript(maxSpeakers) {
+  return speakerOptions(maxSpeakers).map((speaker) => ({ speaker: speaker.value, text: "" }));
+}
+
+// The non-empty turns of a script, trimmed — what actually submits (empty rows are dropped). A row
+// keeps its speaker label so the backend renders the right voice.
+function scriptSegmentsForSubmit(script) {
+  return (Array.isArray(script) ? script : [])
+    .map((segment) => ({
+      speaker: typeof segment?.speaker === "string" ? segment.speaker.trim() : "",
+      text: typeof segment?.text === "string" ? segment.text.trim() : "",
+    }))
+    .filter((segment) => segment.text.length > 0)
+    .map((segment) => (segment.speaker ? { text: segment.text, speaker: segment.speaker } : { text: segment.text }));
+}
+
 // Capitalize the first letter of a capability token for a group heading (e.g. "american" →
 // "American"). The tokens come straight from the manifest, so this is display-only — never a
 // hardcoded taxonomy.
@@ -175,6 +210,11 @@ export function AudioStudio() {
   const [mode, setMode] = useState(saved.mode ?? AUDIO_MODES[0]);
   const [model, setModel] = useState(saved.model ?? audioModels[0]?.id ?? "");
   const [prompt, setPrompt] = useState(saved.prompt ?? "");
+  // Multi-speaker dialogue script (sc-13676): an ordered list of { speaker, text } turns, surfaced by
+  // the segmented-script editor only when the selected model advertises audio.supportsMultiSpeaker.
+  // Restored from the snapshot when present, else an empty array (the editor seeds a starter dialogue
+  // the moment a multi-speaker model is selected — see the model-change clamp effect).
+  const [script, setScript] = useState(Array.isArray(saved.script) ? saved.script : []);
   const [voice, setVoice] = useState(saved.voice ?? "");
   const [language, setLanguage] = useState(saved.language ?? "");
   const [editMode, setEditMode] = useState(saved.editMode ?? "");
@@ -258,6 +298,9 @@ export function AudioStudio() {
   const sampleRates = Array.isArray(audio.sampleRates) ? audio.sampleRates : [];
   const conditioning = Array.isArray(audio.conditioning) ? audio.conditioning : [];
   const maxDurationSecs = Number.isFinite(audio.maxDurationSecs) ? audio.maxDurationSecs : null;
+  // Multi-speaker cap (sc-13676): READ off the selected model's audio.maxSpeakers — never hardcoded.
+  // Falls back to DEFAULT_MAX_SPEAKERS only when the model advertises multi-speaker but omits the cap.
+  const maxSpeakers = Number.isFinite(audio.maxSpeakers) ? audio.maxSpeakers : DEFAULT_MAX_SPEAKERS;
 
   // Which capability-driven controls the active mode surfaces. Speech leads with the full
   // voice/language/length triad C1 builds on; the other modes show a capability-driven scaffold.
@@ -301,6 +344,13 @@ export function AudioStudio() {
   // updates drive the WorkerProgressCard through the stream. Only a Speech model streams today
   // (MOSS-TTS-Realtime); a non-streaming model leaves it hidden so those modes are unperturbed.
   const showStreaming = Boolean(audio.supportsStreaming);
+  // Multi-speaker / long-form dialogue (sc-13676): the Speech tab reveals a segmented-script editor
+  // ONLY when the selected model advertises audio.supportsMultiSpeaker (backend
+  // Capabilities.supports_multi_speaker). CAPABILITY-DRIVEN — never a hardcoded id: MOSS-TTSD lights
+  // it up; every single-voice Speech model (Kokoro, MOSS-TTS-Realtime) leaves the plain prompt intact,
+  // so those modes are unperturbed. The editor offers up to `maxSpeakers` speaker labels.
+  const showMultiSpeaker = mode === "speech" && Boolean(audio.supportsMultiSpeaker);
+  const speakerChoices = useMemo(() => speakerOptions(maxSpeakers), [maxSpeakers]);
 
   // The voice picker's <optgroup> structure — derived from the selected model's voice bank, grouped
   // by accent + gender (sc-13408). Rebuilt only when the bank changes.
@@ -370,10 +420,32 @@ export function AudioStudio() {
     setSavedVoiceNotice(null);
   }
 
-  // Generate is guarded (never a silent no-op): a run needs a wired mode, a non-empty prompt, an
-  // installed model, and no run already in flight. The empty-prompt guard is the DoD's "disable on
+  // Segmented-script editor handlers (sc-13676). Each edits a single { speaker, text } turn; the
+  // speaker dropdown is capped at `maxSpeakers` labels so a script can never name more speakers than
+  // the model renders. A row can always be added (dialogue length is unbounded — max_speakers caps
+  // DISTINCT speakers, not turns) and removed down to a single turn.
+  function updateSegment(index, patch) {
+    setScript((current) => current.map((segment, i) => (i === index ? { ...segment, ...patch } : segment)));
+  }
+  function addSegment() {
+    setScript((current) => {
+      // Default the new turn to the speaker that keeps a two-person dialogue alternating.
+      const next = speakerChoices[current.length % speakerChoices.length]?.value ?? speakerChoices[0]?.value ?? "S1";
+      return [...current, { speaker: next, text: "" }];
+    });
+  }
+  function removeSegment(index) {
+    setScript((current) => (current.length > 1 ? current.filter((_, i) => i !== index) : current));
+  }
+
+  // Generate is guarded (never a silent no-op): a run needs a wired mode, generation content (a
+  // non-empty prompt, or — for a multi-speaker model — at least one non-empty script turn), an
+  // installed model, and no run already in flight. The empty-content guard is the DoD's "disable on
   // empty prompt"; the WIRED_MODES gate keeps the still-scaffold tabs (Music / Voice Clone) inert.
-  const promptReady = prompt.trim().length > 0;
+  const scriptReady = scriptSegmentsForSubmit(script).length > 0;
+  // Multi-speaker Speech submits the script instead of the prompt, so its content signal is a
+  // non-empty script; every other mode (and single-voice Speech) still requires a prompt.
+  const contentReady = showMultiSpeaker ? scriptReady : prompt.trim().length > 0;
   // Voice Clone additionally needs a reference-voice clip selected — the conversion has no target
   // without it. The other wired modes carry no such extra requirement.
   const referenceReady = mode !== "voiceclone" || referenceAudioAssetId.length > 0;
@@ -381,7 +453,7 @@ export function AudioStudio() {
     WIRED_MODES.has(mode) &&
     modelReady &&
     Boolean(model) &&
-    promptReady &&
+    contentReady &&
     referenceReady &&
     !submitting;
 
@@ -420,6 +492,23 @@ export function AudioStudio() {
       }
       return Math.min(DEFAULT_TARGET_DURATION_SECS, maxDurationSecs);
     });
+    // Multi-speaker script (sc-13676): seed a starter dialogue the first time a multi-speaker model is
+    // selected (an empty editor is useless), and clamp any restored/prior segments' speaker labels to
+    // those the NEW model advertises — so a label from a 2-speaker model can never persist onto one
+    // with a different cap. A non-multi-speaker model leaves the script untouched (it's never read).
+    if (audio.supportsMultiSpeaker) {
+      const allowed = new Set(speakerChoices.map((choice) => choice.value));
+      const fallback = speakerChoices[0]?.value ?? "S1";
+      setScript((current) => {
+        if (!Array.isArray(current) || current.length === 0) {
+          return defaultScript(maxSpeakers);
+        }
+        return current.map((segment) => ({
+          ...segment,
+          speaker: allowed.has(segment?.speaker) ? segment.speaker : fallback,
+        }));
+      });
+    }
     // The capability arrays are derived from selectedModel; keying on its id is the intended clamp.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedModel?.id]);
@@ -433,6 +522,7 @@ export function AudioStudio() {
       mode,
       model,
       prompt,
+      script,
       voice,
       language,
       editMode,
@@ -503,8 +593,17 @@ export function AudioStudio() {
         seed: seed === "" ? null : Number(seed),
       };
       if (mode === "speech") {
-        // Speech (Kokoro) ships a voice bank; omitted when unset so the model falls back to af_heart.
-        payload.voice = voice || undefined;
+        if (showMultiSpeaker) {
+          // Multi-speaker Speech (MOSS-TTSD, sc-13676): submit the segmented dialogue as
+          // AudioParams.script (empty turns dropped). No `voice` — a multi-speaker model advertises no
+          // fixed voice bank; it maps the per-segment [S1]/[S2] labels to its own voices. The prompt is
+          // left empty; the script carries the text. The worker passes the script to the generator and
+          // the gen-core floor gates it on supports_multi_speaker / maxSpeakers (never a hardcoded id).
+          payload.script = scriptSegmentsForSubmit(script);
+        } else {
+          // Single-voice Speech (Kokoro) ships a voice bank; omitted when unset so it falls back to af_heart.
+          payload.voice = voice || undefined;
+        }
       } else if (mode === "sfx") {
         // Sound FX (MOSS-SoundEffect) — the CFG guidance scale + solver steps ride the top-level
         // request the diffusion pipeline reads. Cleared ⇒ omitted so the model uses its own default
@@ -616,16 +715,76 @@ export function AudioStudio() {
             </div>
 
             <div className="prompt-input-row">
-              <textarea
-                aria-label="Prompt"
-                className="prompt-input"
-                onChange={(event) => setPrompt(event.target.value)}
-                placeholder={MODE_PLACEHOLDER[mode] ?? "Describe the audio…"}
-                value={prompt}
-              />
+              {/* Multi-speaker / long-form dialogue (sc-13676): the plain prompt is replaced by a
+                  segmented-script editor ONLY when the selected model advertises
+                  audio.supportsMultiSpeaker. Each turn carries a speaker (capped at maxSpeakers, read
+                  off the model) + its text; the script submits as AudioParams.script. Capability-driven
+                  — every single-voice Speech model keeps the plain textarea, so those modes are
+                  unperturbed. */}
+              {showMultiSpeaker ? (
+                <div
+                  className="prompt-input multi-speaker-script"
+                  data-testid="multi-speaker-script"
+                  role="group"
+                  aria-label="Multi-speaker script"
+                >
+                  {script.map((segment, index) => (
+                    <div className="script-segment" key={index}>
+                      <select
+                        aria-label={`Segment ${index + 1} speaker`}
+                        className="script-segment-speaker"
+                        onChange={(event) => updateSegment(index, { speaker: event.target.value })}
+                        value={segment.speaker ?? speakerChoices[0]?.value ?? "S1"}
+                      >
+                        {speakerChoices.map((choice) => (
+                          <option key={choice.value} value={choice.value}>
+                            {choice.label}
+                          </option>
+                        ))}
+                      </select>
+                      <textarea
+                        aria-label={`Segment ${index + 1} text`}
+                        className="script-segment-text"
+                        onChange={(event) => updateSegment(index, { text: event.target.value })}
+                        placeholder="What this speaker says…"
+                        rows={2}
+                        value={segment.text ?? ""}
+                      />
+                      <button
+                        aria-label={`Remove segment ${index + 1}`}
+                        className="script-segment-remove"
+                        disabled={script.length <= 1}
+                        onClick={() => removeSegment(index)}
+                        title="Remove this turn"
+                        type="button"
+                      >
+                        <Icon.Trash size={14} />
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    className="script-add-segment"
+                    data-testid="script-add-segment"
+                    onClick={addSegment}
+                    type="button"
+                  >
+                    <Icon.Plus size={14} />
+                    Add turn
+                  </button>
+                </div>
+              ) : (
+                <textarea
+                  aria-label="Prompt"
+                  className="prompt-input"
+                  onChange={(event) => setPrompt(event.target.value)}
+                  placeholder={MODE_PLACEHOLDER[mode] ?? "Describe the audio…"}
+                  value={prompt}
+                />
+              )}
               {/* The shell's primary action. C1 (sc-13408) wires the real Speech submission via the
-                  form's onSubmit. Disabled — never a silent no-op — until a run can proceed: an empty
-                  script, no installed model, a non-Speech tab, or a run already in flight all block it. */}
+                  form's onSubmit. Disabled — never a silent no-op — until a run can proceed: empty
+                  content (prompt or multi-speaker script), no installed model, a non-Speech tab, or a
+                  run already in flight all block it. */}
               <button className="prompt-cta" type="submit" disabled={!canGenerate}>
                 <Icon.Sparkle size={14} />
                 Generate

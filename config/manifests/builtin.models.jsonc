@@ -8794,6 +8794,136 @@
       }
     },
     {
+      // MOSS-TTSD-v0.5 (sc-13676, epic 13400 E2) — the audio lane's first MULTI-SPEAKER / long-form
+      // dialogue TTS model: a Qwen3 autoregressive backbone driving a delay-pattern 8-channel RVQ
+      // decode, whose frames the separate XY_Tokenizer codec turns into a 24 kHz waveform. It honors
+      // `[S1]`/`[S2]` turn labels end to end, so its `audio.supportsMultiSpeaker` mirrors the backend
+      // Capabilities (candle-audio-moss-ttsd descriptor: supports_multi_speaker = true, max_speakers =
+      // 2) — the single flag the Audio Studio reads to reveal the segmented-script editor (never a
+      // hardcoded id), capped at `audio.maxSpeakers` distinct speakers. It ships NO fixed voice bank
+      // (audio.voices absent) and does NOT stream, so it serves the Speech mode via the multi-speaker
+      // signal rather than a voice list (modelEligibility.audioModelServesMode). 20 in-band languages.
+      // Apache-2.0 (weights + code), verified against candle-audio-moss-tts WEIGHT_LICENSE.
+      //
+      // Two pinned-revision downloads (the sc-13541 / sc-13675 co-requisite pattern). The AR checkpoint
+      // is the primary (single ~4.1 GB model.safetensors); the ~2.1 GB XY_Tokenizer codec is a
+      // `coRequisite` the provider resolves at generate time via resolve_pinned_codec_checkpoint() ->
+      // hf_get_pinned(OpenMOSS-Team/XY_Tokenizer_TTSD_V0 @ c8343372…, xy_tokenizer.ckpt). hf_get_pinned
+      // reads snapshots/<sha>/ and refuses a branch/tag, so both entries pin the exact 40-hex SHA the
+      // runtime resolves — the AR is pinned too because AR and codec are a MATCHED PAIR (this exact
+      // codec revision decodes the AR's delay-pattern frames), keeping a fresh install reproducible.
+      "id": "moss_ttsd_v05",
+      "name": "MOSS-TTSD v0.5 (Multi-Speaker Dialogue)",
+      "family": "moss_ttsd",
+      "type": "audio",
+      "macOnly": false,
+      "audio": {
+        "languages": [
+          "zh",
+          "en",
+          "de",
+          "es",
+          "fr",
+          "ja",
+          "it",
+          "he",
+          "ko",
+          "ru",
+          "fa",
+          "ar",
+          "pl",
+          "pt",
+          "cs",
+          "da",
+          "sv",
+          "hu",
+          "el",
+          "tr"
+        ],
+        "sampleRates": [
+          24000
+        ],
+        "maxDurationSecs": 300,
+        "supportsMultiSpeaker": true,
+        "maxSpeakers": 2,
+        "supportsStreaming": false
+      },
+      "downloads": [
+        {
+          // Primary: the AR backbone (single-file ~4.1 GB model.safetensors — the smallest runnable
+          // MOSS-TTSD dialogue checkpoint) plus the Qwen tokenizer + config. Pinned to the matched-pair
+          // revision candle-audio-moss-tts was ported against (HUB_REVISION 8527b913…).
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-TTSD-v0.5",
+          "revision": "8527b9136b6afefe2252ae597cecea2e80e7ebeb",
+          "files": [
+            "config.json",
+            "model.safetensors",
+            "tokenizer.json",
+            "tokenizer_config.json"
+          ],
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "estimatedSizeBytes": 4110937674,
+          "footprint": {
+            "diskSizeBytes": 4110937674
+          }
+        },
+        {
+          // Co-requisite (sc-13676): the XY_Tokenizer codec — a single raw-pickle ~2.1 GB
+          // xy_tokenizer.ckpt (RVQ delay-pattern frames -> 24 kHz waveform) the provider resolves at
+          // generate time via resolve_pinned_codec_checkpoint() -> hf_get_pinned(OpenMOSS-Team/
+          // XY_Tokenizer_TTSD_V0 @ c8343372…, xy_tokenizer.ckpt). `revision` MUST be the full 40-hex
+          // SHA the resolver pins; predownloading it at that rev makes offline generation
+          // self-contained. Apache-2.0.
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/XY_Tokenizer_TTSD_V0",
+          "revision": "c83433728e698ed0698e88cb5096bc221fb8f8c5",
+          "coRequisite": true,
+          "files": [
+            "xy_tokenizer.ckpt"
+          ],
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "estimatedSizeBytes": 2137328977,
+          "footprint": {
+            "diskSizeBytes": 2137328977
+          }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-TTSD-v0.5"
+      },
+      "candle": {
+        "minMemoryGb": 12,
+        "measured": false
+      },
+      "licenseUrl": "https://huggingface.co/OpenMOSS-Team/MOSS-TTSD-v0.5",
+      "ui": {
+        "label": "MOSS-TTSD v0.5 (Multi-Speaker)",
+        "description": "MOSS-TTSD-v0.5 multi-speaker / long-form dialogue text-to-speech (Qwen3 autoregressive backbone + delay-pattern 8-codebook RVQ decode, rendered to a 24 kHz waveform by the XY_Tokenizer codec). Give it a segmented script — up to two speakers labelled [S1]/[S2] — and it renders the whole dialogue in one clip, each turn in its own voice. 24 kHz mono, 20 in-band languages. Candle-native on every platform (CPU / Accelerate). Apache-2.0.",
+        "recommendedFor": [
+          "speech"
+        ],
+        "promptGuide": {
+          "title": "MOSS-TTSD Multi-Speaker Guide",
+          "path": "/prompt-guides/moss-ttsd-v05.md",
+          "sources": [
+            {
+              "label": "MOSS-TTSD-v0.5 (Hugging Face)",
+              "url": "https://huggingface.co/OpenMOSS-Team/MOSS-TTSD-v0.5"
+            }
+          ]
+        }
+      }
+    },
+    {
       "id": "openvoice_v2",
       "name": "OpenVoice V2 (Voice Conversion)",
       "family": "openvoice",

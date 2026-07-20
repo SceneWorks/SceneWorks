@@ -319,6 +319,26 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
               "ui": { "label": "OpenVoice V2" }
             },
             {
+              "id": "moss_ttsd_v05",
+              "name": "MOSS-TTSD v0.5 (Multi-Speaker Dialogue)",
+              "family": "moss_ttsd",
+              "type": "audio",
+              "audio": {
+                "languages": ["zh", "en"],
+                "sampleRates": [24000],
+                "maxDurationSecs": 300,
+                "supportsMultiSpeaker": true,
+                "maxSpeakers": 2,
+                "supportsStreaming": false
+              },
+              "downloads": [
+                { "provider": "huggingface", "repo": "OpenMOSS-Team/MOSS-TTSD-v0.5", "files": ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"] },
+                { "provider": "huggingface", "repo": "OpenMOSS-Team/XY_Tokenizer_TTSD_V0", "revision": "c83433728e698ed0698e88cb5096bc221fb8f8c5", "coRequisite": true, "files": ["xy_tokenizer.ckpt"] }
+              ],
+              "paths": { "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-TTSD-v0.5" },
+              "ui": { "label": "MOSS-TTSD v0.5 (Multi-Speaker)" }
+            },
+            {
               "id": "not-audio-img",
               "name": "Not Audio",
               "family": "z_image",
@@ -393,6 +413,102 @@ async fn create_audio_job_maps_request_to_audio_generate_payload() {
     assert_eq!(entry["downloads"][0]["repo"], "hexgrad/Kokoro-82M");
     // requestedGpu is stripped from the payload (it rides the job envelope), mirroring the video route.
     assert!(payload.get("requestedGpu").is_none());
+}
+
+/// The multi-speaker path (MOSS-TTSD, sc-13676): a well-formed dialogue `POST /api/v1/audio/jobs`
+/// carries the segmented `script` (each turn's text + speaker) through to the worker payload verbatim,
+/// with an EMPTY prompt accepted (the script carries the text), and injects the resolved MOSS-TTSD
+/// `type: audio` manifest entry so the worker resolves both the AR + codec snapshots.
+#[tokio::test]
+async fn create_audio_job_maps_the_multi_speaker_script() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Dialogue Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "moss_ttsd_v05",
+            // Empty prompt is accepted because a non-empty multi-speaker script carries the text.
+            "prompt": "",
+            "script": [
+                { "text": "Hello, how are you today?", "speaker": "S1" },
+                { "text": "I'm doing great, thanks for asking!", "speaker": "S2" },
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "audio_generate");
+    let payload = &job["payload"];
+    assert_eq!(payload["model"], "moss_ttsd_v05");
+    // The segmented dialogue travels verbatim to the worker as `script` (camelCase round-trip).
+    let script = payload["script"]
+        .as_array()
+        .expect("script array in payload");
+    assert_eq!(script.len(), 2);
+    assert_eq!(script[0]["text"], "Hello, how are you today?");
+    assert_eq!(script[0]["speaker"], "S1");
+    assert_eq!(script[1]["speaker"], "S2");
+    // The MOSS-TTSD manifest entry travels so the worker resolves the AR + codec co-requisite.
+    let entry = &payload["modelManifestEntry"];
+    assert_eq!(entry["id"], "moss_ttsd_v05");
+    assert_eq!(entry["type"], "audio");
+    assert_eq!(entry["audio"]["supportsMultiSpeaker"], true);
+    assert_eq!(entry["audio"]["maxSpeakers"], 2);
+}
+
+/// A multi-speaker script naming >1 turn but with a whitespace-only prompt AND no script is still
+/// rejected — the relaxed prompt guard only accepts an empty prompt when a real script is present.
+#[tokio::test]
+async fn create_audio_job_rejects_empty_prompt_and_empty_script() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Dialogue Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // Empty prompt + empty script array → rejected (a script with no segments is not content).
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({ "projectId": project_id, "model": "moss_ttsd_v05", "prompt": "", "script": [] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // A script segment with empty text → rejected.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "moss_ttsd_v05",
+            "prompt": "",
+            "script": [{ "text": "   ", "speaker": "S1" }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
 
 /// The Sound FX path (MOSS-SoundEffect, sc-13409): a well-formed SFX `POST /api/v1/audio/jobs`
