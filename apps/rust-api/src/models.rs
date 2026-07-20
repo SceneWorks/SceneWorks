@@ -280,6 +280,20 @@ fn build_model_download_job_payload(
     );
     job_payload.insert("repo".to_owned(), Value::String(repo.clone()));
     job_payload.insert("files".to_owned(), json!(files));
+    // Forward an explicit pinned `revision` (sc-13541) so the worker fetches the exact commit SHA the
+    // runtime resolver reads, not `main`. The worker defaults to `main` when this is absent, so
+    // omitting `revision` on an entry keeps its behavior unchanged. Required for companion weights a
+    // provider resolves via a pinned-SHA `hf_get_pinned` (chatterbox_tts's ve/perth co-requisites): the
+    // resolver refuses a non-SHA revision and reads `snapshots/<sha>/`, so a main-branch predownload
+    // would land in the wrong snapshot and offline generation would fail.
+    if let Some(revision) = download
+        .get("revision")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        job_payload.insert("revision".to_owned(), Value::String(revision.to_owned()));
+    }
     // Record which quant tier this job installs (sc-8508) so the download record + per-variant
     // install tracking agree on the tier. Falls back to the selected entry's own `variant` when the
     // request omitted one (the default tier may still be a labeled variant).

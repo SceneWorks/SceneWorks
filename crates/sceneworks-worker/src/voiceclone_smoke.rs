@@ -29,8 +29,8 @@
 use std::path::{Path, PathBuf};
 
 use gen_core::{
-    AudioParams, AudioTransformRequest, CancelFlag, GenerationOutput, GenerationRequest, LoadSpec,
-    Progress, WeightsSource,
+    AudioParams, AudioTransformRequest, CancelFlag, Conditioning, GenerationOutput,
+    GenerationRequest, LoadSpec, Progress, WeightsSource,
 };
 
 use super::smoke_support::env_or;
@@ -417,5 +417,274 @@ fn native_voiceclone_chatterbox_smoke() {
         "[native-clone-smoke] PASS — clone tracks the reference by {:.4} cosine (listen: {})",
         sim_clone_ref - sim_clone_control,
         out_dir.join("native_clone.wav").display()
+    );
+}
+
+// ── sc-13541: offline install-parity DoD ─────────────────────────────────────────────────────────
+// The chatterbox_tts provider resolves two companion weights at generate() time via pinned-SHA
+// `hf_get_pinned` fetches (candle_audio_chatterbox_ve + candle-audio-chatterbox/src/perth.rs at the
+// SceneWorks-pinned inference commit). The manifest co-requisites (sc-13541) pin these EXACT SHAs.
+const CHATTERBOX_REPO: &str = "ResembleAI/chatterbox";
+const VE_REVISION: &str = "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18";
+const PERTH_REPO: &str = "SceneWorks/perth-implicit";
+const PERTH_REVISION: &str = "80b60f9caead09b8d3b512bda0b24038f28c08ec";
+
+/// Materialize one HF snapshot (`repo` @ `revision`, filtered to `files`) into the hub cache via the
+/// worker's REAL model-download executor — `HuggingFaceSnapshot::resolve` + `download_snapshot_into_cache`,
+/// the exact seam `run_model_download_job` drives for a Models-screen install. Returns the resolved
+/// commit SHA. Proving the pinned snapshots land here proves the install materializes them (sc-13541).
+async fn install_snapshot(
+    settings: &crate::Settings,
+    repo: &str,
+    revision: &str,
+    files: &[&str],
+) -> String {
+    use crate::downloads::{
+        download_snapshot_into_cache, DownloadContext, DownloadProgress, HuggingFaceSnapshot,
+    };
+    let client = crate::downloads::streaming_download_client();
+    let api = crate::ApiClient::new(settings);
+    let repo_dir = sceneworks_core::hf_home::huggingface_repo_cache_path(&settings.data_dir, repo)
+        .expect("resolve hub cache path");
+    let file_patterns: Vec<String> = files.iter().map(|f| (*f).to_owned()).collect();
+    let snapshot = HuggingFaceSnapshot::resolve(&client, settings, repo, revision, &file_patterns)
+        .await
+        .expect("resolve HF snapshot listing");
+    assert!(
+        !snapshot.files.is_empty(),
+        "{repo}@{revision} resolved zero files for {file_patterns:?}"
+    );
+    let context = DownloadContext {
+        api: &api,
+        client: &client,
+        settings,
+        job_id: "sc-13541-offline-parity",
+        cancel_message: "canceled",
+        fresh_download: false,
+    };
+    // A report interval longer than any real transfer so the in-loop progress POST never fires: this
+    // harness has no job API (the executor's heartbeat/progress are best-effort and only reached via
+    // the interval tick), and cancel polls already swallow transport errors. The download itself only
+    // talks to the HF hub, which is exactly what we are exercising.
+    let mut progress = DownloadProgress::new(
+        repo,
+        0,
+        snapshot.total_bytes(),
+        std::time::Duration::from_secs(86_400),
+    );
+    download_snapshot_into_cache(&context, &repo_dir, revision, &snapshot, &mut progress)
+        .await
+        .unwrap_or_else(|e| panic!("materialize {repo}@{revision}: {e}"))
+}
+
+/// A short, non-trivial synthetic speech-like reference clip (a vibrato'd fundamental plus two
+/// harmonics and light noise), 24 kHz mono — enough content for the provider to derive a speaker
+/// embedding + prompt tokens without pulling in a second TTS model. Clone quality is irrelevant to
+/// this DoD; the point is that generate() completes with no hub fetch.
+fn synthetic_reference() -> gen_core::AudioTrack {
+    let sample_rate = 24_000u32;
+    let secs = 4.0f32;
+    let n = (sample_rate as f32 * secs) as usize;
+    let mut samples = Vec::with_capacity(n);
+    let mut seed = 0x2b41_53c7u32;
+    for i in 0..n {
+        let t = i as f32 / sample_rate as f32;
+        let vibrato = 1.0 + 0.02 * (2.0 * std::f32::consts::PI * 5.0 * t).sin();
+        let f0 = 165.0 * vibrato;
+        let mut s = 0.6 * (2.0 * std::f32::consts::PI * f0 * t).sin();
+        s += 0.25 * (2.0 * std::f32::consts::PI * 2.0 * f0 * t).sin();
+        s += 0.15 * (2.0 * std::f32::consts::PI * 3.0 * f0 * t).sin();
+        // Cheap LCG noise for a little broadband energy.
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let noise = (seed >> 9) as f32 / (1u32 << 23) as f32 - 0.5;
+        s += 0.05 * noise;
+        // Gentle amplitude envelope so it is not a steady tone.
+        let env = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * 0.5 * t).cos();
+        samples.push(0.8 * env * s);
+    }
+    gen_core::AudioTrack {
+        samples,
+        sample_rate,
+        channels: 1,
+        stems: Vec::new(),
+    }
+}
+
+/// sc-13541 (epic 13400 / E1 follow-up) — **offline install-parity DoD**. `#[ignore]`d; run by hand
+/// on an Apple-Silicon Mac (downloads ~3.2 GB into an ISOLATED temp HF cache):
+/// ```text
+/// cargo test -p sceneworks-worker chatterbox_offline_install_parity_smoke -- --ignored --nocapture
+/// ```
+/// Proves the acceptance criterion end to end: install `chatterbox_tts` on a machine with an EMPTY
+/// HF cache, go offline, render a Voice Clone — it succeeds with NO runtime hub fetch.
+///
+///   1. **Empty cache** — point `HF_HOME` at a fresh temp dir and clear every other HF cache var so
+///      both the SceneWorks downloader and the runtime's hf-hub resolver share one empty hub cache.
+///   2. **Install** — run the REAL download executor for the three primary files (`main`) PLUS the two
+///      pinned companion co-requisites: `ve.safetensors` @ 5bb1f6ee… and `perth_implicit.safetensors`
+///      @ 80b60f9c…. Assert each pinned snapshot (`snapshots/<sha>/…`) + its `refs/<sha>` pointer is
+///      materialized exactly where `hf_get_pinned` reads.
+///   3. **Go offline, hard** — set `HF_HUB_OFFLINE=1` AND point `HF_ENDPOINT` at a black hole
+///      (`127.0.0.1:1`). Cache-first `hf_get_pinned` returns the cached file without a fetch; if it
+///      instead tried the hub (the pre-fix behavior when ve/perth were absent) it would hit the black
+///      hole and hard-fail. So a successful render IS the "no hub fetch" proof.
+///   4. **Render** — load `chatterbox_tts` from its snapshot dir and `generate()` one clone from a
+///      `Conditioning::ReferenceAudio`. generate() resolves ve (embed_reference) + perth (always-on
+///      watermark) internally; success ⇒ both resolved offline from the installed cache.
+#[test]
+#[ignore = "real-weight offline-install-parity DoD: downloads ~3.2 GB into a temp cache; run by hand on an Apple-Silicon Mac"]
+fn chatterbox_offline_install_parity_smoke() {
+    let cache_home = tempfile::tempdir().expect("temp HF home");
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    // One shared, EMPTY hub cache for both the downloader and the runtime resolver: HF_HOME/hub.
+    std::env::set_var("HF_HOME", cache_home.path());
+    std::env::remove_var("HF_HUB_CACHE");
+    std::env::remove_var("HUGGINGFACE_HUB_CACHE");
+    std::env::remove_var("HF_HUB_OFFLINE");
+    std::env::remove_var("HF_ENDPOINT");
+    std::env::remove_var("PERTH_SNAPSHOT");
+    let hub = cache_home.path().join("hub");
+    assert!(
+        !hub.join("models--ResembleAI--chatterbox").exists()
+            && !hub.join("models--SceneWorks--perth-implicit").exists(),
+        "the DoD requires an EMPTY HF cache to start"
+    );
+
+    let settings = crate::Settings {
+        api_url: "http://127.0.0.1:1".to_owned(),
+        access_token: None,
+        data_dir: data_dir.path().to_path_buf(),
+        config_dir: data_dir.path().join("config"),
+        worker_id: "sc-13541".to_owned(),
+        gpu_id: "gpu-0".to_owned(),
+        is_child_worker: false,
+        poll_seconds: 1,
+        heartbeat_seconds: 5,
+        shutdown_timeout_seconds: 1,
+        huggingface_base_url: crate::DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+        huggingface_token: std::env::var("HF_TOKEN").ok(),
+        credentials: Vec::new(),
+        max_lora_url_bytes: crate::DEFAULT_MAX_LORA_URL_BYTES,
+        max_model_url_bytes: crate::DEFAULT_MAX_MODEL_URL_BYTES,
+        allow_private_lora_urls: false,
+        utility_workers: 1,
+        backend_mlx_enabled: true,
+        backend_candle_enabled: false,
+        gpu_memory_limit_bytes: 0,
+        external_model_roots: Vec::new(),
+    };
+
+    // ── Step 2: install (the exact executor a Models-screen install runs) ────────────────────────
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let main_commit = rt.block_on(install_snapshot(
+        &settings,
+        CHATTERBOX_REPO,
+        "main",
+        &["t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json"],
+    ));
+    rt.block_on(install_snapshot(
+        &settings,
+        CHATTERBOX_REPO,
+        VE_REVISION,
+        &["ve.safetensors"],
+    ));
+    rt.block_on(install_snapshot(
+        &settings,
+        PERTH_REPO,
+        PERTH_REVISION,
+        &["perth_implicit.safetensors"],
+    ));
+
+    // ── Assert the pinned companion snapshots landed where hf_get_pinned reads ───────────────────
+    let ve_snapshot = hub
+        .join("models--ResembleAI--chatterbox")
+        .join("snapshots")
+        .join(VE_REVISION)
+        .join("ve.safetensors");
+    let ve_ref = hub
+        .join("models--ResembleAI--chatterbox")
+        .join("refs")
+        .join(VE_REVISION);
+    let perth_snapshot = hub
+        .join("models--SceneWorks--perth-implicit")
+        .join("snapshots")
+        .join(PERTH_REVISION)
+        .join("perth_implicit.safetensors");
+    let perth_ref = hub
+        .join("models--SceneWorks--perth-implicit")
+        .join("refs")
+        .join(PERTH_REVISION);
+    assert!(
+        ve_snapshot.exists(),
+        "ve.safetensors must materialize at the pinned snapshot: {}",
+        ve_snapshot.display()
+    );
+    assert!(ve_ref.exists(), "ve refs/<sha> pointer must exist");
+    assert!(
+        perth_snapshot.exists(),
+        "perth_implicit.safetensors must materialize at the pinned snapshot: {}",
+        perth_snapshot.display()
+    );
+    assert!(perth_ref.exists(), "perth refs/<sha> pointer must exist");
+    eprintln!(
+        "[offline-parity] installed pinned snapshots:\n  {}\n  {}",
+        ve_snapshot.display(),
+        perth_snapshot.display()
+    );
+
+    // ── Step 3: go offline, HARD — any attempted hub fetch now fails loudly ──────────────────────
+    std::env::set_var("HF_HUB_OFFLINE", "1");
+    std::env::set_var("HF_ENDPOINT", "http://127.0.0.1:1");
+
+    // ── Step 4: the single native clone call (resolves ve + perth internally, offline) ───────────
+    let main_snapshot_dir = hub
+        .join("models--ResembleAI--chatterbox")
+        .join("snapshots")
+        .join(&main_commit);
+    assert!(
+        main_snapshot_dir.join("s3gen.safetensors").exists(),
+        "primary chatterbox snapshot dir must hold the generator weights"
+    );
+    let generator = runtime_macos::catalog()
+        .expect("runtime catalog")
+        .audio()
+        .expect("audio lane")
+        .load(
+            "chatterbox_tts",
+            &LoadSpec::new(WeightsSource::Dir(main_snapshot_dir.clone())),
+        )
+        .expect("load chatterbox_tts generator (offline, from the installed snapshot)");
+    let request = GenerationRequest {
+        prompt: "This cloned voice was rendered fully offline from a fresh install.".to_owned(),
+        seed: Some(13541),
+        conditioning: vec![Conditioning::ReferenceAudio {
+            audio: synthetic_reference(),
+            strength: None,
+        }],
+        cancel: CancelFlag::new(),
+        ..Default::default()
+    };
+    let mut on_progress = |_p: Progress| {};
+    let clone = match generator
+        .generate(&request, &mut on_progress)
+        .expect("offline native clone generate (ve + perth must resolve from the installed cache)")
+    {
+        GenerationOutput::Audio(track) => track,
+        other => panic!("expected audio, got {other:?}"),
+    };
+    assert!(!clone.samples.is_empty(), "offline clone is empty");
+    assert!(
+        peak(&clone.samples) > 1e-3,
+        "offline clone is (near-)silent: peak {:.6}",
+        peak(&clone.samples)
+    );
+    let out_dir = PathBuf::from(env_or("VOICECLONE_OUT_DIR", "/tmp/voiceclone_smoke"));
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+    dump_wav(&clone, &out_dir.join("offline_parity_clone.wav"));
+    eprintln!(
+        "[offline-parity] PASS — offline render succeeded with a black-hole HF endpoint: {} samples @ {} Hz (listen: {})",
+        clone.samples.len(),
+        clone.sample_rate,
+        out_dir.join("offline_parity_clone.wav").display()
     );
 }
