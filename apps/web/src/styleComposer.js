@@ -1,26 +1,30 @@
-// sc-13129 — Prompt composer: Style/Description template + directive-collision splice.
+// sc-13129 — Prompt composer: Subject/Style template + directive-collision splice.
 //
 // Pure, side-effect-free composition of the outgoing `prompt` from a catalog-selected style
 // text and the user's own prompt. This is the LAST wrap applied to a prompt: it runs AFTER
 // preset prefix/suffix folding (see composePreset in presetUtils.js). By the time this sees
 // `userPrompt`, any active presets have already been folded into it — so the folded preset
-// text lives inside what becomes the `Description:` block. This module never applies presets
-// itself; it only wraps an already-preset-folded prompt in the Style/Description template.
+// text lives inside what becomes the `Subject:` block. This module never applies presets
+// itself; it only wraps an already-preset-folded prompt in the Subject/Style template.
 //
 // Rules (R3/R5/R6/R7):
 //  - No style selected → return userPrompt unchanged.
-//  - Style selected, no directives → `Style: {styleText}\nDescription: {userPrompt}`.
-//  - Directives detected → emit our `Style:` block first, keep the user's directive lines as
-//    top-level siblings (never demoted under Description), and wrap only the free-text prose
-//    remainder as `Description:`.
+//  - Style selected, no directives → `Subject: {userPrompt}\nStyle: {styleText}`. The user's
+//    subject leads; the catalog style follows it as the trailing modifier.
+//  - Directives detected → wrap the free-text prose remainder as the leading `Subject:` block,
+//    then our `Style:` block, then the user's other directive lines as top-level siblings
+//    (never demoted under Subject).
 //  - User already has their own `Style:` line → MERGE: catalog style first, then the user's
 //    own style content appended after `, ` in the same block (their words get the refinement
 //    position). The `Style:` label is never duplicated.
+//  - User already has their own `Subject:` line → its content folds into the prose that becomes
+//    our `Subject:` block, in line order. The `Subject:` label is never duplicated either.
 
 // The recognized directive set that seeds the parser. A line only counts as a directive when
 // its line-anchored key is one of these. Easily extensible: add a Capitalized key here.
 export const STYLE_DIRECTIVE_KEYS = [
   "Style",
+  "Subject",
   "Description",
   "Setting",
   "Environment",
@@ -33,7 +37,7 @@ export const STYLE_DIRECTIVE_KEYS = [
 ];
 
 const STYLE_KEY = "Style";
-const DESCRIPTION_KEY = "Description";
+const SUBJECT_KEY = "Subject";
 
 // Longest recognized key we will treat as a directive (~20 chars, 1–3 short words). Guards the
 // line-anchored detector against long "Sentence-case sentence: ..." prose that happens to start
@@ -57,7 +61,7 @@ export function parseDirectiveLines(text) {
   // Normalize newlines before classifying so CRLF (\r\n) and lone-CR (\r) line breaks split the
   // same as LF. Splitting on "\n" alone would keep a trailing "\r" on every non-final CRLF line,
   // which fails the anchored DIRECTIVE_LINE_RE, misclassifies the line as prose, and leaks a
-  // literal "\r" into the composed Description.
+  // literal "\r" into the composed Subject.
   return source.split(/\r\n?|\n/).map((raw) => {
     const match = DIRECTIVE_LINE_RE.exec(raw);
     if (match) {
@@ -84,8 +88,9 @@ export function composeStyledPrompt({ styleText, userPrompt } = {}) {
   const prompt = String(userPrompt ?? "");
   const parsed = parseDirectiveLines(prompt);
 
-  // The user's own Style content (may be several lines) merges into our Style block; every
-  // other directive line is preserved verbatim as a top-level sibling.
+  // The user's own Style content (may be several lines) merges into our Style block; their own
+  // Subject content folds into the prose that becomes our Subject block (in line order, so the
+  // label is never doubled); every other directive line is preserved verbatim as a sibling.
   const userStyleParts = [];
   const siblingDirectives = [];
   const proseLines = [];
@@ -95,6 +100,10 @@ export function composeStyledPrompt({ styleText, userPrompt } = {}) {
         if (line.content.trim()) {
           userStyleParts.push(line.content.trim());
         }
+      } else if (line.key === SUBJECT_KEY) {
+        if (line.content.trim()) {
+          proseLines.push(line.content);
+        }
       } else {
         siblingDirectives.push(line.raw);
       }
@@ -103,16 +112,19 @@ export function composeStyledPrompt({ styleText, userPrompt } = {}) {
     }
   }
 
+  // Subject leads, Style follows, the user's other directives trail as siblings.
+  const blocks = [];
+
+  const subject = proseLines.join("\n").trim();
+  if (subject) {
+    blocks.push(`${SUBJECT_KEY}: ${subject}`);
+  }
+
   const styleContent = [style, ...userStyleParts].join(", ");
-  const blocks = [`${STYLE_KEY}: ${styleContent}`];
+  blocks.push(`${STYLE_KEY}: ${styleContent}`);
 
   for (const sibling of siblingDirectives) {
     blocks.push(sibling);
-  }
-
-  const description = proseLines.join("\n").trim();
-  if (description) {
-    blocks.push(`${DESCRIPTION_KEY}: ${description}`);
   }
 
   return blocks.join("\n");

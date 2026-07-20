@@ -1,12 +1,13 @@
 //! Rust port of the web Style composer (`apps/web/src/styleComposer.js`, sc-13129),
 //! so a headless/MCP job that carries a `styleId` + a raw prompt is folded into the
-//! SAME `Style:`/`Description:` composition the web app sends (sc-13134).
+//! SAME `Subject:`/`Style:` composition the web app sends (sc-13134).
 //!
 //! This is a byte-for-byte port of `composeStyledPrompt`: the directive-collision splice
 //! (line-anchored directive detection over a fixed recognized key set; the caller's own
-//! `Style:` line MERGES — catalog text first, the user's words appended after `", "`; every
-//! other recognized directive is kept as a top-level sibling; free text folds into a single
-//! `Description:` block; CRLF/lone-CR safe; identity when no style is selected).
+//! `Style:` line MERGES — catalog text first, the user's words appended after `", "`; their own
+//! `Subject:` line folds into the prose in line order; every other recognized directive is kept
+//! as a top-level sibling; free text folds into a single leading `Subject:` block followed by the
+//! `Style:` block; CRLF/lone-CR safe; identity when no style is selected).
 //!
 //! Cross-language parity is pinned by the shared golden fixtures in
 //! `documents/style-composer.fixtures.json`, exercised by both this module's test and
@@ -14,8 +15,9 @@
 
 /// The recognized directive keys that seed the parser. A line only counts as a directive
 /// when its line-anchored key is one of these — identical to the JS `STYLE_DIRECTIVE_KEYS`.
-pub const STYLE_DIRECTIVE_KEYS: [&str; 10] = [
+pub const STYLE_DIRECTIVE_KEYS: [&str; 11] = [
     "Style",
+    "Subject",
     "Description",
     "Setting",
     "Environment",
@@ -28,7 +30,7 @@ pub const STYLE_DIRECTIVE_KEYS: [&str; 10] = [
 ];
 
 const STYLE_KEY: &str = "Style";
-const DESCRIPTION_KEY: &str = "Description";
+const SUBJECT_KEY: &str = "Subject";
 
 /// Longest recognized key we treat as a directive (mirrors the JS guard). Redundant with the
 /// set membership below, but keeps the structural rule explicit.
@@ -156,7 +158,7 @@ fn parse_directive_lines(text: &str) -> Vec<Line> {
 /// (already preset-folded) prompt — the Rust port of `composeStyledPrompt`.
 ///
 /// Returns the untouched `user_prompt` when `style_text` is empty/whitespace (identity, "no
-/// style selected"), else the spliced `Style:`/siblings/`Description:` composition.
+/// style selected"), else the spliced `Subject:`/`Style:`/siblings composition.
 pub fn compose_styled_prompt(style_text: &str, user_prompt: &str) -> String {
     let style = style_text.trim();
     if style.is_empty() {
@@ -165,7 +167,8 @@ pub fn compose_styled_prompt(style_text: &str, user_prompt: &str) -> String {
 
     let parsed = parse_directive_lines(user_prompt);
 
-    // The user's own `Style:` content merges into our block; every other directive is a sibling.
+    // The user's own `Style:` content merges into our block; their own `Subject:` content folds
+    // into the prose (in line order); every other directive is a sibling.
     let mut user_style_parts: Vec<String> = Vec::new();
     let mut sibling_directives: Vec<String> = Vec::new();
     let mut prose_lines: Vec<String> = Vec::new();
@@ -176,6 +179,10 @@ pub fn compose_styled_prompt(style_text: &str, user_prompt: &str) -> String {
                     if !content.trim().is_empty() {
                         user_style_parts.push(content.trim().to_owned());
                     }
+                } else if key == SUBJECT_KEY {
+                    if !content.trim().is_empty() {
+                        prose_lines.push(content);
+                    }
                 } else {
                     sibling_directives.push(raw);
                 }
@@ -184,20 +191,23 @@ pub fn compose_styled_prompt(style_text: &str, user_prompt: &str) -> String {
         }
     }
 
+    // Subject leads, Style follows, the user's other directives trail as siblings.
+    let mut blocks: Vec<String> = Vec::new();
+
+    let subject = prose_lines.join("\n");
+    let subject = subject.trim();
+    if !subject.is_empty() {
+        blocks.push(format!("{SUBJECT_KEY}: {subject}"));
+    }
+
     let mut style_content = String::from(style);
     for part in &user_style_parts {
         style_content.push_str(", ");
         style_content.push_str(part);
     }
+    blocks.push(format!("{STYLE_KEY}: {style_content}"));
 
-    let mut blocks: Vec<String> = vec![format!("{STYLE_KEY}: {style_content}")];
     blocks.extend(sibling_directives);
-
-    let description = prose_lines.join("\n");
-    let description = description.trim();
-    if !description.is_empty() {
-        blocks.push(format!("{DESCRIPTION_KEY}: {description}"));
-    }
 
     blocks.join("\n")
 }
@@ -267,10 +277,30 @@ mod tests {
     #[test]
     fn no_space_after_colon_is_prose_not_a_directive() {
         // `Setting:x` fails the JS `[ \t]+` separator requirement, so it stays prose and folds
-        // into Description — discriminates the separator rule the port must preserve.
+        // into Subject — discriminates the separator rule the port must preserve.
         assert_eq!(
             compose_styled_prompt("noir", "Setting:x"),
-            "Style: noir\nDescription: Setting:x"
+            "Subject: Setting:x\nStyle: noir"
+        );
+    }
+
+    #[test]
+    fn subject_leads_the_style_block() {
+        // The template order itself: the user's prose is the LEADING block, the catalog style
+        // trails it. Fails if the two blocks are emitted in the pre-sc-13129-rework order.
+        assert_eq!(
+            compose_styled_prompt("cinematic watercolor", "a fox in the snow"),
+            "Subject: a fox in the snow\nStyle: cinematic watercolor"
+        );
+    }
+
+    #[test]
+    fn own_subject_line_folds_in_without_doubling_the_label() {
+        // A caller-typed `Subject:` line contributes its content to the prose in line order
+        // rather than becoming a sibling, so the label is never emitted twice.
+        assert_eq!(
+            compose_styled_prompt("noir", "Subject: a detective\nunder a streetlamp"),
+            "Subject: a detective\nunder a streetlamp\nStyle: noir"
         );
     }
 }

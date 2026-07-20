@@ -8232,7 +8232,7 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 /* sc-13131 — Live style-composed prompt preview. Reuses the preset-stack preview idiom but
-   preserves the Style:/Description: line breaks so the composition stays legible. */
+   preserves the Subject:/Style: line breaks so the composition stays legible. */
 .styled-prompt-preview .preset-stack-prompt p {
   white-space: pre-wrap;
 }

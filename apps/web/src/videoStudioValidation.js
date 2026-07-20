@@ -21,7 +21,7 @@ export function videoGenerateValidation({
   hasLtxIcLora,
   replaceReady,
   modelName,
-  // sc-13136: the COMPOSED outgoing prompt (Style:/Description: wrap + preset fold) and whether a
+  // sc-13136: the COMPOSED outgoing prompt (Subject:/Style: wrap + preset fold) and whether a
   // Style Catalog entry is active. `composedPrompt` is the exact string that will be sent — the same
   // string the live preview shows — so the cap is measured on IT, not the raw prompt field: a
   // ~700–900 char style wrapped around a long-but-under-cap prompt can compose past the backend cap.

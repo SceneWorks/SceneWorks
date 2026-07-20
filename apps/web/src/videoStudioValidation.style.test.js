@@ -36,7 +36,7 @@ describe("videoGenerateValidation — Style Catalog budget gate (sc-13136)", () 
   });
 
   it("style active + composed prompt within budget → ready", () => {
-    const composed = `Style: a gentle style\nDescription: ${"x".repeat(200)}`;
+    const composed = `Subject: ${"x".repeat(200)}\nStyle: a gentle style`;
     const issues = videoGenerateValidation({ ...whole, styleActive: true, composedPrompt: composed });
     expect(summarize(issues).ready).toBe(true);
     expect(errorMessages(issues)).toEqual([]);
