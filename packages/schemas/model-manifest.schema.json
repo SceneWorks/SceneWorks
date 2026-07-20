@@ -563,6 +563,10 @@
                   "type": "string",
                   "description": "Provider repository or model identifier used when queueing a download."
                 },
+                "revision": {
+                  "type": "string",
+                  "description": "Optional pinned git revision for this entry: the download job forwards it so the worker fetches that exact commit into snapshots/<sha>/; the worker defaults to `main` when omitted. For a companion co-requisite whose weight the runtime resolves via a pinned-SHA hf_get_pinned (e.g. chatterbox_tts's ve/perth), this MUST be the full 40-hex commit SHA the resolver reads — a branch/tag/short SHA resolves online but hard-fails offline. See sc-13541."
+                },
                 "default": {
                   "type": "boolean",
                   "description": "Marks the canonical alternate used for displayed size, install path, and download jobs. For a quant matrix this marks the DEFAULT tier (the one that installs when no explicit variant is requested)."
