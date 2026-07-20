@@ -38,9 +38,17 @@ import { AssetPickerField } from "../components/AssetPicker.jsx";
 // Studio source-band pattern). guidance(CFG)/negative are capability-gated: the pinned ACE-Step turbo is
 // guidance-distilled (advertises neither), so they stay hidden for it — surfacing them would be a typed
 // Unsupported at the gen-core floor; a future non-distilled music model that advertises them shows them.
-// The remaining mode (C4 Voice Clone) keeps the C0 scaffold: its fields render capability-driven, but
-// submit stays inert until its story lands (the Generate CTA is disabled off a wired tab rather than
-// being a silent no-op).
+//
+// SCOPE (C4 sc-13411): Voice Clone is fully wired too. Its generate model is a CONVERTER — a model
+// advertising ReferenceAudio conditioning (OpenVoice V2); a bare speaker embedder (Chatterbox-VE,
+// VoiceEmbedding only) is filtered out of the tab/picker (isVoiceCloneConverter). The mode surfaces a
+// reference-voice band (pick a library audio track whose voice is cloned) + a match-strength control
+// (OpenVoice's tone-color sampling temperature τ), and its prompt is the SCRIPT the base voice speaks.
+// Generate submits referenceAudioAssetId + matchStrength through createAudioJob; the worker orchestrates
+// the two backend calls — base TTS (Kokoro) speaks the script, then OpenVoice V2 transfers the reference's
+// tone color — and registers the single converted clip. A named-voice registry (register-a-voice via a
+// stored Chatterbox-VE embedding) is deferred: the embedding's consumer is the future native clone-TTS
+// (E1), not this reference-clip pipeline.
 
 // Tab labels per the epic, keyed by the AUDIO_MODES ids so the ordering follows that array.
 const MODE_LABELS = {
@@ -62,10 +70,18 @@ const MODE_PLACEHOLDER = {
 // audio.maxDurationSecs) applies. Voice Clone follows its reference clip's length.
 const DURATION_MODES = new Set(["speech", "sfx", "music"]);
 // Modes whose Generate CTA is fully wired to createAudioJob (Speech C1 sc-13408, Sound FX C2 sc-13409,
-// Music C3 sc-13410). The remaining mode (Voice Clone) keeps the C0 scaffold — its CTA stays disabled
-// rather than a silent no-op — until its own story lands, so this set is the single guard both
-// `canGenerate` and `submit` read.
-const WIRED_MODES = new Set(["speech", "sfx", "music"]);
+// Music C3 sc-13410, Voice Clone C4 sc-13411). This set is the single guard both `canGenerate` and
+// `submit` read.
+const WIRED_MODES = new Set(["speech", "sfx", "music", "voiceclone"]);
+// Voice Clone runs the OpenVoice V2 conversion chain, so its generate model must be a CONVERTER — a model
+// whose conditioning includes ReferenceAudio (OpenVoice V2). A bare speaker EMBEDDER (Chatterbox-VE,
+// VoiceEmbedding only) also "serves" the voiceclone mode conceptually, but it cannot run the conversion —
+// its embedding feeds register-a-voice / the future native clone-TTS (E1), not this pipeline — so it is
+// filtered out of the generate picker.
+function isVoiceCloneConverter(item) {
+  const conditioning = Array.isArray(item?.audio?.conditioning) ? item.audio.conditioning : [];
+  return conditioning.some((kind) => String(kind).toLowerCase() === "referenceaudio");
+}
 // Modes that expose the diffusion sampling knobs (CFG guidance + solver steps) in the advanced panel.
 // Sound FX runs the MOSS-SoundEffect flow-matching pipeline, which reads guidance/steps off the
 // top-level request; Speech (Kokoro) is not a diffusion model and ignores them, so it hides them. This
@@ -169,6 +185,11 @@ export function AudioStudio() {
   const [editRegionStartSecs, setEditRegionStartSecs] = useState(saved.editRegionStartSecs ?? "");
   const [editRegionEndSecs, setEditRegionEndSecs] = useState(saved.editRegionEndSecs ?? "");
   const [editStrength, setEditStrength] = useState(saved.editStrength ?? "");
+  // Voice Clone (C4 sc-13411) — a USER selection, so it persists like the Music source band.
+  // `referenceAudioAssetId` names the library audio track whose voice is cloned; `matchStrength` is the
+  // OpenVoice conversion strength (τ), empty ⇒ the converter default (0.3).
+  const [referenceAudioAssetId, setReferenceAudioAssetId] = useState(saved.referenceAudioAssetId ?? "");
+  const [matchStrength, setMatchStrength] = useState(saved.matchStrength ?? "");
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   // Guards a Speech run in flight so a second submit (double-click / ⌘↵) can't double-enqueue
   // (mirrors VideoStudio's `submitting`). Cleared in submit's finally.
@@ -178,7 +199,12 @@ export function AudioStudio() {
   // audio capability block matches (audioModelServesMode). The tabs, the picker and the snap effect
   // all derive from this so the user is never trapped on a mode whose model can't serve the others.
   const modelServesMode = (item, value) => audioModelServesMode(item, value);
-  const modelsForMode = (value) => audioModels.filter((item) => modelServesMode(item, value));
+  const modelsForMode = (value) => {
+    const serving = audioModels.filter((item) => modelServesMode(item, value));
+    // Voice Clone's generate model must be a CONVERTER (OpenVoice V2), not a bare speaker embedder —
+    // filter Chatterbox-VE out of the tab/picker so the CTA never routes a conversion to an embedder.
+    return value === "voiceclone" ? serving.filter(isVoiceCloneConverter) : serving;
+  };
   const selectedModel = audioModels.find((item) => item.id === model) ?? audioModels[0] ?? null;
 
   // Model-availability gate: `ready` follows the picker (audioModels is live-catalog-then-fallback in
@@ -218,7 +244,12 @@ export function AudioStudio() {
   // advertises inpaint/repaint/extend; a model without editModes never shows it. Mirrors VideoStudio's
   // `studio-source-band`, which reveals its source-clip picker only on the edit sub-modes.
   const showEditModes = mode === "music" && editModes.length > 0;
-  const showConditioning = mode === "voiceclone" && conditioning.length > 0;
+  // Voice Clone: the reference-voice band (pick a library audio track) + the match-strength control are
+  // revealed whenever the selected converter advertises ReferenceAudio conditioning — the capability that
+  // makes it a voice-conversion model (isVoiceCloneConverter). Chatterbox-VE (VoiceEmbedding only) never
+  // reaches this tab (modelsForMode filters it out).
+  const showVoiceClone =
+    mode === "voiceclone" && conditioning.some((kind) => String(kind).toLowerCase() === "referenceaudio");
   // Steps: both the Sound FX (MOSS) and Music (ACE-Step) diffusion samplers read the top-level
   // `steps`, so the solver-step count surfaces on both. Guidance(CFG): only when the model advertises
   // guidance support — MOSS does (SAMPLING_KNOB_MODES), the guidance-distilled ACE-Step turbo does NOT
@@ -244,8 +275,16 @@ export function AudioStudio() {
   // installed model, and no run already in flight. The empty-prompt guard is the DoD's "disable on
   // empty prompt"; the WIRED_MODES gate keeps the still-scaffold tabs (Music / Voice Clone) inert.
   const promptReady = prompt.trim().length > 0;
+  // Voice Clone additionally needs a reference-voice clip selected — the conversion has no target
+  // without it. The other wired modes carry no such extra requirement.
+  const referenceReady = mode !== "voiceclone" || referenceAudioAssetId.length > 0;
   const canGenerate =
-    WIRED_MODES.has(mode) && modelReady && Boolean(model) && promptReady && !submitting;
+    WIRED_MODES.has(mode) &&
+    modelReady &&
+    Boolean(model) &&
+    promptReady &&
+    referenceReady &&
+    !submitting;
 
   // Snap the model to one that serves the active mode (mirrors VideoStudio). A no-op when the current
   // model already serves the mode, or when nothing serves it (a reduced catalog).
@@ -310,6 +349,8 @@ export function AudioStudio() {
       editRegionStartSecs,
       editRegionEndSecs,
       editStrength,
+      referenceAudioAssetId,
+      matchStrength,
       advancedOpen,
     },
     audioModels.length > 0,
@@ -407,6 +448,14 @@ export function AudioStudio() {
           }
           payload.editStrength = editStrength === "" ? undefined : Number(editStrength);
         }
+      } else if (mode === "voiceclone") {
+        // Voice Clone (OpenVoice V2 conversion chain, sc-13411 C4). The prompt is the SCRIPT the base TTS
+        // (Kokoro) speaks; `referenceAudioAssetId` names the library audio track whose voice is cloned;
+        // `matchStrength` overrides the converter's τ. `canGenerate` guarantees a reference is selected.
+        // No `voice` is sent — the base clip uses Kokoro's default voice, which OpenVoice re-timbres toward
+        // the reference. `baseModel` defaults to kokoro_82m server-side.
+        payload.referenceAudioAssetId = referenceAudioAssetId;
+        payload.matchStrength = matchStrength === "" ? undefined : Number(matchStrength);
       }
       const job = await createAudioJob?.(payload);
       if (job) {
@@ -684,13 +733,42 @@ export function AudioStudio() {
               ) : null}
             </div>
 
-            {/* Voice Clone conditioning scaffold — surfaced from audio.conditioning. Reference upload +
-                cloned-speech wiring is a later mode story (C4); this shows the model's capability. */}
-            {showConditioning ? (
-              <p className="helper-copy">
-                This model conditions on a reference voice ({conditioning.join(", ")}). Reference
-                upload and cloned-speech generation arrive in a later update.
-              </p>
+            {/* Voice Clone (C4 sc-13411): reference-voice band + match strength. Pick a library audio
+                track whose voice is cloned; the prompt above is the script the base voice speaks, then
+                OpenVoice V2 transfers the reference's tone color onto it. Revealed only when the selected
+                converter advertises ReferenceAudio conditioning (isVoiceCloneConverter). */}
+            {showVoiceClone ? (
+              <div className="studio-source-band">
+                <AssetPickerField
+                  assets={audioAssets}
+                  buttonLabel="Select reference voice"
+                  changeLabel="Change"
+                  emptyLabel="No reference voice selected"
+                  label="Reference voice"
+                  onChange={setReferenceAudioAssetId}
+                  showCategories={false}
+                  value={referenceAudioAssetId}
+                />
+                <label className="settings-field settings-field-match-strength">
+                  Match strength
+                  <input
+                    max="1"
+                    min="0"
+                    onChange={(event) => setMatchStrength(event.target.value)}
+                    placeholder="0.3 (default)"
+                    step="0.05"
+                    type="number"
+                    value={matchStrength}
+                  />
+                  <span className="field-hint" role="note">
+                    OpenVoice tone-color sampling temperature (τ). Cleared → model default (0.3).
+                  </span>
+                </label>
+                <p className="helper-copy">
+                  The base voice speaks your script, then OpenVoice V2 converts it to match the reference
+                  clip&rsquo;s voice. Record or import a reference clip into the library to use it here.
+                </p>
+              </div>
             ) : null}
 
             <AdvancedSection

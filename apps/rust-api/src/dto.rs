@@ -961,6 +961,23 @@ pub(crate) struct AudioJobRequest {
     /// Edit strength (0..=1) for the source-audio edit. `None` ⇒ the model default. sc-13410.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) edit_strength: Option<f32>,
+    /// Voice Clone (sc-13411 C4): the reference-voice library `type: "audio"` asset id whose timbre is
+    /// transferred onto the base TTS clip. Its presence routes the job onto the two-call
+    /// Kokoro→OpenVoice chain (the worker's `run_voice_clone_synthesis`); `None` ⇒ an ordinary
+    /// Speech/SFX/Music generation. The route additionally resolves + injects the base TTS model's
+    /// manifest entry (`baseModelManifestEntry`) when this is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reference_audio_asset_id: Option<String>,
+    /// Voice Clone base TTS model id — the "content" generator (Kokoro) whose speech OpenVoice re-timbres.
+    /// Defaults to `kokoro_82m`. Only consulted on a voice-clone request; the route asserts it is a
+    /// `type: "audio"` model and injects its manifest entry as `baseModelManifestEntry`.
+    #[serde(default = "default_audio_base_model")]
+    pub(crate) base_model: String,
+    /// Voice Clone match strength — overrides OpenVoice V2's posterior-sampling temperature τ (rides the
+    /// worker-side `AudioTransformRequest::strength`). `None` ⇒ the converter's own default (0.3).
+    /// Bounded to a blanket sane 0..=1 range here; the converter re-checks it (finite, >= 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) match_strength: Option<f32>,
     #[serde(default)]
     pub(crate) seed: Option<i64>,
     #[serde(default = "default_requested_gpu")]

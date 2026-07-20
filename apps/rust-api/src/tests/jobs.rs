@@ -304,6 +304,21 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
               "ui": { "label": "ACE-Step v1.5 XL Turbo" }
             },
             {
+              "id": "openvoice_v2",
+              "name": "OpenVoice V2 (Voice Conversion)",
+              "family": "openvoice",
+              "type": "audio",
+              "audio": {
+                "sampleRates": [22050],
+                "conditioning": ["ReferenceAudio"]
+              },
+              "downloads": [
+                { "provider": "huggingface", "repo": "myshell-ai/OpenVoiceV2", "files": ["converter/config.json", "converter/checkpoint.pth"] }
+              ],
+              "paths": { "model": "${HF_CACHE}/myshell-ai/OpenVoiceV2" },
+              "ui": { "label": "OpenVoice V2" }
+            },
+            {
               "id": "not-audio-img",
               "name": "Not Audio",
               "family": "z_image",
@@ -436,6 +451,120 @@ async fn create_audio_job_maps_sfx_sampling_knobs() {
         entry["downloads"][0]["repo"],
         "OpenMOSS-Team/MOSS-SoundEffect-v2.0"
     );
+}
+
+/// The Voice Clone path (OpenVoice V2 conversion chain, sc-13411 C4): a `POST /api/v1/audio/jobs` that
+/// names a converter model + `referenceAudioAssetId` carries the reference + match strength through to
+/// the worker payload AND injects a SECOND manifest entry — the base TTS model (`baseModelManifestEntry`)
+/// — so the worker resolves both snapshots. The converter's own entry rides as `modelManifestEntry`.
+#[tokio::test]
+async fn create_audio_job_injects_base_model_entry_for_voice_clone() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Voice Clone Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "openvoice_v2",
+            "prompt": "Clone this into my reference voice.",
+            "referenceAudioAssetId": "ref-voice-1",
+            "matchStrength": 0.5,
+            "seed": 3,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "audio_generate");
+    let payload = &job["payload"];
+    assert_eq!(payload["model"], "openvoice_v2");
+    assert_eq!(payload["referenceAudioAssetId"], "ref-voice-1");
+    assert_eq!(payload["matchStrength"], 0.5);
+    // The selected converter's entry rides as modelManifestEntry (weights resolution).
+    assert_eq!(payload["modelManifestEntry"]["id"], "openvoice_v2");
+    assert_eq!(
+        payload["modelManifestEntry"]["downloads"][0]["repo"],
+        "myshell-ai/OpenVoiceV2"
+    );
+    // ...and the base TTS (Kokoro) entry is injected so the worker resolves the base generator too.
+    let base = &payload["baseModelManifestEntry"];
+    assert_eq!(base["id"], "kokoro_82m");
+    assert_eq!(base["type"], "audio");
+    assert_eq!(base["downloads"][0]["repo"], "hexgrad/Kokoro-82M");
+}
+
+/// A non-voice-clone audio job (no reference) carries NO `baseModelManifestEntry` — the base-model
+/// resolution is scoped to the voice-clone path so ordinary Speech/SFX/Music jobs are untouched.
+#[tokio::test]
+async fn create_audio_job_omits_base_model_entry_without_a_reference() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Plain Audio Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "kokoro_82m",
+            "prompt": "Just plain speech.",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert!(job["payload"].get("baseModelManifestEntry").is_none());
+}
+
+/// The Voice Clone match-strength floor (sc-13411 C4): the API blanket-bounds `matchStrength` to
+/// 0..=1 (the converter re-checks it), so an out-of-range value is a 400 rather than reaching the worker.
+#[tokio::test]
+async fn create_audio_job_rejects_out_of_range_match_strength() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Bad Strength Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, _body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "openvoice_v2",
+            "prompt": "over-driven strength",
+            "referenceAudioAssetId": "ref-voice-1",
+            "matchStrength": 1.5,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 /// The audio validator rejects out-of-blanket sampling knobs up front (sc-13409) — the API blanket
