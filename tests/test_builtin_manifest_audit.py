@@ -554,6 +554,35 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
     }
 
 
+def test_boogu_candle_vram_tiers_cover_and_pin_the_default_q8_tier():
+    """sc-13533: both Boogu entries must carry a MEASURED q8 row — the tier they default to.
+
+    `mlx.quantize: 8` makes the image-lane resolvers derive q8 for a no-pick request, and the shipped
+    `base/`/`turbo/` Q8 turnkey is the ONLY variant `downloads` pulls. The candle blocks originally
+    shipped only {q4, bf16} (sc-13108 measured only those two), so
+    `vram_gate::predicted_peak_gb(entry, "q8")` found no row and fell through to the flat `minMemoryGb`
+    floor, sizing the default tier ~2 GB UNDER its real peak and without the fit gate's 2 GB headroom —
+    the permissive direction. The q8 rows below are the direct CUDA measurements (RTX PRO 6000
+    Blackwell, exclusive GPU, 1024², seed 42, native path) that close it. Never regress them, and never
+    drop the q8 key. Pairs with the Rust coverage lint
+    `every_image_model_budgets_its_default_tier_against_a_measured_row`.
+    """
+    manifest = _load_builtin_models_manifest()
+    expected = {
+        "boogu_image": {"q4": 31.7, "q8": 42.0, "bf16": 54.4},
+        "boogu_image_turbo": {"q4": 31.6, "q8": 42.1, "bf16": 54.5},
+    }
+    for model_id, tiers in expected.items():
+        entry = next(model for model in manifest["models"] if model["id"] == model_id)
+        assert {
+            tier: entry["candle"]["vramGbByTier"][tier] for tier in ("q4", "q8", "bf16")
+        } == tiers, model_id
+        # The coarse `minMemoryGb` floor must not sit BELOW the DEFAULT (q8) tier's measured peak —
+        # that under-floor (turbo shipped 40 < 42.1) was the second face of this bug, exposed whenever
+        # `predicted_peak_gb` falls back to `minMemoryGb`.
+        assert entry["candle"]["minMemoryGb"] >= tiers["q8"], model_id
+
+
 def test_wan_2_2_candle_vram_tiers_match_measured_peaks():
     """sc-13175: never regress the measured 5B SEQUENTIAL peaks (or slide back to the resident ones).
 

@@ -240,6 +240,108 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("different workspace folder");
   });
 
+  // sc-13480 (A3-followup): the SetupWizard used to enumerate only image|video|utility, so the
+  // audio models epic 13400 added were never offered during first-run onboarding. These models
+  // mix a usable audio model (Kokoro — voices[] ⇒ serves the "speech" mode) with a bare audio
+  // entry that serves NO mode. Onboarding must offer the usable one under a friendly "Audio
+  // models" group placed after video, and must NOT dangle the non-serving one (that is the
+  // audioModelUsable gate the Audio Studio already runs its download offers through).
+  const wizardAudioModels = [
+    {
+      id: "z_image_turbo",
+      name: "Z-Image-Turbo",
+      type: "image",
+      recommended: true,
+      downloadable: true,
+      installState: "missing",
+      downloadSizeLabel: "30.6 GB",
+      downloads: [{ repo: "Tongyi-MAI/Z-Image-Turbo" }],
+    },
+    {
+      id: "wan_2_2",
+      name: "Wan2.2",
+      type: "video",
+      downloadable: true,
+      installState: "missing",
+      downloadSizeLabel: "31.8 GB",
+      downloads: [{ repo: "Wan-AI/Wan2.2-TI2V-5B" }],
+    },
+    {
+      id: "kokoro_82m",
+      name: "Kokoro 82M",
+      type: "audio",
+      recommended: true,
+      downloadable: true,
+      installState: "missing",
+      downloadSizeLabel: "330 MB",
+      downloads: [{ repo: "hexgrad/Kokoro-82M" }],
+      // voices[] non-empty ⇒ audioModelUsable ⇒ serves the "speech" mode.
+      audio: { voices: [{ id: "af_heart", label: "Heart" }], languages: ["en-US"], sampleRates: [24000] },
+    },
+    {
+      id: "bare_audio",
+      name: "Bare Audio Entry",
+      type: "audio",
+      downloadable: true,
+      installState: "missing",
+      downloadSizeLabel: "10 MB",
+      downloads: [{ repo: "acme/bare-audio" }],
+      // No `audio` sub-block ⇒ serves no mode ⇒ audioModelUsable is false ⇒ NOT offered.
+    },
+  ];
+
+  it("offers usable audio models under an Audio group after video, gating non-serving entries (sc-13480)", async () => {
+    const props = renderWizard({ models: wizardAudioModels });
+    await act(async () => {
+      root.render(<SetupWizard {...props} />);
+    });
+    await settle();
+
+    // The friendly label — not the raw "audio" fallback — appears.
+    expect(container.textContent).toContain("Audio models");
+    // …and a usable audio model is actually surfaced for install.
+    expect(container.textContent).toContain("Kokoro 82M");
+    // The audioModelUsable gate drops the bare (no-mode) audio entry. This discriminates: with
+    // the gate removed, `bare_audio` is downloadable and WOULD render under Audio models.
+    expect(container.textContent).not.toContain("Bare Audio Entry");
+
+    // Canonical group order: image → video → audio (utility absent here).
+    const headings = [...document.body.querySelectorAll(".setup-wizard-group h3")].map(
+      (node) => node.textContent,
+    );
+    expect(headings).toEqual(["Image models", "Video models", "Audio models"]);
+  });
+
+  it("downloads a selected audio model through the same path as image/video (sc-13480)", async () => {
+    const props = renderWizard({ models: wizardAudioModels });
+    await act(async () => {
+      root.render(<SetupWizard {...props} />);
+    });
+    await settle();
+
+    // Kokoro is recommended ⇒ pre-checked. Its checkbox lives in the Audio group.
+    const kokoroLabel = [...document.body.querySelectorAll(".setup-wizard-model")].find((label) =>
+      label.textContent.includes("Kokoro 82M"),
+    );
+    expect(kokoroLabel).toBeTruthy();
+    expect(kokoroLabel.querySelector("input[type=checkbox]").checked).toBe(true);
+
+    const downloadButton = [...document.body.querySelectorAll("button")].find((button) =>
+      button.textContent.startsWith("Download"),
+    );
+    await act(async () => {
+      downloadButton.click();
+    });
+    await settle();
+
+    // Both recommended models (image + audio) fire through the shared onDownloadModel path…
+    const downloadedIds = props.onDownloadModel.mock.calls.map((call) => call[0].id);
+    expect(downloadedIds).toContain("kokoro_82m");
+    expect(downloadedIds).toContain("z_image_turbo");
+    // …and the gated, non-serving audio entry is never queued.
+    expect(downloadedIds).not.toContain("bare_audio");
+  });
+
   it("renders the app navigation against mocked API calls", async () => {
     root = createRoot(container);
     await act(async () => {

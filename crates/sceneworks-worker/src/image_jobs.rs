@@ -1158,6 +1158,20 @@ pub(crate) fn write_image_asset(
         index + 1
     );
 
+    // The source image an edit was derived from, so the Image Viewer can offer an
+    // Original↔Edited side-by-side compare (the edit stays its own asset — this is
+    // lineage, not a fold). Single-source edits carry it as `sourceAssetId`; the
+    // multi-image reference pickers (FLUX.2-dev multi-select, Krea two-reference)
+    // send `referenceAssetIds` with no scalar source, so anchor to the first
+    // reference. Non-edit jobs keep their own `sourceAssetId` (usually none).
+    let source_asset_id = request.source_asset_id.clone().or_else(|| {
+        if request.mode == "edit_image" {
+            request.reference_asset_ids.first().cloned()
+        } else {
+            None
+        }
+    });
+
     let fact = json!({
         "assetId": fresh_asset_id(),
         "type": "image",
@@ -1182,7 +1196,7 @@ pub(crate) fn write_image_asset(
         "stylePreset": request.style_preset,
         "characterId": request.character_id,
         "characterLookId": request.character_look_id,
-        "sourceAssetId": request.source_asset_id,
+        "sourceAssetId": source_asset_id,
         "rawAdapterSettings": raw_settings,
     });
     Ok(fact.as_object().cloned().expect("json! object literal"))
