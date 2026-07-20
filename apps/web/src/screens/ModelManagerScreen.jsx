@@ -109,6 +109,7 @@ function mlxStatusText(model) {
 const MODEL_TYPE_OPTIONS = [
   { value: "image", label: "Image" },
   { value: "video", label: "Video" },
+  { value: "audio", label: "Audio" },
   { value: "utility", label: "Utility" },
 ];
 
@@ -147,6 +148,44 @@ const CAPABILITY_LABELS = {
 
 function capabilityLabel(capability) {
   return CAPABILITY_LABELS[capability] ?? String(capability).replaceAll("_", " ");
+}
+
+// Audio capability chips (epic 13400 / sc-13406): audio-type models describe what they
+// do through the manifest `audio` sub-block rather than the generic `capabilities[]`, so
+// surface the same at-a-glance chips image/video cards get — derived straight from that
+// sub-block. One chip per PRESENT field (voice bank size, languages, edit modes,
+// multi-speaker); an absent field emits NO chip, so the chips are capability-driven and
+// never per-model. Languages are capped so a many-language model (e.g. ACE-Step's 10)
+// stays a single tidy pill.
+const AUDIO_LANGUAGE_CHIP_MAX = 4;
+
+function audioCapabilityChips(model) {
+  const audio = model?.audio && typeof model.audio === "object" ? model.audio : null;
+  if (!audio) {
+    return [];
+  }
+  const chips = [];
+  const voiceCount = Array.isArray(audio.voices) ? audio.voices.length : 0;
+  if (voiceCount > 0) {
+    chips.push(`${voiceCount} ${voiceCount === 1 ? "voice" : "voices"}`);
+  }
+  const languages = Array.isArray(audio.languages) ? audio.languages.filter(Boolean) : [];
+  if (languages.length) {
+    const shown = languages.slice(0, AUDIO_LANGUAGE_CHIP_MAX).join(", ");
+    chips.push(
+      languages.length > AUDIO_LANGUAGE_CHIP_MAX
+        ? `${shown} +${languages.length - AUDIO_LANGUAGE_CHIP_MAX}`
+        : shown,
+    );
+  }
+  const editModes = Array.isArray(audio.editModes) ? audio.editModes.filter(Boolean) : [];
+  if (editModes.length) {
+    chips.push(`Edit: ${editModes.join(", ")}`);
+  }
+  if (audio.supportsMultiSpeaker === true) {
+    chips.push("Multi-speaker");
+  }
+  return chips;
 }
 
 // Curated "getting started" models, flagged `recommended: true` in the catalog
@@ -1145,6 +1184,9 @@ export function ModelManagerScreen() {
     const downloadSize = downloadSizeText(model);
     const unassociated = !model.family;
     const capabilities = Array.isArray(model.capabilities) ? model.capabilities : [];
+    // Audio-type cards describe themselves via the `audio` sub-block (voice count,
+    // languages, edit modes, multi-speaker) instead of the generic capabilities[].
+    const audioChips = audioCapabilityChips(model);
     const deleteKey = `model:${model.id}`;
     const canDelete = Boolean(onDeleteModel) && model.removable !== false;
     // MLX (macOS) variant: only present when the catalog computed mlxConversionState.
@@ -1201,6 +1243,15 @@ export function ModelManagerScreen() {
             {capabilities.map((capability) => (
               <li className="chip" key={capability}>
                 {capabilityLabel(capability)}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {audioChips.length ? (
+          <ul className="model-capabilities model-audio-capabilities">
+            {audioChips.map((chip) => (
+              <li className="chip" key={chip}>
+                {chip}
               </li>
             ))}
           </ul>
@@ -1569,6 +1620,7 @@ export function ModelManagerScreen() {
   const tabDefs = [
     ["image", "Image Models", models.filter((model) => model.type === "image").length],
     ["video", "Video Models", models.filter((model) => model.type === "video").length],
+    ["audio", "Audio Models", models.filter((model) => model.type === "audio").length],
     ["utility", "Utility Models", models.filter((model) => model.type === "utility").length],
     ["lora", "LoRAs", loras.length],
   ];
@@ -1591,7 +1643,7 @@ export function ModelManagerScreen() {
       .filter(modelMatchesFamily);
     const recommended = activeModels.filter(isRecommendedModel);
     const others = activeModels.filter((model) => !isRecommendedModel(model));
-    const typeLabel = { image: "image", video: "video", utility: "utility" }[type] ?? type;
+    const typeLabel = { image: "image", video: "video", audio: "audio", utility: "utility" }[type] ?? type;
     const othersHeading =
       recommended.length > 0 ? `All ${typeLabel} models` : `${typeLabel.charAt(0).toUpperCase()}${typeLabel.slice(1)} models`;
     return { recommended, others, othersHeading };
@@ -1646,6 +1698,7 @@ export function ModelManagerScreen() {
     const groups = [
       ["image", "Image Models"],
       ["video", "Video Models"],
+      ["audio", "Audio Models"],
       ["utility", "Utility Models"],
     ]
       .map(([type, label]) => ({ label, items: searchModelMatches.filter((model) => model.type === type) }))

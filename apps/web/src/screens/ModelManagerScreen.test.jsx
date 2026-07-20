@@ -626,8 +626,8 @@ describe("ModelManagerScreen type-grouped layout", () => {
 
   it("renders a tab per model type in fixed order, each scoped to its own type", async () => {
     await render({ models: MODELS });
-    // Four fixed tabs; the model tabs carry a total-count badge (LoRAs has 0 here).
-    expect(tabLabels()).toEqual(["Image Models1", "Video Models1", "Utility Models1", "LoRAs0"]);
+    // Five fixed tabs; the model tabs carry a total-count badge (Audio + LoRAs are 0 here).
+    expect(tabLabels()).toEqual(["Image Models1", "Video Models1", "Audio Models0", "Utility Models1", "LoRAs0"]);
     // The default (Image) tab shows only its own type's card.
     expect(container.querySelectorAll(".model-card").length).toBe(1);
     expect(container.textContent).toContain("Z-Image-Turbo");
@@ -640,9 +640,9 @@ describe("ModelManagerScreen type-grouped layout", () => {
     expect(container.textContent).toContain("Real-ESRGAN");
   });
 
-  it("always shows all four tabs, with a zero count and empty state for an unpopulated type", async () => {
+  it("always shows all five tabs, with a zero count and empty state for an unpopulated type", async () => {
     await render({ models: [MODELS[0]] });
-    expect(tabLabels()).toEqual(["Image Models1", "Video Models0", "Utility Models0", "LoRAs0"]);
+    expect(tabLabels()).toEqual(["Image Models1", "Video Models0", "Audio Models0", "Utility Models0", "LoRAs0"]);
     await selectTab(container, "Video Models");
     expect(container.querySelector(".models-empty")).toBeTruthy();
     expect(container.textContent).toContain("No models match your search.");
@@ -1537,5 +1537,219 @@ describe("ModelManagerScreen model & LoRA delete confirms (sc-12068)", () => {
       expect.objectContaining({ title: "Delete LoRA?", tone: "danger" }),
     );
     expect(deleteLora).toHaveBeenCalledWith(expect.objectContaining({ id: "my_lora" }));
+  });
+});
+
+// sc-13406 (epic 13400 B1): the Models library gains an Audio Models tab alongside
+// Image / Video / Utility. Audio-type cards render the shared install/convert/tier UX
+// (the card renderer is type-agnostic) plus audio-specific capability chips derived from
+// the manifest `audio` sub-block — voice count, languages, edit modes, multi-speaker —
+// with a chip shown ONLY when its underlying field is present (capability-driven).
+describe("ModelManagerScreen Audio Models tab + capability chips (sc-13406)", () => {
+  let container;
+  let root;
+  let ModelManagerScreen;
+  let AppContext;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.__TAURI__ = { core: { invoke: vi.fn(async () => null) } };
+    vi.resetModules();
+    ({ AppContext } = await import("../context/AppContext.js"));
+    ({ ModelManagerScreen } = await import("./ModelManagerScreen.jsx"));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete window.__TAURI__;
+    vi.restoreAllMocks();
+  });
+
+  async function render(models) {
+    const value = {
+      activeProject: null,
+      jobs: [],
+      loras: [],
+      models,
+      presets: [],
+      workersById: new Map(),
+      visibleWorkers: [],
+      jobAction: () => {},
+      setActiveView: () => {},
+      deleteLora: () => {},
+      deleteModel: () => {},
+      createModelDownloadJob: () => {},
+      createLoraDownloadJob: () => {},
+      createModelConvertJob: () => {},
+      createLoraImportJob: () => {},
+      createModelImportJob: () => {},
+    };
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={value}>
+          <ModelManagerScreen />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  // Fixtures mirror the seeded `type:"audio"` catalog entries' `audio` sub-block shape.
+  // Kokoro (speech): a voice bank + two languages, no edit modes, single-speaker.
+  const KOKORO = {
+    id: "kokoro_82m",
+    name: "Kokoro 82M (Speech)",
+    type: "audio",
+    family: "kokoro",
+    installState: "missing",
+    recommended: true,
+    audio: {
+      voices: [
+        { id: "af_alloy", label: "Alloy", language: "en-US" },
+        { id: "af_aoede", label: "Aoede", language: "en-US" },
+        { id: "bf_alice", label: "Alice", language: "en-GB" },
+      ],
+      languages: ["en-US", "en-GB"],
+      sampleRates: [24000],
+      maxDurationSecs: 30,
+      supportsMultiSpeaker: false,
+    },
+    ui: { description: "Recommended speech model." },
+  };
+
+  // ACE-Step (music): edit modes + many languages, NO voice bank.
+  const ACE_STEP = {
+    id: "ace_step_v15_turbo",
+    name: "ACE-Step v1.5 XL Turbo (Music)",
+    type: "audio",
+    family: "ace-step",
+    installState: "missing",
+    audio: {
+      languages: ["en", "zh", "ja", "ko", "fr", "de", "es", "it", "pt", "ru"],
+      sampleRates: [48000],
+      maxDurationSecs: 600,
+      editModes: ["inpaint", "repaint", "extend"],
+      conditioning: ["AudioEdit"],
+      supportsMultiSpeaker: false,
+    },
+    ui: { description: "Text-to-music model with audio editing." },
+  };
+
+  // OpenVoice V2 (voice clone): a conditioning-only model. It takes a reference audio
+  // clip and exposes NONE of the chip-bearing fields — no voice bank, no languages, no
+  // edit modes, no multi-speaker flag. This mirrors the real zero-chip seeded shape
+  // (OpenVoice V2 / Chatterbox-VE), which carries only `conditioning`.
+  const OPENVOICE = {
+    id: "openvoice_v2",
+    name: "OpenVoice V2 (Voice Clone)",
+    type: "audio",
+    family: "openvoice",
+    installState: "missing",
+    audio: {
+      sampleRates: [24000],
+      maxDurationSecs: 30,
+      conditioning: ["ReferenceAudio"],
+    },
+    ui: { description: "Voice-clone model conditioned on a reference clip." },
+  };
+
+  const IMAGE_MODEL = {
+    id: "z_image_turbo",
+    name: "Z-Image-Turbo",
+    type: "image",
+    family: "z-image",
+    capabilities: ["text_to_image"],
+    installState: "missing",
+  };
+
+  function cardFor(name) {
+    return [...container.querySelectorAll(".model-card")].find((card) => card.textContent.includes(name));
+  }
+  function audioChipsFor(name) {
+    return [...(cardFor(name)?.querySelectorAll(".model-audio-capabilities .chip") ?? [])].map((chip) =>
+      chip.textContent,
+    );
+  }
+
+  it("registers an Audio Models tab with a per-type count that lists only audio models", async () => {
+    await render([IMAGE_MODEL, KOKORO, ACE_STEP, OPENVOICE]);
+    const tabLabels = [...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent);
+    // Fixed order: Image, Video, Audio, Utility, LoRAs. Audio carries a total-of-3 badge.
+    expect(tabLabels).toEqual(["Image Models1", "Video Models0", "Audio Models3", "Utility Models0", "LoRAs0"]);
+    // Default (Image) tab shows only the image card, not the audio ones.
+    expect(container.textContent).toContain("Z-Image-Turbo");
+    expect(cardFor("Kokoro 82M (Speech)")).toBeUndefined();
+    // Switch to Audio → all three audio models render, and the image model does not.
+    await selectTab(container, "Audio Models");
+    expect(cardFor("Kokoro 82M (Speech)")).toBeTruthy();
+    expect(cardFor("ACE-Step v1.5 XL Turbo (Music)")).toBeTruthy();
+    expect(cardFor("OpenVoice V2 (Voice Clone)")).toBeTruthy();
+    expect(cardFor("Z-Image-Turbo")).toBeUndefined();
+  });
+
+  it("surfaces the recommended audio model in the Recommended band on the Audio tab", async () => {
+    await render([KOKORO, ACE_STEP]);
+    await selectTab(container, "Audio Models");
+    const band = container.querySelector(".models-recommended");
+    expect(band).toBeTruthy();
+    expect(band.textContent).toContain("Recommended");
+    // Only the recommended Kokoro floats into the band; ACE-Step sits below it.
+    expect(band.querySelectorAll(".model-card").length).toBe(1);
+    expect(band.textContent).toContain("Kokoro 82M (Speech)");
+    expect(band.querySelector(".model-card-rec-chip")).toBeTruthy();
+  });
+
+  it("derives voice-count + languages chips for a speech model, and no others", async () => {
+    await render([KOKORO]);
+    await selectTab(container, "Audio Models");
+    const chips = audioChipsFor("Kokoro 82M (Speech)");
+    // voices.length (3) → "3 voices"; languages joined → "en-US, en-GB".
+    expect(chips).toContain("3 voices");
+    expect(chips).toContain("en-US, en-GB");
+    // Discriminating: no edit-modes chip and no multi-speaker chip (those fields absent/false).
+    expect(chips.some((chip) => chip.startsWith("Edit:"))).toBe(false);
+    expect(chips).not.toContain("Multi-speaker");
+  });
+
+  it("derives an edit-modes chip for a music model and shows NO voice chip", async () => {
+    await render([ACE_STEP]);
+    await selectTab(container, "Audio Models");
+    const chips = audioChipsFor("ACE-Step v1.5 XL Turbo (Music)");
+    expect(chips).toContain("Edit: inpaint, repaint, extend");
+    // No voice bank → no voice-count chip (discriminating vs the speech model).
+    expect(chips.some((chip) => /voice/.test(chip))).toBe(false);
+    // 10 languages collapse to a single capped pill (first 4 + overflow count).
+    expect(chips).toContain("en, zh, ja, ko +6");
+  });
+
+  it("shows a Multi-speaker chip only when supportsMultiSpeaker is true", async () => {
+    const multi = {
+      ...KOKORO,
+      id: "multi_speaker_tts",
+      name: "Multi Speaker TTS",
+      recommended: false,
+      audio: { ...KOKORO.audio, supportsMultiSpeaker: true },
+    };
+    await render([KOKORO, multi]);
+    await selectTab(container, "Audio Models");
+    // The single-speaker Kokoro fixture never shows the chip…
+    expect(audioChipsFor("Kokoro 82M (Speech)")).not.toContain("Multi-speaker");
+    // …while the multi-speaker model does.
+    expect(audioChipsFor("Multi Speaker TTS")).toContain("Multi-speaker");
+  });
+
+  it("renders no audio capability chips for a conditioning-only model with none of the chip fields", async () => {
+    await render([OPENVOICE]);
+    await selectTab(container, "Audio Models");
+    // OpenVoice V2 carries only `conditioning` (+ sampleRates) → no voice/language/edit/multi-speaker chips at all.
+    expect(cardFor("OpenVoice V2 (Voice Clone)")).toBeTruthy();
+    expect(audioChipsFor("OpenVoice V2 (Voice Clone)")).toEqual([]);
+    expect(cardFor("OpenVoice V2 (Voice Clone)").querySelector(".model-audio-capabilities")).toBeNull();
   });
 });
