@@ -295,6 +295,12 @@ export function AudioStudio() {
   const showSteps = SAMPLING_KNOB_MODES.has(mode) || mode === "music";
   const showGuidance = SAMPLING_KNOB_MODES.has(mode) || musicSupportsGuidance;
   const showNegative = musicSupportsNegative;
+  // Streaming (sc-13675): the selected model renders the clip incrementally when it advertises
+  // audio.supportsStreaming (backend Capabilities.supports_streaming). CAPABILITY-DRIVEN — never a
+  // hardcoded id: the results zone reveals a streaming affordance and the worker's per-chunk progress
+  // updates drive the WorkerProgressCard through the stream. Only a Speech model streams today
+  // (MOSS-TTS-Realtime); a non-streaming model leaves it hidden so those modes are unperturbed.
+  const showStreaming = Boolean(audio.supportsStreaming);
 
   // The voice picker's <optgroup> structure — derived from the selected model's voice bank, grouped
   // by accent + gender (sc-13408). Rebuilt only when the bank changes.
@@ -1028,7 +1034,23 @@ export function AudioStudio() {
           <div className="studio-results">
             <section className="review-panel">
               <div className="review-panel-head">
-                <h2>Latest audio</h2>
+                <div className="review-panel-head-title">
+                  <h2>Latest audio</h2>
+                  {/* Streaming reveal (sc-13675): shown ONLY when the selected model advertises
+                      audio.supportsStreaming. It signals that the clip renders incrementally — the
+                      worker posts per-chunk progress, so the WorkerProgressCard below advances THROUGH
+                      the stream as chunks arrive, and the first audio is produced before the full clip
+                      finishes. Capability-driven, never a hardcoded id; hidden for every one-shot mode. */}
+                  {showStreaming ? (
+                    <span
+                      className="streaming-badge"
+                      data-testid="audio-streaming-badge"
+                      title="This model streams audio incrementally — the first audio arrives before the full clip finishes rendering."
+                    >
+                      Streams incrementally
+                    </span>
+                  ) : null}
+                </div>
                 <span className="kbd-hint">
                   <kbd>⌘</kbd>
                   <kbd>↵</kbd>

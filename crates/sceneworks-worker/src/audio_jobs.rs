@@ -576,8 +576,18 @@ async fn run_audio_synthesis_using(
     // that was never tripped, so a user cancel is honored DURING the clip render — not only by the
     // post-synthesis `check_cancel` after the whole clip has already rendered.
     let cancel = CancelFlag::new();
+    // Incremental streaming progress (sc-13675). A streaming-capable Generator drives
+    // `generate_streaming` and emits an `AudioChunk` per PCM block as the AR loop decodes it; `on_chunk`
+    // forwards the running chunk count over this channel and the concurrent async pump below posts a
+    // job update as each chunk arrives, so the Audio Studio's WorkerProgressCard advances THROUGH the
+    // stream instead of sitting flat until the whole clip renders. A non-streaming model takes the
+    // one-shot `generate` path and emits nothing here, so every existing audio mode is byte-for-byte
+    // unperturbed. The reassembled chunks equal the returned one-shot track (the gen-core reassembly
+    // law), so the library asset is still the full `AudioTrack` the caller writes.
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
     let handle = {
         let cancel = cancel.clone();
+        let chunk_tx = chunk_tx.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
             let spec = LoadSpec::new(WeightsSource::Dir(model_dir));
             let generator = load_generator(&model_id, &spec)
@@ -608,11 +618,21 @@ async fn run_audio_synthesis_using(
             // the per-stage engine callback is a no-op here — the shared keepalive watcher is what
             // keeps the job alive during synthesis, so the engine progress doesn't need forwarding.
             let mut on_progress = |_progress: Progress| {};
-            let output = generator
-                .generate(&req, &mut on_progress)
-                .map_err(|error| {
-                    classify_audio_synthesis_error("audio generation failed", error)
-                })?;
+            // Gate PURELY on the loaded generator's advertised capability (sc-13675), never a hardcoded
+            // id: a `supports_streaming` model streams incremental chunks; every other model keeps the
+            // exact one-shot `generate` path unchanged. `generate_streaming` also returns the same
+            // aggregate `GenerationOutput` as `generate`, so the written asset is identical either way.
+            let output = if generator.descriptor().capabilities.supports_streaming {
+                let mut on_chunk = |chunk: gen_core::AudioChunk| {
+                    // The 1-based running chunk count. A closed channel (pump already gone) is fine —
+                    // synthesis must never depend on the progress sink.
+                    let _ = chunk_tx.send(chunk.index.saturating_add(1));
+                };
+                generator.generate_streaming(&req, &mut on_chunk, &mut on_progress)
+            } else {
+                generator.generate(&req, &mut on_progress)
+            }
+            .map_err(|error| classify_audio_synthesis_error("audio generation failed", error))?;
             match output {
                 GenerationOutput::Audio(track) => Ok(track),
                 GenerationOutput::Images(_) => Err(WorkerError::Engine(
@@ -624,12 +644,59 @@ async fn run_audio_synthesis_using(
             }
         })
     };
+    // Drop our extra sender so the channel closes the instant synthesis finishes (the blocking task's
+    // clone drops), letting the pump terminate cleanly on `recv() == None`.
+    drop(chunk_tx);
+    // Concurrent incremental-progress pump (sc-13675): posts a Running/Generating job update as each
+    // streamed chunk arrives so the UI reflects the stream. It runs ALONGSIDE
+    // `run_blocking_with_heartbeat` (which owns worker heartbeats + the cancel watcher on a DIFFERENT
+    // endpoint). It stops the instant the shared cancel flag is tripped, so it can never post a Running
+    // status after the watcher writes the terminal `Canceled` (no cancel/heartbeat regression), and it
+    // ends when synthesis closes the channel. Non-streaming synthesis never sends, so the pump exits
+    // immediately with zero posts, leaving those modes untouched.
+    let pump = {
+        let api = api.clone();
+        let job_id = job.id.clone();
+        let backend = backend_label(&settings.gpu_id).to_owned();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            let mut count = 0usize;
+            while let Some(latest) = chunk_rx.recv().await {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                count = count.max(latest);
+                // Asymptotic fraction inside the (Generating 0.2 → Saving 0.9) band: the total chunk
+                // count is unknown ahead of time (the AR loop decides its own length via EOS), so
+                // approach but never reach 0.9 rather than claim a false denominator.
+                let fraction = 0.25 + 0.6 * (count as f64 / (count as f64 + 6.0));
+                let message = format!(
+                    "Streaming audio… ({count} chunk{})",
+                    if count == 1 { "" } else { "s" }
+                );
+                let _ = update_job(
+                    &api,
+                    &job_id,
+                    audio_progress(
+                        JobStatus::Running,
+                        ProgressStage::Generating,
+                        fraction,
+                        &message,
+                        None,
+                        &backend,
+                    ),
+                )
+                .await;
+            }
+            count
+        })
+    };
     // The shared blocking keepalive + cancel watcher (sc-13469): pings the worker heartbeat while the
     // synthesis runs (so a long/cold render is never swept to `interrupted`), polls the API cancel
     // state each interval and trips the SAME `cancel` the request carries, and on completion tears the
     // watcher down cleanly (bounded-join, no leaked task, no false-trip on normal completion). Mirrors
     // the video path's in-loop cancel watcher.
-    run_blocking_with_heartbeat(
+    let result = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
@@ -639,7 +706,11 @@ async fn run_audio_synthesis_using(
         no_cancel_ack(),
         handle,
     )
-    .await
+    .await;
+    // Drain the pump. It has already ended (the channel closed when synthesis finished, or the cancel
+    // flag stopped it), so this is bounded and never hangs.
+    let _ = pump.await;
+    result
 }
 
 /// Which synthesis path a resolved audio job takes — the single-generator lane (Speech / SFX / Music)
@@ -1865,6 +1936,99 @@ mod tests {
         }
     }
 
+    /// A descriptor that advertises `supports_streaming: true` — so `run_audio_synthesis_using`
+    /// takes the `generate_streaming` path (the gate reads the loaded generator's capability, never a
+    /// hardcoded id). The audio twin of the real moss_tts_realtime descriptor's streaming flag.
+    fn streaming_stub_descriptor() -> gen_core::ModelDescriptor {
+        gen_core::ModelDescriptor {
+            id: "stub_streaming_audio",
+            family: "stub",
+            backend: "mlx",
+            modality: gen_core::Modality::Audio,
+            capabilities: gen_core::Capabilities {
+                supports_streaming: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// A streaming [`Generator`] that emits `chunks` incremental [`AudioChunk`]s of `per_chunk`
+    /// interleaved samples through `on_chunk` (with a small inter-chunk delay so the chunks arrive
+    /// incrementally, not all at once), and returns the SAME aggregate track — proving the reassembly
+    /// law (`concat(chunks) == generate()`). Its one-shot `generate` returns that same concatenation.
+    struct StreamingStubGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        chunks: usize,
+        per_chunk: usize,
+    }
+
+    impl StreamingStubGenerator {
+        fn chunk_samples(&self, index: usize) -> Vec<f32> {
+            // Deterministic, non-silent, per-chunk-distinct PCM so a reassembly bug is observable.
+            (0..self.per_chunk)
+                .map(|s| {
+                    let n = (index * self.per_chunk + s) as f32;
+                    ((n * 0.25).sin() * 0.5).clamp(-1.0, 1.0)
+                })
+                .collect()
+        }
+
+        fn aggregate(&self) -> Vec<f32> {
+            (0..self.chunks)
+                .flat_map(|i| self.chunk_samples(i))
+                .collect()
+        }
+    }
+
+    impl gen_core::Generator for StreamingStubGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn generate(
+            &self,
+            _req: &GenerationRequest,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<GenerationOutput> {
+            Ok(GenerationOutput::Audio(gen_core::AudioTrack {
+                samples: self.aggregate(),
+                sample_rate: 24_000,
+                channels: 1,
+                stems: Vec::new(),
+            }))
+        }
+        fn generate_streaming(
+            &self,
+            req: &GenerationRequest,
+            on_chunk: &mut dyn FnMut(gen_core::AudioChunk),
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<GenerationOutput> {
+            let mut all = Vec::new();
+            for index in 0..self.chunks {
+                if req.cancel.is_cancelled() {
+                    return Err(gen_core::Error::Canceled);
+                }
+                let samples = self.chunk_samples(index);
+                all.extend(samples.iter().copied());
+                on_chunk(gen_core::AudioChunk {
+                    samples,
+                    sample_rate: 24_000,
+                    channels: 1,
+                    index,
+                });
+                std::thread::sleep(Duration::from_millis(8));
+            }
+            Ok(GenerationOutput::Audio(gen_core::AudioTrack {
+                samples: all,
+                sample_rate: 24_000,
+                channels: 1,
+                stems: Vec::new(),
+            }))
+        }
+    }
+
     fn stub_transform_descriptor() -> gen_core::AudioTransformDescriptor {
         gen_core::AudioTransformDescriptor {
             id: "stub_converter",
@@ -2217,5 +2381,254 @@ mod tests {
             posts.iter().any(|p| p["status"] == "canceled"),
             "the terminal Canceled must be posted, got {posts:?}"
         );
+    }
+
+    /// Streaming path (sc-13675): a `supports_streaming` Generator must be driven through
+    /// `generate_streaming`, the worker must forward an incremental job update per chunk (so the UI
+    /// advances through the stream), and the returned track must equal the reassembly of every chunk
+    /// (the gen-core reassembly law → the library asset is the full clip). Gated purely on the loaded
+    /// generator's capability, so no model id is hardcoded.
+    #[tokio::test]
+    async fn streaming_synthesis_forwards_per_chunk_progress_and_returns_reassembled_track() {
+        let (base_url, progress) = spawn_audio_cancel_stub(false).await;
+        let settings = cancel_test_settings(base_url);
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("audio-stream");
+        let request = AudioRequest::from_payload(&payload(json!({ "model": "moss_tts_realtime" })));
+
+        let expected = StreamingStubGenerator {
+            descriptor: streaming_stub_descriptor(),
+            chunks: 5,
+            per_chunk: 4,
+        }
+        .aggregate();
+        let load = move |_id: &str, _spec: &LoadSpec| {
+            Ok(Box::new(StreamingStubGenerator {
+                descriptor: streaming_stub_descriptor(),
+                chunks: 5,
+                per_chunk: 4,
+            }) as Box<dyn Generator>)
+        };
+
+        let track = run_audio_synthesis_using(
+            &api,
+            &settings,
+            &job,
+            &request,
+            PathBuf::from("unused"),
+            None,
+            load,
+        )
+        .await
+        .expect("a streaming synthesis returns the reassembled track");
+
+        // The returned one-shot track == concat of the 5×4 streamed chunks (the reassembly law).
+        assert_eq!(
+            track.samples, expected,
+            "the returned track must equal the reassembly of every streamed chunk"
+        );
+        assert_eq!(track.sample_rate, 24_000);
+        assert_eq!(track.channels, 1);
+
+        // The pump forwarded ≥2 incremental "Streaming audio…" job updates BEFORE the clip finished —
+        // the observable proof the worker streams (a non-streaming model posts none; see below).
+        let posts = progress.lock().expect("progress lock");
+        let streaming_posts = posts
+            .iter()
+            .filter(|p| {
+                p["message"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("Streaming audio"))
+            })
+            .count();
+        assert!(
+            streaming_posts >= 2,
+            "expected ≥2 incremental streaming progress posts, got {streaming_posts}: {posts:?}"
+        );
+        // None of the incremental posts is terminal — the pump only ever emits Running/Generating.
+        assert!(
+            posts.iter().all(|p| p["status"] != "canceled"),
+            "a clean stream posts no terminal Canceled, got {posts:?}"
+        );
+    }
+
+    /// Control (sc-13675): a NON-streaming Generator (Capabilities default → `supports_streaming:
+    /// false`) must keep the one-shot `generate` path and emit ZERO incremental "Streaming audio…"
+    /// posts — proving the streaming wiring does not perturb Kokoro/MOSS-SFX/ACE-Step/clone modes.
+    #[tokio::test]
+    async fn non_streaming_synthesis_emits_no_incremental_streaming_posts() {
+        let (base_url, progress) = spawn_audio_cancel_stub(false).await;
+        let settings = cancel_test_settings(base_url);
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("audio-nonstream");
+        let request = AudioRequest::from_payload(&payload(json!({})));
+
+        let observed = Arc::new(AtomicBool::new(false));
+        let load = stub_load(StubBehavior::CompleteOk, observed);
+        run_audio_synthesis_using(
+            &api,
+            &settings,
+            &job,
+            &request,
+            PathBuf::from("unused"),
+            None,
+            load,
+        )
+        .await
+        .expect("a non-streaming synthesis completes");
+
+        let posts = progress.lock().expect("progress lock");
+        assert!(
+            posts.iter().all(|p| {
+                p["message"]
+                    .as_str()
+                    .is_none_or(|m| !m.starts_with("Streaming audio"))
+            }),
+            "a non-streaming model must emit no incremental streaming posts, got {posts:?}"
+        );
+    }
+
+    /// DoD walking skeleton (sc-13675) — REAL MOSS-TTS-Realtime streaming through the generator seam.
+    /// `#[ignore]` because it needs the ~4.66 GB AR checkpoint + ~7.1 GB MOSS-Audio-Tokenizer codec
+    /// (not in CI) and is pathologically slow in a debug build. Run it in RELEASE:
+    ///
+    /// ```text
+    /// SCENEWORKS_MOSS_TTS_AR_DIR=~/.cache/huggingface/hub/models--OpenMOSS-Team--MOSS-TTS-Realtime/\
+    ///   snapshots/6acbc7f161a0db71c291f2d0aaa9eee59334cab2 \
+    /// HF_HUB_OFFLINE=1 \
+    /// cargo test --release -p sceneworks-worker -- --ignored --nocapture \
+    ///   moss_tts_realtime_streams_a_real_clip
+    /// ```
+    ///
+    /// It loads the real generator through the worker's `load_audio` seam, drives `generate_streaming`
+    /// capturing every chunk + timing, then asserts the DoD: ≥2 chunks, the first chunk arrives before
+    /// the full clip finishes, `concat(chunks) == returned track` (reassembly law), 24 kHz, non-silent
+    /// — and writes the assembled WAV + an evidence JSON to `SCENEWORKS_DOD_OUT` (or the temp dir).
+    #[test]
+    #[ignore = "requires the ~12GB MOSS-TTS-Realtime + MOSS-Audio-Tokenizer weights; DoD, run manually in release"]
+    fn moss_tts_realtime_streams_a_real_clip_through_the_generator_seam() {
+        let ar_dir = std::env::var("SCENEWORKS_MOSS_TTS_AR_DIR").expect(
+            "set SCENEWORKS_MOSS_TTS_AR_DIR to the cached MOSS-TTS-Realtime snapshot directory",
+        );
+        let generator = crate::inference_runtime::load_audio(
+            "moss_tts_realtime",
+            &LoadSpec::new(WeightsSource::Dir(PathBuf::from(&ar_dir))),
+        )
+        .expect("load the real moss_tts_realtime generator from the cached snapshot");
+        assert!(
+            generator.descriptor().capabilities.supports_streaming,
+            "moss_tts_realtime must advertise supports_streaming"
+        );
+
+        let req = GenerationRequest {
+            prompt:
+                "SceneWorks streaming speech is now live. This clip was produced incrementally, \
+                     one chunk at a time."
+                    .to_owned(),
+            audio: Some(AudioParams {
+                language: Some("en".to_owned()),
+                target_duration: Some(6.0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let start = Instant::now();
+        let mut chunk_lengths: Vec<usize> = Vec::new();
+        let mut reassembled: Vec<f32> = Vec::new();
+        let mut first_chunk_at: Option<Duration> = None;
+        let mut sample_rate = 0u32;
+        let mut channels = 0u16;
+        {
+            let mut on_chunk = |chunk: gen_core::AudioChunk| {
+                if first_chunk_at.is_none() {
+                    first_chunk_at = Some(start.elapsed());
+                }
+                assert_eq!(
+                    chunk.index,
+                    chunk_lengths.len(),
+                    "chunk indices are gapless"
+                );
+                sample_rate = chunk.sample_rate;
+                channels = chunk.channels;
+                chunk_lengths.push(chunk.samples.len());
+                reassembled.extend(chunk.samples.iter().copied());
+            };
+            let mut on_progress = |_p: Progress| {};
+            let output = generator
+                .generate_streaming(&req, &mut on_chunk, &mut on_progress)
+                .expect("real streaming synthesis succeeds");
+            let total = start.elapsed();
+            let track = match output {
+                GenerationOutput::Audio(track) => track,
+                other => panic!("expected audio, got {other:?}"),
+            };
+
+            let first = first_chunk_at.expect("at least one chunk streamed");
+            // (a) ≥2 chunks, first before the full clip finished.
+            assert!(
+                chunk_lengths.len() >= 2,
+                "streaming must emit ≥2 chunks, got {}",
+                chunk_lengths.len()
+            );
+            assert!(
+                first < total,
+                "the first chunk ({first:?}) must arrive before the full synthesis finishes ({total:?})"
+            );
+            // (b) reassembly law: concat(chunks) == the returned one-shot track.
+            assert_eq!(
+                reassembled, track.samples,
+                "concatenating the streamed chunks must equal the returned track"
+            );
+            // (c) real speech at the expected rate, non-silent.
+            assert_eq!(
+                track.sample_rate, 24_000,
+                "MOSS-TTS-Realtime renders 24 kHz"
+            );
+            assert_eq!(sample_rate, 24_000);
+            assert!(channels >= 1);
+            let peak = track.samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+            assert!(peak > 0.0, "the produced clip must be audible (non-silent)");
+
+            // Save the artifact + evidence to SCENEWORKS_DOD_OUT (or the temp dir).
+            let out_dir = std::env::var("SCENEWORKS_DOD_OUT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| std::env::temp_dir());
+            std::fs::create_dir_all(&out_dir).ok();
+            let wav_path = out_dir.join("moss_tts_realtime_stream_dod.wav");
+            let wav = AudioTrack {
+                samples: track.samples.clone(),
+                sample_rate: track.sample_rate,
+                channels: track.channels.max(1),
+            };
+            write_wav_pcm16(&wav, &wav_path).expect("write the assembled WAV");
+            let evidence = json!({
+                "model": "moss_tts_realtime",
+                "chunkCount": chunk_lengths.len(),
+                "chunkSampleLengths": chunk_lengths,
+                "firstChunkMs": first.as_millis(),
+                "fullSynthesisMs": total.as_millis(),
+                "firstChunkBeforeFull": first < total,
+                "sampleRate": track.sample_rate,
+                "channels": track.channels,
+                "totalSamples": track.samples.len(),
+                "durationSecs": track.samples.len() as f64
+                    / (track.sample_rate.max(1) as f64 * track.channels.max(1) as f64),
+                "peakAmplitude": peak,
+                "reassemblyEqualsOneShot": reassembled == track.samples,
+                "wavPath": wav_path.display().to_string(),
+            });
+            let evidence_path = out_dir.join("moss_tts_realtime_stream_dod.json");
+            std::fs::write(
+                &evidence_path,
+                serde_json::to_string_pretty(&evidence).unwrap(),
+            )
+            .expect("write the evidence JSON");
+            eprintln!(
+                "DoD evidence: {}\nWAV: {}",
+                evidence_path.display(),
+                wav_path.display()
+            );
+        }
     }
 }

@@ -530,6 +530,10 @@
                 "type": "boolean",
                 "description": "Whether the model can render a multi-speaker turn/dialogue in a single request. Absent/false means single-speaker only."
               },
+              "supportsStreaming": {
+                "type": "boolean",
+                "description": "Whether the model streams audio incrementally as it renders (backend Capabilities.supports_streaming, sc-12846). When true the worker drives Generator::generate_streaming so partial PCM chunks arrive before the clip finishes, and the Audio Studio reveals progressive/streaming results in the results zone. Absent/false means one-shot synthesis. The reassembly of every chunk still equals the one-shot track, so it is advisory to the STREAM SHAPE, not to correctness (sc-13675)."
+              },
               "conditioning": {
                 "type": "array",
                 "uniqueItems": true,

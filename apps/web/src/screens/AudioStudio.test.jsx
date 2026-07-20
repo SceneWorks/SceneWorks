@@ -81,6 +81,21 @@ const CHATTERBOX_TTS = {
   ui: { label: "Chatterbox Clone-TTS" },
 };
 
+// Streaming TTS (sc-13675): NO voice bank — serves Speech via audio.supportsStreaming. Kept OUT of
+// ALL_AUDIO so the existing Speech tests keep Kokoro as the default; the streaming tests add it.
+const MOSS_TTS_REALTIME = {
+  id: "moss_tts_realtime",
+  name: "MOSS-TTS-Realtime (Streaming Speech)",
+  type: "audio",
+  audio: {
+    languages: ["en", "zh"],
+    sampleRates: [24000],
+    maxDurationSecs: 2400,
+    supportsStreaming: true,
+  },
+  ui: { label: "MOSS-TTS-Realtime (Streaming)" },
+};
+
 const ALL_AUDIO = [KOKORO, MOSS, ACESTEP, OPENVOICE];
 
 function baseContext(overrides = {}) {
@@ -1220,6 +1235,88 @@ describe("AudioStudio register-a-voice (sc-13517)", () => {
     await click(modeTab(container, "Voice Clone"));
     await click(container.querySelector(".saved-voice-delete"));
     expect(deleteSavedVoice).toHaveBeenCalledWith("voice_a");
+  });
+});
+
+describe("AudioStudio streaming reveal (sc-13675)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <AudioStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const streamingBadge = () => container.querySelector('[data-testid="audio-streaming-badge"]');
+
+  it("serves the Speech tab from supportsStreaming (no voice bank) and reveals the streaming badge", async () => {
+    await render(baseContext({ audioModels: [MOSS_TTS_REALTIME], models: [MOSS_TTS_REALTIME] }));
+
+    // Opens on Speech, with the streaming TTS selected — proving supportsStreaming serves Speech even
+    // without a voice bank (capability-driven eligibility, sc-13675).
+    expect(modeTab(container, "Speech").className).toContain("active");
+    expect(modelSelect(container).value).toBe("moss_tts_realtime");
+
+    // The results zone reveals the streaming affordance.
+    expect(streamingBadge()).toBeTruthy();
+    expect(streamingBadge().textContent).toContain("Streams incrementally");
+
+    // It has NO voice bank, so the Speech voice picker is absent — but language + length still render
+    // from its Capabilities (it is a real Speech model, not SFX).
+    expect(fieldByLabelStart(container, "Voice")).toBeFalsy();
+    expect(fieldByLabelStart(container, "Language").querySelector("select")).toBeTruthy();
+    expect(fieldByLabelStart(container, "Length").querySelector("input").getAttribute("max")).toBe(
+      "2400",
+    );
+  });
+
+  it("does NOT reveal the streaming badge for a one-shot Speech model (Kokoro)", async () => {
+    await render(baseContext({ audioModels: [KOKORO], models: [KOKORO] }));
+    expect(modelSelect(container).value).toBe("kokoro_82m");
+    // Kokoro does not advertise supportsStreaming → no streaming affordance (non-streaming unperturbed).
+    expect(streamingBadge()).toBeNull();
+  });
+
+  it("toggles the badge with the selected model's capability, not the mode", async () => {
+    // Both a streaming and a one-shot Speech model installed; the badge follows the SELECTED model.
+    await render(
+      baseContext({
+        audioModels: [MOSS_TTS_REALTIME, KOKORO],
+        models: [MOSS_TTS_REALTIME, KOKORO],
+      }),
+    );
+    // Default selection is the first Speech model (the streaming one) → badge shown.
+    expect(modelSelect(container).value).toBe("moss_tts_realtime");
+    expect(streamingBadge()).toBeTruthy();
+
+    // Switch to Kokoro (still Speech) → the badge disappears: capability-driven, not mode-driven.
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLSelectElement.prototype,
+        "value",
+      ).set;
+      setter.call(modelSelect(container), "kokoro_82m");
+      modelSelect(container).dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    expect(modelSelect(container).value).toBe("kokoro_82m");
+    expect(streamingBadge()).toBeNull();
   });
 });
 

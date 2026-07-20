@@ -205,6 +205,8 @@ mod tests {
             // Native cloned-voice TTS generator (sc-13412): script + reference clip → cloned WAV in
             // one call, with both VoiceEmbedding and ReferenceAudio conditioning advertised.
             "chatterbox_tts",
+            // Streaming TTS (sc-13675): the audio lane's first `supportsStreaming` provider.
+            "moss_tts_realtime",
         ];
         for id in audio_ids {
             let entry = models
@@ -243,6 +245,59 @@ mod tests {
             Some(28),
             "Kokoro advertises its 28 shipped English voices"
         );
+
+        // MOSS-TTS-Realtime (sc-13675) is the audio lane's first STREAMING model: it advertises
+        // `audio.supportsStreaming: true` (mirroring the backend Capabilities), ships NO fixed voice
+        // bank (it serves Speech via the streaming signal, not a voice list), and declares the
+        // MOSS-Audio-Tokenizer codec as a pinned-revision co-requisite so an offline install is
+        // self-contained. No other seeded audio model advertises streaming, so this pins the surface.
+        let moss_tts = models
+            .iter()
+            .find(|m| m["id"].as_str() == Some("moss_tts_realtime"))
+            .expect("moss_tts_realtime present");
+        assert_eq!(
+            moss_tts["audio"]["supportsStreaming"].as_bool(),
+            Some(true),
+            "moss_tts_realtime must advertise audio.supportsStreaming: true"
+        );
+        assert!(
+            moss_tts["audio"]["voices"].as_array().is_none(),
+            "moss_tts_realtime ships no fixed voice bank"
+        );
+        let codec = moss_tts["downloads"]
+            .as_array()
+            .expect("moss_tts_realtime downloads array")
+            .iter()
+            .find(|d| d["coRequisite"].as_bool() == Some(true))
+            .expect("moss_tts_realtime declares the MOSS-Audio-Tokenizer codec co-requisite");
+        assert_eq!(
+            codec["repo"].as_str(),
+            Some("OpenMOSS-Team/MOSS-Audio-Tokenizer"),
+            "the co-requisite is the MOSS-Audio-Tokenizer codec"
+        );
+        assert_eq!(
+            codec["revision"].as_str().map(str::len),
+            Some(40),
+            "the codec co-requisite pins a full 40-hex commit SHA (hf_get_pinned reads snapshots/<sha>/)"
+        );
+        for model in [
+            "kokoro_82m",
+            "moss_sfx_v2",
+            "acestep_v15_turbo",
+            "openvoice_v2",
+            "chatterbox_ve",
+            "chatterbox_tts",
+        ] {
+            let entry = models
+                .iter()
+                .find(|m| m["id"].as_str() == Some(model))
+                .unwrap_or_else(|| panic!("{model} present"));
+            assert_ne!(
+                entry["audio"]["supportsStreaming"].as_bool(),
+                Some(true),
+                "{model} must NOT advertise streaming — only moss_tts_realtime does"
+            );
+        }
     }
 
     #[test]
