@@ -29,6 +29,7 @@ import { editModelForAsset, workflowModelType } from "./presetUtils.js";
 import { sortNewest, sortWorkers, upsertJobNewest } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
 import { usePresets } from "./hooks/usePresets.js";
+import { useSavedVoices } from "./hooks/useSavedVoices.js";
 import { usePromptBatches } from "./hooks/usePromptBatches.js";
 import { useTraining } from "./hooks/useTraining.js";
 import { useModelsAndLoras } from "./hooks/useModelsAndLoras.js";
@@ -532,6 +533,7 @@ export function App() {
   // purge orphaned scratch/result assets from the SSE handler without re-subscribing.
   const purgeAssetRef = useRef(null);
   const refreshCharactersRef = useRef(null);
+  const refreshSavedVoicesRef = useRef(null);
   const refreshLorasRef = useRef(null);
   const refreshPresetsRef = useRef(null);
   const refreshPromptBatchesRef = useRef(null);
@@ -733,6 +735,14 @@ export function App() {
     duplicatePreset,
     deletePreset,
   } = usePresets({ token, activeProject, setError });
+
+  const {
+    savedVoices,
+    setSavedVoices,
+    refreshSavedVoices,
+    createSavedVoice,
+    deleteSavedVoice,
+  } = useSavedVoices({ token, activeProject, activeProjectRef, setError });
 
   const {
     promptBatches,
@@ -1227,6 +1237,7 @@ export function App() {
     if (!activeProject || !ready) {
       setAssets([]);
       setCharacters([]);
+      setSavedVoices([]);
       setPersonTracks([]);
       setTimelines([]);
       setTimelinesProjectId(null);
@@ -1245,6 +1256,7 @@ export function App() {
     const { signal } = controller;
     refreshAssetsRef.current?.(activeProject.id, { signal });
     refreshCharactersRef.current?.(activeProject.id, { signal });
+    refreshSavedVoicesRef.current?.(activeProject.id, { signal });
     refreshLorasRef.current?.(activeProject.id, { signal });
     refreshPresetsRef.current?.(activeProject.id, { signal });
     refreshPromptBatchesRef.current?.(activeProject.id, { signal });
@@ -1422,6 +1434,7 @@ export function App() {
     refreshDataRef.current = refreshData;
     refreshAssetsRef.current = refreshAssets;
     refreshCharactersRef.current = refreshCharacters;
+    refreshSavedVoicesRef.current = refreshSavedVoices;
     refreshLorasRef.current = refreshLoras;
     refreshPresetsRef.current = refreshPresets;
     refreshPromptBatchesRef.current = refreshPromptBatches;
@@ -2419,6 +2432,11 @@ export function App() {
     trackEditorScratchOp,
     releaseEditorScratchOp,
     registerEditorScratchClaim,
+    // Saved voices (Voice Clone registry, sc-13517)
+    savedVoices,
+    refreshSavedVoices,
+    createSavedVoice,
+    deleteSavedVoice,
     // Characters
     characters,
     createCharacter,
@@ -2466,7 +2484,8 @@ export function App() {
     updateTrainingDataset, batchRenameTrainingDataset, writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob, createTrainingDatasetUpscaleJob, createTrainingDatasetAnalysisJob, createTrainingDatasetFaceAnalysisJob, smartCropTrainingDataset, stripExifTrainingDataset, createTrainingJob, trainingPresets, trainingPresetsError,
     trainingTargets, trainingTargetsError, setActiveView, registerLeaveGuard, registerProjectSwitchGuard,
-    trackEditorScratchOp, releaseEditorScratchOp, registerEditorScratchClaim, characters,
+    trackEditorScratchOp, releaseEditorScratchOp, registerEditorScratchClaim,
+    savedVoices, refreshSavedVoices, createSavedVoice, deleteSavedVoice, characters,
     createCharacter, updateCharacter, archiveCharacter, unarchiveCharacter, listArchivedCharacters,
     addCharacterReference, updateCharacterReference,
     removeCharacterReference, createCharacterLook, updateCharacterLook, deleteCharacterLook,

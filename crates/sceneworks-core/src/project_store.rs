@@ -1066,6 +1066,61 @@ impl ProjectStore {
         Ok(assets)
     }
 
+    /// List the project's saved voices (Voice Clone registry, sc-13517).
+    pub fn list_saved_voices(&self, project_id: &str) -> ProjectStoreResult<Vec<Value>> {
+        let project_path = self.find_project_path(project_id)?;
+        crate::voice_store::SavedVoiceStore::new(project_path).list_saved_voices(project_id)
+    }
+
+    /// Register a saved voice; returns the hydrated voice plus any near-duplicate hit (sc-13517).
+    pub fn create_saved_voice(
+        &self,
+        project_id: &str,
+        input: crate::voice_store::SavedVoiceCreateInput,
+        dedup_threshold: f32,
+    ) -> ProjectStoreResult<(Value, Option<crate::voice_store::SavedVoiceDuplicate>)> {
+        let project_path = self.find_project_path(project_id)?;
+        crate::voice_store::SavedVoiceStore::new(project_path).create_saved_voice(
+            project_id,
+            input,
+            dedup_threshold,
+        )
+    }
+
+    /// Delete a saved voice (sc-13517).
+    pub fn delete_saved_voice(
+        &self,
+        project_id: &str,
+        voice_id: &str,
+    ) -> ProjectStoreResult<crate::voice_store::SavedVoiceMutationResult> {
+        let project_path = self.find_project_path(project_id)?;
+        crate::voice_store::SavedVoiceStore::new(project_path)
+            .delete_saved_voice(project_id, voice_id)
+    }
+
+    /// Resolve a library asset id to its absolute media file path, guarded against path traversal.
+    /// Used by the saved-voice register flow to hand the reference clip to the worker embed path
+    /// (sc-13517). Mirrors `get_asset`'s resolution but returns the on-disk path rather than the JSON.
+    pub fn resolve_asset_media_path(
+        &self,
+        project_id: &str,
+        asset_id: &str,
+    ) -> ProjectStoreResult<PathBuf> {
+        let project_path = self.find_project_path(project_id)?;
+        let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
+        let asset = normalize_asset(project_id, &project_path, &sidecar_path)?;
+        let media_rel = asset
+            .pointer("/file/path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if media_rel.is_empty() || !is_safe_relative_path(media_rel) {
+            return Err(ProjectStoreError::BadRequest(
+                "Asset media path must be project-relative".to_owned(),
+            ));
+        }
+        Ok(project_path.join(media_rel))
+    }
+
     pub fn list_characters(
         &self,
         project_id: &str,
@@ -2664,7 +2719,12 @@ struct ReindexCounts {
 /// `ensure_project_db_ready`, which now heals inline-upscaled asset sidecars that
 /// were missing their fold lineage (`extra.upscaledFromAssetId` / `lineage`), so
 /// existing upscale pairs collapse in the Library on next open.
-const PROJECT_SCHEMA_VERSION: i64 = 4;
+///
+/// v5: sc-13517 — added the `saved_voices` table (Voice Clone "register a voice"
+/// registry). The bump lets existing DBs pick up the new table through the gated
+/// migration; the table is DB-authoritative (no sidecar), so the reindex the bump
+/// triggers — which only clears the sidecar-rebuilt tables — leaves it intact.
+const PROJECT_SCHEMA_VERSION: i64 = 5;
 
 fn project_schema_version(connection: &Connection) -> ProjectStoreResult<i64> {
     Ok(connection.query_row("pragma user_version", [], |row| row.get(0))?)
@@ -2722,6 +2782,7 @@ pub fn apply_project_migrations(connection: &Connection) -> ProjectStoreResult<(
     ensure_column(connection, "assets", "origin", "text")?;
     apply_character_migrations(connection)?;
     apply_training_dataset_migrations(connection)?;
+    crate::voice_store::apply_voice_migrations(connection)?;
     // Pragma assignment cannot be parameterized; the version is a trusted const.
     connection.execute_batch(&format!("pragma user_version = {PROJECT_SCHEMA_VERSION}"))?;
     Ok(())
@@ -4765,7 +4826,7 @@ mod tests {
     /// alongside a deliberate schema change — and when you do, you MUST bump
     /// `PROJECT_SCHEMA_VERSION` so the `user_version=` line below changes too.
     const EXPECTED_PROJECT_DB_SCHEMA: &str = concat!(
-        "user_version=4\n",
+        "user_version=5\n",
         "table assets: id TEXT notnull=0 default=NULL pk=1, type TEXT notnull=1 default=NULL pk=0, display_name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, generation_set_id TEXT notnull=0 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, favorite INTEGER notnull=1 default=0 pk=0, rating INTEGER notnull=1 default=0 pk=0, rejected INTEGER notnull=1 default=0 pk=0, trashed INTEGER notnull=1 default=0 pk=0, sidecar_path TEXT notnull=0 default=NULL pk=0, origin TEXT notnull=0 default=NULL pk=0\n",
         "table character_looks: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, description TEXT notnull=1 default='' pk=0, approved_reference_ids TEXT notnull=1 default='[]' pk=0, recipe_settings TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "table character_loras: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, lora_id TEXT notnull=0 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, source_path TEXT notnull=0 default=NULL pk=0, project_path TEXT notnull=0 default=NULL pk=0, copied_into_project INTEGER notnull=1 default=0 pk=0, category TEXT notnull=1 default='character' pk=0, scope TEXT notnull=1 default='project' pk=0, trigger_words TEXT notnull=1 default='[]' pk=0, default_weight REAL notnull=1 default=1.0 pk=0, compatibility TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
@@ -4773,6 +4834,7 @@ mod tests {
         "table characters: id TEXT notnull=0 default=NULL pk=1, project_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, type TEXT notnull=1 default=NULL pk=0, description TEXT notnull=1 default='' pk=0, sidecar_path TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0, archived INTEGER notnull=1 default=0 pk=0\n",
         "table generation_sets: id TEXT notnull=0 default=NULL pk=1, mode TEXT notnull=1 default=NULL pk=0, model TEXT notnull=1 default=NULL pk=0, prompt TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, job_id TEXT notnull=0 default=NULL pk=0\n",
         "table project_metadata: key TEXT notnull=0 default=NULL pk=1, value TEXT notnull=1 default=NULL pk=0\n",
+        "table saved_voices: id TEXT notnull=0 default=NULL pk=1, project_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, reference_audio_asset_id TEXT notnull=1 default=NULL pk=0, embedding TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0\n",
         "table timelines: id TEXT notnull=0 default=NULL pk=1, name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, aspect_ratio TEXT notnull=1 default=NULL pk=0, width INTEGER notnull=1 default=NULL pk=0, height INTEGER notnull=1 default=NULL pk=0, fps INTEGER notnull=1 default=NULL pk=0, duration REAL notnull=1 default=0 pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "table training_datasets: id TEXT notnull=0 default=NULL pk=1, project_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, modality TEXT notnull=1 default=NULL pk=0, status TEXT notnull=1 default=NULL pk=0, version INTEGER notnull=1 default=NULL pk=0, item_count INTEGER notnull=1 default=0 pk=0, character_id TEXT notnull=0 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "index idx_training_datasets_project_updated on training_datasets",
@@ -6519,6 +6581,149 @@ mod tests {
             .expect("source still present");
         assert_eq!(source_after["lineage"]["sourceAssetId"], Value::Null);
         assert!(source_after.get("extra").is_none());
+    }
+
+    /// sc-13517: the saved-voice id→clip hop end-to-end, cheaply. A saved voice's stored
+    /// `referenceAudioAssetId` resolves back to the exact library clip on disk through
+    /// `resolve_asset_media_path` — the link the register + generate flow relies on, proven directly
+    /// rather than only by composition in the release DoD render. `resolve_asset_media_path` is
+    /// media-type agnostic (it resolves the sidecar's `file.path`), so an imported image asset
+    /// exercises the identical id→path resolution the audio reference clip uses.
+    #[test]
+    fn saved_voice_reference_id_resolves_to_the_clip_path() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Voices").expect("project creates");
+
+        let src = temp_dir.path().join("clip.png");
+        std::fs::write(&src, b"\x89PNG reference clip bytes").expect("source writes");
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "clip.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: src,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("asset imports");
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+        let (voice, _dup) = store
+            .create_saved_voice(
+                &project.id,
+                crate::voice_store::SavedVoiceCreateInput {
+                    name: "Narrator".to_owned(),
+                    reference_audio_asset_id: asset_id.clone(),
+                    embedding: vec![0.1, 0.2, 0.3, 0.4],
+                },
+                crate::voice_store::DEFAULT_VOICE_DEDUP_THRESHOLD,
+            )
+            .expect("register saved voice");
+        // The store persisted the reference pointer verbatim.
+        let stored_ref = voice["referenceAudioAssetId"].as_str().expect("ref id");
+        assert_eq!(stored_ref, asset_id);
+
+        // The stored referenceAudioAssetId resolves to the real clip file on disk.
+        let resolved = store
+            .resolve_asset_media_path(&project.id, stored_ref)
+            .expect("resolve clip");
+        assert!(
+            resolved.is_file(),
+            "resolved clip path must exist: {}",
+            resolved.display()
+        );
+        let expected_rel = store
+            .get_asset(&project.id, &asset_id)
+            .expect("asset")
+            .pointer("/file/path")
+            .and_then(Value::as_str)
+            .expect("file path")
+            .to_owned();
+        assert!(
+            resolved.ends_with(&expected_rel),
+            "resolved {} must end with the asset's relative path {expected_rel}",
+            resolved.display()
+        );
+    }
+
+    /// sc-13517: `resolve_asset_media_path` resolves a real asset AND rejects a path-traversal id
+    /// (the user-controlled `../` escape vector) before joining it into any filesystem path — the
+    /// direct unit test the review flagged as missing.
+    #[test]
+    fn resolve_asset_media_path_resolves_and_rejects_traversal() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Guard").expect("project creates");
+
+        let src = temp_dir.path().join("clip.png");
+        std::fs::write(&src, b"\x89PNG bytes").expect("source writes");
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "clip.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: src,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("asset imports");
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+        // Safe id → a real file under the project directory.
+        let resolved = store
+            .resolve_asset_media_path(&project.id, &asset_id)
+            .expect("resolve safe id");
+        assert!(resolved.is_file());
+        assert!(resolved.starts_with(temp_dir.path()));
+
+        // A `../` escape id is rejected outright (never joined into a path).
+        for escape in ["../../etc/passwd", "..", "a/../../b"] {
+            let result = store.resolve_asset_media_path(&project.id, escape);
+            assert!(
+                matches!(result, Err(ProjectStoreError::BadRequest(_))),
+                "traversal id {escape:?} must be rejected, got {result:?}"
+            );
+        }
+    }
+
+    /// sc-13517: `saved_voices` rows are DB-authoritative and MUST survive a reindex. The reindex
+    /// rebuilds the sidecar-backed tables (assets / generation_sets / timelines / characters) but must
+    /// leave `saved_voices` untouched — this guards that claim against a future schema bump that runs
+    /// the reindex on every existing project.
+    #[test]
+    fn saved_voices_survive_reindex() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Reindex").expect("project creates");
+
+        let (voice, _dup) = store
+            .create_saved_voice(
+                &project.id,
+                crate::voice_store::SavedVoiceCreateInput {
+                    name: "Narrator".to_owned(),
+                    reference_audio_asset_id: "asset_ref".to_owned(),
+                    embedding: vec![0.5, 0.5, 0.5],
+                },
+                crate::voice_store::DEFAULT_VOICE_DEDUP_THRESHOLD,
+            )
+            .expect("register saved voice");
+        let voice_id = voice["id"].as_str().expect("voice id").to_owned();
+        assert_eq!(store.list_saved_voices(&project.id).expect("list").len(), 1);
+
+        // An explicit reindex rebuilds the sidecar tables from disk.
+        store.reindex_project(&project.id).expect("reindex runs");
+
+        let after = store
+            .list_saved_voices(&project.id)
+            .expect("list after reindex");
+        assert_eq!(after.len(), 1, "the saved voice must survive reindex");
+        assert_eq!(after[0]["id"].as_str(), Some(voice_id.as_str()));
+        assert_eq!(after[0]["name"].as_str(), Some("Narrator"));
     }
 
     /// sc-6143: a natively-supported image is stored byte-for-byte (no transcode, no re-encode),

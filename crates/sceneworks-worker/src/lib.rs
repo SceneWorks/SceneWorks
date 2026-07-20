@@ -152,6 +152,11 @@ use video_jobs::*;
 // non-native desktop worker never advertises `audio_generate`, so the arm is unreachable there).
 mod audio_jobs;
 use audio_jobs::*;
+// The Voice Clone "register a voice" embed path (sc-13517): the rust-api calls
+// `voice_register::embed_reference_clip` to compute a reference clip's Chatterbox-VE speaker vector
+// for the saved-voice registry. Public because it is invoked from another crate (rust-api), not the
+// worker job loop.
+pub mod voice_register;
 // Replace-person mask pipeline (epic 3040, sc-3521): cross-platform mask rasterization /
 // resample / stored-seg-mask load, so the mask-port-vs-Python parity test runs on the
 // Linux CI lane. Its masks are consumed only by the macOS Wan-VACE path in `video_jobs`,

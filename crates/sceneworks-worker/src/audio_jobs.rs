@@ -979,7 +979,7 @@ fn audio_edit_region(
 /// the RIFF chunk list so a file carrying extra chunks (LIST/fact) still reads, requires PCM
 /// (`audio_format == 1`) 16-bit samples, and converts interleaved `i16` to `f32` in `[-1, 1)`.
 /// Non-PCM / non-16-bit inputs are a clear `Unsupported` rather than a silent mis-decode.
-fn read_wav_pcm16(path: &Path) -> WorkerResult<gen_core::AudioTrack> {
+pub(crate) fn read_wav_pcm16(path: &Path) -> WorkerResult<gen_core::AudioTrack> {
     let bytes = std::fs::read(path)?;
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(WorkerError::InvalidPayload(format!(

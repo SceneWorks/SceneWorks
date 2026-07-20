@@ -3400,6 +3400,100 @@ label {
   border-radius: var(--r-md);
 }
 
+/* Voice Clone saved-voices registry + register affordance (sc-13517). Reuses the .preset-chip pill
+   and .settings-field/.field-hint tokens; only the per-chip select+delete split and the register row
+   are bespoke. Theme-neutral: everything rides the shared CSS variables, so light/dark are inherited. */
+.saved-voices {
+  display: grid;
+  gap: 6px;
+}
+
+.saved-voices .field-label,
+.register-voice .field-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.saved-voices-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.saved-voice-chip {
+  gap: 6px;
+  padding-right: 4px;
+}
+
+.saved-voice-chip.is-selected {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.saved-voice-select {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.saved-voice-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--t-fast), background var(--t-fast);
+}
+
+.saved-voice-delete:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.saved-voice-delete svg {
+  width: 13px;
+  height: 13px;
+}
+
+.register-voice {
+  display: grid;
+  gap: 6px;
+}
+
+.register-voice-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.register-voice-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.register-voice-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.register-voice-save svg {
+  width: 14px;
+  height: 14px;
+}
+
 /* Strict-control panel (epic 8236, sc-8245): pose / canny / depth structure lock. Reuses the
    .studio-source-band shell, .reference-strength slider, .checkline toggle, and .asset-picker-field /
    .pose-library inner surfaces; only the mode tabs + section spacing are panel-specific. */

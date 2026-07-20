@@ -8,6 +8,18 @@ pub(crate) struct JobsQuery {
     pub(crate) limit: Option<u32>,
 }
 
+/// Register a saved voice (Voice Clone registry, sc-13517): a name + the library audio asset whose
+/// voice is cloned. `dedupThreshold` optionally overrides the cosine-similarity cutoff used to warn
+/// about near-duplicate voices already saved in the project.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SavedVoiceCreateRequest {
+    pub(crate) name: String,
+    pub(crate) reference_audio_asset_id: String,
+    #[serde(default)]
+    pub(crate) dedup_threshold: Option<f32>,
+}
+
 /// Filters for the aggregate generation-metrics feed (epic 10402,
 /// `GET /api/v1/metrics`). All optional; the charts pass a subset.
 #[derive(Debug, Deserialize)]
