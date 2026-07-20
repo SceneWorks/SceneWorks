@@ -1686,7 +1686,28 @@ fn install_state_for(
                     .as_ref()
                     .map(|health| health.missing_files.clone())
                     .unwrap_or_default();
-                (installed, incomplete, missing)
+                // sc-13513: a single-variant no-`model_index` turnkey (Boogu's `base/` default download,
+                // whose component globs match stray weights) reads coarse-installed while actually torn.
+                // Downgrade so the TOP-LEVEL badge agrees with the per-variant state and the worker's
+                // loader gate — otherwise `installState:"installed"`/`repairAvailable:false` renders a
+                // false green over an install that then fails to load. SANA (variant-matrix) is already
+                // covered by the aggregate branch above; Anima's exact-path filter catches torn coarsely.
+                let family = model
+                    .get("family")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if installed
+                    && no_model_index_tier_is_torn(
+                        family,
+                        &download_context.files,
+                        cache_path.as_deref(),
+                        &managed_path,
+                    )
+                {
+                    (false, true, vec![torn_tier_marker(&download_context.files)])
+                } else {
+                    (installed, incomplete, missing)
+                }
             };
         // A quant-matrix model's top-level state is the aggregate of its tier-aware variant states
         // computed above (cache_installed = "any tier installed"). The repo-level managed marker must
@@ -1842,6 +1863,62 @@ fn model_has_variant_matrix(model: &Value) -> bool {
         })
 }
 
+// The shared per-tier completeness predicate for a no-`model_index` MLX turnkey
+// (`sceneworks_core::mlx_tier_completeness`), keyed on the manifest `family`, or `None` for a family
+// whose per-tier completeness is already accurate — diffusers turnkeys (flux/qwen/…) via the
+// `model_index.json` augmentation in `huggingface_filtered_cache_health`, or a family with no bespoke
+// per-tier layout. The catalog uses this to downgrade a tier that clears the coarse `<tier>/*` glob but
+// is actually torn (backbone present, text-encoder/VAE/tokenizer missing) to `incomplete`, so the
+// /models report agrees with the worker's tier resolvers, which gate on these SAME predicates
+// (sc-13513). Anima is included so its convert-output states (`mlx_convert_output_tier_states`) tighten;
+// on its variants[] source download the exact-path `files` filter already reports torn accurately, so
+// this is a no-op there.
+fn no_model_index_family_predicate(family: &str) -> Option<fn(&FsPath) -> bool> {
+    use sceneworks_core::mlx_tier_completeness as tc;
+    match family {
+        "anima" => Some(tc::anima_tier_complete),
+        "boogu" => Some(tc::boogu_tier_complete),
+        "sana" => Some(tc::sana_tier_complete),
+        _ => None,
+    }
+}
+
+// Whether a no-`model_index` MLX turnkey tier that CLEARED the coarse presence check is actually TORN —
+// backbone present, but a text-encoder / VAE / tokenizer component missing per the shared family
+// predicate. `false` when the family has no bespoke predicate, the `files` filter isn't a single tier
+// subdir (e.g. the candle whole-repo SANA entry, `files: []`), or SOME candidate location holds a
+// complete tier. Drives the coarse `installed` → `incomplete` downgrade in BOTH the per-variant states
+// (`model_variant_states`) and the top-level aggregate (`install_state_for`), so the /models badge, the
+// variant state, and the worker's loader gate all agree (sc-13513). Every cache snapshot AND the managed
+// dir is checked with `any` — a SANA repo keeps two snapshots (tiered + flat), and a complete tier in one
+// location must not be dragged down by a sibling that lacks it.
+fn no_model_index_tier_is_torn(
+    family: &str,
+    files: &[String],
+    cache_path: Option<&FsPath>,
+    managed_path: &FsPath,
+) -> bool {
+    let Some(complete) = no_model_index_family_predicate(family) else {
+        return false;
+    };
+    let Some(tier) = tier_subdir_name(files) else {
+        return false;
+    };
+    let mut tier_bases = cache_path
+        .map(huggingface_snapshot_dirs)
+        .unwrap_or_default();
+    tier_bases.push(managed_path.to_path_buf());
+    !tier_bases.iter().any(|base| complete(&base.join(&tier)))
+}
+
+// The `missingRequiredFiles` marker for a torn no-`model_index` tier (`no_model_index_tier_is_torn`),
+// scoped to the tier subdir when the filter names one.
+fn torn_tier_marker(files: &[String]) -> String {
+    tier_subdir_name(files)
+        .map(|tier| format!("{tier}/ (incomplete: missing model components)"))
+        .unwrap_or_else(|| "incomplete: missing model components".to_owned())
+}
+
 // Build the per-variant install state for every supported download entry. A single-variant model
 // yields one entry keyed "default"; a quant-matrix model yields one per tier. Each entry's install
 // state is probed independently against the HF cache using that tier's own `files` filter, so the
@@ -1850,6 +1927,12 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
     let Some(downloads) = model.get("downloads").and_then(Value::as_array) else {
         return Vec::new();
     };
+    // sc-13513: the manifest `family` selects the shared per-tier completeness predicate for the
+    // no-`model_index` MLX turnkeys (SANA/Boogu) so a torn tier reads `incomplete`, not `installed`.
+    let family = model
+        .get("family")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     // Emitted variant keys must be unique: the single-variant case is exactly one "default", and a
     // quant matrix has one entry per distinct q4/q8/bf16 tier. Guard against a manifest that maps two
     // supported entries to the same key (unlabeled alternate sources both collapsing to "default", or
@@ -1880,11 +1963,11 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
             let cache_health = cache_path
                 .as_ref()
                 .map(|path| huggingface_cache_health(path, &files));
-            let installed = cache_health.as_ref().is_some_and(|health| health.installed);
-            let cache_incomplete = cache_health
+            let cache_installed = cache_health.as_ref().is_some_and(|health| health.installed);
+            let mut cache_incomplete = cache_health
                 .as_ref()
                 .is_some_and(|health| health.incomplete);
-            let missing_required_files = cache_health
+            let mut missing_required_files = cache_health
                 .as_ref()
                 .map(|health| health.missing_files.clone())
                 .unwrap_or_default();
@@ -1896,7 +1979,26 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
             // actually exist under the managed dir, not just the marker.
             let managed_path = data_dir.join("models").join(safe_download_dir(&repo));
             let managed_installed = managed_tier_installed(&managed_path, &files);
-            let installed_path = if installed || cache_incomplete {
+            let mut installed = cache_installed || managed_installed;
+
+            // sc-13513: the coarse `<tier>/*` glob (and the managed presence check) is satisfied by ANY
+            // single nested file, so a TORN tier of a no-`model_index` MLX turnkey (SANA/Boogu — backbone
+            // present, text-encoder/VAE/tokenizer missing) read `installed`. The shared family predicate
+            // downgrades it to `incomplete`. Only ever downgrades a coarse `installed`; a clean-missing
+            // tier is never promoted, and a family without a bespoke predicate (diffusers turnkeys,
+            // accurate via the `model_index.json` augmentation) is untouched.
+            if installed
+                && no_model_index_tier_is_torn(family, &files, cache_path.as_deref(), &managed_path)
+            {
+                installed = false;
+                cache_incomplete = true;
+                let marker = torn_tier_marker(&files);
+                if !missing_required_files.contains(&marker) {
+                    missing_required_files.push(marker);
+                }
+            }
+
+            let installed_path = if cache_installed || cache_incomplete {
                 cache_path
             } else if managed_installed {
                 Some(managed_path)
@@ -1910,7 +2012,7 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                     .map(|value| value.trim().to_owned())
                     .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| "default".to_owned()),
-                installed: installed || managed_installed,
+                installed,
                 installed_path: installed_path.map(|path| path.display().to_string()),
                 cache_incomplete,
                 missing_required_files,
@@ -2035,21 +2137,37 @@ fn mlx_convert_output_tiers(converted_dir: &FsPath) -> Vec<&'static str> {
 /// Studio picker can show EVERY tier with the un-converted ones DISABLED — the same "show all, disable
 /// unavailable" rule the download-matrix `variants[]` array gives. Unlike [`mlx_convert_output_tiers`]
 /// (installed tiers only, which can only ever GROW the picker), this lists all three whether or not they
-/// are on disk. `installState` is `"installed"` when the tier holds loadable weights, else `"missing"`;
-/// `cacheState` mirrors it (`"complete"`/`"missing"`). NOTE the completeness here is as coarse as
-/// [`tier_subdir_has_weights`] — it can't yet flag a torn tier (backbone present, text-encoder/VAE gone)
-/// as `incomplete` the way the diffusers `variants[]` path does via `model_index.json`; a torn convert
-/// output would read `installed`. Tightening that needs the worker's family-specific completeness
-/// (anima/boogu/sana) mirrored here — tracked separately.
-fn mlx_convert_output_tier_states(converted_dir: &FsPath) -> Vec<Value> {
+/// are on disk. Three states per tier: `"installed"`/`"complete"` (loadable), `"missing"`/`"incomplete"`
+/// (a TORN tier — backbone present, a component gone; repairable by re-convert), and
+/// `"missing"`/`"missing"` (never converted for this tier).
+///
+/// Completeness is family-specific (sc-13513): a convert-at-install family with a bespoke no-`model_index`
+/// layout (Anima's `diffusion_models/ + text_encoders/ + vae/`) is gated on the SAME shared per-tier
+/// predicate the worker's `anima_tier_subdir` resolver uses ([`no_model_index_family_predicate`]), so a
+/// torn convert output reads `incomplete` rather than `installed`. Any other convert family keeps the
+/// coarse [`tier_subdir_has_weights`] backbone probe.
+fn mlx_convert_output_tier_states(converted_dir: &FsPath, family: &str) -> Vec<Value> {
+    let predicate = no_model_index_family_predicate(family);
     ["q4", "q8", "bf16"]
         .into_iter()
         .map(|tier| {
-            let installed = tier_subdir_has_weights(&converted_dir.join(tier));
+            let dir = converted_dir.join(tier);
+            let has_backbone = tier_subdir_has_weights(&dir);
+            let complete = match predicate {
+                Some(complete) => complete(&dir),
+                None => has_backbone,
+            };
+            let (install_state, cache_state) = if complete {
+                ("installed", "complete")
+            } else if has_backbone {
+                ("missing", "incomplete")
+            } else {
+                ("missing", "missing")
+            };
             json!({
                 "tier": tier,
-                "installState": if installed { "installed" } else { "missing" },
-                "cacheState": if installed { "complete" } else { "missing" },
+                "installState": install_state,
+                "cacheState": cache_state,
             })
         })
         .collect()
@@ -2123,6 +2241,13 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
         if let Some(converted) = status.converted_path.as_deref() {
             let tiers = mlx_convert_output_tiers(converted);
             if !tiers.is_empty() {
+                // Owned before the mutable inserts below so the `family` read doesn't overlap the borrow;
+                // it selects the per-tier completeness predicate for the states (sc-13513).
+                let family = object
+                    .get("family")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
                 object.insert("mlxTiers".to_owned(), json!(tiers));
                 // The FULL possible tier set with per-tier state, so the Studio shows un-converted tiers
                 // disabled rather than omitting them (the web reads `mlxTierStates` in preference to the
@@ -2130,7 +2255,7 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
                 // present), matching `mlxTiers` — an unconverted model still renders no picker.
                 object.insert(
                     "mlxTierStates".to_owned(),
-                    Value::Array(mlx_convert_output_tier_states(converted)),
+                    Value::Array(mlx_convert_output_tier_states(converted, &family)),
                 );
             }
         }
@@ -3635,6 +3760,249 @@ mod variant_install_tests {
         assert!(state.installed, "model installed via the complete q4 tier");
     }
 
+    /// A SANA quant-matrix turnkey (family `sana`). Ships NO `model_index.json`, so the diffusers
+    /// completeness augmentation is a no-op — the tightening comes from the shared `sana_tier_complete`.
+    fn sana_matrix_model(repo: &str) -> Value {
+        json!({
+            "id": "sana_sprint_1600m",
+            "family": "sana",
+            "downloads": [
+                { "provider": "huggingface", "repo": repo, "variant": "q4", "default": true, "files": ["q4/*"] },
+                { "provider": "huggingface", "repo": repo, "variant": "q8", "files": ["q8/*"] },
+                { "provider": "huggingface", "repo": repo, "variant": "bf16", "files": ["bf16/*"] }
+            ]
+        })
+    }
+
+    /// Seed a SANA quant tier: always the transformer + VAE weights, plus the Gemma text encoder + its
+    /// tokenizer only when `complete`. A `complete: false` tier is TORN — its `<tier>/*` glob matches
+    /// (transformer present) but the loader dies on the absent text encoder / tokenizer.
+    fn seed_sana_tier(data_dir: &FsPath, repo: &str, tier: &str, complete: bool) {
+        let cache = huggingface_repo_cache_path(data_dir, repo).expect("cache path");
+        let root = cache.join("snapshots").join("abc123").join(tier);
+        let write = |rel: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        };
+        write("transformer/diffusion_pytorch_model.safetensors");
+        write("vae/diffusion_pytorch_model.safetensors");
+        if complete {
+            write("text_encoder/gemma-2-2b-it.safetensors");
+            write("text_encoder/tokenizer.json");
+        }
+    }
+
+    /// The sc-13513 fix for a no-`model_index` quant-matrix turnkey: a torn SANA tier (its `<tier>/*`
+    /// glob matches the transformer, but the Gemma text encoder + tokenizer never landed) reported a
+    /// green "Installed" badge, then failed to load. It must read `incomplete`; a never-fetched tier
+    /// stays a clean `missing`.
+    #[test]
+    fn torn_sana_tier_reads_incomplete_not_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "SceneWorks/Sana_Sprint_1.6B_1024px_mlx";
+        let model = sana_matrix_model(repo);
+
+        // q4 complete (loads), q8 torn (text encoder + tokenizer missing), bf16 never fetched.
+        seed_sana_tier(data_dir, repo, "q4", true);
+        seed_sana_tier(data_dir, repo, "q8", false);
+
+        let states = model_variant_states(&model, data_dir);
+        let by_variant = |name: &str| states.iter().find(|s| s.variant == name).unwrap();
+
+        assert!(
+            by_variant("q4").installed,
+            "complete q4 tier must read installed"
+        );
+        assert!(
+            !by_variant("q8").installed,
+            "torn q8 tier must NOT read installed just because its transformer matched the glob"
+        );
+        assert!(
+            by_variant("q8").cache_incomplete,
+            "a torn (half-present) tier is a repairable incomplete, not a clean missing"
+        );
+        assert!(
+            !by_variant("bf16").installed && !by_variant("bf16").cache_incomplete,
+            "a never-fetched tier stays a clean missing (no spurious repair prompt)"
+        );
+
+        // Mutation check: completing q8 (add the Gemma text encoder + tokenizer) flips it to installed,
+        // proving the predicate discriminates on the text encoder, not merely the transformer glob.
+        seed_sana_tier(data_dir, repo, "q8", true);
+        let states = model_variant_states(&model, data_dir);
+        assert!(states.iter().find(|s| s.variant == "q8").unwrap().installed);
+    }
+
+    /// A Boogu turnkey (family `boogu`): a single unlabeled "default" download whose `files` filter
+    /// enumerates the three component subdirs of the shipped `base/` Q8 subfolder.
+    fn boogu_model(repo: &str) -> Value {
+        json!({
+            "id": "boogu_image",
+            "family": "boogu",
+            "downloads": [
+                { "provider": "huggingface", "repo": repo, "files": ["base/transformer/*", "base/mllm/*", "base/vae/*"] }
+            ]
+        })
+    }
+
+    /// Seed a Boogu `base/` subfolder: transformer (weights + config), mllm weights, and VAE, plus the
+    /// `mllm/tokenizer.json` only when `complete`. A `complete: false` tree is TORN — the loader crashes
+    /// first on the missing tokenizer, but each `base/<dir>/*` glob matches the stray weights.
+    fn seed_boogu_default(data_dir: &FsPath, repo: &str, complete: bool) {
+        let cache = huggingface_repo_cache_path(data_dir, repo).expect("cache path");
+        let base = cache.join("snapshots").join("abc123").join("base");
+        let write = |rel: &str| {
+            let path = base.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        };
+        write("transformer/diffusion_pytorch_model.safetensors");
+        write("transformer/config.json");
+        write("mllm/model.safetensors");
+        write("vae/diffusion_pytorch_model.safetensors");
+        if complete {
+            write("mllm/tokenizer.json");
+        }
+    }
+
+    #[test]
+    fn torn_boogu_default_reads_incomplete_not_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "SceneWorks/boogu-image-mlx";
+        let model = boogu_model(repo);
+
+        // Torn: transformer + mllm weights + vae present, but `mllm/tokenizer.json` never landed. Each
+        // `base/<dir>/*` glob matches the stray weights, so the coarse check reads installed.
+        seed_boogu_default(data_dir, repo, false);
+        let states = model_variant_states(&model, data_dir);
+        assert_eq!(states.len(), 1);
+        assert!(
+            !states[0].installed,
+            "torn boogu default must NOT read installed just because the component globs matched"
+        );
+        assert!(
+            states[0].cache_incomplete,
+            "a torn boogu default is a repairable incomplete"
+        );
+
+        // Mutation check: adding the tokenizer completes it.
+        seed_boogu_default(data_dir, repo, true);
+        let states = model_variant_states(&model, data_dir);
+        assert!(
+            states[0].installed,
+            "complete boogu default reads installed"
+        );
+    }
+
+    /// The TOP-LEVEL badge must agree with the per-variant state. Boogu is a single-variant download, so
+    /// `install_state_for` takes the non-matrix else branch — which, before sc-13513, used the coarse
+    /// cache health and rendered a false-green `installState:"installed"`/`repairAvailable:false` over a
+    /// torn install. The shared predicate must downgrade it there too.
+    #[test]
+    fn torn_boogu_top_level_badge_reads_incomplete_not_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "SceneWorks/boogu-image-mlx";
+        let model = boogu_model(repo);
+
+        seed_boogu_default(data_dir, repo, false);
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            !state.installed,
+            "a torn boogu install must NOT read installed at the top level"
+        );
+        assert!(
+            state.cache_incomplete,
+            "a torn boogu install is a repairable incomplete at the top level"
+        );
+
+        // Completing it flips the top-level badge to installed.
+        seed_boogu_default(data_dir, repo, true);
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            state.installed,
+            "a complete boogu install reads installed at the top level"
+        );
+        assert!(!state.cache_incomplete);
+    }
+
+    /// SANA repos keep TWO cached snapshots (a tiered one + an older flat one). A tier that is complete
+    /// in the tiered snapshot must read installed even though the flat snapshot has no tier subdir — the
+    /// check folds across snapshots with `any`, not `all` (guards the epic-13075 multi-snapshot trap).
+    #[test]
+    fn sana_tier_complete_in_one_of_two_snapshots_reads_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "SceneWorks/Sana_1600M_1024px_mlx";
+        let model = sana_matrix_model(repo);
+
+        // Tiered snapshot: a complete q4.
+        seed_sana_tier(data_dir, repo, "q4", true);
+        // A second, FLAT snapshot with weights at the root (no q4/ subdir) — must not drag q4 down.
+        let cache = huggingface_repo_cache_path(data_dir, repo).expect("cache path");
+        let flat = cache.join("snapshots").join("flat9999");
+        for rel in [
+            "transformer/diffusion_pytorch_model.safetensors",
+            "vae/diffusion_pytorch_model.safetensors",
+        ] {
+            let path = flat.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        let states = model_variant_states(&model, data_dir);
+        let q4 = states.iter().find(|s| s.variant == "q4").unwrap();
+        assert!(
+            q4.installed,
+            "q4 complete in the tiered snapshot reads installed despite a flat sibling snapshot"
+        );
+        assert!(!q4.cache_incomplete);
+    }
+
+    /// Anima is convert-at-install; its variants[] "default" tracks the three exact `split_files/` SOURCE
+    /// files (not a tier subdir). `tier_subdir_name` resolves those to `split_files`, so the downgrade
+    /// RUNS — but must be a NO-OP: a complete source passes `anima_tier_complete` (the layout is
+    /// compatible), and a torn source is already coarse-missing (exact-path filter), so `if installed` is
+    /// false. This pins that no-op so a future divergence between the download filter and the predicate's
+    /// pinned filenames surfaces as a RED test, not a silent false-incomplete on the Anima source badge.
+    #[test]
+    fn anima_source_download_variant_stays_installed_predicate_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "circlestone-labs/Anima";
+        let model = json!({
+            "id": "anima_base",
+            "family": "anima",
+            "downloads": [
+                { "provider": "huggingface", "repo": repo, "files": [
+                    "split_files/diffusion_models/anima-base-v1.0.safetensors",
+                    "split_files/text_encoders/qwen_3_06b_base.safetensors",
+                    "split_files/vae/qwen_image_vae.safetensors"
+                ]}
+            ]
+        });
+
+        seed_cache(
+            data_dir,
+            repo,
+            &[
+                "split_files/diffusion_models/anima-base-v1.0.safetensors",
+                "split_files/text_encoders/qwen_3_06b_base.safetensors",
+                "split_files/vae/qwen_image_vae.safetensors",
+            ],
+        );
+        let states = model_variant_states(&model, data_dir);
+        assert_eq!(states.len(), 1);
+        assert!(
+            states[0].installed,
+            "a complete anima source reads installed — the predicate must not false-incomplete it"
+        );
+        assert!(!states[0].cache_incomplete);
+    }
+
     /// A model whose ONLY on-disk tier is torn must read NOT installed at the model level — including
     /// via the "usable stale" receipt path (sc-13076 backfilled a receipt for whatever was on disk,
     /// so a metadata-only tier produced a receipt whose files all exist yet cannot load).
@@ -3758,39 +4126,65 @@ mod mlx_tier_probe_tests {
         assert!(mlx_convert_output_tiers(flat.path()).is_empty());
     }
 
-    #[test]
-    fn convert_output_tier_states_lists_the_full_set_marking_un_converted_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        // Only q4 + q8 are converted; bf16 is absent — but ALL THREE must appear so the picker can show
-        // bf16 disabled (the "show all, disable unavailable" rule for convert-at-install models).
-        write_weight(
-            &root.join("q4"),
-            "diffusion_models",
-            "anima-base-v1.0.safetensors",
-        );
-        write_weight(
-            &root.join("q8"),
-            "diffusion_models",
-            "anima-base-v1.0.safetensors",
-        );
-        let states = mlx_convert_output_tier_states(root);
-        assert_eq!(states.len(), 3);
-        let by_tier: std::collections::BTreeMap<_, _> = states
+    /// Seed a converted Anima tier: always the DiT (backbone), plus the dense text encoder + VAE only
+    /// when `complete`. A `complete: false` tier is TORN — its DiT satisfies the coarse
+    /// `tier_subdir_has_weights` probe, but the loader would die on the missing text-encoder/VAE.
+    fn seed_anima_tier(root: &std::path::Path, tier: &str, complete: bool) {
+        let dir = root.join(tier);
+        write_weight(&dir, "diffusion_models", "anima-base-v1.0.safetensors");
+        if complete {
+            write_weight(&dir, "text_encoders", "qwen_3_06b_base.safetensors");
+            write_weight(&dir, "vae", "qwen_image_vae.safetensors");
+        }
+    }
+
+    fn tier_state_map(states: &[Value]) -> std::collections::BTreeMap<String, (String, String)> {
+        states
             .iter()
             .map(|state| {
                 (
-                    state["tier"].as_str().unwrap(),
+                    state["tier"].as_str().unwrap().to_owned(),
                     (
-                        state["installState"].as_str().unwrap(),
-                        state["cacheState"].as_str().unwrap(),
+                        state["installState"].as_str().unwrap().to_owned(),
+                        state["cacheState"].as_str().unwrap().to_owned(),
                     ),
                 )
             })
-            .collect();
-        assert_eq!(by_tier["q4"], ("installed", "complete"));
-        assert_eq!(by_tier["q8"], ("installed", "complete"));
-        assert_eq!(by_tier["bf16"], ("missing", "missing"));
+            .collect()
+    }
+
+    #[test]
+    fn convert_output_tier_states_mark_complete_torn_and_absent_tiers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // q4 complete (loads), q8 TORN (DiT present but text-encoder/VAE never landed), bf16 absent — all
+        // THREE must appear so the picker can show each state (the "show all, disable unavailable" rule).
+        seed_anima_tier(root, "q4", true);
+        seed_anima_tier(root, "q8", false);
+
+        // family "anima" gates on the shared per-tier predicate: the torn q8 reads incomplete, NOT
+        // installed (sc-13513).
+        let anima = mlx_convert_output_tier_states(root, "anima");
+        assert_eq!(anima.len(), 3);
+        let a = tier_state_map(&anima);
+        assert_eq!(a["q4"], ("installed".into(), "complete".into()));
+        assert_eq!(
+            a["q8"],
+            ("missing".into(), "incomplete".into()),
+            "a torn DiT-only tier must read incomplete, not installed"
+        );
+        assert_eq!(a["bf16"], ("missing".into(), "missing".into()));
+
+        // A convert family with no bespoke predicate keeps the coarse backbone probe — a DiT-only tier
+        // reads installed (byte-identical to the pre-sc-13513 behavior for any non-anima convert family).
+        let coarse = tier_state_map(&mlx_convert_output_tier_states(root, "flux2"));
+        assert_eq!(coarse["q8"], ("installed".into(), "complete".into()));
+
+        // Mutation check: completing q8 (add the text encoder + VAE) flips it to installed — proving the
+        // predicate discriminates on the components, not merely the backbone.
+        seed_anima_tier(root, "q8", true);
+        let a2 = tier_state_map(&mlx_convert_output_tier_states(root, "anima"));
+        assert_eq!(a2["q8"], ("installed".into(), "complete".into()));
     }
 
     // Full catalog path: a converted convert-at-install model (Anima) emits `mlxTiers` from
@@ -3798,20 +4192,35 @@ mod mlx_tier_probe_tests {
     // probe is `cfg!(target_os = "macos")`).
     #[test]
     #[cfg(target_os = "macos")]
-    fn catalog_emits_mlxtiers_for_converted_anima() {
+    fn catalog_emits_mlxtiers_and_states_for_converted_anima() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let converted = data_dir.join("models").join("mlx").join("anima_base");
         std::fs::create_dir_all(&converted).unwrap();
         std::fs::write(converted.join("model_index.json"), b"{}").unwrap();
-        for tier in ["bf16", "q8", "q4"] {
-            let dm = converted.join(tier).join("diffusion_models");
-            std::fs::create_dir_all(&dm).unwrap();
-            std::fs::write(dm.join("anima-base-v1.0.safetensors"), b"x").unwrap();
-        }
+        // bf16 + q4 fully converted (DiT + text encoder + VAE); q8 is TORN (DiT only) — a realistic
+        // interrupted convert. The full `apply_mac_and_mlx_fields` path must carry the family predicate.
+        let seed_tier = |tier: &str, complete: bool| {
+            let base = converted.join(tier);
+            let write = |sub: &str, file: &str| {
+                let dir = base.join(sub);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join(file), b"x").unwrap();
+            };
+            write("diffusion_models", "anima-base-v1.0.safetensors");
+            if complete {
+                write("text_encoders", "qwen_3_06b_base.safetensors");
+                write("vae", "qwen_image_vae.safetensors");
+            }
+        };
+        seed_tier("bf16", true);
+        seed_tier("q4", true);
+        seed_tier("q8", false);
+
         let mut object = json!({
             "id": "anima_base",
             "type": "image",
+            "family": "anima",
             "mlx": { "requiresConversion": true }
         })
         .as_object()
@@ -3822,6 +4231,8 @@ mod mlx_tier_probe_tests {
             object.get("mlxConversionState").and_then(Value::as_str),
             Some("converted")
         );
+        // `mlxTiers` is the coarse installed-tier list — it drives whether the picker renders; the torn
+        // q8 still appears (backbone present) so the user sees it, disabled.
         let tiers: Vec<&str> = object
             .get("mlxTiers")
             .and_then(Value::as_array)
@@ -3830,6 +4241,17 @@ mod mlx_tier_probe_tests {
             .filter_map(Value::as_str)
             .collect();
         assert_eq!(tiers, vec!["bf16", "q8", "q4"]);
+        // `mlxTierStates` is authoritative: through the full catalog path the family predicate marks the
+        // torn q8 incomplete and the complete tiers installed (sc-13513).
+        let states = tier_state_map(
+            object
+                .get("mlxTierStates")
+                .and_then(Value::as_array)
+                .expect("mlxTierStates emitted"),
+        );
+        assert_eq!(states["bf16"], ("installed".into(), "complete".into()));
+        assert_eq!(states["q4"], ("installed".into(), "complete".into()));
+        assert_eq!(states["q8"], ("missing".into(), "incomplete".into()));
         // Decoupled from the download matrix — the picker must NOT flip `hasVariantMatrix`.
         assert!(object.get("hasVariantMatrix").is_none());
     }

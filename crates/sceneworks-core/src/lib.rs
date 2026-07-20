@@ -16,6 +16,7 @@ pub mod jsonc;
 pub mod lora_family;
 pub mod lora_url;
 pub mod media_convert;
+pub mod mlx_tier_completeness;
 pub mod observability;
 pub mod payload_util;
 pub mod project_store;
