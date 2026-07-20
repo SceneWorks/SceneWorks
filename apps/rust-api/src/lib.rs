@@ -2812,8 +2812,12 @@ fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
             "prompt must be between 1 and 4000 characters",
         ));
     }
-    // Reuse the shared `advanced`-size guard (audio carries no negative prompt, so pass an empty one).
-    validate_prompt_extras("", &payload.advanced)?;
+    // Reuse the shared negative-prompt + `advanced`-size guard. Music models (ACE-Step) can carry a
+    // negative prompt when they advertise support; the size guard bounds it exactly like image/video.
+    validate_prompt_extras(
+        payload.negative_prompt.as_deref().unwrap_or(""),
+        &payload.advanced,
+    )?;
     if let Some(target) = payload.target_duration_secs {
         if !target.is_finite() || !(0.0..=300.0).contains(&target) {
             return Err(ApiError::bad_request(
@@ -2821,6 +2825,38 @@ fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
             ));
         }
     }
+    // Music describe-the-music sub-block (ACE-Step, sc-13410). BPM must be a real positive tempo; the
+    // model's own `validate` re-checks it (finite & > 0), so this is a blanket sanity bound. key/lyrics
+    // are free-form — bound their length so a runaway payload can't slip past the prompt-size floor.
+    if let Some(bpm) = payload.bpm {
+        if !bpm.is_finite() || !(0.0..=1000.0).contains(&bpm) || bpm <= 0.0 {
+            return Err(ApiError::bad_request("bpm must be between 0 and 1000"));
+        }
+    }
+    if payload
+        .musical_key
+        .as_deref()
+        .is_some_and(|key| key.chars().count() > 64)
+    {
+        return Err(ApiError::bad_request(
+            "musicalKey must be at most 64 characters",
+        ));
+    }
+    if payload
+        .lyrics
+        .as_deref()
+        .is_some_and(|lyrics| lyrics.chars().count() > MAX_PROMPT_CHARS)
+    {
+        return Err(ApiError::bad_request(format!(
+            "lyrics must be at most {MAX_PROMPT_CHARS} characters"
+        )));
+    }
+    // Extend/edit source band (Conditioning::AudioEdit, sc-13410). Source id + edit mode are a pair: one
+    // without the other is a malformed edit request. The mode must be a known token (the model's
+    // advertised `audio.editModes` is the real gate the generator's `validate` applies — this only
+    // rejects a garbage token up front). Region seconds must be finite and well-ordered; strength is a
+    // 0..=1 weight.
+    validate_audio_edit_fields(payload)?;
     // Diffusion-audio sampling knobs (Sound FX / MOSS-SoundEffect, sc-13409). Bounded to a blanket
     // sane range here — the same "API blanket vs. model's real cap" split the duration uses: the
     // generator's `validate` owns the per-model guidance range (MOSS: 1.0..=20.0) and step ceiling
@@ -2835,6 +2871,77 @@ fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
     if let Some(steps) = payload.steps {
         if !(1..=10_000).contains(&steps) {
             return Err(ApiError::bad_request("steps must be between 1 and 10000"));
+        }
+    }
+    Ok(())
+}
+
+/// The edit operations the audio route accepts up front (the union across audio models — each model's
+/// advertised `audio.editModes` is the real gate the generator's `validate` applies). Matches the
+/// [`gen_core::AudioEditMode`] variant set.
+const AUDIO_EDIT_MODES: &[&str] = &["inpaint", "repaint", "extend", "cover"];
+
+/// Sanity-bound the extend/edit source-band fields on an [`AudioJobRequest`] (Conditioning::AudioEdit,
+/// sc-13410). This is the API blanket floor: the source id + edit mode must be a well-formed pair, the
+/// mode a known token, the region seconds finite/ordered, and the strength a 0..=1 weight. The
+/// per-model gates (mode ∈ advertised `audio.editModes`, region inside the clip, 48 kHz source) belong
+/// to the worker/provider, which knows the model surface and the loaded clip.
+fn validate_audio_edit_fields(payload: &AudioJobRequest) -> Result<(), ApiError> {
+    let has_source = payload
+        .source_audio_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty());
+    let has_mode = payload
+        .edit_mode
+        .as_deref()
+        .is_some_and(|mode| !mode.trim().is_empty());
+    // A source without a mode (or vice versa) is a malformed edit request — one names WHAT to edit, the
+    // other HOW. Reject the half-specified pair rather than silently dropping the edit.
+    if has_source != has_mode {
+        return Err(ApiError::bad_request(
+            "an audio edit needs both sourceAudioAssetId and editMode (or neither)",
+        ));
+    }
+    if let Some(mode) = payload
+        .edit_mode
+        .as_deref()
+        .filter(|m| !m.trim().is_empty())
+    {
+        // Match the worker's case handling (`edit_mode.map(|m| m.to_lowercase())` at deserialize,
+        // then `parse_audio_edit_mode`): the token is case-insensitive, so lowercase before the
+        // membership check. Otherwise a mixed-case value like "Extend" is 400'd here even though the
+        // worker would accept it — the two validation seams must agree.
+        if !AUDIO_EDIT_MODES.contains(&mode.to_lowercase().as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "editMode must be one of {AUDIO_EDIT_MODES:?}"
+            )));
+        }
+    }
+    for (field, value) in [
+        ("editRegionStartSecs", payload.edit_region_start_secs),
+        ("editRegionEndSecs", payload.edit_region_end_secs),
+    ] {
+        if let Some(secs) = value {
+            if !secs.is_finite() || !(0.0..=3600.0).contains(&secs) {
+                return Err(ApiError::bad_request(format!(
+                    "{field} must be between 0 and 3600"
+                )));
+            }
+        }
+    }
+    if let (Some(start), Some(end)) = (payload.edit_region_start_secs, payload.edit_region_end_secs)
+    {
+        if end <= start {
+            return Err(ApiError::bad_request(
+                "editRegionEndSecs must be greater than editRegionStartSecs",
+            ));
+        }
+    }
+    if let Some(strength) = payload.edit_strength {
+        if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
+            return Err(ApiError::bad_request(
+                "editStrength must be between 0 and 1",
+            ));
         }
     }
     Ok(())

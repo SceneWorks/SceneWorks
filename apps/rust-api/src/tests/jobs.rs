@@ -286,6 +286,24 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
               "ui": { "label": "MOSS SoundEffect v2" }
             },
             {
+              "id": "acestep_v15_turbo",
+              "name": "ACE-Step v1.5 XL Turbo (Music)",
+              "family": "acestep",
+              "type": "audio",
+              "audio": {
+                "languages": ["en", "zh"],
+                "sampleRates": [48000],
+                "maxDurationSecs": 600,
+                "editModes": ["inpaint", "repaint", "extend"],
+                "conditioning": ["AudioEdit"]
+              },
+              "downloads": [
+                { "provider": "huggingface", "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers", "files": ["model_index.json"] }
+              ],
+              "paths": { "model": "${HF_CACHE}/ACE-Step/acestep-v15-xl-turbo-diffusers" },
+              "ui": { "label": "ACE-Step v1.5 XL Turbo" }
+            },
+            {
               "id": "not-audio-img",
               "name": "Not Audio",
               "family": "z_image",
@@ -453,6 +471,237 @@ async fn create_audio_job_rejects_nonsense_sampling_knobs() {
     assert!(body["detail"]
         .as_str()
         .is_some_and(|detail| detail.contains("steps")));
+}
+
+/// The Music path (ACE-Step, sc-13410): a well-formed music `POST /api/v1/audio/jobs` carries the
+/// describe-the-music sub-block (bpm / musicalKey / lyrics) + steps AND the extend/edit source band
+/// (sourceAudioAssetId / editMode / editRegion* / editStrength) through to the worker payload verbatim,
+/// alongside the resolved ACE-Step `type: audio` manifest entry — so the worker maps them onto
+/// AudioParams + a Conditioning::AudioEdit.
+#[tokio::test]
+async fn create_audio_job_maps_music_and_edit_fields() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Music Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "acestep_v15_turbo",
+            "prompt": "gentle lofi piano loop",
+            "language": "en",
+            "targetDurationSecs": 8.0,
+            "steps": 8,
+            "bpm": 92.0,
+            "musicalKey": "C minor",
+            "lyrics": "[verse] la la la",
+            "sourceAudioAssetId": "audio-src-1",
+            "editMode": "extend",
+            "editRegionEndSecs": 20.0,
+            "editStrength": 0.5,
+            "seed": 5,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "audio_generate");
+    let payload = &job["payload"];
+    assert_eq!(payload["model"], "acestep_v15_turbo");
+    // Describe-the-music sub-block (rides AudioParams music fields).
+    assert_eq!(payload["bpm"], 92.0);
+    assert_eq!(payload["musicalKey"], "C minor");
+    assert_eq!(payload["lyrics"], "[verse] la la la");
+    assert_eq!(payload["steps"], 8);
+    // Extend/edit source band (rides a Conditioning::AudioEdit).
+    assert_eq!(payload["sourceAudioAssetId"], "audio-src-1");
+    assert_eq!(payload["editMode"], "extend");
+    assert_eq!(payload["editRegionEndSecs"], 20.0);
+    assert_eq!(payload["editStrength"], 0.5);
+    let entry = &payload["modelManifestEntry"];
+    assert_eq!(entry["id"], "acestep_v15_turbo");
+    assert_eq!(entry["type"], "audio");
+    assert_eq!(
+        entry["downloads"][0]["repo"],
+        "ACE-Step/acestep-v15-xl-turbo-diffusers"
+    );
+}
+
+/// A half-specified edit (a source track without an edit mode, or vice versa) is malformed — one names
+/// WHAT to edit, the other HOW — so the validator rejects it up front rather than silently dropping the
+/// edit (sc-13410).
+#[tokio::test]
+async fn create_audio_job_rejects_half_specified_edit() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Music Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "acestep_v15_turbo",
+            "prompt": "gentle lofi piano loop",
+            // A source with no editMode → rejected as a malformed pair.
+            "sourceAudioAssetId": "audio-src-1",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("editMode")));
+}
+
+/// The Music validator sanity-bounds the describe-the-music + edit fields up front (sc-13410): a
+/// non-positive BPM, an unknown edit mode, and a mis-ordered region are all 400s before the job is
+/// enqueued (the per-model gate — mode ∈ advertised editModes, region inside the clip — is the
+/// generator's own `validate`).
+#[tokio::test]
+async fn create_audio_job_rejects_nonsense_music_fields() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Music Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // A non-positive BPM is rejected.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "acestep_v15_turbo",
+            "prompt": "loop",
+            "bpm": 0.0,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"].as_str().is_some_and(|d| d.contains("bpm")));
+
+    // An unknown edit mode token is rejected up front.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "acestep_v15_turbo",
+            "prompt": "loop",
+            "sourceAudioAssetId": "audio-src-1",
+            "editMode": "morph",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .is_some_and(|d| d.contains("editMode")));
+
+    // A region whose end is at/below its start is rejected.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "acestep_v15_turbo",
+            "prompt": "loop",
+            "sourceAudioAssetId": "audio-src-1",
+            "editMode": "inpaint",
+            "editRegionStartSecs": 5.0,
+            "editRegionEndSecs": 2.0,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .is_some_and(|d| d.contains("editRegionEndSecs")));
+}
+
+/// The editMode token is case-insensitive at the API, matching the worker's own case handling
+/// (`edit_mode.map(|m| m.to_lowercase())` at deserialize, then `parse_audio_edit_mode`). A mixed-case
+/// KNOWN token (`"Extend"`) is accepted and forwarded verbatim (the worker lowercases it), while a
+/// mixed-case UNKNOWN token (`"Morph"`) is still rejected — lowercasing widens casing, not the mode
+/// set (sc-13410, worker-parity fix).
+#[tokio::test]
+async fn create_audio_job_accepts_case_insensitive_edit_mode() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Music Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // A mixed-case KNOWN token is accepted (parity with the worker) and forwarded verbatim.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "acestep_v15_turbo",
+            "prompt": "gentle lofi piano loop",
+            "sourceAudioAssetId": "audio-src-1",
+            "editMode": "Extend",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["editMode"], "Extend");
+
+    // A mixed-case UNKNOWN token is still rejected — casing widened, the mode set did not.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "acestep_v15_turbo",
+            "prompt": "loop",
+            "sourceAudioAssetId": "audio-src-1",
+            "editMode": "Morph",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .is_some_and(|d| d.contains("editMode")));
 }
 
 /// The audio route is a door for `type: audio` models only: an image/video model posted here is
