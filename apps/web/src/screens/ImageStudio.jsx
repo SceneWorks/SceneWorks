@@ -138,13 +138,16 @@ import {
 import { ControlPanel } from "../components/ControlPanel.jsx";
 import { pidToggleVisible } from "../pidEligibility.js";
 import {
+  allPossibleTiers,
   defaultTierSelection,
   installedTiers,
   isBelowFloor,
   modelQualityFloor,
-  shouldShowTierPicker,
   tierLabel,
+  tierPickerOptions,
 } from "../quantTier.js";
+import { suggestTier } from "../tierSuggestion.js";
+import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
 import { readLastTier, writeLastTier } from "../lastTierStore.js";
 import { readDefaultGenerationQuality } from "../generationQuality.js";
 import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
@@ -932,17 +935,39 @@ export function ImageStudio() {
   // Whether the model ships a packed default + a hosted full-precision bf16 build, exposing the
   // Studio "Full precision (bf16)" toggle (sc-6568) — Boogu Base/Turbo/Edit.
   const precisionToggle = Boolean(selectedModel?.ui?.precisionToggle);
-  // Installed quant tiers of the active model + whether the tier picker should show (sc-8515).
-  // The picker renders only when MORE THAN ONE tier is installed; a single installed tier keeps
-  // the studio unchanged (no toggle). Boogu's `precisionToggle` is orthogonal — those models are
-  // single-download (no variant matrix), so they never hit this path.
+  // Quant-tier picker state (sc-8515, generalized). `availableTiers` is the SELECTABLE set — tiers that
+  // are installed AND complete on disk, and the ONLY tiers we ever send to the worker (the user's bottom
+  // line: never generate off a tier that isn't in the cache). `possibleTiers` is the FULL display set —
+  // every tier the model can have, installed or not — so an un-downloaded tier renders disabled rather
+  // than silently missing. The picker shows whenever there is MORE THAN ONE possible tier (so a user with
+  // one installed tier still sees the others, greyed), provided at least one is actually installed to
+  // select. Boogu's `precisionToggle` is orthogonal — those models have no tier matrix, so `possibleTiers`
+  // is empty and this stays hidden for them.
   const availableTiers = useMemo(
     () => installedTiers(selectedModel, tierOptions),
     [selectedModel, tierOptions],
   );
-  const showTierPicker = useMemo(
-    () => shouldShowTierPicker(selectedModel, tierOptions),
+  // Capability-aware "Auto" default (epic 10721): the highest-fidelity tier that fits this machine's
+  // memory. Fed to `defaultTierSelection` as the base when the global quality setting is Auto (the
+  // default), so a small model (SANA-Sprint) defaults to bf16 and a heavy one on a small Mac to what
+  // fits — instead of a flat q8. `null` memory (probe pending / unavailable) leans to the highest tier;
+  // the worker's capability downtier (sc-10733) still clamps a non-explicit pick to what actually fits.
+  const unifiedMemoryGb = useUnifiedMemoryGb();
+  const autoTier = useMemo(
+    () => suggestTier(selectedModel, unifiedMemoryGb),
+    [selectedModel, unifiedMemoryGb],
+  );
+  const possibleTiers = useMemo(
+    () => allPossibleTiers(selectedModel, tierOptions),
     [selectedModel, tierOptions],
+  );
+  const tierPickerItems = useMemo(
+    () => tierPickerOptions(selectedModel, tierOptions),
+    [selectedModel, tierOptions],
+  );
+  const showTierPicker = useMemo(
+    () => possibleTiers.length > 1 && availableTiers.length > 0,
+    [possibleTiers, availableTiers],
   );
   // Per-model quality floor (sc-10731): the model's minimum-fidelity tier (`minQualityTier`) and whether
   // the CURRENT pick sits below it. The DEFAULT is already clamped up to the floor (defaultTierSelection),
@@ -1325,10 +1350,12 @@ export function ImageStudio() {
         // the per-(screen,model) sticky. Read fresh here (like readLastTier) so a change made in Settings
         // is picked up the next time this effect derives a default — no stale in-memory copy.
         defaultQuality: readDefaultGenerationQuality(),
+        // When that setting is Auto (the default), the base is this capability-aware suggestion.
+        autoTier,
       }) ?? "",
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model, availableTiersKey]);
+  }, [model, availableTiersKey, autoTier]);
   // Switch the active quant tier (sc-8515): persist it as this (screen, model)'s last EXPLICIT tier
   // (sc-10727 — sticky) and surface a brief "loading <tier>" note (reload-always — the worker evicts
   // + reloads a heavy tier on the next generation; there is no co-residence). The note self-clears.
@@ -1336,7 +1363,11 @@ export function ImageStudio() {
   useEffect(() => () => clearTimeout(tierSwitchTimer.current), []);
   const handleTierChange = useCallback(
     (nextTier) => {
-      if (nextTier === quantTier) {
+      // Only an installed-and-complete tier can be selected — the disabled options in the dropdown are
+      // shown for discoverability, never as a pickable target. This is the belt behind the native
+      // `<option disabled>` (which already blocks selection) so no code path can strand the state on a
+      // tier that isn't in the cache.
+      if (nextTier === quantTier || !availableTiers.includes(nextTier)) {
         return;
       }
       setQuantTier(nextTier);
@@ -1345,7 +1376,7 @@ export function ImageStudio() {
       clearTimeout(tierSwitchTimer.current);
       tierSwitchTimer.current = setTimeout(() => setTierSwitching(""), 1500);
     },
-    [model, quantTier],
+    [model, quantTier, availableTiers],
   );
   const {
     availablePresets,
@@ -2045,12 +2076,19 @@ export function ImageStudio() {
       precisionToggle,
       bf16Precision,
       showTierPicker,
-      quantTier,
+      // Never send a tier that isn't installed-and-complete. The seed effect keeps `quantTier` clamped to
+      // an installed tier, but gate the OUTGOING value on the selectable set as a hard belt so no state —
+      // a race, a stale sticky, a torn tier newly reported missing — can leak an uninstalled tier into the
+      // payload (the worker would then default/crash against a tier the user never downloaded). Mirrors the
+      // guard VideoStudio/Editor already apply. Empty string ⇒ `tierQuantize("")` is null ⇒ no mlxQuantize.
+      quantTier: availableTiers.includes(quantTier) ? quantTier : "",
       // sc-10733: the tier is a DELIBERATE pick (not the pure global/base default) when it equals this
       // (screen, model)'s persisted sticky — a prior explicit pick, which `handleTierChange` writes and
       // the seed effect reads back into `quantTier`. The worker honors an explicit pick (never silently
-      // downtiers it); only a non-explicit default is capability-clamped.
-      tierExplicit: quantTier !== "" && readLastTier(TIER_SCREEN, model) === quantTier,
+      // downtiers it); only a non-explicit default is capability-clamped. Gate on the same installed-set
+      // membership so an uninstalled sticky is never flagged explicit.
+      tierExplicit:
+        availableTiers.includes(quantTier) && readLastTier(TIER_SCREEN, model) === quantTier,
       showPidToggle,
       usePid,
       pidTarget,
@@ -3302,15 +3340,15 @@ export function ImageStudio() {
                 </label>
               ) : null}
               {showTierPicker ? (
-                <label className="quant-tier-picker" title="Switch which installed quant tier generates, for A/B comparison. Higher precision = larger memory footprint; switching a heavy tier reloads it before the next generation.">
+                <label className="quant-tier-picker" title="Switch which installed quant tier generates, for A/B comparison. Higher precision = larger memory footprint; switching a heavy tier reloads it before the next generation. Tiers you haven't downloaded are shown but disabled — install them from the Models page to enable.">
                   Quant tier
                   <select
                     onChange={(event) => handleTierChange(event.target.value)}
                     value={quantTier}
                   >
-                    {availableTiers.map((tier) => (
-                      <option key={tier} value={tier}>
-                        {tierLabel(tier)}
+                    {tierPickerItems.map((item) => (
+                      <option key={item.tier} value={item.tier} disabled={item.disabled}>
+                        {item.label}
                       </option>
                     ))}
                   </select>

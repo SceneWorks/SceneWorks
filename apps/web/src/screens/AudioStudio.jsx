@@ -13,6 +13,7 @@ import {
 } from "../modelEligibility.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { jobAudioResultAssets } from "../jobResultAssets.js";
+import { AssetPickerField } from "../components/AssetPicker.jsx";
 
 // SceneWorks Audio Studio — the navigable shell (epic 13400, C0 / sc-13407). This screen mirrors
 // the canonical studio shell (VideoStudio.jsx): page-frame > WorkPanel + .mode-tabs + AdvancedSection
@@ -25,15 +26,29 @@ import { jobAudioResultAssets } from "../jobResultAssets.js";
 // mode (Speech = ships a voice bank, Music = advertises edit ops, Voice Clone = reference/embedding
 // conditioning, Sound FX = residual text→audio generator).
 //
-// SCOPE (C1 sc-13408 + C2 sc-13409): Speech (TTS) and Sound FX are both fully wired — the Generate CTA
-// submits the prompt + capability-driven knobs through createAudioJob → rememberLocalGenerationJob(
-// 'audio', job), surfacing the run in the audioLocalJobs stack below via the shared audio-player card
-// (A5, sc-13405). Speech carries voice/language/length/seed; Sound FX (MOSS-SoundEffect v2) carries the
-// prompt + length/language + the diffusion sampling knobs guidance(CFG)/steps/seed — MOSS advertises no
-// voice surface, so none is sent (the shared gen-core floor would reject an explicit voice). The
-// remaining modes (C3 Music, C4 Voice Clone) keep the C0 scaffold: their fields render capability-driven,
-// but submit stays inert until their stories land (the Generate CTA is disabled off a wired tab rather
-// than being a silent no-op).
+// SCOPE (C1 sc-13408 + C2 sc-13409 + C3 sc-13410): Speech (TTS), Sound FX and Music are fully wired —
+// the Generate CTA submits the prompt + capability-driven knobs through createAudioJob →
+// rememberLocalGenerationJob('audio', job), surfacing the run in the audioLocalJobs stack below via the
+// shared audio-player card (A5, sc-13405). Speech carries voice/language/length/seed; Sound FX
+// (MOSS-SoundEffect v2) carries the prompt + length/language + the diffusion sampling knobs
+// guidance(CFG)/steps/seed. Music (ACE-Step v1.5 XL Turbo) carries the describe-the-music prompt +
+// length/language + BPM/key/lyrics (the gen-core AudioParams music sub-block) + steps/seed, and — ONLY
+// when the selected model advertises audio.editModes — an extend/inpaint/repaint SOURCE band that picks a
+// library audio track + edit mode and rides through as a Conditioning::AudioEdit (mirroring the Video
+// Studio source-band pattern). guidance(CFG)/negative are capability-gated: the pinned ACE-Step turbo is
+// guidance-distilled (advertises neither), so they stay hidden for it — surfacing them would be a typed
+// Unsupported at the gen-core floor; a future non-distilled music model that advertises them shows them.
+//
+// SCOPE (C4 sc-13411): Voice Clone is fully wired too. Its generate model is a CONVERTER — a model
+// advertising ReferenceAudio conditioning (OpenVoice V2); a bare speaker embedder (Chatterbox-VE,
+// VoiceEmbedding only) is filtered out of the tab/picker (isVoiceCloneConverter). The mode surfaces a
+// reference-voice band (pick a library audio track whose voice is cloned) + a match-strength control
+// (OpenVoice's tone-color sampling temperature τ), and its prompt is the SCRIPT the base voice speaks.
+// Generate submits referenceAudioAssetId + matchStrength through createAudioJob; the worker orchestrates
+// the two backend calls — base TTS (Kokoro) speaks the script, then OpenVoice V2 transfers the reference's
+// tone color — and registers the single converted clip. A named-voice registry (register-a-voice via a
+// stored Chatterbox-VE embedding) is deferred: the embedding's consumer is the future native clone-TTS
+// (E1), not this reference-clip pipeline.
 
 // Tab labels per the epic, keyed by the AUDIO_MODES ids so the ordering follows that array.
 const MODE_LABELS = {
@@ -54,10 +69,19 @@ const MODE_PLACEHOLDER = {
 // Modes that emit a fixed-length waveform, so a length control (clamped to the model's
 // audio.maxDurationSecs) applies. Voice Clone follows its reference clip's length.
 const DURATION_MODES = new Set(["speech", "sfx", "music"]);
-// Modes whose Generate CTA is fully wired to createAudioJob (Speech C1 sc-13408, Sound FX C2 sc-13409).
-// The remaining modes keep the C0 scaffold — their CTA stays disabled rather than a silent no-op — until
-// their own stories land, so this set is the single guard both `canGenerate` and `submit` read.
-const WIRED_MODES = new Set(["speech", "sfx"]);
+// Modes whose Generate CTA is fully wired to createAudioJob (Speech C1 sc-13408, Sound FX C2 sc-13409,
+// Music C3 sc-13410, Voice Clone C4 sc-13411). This set is the single guard both `canGenerate` and
+// `submit` read.
+const WIRED_MODES = new Set(["speech", "sfx", "music", "voiceclone"]);
+// Voice Clone runs the OpenVoice V2 conversion chain, so its generate model must be a CONVERTER — a model
+// whose conditioning includes ReferenceAudio (OpenVoice V2). A bare speaker EMBEDDER (Chatterbox-VE,
+// VoiceEmbedding only) also "serves" the voiceclone mode conceptually, but it cannot run the conversion —
+// its embedding feeds register-a-voice / the future native clone-TTS (E1), not this pipeline — so it is
+// filtered out of the generate picker.
+function isVoiceCloneConverter(item) {
+  const conditioning = Array.isArray(item?.audio?.conditioning) ? item.audio.conditioning : [];
+  return conditioning.some((kind) => String(kind).toLowerCase() === "referenceaudio");
+}
 // Modes that expose the diffusion sampling knobs (CFG guidance + solver steps) in the advanced panel.
 // Sound FX runs the MOSS-SoundEffect flow-matching pipeline, which reads guidance/steps off the
 // top-level request; Speech (Kokoro) is not a diffusion model and ignores them, so it hides them. This
@@ -141,10 +165,31 @@ export function AudioStudio() {
     saved.targetDurationSecs ?? DEFAULT_TARGET_DURATION_SECS,
   );
   const [seed, setSeed] = useState(saved.seed ?? "");
-  // Sound FX (MOSS-SoundEffect) diffusion sampling knobs — the CFG guidance scale and the solver step
-  // count. Empty ⇒ the model's own default (MOSS: CFG 4.0 / 100 steps), matching the advanced hint.
+  // Sound FX (MOSS-SoundEffect) + Music (ACE-Step) diffusion sampling knobs — the CFG guidance scale and
+  // the solver step count. Empty ⇒ the model's own default (MOSS: CFG 4.0 / 100 steps; ACE-Step turbo:
+  // 8 steps, guidance baked in), matching the advanced hint.
   const [guidance, setGuidance] = useState(saved.guidance ?? "");
   const [steps, setSteps] = useState(saved.steps ?? "");
+  // Music (ACE-Step) describe-the-music sub-block — the gen-core AudioParams music fields. BPM + key are
+  // optional metadata; lyrics is free-form (empty ⇒ instrumental). Cleared ⇒ omitted so the model derives
+  // its own. Negative is capability-gated (hidden for the guidance-distilled turbo).
+  const [bpm, setBpm] = useState(saved.bpm ?? "");
+  const [musicalKey, setMusicalKey] = useState(saved.musicalKey ?? "");
+  const [lyrics, setLyrics] = useState(saved.lyrics ?? "");
+  const [negativePrompt, setNegativePrompt] = useState(saved.negativePrompt ?? "");
+  // Music extend/edit SOURCE band (Conditioning::AudioEdit) — a USER selection, so it persists like the
+  // Video Studio source band. `sourceAudioAssetId` names a library audio track; `editMode` (inpaint /
+  // repaint / extend) comes from the model's advertised audio.editModes. Region seconds bound an
+  // inpaint/repaint window; extend reuses the Length field as the new total. Strength is optional.
+  const [sourceAudioAssetId, setSourceAudioAssetId] = useState(saved.sourceAudioAssetId ?? "");
+  const [editRegionStartSecs, setEditRegionStartSecs] = useState(saved.editRegionStartSecs ?? "");
+  const [editRegionEndSecs, setEditRegionEndSecs] = useState(saved.editRegionEndSecs ?? "");
+  const [editStrength, setEditStrength] = useState(saved.editStrength ?? "");
+  // Voice Clone (C4 sc-13411) — a USER selection, so it persists like the Music source band.
+  // `referenceAudioAssetId` names the library audio track whose voice is cloned; `matchStrength` is the
+  // OpenVoice conversion strength (τ), empty ⇒ the converter default (0.3).
+  const [referenceAudioAssetId, setReferenceAudioAssetId] = useState(saved.referenceAudioAssetId ?? "");
+  const [matchStrength, setMatchStrength] = useState(saved.matchStrength ?? "");
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   // Guards a Speech run in flight so a second submit (double-click / ⌘↵) can't double-enqueue
   // (mirrors VideoStudio's `submitting`). Cleared in submit's finally.
@@ -154,7 +199,12 @@ export function AudioStudio() {
   // audio capability block matches (audioModelServesMode). The tabs, the picker and the snap effect
   // all derive from this so the user is never trapped on a mode whose model can't serve the others.
   const modelServesMode = (item, value) => audioModelServesMode(item, value);
-  const modelsForMode = (value) => audioModels.filter((item) => modelServesMode(item, value));
+  const modelsForMode = (value) => {
+    const serving = audioModels.filter((item) => modelServesMode(item, value));
+    // Voice Clone's generate model must be a CONVERTER (OpenVoice V2), not a bare speaker embedder —
+    // filter Chatterbox-VE out of the tab/picker so the CTA never routes a conversion to an embedder.
+    return value === "voiceclone" ? serving.filter(isVoiceCloneConverter) : serving;
+  };
   const selectedModel = audioModels.find((item) => item.id === model) ?? audioModels[0] ?? null;
 
   // Model-availability gate: `ready` follows the picker (audioModels is live-catalog-then-fallback in
@@ -185,23 +235,56 @@ export function AudioStudio() {
   const showVoice = mode === "speech" && voices.length > 0;
   const showLanguage = DURATION_MODES.has(mode) && languages.length > 0;
   const showDuration = DURATION_MODES.has(mode) && maxDurationSecs != null;
+  // Music describe-the-music sub-block fields — surfaced on the Music tab. BPM/key/lyrics ride the
+  // gen-core AudioParams music sub-block ACE-Step reads; they are optional, so they render whenever the
+  // Music tab is active (a music model that ignored one would simply not consume it).
+  const showMusicFields = mode === "music";
+  // The extend/edit SOURCE band is revealed ONLY when the selected model advertises audio.editModes —
+  // exactly the capability that makes a model a Music model (modelEligibility.audioHasEditModes). ACE-Step
+  // advertises inpaint/repaint/extend; a model without editModes never shows it. Mirrors VideoStudio's
+  // `studio-source-band`, which reveals its source-clip picker only on the edit sub-modes.
   const showEditModes = mode === "music" && editModes.length > 0;
-  const showConditioning = mode === "voiceclone" && conditioning.length > 0;
-  // The CFG guidance + steps advanced knobs surface only on the diffusion-audio (Sound FX) modes the
-  // selected model actually runs through a sampler — the model's `supports_guidance` surface. See
-  // SAMPLING_KNOB_MODES for why this is mode-gated today.
-  const showSamplingKnobs = SAMPLING_KNOB_MODES.has(mode);
+  // Voice Clone: the reference-voice band (pick a library audio track) + the match-strength control are
+  // revealed whenever the selected converter advertises ReferenceAudio conditioning — the capability that
+  // makes it a voice-conversion model (isVoiceCloneConverter). Chatterbox-VE (VoiceEmbedding only) never
+  // reaches this tab (modelsForMode filters it out).
+  const showVoiceClone =
+    mode === "voiceclone" && conditioning.some((kind) => String(kind).toLowerCase() === "referenceaudio");
+  // Steps: both the Sound FX (MOSS) and Music (ACE-Step) diffusion samplers read the top-level
+  // `steps`, so the solver-step count surfaces on both. Guidance(CFG): only when the model advertises
+  // guidance support — MOSS does (SAMPLING_KNOB_MODES), the guidance-distilled ACE-Step turbo does NOT
+  // (audio.supportsGuidance falsy), so it stays hidden rather than being sent and rejected as a typed
+  // Unsupported at the gen-core floor. Negative prompt is capability-gated the same way. See
+  // SAMPLING_KNOB_MODES for why SFX is mode-gated while Music reads the manifest capability flags.
+  const musicSupportsGuidance = mode === "music" && Boolean(audio.supportsGuidance);
+  const musicSupportsNegative = mode === "music" && Boolean(audio.supportsNegativePrompt);
+  const showSteps = SAMPLING_KNOB_MODES.has(mode) || mode === "music";
+  const showGuidance = SAMPLING_KNOB_MODES.has(mode) || musicSupportsGuidance;
+  const showNegative = musicSupportsNegative;
 
   // The voice picker's <optgroup> structure — derived from the selected model's voice bank, grouped
   // by accent + gender (sc-13408). Rebuilt only when the bank changes.
   const voiceGroups = useMemo(() => groupVoicesByGenderAccent(voices), [voices]);
 
+  // Library audio tracks the Music extend/edit source band can pick from — the audio twin of
+  // VideoStudio's `videoAssets` (type-scoped so the picker only offers real audio; the picker itself
+  // runs with categories hidden since its `all/image/video` tabs carry no audio bucket).
+  const audioAssets = useMemo(() => assets.filter((asset) => asset?.type === "audio"), [assets]);
+
   // Generate is guarded (never a silent no-op): a run needs a wired mode, a non-empty prompt, an
   // installed model, and no run already in flight. The empty-prompt guard is the DoD's "disable on
   // empty prompt"; the WIRED_MODES gate keeps the still-scaffold tabs (Music / Voice Clone) inert.
   const promptReady = prompt.trim().length > 0;
+  // Voice Clone additionally needs a reference-voice clip selected — the conversion has no target
+  // without it. The other wired modes carry no such extra requirement.
+  const referenceReady = mode !== "voiceclone" || referenceAudioAssetId.length > 0;
   const canGenerate =
-    WIRED_MODES.has(mode) && modelReady && Boolean(model) && promptReady && !submitting;
+    WIRED_MODES.has(mode) &&
+    modelReady &&
+    Boolean(model) &&
+    promptReady &&
+    referenceReady &&
+    !submitting;
 
   // Snap the model to one that serves the active mode (mirrors VideoStudio). A no-op when the current
   // model already serves the mode, or when nothing serves it (a reduced catalog).
@@ -258,6 +341,16 @@ export function AudioStudio() {
       seed,
       guidance,
       steps,
+      bpm,
+      musicalKey,
+      lyrics,
+      negativePrompt,
+      sourceAudioAssetId,
+      editRegionStartSecs,
+      editRegionEndSecs,
+      editStrength,
+      referenceAudioAssetId,
+      matchStrength,
       advancedOpen,
     },
     audioModels.length > 0,
@@ -320,6 +413,49 @@ export function AudioStudio() {
         // `voice` is sent — MOSS advertises no voice surface and the floor rejects one.
         payload.guidance = guidance === "" ? undefined : Number(guidance);
         payload.steps = steps === "" ? undefined : Number(steps);
+      } else if (mode === "music") {
+        // Music (ACE-Step) — the describe-the-music sub-block. BPM/key/lyrics ride the gen-core
+        // AudioParams music fields; steps rides the top-level request (the turbo's 8-step sampler).
+        // Cleared ⇒ omitted so the model derives its own. guidance/negative are sent ONLY when the model
+        // advertises support (the guidance-distilled turbo advertises neither, so they are never sent —
+        // the shared floor would reject them as typed Unsupported).
+        payload.bpm = bpm === "" ? undefined : Number(bpm);
+        payload.musicalKey = musicalKey.trim() || undefined;
+        payload.lyrics = lyrics.trim() || undefined;
+        payload.steps = steps === "" ? undefined : Number(steps);
+        if (musicSupportsGuidance) {
+          payload.guidance = guidance === "" ? undefined : Number(guidance);
+        }
+        if (musicSupportsNegative) {
+          payload.negativePrompt = negativePrompt.trim() || undefined;
+        }
+        // Extend/edit SOURCE band → Conditioning::AudioEdit. Only when the user has both picked a source
+        // track AND chosen an edit mode the model advertises; otherwise this is plain text-to-music.
+        if (showEditModes && sourceAudioAssetId && editMode) {
+          payload.sourceAudioAssetId = sourceAudioAssetId;
+          payload.editMode = editMode;
+          if (editMode === "extend") {
+            // Extend: the appended tail's new TOTAL length is the Length field; the worker defaults the
+            // region start to the source clip's own length (where generation begins).
+            payload.editRegionEndSecs = clampedDuration;
+          } else {
+            // Inpaint / repaint: a bounded interior window (seconds). Cleared bounds are omitted so the
+            // worker/provider apply their own defaults (end unset ⇒ to the clip end).
+            payload.editRegionStartSecs =
+              editRegionStartSecs === "" ? undefined : Number(editRegionStartSecs);
+            payload.editRegionEndSecs =
+              editRegionEndSecs === "" ? undefined : Number(editRegionEndSecs);
+          }
+          payload.editStrength = editStrength === "" ? undefined : Number(editStrength);
+        }
+      } else if (mode === "voiceclone") {
+        // Voice Clone (OpenVoice V2 conversion chain, sc-13411 C4). The prompt is the SCRIPT the base TTS
+        // (Kokoro) speaks; `referenceAudioAssetId` names the library audio track whose voice is cloned;
+        // `matchStrength` overrides the converter's τ. `canGenerate` guarantees a reference is selected.
+        // No `voice` is sent — the base clip uses Kokoro's default voice, which OpenVoice re-timbres toward
+        // the reference. `baseModel` defaults to kokoro_82m server-side.
+        payload.referenceAudioAssetId = referenceAudioAssetId;
+        payload.matchStrength = matchStrength === "" ? undefined : Number(matchStrength);
       }
       const job = await createAudioJob?.(payload);
       if (job) {
@@ -472,36 +608,167 @@ export function AudioStudio() {
                     />
                   </label>
                 ) : null}
+
+                {/* Music: optional tempo (BPM) + musical key. Both ride the gen-core AudioParams music
+                    sub-block ACE-Step reads; cleared ⇒ omitted so the model derives its own. */}
+                {showMusicFields ? (
+                  <label className="settings-field settings-field-bpm">
+                    BPM
+                    <input
+                      min="1"
+                      onChange={(event) => setBpm(event.target.value)}
+                      placeholder="Optional"
+                      step="1"
+                      type="number"
+                      value={bpm}
+                    />
+                  </label>
+                ) : null}
+
+                {showMusicFields ? (
+                  <label className="settings-field settings-field-key">
+                    Key
+                    <input
+                      onChange={(event) => setMusicalKey(event.target.value)}
+                      placeholder="e.g. C minor"
+                      type="text"
+                      value={musicalKey}
+                    />
+                  </label>
+                ) : null}
               </div>
 
-              {/* Music editing ops the model advertises (audio.editModes) — capability-driven scaffold
-                  the C3 story builds on. */}
+              {/* Music: optional lyrics (free-form; empty ⇒ instrumental). Rides the AudioParams
+                  `lyrics` field, distinct from the describe-the-music prompt. */}
+              {showMusicFields ? (
+                <label className="settings-field settings-field-lyrics">
+                  Lyrics
+                  <textarea
+                    aria-label="Lyrics"
+                    onChange={(event) => setLyrics(event.target.value)}
+                    placeholder="Optional — [verse] / [chorus] tags supported; leave empty for instrumental"
+                    value={lyrics}
+                  />
+                </label>
+              ) : null}
+
+              {/* Music extend/edit SOURCE band (sc-13410) — revealed ONLY when the selected model
+                  advertises audio.editModes (Conditioning::AudioEdit). Mirrors VideoStudio's
+                  `studio-source-band`: pick a library audio track + an edit mode the model advertises,
+                  then (for a bounded inpaint/repaint) a region window. Extend reuses the Length field as
+                  the new total length. Empty source ⇒ plain text-to-music (the band is optional). */}
               {showEditModes ? (
-                <div className="settings-bar-styles">
-                  <span className="settings-bar-label">Edit</span>
-                  <div className="preset-chips">
-                    {editModes.map((value) => (
-                      <button
-                        className={editMode === value ? "preset-chip active" : "preset-chip"}
-                        key={value}
-                        onClick={() => setEditMode(value)}
-                        type="button"
-                      >
-                        {value}
-                      </button>
-                    ))}
+                <div className="studio-source-band">
+                  <AssetPickerField
+                    assets={audioAssets}
+                    buttonLabel="Select audio"
+                    changeLabel="Change"
+                    emptyLabel="No source track selected"
+                    label="Source track (extend / edit)"
+                    onChange={setSourceAudioAssetId}
+                    showCategories={false}
+                    value={sourceAudioAssetId}
+                  />
+                  <div className="settings-bar-styles">
+                    <span className="settings-bar-label">Edit</span>
+                    <div className="preset-chips">
+                      {editModes.map((value) => (
+                        <button
+                          className={editMode === value ? "preset-chip active" : "preset-chip"}
+                          key={value}
+                          onClick={() => setEditMode(value)}
+                          type="button"
+                        >
+                          {value}
+                        </button>
+                      ))}
+                    </div>
                   </div>
+                  {/* Inpaint / repaint bound a region (seconds) inside the source clip. Extend needs no
+                      region here — its new total length is the Length field, and the worker begins the
+                      appended tail at the source clip's own length. */}
+                  {sourceAudioAssetId && (editMode === "inpaint" || editMode === "repaint") ? (
+                    <div className="settings-bar-row">
+                      <label className="settings-field settings-field-region-start">
+                        Region start (s)
+                        <input
+                          min="0"
+                          onChange={(event) => setEditRegionStartSecs(event.target.value)}
+                          step="0.1"
+                          type="number"
+                          value={editRegionStartSecs}
+                        />
+                      </label>
+                      <label className="settings-field settings-field-region-end">
+                        Region end (s)
+                        <input
+                          min="0"
+                          onChange={(event) => setEditRegionEndSecs(event.target.value)}
+                          placeholder="To clip end"
+                          step="0.1"
+                          type="number"
+                          value={editRegionEndSecs}
+                        />
+                      </label>
+                    </div>
+                  ) : null}
+                  {/* Edit strength (0..=1) — an optional weight on the whole AudioEdit, part of the
+                      Conditioning::AudioEdit contract. Cleared ⇒ the model default; a model that ignores
+                      it (the ACE-Step turbo) simply falls back to its own behaviour. */}
+                  {sourceAudioAssetId ? (
+                    <label className="settings-field settings-field-edit-strength">
+                      Edit strength
+                      <input
+                        max="1"
+                        min="0"
+                        onChange={(event) => setEditStrength(event.target.value)}
+                        placeholder="Model default"
+                        step="0.05"
+                        type="number"
+                        value={editStrength}
+                      />
+                    </label>
+                  ) : null}
                 </div>
               ) : null}
             </div>
 
-            {/* Voice Clone conditioning scaffold — surfaced from audio.conditioning. Reference upload +
-                cloned-speech wiring is a later mode story (C4); this shows the model's capability. */}
-            {showConditioning ? (
-              <p className="helper-copy">
-                This model conditions on a reference voice ({conditioning.join(", ")}). Reference
-                upload and cloned-speech generation arrive in a later update.
-              </p>
+            {/* Voice Clone (C4 sc-13411): reference-voice band + match strength. Pick a library audio
+                track whose voice is cloned; the prompt above is the script the base voice speaks, then
+                OpenVoice V2 transfers the reference's tone color onto it. Revealed only when the selected
+                converter advertises ReferenceAudio conditioning (isVoiceCloneConverter). */}
+            {showVoiceClone ? (
+              <div className="studio-source-band">
+                <AssetPickerField
+                  assets={audioAssets}
+                  buttonLabel="Select reference voice"
+                  changeLabel="Change"
+                  emptyLabel="No reference voice selected"
+                  label="Reference voice"
+                  onChange={setReferenceAudioAssetId}
+                  showCategories={false}
+                  value={referenceAudioAssetId}
+                />
+                <label className="settings-field settings-field-match-strength">
+                  Match strength
+                  <input
+                    max="1"
+                    min="0"
+                    onChange={(event) => setMatchStrength(event.target.value)}
+                    placeholder="0.3 (default)"
+                    step="0.05"
+                    type="number"
+                    value={matchStrength}
+                  />
+                  <span className="field-hint" role="note">
+                    OpenVoice tone-color sampling temperature (τ). Cleared → model default (0.3).
+                  </span>
+                </label>
+                <p className="helper-copy">
+                  The base voice speaks your script, then OpenVoice V2 converts it to match the reference
+                  clip&rsquo;s voice. Record or import a reference clip into the library to use it here.
+                </p>
+              </div>
             ) : null}
 
             <AdvancedSection
@@ -519,11 +786,13 @@ export function AudioStudio() {
                     value={seed}
                   />
                 </label>
-                {/* Sound FX diffusion sampling knobs (MOSS-SoundEffect). Guidance is the CFG scale and
-                    Steps is the solver step count — both ride the top-level request the flow-matching
-                    pipeline reads. Cleared ⇒ the model's own default; the gen-core floor range-checks
-                    any value sent, so no hardcoded ceiling is baked into the input. */}
-                {showSamplingKnobs ? (
+                {/* Diffusion sampling knobs. Steps (the solver step count) rides the top-level request
+                    both the Sound FX (MOSS) and Music (ACE-Step) samplers read. Guidance (the CFG scale)
+                    surfaces only when the model advertises guidance support — MOSS does; the
+                    guidance-distilled ACE-Step turbo does NOT, so it stays hidden rather than sent (the
+                    gen-core floor would reject it). Cleared ⇒ the model's own default; the floor
+                    range-checks any value sent, so no hardcoded ceiling is baked into the input. */}
+                {showGuidance ? (
                   <label>
                     Guidance (CFG)
                     <input
@@ -536,7 +805,7 @@ export function AudioStudio() {
                     />
                   </label>
                 ) : null}
-                {showSamplingKnobs ? (
+                {showSteps ? (
                   <label>
                     Steps
                     <input
@@ -546,6 +815,21 @@ export function AudioStudio() {
                       step="1"
                       type="number"
                       value={steps}
+                    />
+                  </label>
+                ) : null}
+                {/* Negative prompt — the traits to steer away from. Capability-gated: surfaced only when
+                    the model advertises negative-prompt support (audio.supportsNegativePrompt). The
+                    guidance-distilled ACE-Step turbo advertises none, so it stays hidden; a music model
+                    that supports it renders this and rides it through as GenerationRequest.negative_prompt. */}
+                {showNegative ? (
+                  <label>
+                    Negative prompt
+                    <textarea
+                      aria-label="Negative prompt"
+                      onChange={(event) => setNegativePrompt(event.target.value)}
+                      placeholder="Traits to avoid"
+                      value={negativePrompt}
                     />
                   </label>
                 ) : null}

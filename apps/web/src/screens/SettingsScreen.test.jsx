@@ -427,12 +427,15 @@ describe("SettingsScreen default generation quality (sc-10728)", () => {
   const qualitySelect = () =>
     container.querySelector('[aria-label="Default generation quality"]');
 
-  it("renders the control defaulting to Balanced (Q8) when nothing is stored", async () => {
+  it("renders the control defaulting to Auto when nothing is stored (epic 10721 R3)", async () => {
     await render();
     expect(container.textContent).toContain("Generation quality");
     const select = qualitySelect();
     expect(select).toBeTruthy();
-    expect(select.value).toBe("q8");
+    expect(select.value).toBe("auto");
+    // Auto is offered as the first option, alongside the explicit tiers.
+    const optionValues = [...select.options].map((option) => option.value);
+    expect(optionValues).toEqual(["auto", "bf16", "q8", "q4"]);
   });
 
   it("writes a change to the localStorage instant-paint cache and confirms it in the status line (cache path)", async () => {

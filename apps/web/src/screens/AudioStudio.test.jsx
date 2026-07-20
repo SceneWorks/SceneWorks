@@ -200,13 +200,36 @@ describe("AudioStudio shell (sc-13407)", () => {
     expect(fieldByLabelStart(container, "Voice")).toBeFalsy();
   });
 
-  it("surfaces the Voice Clone conditioning scaffold from audio.conditioning", async () => {
+  it("surfaces the Voice Clone reference band + match strength from the converter (sc-13411)", async () => {
     await render(baseContext());
     await click(modeTab(container, "Voice Clone"));
 
-    // Snaps to a conditioning model (OpenVoice), and shows the reference-voice scaffold copy.
+    // Snaps to the CONVERTER (OpenVoice V2 — ReferenceAudio conditioning); a bare embedder never reaches
+    // this tab. The reference-voice band + the match-strength control render for the real conversion.
     expect(modelSelect(container).value).toBe("openvoice_v2");
-    expect(container.textContent).toContain("ReferenceAudio");
+    const band = container.querySelector(".studio-source-band");
+    expect(band).toBeTruthy();
+    expect(band.textContent).toContain("Reference voice");
+    expect(band.querySelector(".settings-field-match-strength input")).toBeTruthy();
+  });
+
+  it("filters a bare speaker embedder (Chatterbox-VE) out of the Voice Clone picker (sc-13411)", async () => {
+    // Chatterbox-VE "serves" voiceclone conceptually (VoiceEmbedding) but cannot run the conversion, so
+    // it must never appear in the generate picker — only converters (ReferenceAudio) do.
+    const chatterbox = {
+      id: "chatterbox_ve",
+      name: "Chatterbox Voice Encoder",
+      type: "audio",
+      audio: { conditioning: ["VoiceEmbedding"] },
+      ui: { label: "Chatterbox Voice Encoder" },
+    };
+    await render(
+      baseContext({ audioModels: [...ALL_AUDIO, chatterbox], models: [...ALL_AUDIO, chatterbox] }),
+    );
+    await click(modeTab(container, "Voice Clone"));
+    const options = [...modelSelect(container).querySelectorAll("option")].map((o) => o.value);
+    expect(options).toContain("openvoice_v2");
+    expect(options).not.toContain("chatterbox_ve");
   });
 
   it("renders the studio body when an audio model is installed (gate open)", async () => {
@@ -438,16 +461,16 @@ describe("AudioStudio Speech generation (sc-13408)", () => {
     expect(results.textContent).not.toContain("No audio yet");
   });
 
-  it("does not submit on a still-scaffold tab (Music / Voice Clone stay inert)", async () => {
+  it("Voice Clone needs a reference before Generate is enabled (sc-13411)", async () => {
     const createAudioJob = vi.fn(async () => ({ id: "nope" }));
     await render(
       baseContext({ createAudioJob, rememberLocalGenerationJob: vi.fn() }),
     );
-    // Music is served only by ACE-Step in the base fixture; switch to it, type a script. (Speech and
-    // Sound FX are wired — C1/C2 — so Music/Voice Clone are the remaining scaffold tabs.)
-    await click(modeTab(container, "Music"));
-    await setTextarea(container.querySelector(".prompt-input"), "some music");
-    // The CTA is disabled off a wired tab, and a direct form submit is a no-op there.
+    // Voice Clone is served by OpenVoice in the base fixture; switch to it, type a script. With NO
+    // reference selected the conversion has no target, so the CTA stays disabled and a direct submit is
+    // a no-op — the guard is a missing reference now, not an unwired tab.
+    await click(modeTab(container, "Voice Clone"));
+    await setTextarea(container.querySelector(".prompt-input"), "reference this voice");
     expect(generateButton(container).disabled).toBe(true);
     await act(async () => {
       container
@@ -611,6 +634,386 @@ describe("AudioStudio Sound FX generation (sc-13409)", () => {
     await submitForm();
     // MOSS advertises maxDurationSecs 30 — the submit clamps to it, never a hardcoded ceiling.
     expect(createAudioJob.mock.calls[0][0].targetDurationSecs).toBe(30);
+  });
+});
+
+// A music model that (unlike the guidance-distilled ACE-Step turbo) DOES advertise CFG guidance +
+// negative-prompt support — proves the advanced music knobs are capability-gated off the manifest
+// flags, not hardcoded to the mode.
+const MUSIC_WITH_GUIDANCE = {
+  id: "music_guided",
+  name: "Guided Music",
+  type: "audio",
+  audio: {
+    languages: ["en"],
+    sampleRates: [48000],
+    maxDurationSecs: 120,
+    editModes: ["inpaint", "repaint", "extend"],
+    conditioning: ["AudioEdit"],
+    supportsGuidance: true,
+    supportsNegativePrompt: true,
+  },
+  ui: { label: "Guided Music" },
+};
+
+describe("AudioStudio Music generation (sc-13410)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <AudioStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const advancedFieldByLabel = (root, label) =>
+    [...root.querySelectorAll(".advanced-panel label")].find((el) =>
+      el.textContent.trim().startsWith(label),
+    );
+  const setTextarea = async (el, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+  };
+  const setNumber = async (el, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+  };
+  const setText = async (el, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+  };
+  const submitForm = async () => {
+    await act(async () => {
+      container
+        .querySelector("form")
+        .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+  };
+
+  it("switching to Music snaps to ACE-Step and reveals the describe-the-music fields + source band", async () => {
+    await render(baseContext({ createAudioJob: vi.fn() }));
+    await click(modeTab(container, "Music"));
+    expect(modelSelect(container).value).toBe("acestep_v15_turbo");
+
+    // The optional describe-the-music sub-block (BPM / key / lyrics) is present.
+    expect(container.querySelector(".settings-field-bpm input")).toBeTruthy();
+    expect(container.querySelector(".settings-field-key input")).toBeTruthy();
+    expect(container.querySelector(".settings-field-lyrics textarea")).toBeTruthy();
+
+    // The extend/edit source band is revealed (ACE-Step advertises editModes) with the three
+    // advertised edit ops — capability-driven, never a hardcoded taxonomy.
+    const band = container.querySelector(".studio-source-band");
+    expect(band).toBeTruthy();
+    expect(band.textContent).toContain("Source track");
+    const editChips = [...band.querySelectorAll(".preset-chip")].map((b) => b.textContent.trim());
+    expect(editChips).toEqual(["inpaint", "repaint", "extend"]);
+  });
+
+  it("hides the music fields + source band on Speech / Sound FX (no editModes advertised)", async () => {
+    await render(baseContext({ createAudioJob: vi.fn() }));
+    // Speech (Kokoro): no music sub-block, no source band.
+    expect(container.querySelector(".settings-field-bpm input")).toBeNull();
+    expect(container.querySelector(".studio-source-band")).toBeNull();
+    // Sound FX (MOSS): still no editModes, so no source band.
+    await click(modeTab(container, "Sound FX"));
+    expect(container.querySelector(".settings-field-bpm input")).toBeNull();
+    expect(container.querySelector(".studio-source-band")).toBeNull();
+  });
+
+  it("submitting Music maps the describe-the-music payload and omits guidance/negative for the distilled turbo", async () => {
+    const job = { id: "music-job-1", type: "audio_generate", status: "queued" };
+    const createAudioJob = vi.fn(async () => job);
+    const rememberLocalGenerationJob = vi.fn();
+    await render(baseContext({ createAudioJob, rememberLocalGenerationJob }));
+
+    await click(modeTab(container, "Music"));
+    await setTextarea(container.querySelector(".prompt-input"), "gentle lofi piano loop");
+    // Non-default values so the assertions discriminate (a hardcoded payload would not follow them).
+    await setNumber(container.querySelector(".settings-field-bpm input"), "92");
+    await setText(container.querySelector(".settings-field-key input"), "C minor");
+    await setTextarea(container.querySelector(".settings-field-lyrics textarea"), "[verse] la la la");
+    await setNumber(fieldByLabelStart(container, "Length").querySelector("input"), "8");
+    await click(container.querySelector(".advanced-section-toggle"));
+    await setNumber(advancedFieldByLabel(container, "Seed").querySelector("input"), "77");
+    await setNumber(advancedFieldByLabel(container, "Steps").querySelector("input"), "8");
+
+    await submitForm();
+
+    expect(createAudioJob).toHaveBeenCalledTimes(1);
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.model).toBe("acestep_v15_turbo");
+    expect(payload.prompt).toBe("gentle lofi piano loop");
+    expect(payload.bpm).toBe(92);
+    expect(payload.musicalKey).toBe("C minor");
+    expect(payload.lyrics).toBe("[verse] la la la");
+    expect(payload.targetDurationSecs).toBe(8);
+    expect(payload.steps).toBe(8);
+    expect(payload.seed).toBe(77);
+    // The guidance-distilled ACE-Step turbo advertises neither guidance nor negative-prompt support,
+    // so the studio never sends them (the gen-core floor would reject them as typed Unsupported).
+    expect(payload.guidance).toBeUndefined();
+    expect(payload.negativePrompt).toBeUndefined();
+    // Music carries no voice, and no source band was picked → plain text-to-music.
+    expect(payload.voice).toBeUndefined();
+    expect(payload.sourceAudioAssetId).toBeUndefined();
+    expect(payload.editMode).toBeUndefined();
+    expect(rememberLocalGenerationJob).toHaveBeenCalledWith("audio", job);
+  });
+
+  it("hides guidance + negative-prompt for ACE-Step but shows steps (capability-gated)", async () => {
+    await render(baseContext({ createAudioJob: vi.fn() }));
+    await click(modeTab(container, "Music"));
+    await click(container.querySelector(".advanced-section-toggle"));
+    // ACE-Step reads the top-level `steps`, so the solver-step count surfaces...
+    expect(advancedFieldByLabel(container, "Steps")).toBeTruthy();
+    // ...but the distilled turbo advertises no guidance / negative-prompt support, so neither shows.
+    expect(advancedFieldByLabel(container, "Guidance")).toBeFalsy();
+    expect(advancedFieldByLabel(container, "Negative prompt")).toBeFalsy();
+  });
+
+  it("shows AND sends guidance + negative for a music model that advertises them (not hardcoded)", async () => {
+    const createAudioJob = vi.fn(async () => ({ id: "guided-1" }));
+    await render(
+      baseContext({
+        audioModels: [MUSIC_WITH_GUIDANCE],
+        models: [MUSIC_WITH_GUIDANCE],
+        createAudioJob,
+        rememberLocalGenerationJob: vi.fn(),
+      }),
+    );
+    await click(modeTab(container, "Music"));
+    await setTextarea(container.querySelector(".prompt-input"), "orchestral swell");
+    await click(container.querySelector(".advanced-section-toggle"));
+    // This model advertises both — so the knobs are present (capability-gated off the manifest flags).
+    expect(advancedFieldByLabel(container, "Guidance")).toBeTruthy();
+    expect(advancedFieldByLabel(container, "Negative prompt")).toBeTruthy();
+    await setNumber(advancedFieldByLabel(container, "Guidance").querySelector("input"), "4.5");
+    await setTextarea(
+      advancedFieldByLabel(container, "Negative prompt").querySelector("textarea"),
+      "harsh distortion",
+    );
+    await submitForm();
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.model).toBe("music_guided");
+    expect(payload.guidance).toBe(4.5);
+    expect(payload.negativePrompt).toBe("harsh distortion");
+  });
+
+  it("rides an extend edit through as an AudioEdit: source + editMode=extend + editRegionEndSecs=length", async () => {
+    // A source track is a persisted user selection, so it restores from the studio snapshot at mount
+    // (like the Video Studio source band). Seed it directly, then pick the edit op.
+    window.localStorage.setItem(
+      "sceneworks-studio-audio-project_1",
+      JSON.stringify({ sourceAudioAssetId: "audio-src-1" }),
+    );
+    const sourceAsset = { id: "audio-src-1", type: "audio", displayName: "Base loop" };
+    const createAudioJob = vi.fn(async () => ({ id: "extend-1" }));
+    await render(
+      baseContext({
+        assets: [sourceAsset],
+        createAudioJob,
+        rememberLocalGenerationJob: vi.fn(),
+      }),
+    );
+    await click(modeTab(container, "Music"));
+    await setTextarea(container.querySelector(".prompt-input"), "extend the outro");
+    await setNumber(fieldByLabelStart(container, "Length").querySelector("input"), "20");
+    // Pick the "extend" edit op from the advertised chips.
+    const band = container.querySelector(".studio-source-band");
+    const extendChip = [...band.querySelectorAll(".preset-chip")].find(
+      (b) => b.textContent.trim() === "extend",
+    );
+    await click(extendChip);
+    await submitForm();
+
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.sourceAudioAssetId).toBe("audio-src-1");
+    expect(payload.editMode).toBe("extend");
+    // Extend reuses the Length field as the new TOTAL length (editRegionEndSecs); the worker begins the
+    // appended tail at the source clip's own length. No interior region start/end is sent for extend.
+    expect(payload.editRegionEndSecs).toBe(20);
+    expect(payload.editRegionStartSecs).toBeUndefined();
+  });
+
+  it("rides an inpaint edit through with a bounded region + strength", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-audio-project_1",
+      JSON.stringify({ sourceAudioAssetId: "audio-src-1" }),
+    );
+    const sourceAsset = { id: "audio-src-1", type: "audio", displayName: "Base loop" };
+    const createAudioJob = vi.fn(async () => ({ id: "inpaint-1" }));
+    await render(
+      baseContext({
+        assets: [sourceAsset],
+        createAudioJob,
+        rememberLocalGenerationJob: vi.fn(),
+      }),
+    );
+    await click(modeTab(container, "Music"));
+    await setTextarea(container.querySelector(".prompt-input"), "repaint the bridge");
+    // editMode defaults to the first advertised op ("inpaint") — which reveals the region window.
+    await setNumber(container.querySelector(".settings-field-region-start input"), "2");
+    await setNumber(container.querySelector(".settings-field-region-end input"), "5");
+    await setNumber(container.querySelector(".settings-field-edit-strength input"), "0.7");
+    await submitForm();
+
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.sourceAudioAssetId).toBe("audio-src-1");
+    expect(payload.editMode).toBe("inpaint");
+    expect(payload.editRegionStartSecs).toBe(2);
+    expect(payload.editRegionEndSecs).toBe(5);
+    expect(payload.editStrength).toBe(0.7);
+  });
+});
+
+describe("AudioStudio Voice Clone generation (sc-13411)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <AudioStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const generateButton = (root) => buttonWithText(root, "Generate");
+  const setTextarea = async (el, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+  };
+  const setNumber = async (el, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+  };
+  const submitForm = async () => {
+    await act(async () => {
+      container
+        .querySelector("form")
+        .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+  };
+
+  it("submits the Voice Clone chain: model=converter + referenceAudioAssetId + matchStrength + script, no voice", async () => {
+    // The reference is a persisted user selection, so it restores from the studio snapshot at mount (like
+    // the Music source band). Seed it, then the CTA is enabled and submit builds the conversion payload.
+    window.localStorage.setItem(
+      "sceneworks-studio-audio-project_1",
+      JSON.stringify({ referenceAudioAssetId: "ref-voice-1" }),
+    );
+    const referenceAsset = { id: "ref-voice-1", type: "audio", displayName: "My reference voice" };
+    const job = { id: "voiceclone-1", type: "audio_generate" };
+    const createAudioJob = vi.fn(async () => job);
+    const rememberLocalGenerationJob = vi.fn();
+    await render(
+      baseContext({
+        assets: [referenceAsset],
+        createAudioJob,
+        rememberLocalGenerationJob,
+      }),
+    );
+    await click(modeTab(container, "Voice Clone"));
+    await setTextarea(
+      container.querySelector(".prompt-input"),
+      "Clone this into my reference voice.",
+    );
+    // A discriminating, non-default match strength so the test can't false-green on a default.
+    await setNumber(container.querySelector(".settings-field-match-strength input"), "0.65");
+    expect(generateButton(container).disabled).toBe(false);
+    await submitForm();
+
+    expect(createAudioJob).toHaveBeenCalledTimes(1);
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.model).toBe("openvoice_v2");
+    expect(payload.prompt).toBe("Clone this into my reference voice.");
+    expect(payload.referenceAudioAssetId).toBe("ref-voice-1");
+    expect(payload.matchStrength).toBe(0.65);
+    // No base voice is sent from the voiceclone tab (Kokoro's default reads the script); no music/edit knobs.
+    expect(payload.voice).toBeUndefined();
+    expect(payload.sourceAudioAssetId).toBeUndefined();
+    expect(payload.bpm).toBeUndefined();
+    // The run lands in the audio local-job lane so it stacks in the results zone.
+    expect(rememberLocalGenerationJob).toHaveBeenCalledWith("audio", job);
+  });
+
+  it("omits matchStrength when cleared so the converter uses its own default", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-audio-project_1",
+      JSON.stringify({ referenceAudioAssetId: "ref-voice-1" }),
+    );
+    const referenceAsset = { id: "ref-voice-1", type: "audio", displayName: "Ref" };
+    const createAudioJob = vi.fn(async () => ({ id: "vc-default" }));
+    await render(
+      baseContext({ assets: [referenceAsset], createAudioJob, rememberLocalGenerationJob: vi.fn() }),
+    );
+    await click(modeTab(container, "Voice Clone"));
+    await setTextarea(container.querySelector(".prompt-input"), "default strength");
+    await submitForm();
+
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.referenceAudioAssetId).toBe("ref-voice-1");
+    expect(payload.matchStrength).toBeUndefined();
   });
 });
 

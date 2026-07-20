@@ -694,6 +694,28 @@ pub(crate) async fn create_audio_job(
         )));
     }
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
+    // Voice Clone (sc-13411 C4): the two-call chain runs a SECOND model — the base TTS (Kokoro) whose
+    // speech the selected converter (OpenVoice V2) re-timbres. Resolve + inject its manifest entry too so
+    // the worker resolves BOTH snapshots without re-parsing the jsonc, exactly as the primary model entry
+    // is injected. Only when the request actually carries a reference voice (the voice-clone discriminator).
+    if payload
+        .reference_audio_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+    {
+        let base_model_id = payload.base_model.clone();
+        let base_entry = resolve_model_manifest_entry(&state, &base_model_id).await?;
+        let base_type = base_entry
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if base_type != "audio" {
+            return Err(ApiError::bad_request(format!(
+                "Base voice model {base_model_id} is not an audio model (type: \"audio\" required)"
+            )));
+        }
+        job_payload.insert("baseModelManifestEntry".to_owned(), base_entry);
+    }
     let job = create_generation_job(
         state,
         JobType::AudioGenerate,

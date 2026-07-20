@@ -1,7 +1,6 @@
 import React, { useState } from "react";
 import { Icon } from "../Icons.jsx";
 import { LoraPickerSection } from "../../screens/generationStudio.jsx";
-import { tierLabel } from "../../quantTier.js";
 import { MOTIONS } from "./editorUtils.js";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../StudioUpdateNotice.jsx";
 
@@ -302,15 +301,16 @@ export function GenerationRail({ gen, header, contextActions = [], onGenerate, g
                 <div className="ve-field">
                   <span className="ve-field-label">Generation tier</span>
                   <div className="ve-chip-row">
-                    {gen.availableTiers.map((tier) => (
+                    {gen.tierPickerItems.map((item) => (
                       <button
-                        className={`ve-chip${gen.quantTier === tier ? " active" : ""}`}
-                        key={tier}
-                        onClick={() => gen.setQuantTier(tier)}
-                        title={tierLabel(tier)}
+                        className={`ve-chip${gen.quantTier === item.tier ? " active" : ""}`}
+                        key={item.tier}
+                        disabled={item.disabled}
+                        onClick={() => gen.selectTier(item.tier)}
+                        title={item.label}
                         type="button"
                       >
-                        {tier.toUpperCase()}
+                        {item.tier.toUpperCase()}
                       </button>
                     ))}
                   </div>

@@ -1000,19 +1000,42 @@ describe("ImageStudio model picker capability gating", () => {
   const generateButton = () =>
     [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate");
 
-  it("shows the quant-tier picker with only installed tiers when >1 is installed (sc-8515)", async () => {
+  it("shows ALL possible tiers, disabling the un-installed ones (sc-8515, availability guard)", async () => {
     await render(baseContext({ imageModels: [matrixModel(["q4", "bf16"])], macCapabilities: MAC_CAPS }));
     await openAdvanced(container);
     await act(async () => {});
     const picker = tierPicker(container);
     expect(picker).toBeTruthy();
     const options = [...picker.options].map((o) => o.value);
-    // q8 is declared but not installed → excluded; smallest→largest order.
-    expect(options).toEqual(["q4", "bf16"]);
+    // Every declared tier appears (smallest→largest) so the un-downloaded q8 is DISCOVERABLE…
+    expect(options).toEqual(["q4", "q8", "bf16"]);
+    // …but only the installed tiers are selectable; q8 (declared, not installed) is disabled so it can
+    // never be picked or sent.
+    const disabledByTier = Object.fromEntries([...picker.options].map((o) => [o.value, o.disabled]));
+    expect(disabledByTier).toEqual({ q4: false, q8: true, bf16: false });
   });
 
-  it("hides the picker when only one tier is installed (sc-8515)", async () => {
+  it("shows the picker with a single installed tier, disabling the un-downloaded rest (sc-8515)", async () => {
     await render(baseContext({ imageModels: [matrixModel(["q4"])], macCapabilities: MAC_CAPS }));
+    await openAdvanced(container);
+    await act(async () => {});
+    const picker = tierPicker(container);
+    // Even with one tier installed the picker now shows, so the other tiers are discoverable (greyed)…
+    expect(picker).toBeTruthy();
+    expect(picker.value).toBe("q4");
+    // …and only the installed q4 is selectable; q8/bf16 are disabled and unsendable.
+    const disabledByTier = Object.fromEntries([...picker.options].map((o) => [o.value, o.disabled]));
+    expect(disabledByTier).toEqual({ q4: false, q8: true, bf16: true });
+  });
+
+  it("hides the picker when only ONE tier is possible at all — nothing to choose (sc-8515)", async () => {
+    const singleTier = {
+      ...Z_IMAGE,
+      id: "z_image_turbo",
+      hasVariantMatrix: true,
+      variants: [{ variant: "q4", default: true, installState: "installed" }],
+    };
+    await render(baseContext({ imageModels: [singleTier], macCapabilities: MAC_CAPS }));
     await openAdvanced(container);
     await act(async () => {});
     expect(tierPicker(container)).toBeFalsy();
@@ -1063,7 +1086,7 @@ describe("ImageStudio model picker capability gating", () => {
     expect(pid().disabled).toBe(true);
   });
 
-  it("still sends the resolved tier's mlxQuantize when only one tier is installed — picker hidden (sc-12090)", async () => {
+  it("still sends the resolved tier's mlxQuantize when only one tier is installed (sc-12090)", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(
       baseContext({
@@ -1074,12 +1097,14 @@ describe("ImageStudio model picker capability gating", () => {
     );
     await openAdvanced(container);
     await act(async () => {});
-    // The picker stays hidden with a single installed tier…
-    expect(tierPicker(container)).toBeFalsy();
+    // The picker now shows (with q8/bf16 disabled) and q4 — the only installed tier — is selected…
+    const picker = tierPicker(container);
+    expect(picker).toBeTruthy();
+    expect(picker.value).toBe("q4");
     await click(generateButton());
-    // …but the resolved tier (q4) now rides the payload regardless, so the worker budgets/loads THAT
-    // tier instead of defaulting to q8 against a tier the user never downloaded (#1516). It is NOT a
-    // deliberate pick (no sticky), so the explicit marker is absent — the worker may capability-downtier.
+    // …and the resolved tier (q4) rides the payload, so the worker budgets/loads THAT tier instead of
+    // defaulting to q8 against a tier the user never downloaded (#1516). It is NOT a deliberate pick (no
+    // sticky), so the explicit marker is absent — the worker may capability-downtier.
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
     expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("mlxQuantizeExplicit");
   });

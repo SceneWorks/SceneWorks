@@ -208,10 +208,12 @@ fn instantid_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             .any(|entry| entry.file_name().to_string_lossy().ends_with(".safetensors"));
         has_backbone.then(|| root.join(name))
     };
-    present(preferred)
-        .or_else(|| present("bf16"))
-        .or_else(|| present("q4"))
-        .or_else(|| present("q8"))
+    // sc-12279 generalized: the `SceneWorks/realvisxl-mlx` base ships a per-tier `model_index.json`, so
+    // route the chain through the shared completeness guard — a torn tier (e.g. `unet/` present but
+    // `tokenizer/` missing) now falls through to a complete sibling instead of crashing the SDXL loader
+    // on the absent tokenizer. `instantid.rs` is `include!`d into the `image_jobs` module, so
+    // `pick_loadable_tier` / `tier_components_present` (base.rs) are directly in scope.
+    pick_loadable_tier(&[preferred, "bf16", "q4", "q8"], &present, &tier_components_present)
         .unwrap_or_else(|| root.to_path_buf())
 }
 
