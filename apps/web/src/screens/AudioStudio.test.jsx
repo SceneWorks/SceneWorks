@@ -124,7 +124,7 @@ describe("AudioStudio shell (sc-13407)", () => {
   it("renders the four mode tabs in AUDIO_MODES order", async () => {
     await render(baseContext());
     const labels = [...modeTabs(container).querySelectorAll(".mode-tab")].map((b) => b.textContent.trim());
-    expect(labels).toEqual(["Speech", "Sound FX", "Music", "Voice Clone"]);
+    expect(labels).toEqual(["Speech", "Music", "Sound FX", "Voice Clone"]);
   });
 
   it("shows an initially empty results zone", async () => {

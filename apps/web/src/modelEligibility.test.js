@@ -231,7 +231,7 @@ describe("audio model eligibility (sc-13403)", () => {
   ];
 
   it("exposes the four Audio Studio mode keys in order", () => {
-    expect(AUDIO_MODES).toEqual(["speech", "sfx", "music", "voiceclone"]);
+    expect(AUDIO_MODES).toEqual(["speech", "music", "sfx", "voiceclone"]);
   });
 
   it.each(seeded)("%s serves exactly its capability-derived mode and rejects the others", (_label, model, expectedMode) => {

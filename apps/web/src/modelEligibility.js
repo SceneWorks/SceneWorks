@@ -26,7 +26,7 @@ export const VIDEO_MODES = [
 ];
 
 // Audio generation modes the Audio Studio exposes (epic 13400 C0/C1 mirror these keys).
-export const AUDIO_MODES = ["speech", "sfx", "music", "voiceclone"];
+export const AUDIO_MODES = ["speech", "music", "sfx", "voiceclone"];
 
 // Conditioning kinds that mark a voice-clone (voice-conversion / speaker-embedding) model —
 // distinct from ACE-Step's "AudioEdit" conditioning, which is a music-editing signal, not a
