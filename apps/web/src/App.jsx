@@ -819,6 +819,12 @@ export function App() {
     const items = generationModelsForType(models, "video");
     return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "video");
   }, [models]);
+  // Audio models (epic 13400) — same live-catalog-then-fallback split as image/video, consumed by
+  // the Audio Studio (C0/C1). Per-mode eligibility comes from audioModelServesMode.
+  const audioModels = useMemo(() => {
+    const items = generationModelsForType(models, "audio");
+    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "audio");
+  }, [models]);
   const selectedAsset = useMemo(
     () => assets.find((asset) => asset.id === selectedAssetId) ?? assets[0] ?? null,
     [assets, selectedAssetId],
@@ -2254,6 +2260,7 @@ export function App() {
     // Models / GPU
     imageModels,
     videoModels,
+    audioModels,
     models,
     // Mac UI gating (sc-3486)
     macCapabilities,
@@ -2358,7 +2365,7 @@ export function App() {
     recentVideoAssets, studioLaunch,
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
     rememberLocalGenerationJob, personTracks, createPersonDetectionJob,
-    createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, models, macCapabilities,
+    createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, audioModels, models, macCapabilities,
     loras, deleteLora, updateLora, fetchLoraEmbeddedTags, deleteModel, deleteModelVariant, createModelDownloadJob, createLoraDownloadJob, createModelConvertJob,
     createLoraImportJob, createModelImportJob, requestedGpu, setRequestedGpu,
     presets, createPreset, updatePreset, deletePreset, duplicatePreset, token, authenticated,

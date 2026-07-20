@@ -767,4 +767,106 @@ export const fallbackModels = [
       promptGuide: { title: "Wan2.2 VACE-Fun Prompt Guide", path: "/prompt-guides/wan-2-2-t2v-14b.md" },
     },
   },
+  // Audio models (epic 13400 A2/A3) — this mirrors the five `type:"audio"` catalog entries so the
+  // Audio Studio still has a model list when the live catalog (/api/v1/models) is unavailable. Each
+  // entry carries only the `audio` capability fields the UI / eligibility predicates read: `voices`
+  // (speech), `editModes` (music), `conditioning` (voiceclone), and `sampleRates` (generation). See
+  // modelEligibility.js `audioModelServesMode` for the capability→mode mapping.
+  {
+    id: "kokoro_82m",
+    name: "Kokoro 82M (Speech)",
+    type: "audio",
+    recommended: true,
+    macOnly: false,
+    // voices[] present → serves the "speech" mode (only a TTS model ships a voice bank).
+    audio: {
+      voices: [
+        { id: "af_heart", label: "Heart", gender: "female", accent: "american", language: "en-US" },
+        { id: "am_michael", label: "Michael", gender: "male", accent: "american", language: "en-US" },
+        { id: "bf_emma", label: "Emma", gender: "female", accent: "british", language: "en-GB" },
+        { id: "bm_george", label: "George", gender: "male", accent: "british", language: "en-GB" },
+      ],
+      languages: ["en-US", "en-GB"],
+      sampleRates: [24000],
+      maxDurationSecs: 30,
+      supportsMultiSpeaker: false,
+    },
+    ui: {
+      label: "Kokoro 82M",
+      description:
+        "Kokoro-82M text-to-speech (StyleTTS2 lineage) — the recommended Speech model. English voices (American + British), 24 kHz mono, up to ~30 s per clip. Candle-native on every platform. Apache-2.0.",
+    },
+  },
+  {
+    id: "moss_sfx_v2",
+    name: "MOSS SoundEffect v2 (SFX)",
+    type: "audio",
+    macOnly: false,
+    // sampleRates only (no voices / editModes / conditioning) → serves the residual "sfx" mode.
+    audio: {
+      languages: ["en", "zh"],
+      sampleRates: [48000],
+      maxDurationSecs: 30,
+      supportsMultiSpeaker: false,
+    },
+    ui: {
+      label: "MOSS SoundEffect v2",
+      description:
+        "MOSS-SoundEffect v2.0 text-to-audio flow-matching model for sound effects and ambience. 48 kHz mono, up to 30 s. Candle-native on every platform. Apache-2.0.",
+    },
+  },
+  {
+    id: "acestep_v15_turbo",
+    name: "ACE-Step v1.5 XL Turbo (Music)",
+    type: "audio",
+    macOnly: false,
+    // editModes[] present → serves the "music" mode; conditioning "AudioEdit" is a music-edit
+    // signal (NOT a voice-clone signal), so it does not serve "voiceclone".
+    audio: {
+      languages: ["en", "zh", "ja", "ko", "fr", "de", "es", "it", "pt", "ru"],
+      sampleRates: [48000],
+      maxDurationSecs: 600,
+      editModes: ["inpaint", "repaint", "extend"],
+      conditioning: ["AudioEdit"],
+      supportsMultiSpeaker: false,
+    },
+    ui: {
+      label: "ACE-Step v1.5 XL Turbo",
+      description:
+        "ACE-Step v1.5 XL Turbo text-to-music model. 48 kHz stereo, up to 10 minutes, with prompted audio editing (inpaint / repaint / extend). Candle-native on every platform. MIT.",
+    },
+  },
+  {
+    id: "openvoice_v2",
+    name: "OpenVoice V2 (Voice Conversion)",
+    type: "audio",
+    macOnly: false,
+    // conditioning "ReferenceAudio" → serves the "voiceclone" mode.
+    audio: {
+      sampleRates: [22050],
+      conditioning: ["ReferenceAudio"],
+      supportsMultiSpeaker: false,
+    },
+    ui: {
+      label: "OpenVoice V2",
+      description:
+        "OpenVoice V2 tone-color voice conversion — transfers a target voice's timbre onto source speech from a short reference clip. 22.05 kHz output. Candle-native on every platform. MIT.",
+    },
+  },
+  {
+    id: "chatterbox_ve",
+    name: "Chatterbox Voice Encoder (Voice Clone)",
+    type: "audio",
+    macOnly: false,
+    // conditioning "VoiceEmbedding" → serves the "voiceclone" mode (speaker-identity embedder).
+    audio: {
+      conditioning: ["VoiceEmbedding"],
+      supportsMultiSpeaker: false,
+    },
+    ui: {
+      label: "Chatterbox Voice Encoder",
+      description:
+        "Chatterbox (Resemble AI) speaker voice encoder — maps a few seconds of reference audio to a voice-identity embedding for cloned-voice conditioning. Candle-native on every platform. MIT.",
+    },
+  },
 ];

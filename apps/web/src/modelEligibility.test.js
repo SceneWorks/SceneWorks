@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import {
+  AUDIO_MODES,
   angleModelUsable,
+  audioModelServesMode,
+  audioModelUsable,
   characterModelUsable,
   documentModelUsable,
   generationModelsForType,
@@ -13,7 +16,7 @@ import {
   videoModelUsable,
   visionCaptionModelUsable,
 } from "./modelEligibility.js";
-import { VISION_CAPTION_MODEL_ID } from "./constants.js";
+import { VISION_CAPTION_MODEL_ID, fallbackModels } from "./constants.js";
 
 const caps = DEFAULT_MAC_CAPABILITIES; // gating off → Mac blocks are no-ops
 
@@ -184,5 +187,116 @@ describe("modelEligibility predicates", () => {
     // No recommended among eligible → fall back to all eligible (not installed).
     const noRec = models.filter((m) => m.id === "plain");
     expect(downloadOffersFor(noRec, imageModelUsable, caps).map((m) => m.id)).toEqual(["plain"]);
+  });
+});
+
+// Audio Studio eligibility (epic 13400, sc-13403). audioModelServesMode is capability-driven: it
+// reads only the model's `audio` sub-block (voices / editModes / conditioning / sampleRates), never
+// the id. The five A2-seeded models must each map to EXACTLY one of speech/sfx/music/voiceclone and
+// fail the other three, so the assertions below discriminate (a model must reject wrong modes).
+describe("audio model eligibility (sc-13403)", () => {
+  // Minimal fixtures mirroring the `audio` sub-blocks of the five seeded catalog models.
+  const kokoro = {
+    id: "kokoro_82m",
+    type: "audio",
+    audio: { voices: [{ id: "af_heart" }, { id: "am_michael" }], sampleRates: [24000], languages: ["en-US"], maxDurationSecs: 30 },
+  };
+  const moss = {
+    id: "moss_sfx_v2",
+    type: "audio",
+    audio: { sampleRates: [48000], languages: ["en", "zh"], maxDurationSecs: 30 },
+  };
+  const acestep = {
+    id: "acestep_v15_turbo",
+    type: "audio",
+    audio: { sampleRates: [48000], editModes: ["inpaint", "repaint", "extend"], conditioning: ["AudioEdit"], maxDurationSecs: 600 },
+  };
+  const openvoice = {
+    id: "openvoice_v2",
+    type: "audio",
+    audio: { sampleRates: [22050], conditioning: ["ReferenceAudio"] },
+  };
+  const chatterbox = {
+    id: "chatterbox_ve",
+    type: "audio",
+    audio: { conditioning: ["VoiceEmbedding"] },
+  };
+
+  const seeded = [
+    ["Kokoro-82M", kokoro, "speech"],
+    ["MOSS-SoundEffect-v2", moss, "sfx"],
+    ["ACE-Step v1.5 Turbo", acestep, "music"],
+    ["OpenVoice V2", openvoice, "voiceclone"],
+    ["Chatterbox-VE", chatterbox, "voiceclone"],
+  ];
+
+  it("exposes the four Audio Studio mode keys in order", () => {
+    expect(AUDIO_MODES).toEqual(["speech", "sfx", "music", "voiceclone"]);
+  });
+
+  it.each(seeded)("%s serves exactly its capability-derived mode and rejects the others", (_label, model, expectedMode) => {
+    expect(audioModelServesMode(model, expectedMode), `${model.id} should serve ${expectedMode}`).toBe(true);
+    for (const mode of AUDIO_MODES.filter((m) => m !== expectedMode)) {
+      expect(audioModelServesMode(model, mode), `${model.id} must NOT serve ${mode}`).toBe(false);
+    }
+  });
+
+  it("ACE-Step is music (editModes) and NOT voiceclone (its conditioning is AudioEdit, not a voice signal)", () => {
+    expect(audioModelServesMode(acestep, "music")).toBe(true);
+    expect(audioModelServesMode(acestep, "voiceclone")).toBe(false);
+    // MOSS is the residual generator (sfx) — not music, because it advertises no editModes.
+    expect(audioModelServesMode(moss, "music")).toBe(false);
+    expect(audioModelServesMode(moss, "sfx")).toBe(true);
+  });
+
+  it("audioModelServesMode is empty-block / unknown-mode safe", () => {
+    expect(audioModelServesMode({ type: "audio" }, "speech")).toBe(false); // no audio block
+    expect(audioModelServesMode({ type: "audio", audio: {} }, "sfx")).toBe(false); // empty block
+    expect(audioModelServesMode(kokoro, "banana")).toBe(false); // unknown mode
+    expect(audioModelServesMode(null, "speech")).toBe(false);
+  });
+
+  it("audioModelUsable matches audio models serving ≥1 mode, rejects other types + non-serving blocks", () => {
+    for (const [, model] of seeded) {
+      expect(audioModelUsable(model, caps), `${model.id} usable`).toBe(true);
+    }
+    // Wrong type → not usable even with an audio block.
+    expect(audioModelUsable({ ...kokoro, type: "video" }, caps)).toBe(false);
+    // Audio type but no serviceable capability (e.g. metadata-only block) → not usable.
+    expect(audioModelUsable({ id: "bare", type: "audio", audio: { languages: ["en"] } }, caps)).toBe(false);
+    expect(audioModelUsable({ id: "none", type: "audio" }, caps)).toBe(false);
+  });
+
+  it("audioModels resolve from a live catalog and from fallbackModels", () => {
+    // Live-catalog fixture: installed audio entries surface; missing/torn/non-audio are excluded.
+    const liveCatalog = [
+      { ...kokoro, installState: "installed" },
+      { ...acestep, installState: "installed", updateAvailable: true },
+      { ...moss, installState: "missing" },
+      { id: "some-video", type: "video", installState: "installed" },
+    ];
+    expect(generationModelsForType(liveCatalog, "audio").map((m) => m.id)).toEqual(["kokoro_82m", "acestep_v15_turbo"]);
+
+    // Fallback mirror: the constants.js audio entries resolve the same five models, and each still
+    // maps to its correct capability-driven mode (proves the fallback carries the discriminating fields).
+    const fallbackAudio = generationModelsForType(fallbackModels, "audio");
+    expect(fallbackAudio.map((m) => m.id).sort()).toEqual(
+      ["acestep_v15_turbo", "chatterbox_ve", "kokoro_82m", "moss_sfx_v2", "openvoice_v2"].sort(),
+    );
+    const expectedMode = {
+      kokoro_82m: "speech",
+      moss_sfx_v2: "sfx",
+      acestep_v15_turbo: "music",
+      openvoice_v2: "voiceclone",
+      chatterbox_ve: "voiceclone",
+    };
+    for (const model of fallbackAudio) {
+      expect(audioModelServesMode(model, expectedMode[model.id]), `fallback ${model.id}`).toBe(true);
+      for (const mode of AUDIO_MODES.filter((m) => m !== expectedMode[model.id])) {
+        expect(audioModelServesMode(model, mode), `fallback ${model.id} must NOT serve ${mode}`).toBe(false);
+      }
+    }
+    // Kokoro is the recommended default in the fallback list.
+    expect(fallbackAudio.find((m) => m.id === "kokoro_82m")?.recommended).toBe(true);
   });
 });
