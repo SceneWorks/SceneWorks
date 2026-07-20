@@ -4920,7 +4920,7 @@ fn write_style_test_manifests(config_dir: &std::path::Path) {
         {
           "schemaVersion": 1,
           "source": "documents/style.txt",
-          "promptTemplate": "Style: {style}\nDescription: {description}",
+          "promptTemplate": "Subject: {subject}\nStyle: {style}",
           "groups": [
             {
               "id": "test-anime",
@@ -4940,9 +4940,9 @@ fn write_style_test_manifests(config_dir: &std::path::Path) {
 #[tokio::test]
 async fn styled_image_job_folds_style_server_side_from_style_id() {
     // Headless/MCP parity (sc-13134): a client that sends a `styleId` + a RAW prompt gets the
-    // exact `Style:`/`Description:` composition the web composer produces — including the
+    // exact `Subject:`/`Style:` composition the web composer produces — including the
     // directive-collision splice (a user `Setting:` line stays a top-level sibling, the free text
-    // folds into Description). This is the whole point of the story: the same styled prompt whether
+    // folds into Subject). This is the whole point of the story: the same styled prompt whether
     // the fold happens on the web or on the server.
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -4958,8 +4958,9 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
-    // Sub-style id → its `prompt` ("gentle hand-painted"); the user's `Setting:` directive is kept
-    // as a sibling and "a fox" becomes the Description — byte-identical to composeStyledPrompt.
+    // Sub-style id → its `prompt` ("gentle hand-painted"); "a fox" becomes the leading Subject and
+    // the user's `Setting:` directive is kept as a trailing sibling — byte-identical to
+    // composeStyledPrompt.
     let (status, styled) = request(
         app.clone(),
         "POST",
@@ -4983,7 +4984,7 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
     );
     assert_eq!(
         styled["payload"]["prompt"],
-        "Style: gentle hand-painted\nSetting: snowy field\nDescription: a fox",
+        "Subject: a fox\nStyle: gentle hand-painted\nSetting: snowy field",
         "server-side fold must match the web composer output"
     );
 
@@ -5007,7 +5008,7 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
     assert_eq!(status, StatusCode::CREATED, "{group_styled:?}");
     assert_eq!(
         group_styled["payload"]["prompt"],
-        "Style: broad test anime look\nDescription: a fox"
+        "Subject: a fox\nStyle: broad test anime look"
     );
 
     // An unknown styleId is a clean 400, not a silent no-op.
@@ -5035,7 +5036,7 @@ async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
     // The web app composes the styled prompt CLIENT-side and sends it verbatim plus
     // presetPromptResolvedClientSide (mirroring the preset skip). The server must take the prompt
     // as-is and NOT re-fold — even when a `styleId` rides along (the studio records it for replay).
-    // Otherwise a web-submitted "Style: …\nDescription: …" would be double-wrapped.
+    // Otherwise a web-submitted "Subject: …\nStyle: …" would be double-wrapped.
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_style_test_manifests(&temp_dir.path().join("config"));
@@ -5050,7 +5051,7 @@ async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
-    let already_composed = "Style: gentle hand-painted\nDescription: a fox";
+    let already_composed = "Subject: a fox\nStyle: gentle hand-painted";
     let (status, verbatim) = request(
         app.clone(),
         "POST",

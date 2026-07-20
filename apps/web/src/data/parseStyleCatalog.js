@@ -10,7 +10,7 @@
 // colon (e.g. "Cyberpunk: Edgerunners Style") — the name regex tolerates one
 // extra short "…: Xxx Style" segment before the description colon.
 
-export const PROMPT_TEMPLATE = "Style: {style}\nDescription: {description}";
+export const PROMPT_TEMPLATE = "Subject: {subject}\nStyle: {style}";
 export const CATALOG_VERSION = 1;
 export const CATALOG_SOURCE = "documents/style.txt";
 

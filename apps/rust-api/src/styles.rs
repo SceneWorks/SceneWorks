@@ -78,7 +78,7 @@ pub(crate) fn style_text_for_id(catalog: &Value, id: &str) -> Option<String> {
 /// when the request carries a top-level `styleId` AND the client did NOT already compose the prompt
 /// (mirrors the `presetPromptResolvedClientSide` skip in `apply_recipe_preset_to_image_payload`),
 /// resolve the id to its catalog style text and apply it to the current `prompt`. A prose prompt is
-/// spliced into the `Style:`/`Description:` template with `compose_styled_prompt`; a structured
+/// spliced into the `Subject:`/`Style:` template with `compose_styled_prompt`; a structured
 /// JSON-caption prompt (Ideogram 4) has the style MERGED into `style_description.aesthetics` via
 /// `merge_style_into_caption` and re-serialized. Both are the Rust twins of the web path, so a
 /// headless/MCP client gets a byte-identical result to the studio.
@@ -125,7 +125,7 @@ pub(crate) async fn apply_style_to_image_payload(
 /// unit-tested without an `AppState`. A structured JSON-caption prompt (Ideogram 4, sc-13224) gets the
 /// style MERGED into `style_description.aesthetics` and re-serialized (the server twin of the web's
 /// `injectStyleIntoCaption` → `serializeCaption`); a prose prompt is spliced into the
-/// `Style:`/`Description:` template. Byte-identical to the web path in either branch.
+/// `Subject:`/`Style:` template. Byte-identical to the web path in either branch.
 fn apply_style_text_to_prompt(style_text: &str, prompt: &str) -> String {
     if let Ok(caption) = serde_json::from_str::<Value>(prompt) {
         if sceneworks_core::ideogram_caption::is_caption(&caption) {
@@ -179,11 +179,11 @@ mod tests {
     }
 
     #[test]
-    fn prose_prompt_gets_the_style_description_template() {
-        // A non-caption prompt keeps the sc-13134 prose fold, unchanged.
+    fn prose_prompt_gets_the_subject_style_template() {
+        // A non-caption prompt keeps the sc-13134 prose fold: Subject leads, Style trails.
         assert_eq!(
             apply_style_text_to_prompt("cinematic watercolor", "a fox in the snow"),
-            "Style: cinematic watercolor\nDescription: a fox in the snow"
+            "Subject: a fox in the snow\nStyle: cinematic watercolor"
         );
     }
 

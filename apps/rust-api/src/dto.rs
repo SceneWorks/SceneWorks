@@ -648,7 +648,7 @@ pub(crate) struct ImageJobRequest {
     pub(crate) style_preset: String,
     // The Style-catalog id the caller picked (sc-13134): a group id or a sub-style id. A
     // headless/MCP client sends this + a raw prompt and the server folds the catalog style text
-    // into `prompt` (the `Style:`/`Description:` splice). The web app composes the prompt
+    // into `prompt` (the `Subject:`/`Style:` splice). The web app composes the prompt
     // client-side and sends `presetPromptResolvedClientSide` instead, so it omits this top-level
     // id (it records the picked id under `advanced.styleId` for replay) and is never re-folded.
     // Dedicated field over the dead `stylePreset`.

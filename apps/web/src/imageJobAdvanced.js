@@ -242,7 +242,7 @@ export function buildImageJobAdvanced(state) {
       : {}),
     // Style Catalog recipe round-trip (sc-13132): when a catalog style is applied client-side, the
     // outgoing top-level `prompt` is the COMPOSED string (styleComposer wraps it into a `Style:` /
-    // `Description:` template — see imageJobRequest.js). Recording only the composed prompt would lose
+    // `Subject:` template — see imageJobRequest.js). Recording only the composed prompt would lose
     // the two facts needed to reproduce the studio state on replay: WHICH style the user picked, and
     // the RAW pre-style prompt. Persist both here (they ride `advanced`, which the worker clones
     // verbatim into rawAdapterSettings — no backend change), so rehydrate can re-select the Style

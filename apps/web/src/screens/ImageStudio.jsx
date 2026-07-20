@@ -1581,7 +1581,7 @@ export function ImageStudio() {
     } else if (hasRawStylePrompt) {
       // Styled recipe (sc-13132): seed the box with the RAW pre-style prompt, NOT the composed
       // `recipe.prompt`. With the picker re-selected above, submit recomposes the identical
-      // `Style:`/`Description:` prompt — recording the raw prompt is what prevents a double-wrap
+      // `Subject:`/`Style:` prompt — recording the raw prompt is what prevents a double-wrap
       // (composing over the already-composed prompt would nest a second `Style:` block).
       setPrompt(rawSettings.stylePrompt);
     } else {
@@ -2042,7 +2042,7 @@ export function ImageStudio() {
       // sc-13130: the selected Style Catalog entry's prompt text (or null for None). The pure
       // builder applies composeStyledPrompt as the LAST wrap — after the preset fold above has
       // produced `promptToSend` — so the style's `Style:` block wraps the already-preset-composed
-      // user prompt as `Description:`. Null → pass-through (prompt sent unchanged). Structured
+      // user prompt as `Subject:`. Null → pass-through (prompt sent unchanged). Structured
       // caption models ignore it (the builder skips composition when sendStructured is true).
       styleText: styleTextForId(styleId),
       // sc-13132: the opaque style id travels with the recipe so replay can re-select the picker.
@@ -2289,10 +2289,10 @@ export function ImageStudio() {
   // the composition here — we run the SAME buildJobRequest the single Generate submit calls (with the
   // live prompt as promptToSend) and read its `.prompt`, so the previewed/measured string is
   // byte-for-byte the prompt that will be sent (preset stack folds into the prompt FIRST, the style's
-  // Style:/Description: wrap is applied LAST — see imageJobRequest.js). It recomputes every render, so
+  // Subject:/Style: wrap is applied LAST — see imageJobRequest.js). It recomputes every render, so
   // it tracks the prompt text, the selected style, and the active preset stack live. Only active for
   // free-text models with a style actually selected: structured-caption models (Ideogram) merge the
-  // style into the caption's `aesthetics` instead (sc-13224), so there's no Style:/Description: prose
+  // style into the caption's `aesthetics` instead (sc-13224), so there's no Subject:/Style: prose
   // to preview, and a null/empty styleText is a pass-through with nothing extra to preview and no
   // style-composition budget to guard.
   const styledPreviewPrompt = stylePreviewActive ? buildJobRequest({ promptToSend: prompt }).prompt : null;
@@ -2303,7 +2303,7 @@ export function ImageStudio() {
       captionHasContent,
       prompt,
       // sc-13133 / sc-13224: measure the COMPOSED outgoing prompt against the cap, but only when a
-      // style is active (styleless behavior unchanged). For prose that is the Style:/Description:
+      // style is active (styleless behavior unchanged). For prose that is the Subject:/Style:
       // composition; for a structured model it is the style-injected, re-serialized caption. Either
       // string is exactly what the run submits, so the cap is measured on IT.
       styleActive: stylePreviewActive || structuredStyleActive,
@@ -3154,7 +3154,7 @@ export function ImageStudio() {
             ) : null}
           </div>
 
-          {/* sc-13131: the EXACT composed prompt (Style:/Description:, preserved sibling directives,
+          {/* sc-13131: the EXACT composed prompt (Subject:/Style:, preserved sibling directives,
               and the own-`Style:` MERGE) the run will send once a style is active — reuses
               buildJobRequest so it can never drift from the payload. Sits under the Style axis row.
               Hidden when no style applies. */}

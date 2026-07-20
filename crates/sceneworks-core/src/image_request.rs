@@ -125,7 +125,7 @@ pub struct ImageRequest {
     pub style_preset: String,
     /// The Style-catalog id the caller selected (sc-13134), a group id or a sub-style id, or
     /// `None`. Dedicated field over the dead `style_preset`: the API resolves it to the catalog
-    /// style text and folds it into `prompt` (the `Style:`/`Description:` splice) before the
+    /// style text and folds it into `prompt` (the `Subject:`/`Style:` splice) before the
     /// worker sees the payload, so the worker mainly records it for lineage/replay. The web sends
     /// the already-composed prompt and omits this top-level id, so a re-parse never double-folds.
     pub style_id: Option<String>,

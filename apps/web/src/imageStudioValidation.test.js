@@ -113,7 +113,7 @@ describe("imageGenerateValidation", () => {
   // not the raw prompt field, and only when a style is active — styleless behavior is unchanged.
   describe("composed-prompt budget (sc-13133)", () => {
     // A raw prompt that is itself well UNDER the cap, but a style long enough that the composed
-    // Style:/Description: string runs OVER it. The whole point of the guard.
+    // Subject:/Style: string runs OVER it. The whole point of the guard.
     const rawPrompt = "a fox in the snow"; // 17 chars — nowhere near the cap on its own
     const longStyle = "x".repeat(PROMPT_MAX_CHARS); // composed will exceed the cap by the wrapper + prompt
     const overComposed = composeStyledPrompt({ styleText: longStyle, userPrompt: rawPrompt });

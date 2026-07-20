@@ -232,7 +232,7 @@ export function isCaption(value) {
 // ----- Style Catalog injection into a caption (sc-13224) --------------------
 //
 // The Style axis (epic 13129/sc-13130) folds a catalog style into a PROSE prompt via the
-// `Style:`/`Description:` composer. Structured JSON-caption models (Ideogram 4) don't take prose —
+// `Subject:`/`Style:` composer. Structured JSON-caption models (Ideogram 4) don't take prose —
 // their prompt is a caption. Instead of skipping the Style axis for them, we merge the selected
 // catalog style text into `style_description.aesthetics`: the ONE field present in BOTH the photo
 // and non-photo style variants, so injecting it never touches the `photo`/`art_style` discriminator
