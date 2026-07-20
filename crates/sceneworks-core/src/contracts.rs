@@ -1134,6 +1134,33 @@ pub struct ClearJobsResponse {
     pub extra: ExtraFields,
 }
 
+/// Body for `POST /api/v1/jobs/cancel-pending` (sc-13448) — the "Cancel pending"
+/// queue action, the bulk analog of the per-job cancel fast path. `project_id`
+/// scopes the cancel to one workspace (matching the queue's project filter);
+/// omitted / null cancels every project's pending (`queued` / `pending_caption`)
+/// jobs. All fields optional so an empty `{}` body is valid.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelPendingJobsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+/// Response for `POST /api/v1/jobs/cancel-pending` (sc-13448): how many pending jobs
+/// were canceled and their updated snapshots (now terminal `canceled`), so the
+/// acting client upserts the flipped cards into its live queue immediately without
+/// waiting for the SSE round-trip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelPendingJobsResponse {
+    pub canceled: usize,
+    pub jobs: Vec<JobSnapshot>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SidecarPatterns {

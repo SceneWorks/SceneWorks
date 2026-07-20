@@ -499,6 +499,84 @@ describe("SceneWorks app shell", () => {
     expect(clearButton.disabled).toBe(true);
   });
 
+  it("cancels all pending queue items scoped to the active project filter (sc-13448)", async () => {
+    const cancelPendingJobs = vi.fn(() => Promise.resolve());
+    const job = (id, status) => ({
+      id,
+      type: "image_generate",
+      status,
+      stage: status,
+      progress: status === "running" ? 0.3 : 0,
+      projectId: "project-1",
+      projectName: "Project 1",
+      requestedGpu: "auto",
+      payload: { prompt: id },
+      attempts: 1,
+    });
+    const baseProps = {
+      activeProject: { id: "project-1", name: "Project 1" },
+      cancelPendingJobs,
+      createPlaceholderJob: (event) => event.preventDefault(),
+      gpuOptions: ["auto", "0"],
+      jobAction: () => {},
+      jobPrompt: "",
+      projectFilter: "project-1",
+      projects: [{ id: "project-1", name: "Project 1" }],
+      requestedGpu: "auto",
+      setJobPrompt: () => {},
+      setProjectFilter: () => {},
+      setRequestedGpu: () => {},
+      visibleWorkers: [],
+    };
+    const findCancelButton = () =>
+      [...document.body.querySelectorAll("button")].find((button) =>
+        button.textContent.startsWith("Cancel pending"),
+      );
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            ...baseProps,
+            // Two pending jobs (queued + pending_caption) and one running (active).
+            filteredJobs: [
+              job("job-queued", "queued"),
+              { ...job("job-caption", "pending_caption"), stage: "pending_caption" },
+              { ...job("job-running", "running"), stage: "generating" },
+            ],
+          },
+          <QueueScreen />,
+        ),
+      );
+    });
+
+    // The button surfaces the pending count and is enabled.
+    let cancelButton = findCancelButton();
+    expect(cancelButton).toBeTruthy();
+    expect(cancelButton.textContent).toBe("Cancel pending (2)");
+    expect(cancelButton.disabled).toBe(false);
+
+    await act(async () => {
+      cancelButton.click();
+    });
+    // Scoped to the active project filter, matching what the operator sees.
+    expect(cancelPendingJobs).toHaveBeenCalledWith("project-1");
+
+    // With nothing pending in view, the action disables and drops the count.
+    await act(async () => {
+      root.render(
+        withAppContext(
+          { ...baseProps, filteredJobs: [{ ...job("job-running", "running"), stage: "generating" }] },
+          <QueueScreen />,
+        ),
+      );
+    });
+    cancelButton = findCancelButton();
+    expect(cancelButton.textContent).toBe("Cancel pending");
+    expect(cancelButton.disabled).toBe(true);
+  });
+
   it("dismisses an individual completed queue item via the per-card × (issue #1556)", async () => {
     const clearJob = vi.fn(() => Promise.resolve());
     const completedJob = {

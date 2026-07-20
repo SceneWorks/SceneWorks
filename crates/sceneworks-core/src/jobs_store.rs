@@ -48,6 +48,12 @@ pub const ACTIVE_STATUSES: &[&str] = &[
     "saving",
 ];
 pub const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "canceled", "interrupted"];
+/// Pending (accepted-but-not-yet-worker-owned) statuses: a job in one of these is
+/// waiting in the queue with no worker to acknowledge a cancel, so it can be
+/// terminated immediately. Exactly the two statuses the `cancel_job` fast path — and
+/// the bulk [`JobsStore::cancel_pending_jobs`] — flip straight to terminal `canceled`.
+/// Kept in lockstep with that fast-path branch and the web `pendingStatuses` set.
+pub const PENDING_STATUSES: &[&str] = &["queued", "pending_caption"];
 pub const JOB_STATUSES: &[&str] = &[
     "queued",
     // Accepted-but-not-yet-claimable: awaiting the API-side async payload rewrite (Ideogram 4
@@ -117,6 +123,22 @@ fn terminal_statuses_sql() -> &'static str {
     static SQL: OnceLock<String> = OnceLock::new();
     SQL.get_or_init(|| {
         TERMINAL_STATUSES
+            .iter()
+            .map(|status| format!("'{status}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+}
+
+/// The pending statuses as a quoted SQL list for `status in (...)` filters, derived
+/// once from [`PENDING_STATUSES`] — same anti-drift rationale as
+/// [`terminal_statuses_sql`]. Used to select the not-yet-started jobs the bulk
+/// [`JobsStore::cancel_pending_jobs`] terminates. Values are crate constants, never
+/// user input, so direct interpolation is safe.
+fn pending_statuses_sql() -> &'static str {
+    static SQL: OnceLock<String> = OnceLock::new();
+    SQL.get_or_init(|| {
+        PENDING_STATUSES
             .iter()
             .map(|status| format!("'{status}'"))
             .collect::<Vec<_>>()
@@ -922,6 +944,94 @@ impl JobsStore {
         let job = self.get_job_on_connection(&transaction, job_id)?;
         transaction.commit()?;
         Ok(job)
+    }
+
+    /// Bulk-cancel every PENDING (not-yet-worker-owned) job — the fleet analog of the
+    /// `queued`/`pending_caption` fast path in [`cancel_job`] (issue: "cancel ALL
+    /// pending jobs"). Optionally scoped to one project (matching the queue's project
+    /// filter); omitted / `None` cancels every project's pending jobs. Each matching
+    /// row goes straight to terminal `canceled` in one UPDATE — no worker owns it to
+    /// acknowledge — and the updated snapshots are returned newest first so the caller
+    /// can broadcast `job.updated` per job and hand the acting client the flipped
+    /// cards immediately.
+    ///
+    /// Deliberately scoped to `queued` + `pending_caption` ([`PENDING_STATUSES`])
+    /// ONLY. An active (worker-owned) job needs cooperative acknowledgement and is
+    /// left untouched — cancel those one at a time via [`cancel_job`] so the owning
+    /// worker self-terminates; already-terminal jobs never match either. The
+    /// `pending_caption` guarded promotion (sc-9120) only ever advances a row that is
+    /// STILL `pending_caption`, so flipping it to `canceled` here can't be resurrected
+    /// — same race-free reasoning as the single-job fast path.
+    pub fn cancel_pending_jobs(
+        &self,
+        project_id: Option<&str>,
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // Collect the ids first (scoped so the borrowed statement drops before the
+        // UPDATE runs on the same transaction), mirroring `clear_terminal_jobs`.
+        let mut select_sql = format!(
+            "select id from jobs where status in ({pending})",
+            pending = pending_statuses_sql()
+        );
+        let mut bindings: Vec<Box<dyn ToSql>> = Vec::new();
+        if let Some(project_id) = project_id {
+            select_sql.push_str(" and project_id = ?");
+            bindings.push(Box::new(project_id.to_owned()));
+        }
+        select_sql.push_str(" order by created_at desc");
+        let pending_ids: Vec<String> = {
+            let mut statement = transaction.prepare(&select_sql)?;
+            let rows = statement.query_map(params_from_iter(bindings.iter()), |row| {
+                row.get::<_, String>(0)
+            })?;
+            let mut ids = Vec::new();
+            for row in rows {
+                ids.push(row?);
+            }
+            ids
+        };
+
+        if !pending_ids.is_empty() {
+            let now = utc_now();
+            // Same terminal transition as the `cancel_job` fast path (lines above),
+            // applied set-wide. The `status in (...)` guard is re-checked inside the
+            // UPDATE so a row that just left the pending stage under a concurrent
+            // writer is skipped rather than clobbered.
+            let mut update_sql = format!(
+                "
+                update jobs
+                   set status = 'canceled',
+                       stage = 'canceled',
+                       progress = 1,
+                       cancel_requested = 1,
+                       message = 'Canceled before a worker started.',
+                       canceled_at = ?,
+                       completed_at = ?,
+                       updated_at = ?
+                 where status in ({pending})
+                ",
+                pending = pending_statuses_sql()
+            );
+            let mut update_bindings: Vec<Box<dyn ToSql>> =
+                vec![Box::new(now.clone()), Box::new(now.clone()), Box::new(now)];
+            if let Some(project_id) = project_id {
+                update_sql.push_str(" and project_id = ?");
+                update_bindings.push(Box::new(project_id.to_owned()));
+            }
+            transaction.execute(&update_sql, params_from_iter(update_bindings.iter()))?;
+        }
+
+        // Re-read the updated snapshots (newest first) so callers broadcast the real
+        // post-cancel state, not the stale pre-update rows.
+        let mut canceled = Vec::with_capacity(pending_ids.len());
+        for id in &pending_ids {
+            canceled.push(self.get_job_on_connection(&transaction, id)?);
+        }
+        transaction.commit()?;
+        Ok(canceled)
     }
 
     pub fn retry_job(&self, job_id: &str, request: RetryJob) -> JobsStoreResult<JobSnapshot> {

@@ -385,6 +385,101 @@ fn clear_job_rejects_a_non_terminal_job() {
     assert_eq!(listed[0].id, queued.id);
 }
 
+#[test]
+fn cancel_pending_jobs_cancels_only_not_yet_started_jobs() {
+    // sc-13448: "Cancel pending" flips every queued / pending_caption job straight to
+    // terminal `canceled`, while leaving worker-owned (active) and already-terminal
+    // jobs untouched.
+    let store = store("cancel-pending-mix");
+    register_image_worker(&store);
+
+    // Two queued jobs and one pending_caption job — all "pending" (no worker owns
+    // them). A claimed job (active/Preparing) and an already-canceled job round out
+    // the mix to prove the scope boundary.
+    let queued_a = store
+        .create_job(image_job(object(json!({ "prompt": "wait a" }))))
+        .expect("creates");
+    let queued_b = store
+        .create_job(image_job(object(json!({ "prompt": "wait b" }))))
+        .expect("creates");
+    let pending_caption = store
+        .create_job(pending_caption_job(
+            json!({ "prompt": "a fox", "model": "ideogram_4" }),
+        ))
+        .expect("creates");
+    // Claim one job so it becomes worker-owned/active (Preparing).
+    let active = store
+        .claim_next_job("worker-1")
+        .expect("claim runs")
+        .expect("claimed");
+    assert_eq!(active.status, JobStatus::Preparing);
+    // A job canceled ahead of time is already terminal.
+    let already = store
+        .create_job(image_job(object(json!({ "prompt": "stop" }))))
+        .expect("creates");
+    store.cancel_job(&already.id).expect("cancels");
+
+    let canceled = store
+        .cancel_pending_jobs(None)
+        .expect("cancels pending jobs");
+    let canceled_ids: Vec<String> = canceled.iter().map(|job| job.id.clone()).collect();
+
+    // Exactly the two queued jobs + the pending_caption job were canceled — the
+    // active job is NOT among them (claim consumed queued_a; queued_b + the
+    // pending_caption remain pending).
+    assert_eq!(canceled.len(), 2);
+    assert!(canceled_ids.contains(&queued_b.id));
+    assert!(canceled_ids.contains(&pending_caption.id));
+    assert!(!canceled_ids.contains(&active.id));
+    assert!(!canceled_ids.contains(&already.id));
+    // Every returned snapshot is the real post-cancel terminal state.
+    for job in &canceled {
+        assert_eq!(job.status, JobStatus::Canceled);
+        assert_eq!(job.stage, ProgressStage::Canceled);
+        assert!(job.cancel_requested);
+        assert!(job.canceled_at.is_some());
+    }
+    // queued_a was the one claimed into `active`.
+    assert_eq!(active.id, queued_a.id);
+
+    // The active job is untouched: still Preparing, no cancel requested.
+    let active_after = store.get_job(&active.id).expect("active reload");
+    assert_eq!(active_after.status, JobStatus::Preparing);
+    assert!(!active_after.cancel_requested);
+
+    // A second sweep is a no-op — nothing pending remains.
+    assert!(store
+        .cancel_pending_jobs(None)
+        .expect("second sweep")
+        .is_empty());
+}
+
+#[test]
+fn cancel_pending_jobs_scopes_to_one_project() {
+    // sc-13448: the bulk cancel honors the queue's project filter — cancelling one
+    // project's pending jobs must never touch another project's queue.
+    let store = store("cancel-pending-scope");
+    let job_in = |project: &str, prompt: &str| CreateJob {
+        project_id: Some(project.to_owned()),
+        ..image_job(object(json!({ "prompt": prompt })))
+    };
+
+    let a = store.create_job(job_in("project-a", "a")).expect("creates");
+    let b = store.create_job(job_in("project-b", "b")).expect("creates");
+
+    let canceled = store
+        .cancel_pending_jobs(Some("project-a"))
+        .expect("cancels project-a");
+    assert_eq!(canceled.len(), 1);
+    assert_eq!(canceled[0].id, a.id);
+    assert_eq!(canceled[0].status, JobStatus::Canceled);
+
+    // project-b's queued job is untouched (still queued).
+    let b_after = store.get_job(&b.id).expect("b reload");
+    assert_eq!(b_after.status, JobStatus::Queued);
+    assert!(!b_after.cancel_requested);
+}
+
 /// An Ideogram auto-caption image job (sc-9120). Created NON-claimable in `pending_caption`.
 fn pending_caption_job(payload: Value) -> CreateJob {
     CreateJob {

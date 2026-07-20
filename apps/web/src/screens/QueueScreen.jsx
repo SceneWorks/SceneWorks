@@ -1,7 +1,7 @@
 import React, { useMemo } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
-import { GPU_REQUIRED_JOB_TYPES, NON_GPU_JOB_TYPES } from "../jobTypes.js";
+import { GPU_REQUIRED_JOB_TYPES, NON_GPU_JOB_TYPES, pendingStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
@@ -187,6 +187,7 @@ export function QueueScreen() {
   const {
     activeProject,
     assets = [],
+    cancelPendingJobs,
     clearCompletedJobs,
     clearJob,
     createPlaceholderJob,
@@ -214,6 +215,13 @@ export function QueueScreen() {
   // button so it disables when there's nothing to clear.
   const completedCount = useMemo(
     () => filteredJobs.filter((job) => terminalStatuses.has(job.status)).length,
+    [filteredJobs],
+  );
+  // "Cancel pending" (sc-13448): how many of the jobs in view are pending
+  // (queued / pending_caption) and thus bulk-cancelable. Gates the button so it
+  // disables when there's nothing to cancel.
+  const pendingCount = useMemo(
+    () => filteredJobs.filter((job) => pendingStatuses.has(job.status)).length,
     [filteredJobs],
   );
   return (
@@ -248,6 +256,19 @@ export function QueueScreen() {
             </option>
           ))}
         </select>
+        {/* Cancel all pending items in the queue (sc-13448). Scoped to the current
+            project filter; disabled when nothing in view is pending. Cancels only
+            not-yet-started (queued / pending_caption) jobs — running jobs are left
+            to the per-card Cancel so the owning worker acknowledges. */}
+        <button
+          className="queue-cancel-pending"
+          disabled={pendingCount === 0 || !cancelPendingJobs}
+          onClick={() => cancelPendingJobs?.(projectFilter)}
+          title="Cancel all pending (not-yet-started) jobs in the queue"
+          type="button"
+        >
+          Cancel pending{pendingCount > 0 ? ` (${pendingCount})` : ""}
+        </button>
         {/* Clear completed items from the queue (issue #1556). Scoped to the
             current project filter; disabled when nothing in view is terminal. */}
         <button
