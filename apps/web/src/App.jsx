@@ -14,6 +14,7 @@ import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { DocumentStudio } from "./screens/DocumentStudio.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
+import { AudioStudio } from "./screens/AudioStudio.jsx";
 import { TrainingDataSetsLibrary, TrainingStudio } from "./screens/TrainingStudio.jsx";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { EditorScreen } from "./screens/EditorScreen.jsx";
@@ -91,6 +92,7 @@ export const KEEP_ALIVE_VIEWS = Object.freeze(
   new Set([
     "Image",
     "Video",
+    "Audio",
     "Characters",
     "Document",
     "Train",
@@ -123,12 +125,16 @@ function KeepAlivePane({ active, children }) {
 // Empty in unconfigured contexts (e.g. some test paths); the footer is hidden then.
 const APP_VERSION = import.meta.env.VITE_APP_VERSION ?? "";
 
-const navSections = [
+// Exported so the nav registration (Workspace / Library / System sections) is assertable in
+// unit tests without rendering the whole App (epic 13400 C0 mirrors the KEEP_ALIVE_VIEWS export).
+export const navSections = [
   {
     label: "Workspace",
     items: [
       { id: "Image", icon: Icon.Image },
       { id: "Video", icon: Icon.Video },
+      // Audio Studio (epic 13400) is a generative studio — it sits with Image/Video in Workspace.
+      { id: "Audio", icon: Icon.Audio },
       // Character Studio is a generative studio (sc-2300) — it sits with Image/Video,
       // below Video and above Training, not in the Library section.
       { id: "Characters", icon: Icon.Character },
@@ -161,7 +167,8 @@ const navSections = [
   },
 ];
 
-const viewTitles = {
+// Exported alongside navSections so a view's title/blurb registration is unit-testable.
+export const viewTitles = {
   Library: { title: "Assets", blurb: "Browse stills and clips across all your projects." },
   LibraryDataSets: { title: "Data Sets", blurb: "Create and caption training datasets." },
   Poses: { title: "Pose Library", blurb: "Manage whole-body pose skeletons and create new ones from photos." },
@@ -171,6 +178,7 @@ const viewTitles = {
   },
   Image: { title: "Image Studio", blurb: "Describe what you want — we'll render variations side by side." },
   Video: { title: "Video Studio", blurb: "Bring stills to life, or render new clips from scratch." },
+  Audio: { title: "Audio Studio", blurb: "Generate speech, music and sound effects — or clone a voice." },
   Document: { title: "Document Studio", blurb: "Generate interleaved text-image documents — guides, storyboards, tutorials." },
   Train: { title: "Training Studio", blurb: "Build datasets and prepare LoRA training plans." },
   Editor: { title: "Video Editor", blurb: "Cut, sequence and export your timeline." },
@@ -2627,6 +2635,12 @@ export function App() {
         {keepAliveMounted("Video") ? (
           <KeepAlivePane active={activeView === "Video"}>
             <VideoStudio key={activeProject?.id ?? "default"} />
+          </KeepAlivePane>
+        ) : null}
+
+        {keepAliveMounted("Audio") ? (
+          <KeepAlivePane active={activeView === "Audio"}>
+            <AudioStudio key={activeProject?.id ?? "default"} />
           </KeepAlivePane>
         ) : null}
 

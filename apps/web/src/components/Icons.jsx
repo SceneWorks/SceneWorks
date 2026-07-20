@@ -24,6 +24,8 @@ export const Icon = {
   Image: (p) => <I {...p} d="M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4" />,
   ImageEditor: (p) => <I {...p} d="M7 2v15a1 1 0 001 1h15M2 7h15a1 1 0 011 1v15" />,
   Video: (p) => <I {...p} d="M3 6h12v12H3zM15 9l6-3v12l-6-3z" />,
+  // Audio Studio (epic 13400) — a centered waveform glyph (rising/falling bars around a baseline).
+  Audio: (p) => <I {...p} d="M4 10v4M7 7v10M10 4v16M13 8v8M16 6v12M19 10v4" />,
   Editor: (p) => <I {...p} d="M3 8h18M3 12h12M3 16h18M16 10l4 2-4 2z" />,
   Train: (p) => <I {...p} d="M5 19V5M12 19V5M19 19V5M3 9h4M10 15h4M17 11h4" />,
   Character: (p) => <I {...p} d="M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0" />,
