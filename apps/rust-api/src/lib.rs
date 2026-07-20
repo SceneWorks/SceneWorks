@@ -2817,10 +2817,64 @@ fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
         return Err(ApiError::bad_request("projectId is required"));
     }
     validate_model_id(&payload.model)?;
-    if payload.prompt.trim().is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
+    // A multi-speaker request (sc-13676) carries the text in its `script`, so the `prompt` may be
+    // empty then; a single-voice request still requires a prompt. The prompt length ceiling always
+    // applies. This keeps a single-voice request (script: None) byte-for-byte on the original path.
+    let has_script = payload
+        .script
+        .as_deref()
+        .is_some_and(|segments| !segments.is_empty());
+    if payload.prompt.chars().count() > MAX_PROMPT_CHARS
+        || (payload.prompt.trim().is_empty() && !has_script)
+    {
         return Err(ApiError::bad_request(
-            "prompt must be between 1 and 4000 characters",
+            "prompt must be between 1 and 4000 characters (or provide a multi-speaker script)",
         ));
+    }
+    // Multi-speaker dialogue script (sc-13676): when present, every segment must carry non-empty text,
+    // and the segment text totals plus the speaker/style labels are bounded so a runaway payload can't
+    // slip past the prompt-size floor. The model's advertised `audio.maxSpeakers` is the real
+    // speaker-count gate the generator's `validate` applies at the gen-core floor (a script sent to a
+    // model that does not advertise `supports_multi_speaker` is a typed Unsupported there); this only
+    // rejects a structurally malformed script up front.
+    if let Some(segments) = payload.script.as_deref() {
+        if segments.is_empty() {
+            return Err(ApiError::bad_request(
+                "script must have at least one segment",
+            ));
+        }
+        let mut total = 0usize;
+        for segment in segments {
+            if segment.text.trim().is_empty() {
+                return Err(ApiError::bad_request(
+                    "each script segment must have non-empty text",
+                ));
+            }
+            total += segment.text.chars().count();
+            if segment
+                .speaker
+                .as_deref()
+                .is_some_and(|speaker| speaker.chars().count() > 64)
+            {
+                return Err(ApiError::bad_request(
+                    "script segment speaker label must be at most 64 characters",
+                ));
+            }
+            if segment
+                .style
+                .as_deref()
+                .is_some_and(|style| style.chars().count() > 64)
+            {
+                return Err(ApiError::bad_request(
+                    "script segment style must be at most 64 characters",
+                ));
+            }
+        }
+        if total > MAX_PROMPT_CHARS {
+            return Err(ApiError::bad_request(format!(
+                "script text must total at most {MAX_PROMPT_CHARS} characters"
+            )));
+        }
     }
     // Reuse the shared negative-prompt + `advanced`-size guard. Music models (ACE-Step) can carry a
     // negative prompt when they advertise support; the size guard bounds it exactly like image/video.
