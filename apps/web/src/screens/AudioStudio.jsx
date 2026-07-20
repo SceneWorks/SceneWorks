@@ -39,16 +39,18 @@ import { AssetPickerField } from "../components/AssetPicker.jsx";
 // guidance-distilled (advertises neither), so they stay hidden for it — surfacing them would be a typed
 // Unsupported at the gen-core floor; a future non-distilled music model that advertises them shows them.
 //
-// SCOPE (C4 sc-13411): Voice Clone is fully wired too. Its generate model is a CONVERTER — a model
-// advertising ReferenceAudio conditioning (OpenVoice V2); a bare speaker embedder (Chatterbox-VE,
-// VoiceEmbedding only) is filtered out of the tab/picker (isVoiceCloneConverter). The mode surfaces a
-// reference-voice band (pick a library audio track whose voice is cloned) + a match-strength control
-// (OpenVoice's tone-color sampling temperature τ), and its prompt is the SCRIPT the base voice speaks.
-// Generate submits referenceAudioAssetId + matchStrength through createAudioJob; the worker orchestrates
-// the two backend calls — base TTS (Kokoro) speaks the script, then OpenVoice V2 transfers the reference's
-// tone color — and registers the single converted clip. A named-voice registry (register-a-voice via a
-// stored Chatterbox-VE embedding) is deferred: the embedding's consumer is the future native clone-TTS
-// (E1), not this reference-clip pipeline.
+// SCOPE (C4 sc-13411 → E1 sc-13412): Voice Clone is fully wired, with TWO capability-gated backends.
+// Its generate model advertises ReferenceAudio conditioning (isVoiceCloneConverter); a bare speaker
+// embedder (Chatterbox-VE, VoiceEmbedding only) is filtered out of the tab/picker. When a NATIVE
+// clone-TTS generator is installed — one advertising BOTH ReferenceAudio and VoiceEmbedding (Chatterbox
+// chatterbox_tts, isNativeCloneGenerator) — the picker prefers it and Generate renders the cloned voice
+// in a SINGLE step from the script + reference; the match-strength (τ) control is hidden because it is
+// the OpenVoice converter's knob, not the native generator's. Otherwise the mode falls back to the
+// OpenVoice conversion converter: it surfaces the match-strength control and the worker runs the two
+// backend calls (base TTS speaks the script, then OpenVoice V2 transfers the reference's tone color).
+// Either way Generate submits referenceAudioAssetId (+ matchStrength only on the conversion path) through
+// createAudioJob and the worker registers the single produced clip. The native-vs-conversion routing is
+// gated purely on the audio catalog's registration + Capabilities in the worker, never a hardcoded id.
 
 // Tab labels per the epic, keyed by the AUDIO_MODES ids so the ordering follows that array.
 const MODE_LABELS = {
@@ -73,14 +75,26 @@ const DURATION_MODES = new Set(["speech", "sfx", "music"]);
 // Music C3 sc-13410, Voice Clone C4 sc-13411). This set is the single guard both `canGenerate` and
 // `submit` read.
 const WIRED_MODES = new Set(["speech", "sfx", "music", "voiceclone"]);
-// Voice Clone runs the OpenVoice V2 conversion chain, so its generate model must be a CONVERTER — a model
-// whose conditioning includes ReferenceAudio (OpenVoice V2). A bare speaker EMBEDDER (Chatterbox-VE,
-// VoiceEmbedding only) also "serves" the voiceclone mode conceptually, but it cannot run the conversion —
-// its embedding feeds register-a-voice / the future native clone-TTS (E1), not this pipeline — so it is
-// filtered out of the generate picker.
+const audioConditioning = (item) =>
+  (Array.isArray(item?.audio?.conditioning) ? item.audio.conditioning : []).map((kind) =>
+    String(kind).toLowerCase(),
+  );
+// Voice Clone's generate model must consume a reference clip: its conditioning includes ReferenceAudio.
+// Both the OpenVoice V2 conversion CONVERTER (ReferenceAudio only) and the native clone-TTS GENERATOR
+// (Chatterbox chatterbox_tts, ReferenceAudio + VoiceEmbedding) qualify. A bare speaker EMBEDDER
+// (Chatterbox-VE, VoiceEmbedding only) "serves" the mode conceptually but cannot render from a reference,
+// so it is filtered out of the generate picker.
 function isVoiceCloneConverter(item) {
-  const conditioning = Array.isArray(item?.audio?.conditioning) ? item.audio.conditioning : [];
-  return conditioning.some((kind) => String(kind).toLowerCase() === "referenceaudio");
+  return audioConditioning(item).includes("referenceaudio");
+}
+// A NATIVE clone-TTS generator (sc-13412): renders the cloned voice from script + reference in ONE call.
+// The capability signature is BOTH ReferenceAudio (the clip) AND VoiceEmbedding (the speaker vector the
+// generator derives from it) — the text→waveform clone generator, as opposed to the OpenVoice converter
+// (ReferenceAudio only) that re-timbres a separately-synthesized base clip. When one is installed the
+// Voice Clone picker prefers it (a single native step) over the two-call conversion chain.
+function isNativeCloneGenerator(item) {
+  const conditioning = audioConditioning(item);
+  return conditioning.includes("referenceaudio") && conditioning.includes("voiceembedding");
 }
 // Modes that expose the diffusion sampling knobs (CFG guidance + solver steps) in the advanced panel.
 // Sound FX runs the MOSS-SoundEffect flow-matching pipeline, which reads guidance/steps off the
@@ -201,9 +215,16 @@ export function AudioStudio() {
   const modelServesMode = (item, value) => audioModelServesMode(item, value);
   const modelsForMode = (value) => {
     const serving = audioModels.filter((item) => modelServesMode(item, value));
-    // Voice Clone's generate model must be a CONVERTER (OpenVoice V2), not a bare speaker embedder —
-    // filter Chatterbox-VE out of the tab/picker so the CTA never routes a conversion to an embedder.
-    return value === "voiceclone" ? serving.filter(isVoiceCloneConverter) : serving;
+    if (value !== "voiceclone") {
+      return serving;
+    }
+    // Voice Clone's generate model must consume a reference clip — filter the bare speaker embedder
+    // (Chatterbox-VE) out so the CTA never routes a clone to an embedder. Prefer a native clone-TTS
+    // generator (single-call, sc-13412) over the OpenVoice conversion converter, so the picker default
+    // (index 0) becomes the native clone whenever one is installed — the capability-gated upgrade.
+    return serving
+      .filter(isVoiceCloneConverter)
+      .sort((a, b) => Number(isNativeCloneGenerator(b)) - Number(isNativeCloneGenerator(a)));
   };
   const selectedModel = audioModels.find((item) => item.id === model) ?? audioModels[0] ?? null;
 
@@ -250,6 +271,11 @@ export function AudioStudio() {
   // reaches this tab (modelsForMode filters it out).
   const showVoiceClone =
     mode === "voiceclone" && conditioning.some((kind) => String(kind).toLowerCase() === "referenceaudio");
+  // Native clone-TTS (sc-13412) renders the cloned voice in a SINGLE step and has no OpenVoice
+  // posterior-sampling temperature (τ), so the match-strength control is meaningful ONLY for the
+  // conversion converter. Driven off the selected model's capability signature, never a hardcoded id.
+  const selectedIsNativeClone = showVoiceClone && isNativeCloneGenerator(selectedModel);
+  const showMatchStrength = showVoiceClone && !selectedIsNativeClone;
   // Steps: both the Sound FX (MOSS) and Music (ACE-Step) diffusion samplers read the top-level
   // `steps`, so the solver-step count surfaces on both. Guidance(CFG): only when the model advertises
   // guidance support — MOSS does (SAMPLING_KNOB_MODES), the guidance-distilled ACE-Step turbo does NOT
@@ -449,13 +475,17 @@ export function AudioStudio() {
           payload.editStrength = editStrength === "" ? undefined : Number(editStrength);
         }
       } else if (mode === "voiceclone") {
-        // Voice Clone (OpenVoice V2 conversion chain, sc-13411 C4). The prompt is the SCRIPT the base TTS
-        // (Kokoro) speaks; `referenceAudioAssetId` names the library audio track whose voice is cloned;
-        // `matchStrength` overrides the converter's τ. `canGenerate` guarantees a reference is selected.
-        // No `voice` is sent — the base clip uses Kokoro's default voice, which OpenVoice re-timbres toward
-        // the reference. `baseModel` defaults to kokoro_82m server-side.
+        // Voice Clone (sc-13411 C4 → sc-13412). The prompt is the SCRIPT to speak in the cloned voice;
+        // `referenceAudioAssetId` names the library audio track whose voice is cloned. `canGenerate`
+        // guarantees a reference is selected. The worker routes on the selected model's capability: a
+        // native clone-TTS generator renders in ONE call; otherwise the base TTS (Kokoro, `baseModel`
+        // server-default) speaks and OpenVoice V2 re-timbres toward the reference. `matchStrength`
+        // overrides the OpenVoice τ and is sent ONLY on the conversion path — the native clone has no τ,
+        // so sending it would be a knob the model doesn't have.
         payload.referenceAudioAssetId = referenceAudioAssetId;
-        payload.matchStrength = matchStrength === "" ? undefined : Number(matchStrength);
+        if (!selectedIsNativeClone) {
+          payload.matchStrength = matchStrength === "" ? undefined : Number(matchStrength);
+        }
       }
       const job = await createAudioJob?.(payload);
       if (job) {
@@ -733,10 +763,11 @@ export function AudioStudio() {
               ) : null}
             </div>
 
-            {/* Voice Clone (C4 sc-13411): reference-voice band + match strength. Pick a library audio
-                track whose voice is cloned; the prompt above is the script the base voice speaks, then
-                OpenVoice V2 transfers the reference's tone color onto it. Revealed only when the selected
-                converter advertises ReferenceAudio conditioning (isVoiceCloneConverter). */}
+            {/* Voice Clone (sc-13411 C4 → sc-13412): reference-voice band + (conversion-only) match
+                strength. Pick a library audio track whose voice is cloned; the prompt above is the script
+                spoken in that voice. A native clone-TTS generator renders it in one step; the OpenVoice
+                converter re-timbres a base clip and exposes the match-strength τ. Revealed only when the
+                selected model advertises ReferenceAudio conditioning (isVoiceCloneConverter). */}
             {showVoiceClone ? (
               <div className="studio-source-band">
                 <AssetPickerField
@@ -749,24 +780,27 @@ export function AudioStudio() {
                   showCategories={false}
                   value={referenceAudioAssetId}
                 />
-                <label className="settings-field settings-field-match-strength">
-                  Match strength
-                  <input
-                    max="1"
-                    min="0"
-                    onChange={(event) => setMatchStrength(event.target.value)}
-                    placeholder="0.3 (default)"
-                    step="0.05"
-                    type="number"
-                    value={matchStrength}
-                  />
-                  <span className="field-hint" role="note">
-                    OpenVoice tone-color sampling temperature (τ). Cleared → model default (0.3).
-                  </span>
-                </label>
+                {showMatchStrength ? (
+                  <label className="settings-field settings-field-match-strength">
+                    Match strength
+                    <input
+                      max="1"
+                      min="0"
+                      onChange={(event) => setMatchStrength(event.target.value)}
+                      placeholder="0.3 (default)"
+                      step="0.05"
+                      type="number"
+                      value={matchStrength}
+                    />
+                    <span className="field-hint" role="note">
+                      OpenVoice tone-color sampling temperature (τ). Cleared → model default (0.3).
+                    </span>
+                  </label>
+                ) : null}
                 <p className="helper-copy">
-                  The base voice speaks your script, then OpenVoice V2 converts it to match the reference
-                  clip&rsquo;s voice. Record or import a reference clip into the library to use it here.
+                  {selectedIsNativeClone
+                    ? "Your script is rendered directly in the reference clip’s voice in a single step. Record or import a reference clip into the library to use it here."
+                    : "The base voice speaks your script, then OpenVoice V2 converts it to match the reference clip’s voice. Record or import a reference clip into the library to use it here."}
                 </p>
               </div>
             ) : null}

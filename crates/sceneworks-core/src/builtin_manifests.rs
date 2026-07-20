@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn ships_the_seeded_audio_models_with_populated_capability_blocks() {
-        // sc-13402 (epic 13400): the shipped catalog the API serves carries the five live
+        // sc-13402 (epic 13400) + sc-13412: the shipped catalog the API serves carries the six live
         // audio providers as first-class `type: "audio"` entries, each with a populated
         // `audio` capability sub-block, and `audio` parses as a first-class ModelKind (not
         // the Unknown fallback) so the type is accepted end to end.
@@ -202,6 +202,9 @@ mod tests {
             "acestep_v15_turbo",
             "openvoice_v2",
             "chatterbox_ve",
+            // Native cloned-voice TTS generator (sc-13412): script + reference clip → cloned WAV in
+            // one call, with both VoiceEmbedding and ReferenceAudio conditioning advertised.
+            "chatterbox_tts",
         ];
         for id in audio_ids {
             let entry = models

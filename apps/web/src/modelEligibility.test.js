@@ -221,6 +221,18 @@ describe("audio model eligibility (sc-13403)", () => {
     type: "audio",
     audio: { conditioning: ["VoiceEmbedding"] },
   };
+  // Native clone-TTS generator (sc-13412): ReferenceAudio + VoiceEmbedding, no voices/editModes → it
+  // serves ONLY voiceclone (a text→waveform clone generator), exactly like the converter/embedder.
+  const chatterboxTts = {
+    id: "chatterbox_tts",
+    type: "audio",
+    audio: {
+      languages: ["en", "en-US"],
+      sampleRates: [24000],
+      maxDurationSecs: 30,
+      conditioning: ["VoiceEmbedding", "ReferenceAudio"],
+    },
+  };
 
   const seeded = [
     ["Kokoro-82M", kokoro, "speech"],
@@ -228,6 +240,7 @@ describe("audio model eligibility (sc-13403)", () => {
     ["ACE-Step v1.5 Turbo", acestep, "music"],
     ["OpenVoice V2", openvoice, "voiceclone"],
     ["Chatterbox-VE", chatterbox, "voiceclone"],
+    ["Chatterbox Clone-TTS", chatterboxTts, "voiceclone"],
   ];
 
   it("exposes the four Audio Studio mode keys in order", () => {
@@ -281,7 +294,14 @@ describe("audio model eligibility (sc-13403)", () => {
     // maps to its correct capability-driven mode (proves the fallback carries the discriminating fields).
     const fallbackAudio = generationModelsForType(fallbackModels, "audio");
     expect(fallbackAudio.map((m) => m.id).sort()).toEqual(
-      ["acestep_v15_turbo", "chatterbox_ve", "kokoro_82m", "moss_sfx_v2", "openvoice_v2"].sort(),
+      [
+        "acestep_v15_turbo",
+        "chatterbox_tts",
+        "chatterbox_ve",
+        "kokoro_82m",
+        "moss_sfx_v2",
+        "openvoice_v2",
+      ].sort(),
     );
     const expectedMode = {
       kokoro_82m: "speech",
@@ -289,6 +309,7 @@ describe("audio model eligibility (sc-13403)", () => {
       acestep_v15_turbo: "music",
       openvoice_v2: "voiceclone",
       chatterbox_ve: "voiceclone",
+      chatterbox_tts: "voiceclone",
     };
     for (const model of fallbackAudio) {
       expect(audioModelServesMode(model, expectedMode[model.id]), `fallback ${model.id}`).toBe(true);

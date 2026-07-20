@@ -97,6 +97,30 @@ pub(crate) fn load_audio(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn 
         .load(id, spec)
 }
 
+/// True when `id` names an audio **Generator** whose advertised [`Capabilities`] consume
+/// [`gen_core::ConditioningKind::ReferenceAudio`] — i.e. a native clone-TTS provider (Chatterbox's
+/// `chatterbox_tts`) that renders a full cloned-voice WAV from a script + reference clip in a single
+/// [`Generator::generate`] call (sc-13412). This is the capability gate the Voice Clone job routes
+/// on: the moment such a generator is linked into the audio catalog it lights up the native
+/// single-call path; otherwise the two-call Kokoro→OpenVoice conversion chain remains the fallback.
+///
+/// Deliberately checks the GENERATOR registry, not the audio-transform registry: OpenVoice V2 is an
+/// [`AudioTransform`] that also advertises `ReferenceAudio`, but it re-timbres existing speech and so
+/// cannot render from text on its own — only a text→waveform generator can. Weights-free: reads the
+/// registration's `descriptor` alone (no model load). Returns `false` on a build with no audio lane.
+pub(crate) fn audio_generator_clones_from_reference(id: &str) -> bool {
+    audio().is_some_and(|registry| {
+        registry.generators().any(|registration| {
+            let descriptor = (registration.descriptor)();
+            descriptor.id == id
+                && descriptor
+                    .capabilities
+                    .conditioning
+                    .contains(&gen_core::ConditioningKind::ReferenceAudio)
+        })
+    })
+}
+
 /// Load an audio [`AudioTransform`] by id from the runtime's candle audio registry — the
 /// non-prompt audio→audio lane (OpenVoice V2 tone-color voice conversion, sc-13411 C4). The audio
 /// twin of [`load_audio`]: errors clearly when this build ships no audio lane so the voice-clone job

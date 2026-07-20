@@ -65,6 +65,22 @@ const OPENVOICE = {
   ui: { label: "OpenVoice V2" },
 };
 
+// Native clone-TTS generator (sc-13412): ReferenceAudio + VoiceEmbedding marks it as a single-call clone
+// (isNativeCloneGenerator). Kept OUT of ALL_AUDIO so the existing converter-default tests stay unchanged;
+// the sc-13412 tests add it explicitly to prove the picker prefers it and hides the OpenVoice τ.
+const CHATTERBOX_TTS = {
+  id: "chatterbox_tts",
+  name: "Chatterbox (Cloned-Voice TTS)",
+  type: "audio",
+  audio: {
+    languages: ["en", "en-US"],
+    sampleRates: [24000],
+    maxDurationSecs: 30,
+    conditioning: ["VoiceEmbedding", "ReferenceAudio"],
+  },
+  ui: { label: "Chatterbox Clone-TTS" },
+};
+
 const ALL_AUDIO = [KOKORO, MOSS, ACESTEP, OPENVOICE];
 
 function baseContext(overrides = {}) {
@@ -1014,6 +1030,67 @@ describe("AudioStudio Voice Clone generation (sc-13411)", () => {
     const payload = createAudioJob.mock.calls[0][0];
     expect(payload.referenceAudioAssetId).toBe("ref-voice-1");
     expect(payload.matchStrength).toBeUndefined();
+  });
+
+  it("prefers the native clone-TTS generator and hides match strength when one is installed (sc-13412)", async () => {
+    // With a native clone-TTS generator (ReferenceAudio + VoiceEmbedding) in the catalog, the Voice
+    // Clone picker default snaps to it — a single-call clone — over the OpenVoice converter, and the
+    // OpenVoice-only match-strength (τ) control is hidden (the native generator has no such knob).
+    await render(
+      baseContext({
+        audioModels: [...ALL_AUDIO, CHATTERBOX_TTS],
+        models: [...ALL_AUDIO, CHATTERBOX_TTS],
+      }),
+    );
+    await click(modeTab(container, "Voice Clone"));
+
+    expect(modelSelect(container).value).toBe("chatterbox_tts");
+    const band = container.querySelector(".studio-source-band");
+    expect(band).toBeTruthy();
+    expect(band.textContent).toContain("Reference voice");
+    expect(
+      band.querySelector(".settings-field-match-strength"),
+      "native clone has no OpenVoice τ, so match strength is hidden",
+    ).toBeNull();
+    // Both reference-consuming clone models are offered; the bare embedder still isn't.
+    const options = [...modelSelect(container).querySelectorAll("option")].map((o) => o.value);
+    expect(options).toContain("chatterbox_tts");
+    expect(options).toContain("openvoice_v2");
+  });
+
+  it("submits the native clone in one step: model=chatterbox_tts + reference + script, no matchStrength (sc-13412)", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-audio-project_1",
+      JSON.stringify({ referenceAudioAssetId: "ref-voice-1" }),
+    );
+    const referenceAsset = { id: "ref-voice-1", type: "audio", displayName: "My reference voice" };
+    const job = { id: "native-clone-1", type: "audio_generate" };
+    const createAudioJob = vi.fn(async () => job);
+    const rememberLocalGenerationJob = vi.fn();
+    await render(
+      baseContext({
+        assets: [referenceAsset],
+        audioModels: [...ALL_AUDIO, CHATTERBOX_TTS],
+        models: [...ALL_AUDIO, CHATTERBOX_TTS],
+        createAudioJob,
+        rememberLocalGenerationJob,
+      }),
+    );
+    await click(modeTab(container, "Voice Clone"));
+    expect(modelSelect(container).value).toBe("chatterbox_tts");
+    await setTextarea(container.querySelector(".prompt-input"), "Render this in the cloned voice.");
+    expect(generateButton(container).disabled).toBe(false);
+    await submitForm();
+
+    expect(createAudioJob).toHaveBeenCalledTimes(1);
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.model).toBe("chatterbox_tts");
+    expect(payload.referenceAudioAssetId).toBe("ref-voice-1");
+    expect(payload.prompt).toBe("Render this in the cloned voice.");
+    // The native single-call clone has no OpenVoice τ — matchStrength is never sent, and no base voice.
+    expect(payload.matchStrength).toBeUndefined();
+    expect(payload.voice).toBeUndefined();
+    expect(rememberLocalGenerationJob).toHaveBeenCalledWith("audio", job);
   });
 });
 

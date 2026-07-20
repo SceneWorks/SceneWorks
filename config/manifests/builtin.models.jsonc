@@ -8703,6 +8703,88 @@
       }
     },
     {
+      // Native cloned-voice TTS (sc-13412 / epic 12833): the Chatterbox generator renders a full
+      // cloned-voice WAV from a script + reference clip in ONE call — the S3Gen token→waveform stack
+      // (s3tokenizer FSQ + CAMPPlus x-vector + flow-matching decoder + HiFTNet vocoder) driven by a
+      // T3 speech-token LM, with a PerTh provenance watermark. It advertises BOTH VoiceEmbedding and
+      // ReferenceAudio conditioning (sc-13239): a full clone requires the reference clip (S3Gen's
+      // reference mel / prompt tokens / speaker x-vector are not recoverable from the 256-d ve vector
+      // alone), and the provider derives the speaker embedding from that reference internally. The
+      // worker routes Voice Clone here — a single Generator call — whenever this model is the selected
+      // clone model, and falls back to the Kokoro→OpenVoice conversion chain otherwise (the routing is
+      // gated purely on the audio catalog's registration + Capabilities, not a hardcoded id).
+      //
+      // `downloads` pins the three files the generator loads from its snapshot dir. The 256-d speaker
+      // embedder (ve.safetensors, the sibling `chatterbox_ve` model) and the PerTh watermarker
+      // (SceneWorks/perth-implicit, MIT) are pinned-SHA hub co-requisites the provider resolves at
+      // generate time, exactly as the inference lane does (offline predownload parity: sc-13541).
+      "id": "chatterbox_tts",
+      "name": "Chatterbox (Cloned-Voice TTS)",
+      "family": "chatterbox",
+      "type": "audio",
+      "macOnly": false,
+      "audio": {
+        "languages": [
+          "en",
+          "en-US"
+        ],
+        "sampleRates": [
+          24000
+        ],
+        "maxDurationSecs": 30,
+        "conditioning": [
+          "VoiceEmbedding",
+          "ReferenceAudio"
+        ],
+        "supportsMultiSpeaker": false
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "ResembleAI/chatterbox",
+          "files": [
+            "t3_cfg.safetensors",
+            "s3gen.safetensors",
+            "tokenizer.json"
+          ],
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "estimatedSizeBytes": 3186163834,
+          "footprint": {
+            "diskSizeBytes": 3186163834
+          }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/ResembleAI/chatterbox"
+      },
+      "candle": {
+        "minMemoryGb": 6,
+        "measured": false
+      },
+      "licenseUrl": "https://huggingface.co/ResembleAI/chatterbox",
+      "ui": {
+        "label": "Chatterbox Clone-TTS",
+        "description": "Chatterbox (Resemble AI) native cloned-voice TTS — renders a full cloned-voice WAV directly from your script plus a short reference clip in a single step (T3 speech-token LM → S3Gen flow-matching token→waveform + HiFTNet vocoder, with a PerTh provenance watermark). 24 kHz mono, up to 30 s. No separate base-TTS/conversion pass. Candle-native on every platform. MIT.",
+        "recommendedFor": [
+          "voice_clone"
+        ],
+        "promptGuide": {
+          "title": "Chatterbox Clone-TTS Guide",
+          "path": "/prompt-guides/chatterbox-tts.md",
+          "sources": [
+            {
+              "label": "Chatterbox (Hugging Face)",
+              "url": "https://huggingface.co/ResembleAI/chatterbox"
+            }
+          ]
+        }
+      }
+    },
+    {
       "id": "chatterbox_ve",
       "name": "Chatterbox Voice Encoder (Voice Clone)",
       "family": "voice",
