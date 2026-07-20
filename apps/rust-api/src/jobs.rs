@@ -403,6 +403,38 @@ pub(crate) async fn clear_jobs(
     }))
 }
 
+/// Cancel every pending (not-yet-started) item in the queue (sc-13448) — the bulk
+/// analog of the per-job cancel fast path. A `queued` / `pending_caption` job has no
+/// worker to acknowledge the cancel, so each is flipped straight to terminal
+/// `canceled` in one pass (see `JobsStore::cancel_pending_jobs`), optionally scoped
+/// to one project via the request body (matching the queue's project filter). Active
+/// (worker-owned) jobs are left untouched — those cancel one at a time so the owning
+/// worker acknowledges. Broadcasts `job.updated` per canceled job so every SSE client
+/// flips the card, plus one queue refresh, and returns the updated snapshots so the
+/// acting client updates instantly.
+pub(crate) async fn cancel_pending_jobs(
+    State(state): State<AppState>,
+    ApiJson(payload): ApiJson<CancelPendingJobsRequest>,
+) -> Result<Json<CancelPendingJobsResponse>, ApiError> {
+    let jobs = store_call(state.clone(), move |store, _timeout| {
+        store.cancel_pending_jobs(payload.project_id.as_deref())
+    })
+    .await?;
+    // Per-job `job.updated` so every subscriber's card flips to Cancelled (the queue
+    // summary alone only updates counts, not individual cards), then one queue refresh
+    // for the status counts. The pending set is bounded by what a user queued, so the
+    // fan-out is small.
+    for job in &jobs {
+        publish(&state, "job.updated", job);
+    }
+    publish_queue(&state).await?;
+    Ok(Json(CancelPendingJobsResponse {
+        canceled: jobs.len(),
+        jobs,
+        extra: Default::default(),
+    }))
+}
+
 /// Clear a single completed item from the queue (sc-12231, issue #1556) — the
 /// per-card "×" dismiss. Soft-hides one terminal job (see `JobsStore::clear_job`)
 /// so it drops off the queue list + counts while its row (and generated assets)

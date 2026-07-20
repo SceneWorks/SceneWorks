@@ -12355,10 +12355,12 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 10px;
 }
 
-/* "Clear completed" (issue #1556) rides at the trailing edge of the queue tools
-   row — a subtle secondary control next to the project filter. */
+/* "Cancel pending" (sc-13448) + "Clear completed" (issue #1556) ride at the
+   trailing edge of the queue tools row — subtle secondary controls next to the
+   project filter. `margin-left: auto` on the first of the pair anchors the group
+   to the right; the flex `gap` spaces them. */
+.queue-cancel-pending,
 .queue-clear-completed {
-  margin-left: auto;
   min-height: var(--control-h);
   padding: 0 14px;
   border: 1px solid var(--border);
@@ -12370,11 +12372,17 @@ details[open] > summary.lora-scope-group-heading::before,
   white-space: nowrap;
 }
 
+.queue-cancel-pending {
+  margin-left: auto;
+}
+
+.queue-cancel-pending:hover:not(:disabled),
 .queue-clear-completed:hover:not(:disabled) {
   border-color: var(--border-strong);
   background: var(--surface-hover);
 }
 
+.queue-cancel-pending:disabled,
 .queue-clear-completed:disabled {
   opacity: 0.5;
   cursor: not-allowed;

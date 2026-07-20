@@ -34,6 +34,12 @@ export const NON_GPU_JOB_TYPES = new Set([
 // Terminal job statuses (no further progress expected).
 export const terminalStatuses = new Set(["completed", "failed", "canceled", "interrupted"]);
 
+// Pending statuses: accepted but not yet owned by a worker (still waiting in the
+// queue). These are exactly the jobs the bulk "Cancel pending" action terminates
+// immediately — mirrors the backend cancel fast path / PENDING_STATUSES
+// (queued + pending_caption).
+export const pendingStatuses = new Set(["queued", "pending_caption"]);
+
 // Statuses that surface job actions (retry/repeat/cancel) in the queue.
 export const actionStatuses = new Set(["failed", "canceled", "interrupted", "completed"]);
 

@@ -2113,6 +2113,32 @@ export function App() {
     [token],
   );
 
+  // Cancel every pending (not-yet-started) item in the queue (sc-13448). The server
+  // flips each queued / pending_caption job straight to terminal `canceled` and
+  // returns the updated snapshots; upsert them so the cards flip to "Cancelled"
+  // immediately without waiting for the SSE round-trip. Scoped to the active project
+  // filter so it cancels exactly what the operator sees ("all" cancels every
+  // project) — mirroring Clear completed. Active/running jobs are untouched.
+  const cancelPendingJobs = useCallback(
+    async (projectId) => {
+      try {
+        const body = projectId && projectId !== "all" ? { projectId } : {};
+        const response = await apiFetch("/api/v1/jobs/cancel-pending", token, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const canceled = response?.jobs ?? [];
+        if (canceled.length) {
+          setJobs((items) => canceled.reduce((acc, job) => upsertJobNewest(acc, job), items));
+        }
+        setError("");
+      } catch (err) {
+        setError(err.message);
+      }
+    },
+    [token],
+  );
+
   // Clear a single completed item from the queue (issue #1556 / sc-12231) — the
   // per-card "×". The server soft-hides just this terminal job; drop it from the
   // live list on success so the card disappears immediately.
@@ -2221,6 +2247,7 @@ export function App() {
     // Job actions (creation/control — stable callbacks, NOT the churning jobs list)
     jobAction,
     clearCompletedJobs,
+    cancelPendingJobs,
     clearJob,
     createVqaJob,
     createInterleaveJob,
@@ -2359,7 +2386,7 @@ export function App() {
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
     assets, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
-    jobAction, clearCompletedJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
+    jobAction, clearCompletedJobs, cancelPendingJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects,
     createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, studioLaunch,

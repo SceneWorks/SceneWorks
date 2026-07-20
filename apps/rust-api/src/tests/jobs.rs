@@ -607,6 +607,106 @@ async fn clear_jobs_scopes_to_the_requested_project() {
 }
 
 #[tokio::test]
+async fn cancel_pending_jobs_cancels_every_queued_item_but_not_active_ones() {
+    // sc-13448: POST /api/v1/jobs/cancel-pending flips every pending (queued) job to
+    // terminal `canceled` in one call, returns the updated snapshots, and leaves a
+    // worker-owned (active) job running.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // Register a worker + create three jobs, then claim one so it is active.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": "GPU 0",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut ids = Vec::new();
+    for prompt in ["one", "two", "three"] {
+        let (_, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "image_detail",
+                "projectId": "project-1",
+                "projectName": "Project 1",
+                "payload": { "prompt": prompt },
+                "requestedGpu": "auto"
+            }),
+        )
+        .await;
+        ids.push(job["id"].as_str().expect("job id").to_owned());
+    }
+
+    // Claim the oldest job — it becomes active (Preparing) and worker-owned.
+    let (_, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+    let active_id = claimed["job"]["id"]
+        .as_str()
+        .expect("claimed id")
+        .to_owned();
+    assert_eq!(claimed["job"]["status"], "preparing");
+
+    // Cancel all pending (empty body == all projects). The two still-queued jobs are
+    // canceled; the active job is not.
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/cancel-pending",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(canceled["canceled"], 2);
+    let canceled_jobs = canceled["jobs"].as_array().expect("jobs array");
+    assert_eq!(canceled_jobs.len(), 2);
+    for job in canceled_jobs {
+        assert_eq!(job["status"], "canceled");
+        assert_eq!(job["stage"], "canceled");
+        assert_eq!(job["cancelRequested"], true);
+        assert_eq!(job["message"], "Canceled before a worker started.");
+        assert!(job["canceledAt"].is_string());
+        assert_ne!(job["id"], json!(active_id));
+    }
+
+    // The active job is untouched: still preparing, no cancel requested.
+    let (_, active) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{active_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(active["status"], "preparing");
+    assert_eq!(active["cancelRequested"], false);
+
+    // Status counts: two canceled, none queued, the active one still in flight.
+    let (_, queue) = request(app.clone(), "GET", "/api/v1/queue", Value::Null).await;
+    assert_eq!(queue["counts"]["canceled"], 2);
+    assert_eq!(queue["counts"]["queued"], 0);
+
+    // A second sweep cancels nothing — no pending jobs remain.
+    let (status, again) = request(app, "POST", "/api/v1/jobs/cancel-pending", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(again["canceled"], 0);
+}
+
+#[tokio::test]
 async fn clear_single_job_soft_hides_only_that_terminal_job() {
     // sc-12231 / issue #1556: POST /api/v1/jobs/:id/clear (the per-card ×) drops one
     // terminal job from the queue and leaves its siblings alone.
