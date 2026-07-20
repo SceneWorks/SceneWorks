@@ -3144,8 +3144,11 @@ fn builtin_manifest_pins_chatterbox_companion_corequisites() {
     );
 
     // (repo, file, expected full-SHA revision) for each companion co-requisite. The SHAs are the exact
-    // pins in the inference resolvers at the SceneWorks-pinned inference commit (candle_audio_chatterbox_ve
-    // and candle-audio-chatterbox/src/perth.rs).
+    // pins in the inference resolvers at the SceneWorks-pinned inference commit:
+    //   ve   -> candle_audio_chatterbox_ve::{HUB_REPO, HUB_REVISION}      (crates/audio/candle-audio-chatterbox-ve/src/model.rs)
+    //   perth-> candle_audio_chatterbox::perth::{PERTH_HUB_REPO, PERTH_HUB_REVISION} (crates/audio/candle-audio-chatterbox/src/perth.rs)
+    // This test hardcodes them (it cannot link the git-dep consts), so a drift between the manifest and
+    // the resolver still needs the offline DoD smoke (voiceclone_smoke.rs) to catch it end to end.
     let cases = [
         (
             "ResembleAI/chatterbox",
