@@ -8787,10 +8787,13 @@ fn build_video_clip_conditioning(
 /// Resolve an asset id to its on-disk media file path (the source clip mp4), mirroring the asset
 /// lookup in [`load_reference_image`] but returning the path for ffmpeg frame extraction (the
 /// Rust equivalent of the torch `source_asset_media_path`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+///
+/// Ungated (compiled in every feature/target config): besides the macOS/candle video conditioning
+/// callers, the cross-platform `audio_jobs` path resolves the voice-clone reference and the
+/// audio-edit source clip through this same project-scoped guard (sc-13410 / sc-13411), so gating
+/// it to the video lanes broke the default Linux `parity` build with an unresolved reference
+/// (sc-13523). The body depends only on cross-platform helpers (`ProjectStore`,
+/// `safe_project_path`), so it compiles everywhere.
 pub(crate) fn resolve_clip_media_path(
     settings: &Settings,
     project_id: &str,
