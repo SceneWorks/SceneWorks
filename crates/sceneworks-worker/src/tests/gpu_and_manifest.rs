@@ -493,6 +493,75 @@ fn builtin_model_entry(id: &str) -> Value {
         .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
 }
 
+/// sc-12155 lint: every `type: "image"` model that carries a candle VRAM budget
+/// (`candle.vramGbByTier`) MUST declare `mlx.quantize` explicitly.
+///
+/// The image-lane tier/quant resolvers — `vram_gate::requested_tier_key` (candle VRAM sizing) and
+/// `image_jobs::base::resolve_quant` (load quant) — read `advanced.mlxQuantize` → `manifest.mlx.quantize`
+/// and fall through to a `None => q8` arm when BOTH are absent. For a tiered model that arm should never
+/// be reachable: it silently budgets + quantizes at q8 regardless of the model's actual default tier.
+/// That silent fallthrough is exactly how `qwen_image_edit_2511` (+`_lightning`) shipped a q8 default
+/// while their sibling `qwen_image` — and every other tiered image model — declares q4 (sc-12155).
+///
+/// Scoped to `type: "image"` deliberately: the video lane (Wan/LTX/…) has its own q4-default resolvers
+/// (`video_jobs.rs`) that read `advanced.mlxQuantize` only and never consult `manifest.mlx.quantize`, so
+/// the `None => q8` arm is unreachable there — video models carry a `candle.vramGbByTier` block yet
+/// correctly declare no `mlx.quantize`, and folding them in would flag a non-bug.
+///
+/// Mutation check: delete `mlx.quantize` from any tiered image model → this test goes RED naming it.
+/// Pairs with the sc-10732 default-tier precedence guard (`26f40824`).
+#[test]
+fn every_image_model_with_a_candle_vram_block_declares_mlx_quantize() {
+    let mut offenders = Vec::new();
+    for model in builtin_models_manifest() {
+        if model.get("type").and_then(Value::as_str) != Some("image") {
+            continue;
+        }
+        // A tiered model = one the candle VRAM gate budgets against a per-tier row.
+        let has_vram_block = model
+            .get("candle")
+            .and_then(|candle| candle.get("vramGbByTier"))
+            .is_some();
+        if !has_vram_block {
+            continue;
+        }
+        let id = model.get("id").and_then(Value::as_str).unwrap_or("<no id>");
+        // Schema: `mlx.quantize` is an integer >= 1. A missing/zero/non-integer value re-opens the
+        // `None => q8` fallthrough that this lint exists to close.
+        let declared = model
+            .get("mlx")
+            .and_then(|mlx| mlx.get("quantize"))
+            .and_then(Value::as_u64)
+            .is_some_and(|bits| bits >= 1);
+        if !declared {
+            offenders.push(id.to_owned());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these image models carry `candle.vramGbByTier` but do not declare a valid `mlx.quantize` \
+         (integer >= 1), so the image-lane `requested_tier_key` / `resolve_quant` `None => q8` \
+         fallthrough silently budgets + quantizes them at q8 instead of their intended default tier \
+         (sc-12155): {offenders:?}"
+    );
+
+    // Lock the sc-12155 decision itself: both Qwen edit ids default to q4 — matching the sibling
+    // `qwen_image`, their `default: true` q4 download, and their own `candle` "DEFAULT (q4) tier"
+    // comment — NOT the q8 the `None` fallthrough used to produce. Pinning this non-default value makes
+    // the guard discriminate on the value, not merely on presence.
+    for id in ["qwen_image_edit_2511", "qwen_image_edit_2511_lightning"] {
+        let entry = builtin_model_entry(id);
+        assert_eq!(
+            entry
+                .get("mlx")
+                .and_then(|mlx| mlx.get("quantize"))
+                .and_then(Value::as_u64),
+            Some(4),
+            "{id} must declare mlx.quantize: 4 (sc-12155 — q4 default, matching `qwen_image`)"
+        );
+    }
+}
+
 /// epic 10765 sc-10920: the FLUX.2 `candle` blocks drive the dynamic fit-gate end-to-end against the
 /// SHIPPED manifest bytes — resident-fits → sequential-offload → reject-before-OOM. The pure
 /// `vram_gate` unit tests cover the decision logic on synthetic fixtures; THIS guards the data half:
