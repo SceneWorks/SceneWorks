@@ -38,6 +38,13 @@ struct AudioRequest {
     voice: Option<String>,
     language: Option<String>,
     target_duration_secs: Option<f32>,
+    /// CFG guidance scale for diffusion-audio models (Sound FX / MOSS-SoundEffect). Rides the
+    /// top-level `GenerationRequest::guidance` — NOT `AudioParams` (sc-13409). `None` ⇒ the model's
+    /// sampler default.
+    guidance: Option<f32>,
+    /// Solver step count for diffusion-audio models. Rides the top-level `GenerationRequest::steps`.
+    /// `None` ⇒ the model's sampler default.
+    steps: Option<u32>,
     seed: Option<i64>,
     model_manifest_entry: Value,
 }
@@ -66,6 +73,14 @@ impl AudioRequest {
                 .get("targetDurationSecs")
                 .and_then(Value::as_f64)
                 .map(|value| value as f32),
+            guidance: payload
+                .get("guidance")
+                .and_then(Value::as_f64)
+                .map(|value| value as f32),
+            steps: payload
+                .get("steps")
+                .and_then(Value::as_u64)
+                .map(|value| value as u32),
             seed: payload.get("seed").and_then(Value::as_i64),
             model_manifest_entry: payload
                 .get("modelManifestEntry")
@@ -332,6 +347,13 @@ async fn run_audio_synthesis(
     let voice = request.voice.clone();
     let language = request.language.as_deref().map(normalize_audio_language);
     let target_duration = request.target_duration_secs;
+    // Diffusion-audio sampling knobs (Sound FX / MOSS-SoundEffect, sc-13409). These live on the
+    // top-level GenerationRequest — the flow-matching pipeline reads `req.guidance` (CFG scale) and
+    // `req.steps`, not `AudioParams`. `None` ⇒ the generator's own sampler default; the shared
+    // gen-core floor range-checks any value we pass. A TTS model (Kokoro) ignores them entirely, so
+    // Speech jobs — which never carry them — are unaffected.
+    let guidance = request.guidance;
+    let steps = request.steps;
     let seed = request.seed.map(|seed| seed as u64);
     let handle = tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
         let spec = LoadSpec::new(WeightsSource::Dir(model_dir));
@@ -340,6 +362,8 @@ async fn run_audio_synthesis(
         let req = GenerationRequest {
             prompt,
             seed,
+            steps,
+            guidance,
             audio: Some(AudioParams {
                 voice,
                 language,
@@ -441,16 +465,21 @@ fn audio_asset_fact(
         "adapter": adapter,
         "prompt": request.prompt,
         // REQUESTED knobs (the replay record). `null` for an omitted voice/language/duration — the
-        // studio falls back to the model's own defaults, exactly as the video recipe does.
+        // studio falls back to the model's own defaults, exactly as the video recipe does. `guidance`
+        // / `steps` are the Sound FX (diffusion) sampling knobs; `null` for a TTS run that carries none.
         "voice": request.voice,
         "language": request.language,
         "targetDurationSecs": request.target_duration_secs,
+        "guidance": request.guidance,
+        "steps": request.steps,
         "seed": request.seed,
         "rawAdapterSettings": {
             "model": request.model,
             "voice": request.voice,
             "language": request.language,
             "targetDurationSecs": request.target_duration_secs,
+            "guidance": request.guidance,
+            "steps": request.steps,
             "sampleRate": sample_rate,
         },
     })
@@ -549,6 +578,33 @@ mod tests {
         assert_eq!(request.target_duration_secs, Some(4.5));
         assert_eq!(request.seed, Some(7));
         assert_eq!(request.family(), "kokoro");
+        // A TTS payload carries no diffusion sampling knobs → None (the generator's own defaults).
+        assert_eq!(request.guidance, None);
+        assert_eq!(request.steps, None);
+    }
+
+    #[test]
+    fn from_payload_reads_the_sfx_sampling_knobs() {
+        // The Sound FX path (MOSS-SoundEffect, sc-13409) additionally carries guidance (CFG scale) +
+        // steps, which the worker maps onto the top-level GenerationRequest — not AudioParams.
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "moss_sfx_v2",
+            "prompt": "a heavy wooden door creaking open",
+            "language": "en",
+            "targetDurationSecs": 3.0,
+            "guidance": 6.5,
+            "steps": 60,
+            "seed": 11,
+        })));
+        assert_eq!(request.model, "moss_sfx_v2");
+        assert_eq!(request.prompt, "a heavy wooden door creaking open");
+        assert_eq!(request.language.as_deref(), Some("en"));
+        assert_eq!(request.target_duration_secs, Some(3.0));
+        assert_eq!(request.guidance, Some(6.5));
+        assert_eq!(request.steps, Some(60));
+        assert_eq!(request.seed, Some(11));
+        // SFX carries no voice — MOSS advertises no voice surface.
+        assert_eq!(request.voice, None);
     }
 
     #[test]
@@ -607,6 +663,9 @@ mod tests {
         assert_eq!(fact["seed"], 42);
         assert_eq!(fact["model"], "kokoro_82m");
         assert_eq!(fact["adapter"], "kokoro");
+        // A TTS run carries no diffusion sampling knobs → null in the replay record.
+        assert!(fact["guidance"].is_null());
+        assert!(fact["steps"].is_null());
         assert!(fact["mediaPath"]
             .as_str()
             .is_some_and(|path| path.starts_with("assets/audios/") && path.ends_with(".wav")));
@@ -615,5 +674,28 @@ mod tests {
         assert_eq!(result["expectedCount"], 1);
         assert_eq!(result["assetWrites"].as_array().map(Vec::len), Some(1));
         assert_eq!(result["assetWrites"][0]["type"], "audio");
+    }
+
+    #[test]
+    fn sfx_asset_fact_records_the_sampling_knobs_for_replay() {
+        // A Sound FX run records its CFG guidance + steps in both the top-level replay record and
+        // rawAdapterSettings, so a re-generate round-trips the exact sampler settings (sc-13409).
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "moss_sfx_v2",
+            "prompt": "distant rolling thunder over a field",
+            "language": "en",
+            "targetDurationSecs": 5.0,
+            "guidance": 7.0,
+            "steps": 80,
+            "seed": 99,
+        })));
+        let plan = AudioPlan::new(&request, Path::new("/tmp/project"));
+        let fact = audio_asset_fact(&plan, &request, 48_000, 1, 5.0);
+        assert_eq!(fact["sampleRate"], 48_000);
+        assert_eq!(fact["guidance"], 7.0);
+        assert_eq!(fact["steps"], 80);
+        assert!(fact["voice"].is_null(), "SFX carries no voice");
+        assert_eq!(fact["rawAdapterSettings"]["guidance"], 7.0);
+        assert_eq!(fact["rawAdapterSettings"]["steps"], 80);
     }
 }

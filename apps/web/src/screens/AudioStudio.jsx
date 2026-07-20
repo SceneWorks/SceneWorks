@@ -25,12 +25,15 @@ import { jobAudioResultAssets } from "../jobResultAssets.js";
 // mode (Speech = ships a voice bank, Music = advertises edit ops, Voice Clone = reference/embedding
 // conditioning, Sound FX = residual text→audio generator).
 //
-// SCOPE (C1, sc-13408): the Speech (TTS) mode is fully wired — the Generate CTA submits the script +
-// capability-driven voice/language/length/seed through createAudioJob → rememberLocalGenerationJob(
-// 'audio', job), which surfaces the run in the audioLocalJobs stack below via the shared audio-player
-// card (A5, sc-13405). The other three modes (C2 Sound FX, C3 Music, C4 Voice Clone) keep the C0
-// scaffold: their fields render capability-driven, but submit stays inert until their own stories
-// land (the Generate CTA is disabled off the Speech tab rather than being a silent no-op).
+// SCOPE (C1 sc-13408 + C2 sc-13409): Speech (TTS) and Sound FX are both fully wired — the Generate CTA
+// submits the prompt + capability-driven knobs through createAudioJob → rememberLocalGenerationJob(
+// 'audio', job), surfacing the run in the audioLocalJobs stack below via the shared audio-player card
+// (A5, sc-13405). Speech carries voice/language/length/seed; Sound FX (MOSS-SoundEffect v2) carries the
+// prompt + length/language + the diffusion sampling knobs guidance(CFG)/steps/seed — MOSS advertises no
+// voice surface, so none is sent (the shared gen-core floor would reject an explicit voice). The
+// remaining modes (C3 Music, C4 Voice Clone) keep the C0 scaffold: their fields render capability-driven,
+// but submit stays inert until their stories land (the Generate CTA is disabled off a wired tab rather
+// than being a silent no-op).
 
 // Tab labels per the epic, keyed by the AUDIO_MODES ids so the ordering follows that array.
 const MODE_LABELS = {
@@ -51,6 +54,17 @@ const MODE_PLACEHOLDER = {
 // Modes that emit a fixed-length waveform, so a length control (clamped to the model's
 // audio.maxDurationSecs) applies. Voice Clone follows its reference clip's length.
 const DURATION_MODES = new Set(["speech", "sfx", "music"]);
+// Modes whose Generate CTA is fully wired to createAudioJob (Speech C1 sc-13408, Sound FX C2 sc-13409).
+// The remaining modes keep the C0 scaffold — their CTA stays disabled rather than a silent no-op — until
+// their own stories land, so this set is the single guard both `canGenerate` and `submit` read.
+const WIRED_MODES = new Set(["speech", "sfx"]);
+// Modes that expose the diffusion sampling knobs (CFG guidance + solver steps) in the advanced panel.
+// Sound FX runs the MOSS-SoundEffect flow-matching pipeline, which reads guidance/steps off the
+// top-level request; Speech (Kokoro) is not a diffusion model and ignores them, so it hides them. This
+// is mode-gated rather than manifest-gated because MOSS is the sole SFX model and the `audio` sub-block
+// carries no per-knob range to drive it — a future non-diffusion SFX model would move this to a
+// capability flag (mirrors how showVoice/showEditModes gate on their mode + a capability array).
+const SAMPLING_KNOB_MODES = new Set(["sfx"]);
 // Fallback target length before the model's cap is known; always clamped to maxDurationSecs.
 const DEFAULT_TARGET_DURATION_SECS = 10;
 
@@ -127,6 +141,10 @@ export function AudioStudio() {
     saved.targetDurationSecs ?? DEFAULT_TARGET_DURATION_SECS,
   );
   const [seed, setSeed] = useState(saved.seed ?? "");
+  // Sound FX (MOSS-SoundEffect) diffusion sampling knobs — the CFG guidance scale and the solver step
+  // count. Empty ⇒ the model's own default (MOSS: CFG 4.0 / 100 steps), matching the advanced hint.
+  const [guidance, setGuidance] = useState(saved.guidance ?? "");
+  const [steps, setSteps] = useState(saved.steps ?? "");
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   // Guards a Speech run in flight so a second submit (double-click / ⌘↵) can't double-enqueue
   // (mirrors VideoStudio's `submitting`). Cleared in submit's finally.
@@ -169,15 +187,21 @@ export function AudioStudio() {
   const showDuration = DURATION_MODES.has(mode) && maxDurationSecs != null;
   const showEditModes = mode === "music" && editModes.length > 0;
   const showConditioning = mode === "voiceclone" && conditioning.length > 0;
+  // The CFG guidance + steps advanced knobs surface only on the diffusion-audio (Sound FX) modes the
+  // selected model actually runs through a sampler — the model's `supports_guidance` surface. See
+  // SAMPLING_KNOB_MODES for why this is mode-gated today.
+  const showSamplingKnobs = SAMPLING_KNOB_MODES.has(mode);
 
   // The voice picker's <optgroup> structure — derived from the selected model's voice bank, grouped
   // by accent + gender (sc-13408). Rebuilt only when the bank changes.
   const voiceGroups = useMemo(() => groupVoicesByGenderAccent(voices), [voices]);
 
-  // Generate is guarded (never a silent no-op): a run needs a non-empty script, an installed model,
-  // and no run already in flight. The empty-script guard is the DoD's "disable on empty script".
-  const scriptReady = prompt.trim().length > 0;
-  const canGenerate = mode === "speech" && modelReady && Boolean(model) && scriptReady && !submitting;
+  // Generate is guarded (never a silent no-op): a run needs a wired mode, a non-empty prompt, an
+  // installed model, and no run already in flight. The empty-prompt guard is the DoD's "disable on
+  // empty prompt"; the WIRED_MODES gate keeps the still-scaffold tabs (Music / Voice Clone) inert.
+  const promptReady = prompt.trim().length > 0;
+  const canGenerate =
+    WIRED_MODES.has(mode) && modelReady && Boolean(model) && promptReady && !submitting;
 
   // Snap the model to one that serves the active mode (mirrors VideoStudio). A no-op when the current
   // model already serves the mode, or when nothing serves it (a reduced catalog).
@@ -232,6 +256,8 @@ export function AudioStudio() {
       editMode,
       targetDurationSecs,
       seed,
+      guidance,
+      steps,
       advancedOpen,
     },
     audioModels.length > 0,
@@ -257,10 +283,10 @@ export function AudioStudio() {
     if (submitting) {
       return;
     }
-    // C1 (Speech, sc-13408) wires Speech only. The mode-specific stories after it (C2 Sound FX,
-    // C3 Music, C4 Voice Clone) extend this per mode — until they land those tabs keep the C0
-    // scaffold, so their submit is intentionally inert.
-    if (mode !== "speech" || !canGenerate) {
+    // Only the wired modes submit (Speech C1 sc-13408, Sound FX C2 sc-13409); Music / Voice Clone
+    // keep the C0 scaffold, so their submit is intentionally inert. `canGenerate` also covers the
+    // empty-prompt / no-model / in-flight guards, so a direct form submit can never slip past them.
+    if (!canGenerate) {
       return;
     }
     setSubmitting(true);
@@ -275,17 +301,27 @@ export function AudioStudio() {
           : undefined;
       // The audio route deserializes `model` (not `modelId`) and reads the typed knobs verbatim
       // (apps/rust-api/src/dto.rs AudioJobRequest → crates/sceneworks-worker/src/audio_jobs.rs). The
-      // language-casing seam (en-US → en-us) is handled server-side. Voice/language are omitted when
-      // unset so the model falls back to its own default (Kokoro's af_heart / en). Mirrors how
-      // VideoStudio builds createVideoJob's payload from its settings.
-      const job = await createAudioJob?.({
+      // language-casing seam (en-US → en-us) is handled server-side. Language is omitted when unset so
+      // the model derives its own default. Mirrors how VideoStudio builds createVideoJob's payload.
+      const payload = {
         model,
         prompt: prompt.trim(),
-        voice: voice || undefined,
         language: language || undefined,
         targetDurationSecs: clampedDuration,
         seed: seed === "" ? null : Number(seed),
-      });
+      };
+      if (mode === "speech") {
+        // Speech (Kokoro) ships a voice bank; omitted when unset so the model falls back to af_heart.
+        payload.voice = voice || undefined;
+      } else if (mode === "sfx") {
+        // Sound FX (MOSS-SoundEffect) — the CFG guidance scale + solver steps ride the top-level
+        // request the diffusion pipeline reads. Cleared ⇒ omitted so the model uses its own default
+        // (CFG 4.0 / 100 steps); the shared gen-core floor range-checks any value we do send. No
+        // `voice` is sent — MOSS advertises no voice surface and the floor rejects one.
+        payload.guidance = guidance === "" ? undefined : Number(guidance);
+        payload.steps = steps === "" ? undefined : Number(steps);
+      }
+      const job = await createAudioJob?.(payload);
       if (job) {
         // Land the run in the audio local-job lane so it stacks in .studio-results via the shared
         // audio-player card (A5 / sc-13405) — the audio twin of rememberLocalGenerationJob('video').
@@ -483,6 +519,36 @@ export function AudioStudio() {
                     value={seed}
                   />
                 </label>
+                {/* Sound FX diffusion sampling knobs (MOSS-SoundEffect). Guidance is the CFG scale and
+                    Steps is the solver step count — both ride the top-level request the flow-matching
+                    pipeline reads. Cleared ⇒ the model's own default; the gen-core floor range-checks
+                    any value sent, so no hardcoded ceiling is baked into the input. */}
+                {showSamplingKnobs ? (
+                  <label>
+                    Guidance (CFG)
+                    <input
+                      min="1"
+                      onChange={(event) => setGuidance(event.target.value)}
+                      placeholder="Model default"
+                      step="0.5"
+                      type="number"
+                      value={guidance}
+                    />
+                  </label>
+                ) : null}
+                {showSamplingKnobs ? (
+                  <label>
+                    Steps
+                    <input
+                      min="1"
+                      onChange={(event) => setSteps(event.target.value)}
+                      placeholder="Model default"
+                      step="1"
+                      type="number"
+                      value={steps}
+                    />
+                  </label>
+                ) : null}
                 {/* Sample rate the model emits at (audio.sampleRates). Capability-driven, never
                     hardcoded — and read-only: the output rate is a fixed property of the model's
                     vocoder (Kokoro is 24 kHz mono), not a request knob the audio route accepts, so it

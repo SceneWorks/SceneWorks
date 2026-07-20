@@ -875,13 +875,18 @@ pub(crate) struct VideoJobRequest {
     pub(crate) advanced: JsonObject,
 }
 
-/// A `POST /api/v1/audio/jobs` request (SceneWorks Audio Studio, epic 13400 / sc-13404). The audio
-/// analogue of [`VideoJobRequest`]: `prompt` is the script text, and the typed audio knobs (`voice`
-/// / `language` / `targetDurationSecs`) map to the worker-side [`gen_core::AudioParams`] sub-block a
-/// `Modality::Audio` generator reads. Every audio knob is optional — an omitted voice/language
-/// falls back to the model's default (Kokoro's `af_heart`, `en`), and an omitted duration lets the
-/// model synthesize its natural length. `Serialize` too so the whole request round-trips into the
-/// job payload the worker claims (mirroring how the video request is `to_json_object`'d).
+/// A `POST /api/v1/audio/jobs` request (SceneWorks Audio Studio, epic 13400 / sc-13404 + sc-13409).
+/// The audio analogue of [`VideoJobRequest`]: `prompt` is the script/sound description, and the typed
+/// audio knobs (`voice` / `language` / `targetDurationSecs`) map to the worker-side
+/// [`gen_core::AudioParams`] sub-block a `Modality::Audio` generator reads. Diffusion-audio models
+/// (MOSS-SoundEffect, the Sound FX mode) additionally read the sampling knobs `guidance` (CFG scale)
+/// and `steps` off the *top-level* [`gen_core::GenerationRequest`] — not `AudioParams` — so those two
+/// are carried here and mapped onto the request by the worker (sc-13409). Every audio knob is optional
+/// — an omitted voice/language falls back to the model's default (Kokoro's `af_heart`, `en`), an
+/// omitted duration lets the model synthesize its natural length, and an omitted guidance/steps lets
+/// the model use its own sampler default (MOSS: CFG 4.0 / 100 steps). `Serialize` too so the whole
+/// request round-trips into the job payload the worker claims (mirroring how the video request is
+/// `to_json_object`'d).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AudioJobRequest {
@@ -904,6 +909,18 @@ pub(crate) struct AudioJobRequest {
     /// the model's advertised `audio.maxDurationSecs` by the worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) target_duration_secs: Option<f32>,
+    /// CFG guidance scale for diffusion-audio models (Sound FX / MOSS-SoundEffect). Rides the
+    /// top-level [`gen_core::GenerationRequest::guidance`] the worker builds. `None` ⇒ the model's
+    /// default (MOSS: 4.0). Bounded to a blanket sane range here; the model's advertised guidance
+    /// range is the real gate the generator's `validate` applies (sc-13409).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) guidance: Option<f32>,
+    /// Solver step count for diffusion-audio models (Sound FX / MOSS-SoundEffect). Rides the
+    /// top-level [`gen_core::GenerationRequest::steps`]. `None` ⇒ the model's default (MOSS: 100).
+    /// Bounded to a blanket sane ceiling here; the model's advertised step ceiling is the real gate
+    /// the generator's `validate` applies (sc-13409).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) steps: Option<u32>,
     #[serde(default)]
     pub(crate) seed: Option<i64>,
     #[serde(default = "default_requested_gpu")]
