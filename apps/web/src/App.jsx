@@ -43,6 +43,7 @@ import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import { generationModelsForType } from "./modelEligibility.js";
 import { isAccentId } from "./accents.js";
 import { writeDefaultGenerationQuality } from "./generationQuality.js";
+import { seedLastTiersFromServer } from "./lastTierStore.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -1067,6 +1068,12 @@ export function App() {
         // normalizes, so an absent/legacy value lands on q8. No PUT: this is a read-only seed.
         if (prefs?.defaultGenerationQuality) {
           writeDefaultGenerationQuality(prefs.defaultGenerationQuality);
+        }
+        // Re-prime the per-(screen,model) tier sticky cache from the durable server copy (epic 10721
+        // R1), so a tier a user picked for a model in a previous session is returned by readLastTier
+        // even after the desktop origin — and its localStorage — changed on relaunch.
+        if (prefs?.perModelTier) {
+          seedLastTiersFromServer(prefs.perModelTier);
         }
       })
       .catch(() => {});

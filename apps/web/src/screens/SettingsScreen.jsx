@@ -9,6 +9,7 @@ import {
 import { apiFetch } from "../api.js";
 import { isDesktop, tauriInvoke as invoke } from "../runtime.js";
 import {
+  GENERATION_QUALITY_OPTIONS,
   generationQualityLabel,
   readDefaultGenerationQuality,
   writeDefaultGenerationQuality,
@@ -295,9 +296,10 @@ export function SettingsScreen() {
         <h3>Generation quality</h3>
         <p className="settings-muted">
           The default quality tier new generations use for a model you haven’t picked a
-          tier for yet. Higher fidelity looks best but uses more memory and is slower;
-          smaller tiers are faster and lighter. You can still override this per model in
-          the studio, and your per-model picks are remembered.
+          tier for yet. <strong>Auto</strong> picks the highest-fidelity tier that fits this
+          machine’s memory for each model — so a small model runs at full precision and a
+          heavy one steps down to what fits. You can still pin a fixed tier here, or override
+          per model in the studio; your per-model picks are remembered.
         </p>
         <div className="settings-actions">
           <label htmlFor="default-generation-quality">Default quality</label>
@@ -307,9 +309,11 @@ export function SettingsScreen() {
             onChange={(event) => changeDefaultQuality(event.target.value)}
             aria-label="Default generation quality"
           >
-            <option value="bf16">High fidelity (bf16)</option>
-            <option value="q8">Balanced (Q8)</option>
-            <option value="q4">Fast (Q4)</option>
+            {GENERATION_QUALITY_OPTIONS.map((value) => (
+              <option key={value} value={value}>
+                {generationQualityLabel(value)}
+              </option>
+            ))}
           </select>
         </div>
       </section>

@@ -923,7 +923,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       .find((label) => label.textContent.trim().startsWith("Quantization"))
       ?.querySelector("select") ?? null;
 
-  it("shows installed tiers on MLX, stays q4-first, and hides with one installed tier", async () => {
+  it("shows ALL possible MLX tiers (disabling un-installed), stays q4-first (sc-12165)", async () => {
     await render(
       baseContext({
         videoModels: [tieredVideoModel(["q4", "q8"])],
@@ -932,9 +932,15 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     );
     await openAdvanced();
 
-    expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8"]);
+    // All bits-based tiers appear (NVFP4 filtered on MLX); bf16 is declared-but-not-installed → disabled.
+    expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8", "bf16"]);
+    const disabledByTier = Object.fromEntries(
+      [...tierPicker().options].map((option) => [option.value, option.disabled]),
+    );
+    expect(disabledByTier).toEqual({ q4: false, q8: false, bf16: true });
     expect(tierPicker().value).toBe("q4");
 
+    // Even with a single installed tier the picker now shows (others disabled), and q4 still rides the payload.
     await unmountRoot(root, container);
     ({ container, root } = mountRoot());
     const context = baseContext({
@@ -944,12 +950,17 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     await render(context);
     await openAdvanced();
 
-    expect(tierPicker()).toBeNull();
+    expect(tierPicker()).toBeTruthy();
+    expect(tierPicker().value).toBe("q4");
+    const soloInstalled = Object.fromEntries(
+      [...tierPicker().options].map((option) => [option.value, option.disabled]),
+    );
+    expect(soloInstalled).toEqual({ q4: false, q8: true, bf16: true });
     await click(buttonWithText(container, "Render clip"));
     expect(context.createVideoJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
   });
 
-  it("keeps the candle-only NVFP4 tier out of the MLX video picker", async () => {
+  it("keeps the candle-only NVFP4 tier out of the MLX video picker (sc-11042)", async () => {
     const context = baseContext({
       videoModels: [tieredVideoModel(["q4", "nvfp4"])],
       macCapabilities: MAC_CAPS,
@@ -957,7 +968,11 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     await render(context);
     await openAdvanced();
 
-    expect(tierPicker()).toBeNull();
+    // The picker shows the bits-based tiers, but NVFP4 is filtered out even though it's installed.
+    expect(tierPicker()).toBeTruthy();
+    const optionValues = [...tierPicker().options].map((option) => option.value);
+    expect(optionValues).toEqual(["q4", "q8", "bf16"]);
+    expect(optionValues).not.toContain("nvfp4");
     await click(buttonWithText(container, "Render clip"));
     expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 4 });
     expect(context.createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("quantTier");

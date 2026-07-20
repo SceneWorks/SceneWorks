@@ -1,5 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readLastTier, writeLastTier } from "./lastTierStore.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// The store mirrors every pick to the durable server copy (epic 10721 R1) so it survives a desktop
+// relaunch. Mock the API so the tests can assert the write-through without a live server.
+vi.mock("./api.js", () => ({ apiFetch: vi.fn(() => Promise.resolve({})) }));
+
+import { apiFetch } from "./api.js";
+import { readLastTier, seedLastTiersFromServer, writeLastTier } from "./lastTierStore.js";
 import { defaultTierSelection } from "./quantTier.js";
 
 // A download-matrix model whose `installed` tiers are present; unlisted declared tiers are missing.
@@ -19,6 +25,7 @@ const STORAGE_KEY = "sceneworks-last-tier";
 
 beforeEach(() => {
   window.localStorage.clear();
+  apiFetch.mockClear();
 });
 
 afterEach(() => {
@@ -131,5 +138,42 @@ describe("lastTierStore — precedence with defaultTierSelection", () => {
     expect(defaultTierSelection(convertModel, readLastTier("image", convertModel.id))).toBe("q8");
     writeLastTier("image", convertModel.id, "q4");
     expect(defaultTierSelection(convertModel, readLastTier("image", convertModel.id))).toBe("q4");
+  });
+});
+
+describe("lastTierStore — durable server persistence (epic 10721 R1)", () => {
+  it("mirrors each pick to the durable ui-preferences copy as the full merged map", () => {
+    writeLastTier("image", "sana_sprint_1600m", "bf16");
+    writeLastTier("image", "flux_dev", "q4");
+    writeLastTier("video", "wan_ti2v_5b", "q8");
+
+    // Every write PUTs the FULL map (so the server can replace wholesale — no deep-merge needed).
+    expect(apiFetch).toHaveBeenCalledTimes(3);
+    const [path, token, opts] = apiFetch.mock.calls.at(-1);
+    expect(path).toBe("/api/v1/ui-preferences");
+    expect(token).toBe(""); // public route
+    expect(opts.method).toBe("PUT");
+    expect(JSON.parse(opts.body)).toEqual({
+      perModelTier: {
+        image: { sana_sprint_1600m: "bf16", flux_dev: "q4" },
+        video: { wan_ti2v_5b: "q8" },
+      },
+    });
+  });
+
+  it("does not re-PUT when the pick is unchanged", () => {
+    writeLastTier("image", "model_x", "q8");
+    apiFetch.mockClear();
+    writeLastTier("image", "model_x", "q8"); // same value — no-op
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it("seedLastTiersFromServer primes the cache so a prior-session pick is read back after relaunch", () => {
+    // Simulate a fresh launch: localStorage empty, server returns a stored map.
+    expect(readLastTier("image", "sana_sprint_1600m")).toBe(null);
+    seedLastTiersFromServer({ image: { sana_sprint_1600m: "bf16" } });
+    expect(readLastTier("image", "sana_sprint_1600m")).toBe("bf16");
+    // Seeding is a read-only cache prime — it must not echo a redundant PUT back to the server.
+    expect(apiFetch).not.toHaveBeenCalled();
   });
 });

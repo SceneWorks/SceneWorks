@@ -238,3 +238,25 @@ describe("suggestTier", () => {
     expect(suggestTier({ hasVariantMatrix: false, variants: [] }, 32)).toBe(null);
   });
 });
+
+describe("suggestTier — real SANA-Sprint footprints (epic 10721 Auto default)", () => {
+  // Actual on-disk tier sizes for SceneWorks/Sana_Sprint_1.6B_1024px_mlx (from the live catalog).
+  const sanaSprint = () =>
+    matrixModel([
+      { variant: "q4", diskGb: 5.19 },
+      { variant: "q8", diskGb: 6.54 },
+      { variant: "bf16", diskGb: 9.05 },
+    ]);
+
+  it("suggests bf16 for a small model on a roomy Mac (Michael's 128 GB case)", () => {
+    // bf16 peak ≈ 9.05 + 14 transient = ~23 GB, well under 128 × 0.9 = 115 GB → full precision.
+    expect(suggestTier(sanaSprint(), 128)).toBe("bf16");
+  });
+
+  it("still leans as high as fits on a mid Mac, and steps down on a tiny one", () => {
+    // 64 GB: bf16 ~23 GB < 57.6 budget → bf16.
+    expect(suggestTier(sanaSprint(), 64)).toBe("bf16");
+    // 16 GB: every tier's peak (~19–23 GB) exceeds the 14.4 GB budget → smallest declared (q4).
+    expect(suggestTier(sanaSprint(), 16)).toBe("q4");
+  });
+});

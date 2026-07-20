@@ -2031,6 +2031,30 @@ fn mlx_convert_output_tiers(converted_dir: &FsPath) -> Vec<&'static str> {
         .collect()
 }
 
+/// Per-tier install state for a convert-at-install model's FULL possible tier set (q4/q8/bf16), so the
+/// Studio picker can show EVERY tier with the un-converted ones DISABLED — the same "show all, disable
+/// unavailable" rule the download-matrix `variants[]` array gives. Unlike [`mlx_convert_output_tiers`]
+/// (installed tiers only, which can only ever GROW the picker), this lists all three whether or not they
+/// are on disk. `installState` is `"installed"` when the tier holds loadable weights, else `"missing"`;
+/// `cacheState` mirrors it (`"complete"`/`"missing"`). NOTE the completeness here is as coarse as
+/// [`tier_subdir_has_weights`] — it can't yet flag a torn tier (backbone present, text-encoder/VAE gone)
+/// as `incomplete` the way the diffusers `variants[]` path does via `model_index.json`; a torn convert
+/// output would read `installed`. Tightening that needs the worker's family-specific completeness
+/// (anima/boogu/sana) mirrored here — tracked separately.
+fn mlx_convert_output_tier_states(converted_dir: &FsPath) -> Vec<Value> {
+    ["q4", "q8", "bf16"]
+        .into_iter()
+        .map(|tier| {
+            let installed = tier_subdir_has_weights(&converted_dir.join(tier));
+            json!({
+                "tier": tier,
+                "installState": if installed { "installed" } else { "missing" },
+                "cacheState": if installed { "complete" } else { "missing" },
+            })
+        })
+        .collect()
+}
+
 /// Whether a converted tier subdir holds loadable weights: a non-hidden `.safetensors` / `.index.json`
 /// under a known backbone dir (`diffusion_models/` for Anima's Cosmos DiT, `transformer/` for other
 /// DiTs, `unet/` for SDXL) or flat in the tier dir. A hidden `._*` AppleDouble sidecar is not a weight
@@ -2100,6 +2124,14 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
             let tiers = mlx_convert_output_tiers(converted);
             if !tiers.is_empty() {
                 object.insert("mlxTiers".to_owned(), json!(tiers));
+                // The FULL possible tier set with per-tier state, so the Studio shows un-converted tiers
+                // disabled rather than omitting them (the web reads `mlxTierStates` in preference to the
+                // installed-only `mlxTiers`). Emitted only when the model is actually converted (>=1 tier
+                // present), matching `mlxTiers` — an unconverted model still renders no picker.
+                object.insert(
+                    "mlxTierStates".to_owned(),
+                    Value::Array(mlx_convert_output_tier_states(converted)),
+                );
             }
         }
         object.insert(
@@ -3724,6 +3756,41 @@ mod mlx_tier_probe_tests {
         let flat = tempfile::tempdir().unwrap();
         std::fs::write(flat.path().join("model_index.json"), b"{}").unwrap();
         assert!(mlx_convert_output_tiers(flat.path()).is_empty());
+    }
+
+    #[test]
+    fn convert_output_tier_states_lists_the_full_set_marking_un_converted_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Only q4 + q8 are converted; bf16 is absent — but ALL THREE must appear so the picker can show
+        // bf16 disabled (the "show all, disable unavailable" rule for convert-at-install models).
+        write_weight(
+            &root.join("q4"),
+            "diffusion_models",
+            "anima-base-v1.0.safetensors",
+        );
+        write_weight(
+            &root.join("q8"),
+            "diffusion_models",
+            "anima-base-v1.0.safetensors",
+        );
+        let states = mlx_convert_output_tier_states(root);
+        assert_eq!(states.len(), 3);
+        let by_tier: std::collections::BTreeMap<_, _> = states
+            .iter()
+            .map(|state| {
+                (
+                    state["tier"].as_str().unwrap(),
+                    (
+                        state["installState"].as_str().unwrap(),
+                        state["cacheState"].as_str().unwrap(),
+                    ),
+                )
+            })
+            .collect();
+        assert_eq!(by_tier["q4"], ("installed", "complete"));
+        assert_eq!(by_tier["q8"], ("installed", "complete"));
+        assert_eq!(by_tier["bf16"], ("missing", "missing"));
     }
 
     // Full catalog path: a converted convert-at-install model (Anima) emits `mlxTiers` from

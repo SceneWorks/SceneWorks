@@ -71,11 +71,12 @@ import {
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { qualityChoices } from "../jobTypes.js";
 import {
+  allPossibleTiers,
   defaultTierSelection,
   installedTiers,
   quantizeTier,
-  shouldShowTierPicker,
   tierLabel,
+  tierPickerOptions,
   tierQuantize,
 } from "../quantTier.js";
 import {
@@ -415,9 +416,21 @@ export function VideoStudio() {
     () => (mlxTierLane ? installedTiers(selectedModel, tierOptions) : []),
     [mlxTierLane, selectedModel, tierOptions],
   );
-  const showTierPicker = useMemo(
-    () => mlxTierLane && shouldShowTierPicker(selectedModel, tierOptions),
+  // The full display set (all possible tiers, installed or not) + the picker option list with
+  // un-downloaded tiers disabled — same show-all/disable-unavailable rule as Image Studio. `availableTiers`
+  // stays the SELECTABLE/send set; the picker shows whenever there is more than one POSSIBLE tier and at
+  // least one is installed to select.
+  const possibleTiers = useMemo(
+    () => (mlxTierLane ? allPossibleTiers(selectedModel, tierOptions) : []),
     [mlxTierLane, selectedModel, tierOptions],
+  );
+  const tierPickerItems = useMemo(
+    () => (mlxTierLane ? tierPickerOptions(selectedModel, tierOptions) : []),
+    [mlxTierLane, selectedModel, tierOptions],
+  );
+  const showTierPicker = useMemo(
+    () => mlxTierLane && possibleTiers.length > 1 && availableTiers.length > 0,
+    [mlxTierLane, possibleTiers, availableTiers],
   );
   const showTorchQuantization = !mlxTierLane && supportsQuantization;
   const selectedMlxQuantize =
@@ -459,7 +472,9 @@ export function VideoStudio() {
   const tierSwitchTimer = useRef(null);
   useEffect(() => () => clearTimeout(tierSwitchTimer.current), []);
   const handleTierChange = (nextTier) => {
-    if (nextTier === quantTier) {
+    // Only an installed-and-complete tier can be selected; the disabled options are shown for
+    // discoverability, never as a pickable target (belt behind the native `<option disabled>`).
+    if (nextTier === quantTier || !availableTiers.includes(nextTier)) {
       return;
     }
     setQuantTier(nextTier);
@@ -1804,9 +1819,9 @@ export function VideoStudio() {
                 >
                   Quant tier
                   <select onChange={(event) => handleTierChange(event.target.value)} value={quantTier}>
-                    {availableTiers.map((tier) => (
-                      <option key={tier} value={tier}>
-                        {tierLabel(tier)}
+                    {tierPickerItems.map((item) => (
+                      <option key={item.tier} value={item.tier} disabled={item.disabled}>
+                        {item.label}
                       </option>
                     ))}
                   </select>

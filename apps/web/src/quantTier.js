@@ -179,14 +179,117 @@ export function installedTiers(model, options = {}) {
       .map((variant) => variant.variant)
       .sort(sortByTierOrder);
   }
-  // Convert-at-install models (sc-10730): tiers are convert OUTPUTS on disk, surfaced by the catalog as
-  // `mlxTiers` — a plain array of installed tier keys, DECOUPLED from the download variant-matrix so the
-  // Models download panel (`hasVariantMatrix`) is untouched. Anima (and other convert-at-install models)
-  // get a Studio generation-time tier picker this way.
+  // Convert-at-install models (sc-10730): tiers are convert OUTPUTS on disk, DECOUPLED from the download
+  // variant-matrix so the Models download panel (`hasVariantMatrix`) is untouched. Preferred shape is the
+  // richer per-tier `mlxTierStates` (each `{ tier, installState, cacheState }`) — the SELECTABLE set is
+  // the tiers whose install is `"installed"` (complete), exactly like the variant matrix above, so a torn
+  // convert output is never offered. Falls back to the legacy installed-only `mlxTiers` list (a plain
+  // array of already-installed keys) when the richer field is absent.
+  if (Array.isArray(model?.mlxTierStates) && model.mlxTierStates.length > 0) {
+    return model.mlxTierStates
+      .filter(
+        (state) =>
+          state &&
+          isSelectableTier(state.tier) &&
+          hostEligible(state.tier) &&
+          state.installState === "installed",
+      )
+      .map((state) => state.tier)
+      .sort(sortByTierOrder);
+  }
   if (Array.isArray(model?.mlxTiers) && model.mlxTiers.length > 0) {
     return model.mlxTiers.filter((tier) => isSelectableTier(tier) && hostEligible(tier)).sort(sortByTierOrder);
   }
   return [];
+}
+
+// Per-tier install state keyed by tier, drawn from whichever catalog shape the model carries. Returns a
+// lookup `tier => { installState, cacheState }` (both may be undefined for a tier the catalog omits).
+// Download-matrix models carry it on `variants[]`; convert-at-install models on the richer
+// `mlxTierStates[]` (each `{ tier, installState, cacheState }`) added so their picker can show the FULL
+// possible set with per-tier availability, not just the installed ones (the legacy `mlxTiers` list has
+// no completeness metadata). Only used to explain WHY a tier is disabled — never to decide selectability
+// (that stays `installedTiers`, the single source of "safe to send").
+function tierStateLookup(model) {
+  const map = new Map();
+  if (model?.hasVariantMatrix && Array.isArray(model.variants)) {
+    for (const variant of model.variants) {
+      if (variant?.variant) {
+        map.set(variant.variant, {
+          installState: variant.installState,
+          cacheState: variant.cacheState,
+        });
+      }
+    }
+  } else if (Array.isArray(model?.mlxTierStates)) {
+    for (const state of model.mlxTierStates) {
+      if (state?.tier) {
+        map.set(state.tier, { installState: state.installState, cacheState: state.cacheState });
+      }
+    }
+  }
+  return (tier) => map.get(tier);
+}
+
+// The FULL set of quant tiers to DISPLAY in a studio picker — every tier the model CAN have, installed
+// or not, in display order. UNLIKE `installedTiers` (only the on-disk-and-complete, selectable tiers),
+// this is the superset the dropdown renders so a user SEES a tier they haven't downloaded (rendered
+// disabled) instead of it silently not existing. The user's bottom line — never generate off a tier
+// that isn't in the cache — is enforced by `installedTiers` (selectability), NOT by this set; this only
+// governs what is shown.
+//
+// Source of the "possible" set:
+//  - Download variant-matrix models (sc-8508): every declared `variants[].variant` — the catalog lists
+//    each tier whether or not it is installed — filtered to selectable + host-eligible.
+//  - Convert-at-install models (sc-10730) that emit the richer per-tier `mlxTierStates` array: every
+//    tier key in it. Falls back to the legacy installed-only `mlxTiers` list when the richer field is
+//    absent, so an older API (or a model not yet upgraded) keeps today's installed-only display rather
+//    than regressing to an empty picker.
+// Returns [] when the model exposes no tier information at all.
+export function allPossibleTiers(model, options = {}) {
+  const { convRotEligible = true, nvfp4Eligible = true } = options;
+  const hostEligible = (tier) =>
+    (convRotEligible || !isConvRotTier(tier)) && (nvfp4Eligible || !isNvfp4Tier(tier));
+  if (model?.hasVariantMatrix && Array.isArray(model.variants)) {
+    return model.variants
+      .filter(
+        (variant) => variant && isSelectableTier(variant.variant) && hostEligible(variant.variant),
+      )
+      .map((variant) => variant.variant)
+      .sort(sortByTierOrder);
+  }
+  if (Array.isArray(model?.mlxTierStates) && model.mlxTierStates.length > 0) {
+    return model.mlxTierStates
+      .filter((state) => state && isSelectableTier(state.tier) && hostEligible(state.tier))
+      .map((state) => state.tier)
+      .sort(sortByTierOrder);
+  }
+  if (Array.isArray(model?.mlxTiers) && model.mlxTiers.length > 0) {
+    return model.mlxTiers.filter((tier) => isSelectableTier(tier) && hostEligible(tier)).sort(sortByTierOrder);
+  }
+  return [];
+}
+
+// The studio tier-picker option list: every POSSIBLE tier as `{ tier, label, disabled }`, in display
+// order, with `disabled: true` for any tier that is NOT installed-and-complete. The three studio
+// surfaces (Image / Video / Editor) render this directly, so the "show all, disable the un-downloaded"
+// rule and its labelling live in ONE place. A disabled option's label carries an explanatory suffix so
+// the user understands why it can't be picked (and, for a torn install, that a re-download is needed).
+// Selectability is `installedTiers` verbatim — the ONLY set that is safe to send to the worker.
+export function tierPickerOptions(model, options = {}) {
+  const installed = new Set(installedTiers(model, options));
+  const stateFor = tierStateLookup(model);
+  return allPossibleTiers(model, options).map((tier) => {
+    if (installed.has(tier)) {
+      return { tier, label: tierLabel(tier), disabled: false };
+    }
+    // A tier present-but-torn reports cacheState "incomplete" (never "installed"); a cleanly-absent one
+    // reports "missing"/undefined. Distinguish so a torn tier reads as "re-download", not "not
+    // downloaded" — the torn case is exactly the crash this whole change exists to prevent.
+    const suffix =
+      stateFor(tier)?.cacheState === "incomplete" ? "download incomplete" : "not downloaded";
+    return { tier, label: `${tierLabel(tier)} — ${suffix}`, disabled: true };
+  });
 }
 
 // Quality rank of a generation quant tier: higher = more faithful (bf16 > q8 > q4). Derived from
@@ -289,16 +392,24 @@ export function defaultTierSelection(model, lastUsed, options = {}) {
   // catalog (no `default` emitted), kept so a manifest that does declare one still wins — subject to the
   // floor below (a declared q4 on a q8-floored model still starts at q8).
   const declared = defaultInstalledTier(model, tiers);
-  // Rung 3: the global default-generation-quality setting is the app-wide base default. The caller
-  // passes it as `options.defaultQuality`; an absent/invalid value falls back to Q8 (the historical
-  // base + worker default) so legacy call sites are unchanged. The base leads a clean-tier fallback so
-  // it is always clamped to what's installed — a base tier that isn't on disk resolves to the nearest
-  // installed clean tier (never the washed q4 unless that's all that's left), never null.
-  let base =
-    declared ??
-    (GENERATION_QUALITY_TIERS.includes(options.defaultQuality)
-      ? options.defaultQuality
-      : DEFAULT_GENERATION_QUALITY);
+  // Rung 3: the global default-generation-quality setting (`options.defaultQuality`), the app-wide base:
+  //   - an explicit tier (bf16/q8/q4) is used verbatim — the user pinned a global quality in Settings;
+  //   - "auto" (the DEFAULT, epic 10721 R3) — or an absent/invalid value — uses the capability-aware
+  //     suggestion `options.autoTier`: the highest-fidelity tier that FITS this machine's memory, which
+  //     the caller computes via `suggestTier(model, unifiedMemoryGb)`. This is what lets a tiny model
+  //     (SANA-Sprint) default to bf16 and a heavy model on a small Mac default to what actually fits,
+  //     instead of a flat q8 for everything (epic 10721 R1/R4/R5 — "lean higher on Apple Silicon").
+  //   - when Auto has no signal (no memory reading yet, or a model with no matrix), `autoTier` is
+  //     null/unknown and this falls back to `DEFAULT_GENERATION_QUALITY` (q8), the historical base — so
+  //     legacy callers that pass neither field stay byte-identical.
+  // The clean-tier fallback below then clamps whatever base we pick to what's actually installed.
+  const explicitQuality = GENERATION_QUALITY_TIERS.includes(options.defaultQuality)
+    ? options.defaultQuality
+    : null;
+  const autoBase = GENERATION_QUALITY_TIERS.includes(options.autoTier)
+    ? options.autoTier
+    : DEFAULT_GENERATION_QUALITY;
+  let base = declared ?? explicitQuality ?? autoBase;
   // Clamp the default UP to the model's quality floor (raises only — a base at/above the floor is
   // untouched; the below fallback still caps it at what's installed).
   if (floor && isTierBelow(base, floor)) {
