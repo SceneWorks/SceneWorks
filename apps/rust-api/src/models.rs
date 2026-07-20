@@ -1686,7 +1686,28 @@ fn install_state_for(
                     .as_ref()
                     .map(|health| health.missing_files.clone())
                     .unwrap_or_default();
-                (installed, incomplete, missing)
+                // sc-13513: a single-variant no-`model_index` turnkey (Boogu's `base/` default download,
+                // whose component globs match stray weights) reads coarse-installed while actually torn.
+                // Downgrade so the TOP-LEVEL badge agrees with the per-variant state and the worker's
+                // loader gate — otherwise `installState:"installed"`/`repairAvailable:false` renders a
+                // false green over an install that then fails to load. SANA (variant-matrix) is already
+                // covered by the aggregate branch above; Anima's exact-path filter catches torn coarsely.
+                let family = model
+                    .get("family")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if installed
+                    && no_model_index_tier_is_torn(
+                        family,
+                        &download_context.files,
+                        cache_path.as_deref(),
+                        &managed_path,
+                    )
+                {
+                    (false, true, vec![torn_tier_marker(&download_context.files)])
+                } else {
+                    (installed, incomplete, missing)
+                }
             };
         // A quant-matrix model's top-level state is the aggregate of its tier-aware variant states
         // computed above (cache_installed = "any tier installed"). The repo-level managed marker must
@@ -1862,6 +1883,42 @@ fn no_model_index_family_predicate(family: &str) -> Option<fn(&FsPath) -> bool> 
     }
 }
 
+// Whether a no-`model_index` MLX turnkey tier that CLEARED the coarse presence check is actually TORN —
+// backbone present, but a text-encoder / VAE / tokenizer component missing per the shared family
+// predicate. `false` when the family has no bespoke predicate, the `files` filter isn't a single tier
+// subdir (e.g. the candle whole-repo SANA entry, `files: []`), or SOME candidate location holds a
+// complete tier. Drives the coarse `installed` → `incomplete` downgrade in BOTH the per-variant states
+// (`model_variant_states`) and the top-level aggregate (`install_state_for`), so the /models badge, the
+// variant state, and the worker's loader gate all agree (sc-13513). Every cache snapshot AND the managed
+// dir is checked with `any` — a SANA repo keeps two snapshots (tiered + flat), and a complete tier in one
+// location must not be dragged down by a sibling that lacks it.
+fn no_model_index_tier_is_torn(
+    family: &str,
+    files: &[String],
+    cache_path: Option<&FsPath>,
+    managed_path: &FsPath,
+) -> bool {
+    let Some(complete) = no_model_index_family_predicate(family) else {
+        return false;
+    };
+    let Some(tier) = tier_subdir_name(files) else {
+        return false;
+    };
+    let mut tier_bases = cache_path
+        .map(huggingface_snapshot_dirs)
+        .unwrap_or_default();
+    tier_bases.push(managed_path.to_path_buf());
+    !tier_bases.iter().any(|base| complete(&base.join(&tier)))
+}
+
+// The `missingRequiredFiles` marker for a torn no-`model_index` tier (`no_model_index_tier_is_torn`),
+// scoped to the tier subdir when the filter names one.
+fn torn_tier_marker(files: &[String]) -> String {
+    tier_subdir_name(files)
+        .map(|tier| format!("{tier}/ (incomplete: missing model components)"))
+        .unwrap_or_else(|| "incomplete: missing model components".to_owned())
+}
+
 // Build the per-variant install state for every supported download entry. A single-variant model
 // yields one entry keyed "default"; a quant-matrix model yields one per tier. Each entry's install
 // state is probed independently against the HF cache using that tier's own `files` filter, so the
@@ -1926,32 +1983,18 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
 
             // sc-13513: the coarse `<tier>/*` glob (and the managed presence check) is satisfied by ANY
             // single nested file, so a TORN tier of a no-`model_index` MLX turnkey (SANA/Boogu — backbone
-            // present, text-encoder/VAE/tokenizer missing) read `installed`. Mirror the worker's shared
-            // family completeness predicate so a torn tier reports `incomplete` instead. This only ever
-            // DOWNGRADES a coarse `installed`; a clean-missing tier is never promoted, a family without a
-            // bespoke predicate (diffusers turnkeys, already accurate via the `model_index.json`
-            // augmentation) is untouched, and the candle whole-repo SANA entry has no single tier subdir
-            // (`tier_subdir_name` → None) so it is skipped. Checked across every cache snapshot AND the
-            // managed dir (a SANA repo keeps TWO snapshots — tiered + flat) with `any`, so a complete tier
-            // in one location isn't dragged down by a sibling snapshot that lacks it.
-            if installed {
-                if let (Some(complete), Some(tier)) = (
-                    no_model_index_family_predicate(family),
-                    tier_subdir_name(&files),
-                ) {
-                    let mut tier_bases = cache_path
-                        .as_ref()
-                        .map(|path| huggingface_snapshot_dirs(path))
-                        .unwrap_or_default();
-                    tier_bases.push(managed_path.clone());
-                    if !tier_bases.iter().any(|base| complete(&base.join(&tier))) {
-                        installed = false;
-                        cache_incomplete = true;
-                        let marker = format!("{tier}/ (incomplete: missing model components)");
-                        if !missing_required_files.contains(&marker) {
-                            missing_required_files.push(marker);
-                        }
-                    }
+            // present, text-encoder/VAE/tokenizer missing) read `installed`. The shared family predicate
+            // downgrades it to `incomplete`. Only ever downgrades a coarse `installed`; a clean-missing
+            // tier is never promoted, and a family without a bespoke predicate (diffusers turnkeys,
+            // accurate via the `model_index.json` augmentation) is untouched.
+            if installed
+                && no_model_index_tier_is_torn(family, &files, cache_path.as_deref(), &managed_path)
+            {
+                installed = false;
+                cache_incomplete = true;
+                let marker = torn_tier_marker(&files);
+                if !missing_required_files.contains(&marker) {
+                    missing_required_files.push(marker);
                 }
             }
 
@@ -3852,6 +3895,112 @@ mod variant_install_tests {
             states[0].installed,
             "complete boogu default reads installed"
         );
+    }
+
+    /// The TOP-LEVEL badge must agree with the per-variant state. Boogu is a single-variant download, so
+    /// `install_state_for` takes the non-matrix else branch — which, before sc-13513, used the coarse
+    /// cache health and rendered a false-green `installState:"installed"`/`repairAvailable:false` over a
+    /// torn install. The shared predicate must downgrade it there too.
+    #[test]
+    fn torn_boogu_top_level_badge_reads_incomplete_not_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "SceneWorks/boogu-image-mlx";
+        let model = boogu_model(repo);
+
+        seed_boogu_default(data_dir, repo, false);
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            !state.installed,
+            "a torn boogu install must NOT read installed at the top level"
+        );
+        assert!(
+            state.cache_incomplete,
+            "a torn boogu install is a repairable incomplete at the top level"
+        );
+
+        // Completing it flips the top-level badge to installed.
+        seed_boogu_default(data_dir, repo, true);
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            state.installed,
+            "a complete boogu install reads installed at the top level"
+        );
+        assert!(!state.cache_incomplete);
+    }
+
+    /// SANA repos keep TWO cached snapshots (a tiered one + an older flat one). A tier that is complete
+    /// in the tiered snapshot must read installed even though the flat snapshot has no tier subdir — the
+    /// check folds across snapshots with `any`, not `all` (guards the epic-13075 multi-snapshot trap).
+    #[test]
+    fn sana_tier_complete_in_one_of_two_snapshots_reads_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "SceneWorks/Sana_1600M_1024px_mlx";
+        let model = sana_matrix_model(repo);
+
+        // Tiered snapshot: a complete q4.
+        seed_sana_tier(data_dir, repo, "q4", true);
+        // A second, FLAT snapshot with weights at the root (no q4/ subdir) — must not drag q4 down.
+        let cache = huggingface_repo_cache_path(data_dir, repo).expect("cache path");
+        let flat = cache.join("snapshots").join("flat9999");
+        for rel in [
+            "transformer/diffusion_pytorch_model.safetensors",
+            "vae/diffusion_pytorch_model.safetensors",
+        ] {
+            let path = flat.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        let states = model_variant_states(&model, data_dir);
+        let q4 = states.iter().find(|s| s.variant == "q4").unwrap();
+        assert!(
+            q4.installed,
+            "q4 complete in the tiered snapshot reads installed despite a flat sibling snapshot"
+        );
+        assert!(!q4.cache_incomplete);
+    }
+
+    /// Anima is convert-at-install; its variants[] "default" tracks the three exact `split_files/` SOURCE
+    /// files (not a tier subdir). `tier_subdir_name` resolves those to `split_files`, so the downgrade
+    /// RUNS — but must be a NO-OP: a complete source passes `anima_tier_complete` (the layout is
+    /// compatible), and a torn source is already coarse-missing (exact-path filter), so `if installed` is
+    /// false. This pins that no-op so a future divergence between the download filter and the predicate's
+    /// pinned filenames surfaces as a RED test, not a silent false-incomplete on the Anima source badge.
+    #[test]
+    fn anima_source_download_variant_stays_installed_predicate_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "circlestone-labs/Anima";
+        let model = json!({
+            "id": "anima_base",
+            "family": "anima",
+            "downloads": [
+                { "provider": "huggingface", "repo": repo, "files": [
+                    "split_files/diffusion_models/anima-base-v1.0.safetensors",
+                    "split_files/text_encoders/qwen_3_06b_base.safetensors",
+                    "split_files/vae/qwen_image_vae.safetensors"
+                ]}
+            ]
+        });
+
+        seed_cache(
+            data_dir,
+            repo,
+            &[
+                "split_files/diffusion_models/anima-base-v1.0.safetensors",
+                "split_files/text_encoders/qwen_3_06b_base.safetensors",
+                "split_files/vae/qwen_image_vae.safetensors",
+            ],
+        );
+        let states = model_variant_states(&model, data_dir);
+        assert_eq!(states.len(), 1);
+        assert!(
+            states[0].installed,
+            "a complete anima source reads installed — the predicate must not false-incomplete it"
+        );
+        assert!(!states[0].cache_incomplete);
     }
 
     /// A model whose ONLY on-disk tier is torn must read NOT installed at the model level — including
