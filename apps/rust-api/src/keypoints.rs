@@ -34,7 +34,7 @@ pub(crate) async fn create_keypoint_sources(
             continue;
         }
         let display_name = field.file_name().unwrap_or("image").to_owned();
-        let path = write_upload_field_to_dir(&state, field, "keypoint-uploads").await?;
+        let path = write_upload_field_to_dir(&state, field, KEYPOINT_UPLOADS_CACHE_DIR).await?;
         sources.push(serde_json::json!({
             "path": path.to_string_lossy(),
             "displayName": display_name,
@@ -105,5 +105,5 @@ pub(crate) async fn delete_keypoint_collection(
 /// never saved). Mirrors `sweep_stale_pose_uploads`.
 pub(crate) fn sweep_stale_keypoint_uploads(data_dir: &FsPath) -> std::io::Result<usize> {
     let cutoff = SystemTime::now() - Duration::from_secs(STALE_UPLOAD_SECONDS);
-    sweep_stale_uploads(data_dir, "keypoint-uploads", cutoff)
+    sweep_stale_uploads(data_dir, KEYPOINT_UPLOADS_CACHE_DIR, cutoff)
 }

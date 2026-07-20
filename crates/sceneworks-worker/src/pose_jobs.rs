@@ -46,7 +46,7 @@ use crate::{
     WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
-use sceneworks_core::project_store::ProjectStore;
+use sceneworks_core::project_store::{ProjectStore, POSE_UPLOADS_CACHE_DIR};
 
 // ---------------------------------------------------------------------------
 // detector constants (rtmlib performance preset)
@@ -971,8 +971,12 @@ fn resolve_source(
     if let Some(raw) = raw {
         let abs = Path::new(raw);
         if abs.is_absolute() {
-            let path =
-                normalize_app_managed_cache_path(settings, raw, "pose-uploads", "pose sourcePath")?;
+            let path = normalize_app_managed_cache_path(
+                settings,
+                raw,
+                POSE_UPLOADS_CACHE_DIR,
+                "pose sourcePath",
+            )?;
             if path.exists() {
                 return Ok(PoseSource {
                     asset_id,
@@ -1346,7 +1350,7 @@ async fn cleanup_temp_uploads(settings: &Settings, temp_paths: &[PathBuf]) {
     if temp_paths.is_empty() {
         return;
     }
-    let uploads_root = settings.data_dir.join("cache").join("pose-uploads");
+    let uploads_root = settings.data_dir.join("cache").join(POSE_UPLOADS_CACHE_DIR);
     let Ok(uploads_root) = uploads_root.canonicalize() else {
         return;
     };
