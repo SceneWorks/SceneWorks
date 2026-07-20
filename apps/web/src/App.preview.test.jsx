@@ -225,6 +225,119 @@ describe("SceneWorks app shell", () => {
     expect(document.body.querySelector(".preview-modal img").getAttribute("src")).toContain("original.png");
   });
 
+  it("toggles a side-by-side Original↔Edited compare for edits with a resolvable source", async () => {
+    const noop = () => {};
+    const original = {
+      id: "asset-original",
+      projectId: "project-1",
+      displayName: "Plate",
+      type: "image",
+      status: {},
+      file: { path: "assets/images/original.png" },
+    };
+    const edited = {
+      id: "asset-edited",
+      projectId: "project-1",
+      displayName: "Plate (edited)",
+      type: "image",
+      status: {},
+      file: { path: "assets/images/edited.png" },
+      recipe: { mode: "edit_image", model: "z_image_turbo" },
+      lineage: { sourceAssetId: "asset-original", parents: ["asset-original"] },
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <FullscreenPreview
+          asset={edited}
+          deleteAsset={noop}
+          nextAsset={null}
+          onClose={noop}
+          onPreviewAsset={noop}
+          previousAsset={null}
+          purgeAsset={noop}
+          sourceAsset={original}
+          updateAssetStatus={noop}
+        />,
+      );
+    });
+
+    // Single view to start; a compare toggle is offered because the source resolves.
+    expect(document.body.querySelector(".preview-compare")).toBeNull();
+    const toggle = document.body.querySelector(".preview-compare-toggle");
+    expect(toggle).not.toBeNull();
+
+    await act(async () => {
+      toggle.click();
+    });
+
+    // Both the original and edited image render side by side, each labelled.
+    const compare = document.body.querySelector(".preview-compare");
+    expect(compare).not.toBeNull();
+    const srcs = [...compare.querySelectorAll("img")].map((img) => img.getAttribute("src"));
+    expect(srcs.some((src) => src.includes("original.png"))).toBe(true);
+    expect(srcs.some((src) => src.includes("edited.png"))).toBe(true);
+    expect(compare.textContent).toContain("Original");
+    expect(compare.textContent).toContain("Edited");
+
+    // Toggling off collapses back to the single edited view.
+    await act(async () => {
+      document.body.querySelector(".preview-compare-toggle").click();
+    });
+    expect(document.body.querySelector(".preview-compare")).toBeNull();
+  });
+
+  it("offers no compare toggle when an edit's source is gone (purged) or the asset isn't an edit", async () => {
+    const noop = () => {};
+    const base = {
+      id: "asset-edited",
+      projectId: "project-1",
+      displayName: "Plate (edited)",
+      type: "image",
+      status: {},
+      file: { path: "assets/images/edited.png" },
+      lineage: { sourceAssetId: "asset-original" },
+    };
+
+    // An edit whose source is no longer in the gallery → App resolves sourceAsset to null.
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <FullscreenPreview
+          asset={{ ...base, recipe: { mode: "edit_image", model: "z_image_turbo" } }}
+          deleteAsset={noop}
+          nextAsset={null}
+          onClose={noop}
+          onPreviewAsset={noop}
+          previousAsset={null}
+          purgeAsset={noop}
+          sourceAsset={null}
+          updateAssetStatus={noop}
+        />,
+      );
+    });
+    expect(document.body.querySelector(".preview-compare-toggle")).toBeNull();
+
+    // A non-edit asset never gets the compare toggle, even with a source present.
+    await act(async () => {
+      root.render(
+        <FullscreenPreview
+          asset={{ ...base, recipe: { mode: "text_to_image", model: "z_image_turbo" } }}
+          deleteAsset={noop}
+          nextAsset={null}
+          onClose={noop}
+          onPreviewAsset={noop}
+          previousAsset={null}
+          purgeAsset={noop}
+          sourceAsset={{ id: "asset-original", projectId: "project-1", type: "image", status: {}, file: { path: "x.png" } }}
+          updateAssetStatus={noop}
+        />,
+      );
+    });
+    expect(document.body.querySelector(".preview-compare-toggle")).toBeNull();
+  });
+
   // sc-8728 zoom math is extracted into pure helpers so the cursor-anchoring can be
   // asserted precisely (jsdom has no layout, so DOM-level anchoring can't be exercised).
   describe("preview zoom helpers (sc-8728)", () => {

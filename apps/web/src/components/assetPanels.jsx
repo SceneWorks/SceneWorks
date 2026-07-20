@@ -738,6 +738,7 @@ export function FullscreenPreview({
   onUseRecipe,
   previousAsset,
   purgeAsset,
+  sourceAsset,
   updateAssetStatus,
 }) {
   const hasUpscaleVariants = Boolean(asset.variants?.original && asset.variants?.upscaled);
@@ -763,6 +764,22 @@ export function FullscreenPreview({
   // Zoom/pan is IMAGES ONLY — video keeps its native <video> controls and gets no
   // zoom overlay/UI (sc-8728). `isVideo` gates the whole zoom surface.
   const isVideo = assetCanRenderAsVideo(displayedAsset);
+
+  // Side-by-side compare (Original vs Edited) for Image-Studio edits that link back
+  // to a source asset still present in the gallery (asset.lineage.sourceAssetId,
+  // resolved by App into `sourceAsset`). Unlike the upscale pair the edit stays its
+  // OWN Library tile — this is a view-only toggle, never a fold. Excluded for video
+  // and for the upscale-variant fold, which owns the footer Original/Upscaled toggle.
+  const canCompare =
+    !isVideo && !hasUpscaleVariants && asset.recipe?.mode === "edit_image" && Boolean(sourceAsset);
+  const [compareMode, setCompareMode] = React.useState(false);
+  const toggleCompare = React.useCallback(() => setCompareMode((on) => !on), []);
+  // Drop compare when navigating to another asset (prev/next) so it never persists
+  // onto a non-edit or an unrelated source pairing.
+  React.useEffect(() => {
+    setCompareMode(false);
+  }, [asset.id]);
+  const compareActive = canCompare && compareMode;
 
   const viewportRef = React.useRef(null);
   const [view, setView] = React.useState(PREVIEW_FIT_VIEW);
@@ -938,6 +955,13 @@ export function FullscreenPreview({
         label: isFullscreen ? "Exit full screen" : "Full screen",
         onSelect: isFullscreen ? exitFullscreen : enterFullscreen,
       });
+      if (canCompare) {
+        items.push({
+          key: "compare",
+          label: compareActive ? "Exit compare" : "Compare with original",
+          onSelect: toggleCompare,
+        });
+      }
       if (!isVideo) {
         items.push({ key: "zoom-in", label: "Zoom In", onSelect: zoomIn });
         items.push({ key: "zoom-out", label: "Zoom Out", onSelect: zoomOut });
@@ -965,6 +989,9 @@ export function FullscreenPreview({
       fitToView,
       onEditImage,
       onEditInStudio,
+      canCompare,
+      compareActive,
+      toggleCompare,
     ],
   );
 
@@ -999,7 +1026,18 @@ export function FullscreenPreview({
           >
             <Icon.ArrowLeft size={18} />
           </button>
-          {isVideo ? (
+          {compareActive ? (
+            <div className="preview-compare" role="group" aria-label="Original and edited image side by side">
+              <figure className="preview-compare-pane">
+                <AssetMedia asset={sourceAsset} controls={false} />
+                <figcaption>Original</figcaption>
+              </figure>
+              <figure className="preview-compare-pane">
+                <AssetMedia asset={asset} controls={false} />
+                <figcaption>Edited</figcaption>
+              </figure>
+            </div>
+          ) : isVideo ? (
             <AssetMedia asset={displayedAsset} />
           ) : (
             <div
@@ -1028,7 +1066,7 @@ export function FullscreenPreview({
           >
             <Icon.ArrowRight size={18} />
           </button>
-          {isVideo ? null : (
+          {isVideo || compareActive ? null : (
             <div className="preview-zoom-controls" role="group" aria-label="Zoom controls">
               <button
                 aria-label="Zoom out"
@@ -1090,6 +1128,18 @@ export function FullscreenPreview({
                 Upscaled
               </button>
             </div>
+          ) : null}
+          {canCompare ? (
+            <button
+              aria-pressed={compareActive}
+              className={`preview-compare-toggle${compareActive ? " active" : ""}`}
+              onClick={toggleCompare}
+              title={compareActive ? "Exit side-by-side compare" : "Compare this edit with the original image"}
+              type="button"
+            >
+              <Icon.Columns size={16} />
+              <span>{compareActive ? "Exit compare" : "Compare original"}</span>
+            </button>
           ) : null}
           <div className="preview-actions">
             {/* Simple, discoverable Save As path — present in desktop AND browser (sc-8729).
