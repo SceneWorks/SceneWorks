@@ -185,8 +185,8 @@ mod tests {
 
     #[test]
     fn ships_the_seeded_audio_models_with_populated_capability_blocks() {
-        // sc-13402 (epic 13400) + sc-13412: the shipped catalog the API serves carries the six live
-        // audio providers as first-class `type: "audio"` entries, each with a populated
+        // sc-13402 (epic 13400) + sc-13412 + sc-13675 + sc-13676: the shipped catalog the API serves
+        // carries the live audio providers as first-class `type: "audio"` entries, each with a populated
         // `audio` capability sub-block, and `audio` parses as a first-class ModelKind (not
         // the Unknown fallback) so the type is accepted end to end.
         let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
@@ -207,6 +207,9 @@ mod tests {
             "chatterbox_tts",
             // Streaming TTS (sc-13675): the audio lane's first `supportsStreaming` provider.
             "moss_tts_realtime",
+            // Multi-speaker dialogue TTS (sc-13676): the audio lane's first `supportsMultiSpeaker`
+            // provider (max_speakers = 2), the 8th audio model.
+            "moss_ttsd_v05",
         ];
         for id in audio_ids {
             let entry = models
@@ -280,6 +283,53 @@ mod tests {
             Some(40),
             "the codec co-requisite pins a full 40-hex commit SHA (hf_get_pinned reads snapshots/<sha>/)"
         );
+
+        // MOSS-TTSD v0.5 (sc-13676) is the audio lane's first MULTI-SPEAKER model: it advertises
+        // `audio.supportsMultiSpeaker: true` + `audio.maxSpeakers: 2` (mirroring the backend
+        // Capabilities), ships NO fixed voice bank (it maps opaque [S1]/[S2] turn labels itself), does
+        // NOT stream, and declares the XY_Tokenizer codec as a pinned-revision co-requisite so an
+        // offline install is self-contained. No other seeded audio model advertises multi-speaker, so
+        // this pins the surface.
+        let moss_ttsd = models
+            .iter()
+            .find(|m| m["id"].as_str() == Some("moss_ttsd_v05"))
+            .expect("moss_ttsd_v05 present");
+        assert_eq!(
+            moss_ttsd["audio"]["supportsMultiSpeaker"].as_bool(),
+            Some(true),
+            "moss_ttsd_v05 must advertise audio.supportsMultiSpeaker: true"
+        );
+        assert_eq!(
+            moss_ttsd["audio"]["maxSpeakers"].as_u64(),
+            Some(2),
+            "moss_ttsd_v05 advertises max_speakers = 2 (matching the backend Capabilities)"
+        );
+        assert!(
+            moss_ttsd["audio"]["voices"].as_array().is_none(),
+            "moss_ttsd_v05 ships no fixed voice bank (opaque [S1]/[S2] labels)"
+        );
+        assert_ne!(
+            moss_ttsd["audio"]["supportsStreaming"].as_bool(),
+            Some(true),
+            "moss_ttsd_v05 is one-shot, not streaming"
+        );
+        let ttsd_codec = moss_ttsd["downloads"]
+            .as_array()
+            .expect("moss_ttsd_v05 downloads array")
+            .iter()
+            .find(|d| d["coRequisite"].as_bool() == Some(true))
+            .expect("moss_ttsd_v05 declares the XY_Tokenizer codec co-requisite");
+        assert_eq!(
+            ttsd_codec["repo"].as_str(),
+            Some("OpenMOSS-Team/XY_Tokenizer_TTSD_V0"),
+            "the co-requisite is the XY_Tokenizer codec"
+        );
+        assert_eq!(
+            ttsd_codec["revision"].as_str().map(str::len),
+            Some(40),
+            "the codec co-requisite pins a full 40-hex commit SHA (hf_get_pinned reads snapshots/<sha>/)"
+        );
+
         for model in [
             "kokoro_82m",
             "moss_sfx_v2",
@@ -287,6 +337,8 @@ mod tests {
             "openvoice_v2",
             "chatterbox_ve",
             "chatterbox_tts",
+            // MOSS-TTSD is multi-speaker, not streaming — it belongs on the streaming-negative side.
+            "moss_ttsd_v05",
         ] {
             let entry = models
                 .iter()
@@ -296,6 +348,29 @@ mod tests {
                 entry["audio"]["supportsStreaming"].as_bool(),
                 Some(true),
                 "{model} must NOT advertise streaming — only moss_tts_realtime does"
+            );
+        }
+
+        // Multi-speaker is exclusive to MOSS-TTSD across the seeded set (sc-13676) — the mirror of the
+        // streaming-negative loop, so the capability that reveals the segmented-script editor can never
+        // silently leak onto a single-voice model.
+        for model in [
+            "kokoro_82m",
+            "moss_sfx_v2",
+            "acestep_v15_turbo",
+            "openvoice_v2",
+            "chatterbox_ve",
+            "chatterbox_tts",
+            "moss_tts_realtime",
+        ] {
+            let entry = models
+                .iter()
+                .find(|m| m["id"].as_str() == Some(model))
+                .unwrap_or_else(|| panic!("{model} present"));
+            assert_ne!(
+                entry["audio"]["supportsMultiSpeaker"].as_bool(),
+                Some(true),
+                "{model} must NOT advertise multi-speaker — only moss_ttsd_v05 does"
             );
         }
     }

@@ -19,7 +19,8 @@ use super::*;
 
 use gen_core::{
     AudioEditMode, AudioParams, AudioTransform, AudioTransformRequest, CancelFlag, Conditioning,
-    GenerationOutput, GenerationRequest, Generator, LoadSpec, Progress, TimeRegion, WeightsSource,
+    GenerationOutput, GenerationRequest, Generator, LoadSpec, Progress, SpeechSegment, TimeRegion,
+    WeightsSource,
 };
 
 use crate::video_jobs::{write_wav_pcm16, AudioTrack};
@@ -53,6 +54,12 @@ struct AudioRequest {
     voice: Option<String>,
     language: Option<String>,
     target_duration_secs: Option<f32>,
+    /// Multi-speaker / long-form dialogue script (sc-13676) — an ordered list of spoken segments that
+    /// rides [`AudioParams::script`]. A model advertising `supports_multi_speaker` (MOSS-TTSD) renders
+    /// each segment in its own voice into one clip; the gen-core floor rejects a script sent to a
+    /// model that does NOT advertise it. `None` (no `script` key, or an empty array) ⇒ an ordinary
+    /// single-voice request, byte-for-byte unaffected.
+    script: Option<Vec<SpeechSegment>>,
     /// CFG guidance scale for diffusion-audio models (Sound FX / MOSS-SoundEffect). Rides the
     /// top-level `GenerationRequest::guidance` — NOT `AudioParams` (sc-13409). `None` ⇒ the model's
     /// sampler default.
@@ -101,6 +108,66 @@ struct AudioRequest {
     model_manifest_entry: Value,
 }
 
+/// Parse a `script` payload value into a multi-speaker dialogue script (sc-13676). The wire shape is
+/// an array of `{ text, speaker?, style? }` objects (the API's `SpeechSegmentDto`, camelCase). Returns
+/// `None` when the key is absent, not an array, or empty — so a single-voice request (which never
+/// carries `script`) builds the identical `AudioParams { script: None, .. }` as before. A segment with
+/// empty/whitespace text is dropped defensively; the API's `validate_audio_job` already rejects one,
+/// and the gen-core floor gates the whole script against the model's `supports_multi_speaker` /
+/// `max_speakers`.
+fn parse_speech_segments(value: Option<&Value>) -> Option<Vec<SpeechSegment>> {
+    let array = value.and_then(Value::as_array)?;
+    let opt_string = |segment: &Value, key: &str| {
+        segment
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let segments: Vec<SpeechSegment> = array
+        .iter()
+        .filter_map(|segment| {
+            let text = segment.get("text").and_then(Value::as_str)?;
+            if text.trim().is_empty() {
+                return None;
+            }
+            Some(SpeechSegment {
+                text: text.to_owned(),
+                speaker: opt_string(segment, "speaker"),
+                style: opt_string(segment, "style"),
+            })
+        })
+        .collect();
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments)
+    }
+}
+
+/// Serialize a parsed multi-speaker script back to the wire shape (`[{ text, speaker?, style? }]`) for
+/// the asset's replay record (sc-13676) — the inverse of [`parse_speech_segments`], so a re-generate
+/// reconstructs the exact dialogue. `None` ⇒ JSON `null` (a single-voice run carries no script).
+/// gen-core's `SpeechSegment` is not `Serialize`, so this maps it by hand.
+fn script_to_json(script: &Option<Vec<SpeechSegment>>) -> Value {
+    match script {
+        Some(segments) => Value::Array(
+            segments
+                .iter()
+                .map(|segment| {
+                    json!({
+                        "text": segment.text,
+                        "speaker": segment.speaker,
+                        "style": segment.style,
+                    })
+                })
+                .collect(),
+        ),
+        None => Value::Null,
+    }
+}
+
 impl AudioRequest {
     fn from_payload(payload: &JsonObject) -> Self {
         let string = |key: &str| {
@@ -125,6 +192,10 @@ impl AudioRequest {
                 .get("targetDurationSecs")
                 .and_then(Value::as_f64)
                 .map(|value| value as f32),
+            // Multi-speaker dialogue script (sc-13676): parse the `script` array into gen-core
+            // SpeechSegments. Absent or empty ⇒ `None`, so a single-voice request builds the identical
+            // `AudioParams { script: None, .. }` it did before this field existed.
+            script: parse_speech_segments(payload.get("script")),
             guidance: payload
                 .get("guidance")
                 .and_then(Value::as_f64)
@@ -335,9 +406,13 @@ fn audio_preflight(request: &AudioRequest) -> WorkerResult<()> {
             "projectId is required.".to_owned(),
         ));
     }
-    if request.prompt.trim().is_empty() {
+    // A single-voice request needs a prompt; a multi-speaker request (sc-13676) carries its text in
+    // the `script` instead, so one of the two must be present. `script` is `None` for every
+    // single-voice request, so this is byte-for-byte the original "prompt required" check for them.
+    let has_script = request.script.as_ref().is_some_and(|s| !s.is_empty());
+    if request.prompt.trim().is_empty() && !has_script {
         return Err(WorkerError::InvalidPayload(
-            "prompt (the script text) is required.".to_owned(),
+            "prompt (or a multi-speaker script) is required.".to_owned(),
         ));
     }
     Ok(())
@@ -554,6 +629,11 @@ async fn run_audio_synthesis_using(
     let voice = request.voice.clone();
     let language = request.language.as_deref().map(normalize_audio_language);
     let target_duration = request.target_duration_secs;
+    // Multi-speaker dialogue script (sc-13676): rides AudioParams.script. `None` for a single-voice
+    // request, so the built AudioParams is identical to the pre-sc-13676 one for those; a model
+    // advertising `supports_multi_speaker` (MOSS-TTSD) renders each segment in its own voice, and the
+    // gen-core floor rejects a script sent to a model that does not advertise it (typed Unsupported).
+    let script = request.script.clone();
     // Diffusion-audio sampling knobs (Sound FX / MOSS-SoundEffect, sc-13409). These live on the
     // top-level GenerationRequest — the flow-matching pipeline reads `req.guidance` (CFG scale) and
     // `req.steps`, not `AudioParams`. `None` ⇒ the generator's own sampler default; the shared
@@ -605,6 +685,7 @@ async fn run_audio_synthesis_using(
                     bpm,
                     musical_key,
                     lyrics,
+                    script,
                     ..Default::default()
                 }),
                 // Extend/edit source-audio conditioning (Conditioning::AudioEdit), when a source band
@@ -1255,6 +1336,8 @@ fn audio_asset_fact(
         "voice": request.voice,
         "language": request.language,
         "targetDurationSecs": request.target_duration_secs,
+        // Multi-speaker dialogue script (sc-13676) — `null` on a single-voice run.
+        "script": script_to_json(&request.script),
         "guidance": request.guidance,
         "steps": request.steps,
         "negativePrompt": request.negative_prompt,
@@ -1298,6 +1381,9 @@ fn audio_asset_fact(
         "voice": request.voice,
         "language": request.language,
         "targetDurationSecs": request.target_duration_secs,
+        // Multi-speaker dialogue script (sc-13676): the ordered segments round-trip for replay so a
+        // re-generate reconstructs the same dialogue. `null` on a single-voice run.
+        "script": script_to_json(&request.script),
         "guidance": request.guidance,
         "steps": request.steps,
         "negativePrompt": request.negative_prompt,
@@ -1473,6 +1559,94 @@ mod tests {
         assert!(audio_preflight(&no_project).is_err());
         let no_prompt = AudioRequest::from_payload(&payload(json!({ "prompt": "   " })));
         assert!(audio_preflight(&no_prompt).is_err());
+    }
+
+    #[test]
+    fn parse_speech_segments_reads_the_wire_shape() {
+        // Absent / non-array / empty → None (so a single-voice request builds AudioParams.script:
+        // None, byte-for-byte unaffected).
+        assert!(parse_speech_segments(None).is_none());
+        assert!(parse_speech_segments(Some(&json!("not-an-array"))).is_none());
+        assert!(parse_speech_segments(Some(&json!([]))).is_none());
+        // A whitespace-only-text segment is dropped defensively; if that leaves nothing → None.
+        assert!(parse_speech_segments(Some(&json!([{ "text": "   " }]))).is_none());
+        // Well-formed segments map text + optional speaker/style; blank speaker/style → None.
+        let script = parse_speech_segments(Some(&json!([
+            { "text": "Hi there.", "speaker": "S1", "style": "cheerful" },
+            { "text": "Hello!", "speaker": "  ", "style": "" },
+        ])))
+        .expect("a non-empty script parses");
+        assert_eq!(script.len(), 2);
+        assert_eq!(script[0].text, "Hi there.");
+        assert_eq!(script[0].speaker.as_deref(), Some("S1"));
+        assert_eq!(script[0].style.as_deref(), Some("cheerful"));
+        assert_eq!(script[1].text, "Hello!");
+        assert_eq!(
+            script[1].speaker, None,
+            "a blank speaker is dropped to None"
+        );
+        assert_eq!(script[1].style, None);
+    }
+
+    #[test]
+    fn from_payload_reads_the_multi_speaker_script() {
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "moss_ttsd_v05",
+            "prompt": "",
+            "script": [
+                { "text": "Line one.", "speaker": "S1" },
+                { "text": "Line two.", "speaker": "S2" },
+            ],
+        })));
+        let script = request.script.as_ref().expect("script parsed");
+        assert_eq!(script.len(), 2);
+        assert_eq!(script[1].speaker.as_deref(), Some("S2"));
+    }
+
+    #[test]
+    fn preflight_accepts_a_script_only_request_and_still_gates_the_empty_case() {
+        // A multi-speaker request carries its text in the script — an empty prompt is fine THEN.
+        let script_only = AudioRequest::from_payload(&payload(json!({
+            "model": "moss_ttsd_v05",
+            "prompt": "",
+            "script": [{ "text": "Hello.", "speaker": "S1" }],
+        })));
+        assert!(script_only.script.is_some());
+        assert!(audio_preflight(&script_only).is_ok());
+        // But an empty prompt AND no script is still rejected (single-voice unaffected).
+        let neither = AudioRequest::from_payload(&payload(json!({ "prompt": "" })));
+        assert!(neither.script.is_none());
+        assert!(audio_preflight(&neither).is_err());
+    }
+
+    #[test]
+    fn asset_fact_records_the_script_for_replay_and_null_for_single_voice() {
+        // Multi-speaker: the ordered dialogue round-trips as an array in the replay record.
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "moss_ttsd_v05",
+            "prompt": "",
+            "script": [
+                { "text": "First turn.", "speaker": "S1" },
+                { "text": "Second turn.", "speaker": "S2", "style": "warm" },
+            ],
+        })));
+        let plan = AudioPlan::new(&request, Path::new("/tmp/project"));
+        let fact = audio_asset_fact(&plan, &request, 24_000, 1, 5.0, false);
+        let script = fact["script"]
+            .as_array()
+            .expect("script recorded as an array");
+        assert_eq!(script.len(), 2);
+        assert_eq!(script[0]["text"], "First turn.");
+        assert_eq!(script[0]["speaker"], "S1");
+        assert_eq!(script[1]["speaker"], "S2");
+        assert_eq!(script[1]["style"], "warm");
+        assert_eq!(fact["rawAdapterSettings"]["script"], fact["script"]);
+
+        // Single-voice: `script` is null (the byte-for-byte-unaffected replay record).
+        let single = AudioRequest::from_payload(&payload(json!({ "voice": "af_heart" })));
+        let single_plan = AudioPlan::new(&single, Path::new("/tmp/project"));
+        let single_fact = audio_asset_fact(&single_plan, &single, 24_000, 1, 3.0, false);
+        assert!(single_fact["script"].is_null());
     }
 
     #[test]
@@ -2277,6 +2451,150 @@ mod tests {
         );
     }
 
+    /// A stub [`Generator`] that records the [`AudioParams::script`] it receives (sc-13676) — so a
+    /// test can prove the parsed multi-speaker script actually reaches `GenerationRequest.audio.script`,
+    /// and that a single-voice request carries `None` there (byte-for-byte unaffected). The outer
+    /// `Option` records whether `generate` ran at all; the inner is the observed script value.
+    struct ScriptCaptureGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        captured: Arc<Mutex<Option<Option<Vec<SpeechSegment>>>>>,
+    }
+
+    impl gen_core::Generator for ScriptCaptureGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn generate(
+            &self,
+            req: &GenerationRequest,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<GenerationOutput> {
+            *self.captured.lock().expect("capture lock") =
+                Some(req.audio.as_ref().and_then(|audio| audio.script.clone()));
+            Ok(GenerationOutput::Audio(gen_core::AudioTrack {
+                samples: vec![0.1, -0.1, 0.1, -0.1],
+                sample_rate: 24_000,
+                channels: 1,
+                stems: Vec::new(),
+            }))
+        }
+    }
+
+    /// A multi-speaker descriptor (supports_multi_speaker + max_speakers = 2), the audio twin of the
+    /// real moss_ttsd_v05 descriptor's dialogue flags.
+    fn multi_speaker_stub_descriptor() -> gen_core::ModelDescriptor {
+        gen_core::ModelDescriptor {
+            id: "stub_multi_speaker_audio",
+            family: "stub",
+            backend: "mlx",
+            modality: gen_core::Modality::Audio,
+            capabilities: gen_core::Capabilities {
+                supports_multi_speaker: true,
+                max_speakers: Some(2),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn script_capture_load(
+        captured: Arc<Mutex<Option<Option<Vec<SpeechSegment>>>>>,
+    ) -> impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static {
+        move |_id: &str, _spec: &LoadSpec| {
+            Ok(Box::new(ScriptCaptureGenerator {
+                descriptor: multi_speaker_stub_descriptor(),
+                captured,
+            }) as Box<dyn Generator>)
+        }
+    }
+
+    /// Multi-speaker path (sc-13676): a parsed `script` must ride `GenerationRequest.audio.script`
+    /// through the SAME one-shot synthesis seam every Speech job uses — proving the segmented dialogue
+    /// reaches the generator (the model's own `validate` is the capability gate at the gen-core floor).
+    #[tokio::test]
+    async fn single_synthesis_forwards_the_multi_speaker_script_to_audio_params() {
+        let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
+        let settings = cancel_test_settings(base_url);
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("audio-script");
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "moss_ttsd_v05",
+            "prompt": "",
+            "script": [
+                { "text": "Hello, how are you today?", "speaker": "S1" },
+                { "text": "I'm doing great, thanks for asking!", "speaker": "S2" },
+            ],
+        })));
+
+        let captured = Arc::new(Mutex::new(None));
+        let load = script_capture_load(captured.clone());
+
+        run_audio_synthesis_using(
+            &api,
+            &settings,
+            &job,
+            &request,
+            PathBuf::from("unused"),
+            None,
+            load,
+        )
+        .await
+        .expect("a clean multi-speaker synthesis returns the produced track");
+
+        let observed = captured.lock().expect("capture lock").clone();
+        let script = observed
+            .expect("generate() must have run")
+            .expect("the multi-speaker script must reach AudioParams.script");
+        assert_eq!(
+            script.len(),
+            2,
+            "both dialogue segments reach the generator"
+        );
+        assert_eq!(script[0].text, "Hello, how are you today?");
+        assert_eq!(script[0].speaker.as_deref(), Some("S1"));
+        assert_eq!(script[1].speaker.as_deref(), Some("S2"));
+    }
+
+    /// Single-voice control (sc-13676): a request with no `script` must build the identical
+    /// `AudioParams { script: None, .. }` — the byte-for-byte-unaffected guarantee for every existing
+    /// Speech / SFX / Music mode.
+    #[tokio::test]
+    async fn single_voice_request_carries_no_script() {
+        let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
+        let settings = cancel_test_settings(base_url);
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("audio-no-script");
+        let request = AudioRequest::from_payload(&payload(json!({ "voice": "af_heart" })));
+        assert!(
+            request.script.is_none(),
+            "a request with no script parses to script: None"
+        );
+
+        let captured = Arc::new(Mutex::new(None));
+        let load = script_capture_load(captured.clone());
+
+        run_audio_synthesis_using(
+            &api,
+            &settings,
+            &job,
+            &request,
+            PathBuf::from("unused"),
+            None,
+            load,
+        )
+        .await
+        .expect("a clean single-voice synthesis returns the produced track");
+
+        let observed = captured.lock().expect("capture lock").clone();
+        assert_eq!(
+            observed.expect("generate() must have run"),
+            None,
+            "a single-voice request must reach the generator with AudioParams.script == None"
+        );
+    }
+
     /// Voice-clone chain: base TTS completes, then the CONVERTER call blocks. A cancel observed inside
     /// the converter stub proves the shared flag reached `AudioTransformRequest.cancel` (the two-call
     /// trap the fix closes — that request previously defaulted `cancel` to a fresh flag).
@@ -2630,5 +2948,207 @@ mod tests {
                 wav_path.display()
             );
         }
+    }
+
+    /// DoD walking skeleton (sc-13676) — REAL MOSS-TTSD multi-speaker dialogue through the worker's
+    /// generator seam (`load_audio`), with objective cross-speaker-vs-self voice-distinctness measured
+    /// by the real `chatterbox_ve` speaker embedder. `#[ignore]` because it needs the ~4.1 GB AR
+    /// checkpoint + ~2.1 GB XY_Tokenizer codec + the 5.7 MB chatterbox_ve weights (not in CI) and is
+    /// pathologically slow in a debug build. Run it in RELEASE:
+    ///
+    /// ```text
+    /// SCENEWORKS_MOSS_TTSD_AR_DIR=~/.cache/huggingface/hub/models--OpenMOSS-Team--MOSS-TTSD-v0.5/\
+    ///   snapshots/8527b9136b6afefe2252ae597cecea2e80e7ebeb \
+    /// SCENEWORKS_CHATTERBOX_VE_FILE=~/.cache/huggingface/hub/models--ResembleAI--chatterbox/\
+    ///   snapshots/5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18/ve.safetensors \
+    /// HF_HUB_OFFLINE=1 \
+    /// cargo test --release -p sceneworks-worker -- --ignored --nocapture \
+    ///   moss_ttsd_renders_a_multi_speaker_dialogue
+    /// ```
+    ///
+    /// It loads the real generator through the worker's `load_audio` seam, renders (a) the 2-speaker
+    /// dialogue as ONE clip, (b) three probe clips whose chatterbox_ve embeddings give a cross-speaker
+    /// cosine materially below the same-speaker (self) cosine — objective proof the two turns are
+    /// DIFFERENT voices — and (c) a single-voice (no-script) control. It asserts the DoD: both segments
+    /// rendered (the dialogue is longer than one turn alone), 24 kHz, non-silent, cross < self, and the
+    /// single-voice control still renders. Writes the dialogue WAV + an evidence JSON to
+    /// `SCENEWORKS_DOD_OUT` (or the temp dir).
+    #[test]
+    #[ignore = "requires the ~6GB MOSS-TTSD + XY_Tokenizer weights + chatterbox_ve; DoD, run manually in release"]
+    fn moss_ttsd_renders_a_multi_speaker_dialogue_in_distinct_voices() {
+        let ar_dir = std::env::var("SCENEWORKS_MOSS_TTSD_AR_DIR").expect(
+            "set SCENEWORKS_MOSS_TTSD_AR_DIR to the cached MOSS-TTSD-v0.5 snapshot directory",
+        );
+        let ve_file = std::env::var("SCENEWORKS_CHATTERBOX_VE_FILE").expect(
+            "set SCENEWORKS_CHATTERBOX_VE_FILE to the cached chatterbox ve.safetensors path",
+        );
+
+        let generator = crate::inference_runtime::load_audio(
+            "moss_ttsd_v05",
+            &LoadSpec::new(WeightsSource::Dir(PathBuf::from(&ar_dir))),
+        )
+        .expect("load the real moss_ttsd_v05 generator from the cached snapshot");
+        assert!(
+            generator.descriptor().capabilities.supports_multi_speaker,
+            "moss_ttsd_v05 must advertise supports_multi_speaker"
+        );
+        assert_eq!(
+            generator.descriptor().capabilities.max_speakers,
+            Some(2),
+            "moss_ttsd_v05 advertises max_speakers = 2"
+        );
+
+        // Render one request (script OR plain prompt) into a track through the generator seam.
+        let render =
+            |script: Option<Vec<SpeechSegment>>, prompt: &str, secs: f32| -> gen_core::AudioTrack {
+                let req = GenerationRequest {
+                    prompt: prompt.to_owned(),
+                    audio: Some(AudioParams {
+                        language: Some("en".to_owned()),
+                        target_duration: Some(secs),
+                        script,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let mut on_progress = |_p: Progress| {};
+                match generator
+                    .generate(&req, &mut on_progress)
+                    .expect("real MOSS-TTSD synthesis succeeds")
+                {
+                    GenerationOutput::Audio(track) => track,
+                    other => panic!("expected audio, got {other:?}"),
+                }
+            };
+        let seg = |text: &str, speaker: &str| SpeechSegment {
+            text: text.to_owned(),
+            speaker: Some(speaker.to_owned()),
+            style: None,
+        };
+        // The exact balanced two-line dialogue the inference DoD proved distinct (cross 0.4953 vs
+        // self 0.749) — balanced turn lengths so the midpoint split cleanly separates the two voices.
+        let line_a = "Hello, how are you today?";
+        let line_b = "I'm doing great, thanks for asking!";
+
+        // (a) The real 2-speaker dialogue — both turns rendered into ONE clip. The delay-pattern loop
+        // stops at EOS, so `[S1]line_a[S2]line_b` is a real multi-second utterance carrying both turns.
+        let dialogue = render(Some(vec![seg(line_a, "S1"), seg(line_b, "S2")]), "", 6.0);
+        assert_eq!(dialogue.sample_rate, 24_000, "MOSS-TTSD renders 24 kHz");
+        assert!(
+            !dialogue.samples.is_empty() && dialogue.samples.iter().all(|s| s.is_finite()),
+            "the dialogue clip must be a non-empty, finite waveform"
+        );
+        let dialogue_peak = dialogue.samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+        let dialogue_rms = (dialogue.samples.iter().map(|s| s * s).sum::<f32>()
+            / dialogue.samples.len() as f32)
+            .sqrt();
+        assert!(
+            dialogue_rms > 1e-3,
+            "the dialogue clip must be audible (rms={dialogue_rms})"
+        );
+        let dialogue_secs = dialogue.samples.len() as f32 / 24_000.0;
+        // A two-turn dialogue is a real multi-second clip — well away from empty.
+        assert!(
+            dialogue_secs > 1.0,
+            "a 2-turn dialogue is longer than 1s (got {dialogue_secs:.2}s)"
+        );
+
+        // (b) Voice distinctness (mirrors the inference DoD): split the dialogue into its first / second
+        // half ([S1] then [S2]), embed each with the real chatterbox_ve speaker encoder, and require the
+        // CROSS-speaker cosine to sit materially BELOW the same-speaker self-similarity (each half split
+        // again into quarters). This measures the two turns as DIFFERENT voices — the objective proof.
+        let embedder = crate::inference_runtime::load_voice_embedder(
+            "chatterbox_ve",
+            &LoadSpec::new(WeightsSource::File(PathBuf::from(&ve_file))),
+        )
+        .expect("load the real chatterbox_ve embedder");
+        let ve_embed = |samples: &[f32]| -> Vec<f32> {
+            embedder
+                .embed(&gen_core::AudioTrack {
+                    samples: samples.to_vec(),
+                    sample_rate: dialogue.sample_rate,
+                    channels: dialogue.channels.max(1),
+                    stems: Vec::new(),
+                })
+                .expect("embed a waveform slice")
+        };
+        let cosine = |a: &[f32], b: &[f32]| -> f32 {
+            let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+            let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if na == 0.0 || nb == 0.0 {
+                0.0
+            } else {
+                dot / (na * nb)
+            }
+        };
+        let half = dialogue.samples.len() / 2;
+        let (s1, s2) = dialogue.samples.split_at(half);
+        let (q1a, q1b) = s1.split_at(s1.len() / 2);
+        let (q2a, q2b) = s2.split_at(s2.len() / 2);
+        let cross_cosine = cosine(&ve_embed(s1), &ve_embed(s2));
+        let self_s1 = cosine(&ve_embed(q1a), &ve_embed(q1b));
+        let self_s2 = cosine(&ve_embed(q2a), &ve_embed(q2b));
+        let self_cosine = 0.5 * (self_s1 + self_s2);
+        assert!(
+            cross_cosine < self_cosine - 0.05,
+            "the two turns must be acoustically distinct: cross-speaker cosine {cross_cosine:.4} is \
+             not materially below same-speaker self-similarity {self_cosine:.4} (S1 {self_s1:.4}, \
+             S2 {self_s2:.4})"
+        );
+
+        // (c) Single-voice control — no script, plain prompt — still renders a valid non-silent clip,
+        // proving the multi-speaker script field is additive (single-voice byte-for-byte unaffected).
+        let single_voice = render(None, "Hello, how are you today?", 3.0);
+        let single_rms = (single_voice.samples.iter().map(|s| s * s).sum::<f32>()
+            / single_voice.samples.len().max(1) as f32)
+            .sqrt();
+        assert_eq!(single_voice.sample_rate, 24_000);
+        assert!(
+            !single_voice.samples.is_empty() && single_rms > 1e-3,
+            "the single-voice control must render non-silent audio (rms={single_rms})"
+        );
+
+        // Save the dialogue artifact + evidence.
+        let out_dir = std::env::var("SCENEWORKS_DOD_OUT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir());
+        std::fs::create_dir_all(&out_dir).ok();
+        let wav_path = out_dir.join("moss_ttsd_dialogue_dod.wav");
+        let wav = AudioTrack {
+            samples: dialogue.samples.clone(),
+            sample_rate: dialogue.sample_rate,
+            channels: dialogue.channels.max(1),
+        };
+        write_wav_pcm16(&wav, &wav_path).expect("write the dialogue WAV");
+        let evidence = json!({
+            "model": "moss_ttsd_v05",
+            "script": [{ "speaker": "S1", "text": line_a }, { "speaker": "S2", "text": line_b }],
+            "sampleRate": dialogue.sample_rate,
+            "channels": dialogue.channels,
+            "dialogueSamples": dialogue.samples.len(),
+            "dialogueDurationSecs": dialogue_secs,
+            "dialoguePeakAmplitude": dialogue_peak,
+            "dialogueRms": dialogue_rms,
+            "crossCosineDifferentSpeaker": cross_cosine,
+            "selfCosineSameSpeaker": self_cosine,
+            "selfCosineS1": self_s1,
+            "selfCosineS2": self_s2,
+            "crossMateriallyBelowSelf": cross_cosine < self_cosine - 0.05,
+            "singleVoiceControlSamples": single_voice.samples.len(),
+            "singleVoiceControlRms": single_rms,
+            "wavPath": wav_path.display().to_string(),
+        });
+        let evidence_path = out_dir.join("moss_ttsd_dialogue_dod.json");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_string_pretty(&evidence).unwrap(),
+        )
+        .expect("write the evidence JSON");
+        eprintln!(
+            "DoD evidence: {}\nWAV: {}\nself={self_cosine:.4} cross={cross_cosine:.4}",
+            evidence_path.display(),
+            wav_path.display()
+        );
     }
 }

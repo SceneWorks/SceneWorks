@@ -143,6 +143,7 @@ def _sample_audio_model_entry() -> dict:
             "maxDurationSecs": 30.0,
             "editModes": ["extend", "inpaint", "cover"],
             "supportsMultiSpeaker": True,
+            "maxSpeakers": 2,
             "conditioning": ["AudioEdit", "ReferenceAudio", "VoiceEmbedding"],
         },
     }

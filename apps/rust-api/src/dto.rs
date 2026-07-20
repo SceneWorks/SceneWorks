@@ -887,6 +887,21 @@ pub(crate) struct VideoJobRequest {
     pub(crate) advanced: JsonObject,
 }
 
+/// One segment of a multi-speaker dialogue script (sc-13676) — the wire twin of
+/// [`gen_core::SpeechSegment`]. `text` is what this turn says; `speaker` is the turn's dialogue label
+/// (e.g. `"S1"` / `"S2"`) a multi-speaker model maps to a distinct voice; `style` is an advisory
+/// per-segment emotion hint. `Serialize` too so the request round-trips verbatim into the worker
+/// payload (the worker rebuilds `gen_core::SpeechSegment` from these camelCase keys).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SpeechSegmentDto {
+    pub(crate) text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) speaker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) style: Option<String>,
+}
+
 /// A `POST /api/v1/audio/jobs` request (SceneWorks Audio Studio, epic 13400 / sc-13404 + sc-13409).
 /// The audio analogue of [`VideoJobRequest`]: `prompt` is the script/sound description, and the typed
 /// audio knobs (`voice` / `language` / `targetDurationSecs`) map to the worker-side
@@ -921,6 +936,16 @@ pub(crate) struct AudioJobRequest {
     /// the model's advertised `audio.maxDurationSecs` by the worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) target_duration_secs: Option<f32>,
+    /// A multi-speaker / long-form dialogue script (sc-13676) — an ordered list of spoken segments,
+    /// each with its own text and an optional speaker label. Rides the worker-side
+    /// [`gen_core::AudioParams::script`], which a model advertising
+    /// [`gen_core::Capabilities::supports_multi_speaker`] (MOSS-TTSD) renders as one clip with each
+    /// turn in its own voice. `None` (the default) is an ordinary single-voice request, byte-for-byte
+    /// unaffected: a script sent to a model that does NOT advertise multi-speaker is a typed
+    /// Unsupported at the gen-core floor. When a non-empty script is present the `prompt` may be empty
+    /// (the script carries the text); a single-voice request still requires a prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) script: Option<Vec<SpeechSegmentDto>>,
     /// CFG guidance scale for diffusion-audio models (Sound FX / MOSS-SoundEffect). Rides the
     /// top-level [`gen_core::GenerationRequest::guidance`] the worker builds. `None` ⇒ the model's
     /// default (MOSS: 4.0). Bounded to a blanket sane range here; the model's advertised guidance

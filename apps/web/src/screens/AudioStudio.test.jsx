@@ -96,6 +96,23 @@ const MOSS_TTS_REALTIME = {
   ui: { label: "MOSS-TTS-Realtime (Streaming)" },
 };
 
+// Multi-speaker dialogue TTS (sc-13676): NO voice bank — serves Speech via audio.supportsMultiSpeaker
+// (+ maxSpeakers). Kept OUT of ALL_AUDIO so the existing Speech tests keep Kokoro as the default; the
+// multi-speaker tests add it.
+const MOSS_TTSD = {
+  id: "moss_ttsd_v05",
+  name: "MOSS-TTSD v0.5 (Multi-Speaker Dialogue)",
+  type: "audio",
+  audio: {
+    languages: ["zh", "en"],
+    sampleRates: [24000],
+    maxDurationSecs: 300,
+    supportsMultiSpeaker: true,
+    maxSpeakers: 2,
+  },
+  ui: { label: "MOSS-TTSD v0.5 (Multi-Speaker)" },
+};
+
 const ALL_AUDIO = [KOKORO, MOSS, ACESTEP, OPENVOICE];
 
 function baseContext(overrides = {}) {
@@ -1317,6 +1334,142 @@ describe("AudioStudio streaming reveal (sc-13675)", () => {
     });
     expect(modelSelect(container).value).toBe("kokoro_82m");
     expect(streamingBadge()).toBeNull();
+  });
+});
+
+describe("AudioStudio multi-speaker reveal (sc-13676)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <AudioStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const generateButton = (root) => buttonWithText(root, "Generate");
+  const scriptEditor = () => container.querySelector('[data-testid="multi-speaker-script"]');
+  const segmentTextareas = () => [...container.querySelectorAll(".script-segment-text")];
+  const speakerSelects = () => [...container.querySelectorAll(".script-segment-speaker")];
+  const setTextarea = async (el, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+      setter.call(el, value);
+      el.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+  };
+  const setSelect = async (el, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set;
+      setter.call(el, value);
+      el.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+  };
+
+  it("serves the Speech tab from supportsMultiSpeaker (no voice bank) and reveals the segmented-script editor", async () => {
+    await render(baseContext({ audioModels: [MOSS_TTSD], models: [MOSS_TTSD] }));
+
+    // Opens on Speech, with the multi-speaker model selected — proving supportsMultiSpeaker serves
+    // Speech even without a voice bank (capability-driven eligibility, sc-13676).
+    expect(modeTab(container, "Speech").className).toContain("active");
+    expect(modelSelect(container).value).toBe("moss_ttsd_v05");
+
+    // The segmented-script editor replaces the plain prompt textarea; a starter dialogue seeds one
+    // turn per advertised speaker (maxSpeakers = 2), and each speaker select offers exactly 2 labels
+    // (read off the model, never hardcoded).
+    expect(scriptEditor()).toBeTruthy();
+    expect(container.querySelector(".prompt-input:not(.multi-speaker-script)")).toBeNull();
+    expect(segmentTextareas().length).toBe(2);
+    expect([...speakerSelects()[0].querySelectorAll("option")].map((o) => o.value)).toEqual(["S1", "S2"]);
+
+    // A voice picker never appears (multi-speaker models ship no fixed voice bank).
+    expect(fieldByLabelStart(container, "Voice")).toBeFalsy();
+  });
+
+  it("does NOT reveal the script editor for a single-voice Speech model (Kokoro)", async () => {
+    await render(baseContext({ audioModels: [KOKORO], models: [KOKORO] }));
+    expect(modelSelect(container).value).toBe("kokoro_82m");
+    // Kokoro is single-voice → the plain prompt textarea, no script editor (single-voice unperturbed).
+    expect(scriptEditor()).toBeNull();
+    expect(container.querySelector(".prompt-input")).toBeTruthy();
+  });
+
+  it("Generate is disabled until a script turn has text, then submits AudioParams.script", async () => {
+    const job = { id: "audio-ms-1", type: "audio_generate", status: "queued" };
+    const createAudioJob = vi.fn(async () => job);
+    const rememberLocalGenerationJob = vi.fn();
+    await render(
+      baseContext({
+        audioModels: [MOSS_TTSD],
+        models: [MOSS_TTSD],
+        createAudioJob,
+        rememberLocalGenerationJob,
+      }),
+    );
+
+    // Empty starter script → the guard disables the CTA (never a silent no-op).
+    expect(generateButton(container).disabled).toBe(true);
+
+    // Fill both turns and assign the second to Speaker 2.
+    await setTextarea(segmentTextareas()[0], "Hello, how are you today?");
+    await setTextarea(segmentTextareas()[1], "I'm doing great, thanks for asking!");
+    await setSelect(speakerSelects()[1], "S2");
+    expect(generateButton(container).disabled).toBe(false);
+
+    await act(async () => {
+      generateButton(container).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(createAudioJob).toHaveBeenCalledTimes(1);
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.model).toBe("moss_ttsd_v05");
+    // The segmented dialogue submits as AudioParams.script — both turns, in order, with speakers.
+    expect(payload.script).toEqual([
+      { text: "Hello, how are you today?", speaker: "S1" },
+      { text: "I'm doing great, thanks for asking!", speaker: "S2" },
+    ]);
+    // A multi-speaker model ships no voice bank, so no `voice` is sent.
+    expect(payload.voice).toBeUndefined();
+    expect(rememberLocalGenerationJob).toHaveBeenCalledWith("audio", job);
+  });
+
+  it("adds and removes script turns (Add turn / remove), capped-speaker labels only", async () => {
+    await render(baseContext({ audioModels: [MOSS_TTSD], models: [MOSS_TTSD] }));
+    expect(segmentTextareas().length).toBe(2);
+
+    // Add a third turn — dialogue length is unbounded (maxSpeakers caps DISTINCT speakers, not turns).
+    await act(async () => {
+      buttonWithText(container, "Add turn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(segmentTextareas().length).toBe(3);
+    // Every speaker select still offers only the 2 advertised labels.
+    for (const select of speakerSelects()) {
+      expect([...select.querySelectorAll("option")].map((o) => o.value)).toEqual(["S1", "S2"]);
+    }
+
+    // Remove one turn back to 2.
+    await act(async () => {
+      container
+        .querySelector(".script-segment-remove:not([disabled])")
+        .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(segmentTextareas().length).toBe(2);
   });
 });
 

@@ -240,10 +240,18 @@ describe("audio model eligibility (sc-13403)", () => {
     type: "audio",
     audio: { languages: ["en", "zh"], sampleRates: [24000], maxDurationSecs: 2400, supportsStreaming: true },
   };
+  // Multi-speaker dialogue TTS (sc-13676): NO voice bank — it serves "speech" via
+  // audio.supportsMultiSpeaker (+ maxSpeakers), and must stay OFF "sfx" despite advertising sampleRates.
+  const mossTtsd = {
+    id: "moss_ttsd_v05",
+    type: "audio",
+    audio: { languages: ["zh", "en"], sampleRates: [24000], maxDurationSecs: 300, supportsMultiSpeaker: true, maxSpeakers: 2 },
+  };
 
   const seeded = [
     ["Kokoro-82M", kokoro, "speech"],
     ["MOSS-TTS-Realtime (streaming)", mossTtsRealtime, "speech"],
+    ["MOSS-TTSD (multi-speaker)", mossTtsd, "speech"],
     ["MOSS-SoundEffect-v2", moss, "sfx"],
     ["ACE-Step v1.5 Turbo", acestep, "music"],
     ["OpenVoice V2", openvoice, "voiceclone"],
@@ -280,6 +288,21 @@ describe("audio model eligibility (sc-13403)", () => {
     // And a plain (non-streaming) voiceless generator with the SAME sample-rate block stays sfx —
     // proving the classifier keys on the streaming flag, not on the absence of voices alone.
     const plainSfx = { id: "x", type: "audio", audio: { sampleRates: [24000], languages: ["en"] } };
+    expect(audioModelServesMode(plainSfx, "speech")).toBe(false);
+    expect(audioModelServesMode(plainSfx, "sfx")).toBe(true);
+  });
+
+  it("MOSS-TTSD serves speech via supportsMultiSpeaker (no voice bank) and NOT sfx", () => {
+    // The multi-speaker dialogue TTS has no voices — the multi-speaker capability is its speech
+    // signal (sc-13676), exactly as streaming is MOSS-TTS-Realtime's.
+    expect(audioModelServesMode(mossTtsd, "speech")).toBe(true);
+    // It must NOT leak into the residual sfx bucket even though it advertises sampleRates.
+    expect(audioModelServesMode(mossTtsd, "sfx")).toBe(false);
+    expect(audioModelServesMode(mossTtsd, "music")).toBe(false);
+    expect(audioModelServesMode(mossTtsd, "voiceclone")).toBe(false);
+    // A plain (non-multi-speaker) voiceless generator with the SAME sample-rate block stays sfx —
+    // proving the classifier keys on the multi-speaker flag, not on the absence of voices alone.
+    const plainSfx = { id: "y", type: "audio", audio: { sampleRates: [24000], languages: ["en"] } };
     expect(audioModelServesMode(plainSfx, "speech")).toBe(false);
     expect(audioModelServesMode(plainSfx, "sfx")).toBe(true);
   });
@@ -323,12 +346,14 @@ describe("audio model eligibility (sc-13403)", () => {
         "kokoro_82m",
         "moss_sfx_v2",
         "moss_tts_realtime",
+        "moss_ttsd_v05",
         "openvoice_v2",
       ].sort(),
     );
     const expectedMode = {
       kokoro_82m: "speech",
       moss_tts_realtime: "speech",
+      moss_ttsd_v05: "speech",
       moss_sfx_v2: "sfx",
       acestep_v15_turbo: "music",
       openvoice_v2: "voiceclone",
