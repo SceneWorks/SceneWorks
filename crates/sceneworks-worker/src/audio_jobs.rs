@@ -420,10 +420,10 @@ pub(crate) async fn run_audio_generate_job(
     .await?;
 
     // Synthesis (load + generate) is CPU/GPU-bound and synchronous — run it on the blocking pool so
-    // the worker's async runtime stays responsive, and emit periodic keepalive heartbeats + progress
-    // while it runs so a long synthesis (a cold pipeline build, a 30 s clip, or a slow host) is never
-    // flagged stale and marked `interrupted` mid-flight. Mirrors the video path's interval keepalive
-    // for the no-progress cold-load phase. The voice-clone chain runs TWO backend calls (base TTS then
+    // the worker's async runtime stays responsive, and emit periodic keepalive heartbeats while it
+    // runs so a long synthesis (a cold pipeline build, a 30 s clip, or a slow host) is never flagged
+    // stale and marked `interrupted` mid-flight. Mirrors the video path's interval keepalive for the
+    // no-progress cold-load phase. The voice-clone chain runs TWO backend calls (base TTS then
     // conversion) inside one blocking task, so the single keepalive loop spans both.
     // Whether this run took the native single-call clone path — threaded into the asset fact so the
     // replay record omits the (unused) base-TTS model that only the conversion chain carries.
