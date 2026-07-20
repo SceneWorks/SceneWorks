@@ -854,6 +854,27 @@ export const fallbackModels = [
     },
   },
   {
+    id: "chatterbox_tts",
+    name: "Chatterbox (Cloned-Voice TTS)",
+    type: "audio",
+    macOnly: false,
+    // A native clone-TTS GENERATOR: conditioning includes "ReferenceAudio" (→ serves "voiceclone")
+    // AND "VoiceEmbedding" — the pairing that marks it as a single-call clone (isNativeCloneGenerator),
+    // so the Voice Clone picker prefers it over the OpenVoice conversion converter when installed.
+    audio: {
+      languages: ["en", "en-US"],
+      sampleRates: [24000],
+      maxDurationSecs: 30,
+      conditioning: ["VoiceEmbedding", "ReferenceAudio"],
+      supportsMultiSpeaker: false,
+    },
+    ui: {
+      label: "Chatterbox Clone-TTS",
+      description:
+        "Chatterbox (Resemble AI) native cloned-voice TTS — renders a full cloned-voice WAV directly from your script plus a short reference clip in a single step (no separate base-TTS/conversion pass). 24 kHz mono, up to 30 s. Candle-native on every platform. MIT.",
+    },
+  },
+  {
     id: "chatterbox_ve",
     name: "Chatterbox Voice Encoder (Voice Clone)",
     type: "audio",

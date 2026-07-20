@@ -362,12 +362,22 @@ pub(crate) async fn run_audio_generate_job(
 
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
 
-    // Voice Clone (sc-13411 C4) routes onto the two-call Kokoro→OpenVoice chain; every other mode runs
-    // the single-generator path. Both resolve their snapshot dir(s) up front so a missing install fails
-    // with a clear error before the job is marked Running.
+    // Voice Clone routing (sc-13411 C4 → sc-13412). A reference-voice job renders natively when the
+    // selected clone model is a Generator that advertises `ReferenceAudio` conditioning — Chatterbox
+    // `chatterbox_tts`: a SINGLE generator call clones from the script + reference. The choice is gated
+    // purely on the audio catalog's registration + Capabilities (not a hardcoded id), so the native
+    // path lights up automatically the moment such a generator is linked in; otherwise the two-call
+    // Kokoro→OpenVoice conversion chain remains the fallback. Every other mode runs the single-generator
+    // path. All resolve their snapshot dir(s) up front so a missing install fails with a clear error
+    // before the job is marked Running.
     let synthesis: AudioSynthesis = if request.is_voice_clone() {
-        let plan = resolve_voice_clone_plan(settings, &request, &project_path)?;
-        AudioSynthesis::VoiceClone(plan)
+        if crate::inference_runtime::audio_generator_clones_from_reference(&request.model) {
+            let plan = resolve_native_voice_clone_plan(settings, &request, &project_path)?;
+            AudioSynthesis::NativeVoiceClone(plan)
+        } else {
+            let plan = resolve_voice_clone_plan(settings, &request, &project_path)?;
+            AudioSynthesis::VoiceClone(plan)
+        }
     } else {
         let model_dir = resolve_audio_model_dir(settings, &request)?;
         // Extend/edit SOURCE band (sc-13410): resolve + decode the source track and build the
@@ -401,6 +411,9 @@ pub(crate) async fn run_audio_generate_job(
     // flagged stale and marked `interrupted` mid-flight. Mirrors the video path's interval keepalive
     // for the no-progress cold-load phase. The voice-clone chain runs TWO backend calls (base TTS then
     // conversion) inside one blocking task, so the single keepalive loop spans both.
+    // Whether this run took the native single-call clone path — threaded into the asset fact so the
+    // replay record omits the (unused) base-TTS model that only the conversion chain carries.
+    let native_clone = matches!(synthesis, AudioSynthesis::NativeVoiceClone(_));
     let track = match synthesis {
         AudioSynthesis::Single {
             model_dir,
@@ -411,6 +424,9 @@ pub(crate) async fn run_audio_generate_job(
         }
         AudioSynthesis::VoiceClone(plan) => {
             run_voice_clone_synthesis(api, settings, job, backend, &request, plan).await?
+        }
+        AudioSynthesis::NativeVoiceClone(plan) => {
+            run_native_voice_clone_synthesis(api, settings, job, backend, &request, plan).await?
         }
     };
 
@@ -457,7 +473,14 @@ pub(crate) async fn run_audio_generate_job(
         .await
         .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
 
-    let fact = audio_asset_fact(&plan, &request, sample_rate, channels, duration_secs);
+    let fact = audio_asset_fact(
+        &plan,
+        &request,
+        sample_rate,
+        channels,
+        duration_secs,
+        native_clone,
+    );
     let result = audio_streaming_result(&plan, &request, &fact);
     update_job(
         api,
@@ -613,6 +636,19 @@ enum AudioSynthesis {
         audio_edit: Option<Conditioning>,
     },
     VoiceClone(VoiceClonePlan),
+    /// Native cloned-voice TTS (sc-13412): a single-generator clone from the script + reference,
+    /// chosen when the selected clone model is a Generator advertising `ReferenceAudio` conditioning
+    /// (Chatterbox `chatterbox_tts`) instead of the two-call OpenVoice conversion chain.
+    NativeVoiceClone(NativeVoiceClonePlan),
+}
+
+/// A resolved native clone-TTS job (sc-13412): the clone generator's snapshot dir + the decoded
+/// reference-voice clip. Unlike [`VoiceClonePlan`] there is NO base-TTS/converter pair — the single
+/// generator renders directly from the script + reference. Resolved in async (settings + project path
+/// in scope) so the blocking synthesis gets ready-to-load inputs.
+struct NativeVoiceClonePlan {
+    model_dir: PathBuf,
+    reference: gen_core::AudioTrack,
 }
 
 /// A resolved voice-clone job: the base TTS snapshot dir, the OpenVoice converter snapshot dir, and
@@ -746,6 +782,100 @@ async fn run_voice_clone_synthesis(
             .into_iter()
             .next()
             .ok_or_else(|| WorkerError::Engine("voice conversion produced no track".to_owned()))
+    });
+    await_audio_blocking(api, settings, job, backend, handle).await
+}
+
+/// Resolve the native clone-TTS snapshot dir + the reference-voice clip for a Voice Clone job that
+/// routes onto the single-call native path (sc-13412). The clone generator (`chatterbox_tts`) renders
+/// directly from the script + reference, so — unlike [`resolve_voice_clone_plan`] — there is NO
+/// separate base-TTS model to resolve. Fails with a clear error before the job is marked Running when
+/// the model isn't installed or the reference asset can't be resolved to a decodable WAV.
+fn resolve_native_voice_clone_plan(
+    settings: &Settings,
+    request: &AudioRequest,
+    project_path: &Path,
+) -> WorkerResult<NativeVoiceClonePlan> {
+    let model_dir = resolve_audio_model_dir(settings, request)?;
+    let reference_id = request
+        .reference_audio_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "a voice-clone job needs a referenceAudioAssetId.".to_owned(),
+            )
+        })?;
+    // Resolve the reference through the same project-scoped guard the conversion chain + the
+    // extend/edit source clip use, then decode its PCM-16 WAV into the host AudioTrack the clone
+    // generator consumes as its `Conditioning::ReferenceAudio` voice.
+    let reference_path = crate::video_jobs::resolve_clip_media_path(
+        settings,
+        &request.project_id,
+        reference_id,
+        project_path,
+    )?;
+    let reference = read_wav_pcm16(&reference_path)?;
+    Ok(NativeVoiceClonePlan {
+        model_dir,
+        reference,
+    })
+}
+
+/// Run the native clone-TTS synthesis on a blocking thread (sc-13412): a SINGLE Chatterbox generator
+/// call renders the script in the reference voice. The reference clip rides as
+/// [`Conditioning::ReferenceAudio`] — the provider derives the 256-d speaker embedding from it (the
+/// `VoiceEmbedding` path) AND consumes the clip as S3Gen's reference mel / prompt tokens / speaker
+/// x-vector, so this one call produces the full cloned WAV with no base-TTS + conversion pass. Returns
+/// the produced `gen_core::AudioTrack` for the caller to write + register, exactly like
+/// [`run_audio_synthesis`].
+async fn run_native_voice_clone_synthesis(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    backend: &str,
+    request: &AudioRequest,
+    plan: NativeVoiceClonePlan,
+) -> WorkerResult<gen_core::AudioTrack> {
+    let NativeVoiceClonePlan {
+        model_dir,
+        reference,
+    } = plan;
+    let model_id = request.model.clone();
+    let script = request.prompt.clone();
+    let seed = request.seed.map(|seed| seed as u64);
+    let handle = tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+        let spec = LoadSpec::new(WeightsSource::Dir(model_dir));
+        let generator = crate::inference_runtime::load_audio(&model_id, &spec)
+            .map_err(|error| crate::classify_engine_error("clone-TTS model load failed", error))?;
+        let req = GenerationRequest {
+            prompt: script,
+            seed,
+            // The reference clip is the sole voice conditioning — one native call renders the clone.
+            // No `voice` (the model has no named voice bank), no `language`/`target_duration` (Voice
+            // Clone carries none; the utterance is text-proportional), and no `matchStrength` (that τ
+            // is the OpenVoice converter's, not this generator's).
+            conditioning: vec![Conditioning::ReferenceAudio {
+                audio: reference,
+                strength: None,
+            }],
+            cancel: CancelFlag::new(),
+            ..Default::default()
+        };
+        let mut on_progress = |_progress: Progress| {};
+        match generator
+            .generate(&req, &mut on_progress)
+            .map_err(|error| crate::classify_engine_error("clone-TTS generation failed", error))?
+        {
+            GenerationOutput::Audio(track) => Ok(track),
+            GenerationOutput::Images(_) => Err(WorkerError::Engine(
+                "clone-TTS model returned images, expected an audio track".to_owned(),
+            )),
+            GenerationOutput::Video { .. } => Err(WorkerError::Engine(
+                "clone-TTS model returned video, expected an audio track".to_owned(),
+            )),
+        }
     });
     await_audio_blocking(api, settings, job, backend, handle).await
 }
@@ -926,6 +1056,9 @@ fn audio_asset_fact(
     sample_rate: u32,
     channels: u16,
     duration_secs: f64,
+    // Whether this run took the native single-call clone path (sc-13412): the native generator has no
+    // base-TTS model, so `baseModel` is omitted for it (it is only meaningful to the OpenVoice chain).
+    native_clone: bool,
 ) -> Value {
     let title: String = request.prompt.chars().take(56).collect();
     let title = title.trim();
@@ -963,7 +1096,7 @@ fn audio_asset_fact(
         // Voice Clone (sc-13411 C4): the reference-voice asset, base TTS model, and match strength (τ) so a
         // re-generate reconstructs the exact chain. `null` on a non-voice-clone run.
         "referenceAudioAssetId": request.reference_audio_asset_id,
-        "baseModel": if request.is_voice_clone() { Some(request.base_model.as_str()) } else { None },
+        "baseModel": if request.is_voice_clone() && !native_clone { Some(request.base_model.as_str()) } else { None },
         "matchStrength": request.match_strength,
         "sampleRate": sample_rate,
     });
@@ -1005,7 +1138,7 @@ fn audio_asset_fact(
         "editStrength": request.edit_strength,
         // Voice Clone replay record (sc-13411 C4) — `null` on a non-voice-clone run.
         "referenceAudioAssetId": request.reference_audio_asset_id,
-        "baseModel": if request.is_voice_clone() { Some(request.base_model.as_str()) } else { None },
+        "baseModel": if request.is_voice_clone() && !native_clone { Some(request.base_model.as_str()) } else { None },
         "matchStrength": request.match_strength,
         "seed": request.seed,
         "rawAdapterSettings": raw_adapter_settings,
@@ -1178,7 +1311,7 @@ mod tests {
             "seed": 42,
         })));
         let plan = AudioPlan::new(&request, Path::new("/tmp/project"));
-        let fact = audio_asset_fact(&plan, &request, 24_000, 1, 3.25);
+        let fact = audio_asset_fact(&plan, &request, 24_000, 1, 3.25, false);
         assert_eq!(fact["type"], "audio");
         assert_eq!(fact["mimeType"], "audio/wav");
         assert_eq!(fact["sampleRate"], 24_000);
@@ -1358,7 +1491,7 @@ mod tests {
             "seed": 5,
         })));
         let plan = AudioPlan::new(&request, Path::new("/tmp/project"));
-        let fact = audio_asset_fact(&plan, &request, 48_000, 2, 8.0);
+        let fact = audio_asset_fact(&plan, &request, 48_000, 2, 8.0, false);
         assert_eq!(fact["sampleRate"], 48_000);
         assert_eq!(fact["channels"], 2);
         assert_eq!(fact["bpm"], 92.0);
@@ -1390,7 +1523,7 @@ mod tests {
             "seed": 99,
         })));
         let plan = AudioPlan::new(&request, Path::new("/tmp/project"));
-        let fact = audio_asset_fact(&plan, &request, 48_000, 1, 5.0);
+        let fact = audio_asset_fact(&plan, &request, 48_000, 1, 5.0, false);
         assert_eq!(fact["sampleRate"], 48_000);
         assert_eq!(fact["guidance"], 7.0);
         assert_eq!(fact["steps"], 80);
@@ -1468,7 +1601,7 @@ mod tests {
             "seed": 3,
         })));
         let plan = AudioPlan::new(&request, Path::new("/tmp/project"));
-        let fact = audio_asset_fact(&plan, &request, 22_050, 1, 4.2);
+        let fact = audio_asset_fact(&plan, &request, 22_050, 1, 4.2, false);
         assert_eq!(fact["mode"], "voice_clone");
         assert_eq!(fact["model"], "openvoice_v2");
         assert_eq!(fact["referenceAudioAssetId"], "ref-voice-1");
@@ -1488,7 +1621,7 @@ mod tests {
         // A non-voice-clone run leaves the voice-clone fields null and baseModel null (not "kokoro_82m").
         let plain = AudioRequest::from_payload(&payload(json!({ "model": "kokoro_82m" })));
         let plain_plan = AudioPlan::new(&plain, Path::new("/tmp/project"));
-        let plain_fact = audio_asset_fact(&plain_plan, &plain, 24_000, 1, 3.0);
+        let plain_fact = audio_asset_fact(&plain_plan, &plain, 24_000, 1, 3.0, false);
         assert_eq!(plain_fact["mode"], "text_to_audio");
         assert!(plain_fact["referenceAudioAssetId"].is_null());
         assert!(
@@ -1496,5 +1629,43 @@ mod tests {
             "baseModel is null on a non-voice-clone run"
         );
         assert!(plain_fact["matchStrength"].is_null());
+    }
+
+    #[test]
+    fn native_voice_clone_asset_fact_omits_the_base_model() {
+        // A native clone-TTS run (sc-13412) is still a `voice_clone` mode with a reference, but it has
+        // NO base-TTS model — the single generator renders directly. So `baseModel` is null even though
+        // `is_voice_clone()` is true (native_clone = true), while the reference is still recorded for
+        // replay. This is the ONE field that differs from the OpenVoice conversion chain's replay record.
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "chatterbox_tts",
+            "prompt": "Render this in the cloned voice, in one step.",
+            "referenceAudioAssetId": "ref-voice-1",
+            "seed": 9,
+        })));
+        let plan = AudioPlan::new(&request, Path::new("/tmp/project"));
+        let fact = audio_asset_fact(
+            &plan, &request, 24_000, 1, 4.0, /* native_clone */ true,
+        );
+        assert_eq!(fact["mode"], "voice_clone");
+        assert_eq!(fact["model"], "chatterbox_tts");
+        assert_eq!(fact["referenceAudioAssetId"], "ref-voice-1");
+        // No base-TTS pass on the native path — baseModel is omitted in both the top-level record and
+        // rawAdapterSettings (the conversion chain records "kokoro_82m" here; the native clone does not).
+        assert!(
+            fact["baseModel"].is_null(),
+            "native clone has no base-TTS model"
+        );
+        assert!(fact["rawAdapterSettings"]["baseModel"].is_null());
+        // The reference still round-trips for replay.
+        assert_eq!(
+            fact["rawAdapterSettings"]["referenceAudioAssetId"],
+            "ref-voice-1"
+        );
+
+        // Contrast: the SAME request scored as the conversion chain (native_clone = false) DOES record
+        // the base model — proving the flag is the only lever and the default (conversion) is unchanged.
+        let conversion_fact = audio_asset_fact(&plan, &request, 24_000, 1, 4.0, false);
+        assert_eq!(conversion_fact["baseModel"], "kokoro_82m");
     }
 }

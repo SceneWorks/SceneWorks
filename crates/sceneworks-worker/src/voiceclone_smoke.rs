@@ -47,6 +47,14 @@ const BASE_VOICE: &str = "af_heart";
 /// and the Chatterbox-VE evidence is unambiguous.
 const REFERENCE_VOICE: &str = "am_michael";
 
+/// The native clone smoke's script (sc-13412) — the words rendered in the reference voice.
+const NATIVE_CLONE_SCRIPT: &str =
+    "Hello there. This sentence is spoken in a cloned voice by the synthesizer.";
+/// The reference voice the native clone must track — a female Kokoro voice.
+const REFERENCE_VOICE_FEMALE: &str = "af_heart";
+/// A DIFFERENT (male) control voice the clone must be measurably farther from than the reference.
+const CONTROL_VOICE_MALE: &str = "am_michael";
+
 /// Find the single HF-hub snapshot dir for `models--<owner>--<repo>` under `~/.cache/huggingface`,
 /// or `None` if the cache is laid out elsewhere (then the caller falls back to the env override).
 fn hub_snapshot(owner_repo: &str) -> Option<PathBuf> {
@@ -260,5 +268,154 @@ fn voiceclone_chain_smoke() {
          {:.4} cosine (listen: {})",
         sim_conv_ref - sim_base_ref,
         out_dir.join("converted.wav").display()
+    );
+}
+
+/// Build the exact `GenerationRequest` the worker's native clone path
+/// ([`crate::audio_jobs::run_native_voice_clone_synthesis`]) sends: the script as the prompt and the
+/// reference clip as the SOLE voice conditioning (`Conditioning::ReferenceAudio`). Kept as a tiny
+/// shared builder so this smoke proves the request the worker actually issues, not a bespoke one.
+fn native_clone_request(
+    script: &str,
+    reference: gen_core::AudioTrack,
+    seed: u64,
+) -> GenerationRequest {
+    GenerationRequest {
+        prompt: script.to_owned(),
+        seed: Some(seed),
+        conditioning: vec![gen_core::Conditioning::ReferenceAudio {
+            audio: reference,
+            strength: None,
+        }],
+        cancel: CancelFlag::new(),
+        ..Default::default()
+    }
+}
+
+/// Local real-weight smoke for the **native cloned-voice TTS** path (sc-13412 / epic 12833 E1).
+/// `#[ignore]`d — run by hand on an Apple-Silicon Mac. It drives the exact runtime seam the worker's
+/// native Voice Clone path uses (`catalog().audio().load("chatterbox_tts")` +
+/// `Generator::generate` with a single `Conditioning::ReferenceAudio`), minus the API/job plumbing,
+/// and proves the DoD: a real cloned WAV whose Chatterbox-VE speaker embedding is materially closer to
+/// the REFERENCE voice than to a different CONTROL voice.
+///
+///   1. **Reference + control clips** — two real Kokoro clips in distinctly different voices
+///      (`af_heart` female reference, `am_michael` male control) stand in for a user reference sample
+///      and an unrelated voice. The clone is rendered from the reference only.
+///   2. **Native clone** — `chatterbox_tts` renders the script in the reference voice in ONE call
+///      (T3 speech-token LM → S3Gen token→waveform + HiFTNet + PerTh watermark). 24 kHz mono.
+///   3. **Chatterbox-VE evidence** — embed the clone, the reference, and the control; the clone's
+///      speaker identity must be closer to the reference than to the control:
+///      cosine(clone, ref) > cosine(clone, control). That is the objective, ear-free proof that the
+///      clone tracks the reference voice — a true audible match still needs a listen, so all three
+///      WAVs are written out.
+///
+/// Setup — one snapshot dir holding the Chatterbox files the generator + embedder load
+/// (`t3_cfg.safetensors` + `s3gen.safetensors` + `tokenizer.json` + `ve.safetensors`), plus a Kokoro
+/// snapshot for the reference/control clips; the PerTh watermarker resolves off the HF hub (online) or
+/// from `PERTH_SNAPSHOT`:
+/// ```text
+/// cargo test -p sceneworks-worker --release native_voiceclone_chatterbox_smoke -- --ignored --nocapture
+/// # overrides: VOICECLONE_KOKORO_DIR / VOICECLONE_CHATTERBOX_DIR / VOICECLONE_OUT_DIR
+/// #            (default /tmp/voiceclone_smoke), PERTH_SNAPSHOT (offline watermarker override)
+/// ```
+#[test]
+#[ignore = "real-weight audio smoke: run by hand on an Apple-Silicon Mac"]
+fn native_voiceclone_chatterbox_smoke() {
+    let kokoro_dir = resolve_dir("VOICECLONE_KOKORO_DIR", "hexgrad/Kokoro-82M", None);
+    // The chatterbox_tts generator loads its T3 + S3Gen + tokenizer from a snapshot DIR; the
+    // Chatterbox-VE embedder loads the single `ve.safetensors` from that same dir.
+    let chatterbox_dir = resolve_dir("VOICECLONE_CHATTERBOX_DIR", "ResembleAI/chatterbox", None);
+    let out_dir = PathBuf::from(env_or("VOICECLONE_OUT_DIR", "/tmp/voiceclone_smoke"));
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+    let seed: u64 = 20260720;
+
+    // ── Reference + control clips (distinct voices) ──────────────────────────────────────────────
+    let reference = kokoro_clip(
+        &kokoro_dir,
+        "The quick brown fox jumps over the lazy dog near the river bank at first light.",
+        REFERENCE_VOICE_FEMALE,
+    );
+    assert!(peak(&reference.samples) > 0.0, "reference clip is silent");
+    dump_wav(&reference, &out_dir.join("native_reference.wav"));
+    let control = kokoro_clip(
+        &kokoro_dir,
+        "The quick brown fox jumps over the lazy dog near the river bank at first light.",
+        CONTROL_VOICE_MALE,
+    );
+    assert!(peak(&control.samples) > 0.0, "control clip is silent");
+    dump_wav(&control, &out_dir.join("native_control.wav"));
+
+    // ── The single native clone call ─────────────────────────────────────────────────────────────
+    let generator = runtime_macos::catalog()
+        .expect("runtime catalog")
+        .audio()
+        .expect("audio lane")
+        .load(
+            "chatterbox_tts",
+            &LoadSpec::new(WeightsSource::Dir(chatterbox_dir.clone())),
+        )
+        .expect("load chatterbox_tts generator");
+    let mut on_progress = |_p: Progress| {};
+    let clone = match generator
+        .generate(
+            &native_clone_request(NATIVE_CLONE_SCRIPT, reference.clone(), seed),
+            &mut on_progress,
+        )
+        .expect("native clone generate")
+    {
+        GenerationOutput::Audio(track) => track,
+        other => panic!("expected audio, got {other:?}"),
+    };
+    assert!(!clone.samples.is_empty(), "clone is empty");
+    let clone_peak = peak(&clone.samples);
+    assert!(
+        clone_peak > 1e-2,
+        "clone is (near-)silent: peak {clone_peak:.6}"
+    );
+    assert_eq!(clone.sample_rate, 24_000, "clone must be 24 kHz");
+    assert_eq!(clone.channels, 1, "clone must be mono");
+    dump_wav(&clone, &out_dir.join("native_clone.wav"));
+
+    // ── Chatterbox-VE evidence: does the clone track the reference? ──────────────────────────────
+    let embedder = runtime_macos::catalog()
+        .expect("runtime catalog")
+        .audio()
+        .expect("audio lane")
+        .load_voice_embedder(
+            "chatterbox_ve",
+            &LoadSpec::new(WeightsSource::File(chatterbox_dir.join("ve.safetensors"))),
+        )
+        .expect("load chatterbox_ve embedder");
+    let emb_clone = embedder.embed(&clone).expect("embed clone");
+    let emb_ref = embedder.embed(&reference).expect("embed reference");
+    let emb_control = embedder.embed(&control).expect("embed control");
+
+    let sim_clone_ref = cosine(&emb_clone, &emb_ref);
+    let sim_clone_control = cosine(&emb_clone, &emb_control);
+
+    eprintln!("[native-clone-smoke] out dir: {}", out_dir.display());
+    eprintln!(
+        "[native-clone-smoke] clone: {} samples @ {} Hz, peak {clone_peak:.4}",
+        clone.samples.len(),
+        clone.sample_rate
+    );
+    eprintln!(
+        "[native-clone-smoke] Chatterbox-VE cosine — clone↔ref {sim_clone_ref:.4} | \
+         clone↔control {sim_clone_control:.4}  (margin {:.4})",
+        sim_clone_ref - sim_clone_control
+    );
+
+    // The DoD evidence: the clone's speaker identity is closer to the reference than to a DIFFERENT
+    // control voice — the clone tracks the reference the request supplied.
+    assert!(
+        sim_clone_ref > sim_clone_control,
+        "clone did not track the reference: clone↔ref {sim_clone_ref:.4} must exceed \
+         clone↔control {sim_clone_control:.4}"
+    );
+    eprintln!(
+        "[native-clone-smoke] PASS — clone tracks the reference by {:.4} cosine (listen: {})",
+        sim_clone_ref - sim_clone_control,
+        out_dir.join("native_clone.wav").display()
     );
 }
