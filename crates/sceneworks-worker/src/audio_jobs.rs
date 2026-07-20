@@ -3025,13 +3025,33 @@ mod tests {
             speaker: Some(speaker.to_owned()),
             style: None,
         };
-        // The exact balanced two-line dialogue the inference DoD proved distinct (cross 0.4953 vs
-        // self 0.749) — balanced turn lengths so the midpoint split cleanly separates the two voices.
+        // Two contrasting lines. The turns are UNBALANCED (S1's line is much shorter than S2's), so a
+        // blind 50% midpoint split of the dialogue would NOT separate the voices — the midpoint lands
+        // deep inside S2. Instead we isolate each voice explicitly (below).
         let line_a = "Hello, how are you today?";
         let line_b = "I'm doing great, thanks for asking!";
 
-        // (a) The real 2-speaker dialogue — both turns rendered into ONE clip. The delay-pattern loop
-        // stops at EOS, so `[S1]line_a[S2]line_b` is a real multi-second utterance carrying both turns.
+        // (a) Single-voice control — NO script, one plain-prompt line. It doubles as the both-turns
+        // length reference (one line spoken) and proves the multi-speaker script field is additive
+        // (single-voice byte-for-byte unaffected).
+        let single_voice = render(None, line_a, 4.0);
+        let single_rms = (single_voice.samples.iter().map(|s| s * s).sum::<f32>()
+            / single_voice.samples.len().max(1) as f32)
+            .sqrt();
+        assert_eq!(single_voice.sample_rate, 24_000, "MOSS-TTSD renders 24 kHz");
+        assert!(
+            !single_voice.samples.is_empty() && single_rms > 1e-3,
+            "the single-voice control must render non-silent audio (rms={single_rms})"
+        );
+
+        // (b) A pure voice-1 reference clip for the SAME line the second turn speaks. A single-segment
+        // script maps its sole (first-seen) speaker onto MOSS-TTSD's `[S1]` turn tag, so this renders
+        // entirely in the FIRST voice — a 100%-one-speaker clip (used for the cross comparison + the
+        // same-speaker self baseline, where an intra-clip split is valid because it is one voice).
+        let v1_line_b = render(Some(vec![seg(line_b, "S1")]), "", 4.0);
+
+        // (c) The real 2-speaker dialogue — S1 then S2 — rendered into ONE clip. `[S1]line_a[S2]line_b`
+        // renders line_a in voice 1 then line_b in voice 2.
         let dialogue = render(Some(vec![seg(line_a, "S1"), seg(line_b, "S2")]), "", 6.0);
         assert_eq!(dialogue.sample_rate, 24_000, "MOSS-TTSD renders 24 kHz");
         assert!(
@@ -3047,16 +3067,28 @@ mod tests {
             "the dialogue clip must be audible (rms={dialogue_rms})"
         );
         let dialogue_secs = dialogue.samples.len() as f32 / 24_000.0;
-        // A two-turn dialogue is a real multi-second clip — well away from empty.
+
+        // BOTH turns must actually render: the 2-turn dialogue must be materially LONGER than one line
+        // spoken alone (the single-voice control). A single dropped turn would leave a ~one-line clip,
+        // so this rejects that; the speaker-distinctness check below is the semantic both-turns guard
+        // (a dropped 2nd turn leaves the tail in voice 1 → cross ≈ self → the distinctness assert fails).
         assert!(
-            dialogue_secs > 1.0,
-            "a 2-turn dialogue is longer than 1s (got {dialogue_secs:.2}s)"
+            dialogue.samples.len() > single_voice.samples.len() * 2,
+            "the 2-turn dialogue ({} samples) must be materially longer than a single-line control \
+             ({} samples) — both segments must render",
+            dialogue.samples.len(),
+            single_voice.samples.len()
         );
 
-        // (b) Voice distinctness (mirrors the inference DoD): split the dialogue into its first / second
-        // half ([S1] then [S2]), embed each with the real chatterbox_ve speaker encoder, and require the
-        // CROSS-speaker cosine to sit materially BELOW the same-speaker self-similarity (each half split
-        // again into quarters). This measures the two turns as DIFFERENT voices — the objective proof.
+        // (c) Voice distinctness — with the speakers ISOLATED (never a blind midpoint split of the
+        // unbalanced dialogue). S1's turn is the SHORT first turn, so the dialogue's TAIL is purely
+        // voice 2 saying line_b; `v1_line_b` is purely voice 1 saying the SAME line. Comparing them
+        // holds the TEXT constant and varies ONLY the speaker, so a low cosine is a genuine speaker
+        // difference (chatterbox_ve is a text-independent speaker-identity encoder). The same-speaker
+        // baseline is measured within a SINGLE-speaker clip (halves of `v1_line_b`), where the split is
+        // valid because it is one voice throughout. The AUTHORITATIVE distinctness proof is the upstream
+        // inference conformance DoD (cross 0.4953 vs self 0.749, real weights); this SceneWorks test
+        // confirms both turns present + non-silent + a correctly-ordered, speaker-isolated cross < self.
         let embedder = crate::inference_runtime::load_voice_embedder(
             "chatterbox_ve",
             &LoadSpec::new(WeightsSource::File(PathBuf::from(&ve_file))),
@@ -3082,31 +3114,22 @@ mod tests {
                 dot / (na * nb)
             }
         };
-        let half = dialogue.samples.len() / 2;
-        let (s1, s2) = dialogue.samples.split_at(half);
-        let (q1a, q1b) = s1.split_at(s1.len() / 2);
-        let (q2a, q2b) = s2.split_at(s2.len() / 2);
-        let cross_cosine = cosine(&ve_embed(s1), &ve_embed(s2));
-        let self_s1 = cosine(&ve_embed(q1a), &ve_embed(q1b));
-        let self_s2 = cosine(&ve_embed(q2a), &ve_embed(q2b));
-        let self_cosine = 0.5 * (self_s1 + self_s2);
+        // Voice-2 window: the last 45% of the dialogue. S1's (short) turn is FIRST, so this tail is deep
+        // inside S2's turn — guaranteed pure voice 2 (no midpoint contamination from voice 1).
+        let v2_start = (dialogue.samples.len() as f32 * 0.55) as usize;
+        let v2_line_b = &dialogue.samples[v2_start..];
+        // Same-speaker self-similarity: two halves of the pure voice-1 clip (one voice throughout, so
+        // the split is valid — the exact flaw the old 50%-of-unbalanced-dialogue split had).
+        let (v1b_first, v1b_second) = v1_line_b.samples.split_at(v1_line_b.samples.len() / 2);
+        let self_cosine = cosine(&ve_embed(v1b_first), &ve_embed(v1b_second));
+        // Cross-speaker: the SAME line (line_b), voice 1 (`v1_line_b`) vs voice 2 (dialogue tail) —
+        // text held constant, only the speaker varies.
+        let cross_cosine = cosine(&ve_embed(&v1_line_b.samples), &ve_embed(v2_line_b));
         assert!(
             cross_cosine < self_cosine - 0.05,
-            "the two turns must be acoustically distinct: cross-speaker cosine {cross_cosine:.4} is \
-             not materially below same-speaker self-similarity {self_cosine:.4} (S1 {self_s1:.4}, \
-             S2 {self_s2:.4})"
-        );
-
-        // (c) Single-voice control — no script, plain prompt — still renders a valid non-silent clip,
-        // proving the multi-speaker script field is additive (single-voice byte-for-byte unaffected).
-        let single_voice = render(None, "Hello, how are you today?", 3.0);
-        let single_rms = (single_voice.samples.iter().map(|s| s * s).sum::<f32>()
-            / single_voice.samples.len().max(1) as f32)
-            .sqrt();
-        assert_eq!(single_voice.sample_rate, 24_000);
-        assert!(
-            !single_voice.samples.is_empty() && single_rms > 1e-3,
-            "the single-voice control must render non-silent audio (rms={single_rms})"
+            "the two turns must be acoustically distinct: speaker-isolated cross cosine \
+             {cross_cosine:.4} (voice 1 vs voice 2, same line) is not materially below the \
+             same-speaker self-similarity {self_cosine:.4}"
         );
 
         // Save the dialogue artifact + evidence.
@@ -3130,13 +3153,16 @@ mod tests {
             "dialogueDurationSecs": dialogue_secs,
             "dialoguePeakAmplitude": dialogue_peak,
             "dialogueRms": dialogue_rms,
-            "crossCosineDifferentSpeaker": cross_cosine,
-            "selfCosineSameSpeaker": self_cosine,
-            "selfCosineS1": self_s1,
-            "selfCosineS2": self_s2,
-            "crossMateriallyBelowSelf": cross_cosine < self_cosine - 0.05,
             "singleVoiceControlSamples": single_voice.samples.len(),
             "singleVoiceControlRms": single_rms,
+            "bothTurnsRendered": dialogue.samples.len() > single_voice.samples.len() * 2,
+            "pureV1LineBSamples": v1_line_b.samples.len(),
+            "v2WindowStartSample": v2_start,
+            "distinctnessMethod": "speaker-isolated: cross = cosine(pure voice-1 line_b, dialogue voice-2 tail [last 45%], SAME line line_b); self = cosine(halves of the pure voice-1 line_b clip)",
+            "crossCosineSameLineDifferentSpeaker": cross_cosine,
+            "selfCosineSameSpeakerHalves": self_cosine,
+            "crossMateriallyBelowSelf": cross_cosine < self_cosine - 0.05,
+            "authoritativeUpstreamDoD": "inference conformance: cross 0.4953 vs self 0.749",
             "wavPath": wav_path.display().to_string(),
         });
         let evidence_path = out_dir.join("moss_ttsd_dialogue_dod.json");
