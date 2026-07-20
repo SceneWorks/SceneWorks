@@ -72,6 +72,74 @@ function findBuiltMetallib() {
   return existsSync(cached) ? cached : null;
 }
 
+// Packaging-time regression guard for the quant/moe kernel fatbin (sc-7544 / sc-13510).
+// candle-kernels' GGUF quant/moe kernels are a static `libmoe.a` of SASS (no PTX): built
+// un-patched at the cap=80 baseline it holds an sm_80-only cubin, and on Blackwell every
+// quantized matmul silently returns zeros (models render solid black — nothing else fails).
+// The multi-arch fatbin comes from the root Cargo.toml [patch] onto the inference repo's
+// vendored candle-kernels; that patch was silently lost once already (sc-13510), so trusting
+// the build graph is not enough — inspect the artifact we are about to package. Requires
+// `cuobjdump`, which ships in the same CUDA toolkit bin dir as the nvcc this build just ran.
+function verifyCandleQuantFatbin(computeCap) {
+  const buildRoot = join(repoRoot, "target", "release", "build");
+  const candidates = [];
+  if (existsSync(buildRoot)) {
+    for (const entry of readdirSync(buildRoot)) {
+      if (!entry.startsWith("candle-kernels-")) continue;
+      const lib = join(buildRoot, entry, "out", "libmoe.a");
+      if (existsSync(lib)) candidates.push([lib, statSync(lib).mtimeMs]);
+    }
+  }
+  if (!candidates.length) {
+    console.error(
+      "build-sidecar: candle build left no candle-kernels-*/out/libmoe.a under " +
+        `${buildRoot} — cannot verify the quant kernel fatbin`,
+    );
+    process.exit(1);
+  }
+  candidates.sort((a, b) => b[1] - a[1]);
+  const lib = candidates[0][0];
+  const dump = (flag) => {
+    try {
+      return execFileSync("cuobjdump", [flag, lib], { encoding: "utf8" });
+    } catch (err) {
+      console.error(
+        `build-sidecar: cuobjdump ${flag} failed (${err?.message ?? err}) — it ships in the ` +
+          `same CUDA toolkit bin dir as the nvcc this build just used; ensure that dir is on PATH`,
+      );
+      process.exit(1);
+    }
+  };
+  const elf = dump("--list-elf");
+  const ptx = dump("--list-ptx");
+  // The vendored build.rs always adds sm_90 + sm_120 SASS and compute_120 PTX on top of
+  // cudaforge's one CUDA_COMPUTE_CAP-derived baseline arch (sm_80 at the packaging default).
+  // cuobjdump lists cubins as `libmoe.N.sm_XX.cubin`; the compute_120 PTX entry is listed
+  // as `libmoe.N.sm_120.ptx` (cuobjdump names PTX by target arch, not virtual arch).
+  const required = [...new Set([`sm_${computeCap}`, "sm_90", "sm_120"])];
+  const missing = required.filter((arch) => !elf.includes(`${arch}.cubin`));
+  const problems = [];
+  if (missing.length) {
+    problems.push(`libmoe.a lacks ${missing.join(", ")} SASS (has:\n${elf.trim()})`);
+  }
+  if (!ptx.includes("sm_120.ptx")) {
+    problems.push(`libmoe.a lacks compute_120 PTX (forward-JIT for post-Blackwell archs)`);
+  }
+  if (problems.length) {
+    console.error(
+      `build-sidecar: ${lib} is not the multi-arch quant fatbin — quantized models would ` +
+        `silently render black on unsupported GPU architectures (sc-7544 / sc-13510):\n` +
+        problems.map((p) => `  - ${p}`).join("\n") +
+        `\nThe root Cargo.toml [patch] onto the inference repo's vendored candle-kernels is ` +
+        `probably not in effect; see crates/sceneworks-worker/tests/candle_kernels_patch_guard.rs.`,
+    );
+    process.exit(1);
+  }
+  console.log(
+    `build-sidecar: quant kernel fatbin verified (${required.join("+")} SASS + compute_120 PTX) at ${lib}`,
+  );
+}
+
 // Host target triple, e.g. aarch64-apple-darwin or x86_64-pc-windows-msvc.
 const triple = execFileSync("rustc", ["-vV"], { encoding: "utf8" }).match(
   /host:\s*(\S+)/,
@@ -139,8 +207,15 @@ const candle =
   process.platform === "win32" && process.env.SCENEWORKS_DESKTOP_CANDLE !== "0";
 if (candle) {
   // CUDA_COMPUTE_CAP=80 builds `compute_80` PTX the driver JITs forward to sm_120
-  // (Blackwell) — one binary covers Ampere→Blackwell (per sc-3676). Honor an
-  // explicit override (e.g. a single-arch dev build) if the env already set it.
+  // (Blackwell) — one binary covers Ampere→Blackwell (per sc-3676). That claim holds
+  // for candle-kernels' dense build_ptx() kernels only: the GGUF quant/moe kernels are
+  // a static SASS `libmoe.a` with NO PTX, which at cap=80 alone is Ampere-only and
+  // silently zeros every quantized matmul on Blackwell (sc-7544). Multi-arch coverage
+  // for those comes from the root Cargo.toml [patch] onto the inference repo's
+  // vendored candle-kernels (sm_80+sm_90+sm_120 SASS + compute_120 PTX), verified
+  // below after the build (sc-13510 — the patch already dropped out silently once).
+  // Honor an explicit override (e.g. a native-cap dev build; the vendored extra gencodes
+  // are unconditional, so the quant fatbin stays multi-arch at any cap) if the env set it.
   const candleEnv = { VITE_API_BASE_URL: "" };
   if (!process.env.CUDA_COMPUTE_CAP) {
     candleEnv.CUDA_COMPUTE_CAP = "80";
@@ -182,6 +257,7 @@ if (candle) {
       CUDAFORGE_THREADS: "1",
     });
   }
+  verifyCandleQuantFatbin(process.env.CUDA_COMPUTE_CAP || candleEnv.CUDA_COMPUTE_CAP);
 } else {
   run(npmCmd, ["run", "api:build:embedded"], { VITE_API_BASE_URL: "" });
 }

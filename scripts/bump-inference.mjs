@@ -5,8 +5,11 @@
 // the two repos -- releases stay for durable/shareable snapshots (inference's cut_release.py).
 //
 // The pins live in crates/sceneworks-worker/Cargo.toml: sceneworks-gen-core + the runtime-macos /
-// runtime-cuda bundles, all on https://github.com/SceneWorks/inference. This rewrites each of those
-// `tag = "..."` / `rev = "..."` pins to `rev = "<sha>"` and regenerates the lockfile.
+// runtime-cuda bundles, all on https://github.com/SceneWorks/inference. The root Cargo.toml
+// additionally `[patch]`es candle-kernels to the multi-arch vendored copy inside the same
+// inference revision (sc-7544 / sc-13510) — that rev must move in lockstep or the patched kernels
+// skew against the pinned candle-core. This rewrites each of those `tag = "..."` / `rev = "..."`
+// pins (in BOTH manifests) to `rev = "<sha>"` and regenerates the lockfile.
 //
 // The direct `mlx-rs` pin (michaeltrefry/mlx-rs, a DIFFERENT url) is intentionally left alone -- but
 // it must resolve to the same fork the pinned inference uses or Cargo builds two mlx-rs and the
@@ -25,13 +28,18 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST = join(repoRoot, "crates/sceneworks-worker/Cargo.toml");
+// Root workspace manifest: holds the candle-kernels [patch] pin (same repo, same rev).
+const ROOT_MANIFEST = join(repoRoot, "Cargo.toml");
 const INFERENCE_GIT = "https://github.com/SceneWorks/inference";
 const INFERENCE_CRATES = ["sceneworks-gen-core", "runtime-macos", "runtime-cuda"];
+// Resolved through the root [patch], not a direct dependency — still pinned to the inference
+// repo, so its lock entry must be refreshed on every bump.
+const PATCHED_CRATES = ["candle-kernels"];
 const SHA_RE = /^[0-9a-f]{40}$/;
 
 // --- pure: rewrite the inference pins to rev=<sha> (self-tested; no fs/network) ---------------
 
-function repin(manifestText, sha) {
+function repin(manifestText, sha, manifestPath = MANIFEST) {
   let inferenceLines = 0;
   let rewrote = 0;
   const out = manifestText.split("\n").map((line) => {
@@ -45,7 +53,7 @@ function repin(manifestText, sha) {
     });
   });
   if (inferenceLines === 0) {
-    throw new Error(`no inference pins found (looked for ${INFERENCE_GIT} in ${MANIFEST})`);
+    throw new Error(`no inference pins found (looked for ${INFERENCE_GIT} in ${manifestPath})`);
   }
   if (rewrote !== inferenceLines) {
     throw new Error(`expected to rewrite ${inferenceLines} inference pin(s), rewrote ${rewrote}`);
@@ -63,7 +71,7 @@ function latestInferenceSha() {
 }
 
 function cargoUpdate() {
-  const spec = INFERENCE_CRATES.flatMap((crate) => ["-p", crate]);
+  const spec = [...INFERENCE_CRATES, ...PATCHED_CRATES].flatMap((crate) => ["-p", crate]);
   console.log(`$ cargo update ${spec.join(" ")}`);
   execFileSync("cargo", ["update", ...spec], { cwd: repoRoot, stdio: "inherit" });
 }
@@ -136,6 +144,11 @@ function selfTest() {
       SHA,
     ).match(new RegExp(`rev = "${SHA}"`, "g")) || []).length === 2,
   );
+  check(
+    "root-manifest candle-kernels [patch] pin bumps",
+    repin(`candle-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }`, SHA) ===
+      `candle-kernels = { git = "${INFERENCE_GIT}", rev = "${SHA}" }`,
+  );
   let threw = false;
   try {
     repin(`foo = "bar"`, SHA);
@@ -162,19 +175,31 @@ function main() {
     process.exit(2);
   }
 
-  const current = readFileSync(MANIFEST, "utf8");
-  const bumped = repin(current, sha);
-  if (bumped === current) {
+  // Both manifests carry inference pins: the worker's direct deps and the root's
+  // candle-kernels [patch]. They must land on the same rev, so bump them as one unit.
+  const manifests = [MANIFEST, ROOT_MANIFEST].map((path) => {
+    const current = readFileSync(path, "utf8");
+    return { path, current, bumped: repin(current, sha, path) };
+  });
+  if (manifests.every((m) => m.bumped === m.current)) {
     console.log(`bump-inference: already pinned at ${sha}`);
     return;
   }
-  console.log(`bump-inference: pinning inference (${INFERENCE_CRATES.join(", ")}) -> ${sha}`);
+  console.log(
+    `bump-inference: pinning inference (${[...INFERENCE_CRATES, ...PATCHED_CRATES].join(", ")}) -> ${sha}`,
+  );
   if (dryRun) {
     console.log("bump-inference: dry run, no files written");
     return;
   }
-  writeFileSync(MANIFEST, bumped);
-  console.log("  wrote crates/sceneworks-worker/Cargo.toml");
+  for (const m of manifests) {
+    if (m.bumped === m.current) {
+      console.log(`  unchanged ${m.path} (already at ${sha})`);
+      continue;
+    }
+    writeFileSync(m.path, m.bumped);
+    console.log(`  wrote ${m.path}`);
+  }
   cargoUpdate();
   verifyNoSkew();
   console.log("bump-inference: done");

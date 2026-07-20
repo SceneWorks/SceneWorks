@@ -99,8 +99,12 @@ CMD ["sceneworks-rust-worker"]
 # toolchain the candle lane builds + validates against (server-candle-linux.yml + the
 # dev box). CUDA_COMPUTE_CAP=80 emits compute_80 PTX the driver JITs forward to sm_120
 # (RTX PRO 6000) — one binary covers Ampere→Blackwell, matching the Windows desktop
-# bundle (build-sidecar.mjs) and the Linux candle CI lane. The backend-candle feature
-# lives on the sceneworks-worker library crate, enabled through the thin binary
+# bundle (build-sidecar.mjs) and the Linux candle CI lane. NB: that forward-JIT story
+# holds for the DENSE (PTX) kernels only; the GGUF quant/moe kernels are a static SASS
+# libmoe.a whose multi-arch coverage (sm_80+sm_90+sm_120 + compute_120 PTX) comes from
+# the root Cargo.toml [patch] onto the inference repo's vendored candle-kernels
+# (sc-7544 / sc-13510 — guarded by candle_kernels_patch_guard). The backend-candle
+# feature lives on the sceneworks-worker library crate, enabled through the thin binary
 # (epic 5483 Phase 7 / sc-5503 — the Docker torch→candle cutover).
 FROM nvidia/cuda:12.9.1-devel-ubuntu22.04 AS candle-builder
 ENV DEBIAN_FRONTEND=noninteractive
