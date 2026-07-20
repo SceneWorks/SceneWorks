@@ -2821,6 +2821,22 @@ fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
             ));
         }
     }
+    // Diffusion-audio sampling knobs (Sound FX / MOSS-SoundEffect, sc-13409). Bounded to a blanket
+    // sane range here — the same "API blanket vs. model's real cap" split the duration uses: the
+    // generator's `validate` owns the per-model guidance range (MOSS: 1.0..=20.0) and step ceiling
+    // (MOSS: 1000), so this only rejects nonsense (NaN / non-positive / absurdly large) up front.
+    if let Some(guidance) = payload.guidance {
+        if !guidance.is_finite() || !(0.0..=100.0).contains(&guidance) {
+            return Err(ApiError::bad_request(
+                "guidance (CFG scale) must be between 0 and 100",
+            ));
+        }
+    }
+    if let Some(steps) = payload.steps {
+        if !(1..=10_000).contains(&steps) {
+            return Err(ApiError::bad_request("steps must be between 1 and 10000"));
+        }
+    }
     Ok(())
 }
 

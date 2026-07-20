@@ -270,6 +270,22 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
               "ui": { "label": "Kokoro 82M" }
             },
             {
+              "id": "moss_sfx_v2",
+              "name": "MOSS SoundEffect v2 (SFX)",
+              "family": "moss_soundeffect",
+              "type": "audio",
+              "audio": {
+                "languages": ["en", "zh"],
+                "sampleRates": [48000],
+                "maxDurationSecs": 30
+              },
+              "downloads": [
+                { "provider": "huggingface", "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0", "files": ["model_index.json"] }
+              ],
+              "paths": { "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-SoundEffect-v2.0" },
+              "ui": { "label": "MOSS SoundEffect v2" }
+            },
+            {
               "id": "not-audio-img",
               "name": "Not Audio",
               "family": "z_image",
@@ -344,6 +360,99 @@ async fn create_audio_job_maps_request_to_audio_generate_payload() {
     assert_eq!(entry["downloads"][0]["repo"], "hexgrad/Kokoro-82M");
     // requestedGpu is stripped from the payload (it rides the job envelope), mirroring the video route.
     assert!(payload.get("requestedGpu").is_none());
+}
+
+/// The Sound FX path (MOSS-SoundEffect, sc-13409): a well-formed SFX `POST /api/v1/audio/jobs`
+/// carries the diffusion sampling knobs (`guidance` = CFG scale, `steps`) through to the worker
+/// payload verbatim alongside the shared audio knobs, and injects the resolved MOSS `type: audio`
+/// manifest entry — so the worker can map guidance/steps onto the top-level GenerationRequest. No
+/// voice is sent (MOSS advertises no voice surface).
+#[tokio::test]
+async fn create_audio_job_maps_sfx_sampling_knobs() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SFX Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "moss_sfx_v2",
+            "prompt": "a heavy wooden door creaking open",
+            "language": "en",
+            "targetDurationSecs": 3.0,
+            "guidance": 6.5,
+            "steps": 60,
+            "seed": 11,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "audio_generate");
+    let payload = &job["payload"];
+    assert_eq!(payload["model"], "moss_sfx_v2");
+    assert_eq!(payload["prompt"], "a heavy wooden door creaking open");
+    assert_eq!(payload["language"], "en");
+    assert_eq!(payload["targetDurationSecs"], 3.0);
+    // The SFX sampling knobs ride through to the worker payload (which maps them onto the top-level
+    // GenerationRequest's guidance/steps — not AudioParams).
+    assert_eq!(payload["guidance"], 6.5);
+    assert_eq!(payload["steps"], 60);
+    assert_eq!(payload["seed"], 11);
+    // No voice on an SFX request; the MOSS manifest entry travels for weight resolution.
+    assert!(payload.get("voice").is_none());
+    let entry = &payload["modelManifestEntry"];
+    assert_eq!(entry["id"], "moss_sfx_v2");
+    assert_eq!(entry["type"], "audio");
+    assert_eq!(
+        entry["downloads"][0]["repo"],
+        "OpenMOSS-Team/MOSS-SoundEffect-v2.0"
+    );
+}
+
+/// The audio validator rejects out-of-blanket sampling knobs up front (sc-13409) — the API blanket
+/// (guidance 0..=100, steps 1..=10000); the per-model range (MOSS: guidance 1..=20, steps ≤1000) is
+/// the generator's own `validate` at generate time.
+#[tokio::test]
+async fn create_audio_job_rejects_nonsense_sampling_knobs() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SFX Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "moss_sfx_v2",
+            "prompt": "thunder",
+            "steps": 0,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("steps")));
 }
 
 /// The audio route is a door for `type: audio` models only: an image/video model posted here is

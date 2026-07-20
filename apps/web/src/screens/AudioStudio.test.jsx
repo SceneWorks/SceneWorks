@@ -438,15 +438,16 @@ describe("AudioStudio Speech generation (sc-13408)", () => {
     expect(results.textContent).not.toContain("No audio yet");
   });
 
-  it("does not submit on a non-Speech tab (SFX/Music/Voice Clone stay scaffold)", async () => {
+  it("does not submit on a still-scaffold tab (Music / Voice Clone stay inert)", async () => {
     const createAudioJob = vi.fn(async () => ({ id: "nope" }));
     await render(
       baseContext({ createAudioJob, rememberLocalGenerationJob: vi.fn() }),
     );
-    // Music is served only by ACE-Step in the base fixture; switch to it, type a script.
+    // Music is served only by ACE-Step in the base fixture; switch to it, type a script. (Speech and
+    // Sound FX are wired — C1/C2 — so Music/Voice Clone are the remaining scaffold tabs.)
     await click(modeTab(container, "Music"));
     await setTextarea(container.querySelector(".prompt-input"), "some music");
-    // The CTA is disabled off the Speech tab, and a direct form submit is a no-op there.
+    // The CTA is disabled off a wired tab, and a direct form submit is a no-op there.
     expect(generateButton(container).disabled).toBe(true);
     await act(async () => {
       container
@@ -454,6 +455,162 @@ describe("AudioStudio Speech generation (sc-13408)", () => {
         .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
     });
     expect(createAudioJob).not.toHaveBeenCalled();
+  });
+});
+
+describe("AudioStudio Sound FX generation (sc-13409)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <AudioStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const generateButton = (root) => buttonWithText(root, "Generate");
+  const advancedFieldByLabel = (root, label) =>
+    [...root.querySelectorAll(".advanced-panel label")].find((el) =>
+      el.textContent.trim().startsWith(label),
+    );
+  const setTextarea = async (el, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+  };
+  const setSelect = async (el, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLSelectElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+  };
+  const setNumber = async (el, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+  };
+  const submitForm = async () => {
+    await act(async () => {
+      container
+        .querySelector("form")
+        .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+  };
+
+  it("Generate is disabled on an empty SFX prompt and enabled once a description is typed", async () => {
+    await render(baseContext({ createAudioJob: vi.fn(), rememberLocalGenerationJob: vi.fn() }));
+    // Switch to Sound FX — the base fixture snaps the model to MOSS (the sole SFX model).
+    await click(modeTab(container, "Sound FX"));
+    expect(modelSelect(container).value).toBe("moss_sfx_v2");
+
+    // Empty default prompt → the guard disables the CTA (never a silent no-op).
+    expect(generateButton(container).disabled).toBe(true);
+    await setTextarea(container.querySelector(".prompt-input"), "a heavy wooden door creaking open");
+    expect(generateButton(container).disabled).toBe(false);
+  });
+
+  it("surfaces the CFG guidance + steps sampling knobs only on the Sound FX tab, not on Speech", async () => {
+    await render(baseContext({ createAudioJob: vi.fn() }));
+    // Speech (Kokoro) is not a diffusion model — no guidance/steps knobs.
+    await click(container.querySelector(".advanced-section-toggle"));
+    expect(advancedFieldByLabel(container, "Guidance")).toBeFalsy();
+    expect(advancedFieldByLabel(container, "Steps")).toBeFalsy();
+
+    // Sound FX (MOSS) exposes both — the diffusion sampling surface.
+    await click(modeTab(container, "Sound FX"));
+    expect(advancedFieldByLabel(container, "Guidance")).toBeTruthy();
+    expect(advancedFieldByLabel(container, "Steps")).toBeTruthy();
+    // MOSS ships no voice bank, so the Speech-only voice field never appears on SFX.
+    expect(fieldByLabelStart(container, "Voice")).toBeFalsy();
+  });
+
+  it("submitting the Sound FX form calls createAudioJob with the SFX-derived payload, then remembers the job", async () => {
+    const job = { id: "sfx-job-1", type: "audio_generate", status: "queued" };
+    const createAudioJob = vi.fn(async () => job);
+    const rememberLocalGenerationJob = vi.fn();
+    await render(baseContext({ createAudioJob, rememberLocalGenerationJob }));
+
+    await click(modeTab(container, "Sound FX"));
+    await setTextarea(container.querySelector(".prompt-input"), "a heavy wooden door creaking open");
+    // Non-default values so the assertions discriminate (a hardcoded payload would not follow them).
+    await setSelect(fieldByLabelStart(container, "Language").querySelector("select"), "zh");
+    await setNumber(fieldByLabelStart(container, "Length").querySelector("input"), "4");
+    await click(container.querySelector(".advanced-section-toggle"));
+    await setNumber(advancedFieldByLabel(container, "Seed").querySelector("input"), "11");
+    await setNumber(advancedFieldByLabel(container, "Guidance").querySelector("input"), "6.5");
+    await setNumber(advancedFieldByLabel(container, "Steps").querySelector("input"), "60");
+
+    await submitForm();
+
+    expect(createAudioJob).toHaveBeenCalledTimes(1);
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.model).toBe("moss_sfx_v2");
+    expect(payload.prompt).toBe("a heavy wooden door creaking open");
+    expect(payload.language).toBe("zh");
+    expect(payload.targetDurationSecs).toBe(4);
+    expect(payload.guidance).toBe(6.5);
+    expect(payload.steps).toBe(60);
+    expect(payload.seed).toBe(11);
+    // MOSS advertises no voice surface, so the SFX payload never carries one.
+    expect(payload.voice).toBeUndefined();
+    // The returned job lands in the audio local-job lane so it stacks in the results zone.
+    expect(rememberLocalGenerationJob).toHaveBeenCalledWith("audio", job);
+  });
+
+  it("omits guidance/steps when cleared so the model falls back to its own sampler default", async () => {
+    const createAudioJob = vi.fn(async () => ({ id: "sfx-job-default" }));
+    await render(baseContext({ createAudioJob, rememberLocalGenerationJob: vi.fn() }));
+
+    await click(modeTab(container, "Sound FX"));
+    await setTextarea(container.querySelector(".prompt-input"), "gentle rain on a tin roof");
+    // Leave guidance/steps untouched (empty) — they must not be sent.
+    await submitForm();
+
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.model).toBe("moss_sfx_v2");
+    expect(payload.guidance).toBeUndefined();
+    expect(payload.steps).toBeUndefined();
+  });
+
+  it("clamps the requested SFX length to the model's advertised cap", async () => {
+    const createAudioJob = vi.fn(async () => ({ id: "sfx-clamp" }));
+    await render(baseContext({ createAudioJob, rememberLocalGenerationJob: vi.fn() }));
+    await click(modeTab(container, "Sound FX"));
+    await setTextarea(container.querySelector(".prompt-input"), "over the cap");
+    await setNumber(fieldByLabelStart(container, "Length").querySelector("input"), "999");
+    await submitForm();
+    // MOSS advertises maxDurationSecs 30 — the submit clamps to it, never a hardcoded ceiling.
+    expect(createAudioJob.mock.calls[0][0].targetDurationSecs).toBe(30);
   });
 });
 
