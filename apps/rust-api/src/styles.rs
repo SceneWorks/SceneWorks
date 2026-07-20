@@ -100,6 +100,34 @@ pub(crate) async fn apply_style_to_image_payload(
     else {
         return Ok(());
     };
+
+    // Booru-tag models (Anima, Illustrious — `captionStyle: "tags"`) take comma-separated tags, not
+    // prose, and every catalog style is a 600–900-char English prose paragraph. The studio hides the
+    // axis for them, so a `styleId` can only reach here from a headless/MCP caller: reject it by name
+    // rather than silently dropping the field, matching the unknown-style 400 below and the audio
+    // route's type gate (`generation.rs`).
+    //
+    // This runs BEFORE the client-side-resolved skip on purpose. That skip is a *fold* detail — it
+    // says "the prompt is already composed" — whereas this is a capability gate on the model, so a
+    // caller that sets both the flag and a styleId still gets told rather than quietly rendering a
+    // prose-wrapped prompt through a tag checkpoint.
+    //
+    // Keyed off the POST-preset `job_payload["model"]`, NOT `payload.model`: the recipe-preset fold
+    // that ran before us may have substituted the preset's own model when the caller named none, and
+    // reading the stale DTO field would resolve the DEFAULT model's entry (sc-12300). An unknown id
+    // resolves to `{}`, so it falls through to the normal path instead of a spurious rejection.
+    let model_id = job_payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(payload.model.as_str())
+        .to_owned();
+    let model_entry = crate::models::resolve_model_manifest_entry(state, &model_id).await?;
+    if model_entry.get("captionStyle").and_then(Value::as_str) == Some("tags") {
+        return Err(ApiError::bad_request(format!(
+            "Model {model_id} uses tag-style prompts, so the Style catalog does not apply (remove styleId)"
+        )));
+    }
+
     // The client already composed the full prompt client-side (web path) — take it verbatim so we
     // never double-fold. Mirrors the preset skip.
     if payload.preset_prompt_resolved_client_side.unwrap_or(false) {
