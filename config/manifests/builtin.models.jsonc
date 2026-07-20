@@ -622,6 +622,15 @@
         "families": ["qwen-image"],
         "types": ["style", "enhance", "character"]
       },
+      // Default generation tier q4 (sc-12155). Declared EXPLICITLY so the image-lane VRAM gate
+      // (`vram_gate::requested_tier_key`) and load quant (`resolve_quant`) don't fall through their
+      // `None => q8` arm — the omission that silently budgeted + quantized this edit lane one tier ABOVE
+      // its sibling `qwen_image` (which declares 4). Matches the `default: true` q4 download and the
+      // `candle` block below ("gates the DEFAULT (q4) tier"). Shared checkpoint with the Lightning
+      // variant, which carries the same declaration.
+      "mlx": {
+        "quantize": 4
+      },
       // candle/CUDA VRAM gate (epic 10765 sc-11019, the EDIT measure-sibling of the qwen txt2img sc-10969
       // + flux2 sc-10920) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at 1024²/8-step via the
       // candle-gen-qwen-image edit offload A/B harness (qwen_edit_probed_generate_for_offload_ab,
@@ -740,6 +749,12 @@
       "loraCompatibility": {
         "families": ["qwen-image"],
         "types": ["style", "enhance", "character"]
+      },
+      // Default generation tier q4 (sc-12155) — same rationale + shared checkpoint as `qwen_image_edit_2511`.
+      // Explicit so the image gate / `resolve_quant` never hit their `None => q8` fallthrough; matches the
+      // `default: true` q4 download and the `candle` block below ("gates the DEFAULT (q4) tier").
+      "mlx": {
+        "quantize": 4
       },
       // candle/CUDA VRAM gate (epic 10765) — MEASURED through the shared additive-LoRA path (sc-11666;
       // candle-gen #425 / sc-11091), replacing the sc-11019 base-copied estimate. q4/q8 apply the lightx2v

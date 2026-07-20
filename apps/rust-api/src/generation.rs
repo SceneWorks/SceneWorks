@@ -24,7 +24,7 @@ pub(crate) async fn create_image_job(
     let catalogs = JobCatalogSnapshot::default();
     apply_recipe_preset_to_image_payload(&state, &payload, &mut job_payload, &catalogs).await?;
     // Style-catalog fold (sc-13134): a headless/MCP client that sends a `styleId` + raw prompt gets
-    // the SAME `Style:`/`Description:` composition the web app does. Runs AFTER the preset fold so it
+    // the SAME `Subject:`/`Style:` composition the web app does. Runs AFTER the preset fold so it
     // wraps the preset-composed prompt exactly as the web's composeStyledPrompt is the LAST wrap; a
     // no-op for a web request (which sends the already-composed prompt + presetPromptResolvedClientSide
     // and no top-level styleId), so a web-composed prompt is never double-folded.

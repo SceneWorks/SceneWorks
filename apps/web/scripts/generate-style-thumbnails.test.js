@@ -115,8 +115,8 @@ describe("composeThumbnailPrompt", () => {
     const expected = composeStyledPrompt({ styleText: styleTextForId(id), userPrompt: REF });
     const actual = composeThumbnailPrompt(id, REF);
     expect(actual).toBe(expected);
-    expect(actual.startsWith("Style: ")).toBe(true);
-    expect(actual).toContain(`\nDescription: ${REF}`);
+    expect(actual.startsWith(`Subject: ${REF}`)).toBe(true);
+    expect(actual).toContain("\nStyle: ");
   });
 
   it("matches composeStyledPrompt for a GROUP id (resolves the group description)", () => {
@@ -125,8 +125,8 @@ describe("composeThumbnailPrompt", () => {
     const expected = composeStyledPrompt({ styleText: styleTextForId(id), userPrompt: REF });
     const actual = composeThumbnailPrompt(id, REF);
     expect(actual).toBe(expected);
-    expect(actual.startsWith("Style: ")).toBe(true);
-    expect(actual).toContain(`\nDescription: ${REF}`);
+    expect(actual.startsWith(`Subject: ${REF}`)).toBe(true);
+    expect(actual).toContain("\nStyle: ");
   });
 });
 

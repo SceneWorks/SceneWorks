@@ -14,7 +14,7 @@
     },
     "promptTemplate": {
       "type": "string",
-      "description": "The two-field composition template the client and server both apply: \"Style: {style}\\nDescription: {description}\"."
+      "description": "The two-field composition template the client and server both apply: \"Subject: {subject}\\nStyle: {style}\"."
     },
     "groups": {
       "type": "array",

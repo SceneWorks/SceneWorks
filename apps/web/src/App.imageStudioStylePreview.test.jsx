@@ -129,8 +129,8 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
     await selectStyle(firstStyle.name);
 
     const shown = previewText();
-    expect(shown).toContain("Style: ");
-    expect(shown).toContain("\nDescription: a fox in the snow");
+    expect(shown).toContain("Subject: a fox in the snow");
+    expect(shown).toContain("\nStyle: ");
 
     const submittedPrompt = await submitAndReadPayloadPrompt();
     // The DoD: what the user SEES is exactly what is SENT.
@@ -191,7 +191,7 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
     await typePrompt("a wolf on a ridge at dusk");
     const second = previewText();
     expect(second).not.toBe(first);
-    expect(second).toContain("\nDescription: a wolf on a ridge at dusk");
+    expect(second).toContain("Subject: a wolf on a ridge at dusk");
 
     const submittedPrompt = await submitAndReadPayloadPrompt();
     expect(second).toBe(submittedPrompt);
@@ -205,7 +205,7 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
     const shown = previewText();
     // Catalog style leads, the user's own style words merge after ", " in the same Style block.
     expect(shown).toContain(", neon rimlight");
-    expect(shown).toContain("\nDescription: a fox in the snow");
+    expect(shown).toContain("Subject: a fox in the snow");
 
     const submittedPrompt = await submitAndReadPayloadPrompt();
     expect(shown).toBe(submittedPrompt);
