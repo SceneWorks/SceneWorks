@@ -35,6 +35,14 @@ export function assetCanRenderAsVideo(asset) {
   return asset?.type === "video" || asset?.file?.mimeType?.startsWith("video/");
 }
 
+// Audio outputs (SceneWorks Audio Studio, epic 13400 A5). A `type:"audio"` asset
+// (or any file whose mimeType is audio/*) is playable via an <audio> element —
+// there is no poster/thumbnail frame, so the shared results zone renders a
+// transport instead (WorkerProgressCard audio-player variant, sc-13405).
+export function assetCanRenderAsAudio(asset) {
+  return asset?.type === "audio" || asset?.file?.mimeType?.startsWith("audio/");
+}
+
 // Suppress the native WKWebView context menu on grid thumbnails (sc-8731). Right-
 // clicking a thumbnail image in a Tauri webview otherwise pops the OS "Download
 // Image / Copy Image / Share" menu; thumbnails have no custom menu, so we just
@@ -162,6 +170,22 @@ export const AssetMedia = React.forwardRef(function AssetMedia({ asset, classNam
         muted
         playsInline
         poster={posterUrl(asset)}
+        preload="metadata"
+        ref={ref}
+        src={src}
+        {...mediaProps}
+      />
+    );
+  }
+  if (assetCanRenderAsAudio(asset)) {
+    // Audio has no poster/first-frame; render a plain <audio> so the results zone
+    // (and the WorkerProgressCard audio-player transport, which drives this via a
+    // ref with controls off) can play the clip. Mirrors the <video> branch above
+    // for src resolution, controls, preload and ref/prop passthrough.
+    return (
+      <audio
+        className={className}
+        controls={controls}
         preload="metadata"
         ref={ref}
         src={src}

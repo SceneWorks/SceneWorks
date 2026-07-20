@@ -99,3 +99,12 @@ export function resolveJobResultAssets(job, assets, options = {}) {
   }
   return [];
 }
+
+// Resolve an audio job's result assets against the live catalog so the shared
+// results zone (WorkerProgressCard audio-player variant) can play the finished
+// clip (SceneWorks Audio Studio, epic 13400 A5, sc-13405). Mirrors the video
+// lane exactly: keeps only `type:"audio"` assets and leaves the generationSetId
+// fallback in catalog order (no batch-slot sort — that is image-only).
+export function jobAudioResultAssets(job, assets) {
+  return resolveJobResultAssets(job, assets, { type: "audio" });
+}

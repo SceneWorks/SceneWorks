@@ -13683,6 +13683,108 @@ details[open] > summary.lora-scope-group-heading::before,
   cursor: pointer;
 }
 
+/* Audio-player variant (SceneWorks Audio Studio, epic 13400 A5 / sc-13405).
+   A single-clip transport: play/pause control + scrubber + m:ss read-out. All
+   theme tokens so it reads correctly in light and dark. */
+.worker-progress-card__thumbnails--audio-player {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.worker-progress-card__audio {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+/* The underlying <audio> is driven programmatically (native controls off); it
+   has no visual box, but keep it out of layout explicitly. */
+.worker-progress-card__audio-el {
+  display: none;
+}
+
+.worker-progress-card__audio-play {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--accent-fg);
+  cursor: pointer;
+}
+
+.worker-progress-card__audio-play:hover {
+  background: var(--accent-strong);
+}
+
+.worker-progress-card__audio-play svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.worker-progress-card__audio-scrubber {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 4px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.worker-progress-card__audio-scrubber:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.worker-progress-card__audio-time {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.worker-progress-card__audio-time-current {
+  color: var(--text);
+}
+
+.worker-progress-card__audio-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 54px;
+  background: color-mix(in oklch, var(--surface) 70%, var(--surface-2));
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+  color: var(--text-muted);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.worker-progress-card__audio-open {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: color-mix(in oklch, var(--surface-2) 80%, transparent);
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+}
+
 /* Stacked WorkerProgressCards in Image/Video Studio (sc-2088 / sc-2089).
    The stack wraps active jobs; Recent Assets renders below it. */
 .worker-progress-card-stack {
