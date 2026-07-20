@@ -648,6 +648,62 @@ async fn create_audio_job_rejects_nonsense_music_fields() {
         .is_some_and(|d| d.contains("editRegionEndSecs")));
 }
 
+/// The editMode token is case-insensitive at the API, matching the worker's own case handling
+/// (`edit_mode.map(|m| m.to_lowercase())` at deserialize, then `parse_audio_edit_mode`). A mixed-case
+/// KNOWN token (`"Extend"`) is accepted and forwarded verbatim (the worker lowercases it), while a
+/// mixed-case UNKNOWN token (`"Morph"`) is still rejected — lowercasing widens casing, not the mode
+/// set (sc-13410, worker-parity fix).
+#[tokio::test]
+async fn create_audio_job_accepts_case_insensitive_edit_mode() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Music Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // A mixed-case KNOWN token is accepted (parity with the worker) and forwarded verbatim.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "acestep_v15_turbo",
+            "prompt": "gentle lofi piano loop",
+            "sourceAudioAssetId": "audio-src-1",
+            "editMode": "Extend",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["editMode"], "Extend");
+
+    // A mixed-case UNKNOWN token is still rejected — casing widened, the mode set did not.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "acestep_v15_turbo",
+            "prompt": "loop",
+            "sourceAudioAssetId": "audio-src-1",
+            "editMode": "Morph",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .is_some_and(|d| d.contains("editMode")));
+}
+
 /// The audio route is a door for `type: audio` models only: an image/video model posted here is
 /// rejected up front rather than failing deep in the worker's audio lane (sc-13404).
 #[tokio::test]

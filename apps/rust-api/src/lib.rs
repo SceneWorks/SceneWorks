@@ -2907,7 +2907,11 @@ fn validate_audio_edit_fields(payload: &AudioJobRequest) -> Result<(), ApiError>
         .as_deref()
         .filter(|m| !m.trim().is_empty())
     {
-        if !AUDIO_EDIT_MODES.contains(&mode) {
+        // Match the worker's case handling (`edit_mode.map(|m| m.to_lowercase())` at deserialize,
+        // then `parse_audio_edit_mode`): the token is case-insensitive, so lowercase before the
+        // membership check. Otherwise a mixed-case value like "Extend" is 400'd here even though the
+        // worker would accept it — the two validation seams must agree.
+        if !AUDIO_EDIT_MODES.contains(&mode.to_lowercase().as_str()) {
             return Err(ApiError::bad_request(format!(
                 "editMode must be one of {AUDIO_EDIT_MODES:?}"
             )));
