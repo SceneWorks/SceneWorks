@@ -4901,6 +4901,23 @@ fn write_style_test_manifests(config_dir: &std::path::Path) {
               "limits": {},
               "loraCompatibility": { "families": ["z-image"] },
               "ui": { "label": "Img" }
+            },
+            {
+              "id": "tag-model",
+              "name": "Tag Model",
+              "family": "anima",
+              "type": "image",
+              "adapter": "anima",
+              "captionStyle": "tags",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/tag", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "loraCompatibility": { "families": ["anima"] },
+              "ui": { "label": "Tag" }
             }
           ]
         }
@@ -5029,6 +5046,70 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err:?}");
+}
+
+#[tokio::test]
+async fn styled_image_job_rejects_a_style_on_a_tag_convention_model() {
+    // Booru-tag models (`captionStyle: "tags"`) take comma-separated tags, so the prose Style catalog
+    // does not apply. The studio hides the axis; a headless/MCP caller that sends a styleId anyway
+    // must get a named 400 rather than a silently prose-wrapped prompt.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_style_test_manifests(&temp_dir.path().join("config"));
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Tag Model Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let body = json!({
+        "projectId": project_id,
+        "mode": "text_to_image",
+        "prompt": "1girl, solo, pink hair",
+        "model": "tag-model",
+        "count": 1,
+        "width": 1024,
+        "height": 1024,
+        "styleId": "test-ghibli"
+    });
+    let (status, err) = request(app.clone(), "POST", "/api/v1/image/jobs", body.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err:?}");
+    let message = err["detail"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        message.contains("tag-model") && message.contains("tag-style"),
+        "the rejection must name the model and the reason: {message}"
+    );
+
+    // The gate is a MODEL capability, not a fold detail: it fires even when the caller claims the
+    // prompt was already composed client-side (the flag that otherwise short-circuits the fold).
+    let mut claimed = body;
+    claimed["presetPromptResolvedClientSide"] = json!(true);
+    let (status, err) = request(app.clone(), "POST", "/api/v1/image/jobs", claimed).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err:?}");
+
+    // Same model with NO styleId is untouched — the gate rejects the axis, not the model.
+    let (status, plain) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project["id"].as_str().expect("project id"),
+            "mode": "text_to_image",
+            "prompt": "1girl, solo, pink hair",
+            "model": "tag-model",
+            "count": 1,
+            "width": 1024,
+            "height": 1024
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{plain:?}");
+    assert_eq!(plain["payload"]["prompt"], "1girl, solo, pink hair");
 }
 
 #[tokio::test]

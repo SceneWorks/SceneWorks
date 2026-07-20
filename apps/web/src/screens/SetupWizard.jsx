@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { Logo } from "../components/Logo.jsx";
 import { terminalStatuses } from "../constants.js";
+import { audioModelUsable } from "../modelEligibility.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 
 // The curated "getting started" set is catalog-driven: a model is recommended when
@@ -21,6 +22,17 @@ function isDownloadable(model) {
   return model.downloadable !== false && Boolean(model.downloads?.[0]?.repo ?? model.repo);
 }
 
+// Which catalog models onboarding actually OFFERS. Image/video/utility ride the plain
+// downloadable check they always have. Audio is the new type (epic 13400 A3): an
+// `audio`-type entry is only offered when it's genuinely usable — i.e. it serves ≥1 Audio
+// Studio mode and isn't Mac-blocked — using the exact predicate the Audio Studio's own
+// download offers run through (modelEligibility.js `audioModelUsable`), so onboarding never
+// dangles a bare audio entry that no mode can drive. `audioModelUsable` already requires
+// `type === "audio"`, so the guard is a no-op for every other type.
+function isOfferable(model, caps) {
+  return isDownloadable(model) && (model.type !== "audio" || audioModelUsable(model, caps));
+}
+
 function downloadSizeText(model) {
   if (!model.downloadSizeLabel) {
     return "Size unavailable";
@@ -28,12 +40,12 @@ function downloadSizeText(model) {
   return model.downloadSizeEstimated ? `~${model.downloadSizeLabel}` : model.downloadSizeLabel;
 }
 
-function defaultSelection(models) {
+function defaultSelection(models, caps) {
   return new Set(
     models
       .filter(
         (model) =>
-          isDownloadable(model) &&
+          isOfferable(model, caps) &&
           model.installState !== "installed" &&
           isRecommended(model) &&
           !autoDownloadDisabled(model),
@@ -42,11 +54,34 @@ function defaultSelection(models) {
   );
 }
 
-const TYPE_LABELS = { image: "Image models", video: "Video models", utility: "Utility models" };
+const TYPE_LABELS = {
+  image: "Image models",
+  video: "Video models",
+  audio: "Audio models",
+  utility: "Utility models",
+};
 
-export function SetupWizard({ models, jobs, onDownloadModel, onCreateProject, onComplete, onOpenQueue }) {
+// Deterministic group order so audio always lands between video and utility regardless of
+// catalog iteration order. Types not listed here (future / "other") render after these, in
+// first-seen order.
+const TYPE_ORDER = ["image", "video", "audio", "utility"];
+
+function typeRank(type) {
+  const index = TYPE_ORDER.indexOf(type);
+  return index === -1 ? TYPE_ORDER.length : index;
+}
+
+export function SetupWizard({
+  models,
+  jobs,
+  macCapabilities,
+  onDownloadModel,
+  onCreateProject,
+  onComplete,
+  onOpenQueue,
+}) {
   const [step, setStep] = useState("models");
-  const [selected, setSelected] = useState(() => defaultSelection(models));
+  const [selected, setSelected] = useState(() => defaultSelection(models, macCapabilities));
   const [started, setStarted] = useState(() => new Set());
   const [projectName, setProjectName] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -62,12 +97,15 @@ export function SetupWizard({ models, jobs, onDownloadModel, onCreateProject, on
   // once it does (without clobbering a choice the user already made).
   useEffect(() => {
     if (!initializedRef.current && models.length) {
-      setSelected(defaultSelection(models));
+      setSelected(defaultSelection(models, macCapabilities));
       initializedRef.current = true;
     }
-  }, [models]);
+  }, [models, macCapabilities]);
 
-  const downloadable = useMemo(() => models.filter(isDownloadable), [models]);
+  const downloadable = useMemo(
+    () => models.filter((model) => isOfferable(model, macCapabilities)),
+    [models, macCapabilities],
+  );
   const grouped = useMemo(() => {
     const byType = new Map();
     for (const model of downloadable) {
@@ -77,7 +115,9 @@ export function SetupWizard({ models, jobs, onDownloadModel, onCreateProject, on
       }
       byType.get(key).push(model);
     }
-    return byType;
+    // Render groups in the canonical image → video → audio → utility order (then any
+    // other types, first-seen) so audio always slots in beside its peers.
+    return new Map([...byType.entries()].sort((a, b) => typeRank(a[0]) - typeRank(b[0])));
   }, [downloadable]);
 
   const activeDownloadJobs = useMemo(
