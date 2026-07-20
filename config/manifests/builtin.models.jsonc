@@ -647,6 +647,16 @@
       // is the dense 5-shard DiT + dense f32 TE (81.7 GB resident) — it fits a 96 GB card but overflows
       // the epic's small-card targets even sequentially, so the gate rejects it there. minMemoryGb 59
       // gates the DEFAULT (q4) tier (resident 56.7 GB).
+      //
+      // sc-13534: these rows only DESCRIBE what the candle lane loads as of that story. They were always
+      // measured against the staged `SceneWorks/qwen-image-edit-2511-mlx` tier subdirs below, but until
+      // sc-13534 `resolve_qwen_edit_candle_base` resolved the UPSTREAM `Qwen/Qwen-Image-Edit(-2511)`
+      // snapshot instead — a repo no `downloads` entry here ever fetches (so the lane was unreachable on
+      // a stock install) and, where a dev box happened to have it cached, a DENSE bf16 load budgeted
+      // against the q4 row: a ~25 GB under-prediction. The lane now descends into the tier subdir via
+      // `standard_tier_subdir` (like the `qwen_image` txt2img sibling) and the fit-gate keys off the
+      // RESOLVED dir (`gate_tier_key`), so the tier that loads is the tier that is budgeted. Keep that
+      // true when re-measuring: a row here is only honest if the lane can actually resolve that subdir.
       "candle": {
         "minMemoryGb": 59,
         "vramGbByTier": { "q4": 56.7, "q8": 69.0, "bf16": 81.7 },
@@ -770,6 +780,10 @@
       // distill LoRA. Resident/sequential pixels byte-identical per tier (q4 md5 08385ae1, q8 e78141a8, bf16
       // ea51b237). The edit fit-gate (qwen_edit_candle.rs, sc-10968) reads vramGbByTier vs free VRAM to choose
       // sequential-offload vs reject; minMemoryGb 59 gates the DEFAULT (q4) tier (resident 57.0).
+      //
+      // sc-13534: same reconciliation as `qwen_image_edit_2511` above (shared checkpoint, shared lane) —
+      // the candle lane resolved the upstream dense snapshot rather than these staged tier subdirs until
+      // that story pointed it at `standard_tier_subdir` and keyed the fit-gate off the resolved dir.
       "candle": {
         "minMemoryGb": 59,
         "vramGbByTier": { "q4": 57.0, "q8": 65.8, "bf16": 87.4 },

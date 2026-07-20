@@ -261,6 +261,13 @@ mod anima_gpu_smoke;
 // hardware evidence backing `macOnly: false` / `candle_routed = true`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod sana_candle_gpu_smoke;
+// Real-weight GPU smoke for the candle Qwen-Image-Edit lane (sc-13534). Test-only + candle-only; drives
+// the WORKER's `resolve_qwen_edit_candle_base` (the tier/gate reconciliation this story landed) + a
+// bespoke `runtime_cuda::providers::qwen_image::QwenEdit` load + render, proving the resolver lands on the
+// packed q4 tier subdir of the `SceneWorks/qwen-image-edit-2511-mlx` turnkey (NOT the upstream snapshot
+// the pre-fix code reached) and that q4 packed-loads + renders a coherent edit on real CUDA.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod qwen_edit_candle_gpu_smoke;
 // Real-weight GPU smoke for the candle InstantID + PiD super-resolving decode (epic 7840, sc-8386).
 // Test-only + candle-only; drives the bespoke `runtime_cuda::providers::instantid::InstantId` provider across
 // Identity/Angle/Pose with the `pid_sdxl` student attached, asserting the PiD decode 4×-super-resolves
