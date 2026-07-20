@@ -10,12 +10,12 @@ use std::sync::OnceLock;
 #[cfg(all(test, target_os = "macos"))]
 use gen_core::core_llm::TextLlmRegistration;
 use gen_core::core_llm::{LoadSpec as TextLoadSpec, ModelRequirements, TextLlm, TextLlmRegistry};
+use gen_core::{AudioTransform, Generator, LoadSpec, ProviderRegistry};
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use gen_core::{Captioner, ImageEmbedder, ModelRegistration, TextEmbedder, Trainer};
-use gen_core::{Generator, LoadSpec, ProviderRegistry};
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use runtime_cuda as platform_runtime;
@@ -95,6 +95,25 @@ pub(crate) fn load_audio(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn 
             )
         })?
         .load(id, spec)
+}
+
+/// Load an audio [`AudioTransform`] by id from the runtime's candle audio registry — the
+/// non-prompt audio→audio lane (OpenVoice V2 tone-color voice conversion, sc-13411 C4). The audio
+/// twin of [`load_audio`]: errors clearly when this build ships no audio lane so the voice-clone job
+/// turns it into a loud job failure rather than a silent no-op.
+pub(crate) fn load_audio_transform(
+    id: &str,
+    spec: &LoadSpec,
+) -> gen_core::Result<Box<dyn AudioTransform>> {
+    audio()
+        .ok_or_else(|| {
+            gen_core::Error::Msg(
+                "no audio lane is linked in this runtime build (the candle audio registry is \
+                 unavailable)"
+                    .to_owned(),
+            )
+        })?
+        .load_audio_transform(id, spec)
 }
 
 pub(crate) fn text() -> &'static TextLlmRegistry {

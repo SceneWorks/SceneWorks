@@ -1,0 +1,264 @@
+//! Local real-weight smoke for the **Voice Clone** two-call chain (epic 13400 / sc-13411, C4).
+//! `#[ignore]`d — run by hand on an Apple-Silicon Mac. It drives the exact runtime seams the
+//! worker's voice-clone job (`audio_jobs::run_voice_clone_synthesis`) uses, minus the API/job plumbing:
+//!
+//!   1. **Base TTS** — `runtime_macos::catalog().audio().load("kokoro_82m")` speaks the script in a
+//!      default voice (the "content" clip).
+//!   2. **Reference voice** — a SECOND real Kokoro clip in a distinctly different voice
+//!      (`am_michael`, male) stands in for a user-supplied reference-voice sample. Any real clip
+//!      works; a Kokoro clip in another voice gives a controlled, reproducible target timbre.
+//!   3. **OpenVoice V2 conversion** — `load_audio_transform("openvoice_v2")` +
+//!      `AudioTransform::apply` with the base clip as the source and the reference clip as
+//!      `target_reference`, `strength` overriding the posterior-sampling temperature τ. This is the
+//!      real tone-color transfer.
+//!   4. **Chatterbox-VE evidence** — `load_voice_embedder("chatterbox_ve")` embeds the base,
+//!      reference, and converted clips; the converted clip's speaker embedding must move measurably
+//!      TOWARD the reference (cosine(converted, ref) > cosine(base, ref)). That is the objective,
+//!      ear-free proof that the timbre moved toward the target — a true audible match still needs a
+//!      listen, so the WAVs are written out for that.
+//!
+//! Setup — the three snapshots install through the ordinary Audio Studio model download; this smoke
+//! resolves them from the HF hub cache (override with the env vars if they live elsewhere):
+//! ```text
+//! cargo test -p sceneworks-worker --release voiceclone_chain_smoke -- --ignored --nocapture
+//! # overrides: VOICECLONE_KOKORO_DIR / VOICECLONE_OPENVOICE_DIR (the converter/ dir) /
+//! #            VOICECLONE_CHATTERBOX_DIR, VOICECLONE_STRENGTH (τ, default 0.3),
+//! #            VOICECLONE_OUT_DIR (default /tmp/voiceclone_smoke)
+//! ```
+
+use std::path::{Path, PathBuf};
+
+use gen_core::{
+    AudioParams, AudioTransformRequest, CancelFlag, GenerationOutput, GenerationRequest, LoadSpec,
+    Progress, WeightsSource,
+};
+
+use super::smoke_support::env_or;
+use crate::video_jobs::{write_wav_pcm16, AudioTrack};
+
+/// The script the base TTS speaks (and the converted clip preserves).
+const SCRIPT: &str = "SceneWorks turns a short reference clip into a cloned voiceover.";
+/// The reference-voice clip's script — content is irrelevant to tone-color extraction; a different
+/// sentence keeps it honest that the converter transfers TIMBRE, not content.
+const REFERENCE_SCRIPT: &str = "This is my natural speaking voice, captured for cloning.";
+/// The base (source/content) voice — Kokoro's default female voice.
+const BASE_VOICE: &str = "af_heart";
+/// The reference (target) voice — a distinctly different male voice, so the tone-color move is large
+/// and the Chatterbox-VE evidence is unambiguous.
+const REFERENCE_VOICE: &str = "am_michael";
+
+/// Find the single HF-hub snapshot dir for `models--<owner>--<repo>` under `~/.cache/huggingface`,
+/// or `None` if the cache is laid out elsewhere (then the caller falls back to the env override).
+fn hub_snapshot(owner_repo: &str) -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let cache_key = format!("models--{}", owner_repo.replace('/', "--"));
+    let snapshots = Path::new(&home)
+        .join(".cache/huggingface/hub")
+        .join(cache_key)
+        .join("snapshots");
+    let mut entries = std::fs::read_dir(&snapshots).ok()?;
+    entries
+        .find_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir())
+}
+
+/// Resolve a model dir from an env override or the HF hub cache, panicking with a clear message if
+/// neither resolves — this is a manual smoke, so a missing snapshot should say exactly what to install.
+fn resolve_dir(env_key: &str, owner_repo: &str, subdir: Option<&str>) -> PathBuf {
+    let base = match std::env::var(env_key).ok().filter(|v| !v.trim().is_empty()) {
+        Some(v) => PathBuf::from(v.trim()),
+        None => hub_snapshot(owner_repo).unwrap_or_else(|| {
+            panic!(
+                "{env_key} unset and no HF hub snapshot for {owner_repo} — install the model via the \
+                 Audio Studio (or `hf download {owner_repo}`) or set {env_key}"
+            )
+        }),
+    };
+    let dir = match subdir {
+        Some(sub) if base.join(sub).is_dir() => base.join(sub),
+        _ => base,
+    };
+    assert!(
+        dir.is_dir(),
+        "{env_key}: {} is not a directory",
+        dir.display()
+    );
+    dir
+}
+
+/// Generate one real Kokoro clip (the base TTS call), returning the produced `gen_core::AudioTrack`.
+fn kokoro_clip(dir: &Path, script: &str, voice: &str) -> gen_core::AudioTrack {
+    let audio = runtime_macos::catalog()
+        .expect("runtime catalog")
+        .audio()
+        .expect("audio lane")
+        .load(
+            "kokoro_82m",
+            &LoadSpec::new(WeightsSource::Dir(dir.to_path_buf())),
+        )
+        .expect("load kokoro");
+    let req = GenerationRequest {
+        prompt: script.to_owned(),
+        audio: Some(AudioParams {
+            voice: Some(voice.to_owned()),
+            language: Some("en-us".to_owned()),
+            ..Default::default()
+        }),
+        cancel: CancelFlag::new(),
+        ..Default::default()
+    };
+    let mut on_progress = |_p: Progress| {};
+    match audio
+        .generate(&req, &mut on_progress)
+        .expect("kokoro generate")
+    {
+        GenerationOutput::Audio(track) => track,
+        _ => panic!("kokoro returned non-audio output"),
+    }
+}
+
+/// Peak absolute sample amplitude — the "is it silent?" check.
+fn peak(samples: &[f32]) -> f32 {
+    samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()))
+}
+
+/// Cosine similarity of two raw embedding vectors (both must be the same length).
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(&x, &y)| x * y).sum();
+    let na: f32 = a.iter().map(|&x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|&x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na * nb)
+}
+
+/// Write a `gen_core::AudioTrack` out as a PCM-16 WAV for a manual listen.
+fn dump_wav(track: &gen_core::AudioTrack, path: &Path) {
+    let wav = AudioTrack {
+        samples: track.samples.clone(),
+        sample_rate: track.sample_rate.max(1),
+        channels: track.channels.max(1),
+    };
+    write_wav_pcm16(&wav, path).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+}
+
+#[test]
+#[ignore = "real-weight audio smoke: run by hand on an Apple-Silicon Mac"]
+fn voiceclone_chain_smoke() {
+    let kokoro_dir = resolve_dir("VOICECLONE_KOKORO_DIR", "hexgrad/Kokoro-82M", None);
+    // OpenVoice's converter files live under `converter/` in the snapshot.
+    let openvoice_dir = resolve_dir(
+        "VOICECLONE_OPENVOICE_DIR",
+        "myshell-ai/OpenVoiceV2",
+        Some("converter"),
+    );
+    let chatterbox_dir = resolve_dir("VOICECLONE_CHATTERBOX_DIR", "ResembleAI/chatterbox", None);
+    let out_dir = PathBuf::from(env_or("VOICECLONE_OUT_DIR", "/tmp/voiceclone_smoke"));
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+    let tau: f32 = env_or("VOICECLONE_STRENGTH", "0.3")
+        .parse()
+        .expect("τ float");
+
+    // ── Call 1: base TTS (the content clip) ──────────────────────────────────────────────────────
+    let base = kokoro_clip(&kokoro_dir, SCRIPT, BASE_VOICE);
+    assert!(!base.samples.is_empty(), "base clip is empty");
+    let base_peak = peak(&base.samples);
+    assert!(base_peak > 0.0, "base clip is silent");
+    dump_wav(&base, &out_dir.join("base_kokoro.wav"));
+
+    // A separate real clip in a DIFFERENT voice stands in for the user's reference-voice sample.
+    let reference = kokoro_clip(&kokoro_dir, REFERENCE_SCRIPT, REFERENCE_VOICE);
+    assert!(peak(&reference.samples) > 0.0, "reference clip is silent");
+    dump_wav(&reference, &out_dir.join("reference.wav"));
+
+    // ── Call 2: OpenVoice V2 tone-color conversion ───────────────────────────────────────────────
+    let converter = runtime_macos::catalog()
+        .expect("runtime catalog")
+        .audio()
+        .expect("audio lane")
+        .load_audio_transform(
+            "openvoice_v2",
+            &LoadSpec::new(WeightsSource::Dir(openvoice_dir.clone())),
+        )
+        .expect("load openvoice_v2 transform");
+    let req = AudioTransformRequest {
+        audio: base.clone(),
+        target_reference: Some(reference.clone()),
+        strength: Some(tau),
+        seed: Some(7),
+        ..Default::default()
+    };
+    let mut on_progress = |_p: Progress| {};
+    let converted = converter
+        .apply(&req, &mut on_progress)
+        .expect("openvoice apply")
+        .into_iter()
+        .next()
+        .expect("openvoice produced a track");
+    assert!(!converted.samples.is_empty(), "converted clip is empty");
+    let conv_peak = peak(&converted.samples);
+    assert!(conv_peak > 0.0, "converted clip is silent");
+    dump_wav(&converted, &out_dir.join("converted.wav"));
+
+    // The converted clip must NOT be a copy of the base clip: OpenVoice emits at its native 22.05 kHz
+    // (Kokoro is 24 kHz), so the rate alone already differs — but assert the WAVEFORM moved too.
+    assert_eq!(converted.sample_rate, 22_050, "openvoice native rate");
+    assert_eq!(converted.channels, 1, "openvoice mono output");
+
+    // ── Chatterbox-VE evidence: did the tone color move toward the reference? ─────────────────────
+    let embedder = runtime_macos::catalog()
+        .expect("runtime catalog")
+        .audio()
+        .expect("audio lane")
+        .load_voice_embedder(
+            "chatterbox_ve",
+            // Chatterbox-VE loads the single `ve.safetensors`, not a snapshot dir.
+            &LoadSpec::new(WeightsSource::File(chatterbox_dir.join("ve.safetensors"))),
+        )
+        .expect("load chatterbox_ve embedder");
+    let emb_base = embedder.embed(&base).expect("embed base");
+    let emb_ref = embedder.embed(&reference).expect("embed reference");
+    let emb_conv = embedder.embed(&converted).expect("embed converted");
+
+    let sim_base_ref = cosine(&emb_base, &emb_ref);
+    let sim_conv_ref = cosine(&emb_conv, &emb_ref);
+    let sim_conv_base = cosine(&emb_conv, &emb_base);
+
+    eprintln!("[voiceclone-smoke] out dir: {}", out_dir.display());
+    eprintln!(
+        "[voiceclone-smoke] base:      {} samples @ {} Hz, peak {:.4}",
+        base.samples.len(),
+        base.sample_rate,
+        base_peak
+    );
+    eprintln!(
+        "[voiceclone-smoke] reference: {} samples @ {} Hz",
+        reference.samples.len(),
+        reference.sample_rate
+    );
+    eprintln!(
+        "[voiceclone-smoke] converted: {} samples @ {} Hz, peak {:.4} (τ={tau})",
+        converted.samples.len(),
+        converted.sample_rate,
+        conv_peak
+    );
+    eprintln!(
+        "[voiceclone-smoke] Chatterbox-VE cosine — base↔ref {sim_base_ref:.4} | \
+         converted↔ref {sim_conv_ref:.4} | converted↔base {sim_conv_base:.4}"
+    );
+
+    // The core acceptance evidence: the converted clip's speaker identity is closer to the reference
+    // than the base clip's is — the tone color moved toward the target voice.
+    assert!(
+        sim_conv_ref > sim_base_ref,
+        "tone color did not move toward the reference: converted↔ref {sim_conv_ref:.4} \
+         must exceed base↔ref {sim_base_ref:.4}"
+    );
+    eprintln!(
+        "[voiceclone-smoke] PASS — tone color moved toward the reference by \
+         {:.4} cosine (listen: {})",
+        sim_conv_ref - sim_base_ref,
+        out_dir.join("converted.wav").display()
+    );
+}
