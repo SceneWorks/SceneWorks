@@ -2605,6 +2605,7 @@ export function App() {
         {showSetupWizard ? (
           <SetupWizard
             jobs={jobs}
+            macCapabilities={macCapabilities}
             models={models}
             onComplete={completeSetupWizard}
             onCreateProject={createProject}
