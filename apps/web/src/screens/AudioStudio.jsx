@@ -25,11 +25,12 @@ import { jobAudioResultAssets } from "../jobResultAssets.js";
 // mode (Speech = ships a voice bank, Music = advertises edit ops, Voice Clone = reference/embedding
 // conditioning, Sound FX = residual text→audio generator).
 //
-// SCOPE (C0): the navigable shell only. The Generate CTA renders but its real submission —
-// createAudioJob → rememberLocalGenerationJob('audio', job) → the results stack below — is wired by
-// C1 (Speech, sc-13408) and the mode-specific stories after it. The audioLocalJobs results zone is
-// already wired to the shared audio-player card (A5, sc-13405), so once C1 enqueues jobs they surface
-// here with no further shell change.
+// SCOPE (C1, sc-13408): the Speech (TTS) mode is fully wired — the Generate CTA submits the script +
+// capability-driven voice/language/length/seed through createAudioJob → rememberLocalGenerationJob(
+// 'audio', job), which surfaces the run in the audioLocalJobs stack below via the shared audio-player
+// card (A5, sc-13405). The other three modes (C2 Sound FX, C3 Music, C4 Voice Clone) keep the C0
+// scaffold: their fields render capability-driven, but submit stays inert until their own stories
+// land (the Generate CTA is disabled off the Speech tab rather than being a silent no-op).
 
 // Tab labels per the epic, keyed by the AUDIO_MODES ids so the ordering follows that array.
 const MODE_LABELS = {
@@ -53,6 +54,45 @@ const DURATION_MODES = new Set(["speech", "sfx", "music"]);
 // Fallback target length before the model's cap is known; always clamped to maxDurationSecs.
 const DEFAULT_TARGET_DURATION_SECS = 10;
 
+// Capitalize the first letter of a capability token for a group heading (e.g. "american" →
+// "American"). The tokens come straight from the manifest, so this is display-only — never a
+// hardcoded taxonomy.
+const titleCase = (value) =>
+  typeof value === "string" && value ? value.charAt(0).toUpperCase() + value.slice(1) : "";
+
+// Human-readable heading for a voice group, built from whichever of accent / gender the manifest
+// supplies (e.g. "American · Female"). Both absent ⇒ "" (an unlabeled bucket, rendered as bare
+// options), so a model that ships a flat voice bank still renders.
+function voiceGroupLabel(accent, gender) {
+  return [titleCase(accent), titleCase(gender)].filter(Boolean).join(" · ");
+}
+
+// Group a model's advertised voice bank into <optgroup>s keyed by accent + gender — the picker the
+// Speech mode surfaces (sc-13408). CAPABILITY-DRIVEN: the buckets and their headings come straight
+// from voices[].accent / voices[].gender, never a hardcoded list. Group order and within-group order
+// follow first appearance in the advertised bank, so the picker mirrors the manifest exactly; voices
+// with neither field collapse into a single unlabeled bucket rendered as bare options.
+function groupVoicesByGenderAccent(voices) {
+  const groups = [];
+  const byKey = new Map();
+  for (const voice of Array.isArray(voices) ? voices : []) {
+    if (!voice || typeof voice !== "object" || !voice.id) {
+      continue;
+    }
+    const accent = typeof voice.accent === "string" ? voice.accent.trim() : "";
+    const gender = typeof voice.gender === "string" ? voice.gender.trim() : "";
+    const key = `${accent}|${gender}`;
+    let group = byKey.get(key);
+    if (!group) {
+      group = { key, label: voiceGroupLabel(accent, gender), voices: [] };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    group.voices.push(voice);
+  }
+  return groups;
+}
+
 export function AudioStudio() {
   const {
     activeProject,
@@ -62,7 +102,9 @@ export function AudioStudio() {
     jobs = [],
     audioLocalJobs = [],
     jobAction,
+    createAudioJob,
     createModelDownloadJob,
+    rememberLocalGenerationJob,
     setActiveView,
     setPreviewAsset,
     macCapabilities,
@@ -86,6 +128,9 @@ export function AudioStudio() {
   );
   const [seed, setSeed] = useState(saved.seed ?? "");
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
+  // Guards a Speech run in flight so a second submit (double-click / ⌘↵) can't double-enqueue
+  // (mirrors VideoStudio's `submitting`). Cleared in submit's finally.
+  const [submitting, setSubmitting] = useState(false);
 
   // Models gated on the selected tab (mirrors VideoStudio.jsx): a model "serves" a mode when its
   // audio capability block matches (audioModelServesMode). The tabs, the picker and the snap effect
@@ -124,6 +169,15 @@ export function AudioStudio() {
   const showDuration = DURATION_MODES.has(mode) && maxDurationSecs != null;
   const showEditModes = mode === "music" && editModes.length > 0;
   const showConditioning = mode === "voiceclone" && conditioning.length > 0;
+
+  // The voice picker's <optgroup> structure — derived from the selected model's voice bank, grouped
+  // by accent + gender (sc-13408). Rebuilt only when the bank changes.
+  const voiceGroups = useMemo(() => groupVoicesByGenderAccent(voices), [voices]);
+
+  // Generate is guarded (never a silent no-op): a run needs a non-empty script, an installed model,
+  // and no run already in flight. The empty-script guard is the DoD's "disable on empty script".
+  const scriptReady = prompt.trim().length > 0;
+  const canGenerate = mode === "speech" && modelReady && Boolean(model) && scriptReady && !submitting;
 
   // Snap the model to one that serves the active mode (mirrors VideoStudio). A no-op when the current
   // model already serves the mode, or when nothing serves it (a reduced catalog).
@@ -198,12 +252,48 @@ export function AudioStudio() {
   const onCancelJob = (job) => jobAction?.(job, "cancel");
   const onPreview = (asset, scope) => setPreviewAsset?.(asset, scope);
 
-  function submit(event) {
+  async function submit(event) {
     event.preventDefault();
-    // C0 is the navigable shell only. C1 (Speech, sc-13408) wires this to createAudioJob →
-    // rememberLocalGenerationJob('audio', job), which surfaces the run in the audioLocalJobs stack
-    // below (already rendered here via the shared audio-player card, A5 / sc-13405). The mode-specific
-    // stories (C2 Sound FX, C3 Music, C4 Voice Clone) extend the same submit per mode.
+    if (submitting) {
+      return;
+    }
+    // C1 (Speech, sc-13408) wires Speech only. The mode-specific stories after it (C2 Sound FX,
+    // C3 Music, C4 Voice Clone) extend this per mode — until they land those tabs keep the C0
+    // scaffold, so their submit is intentionally inert.
+    if (mode !== "speech" || !canGenerate) {
+      return;
+    }
+    setSubmitting(true);
+    try {
+      // Clamp the requested length to the model's advertised cap (never a hardcoded ceiling); the
+      // worker range-checks it too. Omitted when the mode carries no duration control so the model
+      // synthesizes its natural length.
+      const durationValue = Number(targetDurationSecs);
+      const clampedDuration =
+        showDuration && Number.isFinite(durationValue) && durationValue > 0
+          ? Math.min(durationValue, maxDurationSecs)
+          : undefined;
+      // The audio route deserializes `model` (not `modelId`) and reads the typed knobs verbatim
+      // (apps/rust-api/src/dto.rs AudioJobRequest → crates/sceneworks-worker/src/audio_jobs.rs). The
+      // language-casing seam (en-US → en-us) is handled server-side. Voice/language are omitted when
+      // unset so the model falls back to its own default (Kokoro's af_heart / en). Mirrors how
+      // VideoStudio builds createVideoJob's payload from its settings.
+      const job = await createAudioJob?.({
+        model,
+        prompt: prompt.trim(),
+        voice: voice || undefined,
+        language: language || undefined,
+        targetDurationSecs: clampedDuration,
+        seed: seed === "" ? null : Number(seed),
+      });
+      if (job) {
+        // Land the run in the audio local-job lane so it stacks in .studio-results via the shared
+        // audio-player card (A5 / sc-13405) — the audio twin of rememberLocalGenerationJob('video').
+        rememberLocalGenerationJob?.("audio", job);
+      }
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   // The model list the picker offers: those that serve the active mode, falling back to the full
@@ -258,9 +348,10 @@ export function AudioStudio() {
                 placeholder={MODE_PLACEHOLDER[mode] ?? "Describe the audio…"}
                 value={prompt}
               />
-              {/* C0: the CTA renders as the shell's primary action; C1 (sc-13408) wires the real
-                  submission. Kept type="submit" so the form shape matches the other studios. */}
-              <button className="prompt-cta" type="submit">
+              {/* The shell's primary action. C1 (sc-13408) wires the real Speech submission via the
+                  form's onSubmit. Disabled — never a silent no-op — until a run can proceed: an empty
+                  script, no installed model, a non-Speech tab, or a run already in flight all block it. */}
+              <button className="prompt-cta" type="submit" disabled={!canGenerate}>
                 <Icon.Sparkle size={14} />
                 Generate
               </button>
@@ -286,16 +377,33 @@ export function AudioStudio() {
                   ) : null}
                 </label>
 
-                {/* Speech: the voice bank the selected model ships (audio.voices). C1 builds on this. */}
+                {/* Speech: the voice bank the selected model ships (audio.voices), grouped into
+                    <optgroup>s by accent + gender (sc-13408). The buckets and their headings are
+                    capability-driven — straight from voices[].accent / voices[].gender — never a
+                    hardcoded taxonomy; a flat bank (no accent/gender) renders as bare options. */}
                 {showVoice ? (
                   <label className="settings-field settings-field-voice">
                     Voice
                     <select onChange={(event) => setVoice(event.target.value)} value={voice}>
-                      {voices.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.label ?? item.id}
-                        </option>
-                      ))}
+                      {voiceGroups.map((group) =>
+                        group.label ? (
+                          <optgroup key={group.key} label={group.label}>
+                            {group.voices.map((item) => (
+                              <option key={item.id} value={item.id}>
+                                {item.label ?? item.id}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ) : (
+                          <React.Fragment key={group.key}>
+                            {group.voices.map((item) => (
+                              <option key={item.id} value={item.id}>
+                                {item.label ?? item.id}
+                              </option>
+                            ))}
+                          </React.Fragment>
+                        ),
+                      )}
                     </select>
                   </label>
                 ) : null}
@@ -375,9 +483,11 @@ export function AudioStudio() {
                     value={seed}
                   />
                 </label>
-                {/* Sample-rate readout when the model advertises more than one; a single rate is shown
-                    in the capability summary above. Capability-driven, never hardcoded. */}
-                {sampleRates.length > 1 ? (
+                {/* Sample rate the model emits at (audio.sampleRates). Capability-driven, never
+                    hardcoded — and read-only: the output rate is a fixed property of the model's
+                    vocoder (Kokoro is 24 kHz mono), not a request knob the audio route accepts, so it
+                    is surfaced for transparency rather than sent in the payload. */}
+                {sampleRates.length ? (
                   <label>
                     Sample rate
                     <select disabled value={String(sampleRates[0])}>

@@ -225,6 +225,238 @@ describe("AudioStudio shell (sc-13407)", () => {
   });
 });
 
+// A Kokoro-shaped fixture whose voices carry the manifest's gender/accent so the grouped picker can
+// be asserted (the sc-13407 KOKORO fixture ships a flat bank, exercising the ungrouped fallback).
+const KOKORO_GROUPED = {
+  id: "kokoro_82m",
+  name: "Kokoro 82M (Speech)",
+  type: "audio",
+  recommended: true,
+  audio: {
+    voices: [
+      { id: "af_heart", label: "Heart", gender: "female", accent: "american", language: "en-US" },
+      { id: "am_michael", label: "Michael", gender: "male", accent: "american", language: "en-US" },
+      { id: "bf_emma", label: "Emma", gender: "female", accent: "british", language: "en-GB" },
+      { id: "bm_george", label: "George", gender: "male", accent: "british", language: "en-GB" },
+    ],
+    languages: ["en-US", "en-GB"],
+    sampleRates: [24000],
+    maxDurationSecs: 30,
+  },
+  ui: { label: "Kokoro 82M" },
+};
+
+describe("AudioStudio Speech generation (sc-13408)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <AudioStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const generateButton = (root) => buttonWithText(root, "Generate");
+  const setTextarea = async (el, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+  };
+  const setSelect = async (el, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLSelectElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+  };
+  const setNumber = async (el, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+  };
+
+  it("Generate is disabled on an empty script and enabled once a script is typed", async () => {
+    await render(baseContext({ createAudioJob: vi.fn(), rememberLocalGenerationJob: vi.fn() }));
+    const button = generateButton(container);
+    // Empty default script → the guard disables the CTA (never a silent no-op).
+    expect(button.disabled).toBe(true);
+
+    await setTextarea(container.querySelector(".prompt-input"), "The walking skeleton is alive.");
+    expect(generateButton(container).disabled).toBe(false);
+  });
+
+  it("submitting the Speech form calls createAudioJob with args derived from the fields, then remembers the job in the audio lane", async () => {
+    const job = { id: "audio-job-1", type: "audio_generate", status: "queued" };
+    const createAudioJob = vi.fn(async () => job);
+    const rememberLocalGenerationJob = vi.fn();
+    await render(
+      baseContext({
+        audioModels: [KOKORO_GROUPED],
+        models: [KOKORO_GROUPED],
+        createAudioJob,
+        rememberLocalGenerationJob,
+      }),
+    );
+
+    await setTextarea(container.querySelector(".prompt-input"), "The walking skeleton is alive.");
+    // Pick non-default values so the assertions discriminate (a hardcoded payload would not follow).
+    await setSelect(fieldByLabelStart(container, "Voice").querySelector("select"), "bm_george");
+    await setSelect(fieldByLabelStart(container, "Language").querySelector("select"), "en-GB");
+    await setNumber(fieldByLabelStart(container, "Length").querySelector("input"), "6");
+    // Advanced seed.
+    await click(container.querySelector(".advanced-section-toggle"));
+    await setNumber([...container.querySelectorAll(".advanced-panel input")][0], "123");
+
+    await act(async () => {
+      container
+        .querySelector("form")
+        .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(createAudioJob).toHaveBeenCalledTimes(1);
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.model).toBe("kokoro_82m");
+    expect(payload.prompt).toBe("The walking skeleton is alive.");
+    expect(payload.voice).toBe("bm_george");
+    expect(payload.language).toBe("en-GB");
+    expect(payload.targetDurationSecs).toBe(6);
+    expect(payload.seed).toBe(123);
+    // The returned job lands in the audio local-job lane so it stacks in the results zone.
+    expect(rememberLocalGenerationJob).toHaveBeenCalledWith("audio", job);
+  });
+
+  it("clamps the requested length to the model's advertised cap", async () => {
+    const createAudioJob = vi.fn(async () => ({ id: "audio-job-clamp" }));
+    await render(
+      baseContext({
+        audioModels: [KOKORO_GROUPED],
+        models: [KOKORO_GROUPED],
+        createAudioJob,
+        rememberLocalGenerationJob: vi.fn(),
+      }),
+    );
+    await setTextarea(container.querySelector(".prompt-input"), "Over the cap.");
+    // The number input's max attribute won't stop a programmatic value; the submit clamps it.
+    await setNumber(fieldByLabelStart(container, "Length").querySelector("input"), "999");
+    await act(async () => {
+      container
+        .querySelector("form")
+        .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(createAudioJob.mock.calls[0][0].targetDurationSecs).toBe(30);
+  });
+
+  it("groups the voice options by accent + gender from the model's Capabilities", async () => {
+    await render(
+      baseContext({ audioModels: [KOKORO_GROUPED], models: [KOKORO_GROUPED], createAudioJob: vi.fn() }),
+    );
+    const voiceSelect = fieldByLabelStart(container, "Voice").querySelector("select");
+
+    // The picker is structured into <optgroup>s whose labels come straight from accent + gender.
+    const groups = [...voiceSelect.querySelectorAll("optgroup")];
+    expect(groups.map((g) => g.getAttribute("label"))).toEqual([
+      "American · Female",
+      "American · Male",
+      "British · Female",
+      "British · Male",
+    ]);
+    // Each group holds exactly the voices with that accent+gender, in manifest order.
+    const optionIds = (group) => [...group.querySelectorAll("option")].map((o) => o.value);
+    expect(optionIds(groups[0])).toEqual(["af_heart"]);
+    expect(optionIds(groups[1])).toEqual(["am_michael"]);
+    expect(optionIds(groups[2])).toEqual(["bf_emma"]);
+    expect(optionIds(groups[3])).toEqual(["bm_george"]);
+    // And every advertised voice is still selectable (options flatten across optgroups).
+    expect([...voiceSelect.options].map((o) => o.value)).toEqual([
+      "af_heart",
+      "am_michael",
+      "bf_emma",
+      "bm_george",
+    ]);
+  });
+
+  it("renders an audio-player results card for a completed audio job in the lane", async () => {
+    const audioAsset = {
+      id: "audio-asset-1",
+      type: "audio",
+      projectId: "project_1",
+      displayName: "The walking skeleton is alive.",
+      file: { path: "assets/audios/genset_x/2026-07-19_kokoro_walking.wav", mimeType: "audio/wav" },
+    };
+    const completedJob = {
+      id: "audio-job-done",
+      type: "audio_generate",
+      status: "completed",
+      result: { assetIds: ["audio-asset-1"], expectedCount: 1 },
+    };
+    await render(
+      baseContext({
+        assets: [audioAsset],
+        audioLocalJobs: [completedJob],
+        createAudioJob: vi.fn(),
+        rememberLocalGenerationJob: vi.fn(),
+      }),
+    );
+
+    const results = container.querySelector(".studio-results");
+    expect(results.querySelector(".worker-progress-card")).toBeTruthy();
+    // The completed clip surfaces through the shared audio-player card with a real <audio> src.
+    const audioEl = results.querySelector("audio");
+    expect(audioEl).toBeTruthy();
+    expect(audioEl.getAttribute("src")).toContain(
+      "assets/audios/genset_x/2026-07-19_kokoro_walking.wav",
+    );
+    expect(results.textContent).not.toContain("No audio yet");
+  });
+
+  it("does not submit on a non-Speech tab (SFX/Music/Voice Clone stay scaffold)", async () => {
+    const createAudioJob = vi.fn(async () => ({ id: "nope" }));
+    await render(
+      baseContext({ createAudioJob, rememberLocalGenerationJob: vi.fn() }),
+    );
+    // Music is served only by ACE-Step in the base fixture; switch to it, type a script.
+    await click(modeTab(container, "Music"));
+    await setTextarea(container.querySelector(".prompt-input"), "some music");
+    // The CTA is disabled off the Speech tab, and a direct form submit is a no-op there.
+    expect(generateButton(container).disabled).toBe(true);
+    await act(async () => {
+      container
+        .querySelector("form")
+        .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(createAudioJob).not.toHaveBeenCalled();
+  });
+});
+
 describe("Audio nav registration (sc-13407)", () => {
   it("registers Audio in KEEP_ALIVE_VIEWS", () => {
     expect(KEEP_ALIVE_VIEWS.has("Audio")).toBe(true);
