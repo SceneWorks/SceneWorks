@@ -2349,12 +2349,22 @@
         "quantize": 8,
         "repo": "SceneWorks/boogu-image-mlx"
       },
-      // Direct sc-13108 CUDA probes on RTX PRO 6000 Blackwell, exclusive GPU, 1024², seed 42,
-      // native 50-step Base path: q4 31.68 GB and bf16 54.40 GB from a 0.02 GB baseline.
-      // minMemoryGb 44 preserves the existing packed-tier headroom.
+      // Direct CUDA probes on RTX PRO 6000 Blackwell, exclusive GPU, 1024², seed 42, native 50-step
+      // Base path, from a 0.02 GB baseline: q4 31.68 and bf16 54.40 (sc-13108); q8 41.98 (sc-13533,
+      // same harness — candle-gen-boogu's `boogu-txt2img` example under `VramProbe`, one tier per
+      // process).
+      //
+      // sc-13533: q8 is this model's DEFAULT tier (`mlx.quantize: 8` — the shipped `base/` Q8 turnkey,
+      // and the ONLY variant `downloads` pulls), so shipping no q8 row here was the bug (Turbo's
+      // matching q8 gap is where it bit hard). `vram_gate::predicted_peak_gb` found no q8 row and fell
+      // through to `minMemoryGb`, returning a flat 44.0 GB. Base got LUCKY: 44.0 ≈ the real 41.98 peak
+      // + ~2 headroom, so its fit prediction is unchanged by this fix — but that was coincidence, not
+      // design (the fallback adds no headroom of its own and would drift the moment either number
+      // moved). The q8 row makes it principled: the gate now reads 41.98 + its 2 GB headroom for the
+      // exact tier the model defaults to. minMemoryGb 44 already covers 41.98 + ~2, so it is unchanged.
       "candle": {
         "minMemoryGb": 44,
-        "vramGbByTier": { "q4": 31.7, "bf16": 54.4 },
+        "vramGbByTier": { "q4": 31.7, "q8": 42.0, "bf16": 54.4 },
         "measured": true
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Base",
@@ -2450,12 +2460,27 @@
         "quantize": 8,
         "repo": "SceneWorks/boogu-image-mlx"
       },
-      // Direct sc-13108 CUDA probes on RTX PRO 6000 Blackwell, exclusive GPU, 1024², seed 42,
-      // native 4-step Turbo path: q4 31.58 GB and bf16 54.46 GB from a 0.02 GB baseline.
-      // minMemoryGb 40 preserves the existing packed-tier headroom.
+      // Direct CUDA probes on RTX PRO 6000 Blackwell, exclusive GPU, 1024², seed 42, native 4-step
+      // Turbo path, from a 0.02 GB baseline: q4 31.58 and bf16 54.46 (sc-13108); q8 42.12 (sc-13533,
+      // same harness — candle-gen-boogu's `boogu-txt2img` example under `VramProbe`, one tier per
+      // process).
+      //
+      // sc-13533: q8 is this model's DEFAULT tier (`mlx.quantize: 8` — the shipped `turbo/` Q8
+      // turnkey, and the ONLY variant `downloads` pulls), so shipping no q8 row here was the bug.
+      // `vram_gate::predicted_peak_gb` found no q8 row and fell through to `minMemoryGb`, returning a
+      // flat 40.0 GB (the fallback adds no headroom) against a real 42.12 GB peak — 2.1 GB under, the
+      // PERMISSIVE direction (it admits a load that then OOMs), the outcome `predicted_peak_gb`'s own
+      // rustdoc warns the `minMemoryGb` fallthrough produces for a tier heavier than the lightest one.
+      // Adding the q8 row is the fix: the gate now predicts 42.12 + its 2 GB headroom = ~44.1 GB for a
+      // default Turbo render and sizes resident/sequential/reject correctly.
+      //
+      // minMemoryGb 40 → 44 is the secondary half: with all three tiers now rowed, minMemoryGb is only
+      // the fallback for an unrowed tier, but the schema still defines it as the DEFAULT (q8) tier's
+      // peak + headroom, and 40 sat BELOW the measured 42.12 default peak — an under-floor of its own.
+      // 44 clears the 42.12 peak (~1.9 GB margin) and matches Base.
       "candle": {
-        "minMemoryGb": 40,
-        "vramGbByTier": { "q4": 31.6, "bf16": 54.5 },
+        "minMemoryGb": 44,
+        "vramGbByTier": { "q4": 31.6, "q8": 42.1, "bf16": 54.5 },
         "measured": true
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo",

@@ -562,6 +562,135 @@ fn every_image_model_with_a_candle_vram_block_declares_mlx_quantize() {
     }
 }
 
+/// sc-13533 — the sc-12155 lint above, strengthened from PRESENCE to COVERAGE: declaring
+/// `mlx.quantize` is not enough; the tier that declaration RESOLVES TO must itself have a measured
+/// `candle.vramGbByTier` row.
+///
+/// sc-12155 deliberately stopped at presence because a coverage check went RED on `boogu_image` /
+/// `boogu_image_turbo` — both declare `mlx.quantize: 8` (their shipped, and only auto-downloaded,
+/// Q8 `base/` / `turbo/` tier) while `vramGbByTier` carried only `{q4, bf16}`. With no `q8` row,
+/// [`vram_gate::predicted_peak_gb`](crate::vram_gate::predicted_peak_gb) fell past the row lookup to
+/// the `candle.minMemoryGb` floor — which that function's own rustdoc names as the WRONG number to
+/// land on, because the schema defines it as the DEFAULT (lightest) tier's peak and so it sizes a
+/// heavier tier PERMISSIVELY (an under-prediction admits a load that can OOM). sc-13533 measured the
+/// missing q8 rows on CUDA, so the check can now be enforced.
+///
+/// `advanced` is empty and `nvfp4` is false on purpose: this asks what a plain no-pick request
+/// budgets against — the manifest's OWN default tier. (NVFP4 is an explicit per-request opt-in that
+/// no shipping model packs, and it has a documented q8 degrade path of its own.)
+///
+/// Scoped to `type: "image"` for the same reason sc-12155 was: the video lane's resolvers
+/// (`video_jobs.rs`) never consult `manifest.mlx.quantize`, so a video entry's derived key here would
+/// be a fiction.
+///
+/// [`default_tier_key`] mirrors [`vram_gate::requested_tier_key`](crate::vram_gate) rather than
+/// calling it, because `vram_gate` is `backend-candle`-gated and this lint guards MANIFEST DATA that
+/// ships on every lane — gating it would stop it running in the default build, which is where a bad
+/// manifest edit lands first. The mirror cannot silently drift: the companion
+/// `default_tier_key_mirrors_the_production_resolver` below pins the two against each other across
+/// every shipped entry wherever the candle build exists.
+///
+/// Mutation check: delete the `q8` row from either boogu entry (or from `krea_2_raw`, whose default
+/// is also q8) → RED, naming the model and the tier it defaults to.
+#[test]
+fn every_image_model_budgets_its_default_tier_against_a_measured_row() {
+    let mut offenders = Vec::new();
+    for model in builtin_models_manifest() {
+        if model.get("type").and_then(Value::as_str) != Some("image") {
+            continue;
+        }
+        let Some(candle) = model.get("candle") else {
+            continue;
+        };
+        let id = model.get("id").and_then(Value::as_str).unwrap_or("<no id>");
+        let tier = default_tier_key(&model);
+        // Both stages of the gate, same invariant. `sequentialPeakGb` is OPTIONAL (absent ⇒
+        // `predicted_sequential_peak_gb` returns None and the Offload path stays best-effort by
+        // design, e.g. Boogu) — but a block that exists and skips the DEFAULT tier is the same
+        // silent hole as a missing `vramGbByTier` row, one stage further down.
+        for block in ["vramGbByTier", "sequentialPeakGb"] {
+            let Some(rows) = candle.get(block) else {
+                continue;
+            };
+            if rows.get(tier).and_then(Value::as_f64).is_none() {
+                let present = rows
+                    .as_object()
+                    .map(|rows| rows.keys().cloned().collect::<Vec<_>>().join(", "))
+                    .unwrap_or_default();
+                offenders.push(format!(
+                    "{id}.candle.{block} (defaults to {tier}; rows present: [{present}])"
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these image models default to a quant tier that has no measured `candle.vramGbByTier` row, \
+         so `predicted_peak_gb` falls through to the `candle.minMemoryGb` floor and sizes the \
+         DEFAULT tier against the LIGHTEST tier's number — a permissive under-prediction that can \
+         admit a load which then OOMs (sc-13533). Measure the tier and add its row: {offenders:?}"
+    );
+
+    // Pin the sc-13533 subjects on the value, not merely on the sweep above: both Boogu entries must
+    // still DERIVE q8 (the shipped `base/` / `turbo/` Q8 turnkey) and must carry a q8 row. Flipping
+    // `mlx.quantize` to dodge the lint, or dropping the row, both go RED here.
+    for id in ["boogu_image", "boogu_image_turbo"] {
+        let entry = builtin_model_entry(id);
+        assert_eq!(
+            default_tier_key(&entry),
+            "q8",
+            "{id} ships the Q8 turnkey as its only auto-downloaded tier, so a no-pick request must \
+             still derive q8 (sc-13533)"
+        );
+        assert!(
+            entry
+                .get("candle")
+                .and_then(|candle| candle.get("vramGbByTier"))
+                .and_then(|tiers| tiers.get("q8"))
+                .and_then(Value::as_f64)
+                .is_some(),
+            "{id} must carry a measured q8 `vramGbByTier` row — the tier it defaults to (sc-13533)"
+        );
+    }
+}
+
+/// The tier key a no-pick request derives for `model` from `mlx.quantize` alone — a lane-independent
+/// mirror of `vram_gate::requested_tier_key`'s bits map (`None`/`> 4` ⇒ q8, `<= 0` ⇒ bf16, `<= 4` ⇒
+/// q4) with `advanced` empty and `nvfp4` false. See the lint above for why this is a mirror and not a
+/// call; `default_tier_key_mirrors_the_production_resolver` keeps the two honest.
+fn default_tier_key(model: &Value) -> &'static str {
+    let bits = model
+        .get("mlx")
+        .and_then(|mlx| mlx.get("quantize"))
+        .and_then(Value::as_i64);
+    match bits {
+        None => "q8",
+        Some(bits) if bits <= 0 => "bf16",
+        Some(bits) if bits <= 4 => "q4",
+        Some(_) => "q8",
+    }
+}
+
+/// sc-13533: the ungated lint's [`default_tier_key`] mirror must agree with the real
+/// `vram_gate::requested_tier_key` on EVERY shipped manifest entry — so the always-on lint can never
+/// quietly guard a different rule than the resolver it exists to protect. Runs wherever the candle
+/// build does; the mirror itself runs everywhere.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn default_tier_key_mirrors_the_production_resolver() {
+    let no_advanced = serde_json::Map::new();
+    for model in builtin_models_manifest() {
+        let id = model.get("id").and_then(Value::as_str).unwrap_or("<no id>");
+        let entry = model.as_object().expect("manifest entries are JSON objects");
+        assert_eq!(
+            default_tier_key(&model),
+            crate::vram_gate::requested_tier_key(&no_advanced, entry, false),
+            "the gpu_and_manifest lint's tier mirror disagrees with vram_gate::requested_tier_key \
+             for {id} — update `default_tier_key` to match the resolver (sc-13533)"
+        );
+    }
+}
+
 /// epic 10765 sc-10920: the FLUX.2 `candle` blocks drive the dynamic fit-gate end-to-end against the
 /// SHIPPED manifest bytes — resident-fits → sequential-offload → reject-before-OOM. The pure
 /// `vram_gate` unit tests cover the decision logic on synthetic fixtures; THIS guards the data half:
