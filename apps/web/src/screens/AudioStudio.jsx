@@ -663,6 +663,23 @@ export function AudioStudio() {
                       </label>
                     </div>
                   ) : null}
+                  {/* Edit strength (0..=1) — an optional weight on the whole AudioEdit, part of the
+                      Conditioning::AudioEdit contract. Cleared ⇒ the model default; a model that ignores
+                      it (the ACE-Step turbo) simply falls back to its own behaviour. */}
+                  {sourceAudioAssetId ? (
+                    <label className="settings-field settings-field-edit-strength">
+                      Edit strength
+                      <input
+                        max="1"
+                        min="0"
+                        onChange={(event) => setEditStrength(event.target.value)}
+                        placeholder="Model default"
+                        step="0.05"
+                        type="number"
+                        value={editStrength}
+                      />
+                    </label>
+                  ) : null}
                 </div>
               ) : null}
             </div>

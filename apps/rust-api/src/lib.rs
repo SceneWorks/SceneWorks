@@ -2814,7 +2814,10 @@ fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
     }
     // Reuse the shared negative-prompt + `advanced`-size guard. Music models (ACE-Step) can carry a
     // negative prompt when they advertise support; the size guard bounds it exactly like image/video.
-    validate_prompt_extras(payload.negative_prompt.as_deref().unwrap_or(""), &payload.advanced)?;
+    validate_prompt_extras(
+        payload.negative_prompt.as_deref().unwrap_or(""),
+        &payload.advanced,
+    )?;
     if let Some(target) = payload.target_duration_secs {
         if !target.is_finite() || !(0.0..=300.0).contains(&target) {
             return Err(ApiError::bad_request(
@@ -2853,7 +2856,7 @@ fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
     // advertised `audio.editModes` is the real gate the generator's `validate` applies — this only
     // rejects a garbage token up front). Region seconds must be finite and well-ordered; strength is a
     // 0..=1 weight.
-    validate_audio_edit_fields(&payload)?;
+    validate_audio_edit_fields(payload)?;
     // Diffusion-audio sampling knobs (Sound FX / MOSS-SoundEffect, sc-13409). Bounded to a blanket
     // sane range here — the same "API blanket vs. model's real cap" split the duration uses: the
     // generator's `validate` owns the per-model guidance range (MOSS: 1.0..=20.0) and step ceiling
@@ -2899,7 +2902,11 @@ fn validate_audio_edit_fields(payload: &AudioJobRequest) -> Result<(), ApiError>
             "an audio edit needs both sourceAudioAssetId and editMode (or neither)",
         ));
     }
-    if let Some(mode) = payload.edit_mode.as_deref().filter(|m| !m.trim().is_empty()) {
+    if let Some(mode) = payload
+        .edit_mode
+        .as_deref()
+        .filter(|m| !m.trim().is_empty())
+    {
         if !AUDIO_EDIT_MODES.contains(&mode) {
             return Err(ApiError::bad_request(format!(
                 "editMode must be one of {AUDIO_EDIT_MODES:?}"
@@ -2918,7 +2925,8 @@ fn validate_audio_edit_fields(payload: &AudioJobRequest) -> Result<(), ApiError>
             }
         }
     }
-    if let (Some(start), Some(end)) = (payload.edit_region_start_secs, payload.edit_region_end_secs) {
+    if let (Some(start), Some(end)) = (payload.edit_region_start_secs, payload.edit_region_end_secs)
+    {
         if end <= start {
             return Err(ApiError::bad_request(
                 "editRegionEndSecs must be greater than editRegionStartSecs",

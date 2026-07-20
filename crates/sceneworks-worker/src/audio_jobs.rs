@@ -320,10 +320,8 @@ pub(crate) async fn run_audio_generate_job(
     // while it runs so a long synthesis (a cold pipeline build, a 30 s clip, or a slow host) is never
     // flagged stale and marked `interrupted` mid-flight. Mirrors the video path's interval keepalive
     // for the no-progress cold-load phase.
-    let track = run_audio_synthesis(
-        api, settings, job, backend, &request, model_dir, audio_edit,
-    )
-    .await?;
+    let track =
+        run_audio_synthesis(api, settings, job, backend, &request, model_dir, audio_edit).await?;
 
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
     update_job(
@@ -545,8 +543,12 @@ fn build_audio_edit(
         )
     })?;
     let mode = parse_audio_edit_mode(mode)?;
-    let source_path =
-        crate::video_jobs::resolve_clip_media_path(settings, &request.project_id, source_id, project_path)?;
+    let source_path = crate::video_jobs::resolve_clip_media_path(
+        settings,
+        &request.project_id,
+        source_id,
+        project_path,
+    )?;
     let track = read_wav_pcm16(&source_path)?;
     // The clip's running length in seconds (interleaved: total samples / (rate · channels)).
     let src_secs = track.samples.len() as f32
@@ -686,6 +688,27 @@ fn audio_asset_fact(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(AUDIO_ADAPTER_FALLBACK);
+    // Build the `rawAdapterSettings` sub-object separately (not inline in the outer `json!`): the audio
+    // knob set has grown wide enough (TTS + SFX + the sc-13410 music/edit fields) that a single nested
+    // `json!` literal blows past the macro recursion limit. A separate expansion keeps each within it.
+    let raw_adapter_settings = json!({
+        "model": request.model,
+        "voice": request.voice,
+        "language": request.language,
+        "targetDurationSecs": request.target_duration_secs,
+        "guidance": request.guidance,
+        "steps": request.steps,
+        "negativePrompt": request.negative_prompt,
+        "bpm": request.bpm,
+        "musicalKey": request.musical_key,
+        "lyrics": request.lyrics,
+        "sourceAudioAssetId": request.source_audio_asset_id,
+        "editMode": request.edit_mode,
+        "editRegionStartSecs": request.edit_region_start_secs,
+        "editRegionEndSecs": request.edit_region_end_secs,
+        "editStrength": request.edit_strength,
+        "sampleRate": sample_rate,
+    });
     json!({
         "type": "audio",
         "assetId": plan.asset_id,
@@ -723,24 +746,7 @@ fn audio_asset_fact(
         "editRegionEndSecs": request.edit_region_end_secs,
         "editStrength": request.edit_strength,
         "seed": request.seed,
-        "rawAdapterSettings": {
-            "model": request.model,
-            "voice": request.voice,
-            "language": request.language,
-            "targetDurationSecs": request.target_duration_secs,
-            "guidance": request.guidance,
-            "steps": request.steps,
-            "negativePrompt": request.negative_prompt,
-            "bpm": request.bpm,
-            "musicalKey": request.musical_key,
-            "lyrics": request.lyrics,
-            "sourceAudioAssetId": request.source_audio_asset_id,
-            "editMode": request.edit_mode,
-            "editRegionStartSecs": request.edit_region_start_secs,
-            "editRegionEndSecs": request.edit_region_end_secs,
-            "editStrength": request.edit_strength,
-            "sampleRate": sample_rate,
-        },
+        "rawAdapterSettings": raw_adapter_settings,
     })
 }
 
@@ -933,6 +939,179 @@ mod tests {
         assert_eq!(result["expectedCount"], 1);
         assert_eq!(result["assetWrites"].as_array().map(Vec::len), Some(1));
         assert_eq!(result["assetWrites"][0]["type"], "audio");
+    }
+
+    #[test]
+    fn from_payload_reads_the_music_and_edit_fields() {
+        // The Music path (ACE-Step, sc-13410) carries the describe-the-music sub-block (bpm / key /
+        // lyrics), a negative prompt, and the extend/edit source band (source id + mode + region +
+        // strength). All ride verbatim onto the AudioRequest.
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "acestep_v15_turbo",
+            "prompt": "gentle lofi piano loop",
+            "language": "en",
+            "targetDurationSecs": 8.0,
+            "steps": 8,
+            "bpm": 92.0,
+            "musicalKey": "C minor",
+            "lyrics": "  [verse] la la la  ",
+            "negativePrompt": "harsh distortion",
+            "sourceAudioAssetId": "audio-src-1",
+            "editMode": "Extend",
+            "editRegionStartSecs": 3.0,
+            "editRegionEndSecs": 20.0,
+            "editStrength": 0.5,
+            "seed": 5,
+        })));
+        assert_eq!(request.model, "acestep_v15_turbo");
+        assert_eq!(request.bpm, Some(92.0));
+        assert_eq!(request.musical_key.as_deref(), Some("C minor"));
+        // Lyrics are read verbatim (interior whitespace / tags preserved), only trimmed of nothing —
+        // they may legitimately be multi-line; a purely-blank value would be None (instrumental).
+        assert_eq!(request.lyrics.as_deref(), Some("  [verse] la la la  "));
+        assert_eq!(request.negative_prompt.as_deref(), Some("harsh distortion"));
+        assert_eq!(
+            request.source_audio_asset_id.as_deref(),
+            Some("audio-src-1")
+        );
+        // The edit mode is lowercased at the parse seam so a mixed-case token still routes.
+        assert_eq!(request.edit_mode.as_deref(), Some("extend"));
+        assert_eq!(request.edit_region_start_secs, Some(3.0));
+        assert_eq!(request.edit_region_end_secs, Some(20.0));
+        assert_eq!(request.edit_strength, Some(0.5));
+        assert_eq!(request.steps, Some(8));
+        assert_eq!(request.seed, Some(5));
+        // A blank lyrics value is dropped to None (instrumental), not carried as an empty string.
+        let instrumental = AudioRequest::from_payload(&payload(json!({ "lyrics": "   " })));
+        assert_eq!(instrumental.lyrics, None);
+    }
+
+    #[test]
+    fn parse_audio_edit_mode_maps_the_tokens_and_rejects_garbage() {
+        assert_eq!(
+            parse_audio_edit_mode("inpaint").unwrap(),
+            AudioEditMode::Inpaint
+        );
+        assert_eq!(
+            parse_audio_edit_mode("repaint").unwrap(),
+            AudioEditMode::Repaint
+        );
+        assert_eq!(
+            parse_audio_edit_mode("extend").unwrap(),
+            AudioEditMode::Extend
+        );
+        assert_eq!(
+            parse_audio_edit_mode("cover").unwrap(),
+            AudioEditMode::Cover
+        );
+        assert!(parse_audio_edit_mode("bogus").is_err());
+    }
+
+    #[test]
+    fn audio_edit_region_policy_matches_the_mode_contract() {
+        // Extend: begins the appended tail at the source clip's own length when no start is given, and
+        // reads `end` as the new total length (gen_core AudioEditMode::Extend contract).
+        let region = audio_edit_region(AudioEditMode::Extend, 10.0, None, Some(20.0))
+            .expect("extend yields a region");
+        assert_eq!(region.start_secs, 10.0);
+        assert_eq!(region.end_secs, Some(20.0));
+        // An explicit start overrides the source-length default.
+        let region = audio_edit_region(AudioEditMode::Extend, 10.0, Some(8.0), Some(20.0))
+            .expect("extend region");
+        assert_eq!(region.start_secs, 8.0);
+
+        // Inpaint / Repaint: carry the request's bounded window; a MISSING start ⇒ None (so the
+        // generator's own "region required" check fires rather than the worker inventing a window).
+        let region = audio_edit_region(AudioEditMode::Inpaint, 10.0, Some(2.0), Some(5.0))
+            .expect("inpaint region");
+        assert_eq!(region.start_secs, 2.0);
+        assert_eq!(region.end_secs, Some(5.0));
+        assert!(audio_edit_region(AudioEditMode::Repaint, 10.0, None, None).is_none());
+
+        // Cover: whole-clip, no region.
+        assert!(audio_edit_region(AudioEditMode::Cover, 10.0, Some(1.0), Some(2.0)).is_none());
+    }
+
+    #[test]
+    fn build_audio_edit_is_none_without_a_source() {
+        // No source id ⇒ plain text-to-music (no Conditioning), regardless of the other edit fields.
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "acestep_v15_turbo",
+            "editMode": "extend",
+        })));
+        let settings = crate::test_env::offline_settings();
+        assert!(
+            build_audio_edit(&settings, &request, Path::new("/tmp/project"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_wav_pcm16_roundtrips_a_written_wav() {
+        // A clip written by the shared `write_wav_pcm16` (48 kHz stereo, the ACE-Step output shape) must
+        // decode back through `read_wav_pcm16` into a gen_core::AudioTrack with the same rate / channels
+        // / sample count — the source-track reader the extend/edit path resolves through.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("source.wav");
+        let track = AudioTrack {
+            samples: vec![0.0, 0.25, -0.5, 0.75, -0.1, 0.4], // 3 interleaved stereo frames
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        write_wav_pcm16(&track, &path).expect("write wav");
+        let decoded = read_wav_pcm16(&path).expect("read wav");
+        assert_eq!(decoded.sample_rate, 48_000);
+        assert_eq!(decoded.channels, 2);
+        assert_eq!(decoded.samples.len(), 6);
+        assert!(decoded.stems.is_empty());
+        // Values land in the normalized [-1, 1) range (peak-normalized on write), and are finite.
+        assert!(decoded
+            .samples
+            .iter()
+            .all(|s| s.is_finite() && (-1.0..=1.0).contains(s)));
+
+        // A non-RIFF blob is a clear error, not a silent mis-decode.
+        let junk = dir.path().join("junk.wav");
+        std::fs::write(&junk, b"not a wav file at all").expect("write junk");
+        assert!(read_wav_pcm16(&junk).is_err());
+    }
+
+    #[test]
+    fn music_asset_fact_records_the_music_and_edit_fields_for_replay() {
+        // A Music run records the describe-the-music sub-block + the extend/edit source band in both the
+        // top-level replay record and rawAdapterSettings, so a re-generate round-trips exactly (sc-13410).
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "acestep_v15_turbo",
+            "prompt": "gentle lofi piano loop",
+            "targetDurationSecs": 8.0,
+            "steps": 8,
+            "bpm": 92.0,
+            "musicalKey": "C minor",
+            "lyrics": "[verse] la la la",
+            "sourceAudioAssetId": "audio-src-1",
+            "editMode": "extend",
+            "editRegionEndSecs": 20.0,
+            "editStrength": 0.5,
+            "seed": 5,
+        })));
+        let plan = AudioPlan::new(&request, Path::new("/tmp/project"));
+        let fact = audio_asset_fact(&plan, &request, 48_000, 2, 8.0);
+        assert_eq!(fact["sampleRate"], 48_000);
+        assert_eq!(fact["channels"], 2);
+        assert_eq!(fact["bpm"], 92.0);
+        assert_eq!(fact["musicalKey"], "C minor");
+        assert_eq!(fact["lyrics"], "[verse] la la la");
+        assert_eq!(fact["sourceAudioAssetId"], "audio-src-1");
+        assert_eq!(fact["editMode"], "extend");
+        assert_eq!(fact["editRegionEndSecs"], 20.0);
+        assert_eq!(fact["editStrength"], 0.5);
+        // ...and mirrored into rawAdapterSettings so the exact request is reconstructable.
+        assert_eq!(fact["rawAdapterSettings"]["bpm"], 92.0);
+        assert_eq!(fact["rawAdapterSettings"]["editMode"], "extend");
+        assert_eq!(fact["rawAdapterSettings"]["editStrength"], 0.5);
+        // A music run carries no voice; a distilled-turbo run carries no guidance/negative.
+        assert!(fact["voice"].is_null(), "music carries no voice");
     }
 
     #[test]
