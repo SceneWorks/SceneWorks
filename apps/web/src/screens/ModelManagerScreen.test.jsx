@@ -1641,19 +1641,22 @@ describe("ModelManagerScreen Audio Models tab + capability chips (sc-13406)", ()
     ui: { description: "Text-to-music model with audio editing." },
   };
 
-  // MOSS (sfx): a plain generator — sampleRates only, none of the chip-bearing fields.
-  const MOSS = {
-    id: "moss_sfx_v2",
-    name: "MOSS SoundEffect v2 (SFX)",
+  // OpenVoice V2 (voice clone): a conditioning-only model. It takes a reference audio
+  // clip and exposes NONE of the chip-bearing fields — no voice bank, no languages, no
+  // edit modes, no multi-speaker flag. This mirrors the real zero-chip seeded shape
+  // (OpenVoice V2 / Chatterbox-VE), which carries only `conditioning`.
+  const OPENVOICE = {
+    id: "openvoice_v2",
+    name: "OpenVoice V2 (Voice Clone)",
     type: "audio",
-    family: "moss",
+    family: "openvoice",
     installState: "missing",
     audio: {
-      sampleRates: [48000],
+      sampleRates: [24000],
       maxDurationSecs: 30,
-      supportsMultiSpeaker: false,
+      conditioning: ["ReferenceAudio"],
     },
-    ui: { description: "Text-to-audio SFX generator." },
+    ui: { description: "Voice-clone model conditioned on a reference clip." },
   };
 
   const IMAGE_MODEL = {
@@ -1675,7 +1678,7 @@ describe("ModelManagerScreen Audio Models tab + capability chips (sc-13406)", ()
   }
 
   it("registers an Audio Models tab with a per-type count that lists only audio models", async () => {
-    await render([IMAGE_MODEL, KOKORO, ACE_STEP, MOSS]);
+    await render([IMAGE_MODEL, KOKORO, ACE_STEP, OPENVOICE]);
     const tabLabels = [...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent);
     // Fixed order: Image, Video, Audio, Utility, LoRAs. Audio carries a total-of-3 badge.
     expect(tabLabels).toEqual(["Image Models1", "Video Models0", "Audio Models3", "Utility Models0", "LoRAs0"]);
@@ -1686,7 +1689,7 @@ describe("ModelManagerScreen Audio Models tab + capability chips (sc-13406)", ()
     await selectTab(container, "Audio Models");
     expect(cardFor("Kokoro 82M (Speech)")).toBeTruthy();
     expect(cardFor("ACE-Step v1.5 XL Turbo (Music)")).toBeTruthy();
-    expect(cardFor("MOSS SoundEffect v2 (SFX)")).toBeTruthy();
+    expect(cardFor("OpenVoice V2 (Voice Clone)")).toBeTruthy();
     expect(cardFor("Z-Image-Turbo")).toBeUndefined();
   });
 
@@ -1741,12 +1744,12 @@ describe("ModelManagerScreen Audio Models tab + capability chips (sc-13406)", ()
     expect(audioChipsFor("Multi Speaker TTS")).toContain("Multi-speaker");
   });
 
-  it("renders no audio capability chips for a plain generator with none of the chip fields", async () => {
-    await render([MOSS]);
+  it("renders no audio capability chips for a conditioning-only model with none of the chip fields", async () => {
+    await render([OPENVOICE]);
     await selectTab(container, "Audio Models");
-    // MOSS advertises only sampleRates → no voice/language/edit/multi-speaker chips at all.
-    expect(cardFor("MOSS SoundEffect v2 (SFX)")).toBeTruthy();
-    expect(audioChipsFor("MOSS SoundEffect v2 (SFX)")).toEqual([]);
-    expect(cardFor("MOSS SoundEffect v2 (SFX)").querySelector(".model-audio-capabilities")).toBeNull();
+    // OpenVoice V2 carries only `conditioning` (+ sampleRates) → no voice/language/edit/multi-speaker chips at all.
+    expect(cardFor("OpenVoice V2 (Voice Clone)")).toBeTruthy();
+    expect(audioChipsFor("OpenVoice V2 (Voice Clone)")).toEqual([]);
+    expect(cardFor("OpenVoice V2 (Voice Clone)").querySelector(".model-audio-capabilities")).toBeNull();
   });
 });
