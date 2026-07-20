@@ -25,6 +25,14 @@ export const VIDEO_MODES = [
   "animate_character",
 ];
 
+// Audio generation modes the Audio Studio exposes (epic 13400 C0/C1 mirror these keys).
+export const AUDIO_MODES = ["speech", "sfx", "music", "voiceclone"];
+
+// Conditioning kinds that mark a voice-clone (voice-conversion / speaker-embedding) model —
+// distinct from ACE-Step's "AudioEdit" conditioning, which is a music-editing signal, not a
+// reference/identity signal. Compared case-insensitively so manifest casing never matters.
+const VOICE_CLONE_CONDITIONING = new Set(["referenceaudio", "voiceembedding"]);
+
 // Image Studio — mirrors ImageStudio.jsx `imageModelServesMode`. A model serves a mode
 // when it declares the capability and, under active Mac gating, that feature is MLX-routed
 // for it (the macModelFeatureBlock calls are no-ops off Mac).
@@ -65,6 +73,71 @@ export function videoModelUsable(model, caps) {
     model?.type === "video" &&
     !macModelBlock(model, caps) &&
     VIDEO_MODES.some((mode) => videoModelServesMode(model, mode, caps))
+  );
+}
+
+// Audio Studio — capability-driven per-mode eligibility, derived from the model's `audio`
+// sub-block (mirrors how videoModelServesMode reads video capabilities; no hardcoded ids).
+// Each seeded model maps to exactly one mode and fails the other three:
+//   * speech     — ships a voice bank (audio.voices[] non-empty). → Kokoro-82M.
+//   * music      — advertises audio-editing ops (audio.editModes[]: inpaint/repaint/extend). → ACE-Step.
+//   * voiceclone — conditions on a reference / speaker-identity embedding
+//                  (audio.conditioning ⊇ ReferenceAudio | VoiceEmbedding). → OpenVoice V2, Chatterbox-VE.
+//                  ACE-Step's conditioning is "AudioEdit" (a music-edit signal), so it does NOT match.
+//   * sfx        — a general text-to-audio generator (audio.sampleRates[]) that is none of the above. → MOSS.
+function audioBlock(model) {
+  return model?.audio && typeof model.audio === "object" ? model.audio : null;
+}
+
+function audioHasVoices(audio) {
+  return Array.isArray(audio?.voices) && audio.voices.length > 0;
+}
+
+function audioHasEditModes(audio) {
+  return Array.isArray(audio?.editModes) && audio.editModes.length > 0;
+}
+
+function audioGenerates(audio) {
+  // A generative (text→waveform) model advertises the sample rates it emits.
+  return Array.isArray(audio?.sampleRates) && audio.sampleRates.length > 0;
+}
+
+function audioHasVoiceCloneConditioning(audio) {
+  const conditioning = Array.isArray(audio?.conditioning) ? audio.conditioning : [];
+  return conditioning.some((kind) => VOICE_CLONE_CONDITIONING.has(String(kind).toLowerCase()));
+}
+
+export function audioModelServesMode(model, mode) {
+  const audio = audioBlock(model);
+  if (!audio) {
+    return false;
+  }
+  if (mode === "speech") {
+    return audioHasVoices(audio);
+  }
+  if (mode === "music") {
+    return audioHasEditModes(audio);
+  }
+  if (mode === "voiceclone") {
+    return audioHasVoiceCloneConditioning(audio);
+  }
+  if (mode === "sfx") {
+    return (
+      audioGenerates(audio) &&
+      !audioHasVoices(audio) &&
+      !audioHasEditModes(audio) &&
+      !audioHasVoiceCloneConditioning(audio)
+    );
+  }
+  return false;
+}
+
+// Usable on Audio Studio: an audio-type model that isn't Mac-blocked and serves ≥1 mode.
+export function audioModelUsable(model, caps) {
+  return (
+    model?.type === "audio" &&
+    !macModelBlock(model, caps) &&
+    AUDIO_MODES.some((mode) => audioModelServesMode(model, mode))
   );
 }
 
