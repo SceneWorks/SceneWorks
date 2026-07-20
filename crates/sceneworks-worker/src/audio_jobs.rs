@@ -18,8 +18,8 @@
 use super::*;
 
 use gen_core::{
-    AudioEditMode, AudioParams, AudioTransformRequest, CancelFlag, Conditioning, GenerationOutput,
-    GenerationRequest, LoadSpec, Progress, TimeRegion, WeightsSource,
+    AudioEditMode, AudioParams, AudioTransform, AudioTransformRequest, CancelFlag, Conditioning,
+    GenerationOutput, GenerationRequest, Generator, LoadSpec, Progress, TimeRegion, WeightsSource,
 };
 
 use crate::video_jobs::{write_wav_pcm16, AudioTrack};
@@ -28,6 +28,20 @@ const CANCEL_MESSAGE: &str = "Audio generation canceled by user.";
 /// Adapter id recorded on the asset when the manifest declares no family — the audio twin of the
 /// video/image adapter labels.
 const AUDIO_ADAPTER_FALLBACK: &str = "audio";
+
+/// Classify an error surfacing from a synthesis `generate` / `apply` call (sc-13469). A cooperative
+/// mid-synthesis bail on the tripped [`CancelFlag`] arrives as [`gen_core::Error::Canceled`], which
+/// MUST surface as [`WorkerError::Canceled`] so [`run_blocking_with_heartbeat`] posts the terminal
+/// `Canceled` and the job reads as canceled — [`crate::classify_engine_error`] would otherwise bucket
+/// it as a generic `Engine` failure (its match only special-cases `Unsupported`), turning a user
+/// cancel into a spurious job failure. Every other engine error keeps the ordinary classification.
+fn classify_audio_synthesis_error(context: &str, error: gen_core::Error) -> WorkerError {
+    if matches!(error, gen_core::Error::Canceled) {
+        WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
+    } else {
+        crate::classify_engine_error(context, error)
+    }
+}
 
 /// The parsed audio job payload — the audio twin of `VideoRequest`, kept local to the worker (audio
 /// has far fewer knobs than video, so it needs no shared-core struct). Infallible parse: missing
@@ -418,15 +432,12 @@ pub(crate) async fn run_audio_generate_job(
         AudioSynthesis::Single {
             model_dir,
             audio_edit,
-        } => {
-            run_audio_synthesis(api, settings, job, backend, &request, model_dir, audio_edit)
-                .await?
-        }
+        } => run_audio_synthesis(api, settings, job, &request, model_dir, audio_edit).await?,
         AudioSynthesis::VoiceClone(plan) => {
-            run_voice_clone_synthesis(api, settings, job, backend, &request, plan).await?
+            run_voice_clone_synthesis(api, settings, job, &request, plan).await?
         }
         AudioSynthesis::NativeVoiceClone(plan) => {
-            run_native_voice_clone_synthesis(api, settings, job, backend, &request, plan).await?
+            run_native_voice_clone_synthesis(api, settings, job, &request, plan).await?
         }
     };
 
@@ -498,22 +509,45 @@ pub(crate) async fn run_audio_generate_job(
     Ok(())
 }
 
-/// Keepalive cadence while the blocking synthesis runs (seconds). Comfortably under the API's
-/// default 90 s worker-timeout, so a long synthesis is never swept to `interrupted`.
-const AUDIO_KEEPALIVE_SECS: u64 = 15;
-
-/// Load the audio generator and run one synthesis on a blocking thread, emitting periodic keepalive
-/// heartbeats + progress updates while it runs. Returns the engine [`AudioTrack`] (`gen_core`'s) for
-/// the caller to write + register.
-#[allow(clippy::too_many_arguments)]
+/// Load the audio generator and run one synthesis on a blocking thread, honoring a mid-synthesis
+/// cancel through the shared [`run_blocking_with_heartbeat`] watcher (sc-13469). Returns the engine
+/// [`AudioTrack`] (`gen_core`'s) for the caller to write + register.
 async fn run_audio_synthesis(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
-    backend: &str,
     request: &AudioRequest,
     model_dir: PathBuf,
     audio_edit: Option<Conditioning>,
+) -> WorkerResult<gen_core::AudioTrack> {
+    run_audio_synthesis_using(
+        api,
+        settings,
+        job,
+        request,
+        model_dir,
+        audio_edit,
+        crate::inference_runtime::load_audio,
+    )
+    .await
+}
+
+/// [`run_audio_synthesis`] with the generator loader injected (sc-13469), the audio sibling of
+/// [`crate::video_jobs::generate_video_using`]: with the load threaded in, a test drives the REAL
+/// synthesis path against a stub [`Generator`] and asserts the shared engine [`CancelFlag`] that
+/// reaches [`GenerationRequest::cancel`] is tripped mid-generation (not only by the post-synthesis
+/// `check_cancel` after the whole clip has rendered).
+#[allow(clippy::too_many_arguments)]
+async fn run_audio_synthesis_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &AudioRequest,
+    model_dir: PathBuf,
+    audio_edit: Option<Conditioning>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
 ) -> WorkerResult<gen_core::AudioTrack> {
     let model_id = request.model.clone();
     let prompt = request.prompt.clone();
@@ -536,95 +570,76 @@ async fn run_audio_synthesis(
     let musical_key = request.musical_key.clone();
     let lyrics = request.lyrics.clone();
     let seed = request.seed.map(|seed| seed as u64);
-    let handle = tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
-        let spec = LoadSpec::new(WeightsSource::Dir(model_dir));
-        let generator = crate::inference_runtime::load_audio(&model_id, &spec)
-            .map_err(|error| crate::classify_engine_error("audio model load failed", error))?;
-        let req = GenerationRequest {
-            prompt,
-            negative_prompt,
-            seed,
-            steps,
-            guidance,
-            audio: Some(AudioParams {
-                voice,
-                language,
-                target_duration,
-                bpm,
-                musical_key,
-                lyrics,
+    // sc-13469: ONE shared engine CancelFlag — cloned into the request the blocking synthesis runs
+    // AND handed to `run_blocking_with_heartbeat`, whose watcher polls the API cancel state (and a
+    // worker shutdown) and trips it MID-synthesis. Replaces the degenerate inline `CancelFlag::new()`
+    // that was never tripped, so a user cancel is honored DURING the clip render — not only by the
+    // post-synthesis `check_cancel` after the whole clip has already rendered.
+    let cancel = CancelFlag::new();
+    let handle = {
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+            let spec = LoadSpec::new(WeightsSource::Dir(model_dir));
+            let generator = load_generator(&model_id, &spec)
+                .map_err(|error| crate::classify_engine_error("audio model load failed", error))?;
+            let req = GenerationRequest {
+                prompt,
+                negative_prompt,
+                seed,
+                steps,
+                guidance,
+                audio: Some(AudioParams {
+                    voice,
+                    language,
+                    target_duration,
+                    bpm,
+                    musical_key,
+                    lyrics,
+                    ..Default::default()
+                }),
+                // Extend/edit source-audio conditioning (Conditioning::AudioEdit), when a source band
+                // was supplied; empty for plain text-to-music.
+                conditioning: audio_edit.into_iter().collect(),
+                // The shared, watcher-tripped flag (sc-13469) — NOT a fresh `CancelFlag::new()`.
+                cancel,
                 ..Default::default()
-            }),
-            // Extend/edit source-audio conditioning (Conditioning::AudioEdit), when a source band was
-            // supplied; empty for plain text-to-music.
-            conditioning: audio_edit.into_iter().collect(),
-            cancel: CancelFlag::new(),
-            ..Default::default()
-        };
-        // The Audio Studio progress is driven around this call (Preparing → Generating → Saving);
-        // the per-stage engine callback is a no-op here — the async keepalive below is what keeps the
-        // job alive during synthesis, so the engine progress doesn't need to be forwarded.
-        let mut on_progress = |_progress: Progress| {};
-        let output = generator
-            .generate(&req, &mut on_progress)
-            .map_err(|error| crate::classify_engine_error("audio generation failed", error))?;
-        match output {
-            GenerationOutput::Audio(track) => Ok(track),
-            GenerationOutput::Images(_) => Err(WorkerError::Engine(
-                "audio model returned images, expected an audio track".to_owned(),
-            )),
-            GenerationOutput::Video { .. } => Err(WorkerError::Engine(
-                "audio model returned video, expected an audio track".to_owned(),
-            )),
-        }
-    });
-    await_audio_blocking(api, settings, job, backend, handle).await
-}
-
-/// Await a blocking audio-synthesis join handle while emitting periodic keepalive heartbeats +
-/// progress updates, so a long synthesis (a cold pipeline build, a slow host, or — for voice clone —
-/// two chained backend calls) is never flagged stale and swept to `interrupted` mid-flight. Shared by
-/// the single-generator path ([`run_audio_synthesis`]) and the voice-clone chain
-/// ([`run_voice_clone_synthesis`]); mirrors the video path's interval keepalive for the no-progress
-/// cold-load phase.
-async fn await_audio_blocking(
-    api: &ApiClient,
-    settings: &Settings,
-    job: &JobSnapshot,
-    backend: &str,
-    handle: tokio::task::JoinHandle<WorkerResult<gen_core::AudioTrack>>,
-) -> WorkerResult<gen_core::AudioTrack> {
-    tokio::pin!(handle);
-    let mut ticker = tokio::time::interval(Duration::from_secs(AUDIO_KEEPALIVE_SECS));
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    // The first tick fires immediately; skip it so the first keepalive lands one interval in (the
-    // job was already marked Generating by the caller just before this).
-    ticker.tick().await;
-    loop {
-        tokio::select! {
-            result = &mut handle => {
-                return result.map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
+            };
+            // The Audio Studio progress is driven around this call (Preparing → Generating → Saving);
+            // the per-stage engine callback is a no-op here — the shared keepalive watcher is what
+            // keeps the job alive during synthesis, so the engine progress doesn't need forwarding.
+            let mut on_progress = |_progress: Progress| {};
+            let output = generator
+                .generate(&req, &mut on_progress)
+                .map_err(|error| {
+                    classify_audio_synthesis_error("audio generation failed", error)
+                })?;
+            match output {
+                GenerationOutput::Audio(track) => Ok(track),
+                GenerationOutput::Images(_) => Err(WorkerError::Engine(
+                    "audio model returned images, expected an audio track".to_owned(),
+                )),
+                GenerationOutput::Video { .. } => Err(WorkerError::Engine(
+                    "audio model returned video, expected an audio track".to_owned(),
+                )),
             }
-            _ = ticker.tick() => {
-                // Best-effort keepalive: a failed heartbeat/update must not abort a synthesis that is
-                // otherwise progressing (the job completes on the next successful post).
-                let _ = heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await;
-                let _ = update_job(
-                    api,
-                    &job.id,
-                    audio_progress(
-                        JobStatus::Running,
-                        ProgressStage::Generating,
-                        0.2,
-                        "Synthesizing audio.",
-                        None,
-                        backend,
-                    ),
-                )
-                .await;
-            }
-        }
-    }
+        })
+    };
+    // The shared blocking keepalive + cancel watcher (sc-13469): pings the worker heartbeat while the
+    // synthesis runs (so a long/cold render is never swept to `interrupted`), polls the API cancel
+    // state each interval and trips the SAME `cancel` the request carries, and on completion tears the
+    // watcher down cleanly (bounded-join, no leaked task, no false-trip on normal completion). Mirrors
+    // the video path's in-loop cancel watcher.
+    run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        CANCEL_MESSAGE,
+        "audio synthesis",
+        no_cancel_ack(),
+        handle,
+    )
+    .await
 }
 
 /// Which synthesis path a resolved audio job takes — the single-generator lane (Speech / SFX / Music)
@@ -711,9 +726,37 @@ async fn run_voice_clone_synthesis(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
-    backend: &str,
     request: &AudioRequest,
     plan: VoiceClonePlan,
+) -> WorkerResult<gen_core::AudioTrack> {
+    run_voice_clone_synthesis_using(
+        api,
+        settings,
+        job,
+        request,
+        plan,
+        crate::inference_runtime::load_audio,
+        crate::inference_runtime::load_audio_transform,
+    )
+    .await
+}
+
+/// [`run_voice_clone_synthesis`] with the base-TTS + converter loaders injected (sc-13469). Both
+/// backend calls run inside ONE blocking task under ONE shared engine [`CancelFlag`] threaded into
+/// BOTH the base [`GenerationRequest::cancel`] and the [`AudioTransformRequest::cancel`], so a cancel
+/// requested while EITHER call is in-flight trips promptly — the two-call trap (the converter request
+/// used to default `cancel` to a fresh, never-tripped flag via `..Default::default()`).
+#[allow(clippy::too_many_arguments)]
+async fn run_voice_clone_synthesis_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &AudioRequest,
+    plan: VoiceClonePlan,
+    load_base: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static,
+    load_converter: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn AudioTransform>>
+        + Send
+        + 'static,
 ) -> WorkerResult<gen_core::AudioTrack> {
     let VoiceClonePlan {
         base_model_dir,
@@ -731,59 +774,77 @@ async fn run_voice_clone_synthesis(
     // own default (0.3). The converter range-checks it (finite, >= 0).
     let strength = request.match_strength;
     let seed = request.seed.map(|seed| seed as u64);
-    let handle = tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
-        // Call 1 — base TTS: synthesize the script in the requested base voice.
-        let base_spec = LoadSpec::new(WeightsSource::Dir(base_model_dir));
-        let base_generator = crate::inference_runtime::load_audio(&base_model, &base_spec)
-            .map_err(|error| {
+    // sc-13469: ONE shared engine CancelFlag spanning BOTH backend calls, tripped mid-synthesis by the
+    // `run_blocking_with_heartbeat` watcher (see [`run_audio_synthesis_using`]).
+    let cancel = CancelFlag::new();
+    let handle = {
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+            // Call 1 — base TTS: synthesize the script in the requested base voice.
+            let base_spec = LoadSpec::new(WeightsSource::Dir(base_model_dir));
+            let base_generator = load_base(&base_model, &base_spec).map_err(|error| {
                 crate::classify_engine_error("voice-clone base TTS load failed", error)
             })?;
-        let base_req = GenerationRequest {
-            prompt: script,
-            audio: Some(AudioParams {
-                voice,
-                language,
+            let base_req = GenerationRequest {
+                prompt: script,
+                audio: Some(AudioParams {
+                    voice,
+                    language,
+                    ..Default::default()
+                }),
+                // The shared, watcher-tripped flag (sc-13469).
+                cancel: cancel.clone(),
                 ..Default::default()
-            }),
-            cancel: CancelFlag::new(),
-            ..Default::default()
-        };
-        let mut on_progress = |_progress: Progress| {};
-        let base_track = match base_generator
-            .generate(&base_req, &mut on_progress)
-            .map_err(|error| crate::classify_engine_error("voice-clone base TTS failed", error))?
-        {
-            GenerationOutput::Audio(track) => track,
-            _ => {
-                return Err(WorkerError::Engine(
-                    "voice-clone base TTS returned non-audio output".to_owned(),
-                ))
-            }
-        };
-
-        // Call 2 — OpenVoice V2 tone-color conversion: transfer the reference clip's timbre onto the
-        // base speech. The source (`audio`) carries content + prosody; `target_reference` is the voice.
-        let converter_spec = LoadSpec::new(WeightsSource::Dir(converter_dir));
-        let transform =
-            crate::inference_runtime::load_audio_transform(&converter_model, &converter_spec)
+            };
+            let mut on_progress = |_progress: Progress| {};
+            let base_track = match base_generator
+                .generate(&base_req, &mut on_progress)
                 .map_err(|error| {
-                    crate::classify_engine_error("voice-clone converter load failed", error)
-                })?;
-        let transform_req = AudioTransformRequest {
-            audio: base_track,
-            target_reference: Some(reference),
-            strength,
-            seed,
-            ..Default::default()
-        };
-        transform
-            .apply(&transform_req, &mut on_progress)
-            .map_err(|error| crate::classify_engine_error("voice conversion failed", error))?
-            .into_iter()
-            .next()
-            .ok_or_else(|| WorkerError::Engine("voice conversion produced no track".to_owned()))
-    });
-    await_audio_blocking(api, settings, job, backend, handle).await
+                    classify_audio_synthesis_error("voice-clone base TTS failed", error)
+                })? {
+                GenerationOutput::Audio(track) => track,
+                _ => {
+                    return Err(WorkerError::Engine(
+                        "voice-clone base TTS returned non-audio output".to_owned(),
+                    ))
+                }
+            };
+
+            // Call 2 — OpenVoice V2 tone-color conversion: transfer the reference clip's timbre onto the
+            // base speech. The source (`audio`) carries content + prosody; `target_reference` is the voice.
+            let converter_spec = LoadSpec::new(WeightsSource::Dir(converter_dir));
+            let transform = load_converter(&converter_model, &converter_spec).map_err(|error| {
+                crate::classify_engine_error("voice-clone converter load failed", error)
+            })?;
+            let transform_req = AudioTransformRequest {
+                audio: base_track,
+                target_reference: Some(reference),
+                strength,
+                seed,
+                // The SAME shared flag also drives the converter call (sc-13469) — never the
+                // `..Default::default()` fresh flag that would ignore a mid-conversion cancel.
+                cancel,
+                ..Default::default()
+            };
+            transform
+                .apply(&transform_req, &mut on_progress)
+                .map_err(|error| classify_audio_synthesis_error("voice conversion failed", error))?
+                .into_iter()
+                .next()
+                .ok_or_else(|| WorkerError::Engine("voice conversion produced no track".to_owned()))
+        })
+    };
+    run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        CANCEL_MESSAGE,
+        "voice-clone synthesis",
+        no_cancel_ack(),
+        handle,
+    )
+    .await
 }
 
 /// Resolve the native clone-TTS snapshot dir + the reference-voice clip for a Voice Clone job that
@@ -834,9 +895,32 @@ async fn run_native_voice_clone_synthesis(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
-    backend: &str,
     request: &AudioRequest,
     plan: NativeVoiceClonePlan,
+) -> WorkerResult<gen_core::AudioTrack> {
+    run_native_voice_clone_synthesis_using(
+        api,
+        settings,
+        job,
+        request,
+        plan,
+        crate::inference_runtime::load_audio,
+    )
+    .await
+}
+
+/// [`run_native_voice_clone_synthesis`] with the clone-generator loader injected (sc-13469). The
+/// shared engine [`CancelFlag`] reaches [`GenerationRequest::cancel`] and is tripped mid-synthesis by
+/// the `run_blocking_with_heartbeat` watcher (see [`run_audio_synthesis_using`]).
+async fn run_native_voice_clone_synthesis_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &AudioRequest,
+    plan: NativeVoiceClonePlan,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
 ) -> WorkerResult<gen_core::AudioTrack> {
     let NativeVoiceClonePlan {
         model_dir,
@@ -845,39 +929,57 @@ async fn run_native_voice_clone_synthesis(
     let model_id = request.model.clone();
     let script = request.prompt.clone();
     let seed = request.seed.map(|seed| seed as u64);
-    let handle = tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
-        let spec = LoadSpec::new(WeightsSource::Dir(model_dir));
-        let generator = crate::inference_runtime::load_audio(&model_id, &spec)
-            .map_err(|error| crate::classify_engine_error("clone-TTS model load failed", error))?;
-        let req = GenerationRequest {
-            prompt: script,
-            seed,
-            // The reference clip is the sole voice conditioning — one native call renders the clone.
-            // No `voice` (the model has no named voice bank), no `language`/`target_duration` (Voice
-            // Clone carries none; the utterance is text-proportional), and no `matchStrength` (that τ
-            // is the OpenVoice converter's, not this generator's).
-            conditioning: vec![Conditioning::ReferenceAudio {
-                audio: reference,
-                strength: None,
-            }],
-            cancel: CancelFlag::new(),
-            ..Default::default()
-        };
-        let mut on_progress = |_progress: Progress| {};
-        match generator
-            .generate(&req, &mut on_progress)
-            .map_err(|error| crate::classify_engine_error("clone-TTS generation failed", error))?
-        {
-            GenerationOutput::Audio(track) => Ok(track),
-            GenerationOutput::Images(_) => Err(WorkerError::Engine(
-                "clone-TTS model returned images, expected an audio track".to_owned(),
-            )),
-            GenerationOutput::Video { .. } => Err(WorkerError::Engine(
-                "clone-TTS model returned video, expected an audio track".to_owned(),
-            )),
-        }
-    });
-    await_audio_blocking(api, settings, job, backend, handle).await
+    // sc-13469: ONE shared engine CancelFlag, tripped mid-synthesis by the keepalive watcher.
+    let cancel = CancelFlag::new();
+    let handle = {
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+            let spec = LoadSpec::new(WeightsSource::Dir(model_dir));
+            let generator = load_generator(&model_id, &spec).map_err(|error| {
+                crate::classify_engine_error("clone-TTS model load failed", error)
+            })?;
+            let req = GenerationRequest {
+                prompt: script,
+                seed,
+                // The reference clip is the sole voice conditioning — one native call renders the clone.
+                // No `voice` (the model has no named voice bank), no `language`/`target_duration` (Voice
+                // Clone carries none; the utterance is text-proportional), and no `matchStrength` (that τ
+                // is the OpenVoice converter's, not this generator's).
+                conditioning: vec![Conditioning::ReferenceAudio {
+                    audio: reference,
+                    strength: None,
+                }],
+                // The shared, watcher-tripped flag (sc-13469).
+                cancel,
+                ..Default::default()
+            };
+            let mut on_progress = |_progress: Progress| {};
+            match generator
+                .generate(&req, &mut on_progress)
+                .map_err(|error| {
+                    classify_audio_synthesis_error("clone-TTS generation failed", error)
+                })? {
+                GenerationOutput::Audio(track) => Ok(track),
+                GenerationOutput::Images(_) => Err(WorkerError::Engine(
+                    "clone-TTS model returned images, expected an audio track".to_owned(),
+                )),
+                GenerationOutput::Video { .. } => Err(WorkerError::Engine(
+                    "clone-TTS model returned video, expected an audio track".to_owned(),
+                )),
+            }
+        })
+    };
+    run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        CANCEL_MESSAGE,
+        "clone-TTS synthesis",
+        no_cancel_ack(),
+        handle,
+    )
+    .await
 }
 
 /// Parse an edit-mode token (`inpaint` / `repaint` / `extend` / `cover`) into the gen-core
@@ -1667,5 +1769,453 @@ mod tests {
         // the base model — proving the flag is the only lever and the default (conversion) is unchanged.
         let conversion_fact = audio_asset_fact(&plan, &request, 24_000, 1, 4.0, false);
         assert_eq!(conversion_fact["baseModel"], "kokoro_82m");
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // sc-13469 — mid-synthesis cancellation (parity with the video cancel watcher). Each blocking
+    // synthesis path now runs under ONE shared engine `CancelFlag` that reaches BOTH the request(s)
+    // the engine sees AND `run_blocking_with_heartbeat`, whose interval watcher polls the API cancel
+    // state and trips the flag while generation is IN FLIGHT — not only via the post-synthesis
+    // `check_cancel` after the whole clip has already rendered.
+    //
+    // These tests drive the REAL `_using` synthesis functions against stub engines that read
+    // `req.cancel`, so the regression the story fixes (a fresh `CancelFlag::new()` in the request,
+    // never tripped) FAILS them: the stub would never observe a trip and its wait-for-cancel loop
+    // would time out. This is the deterministic watcher test the DoD prefers over a timing-based
+    // real-inference abort (the seeded models render short clips, making a real mid-flight cancel
+    // flaky).
+    // -------------------------------------------------------------------------------------------
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use axum::{
+        extract::{Path as AxumPath, State},
+        response::{IntoResponse, Response},
+        routing::{get, post},
+        Json, Router,
+    };
+
+    fn stub_descriptor() -> gen_core::ModelDescriptor {
+        gen_core::ModelDescriptor {
+            id: "stub_audio",
+            family: "stub",
+            backend: "mlx",
+            modality: gen_core::Modality::Audio,
+            capabilities: gen_core::Capabilities::default(),
+        }
+    }
+
+    enum StubBehavior {
+        /// Block until `req.cancel` is tripped, then surface the engine's typed cancellation — the
+        /// cooperative mid-synthesis bail a MOSS-SFX / ACE-Step / chatterbox step loop performs.
+        WaitForCancel,
+        /// Return a short non-silent track promptly (the clean-completion control).
+        CompleteOk,
+    }
+
+    /// A stub [`Generator`] whose `generate` reads `req.cancel` — so it can prove the SHARED,
+    /// watcher-tripped flag actually reached [`GenerationRequest::cancel`].
+    struct StubGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        behavior: StubBehavior,
+        observed_cancel: Arc<AtomicBool>,
+    }
+
+    impl gen_core::Generator for StubGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn generate(
+            &self,
+            req: &GenerationRequest,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<GenerationOutput> {
+            match self.behavior {
+                StubBehavior::WaitForCancel => {
+                    let start = Instant::now();
+                    while !req.cancel.is_cancelled() {
+                        if start.elapsed() > Duration::from_secs(30) {
+                            return Err(gen_core::Error::Msg(
+                                "req.cancel was never tripped mid-synthesis".to_owned(),
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    // Observed the shared flag trip DURING generate() — the proof this path wires it.
+                    self.observed_cancel.store(true, Ordering::SeqCst);
+                    Err(gen_core::Error::Canceled)
+                }
+                StubBehavior::CompleteOk => {
+                    if req.cancel.is_cancelled() {
+                        self.observed_cancel.store(true, Ordering::SeqCst);
+                    }
+                    Ok(GenerationOutput::Audio(gen_core::AudioTrack {
+                        samples: vec![0.1, -0.1, 0.1, -0.1],
+                        sample_rate: 24_000,
+                        channels: 1,
+                        stems: Vec::new(),
+                    }))
+                }
+            }
+        }
+    }
+
+    fn stub_transform_descriptor() -> gen_core::AudioTransformDescriptor {
+        gen_core::AudioTransformDescriptor {
+            id: "stub_converter",
+            family: "audio",
+            backend: "mlx",
+            capabilities: gen_core::AudioTransformCapabilities::default(),
+        }
+    }
+
+    /// A converter stub that blocks until `req.cancel` trips — proving the shared flag reaches the
+    /// SECOND (converter) call of the voice-clone chain, whose request used to default `cancel` to a
+    /// fresh, never-tripped flag via `..Default::default()`.
+    struct StubTransform {
+        descriptor: gen_core::AudioTransformDescriptor,
+        observed_cancel: Arc<AtomicBool>,
+    }
+
+    impl gen_core::AudioTransform for StubTransform {
+        fn descriptor(&self) -> &gen_core::AudioTransformDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _req: &AudioTransformRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn apply(
+            &self,
+            req: &AudioTransformRequest,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<Vec<gen_core::AudioTrack>> {
+            let start = Instant::now();
+            while !req.cancel.is_cancelled() {
+                if start.elapsed() > Duration::from_secs(30) {
+                    return Err(gen_core::Error::Msg(
+                        "converter req.cancel was never tripped mid-conversion".to_owned(),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            self.observed_cancel.store(true, Ordering::SeqCst);
+            Err(gen_core::Error::Canceled)
+        }
+    }
+
+    fn audio_test_job(job_id: &str) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": job_id,
+            "type": "audio_generate",
+            "status": "running",
+            "projectId": null,
+            "projectName": null,
+            "payload": {},
+            "result": {},
+            "requestedGpu": "auto",
+            "assignedGpu": null,
+            "workerId": "test-worker",
+            "progress": 0.2,
+            "stage": "generating",
+            "message": "running",
+            "error": null,
+            "etaSeconds": null,
+            "elapsedSeconds": null,
+            "attempts": 1,
+            "sourceJobId": null,
+            "duplicateOfJobId": null,
+            "cancelRequested": false,
+            "createdAt": "2026-07-20T00:00:00Z",
+            "updatedAt": "2026-07-20T00:00:00Z",
+            "startedAt": null,
+            "completedAt": null,
+            "canceledAt": null,
+            "lastHeartbeatAt": null
+        }))
+        .expect("audio job snapshot deserializes")
+    }
+
+    fn cancel_job_json(job_id: &str, cancel_requested: bool) -> Value {
+        json!({
+            "id": job_id, "type": "audio_generate", "status": "running",
+            "projectId": null, "projectName": null, "payload": {}, "result": {},
+            "requestedGpu": "auto", "assignedGpu": null, "workerId": "test-worker",
+            "progress": 0.2, "stage": "generating", "message": "running", "error": null,
+            "etaSeconds": null, "elapsedSeconds": null, "attempts": 1,
+            "sourceJobId": null, "duplicateOfJobId": null,
+            "cancelRequested": cancel_requested,
+            "createdAt": "2026-07-20T00:00:00Z", "updatedAt": "2026-07-20T00:00:00Z",
+            "startedAt": null, "completedAt": null, "canceledAt": null, "lastHeartbeatAt": null
+        })
+    }
+
+    #[derive(Clone)]
+    struct CancelStubState {
+        cancel_requested: bool,
+        progress: Arc<Mutex<Vec<Value>>>,
+    }
+
+    /// Spawn an API stub whose job GET + progress POST report `cancel_requested` (so the
+    /// `run_blocking_with_heartbeat` interval watcher trips the shared flag on its first, immediate
+    /// tick when `true`), records every progress body (so the terminal `Canceled` write is
+    /// observable), and answers worker heartbeats.
+    async fn spawn_audio_cancel_stub(cancel_requested: bool) -> (String, Arc<Mutex<Vec<Value>>>) {
+        async fn job_route(
+            State(state): State<CancelStubState>,
+            AxumPath(job_id): AxumPath<String>,
+        ) -> Response {
+            Json(cancel_job_json(&job_id, state.cancel_requested)).into_response()
+        }
+        async fn progress_route(
+            State(state): State<CancelStubState>,
+            AxumPath(job_id): AxumPath<String>,
+            Json(body): Json<Value>,
+        ) -> Response {
+            state.progress.lock().expect("progress lock").push(body);
+            Json(cancel_job_json(&job_id, state.cancel_requested)).into_response()
+        }
+        async fn heartbeat_route() -> Response {
+            // The body does not parse as a WorkerSnapshot; heartbeat() tolerates the decode failure as
+            // a transport error, so the keepalive ping still succeeds without modeling the snapshot.
+            Json(json!({})).into_response()
+        }
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let state = CancelStubState {
+            cancel_requested,
+            progress: progress.clone(),
+        };
+        let app = Router::new()
+            .route("/api/v1/jobs/:job_id", get(job_route))
+            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+            .route(
+                "/api/v1/workers/:worker_id/heartbeat",
+                post(heartbeat_route),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("listener has address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("stub serves");
+        });
+        (format!("http://{address}"), progress)
+    }
+
+    fn cancel_test_settings(base_url: String) -> Settings {
+        let mut settings = Settings::from_env();
+        settings.api_url = base_url;
+        settings.worker_id = "test-worker".to_owned();
+        // Shortest interval the clamp allows so the watcher polls promptly (the first interval tick is
+        // immediate regardless).
+        settings.heartbeat_seconds = 5;
+        settings
+    }
+
+    fn stub_load(
+        behavior: StubBehavior,
+        observed: Arc<AtomicBool>,
+    ) -> impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static {
+        move |_id: &str, _spec: &LoadSpec| {
+            Ok(Box::new(StubGenerator {
+                descriptor: stub_descriptor(),
+                behavior,
+                observed_cancel: observed,
+            }) as Box<dyn Generator>)
+        }
+    }
+
+    /// Single path (Speech / SFX / Music): a cancel requested while synthesis is in flight must trip
+    /// the SHARED flag the request carries — observed from inside the stub's `generate` — and surface
+    /// as a terminal `Canceled`, not a failure.
+    #[tokio::test]
+    async fn single_synthesis_trips_shared_cancel_flag_during_generation() {
+        let (base_url, progress) = spawn_audio_cancel_stub(true).await;
+        let settings = cancel_test_settings(base_url);
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("audio-cancel-single");
+        let request = AudioRequest::from_payload(&payload(json!({})));
+
+        let observed = Arc::new(AtomicBool::new(false));
+        let load = stub_load(StubBehavior::WaitForCancel, observed.clone());
+
+        let result = run_audio_synthesis_using(
+            &api,
+            &settings,
+            &job,
+            &request,
+            PathBuf::from("unused"),
+            None,
+            load,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(WorkerError::Canceled(_))),
+            "a mid-synthesis cancel must surface as WorkerError::Canceled, got {result:?}"
+        );
+        assert!(
+            observed.load(Ordering::SeqCst),
+            "the stub generator must have observed its req.cancel tripped DURING generate() — proving \
+             the shared, watcher-tripped flag reached GenerationRequest.cancel, not a fresh \
+             CancelFlag::new()"
+        );
+        let posts = progress.lock().expect("progress lock");
+        assert!(
+            posts.iter().any(|p| p["status"] == "canceled"),
+            "the terminal Canceled must be posted, got {posts:?}"
+        );
+    }
+
+    /// Control: a clean completion must NOT trip the flag and must NOT leak the watcher. The call
+    /// returning at all proves the watcher tore down when the blocking task resolved; the flag stays
+    /// untripped and no terminal `Canceled` is posted.
+    #[tokio::test]
+    async fn single_synthesis_completes_cleanly_without_a_false_trip_or_leak() {
+        let (base_url, progress) = spawn_audio_cancel_stub(false).await;
+        let settings = cancel_test_settings(base_url);
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("audio-ok-single");
+        let request = AudioRequest::from_payload(&payload(json!({})));
+
+        let observed = Arc::new(AtomicBool::new(false));
+        let load = stub_load(StubBehavior::CompleteOk, observed.clone());
+
+        let track = run_audio_synthesis_using(
+            &api,
+            &settings,
+            &job,
+            &request,
+            PathBuf::from("unused"),
+            None,
+            load,
+        )
+        .await
+        .expect("a clean synthesis returns the produced track");
+
+        assert!(
+            !track.samples.is_empty(),
+            "the produced track carries samples"
+        );
+        assert!(
+            !observed.load(Ordering::SeqCst),
+            "a normal completion must NOT trip the request's cancel flag (no false-trip)"
+        );
+        let posts = progress.lock().expect("progress lock");
+        assert!(
+            posts.iter().all(|p| p["status"] != "canceled"),
+            "a clean completion posts no terminal Canceled, got {posts:?}"
+        );
+    }
+
+    /// Voice-clone chain: base TTS completes, then the CONVERTER call blocks. A cancel observed inside
+    /// the converter stub proves the shared flag reached `AudioTransformRequest.cancel` (the two-call
+    /// trap the fix closes — that request previously defaulted `cancel` to a fresh flag).
+    #[tokio::test]
+    async fn voice_clone_trips_shared_flag_during_the_converter_call() {
+        let (base_url, progress) = spawn_audio_cancel_stub(true).await;
+        let settings = cancel_test_settings(base_url);
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("audio-cancel-voiceclone");
+        let request = AudioRequest::from_payload(&payload(json!({})));
+
+        let base_observed = Arc::new(AtomicBool::new(false));
+        let base_load = stub_load(StubBehavior::CompleteOk, base_observed);
+        let converter_observed = Arc::new(AtomicBool::new(false));
+        let converter_load = {
+            let converter_observed = converter_observed.clone();
+            move |_id: &str, _spec: &LoadSpec| {
+                Ok(Box::new(StubTransform {
+                    descriptor: stub_transform_descriptor(),
+                    observed_cancel: converter_observed,
+                }) as Box<dyn AudioTransform>)
+            }
+        };
+        let plan = VoiceClonePlan {
+            base_model_dir: PathBuf::from("unused-base"),
+            converter_dir: PathBuf::from("unused-converter"),
+            reference: gen_core::AudioTrack {
+                samples: vec![0.05, -0.05, 0.05],
+                sample_rate: 24_000,
+                channels: 1,
+                stems: Vec::new(),
+            },
+        };
+
+        let result = run_voice_clone_synthesis_using(
+            &api,
+            &settings,
+            &job,
+            &request,
+            plan,
+            base_load,
+            converter_load,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(WorkerError::Canceled(_))),
+            "a mid-conversion cancel must surface as WorkerError::Canceled, got {result:?}"
+        );
+        assert!(
+            converter_observed.load(Ordering::SeqCst),
+            "the SHARED flag must reach the converter's AudioTransformRequest.cancel and trip \
+             mid-conversion — the two-call trap"
+        );
+        let posts = progress.lock().expect("progress lock");
+        assert!(
+            posts.iter().any(|p| p["status"] == "canceled"),
+            "the terminal Canceled must be posted, got {posts:?}"
+        );
+    }
+
+    /// Native single-call clone-TTS path (`chatterbox_tts`): the shared flag reaches the one
+    /// `GenerationRequest.cancel` and trips mid-generation.
+    #[tokio::test]
+    async fn native_voice_clone_trips_shared_cancel_flag_during_generation() {
+        let (base_url, progress) = spawn_audio_cancel_stub(true).await;
+        let settings = cancel_test_settings(base_url);
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("audio-cancel-native");
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "chatterbox_tts",
+            "referenceAudioAssetId": "ref-1",
+        })));
+
+        let observed = Arc::new(AtomicBool::new(false));
+        let load = stub_load(StubBehavior::WaitForCancel, observed.clone());
+        let plan = NativeVoiceClonePlan {
+            model_dir: PathBuf::from("unused"),
+            reference: gen_core::AudioTrack {
+                samples: vec![0.05, -0.05],
+                sample_rate: 24_000,
+                channels: 1,
+                stems: Vec::new(),
+            },
+        };
+
+        let result =
+            run_native_voice_clone_synthesis_using(&api, &settings, &job, &request, plan, load)
+                .await;
+
+        assert!(
+            matches!(result, Err(WorkerError::Canceled(_))),
+            "a mid-synthesis cancel must surface as WorkerError::Canceled, got {result:?}"
+        );
+        assert!(
+            observed.load(Ordering::SeqCst),
+            "the native clone path must trip its req.cancel mid-generation (shared flag reached the \
+             request)"
+        );
+        let posts = progress.lock().expect("progress lock");
+        assert!(
+            posts.iter().any(|p| p["status"] == "canceled"),
+            "the terminal Canceled must be posted, got {posts:?}"
+        );
     }
 }
