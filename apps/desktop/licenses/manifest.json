@@ -91,6 +91,66 @@
         { "label": "LTX-2 Community License", "key": "ltx-2.3-license" },
         { "label": "Google Gemma Terms", "key": "ltx-2.3-gemma" }
       ]
+    },
+    {
+      "id": "kokoro-82m",
+      "name": "Kokoro-82M (Speech)",
+      "publisher": "hexgrad",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/hexgrad/Kokoro-82M",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "Text-to-speech model (Audio Studio → Speech). SceneWorks downloads the upstream Apache-2.0 weights on first use from hexgrad/Kokoro-82M and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
+      "documents": [
+        { "label": "Apache License 2.0", "key": "kokoro-82m-apache" }
+      ]
+    },
+    {
+      "id": "moss-soundeffect-v2",
+      "name": "MOSS-SoundEffect v2.0 (SFX)",
+      "publisher": "OpenMOSS Team",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "Text-to-audio sound-effect / ambience model (Audio Studio → SFX). SceneWorks downloads the upstream Apache-2.0 weights on first use from OpenMOSS-Team/MOSS-SoundEffect-v2.0 and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
+      "documents": [
+        { "label": "Apache License 2.0", "key": "moss-soundeffect-v2-apache" }
+      ]
+    },
+    {
+      "id": "acestep-v15-turbo",
+      "name": "ACE-Step v1.5 XL Turbo (Music)",
+      "publisher": "ACE Studio · StepFun",
+      "license": "MIT",
+      "homepage": "https://huggingface.co/ACE-Step/acestep-v15-xl-turbo-diffusers",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "Text-to-music model with prompted audio editing (Audio Studio → Music). SceneWorks downloads the upstream MIT weights on first use from ACE-Step/acestep-v15-xl-turbo-diffusers and runs them natively (Candle) on every platform. Ships its own Oobleck VAE (no Stability-licensed component). Redistributed with attribution as permitted by MIT. Permissive — commercial use allowed.",
+      "documents": [
+        { "label": "MIT License", "key": "acestep-v15-turbo-mit" }
+      ]
+    },
+    {
+      "id": "openvoice-v2",
+      "name": "OpenVoice V2 (Voice Conversion)",
+      "publisher": "MyShell.ai",
+      "license": "MIT",
+      "homepage": "https://huggingface.co/myshell-ai/OpenVoiceV2",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "Tone-color voice-conversion model (Audio Studio → VoiceClone). SceneWorks downloads the upstream MIT converter weights on first use from myshell-ai/OpenVoiceV2 and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by MIT. Permissive — commercial use allowed.",
+      "documents": [
+        { "label": "MIT License", "key": "openvoice-v2-mit" }
+      ]
+    },
+    {
+      "id": "chatterbox-ve",
+      "name": "Chatterbox Voice Encoder (Voice Clone)",
+      "publisher": "Resemble AI",
+      "license": "MIT",
+      "homepage": "https://huggingface.co/ResembleAI/chatterbox",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "Speaker voice-identity encoder for cloned-voice conditioning (Audio Studio → VoiceClone). SceneWorks downloads the upstream MIT ve.safetensors weights on first use from ResembleAI/chatterbox and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by MIT. Permissive — commercial use allowed.",
+      "documents": [
+        { "label": "MIT License", "key": "chatterbox-ve-mit" }
+      ]
     }
   ]
 }

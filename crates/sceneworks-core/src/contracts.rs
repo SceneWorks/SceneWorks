@@ -597,6 +597,7 @@ string_enum! {
     pub enum ModelKind {
         Image => "image",
         Video => "video",
+        Audio => "audio",
         Utility => "utility",
     }
 }

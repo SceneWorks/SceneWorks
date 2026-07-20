@@ -22,6 +22,14 @@ import wanI2vA14bApache from "../../../desktop/licenses/wan2.2-i2v-a14b/Apache-2
 import wanT2vA14bApache from "../../../desktop/licenses/wan2.2-t2v-a14b/Apache-2.0.txt?raw";
 import ltxLicense from "../../../desktop/licenses/ltx-2.3/LTX-2-Community-License.txt?raw";
 import ltxGemma from "../../../desktop/licenses/ltx-2.3/Gemma-Terms.txt?raw";
+// Audio model weights (epic 13400, sc-13402). All permissive (Apache-2.0 / MIT) —
+// downloaded on first use from the upstream Hugging Face repos and run natively
+// (Candle) on every platform.
+import kokoroApache from "../../../desktop/licenses/kokoro-82m/Apache-2.0.txt?raw";
+import mossApache from "../../../desktop/licenses/moss-soundeffect-v2/Apache-2.0.txt?raw";
+import acestepMit from "../../../desktop/licenses/acestep-v15-turbo/MIT.txt?raw";
+import openvoiceMit from "../../../desktop/licenses/openvoice-v2/MIT.txt?raw";
+import chatterboxMit from "../../../desktop/licenses/chatterbox-ve/MIT.txt?raw";
 
 // Maps a manifest document `key` to its imported text. New components: add the
 // files under apps/desktop/licenses/<id>/, list them in manifest.json, and wire
@@ -37,6 +45,11 @@ const DOCUMENT_TEXT = {
   "wan2.2-t2v-a14b-apache": wanT2vA14bApache,
   "ltx-2.3-license": ltxLicense,
   "ltx-2.3-gemma": ltxGemma,
+  "kokoro-82m-apache": kokoroApache,
+  "moss-soundeffect-v2-apache": mossApache,
+  "acestep-v15-turbo-mit": acestepMit,
+  "openvoice-v2-mit": openvoiceMit,
+  "chatterbox-ve-mit": chatterboxMit,
 };
 
 // Resolve each component's document keys to its actual text once, at module load.

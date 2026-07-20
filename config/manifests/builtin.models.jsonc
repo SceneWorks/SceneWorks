@@ -8214,6 +8214,534 @@
           ]
         }
       }
+    },
+    {
+      "id": "kokoro_82m",
+      "name": "Kokoro 82M (Speech)",
+      "family": "kokoro",
+      "type": "audio",
+      "recommended": true,
+      "macOnly": false,
+      "audio": {
+        "voices": [
+          {
+            "id": "af_alloy",
+            "label": "Alloy",
+            "gender": "female",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "af_aoede",
+            "label": "Aoede",
+            "gender": "female",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "af_bella",
+            "label": "Bella",
+            "gender": "female",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "af_heart",
+            "label": "Heart",
+            "gender": "female",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "af_jessica",
+            "label": "Jessica",
+            "gender": "female",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "af_kore",
+            "label": "Kore",
+            "gender": "female",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "af_nicole",
+            "label": "Nicole",
+            "gender": "female",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "af_nova",
+            "label": "Nova",
+            "gender": "female",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "af_river",
+            "label": "River",
+            "gender": "female",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "af_sarah",
+            "label": "Sarah",
+            "gender": "female",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "af_sky",
+            "label": "Sky",
+            "gender": "female",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "am_adam",
+            "label": "Adam",
+            "gender": "male",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "am_echo",
+            "label": "Echo",
+            "gender": "male",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "am_eric",
+            "label": "Eric",
+            "gender": "male",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "am_fenrir",
+            "label": "Fenrir",
+            "gender": "male",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "am_liam",
+            "label": "Liam",
+            "gender": "male",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "am_michael",
+            "label": "Michael",
+            "gender": "male",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "am_onyx",
+            "label": "Onyx",
+            "gender": "male",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "am_puck",
+            "label": "Puck",
+            "gender": "male",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "am_santa",
+            "label": "Santa",
+            "gender": "male",
+            "accent": "american",
+            "language": "en-US"
+          },
+          {
+            "id": "bf_alice",
+            "label": "Alice",
+            "gender": "female",
+            "accent": "british",
+            "language": "en-GB"
+          },
+          {
+            "id": "bf_emma",
+            "label": "Emma",
+            "gender": "female",
+            "accent": "british",
+            "language": "en-GB"
+          },
+          {
+            "id": "bf_isabella",
+            "label": "Isabella",
+            "gender": "female",
+            "accent": "british",
+            "language": "en-GB"
+          },
+          {
+            "id": "bf_lily",
+            "label": "Lily",
+            "gender": "female",
+            "accent": "british",
+            "language": "en-GB"
+          },
+          {
+            "id": "bm_daniel",
+            "label": "Daniel",
+            "gender": "male",
+            "accent": "british",
+            "language": "en-GB"
+          },
+          {
+            "id": "bm_fable",
+            "label": "Fable",
+            "gender": "male",
+            "accent": "british",
+            "language": "en-GB"
+          },
+          {
+            "id": "bm_george",
+            "label": "George",
+            "gender": "male",
+            "accent": "british",
+            "language": "en-GB"
+          },
+          {
+            "id": "bm_lewis",
+            "label": "Lewis",
+            "gender": "male",
+            "accent": "british",
+            "language": "en-GB"
+          }
+        ],
+        "languages": [
+          "en-US",
+          "en-GB"
+        ],
+        "sampleRates": [
+          24000
+        ],
+        "maxDurationSecs": 30,
+        "supportsMultiSpeaker": false
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "hexgrad/Kokoro-82M",
+          "files": [
+            "config.json",
+            "kokoro-v1_0.pth",
+            "voices/*"
+          ],
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "estimatedSizeBytes": 327214577,
+          "footprint": {
+            "diskSizeBytes": 327214577
+          }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/hexgrad/Kokoro-82M"
+      },
+      "candle": {
+        "minMemoryGb": 2,
+        "measured": false
+      },
+      "licenseUrl": "https://huggingface.co/hexgrad/Kokoro-82M",
+      "ui": {
+        "label": "Kokoro 82M",
+        "description": "Kokoro-82M text-to-speech (StyleTTS2 lineage) — the recommended Speech model. 28 English voices (American + British), 24 kHz mono, up to ~30 s per clip. Candle-native on every platform. Apache-2.0.",
+        "recommendedFor": [
+          "speech"
+        ],
+        "promptGuide": {
+          "title": "Kokoro 82M Speech Guide",
+          "path": "/prompt-guides/kokoro-82m.md",
+          "sources": [
+            {
+              "label": "Kokoro-82M (Hugging Face)",
+              "url": "https://huggingface.co/hexgrad/Kokoro-82M"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "moss_sfx_v2",
+      "name": "MOSS SoundEffect v2 (SFX)",
+      "family": "moss_soundeffect",
+      "type": "audio",
+      "macOnly": false,
+      "audio": {
+        "languages": [
+          "en",
+          "zh"
+        ],
+        "sampleRates": [
+          48000
+        ],
+        "maxDurationSecs": 30,
+        "supportsMultiSpeaker": false
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+          "files": [
+            "model_index.json",
+            "scheduler/*",
+            "transformer/*",
+            "text_encoder/*",
+            "tokenizer/*",
+            "vae/*"
+          ],
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "estimatedSizeBytes": 11230164877,
+          "footprint": {
+            "diskSizeBytes": 11230164877
+          }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-SoundEffect-v2.0"
+      },
+      "candle": {
+        "minMemoryGb": 12,
+        "measured": false
+      },
+      "licenseUrl": "https://huggingface.co/OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+      "ui": {
+        "label": "MOSS SoundEffect v2",
+        "description": "MOSS-SoundEffect v2.0 text-to-audio flow-matching model for sound effects and ambience (Qwen3-1.7B text encoder + 1.3B DiT + DAC VAE). 48 kHz mono, up to 30 s with 0.1 s duration control. Candle-native on every platform. Apache-2.0.",
+        "recommendedFor": [
+          "sound_effect"
+        ],
+        "promptGuide": {
+          "title": "MOSS SoundEffect v2 Guide",
+          "path": "/prompt-guides/moss-soundeffect-v2.md",
+          "sources": [
+            {
+              "label": "MOSS-SoundEffect-v2.0 (Hugging Face)",
+              "url": "https://huggingface.co/OpenMOSS-Team/MOSS-SoundEffect-v2.0"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "acestep_v15_turbo",
+      "name": "ACE-Step v1.5 XL Turbo (Music)",
+      "family": "acestep",
+      "type": "audio",
+      "macOnly": false,
+      "audio": {
+        "languages": [
+          "en",
+          "zh",
+          "ja",
+          "ko",
+          "fr",
+          "de",
+          "es",
+          "it",
+          "pt",
+          "ru"
+        ],
+        "sampleRates": [
+          48000
+        ],
+        "maxDurationSecs": 600,
+        "editModes": [
+          "inpaint",
+          "repaint",
+          "extend"
+        ],
+        "conditioning": [
+          "AudioEdit"
+        ],
+        "supportsMultiSpeaker": false
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+          "files": [
+            "model_index.json",
+            "scheduler/*",
+            "transformer/*",
+            "condition_encoder/*",
+            "text_encoder/*",
+            "tokenizer/*",
+            "vae/*",
+            "silence_latent.pt"
+          ],
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "estimatedSizeBytes": 11100883579,
+          "footprint": {
+            "diskSizeBytes": 11100883579
+          }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/ACE-Step/acestep-v15-xl-turbo-diffusers"
+      },
+      "candle": {
+        "minMemoryGb": 12,
+        "measured": false
+      },
+      "licenseUrl": "https://huggingface.co/ACE-Step/acestep-v15-xl-turbo-diffusers",
+      "ui": {
+        "label": "ACE-Step v1.5 XL Turbo",
+        "description": "ACE-Step v1.5 XL Turbo text-to-music model (guidance-distilled turbo checkpoint, ships its own Oobleck VAE). 48 kHz stereo, up to 10 minutes, with prompted audio editing (inpaint / repaint / extend). Candle-native on every platform. MIT.",
+        "recommendedFor": [
+          "music"
+        ],
+        "promptGuide": {
+          "title": "ACE-Step v1.5 XL Turbo Music Guide",
+          "path": "/prompt-guides/acestep-v15-turbo.md",
+          "sources": [
+            {
+              "label": "ACE-Step v1.5 XL Turbo (Hugging Face)",
+              "url": "https://huggingface.co/ACE-Step/acestep-v15-xl-turbo-diffusers"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "openvoice_v2",
+      "name": "OpenVoice V2 (Voice Conversion)",
+      "family": "openvoice",
+      "type": "audio",
+      "macOnly": false,
+      "audio": {
+        "sampleRates": [
+          22050
+        ],
+        "conditioning": [
+          "ReferenceAudio"
+        ],
+        "supportsMultiSpeaker": false
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "myshell-ai/OpenVoiceV2",
+          "files": [
+            "converter/config.json",
+            "converter/checkpoint.pth"
+          ],
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "estimatedSizeBytes": 131321328,
+          "footprint": {
+            "diskSizeBytes": 131321328
+          }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/myshell-ai/OpenVoiceV2"
+      },
+      "candle": {
+        "minMemoryGb": 2,
+        "measured": false
+      },
+      "licenseUrl": "https://huggingface.co/myshell-ai/OpenVoiceV2",
+      "ui": {
+        "label": "OpenVoice V2",
+        "description": "OpenVoice V2 tone-color voice conversion (VITS-family flow converter) — transfers a target voice's timbre onto source speech from a short reference clip while preserving content and prosody. 22.05 kHz output. Candle-native on every platform. MIT.",
+        "recommendedFor": [
+          "voice_clone"
+        ],
+        "promptGuide": {
+          "title": "OpenVoice V2 Voice Conversion Guide",
+          "path": "/prompt-guides/openvoice-v2.md",
+          "sources": [
+            {
+              "label": "OpenVoice V2 (Hugging Face)",
+              "url": "https://huggingface.co/myshell-ai/OpenVoiceV2"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "chatterbox_ve",
+      "name": "Chatterbox Voice Encoder (Voice Clone)",
+      "family": "voice",
+      "type": "audio",
+      "macOnly": false,
+      "audio": {
+        "conditioning": [
+          "VoiceEmbedding"
+        ],
+        "supportsMultiSpeaker": false
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "ResembleAI/chatterbox",
+          "files": [
+            "ve.safetensors"
+          ],
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "estimatedSizeBytes": 5695784,
+          "footprint": {
+            "diskSizeBytes": 5695784
+          }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/ResembleAI/chatterbox"
+      },
+      "candle": {
+        "minMemoryGb": 1,
+        "measured": false
+      },
+      "licenseUrl": "https://huggingface.co/ResembleAI/chatterbox",
+      "ui": {
+        "label": "Chatterbox Voice Encoder",
+        "description": "Chatterbox (Resemble AI) GE2E-style speaker voice encoder — maps a few seconds of reference audio to a 256-dim voice-identity embedding for cloned-voice conditioning. 16 kHz reference input; ~5.7 MB. Candle-native on every platform. MIT.",
+        "recommendedFor": [
+          "voice_clone"
+        ],
+        "promptGuide": {
+          "title": "Chatterbox Voice Encoder Guide",
+          "path": "/prompt-guides/chatterbox-ve.md",
+          "sources": [
+            {
+              "label": "Chatterbox (Hugging Face)",
+              "url": "https://huggingface.co/ResembleAI/chatterbox"
+            }
+          ]
+        }
+      }
     }
   ]
 }

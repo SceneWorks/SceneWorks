@@ -184,6 +184,65 @@ mod tests {
     }
 
     #[test]
+    fn ships_the_seeded_audio_models_with_populated_capability_blocks() {
+        // sc-13402 (epic 13400): the shipped catalog the API serves carries the five live
+        // audio providers as first-class `type: "audio"` entries, each with a populated
+        // `audio` capability sub-block, and `audio` parses as a first-class ModelKind (not
+        // the Unknown fallback) so the type is accepted end to end.
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let models = manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array");
+
+        let audio_ids = [
+            "kokoro_82m",
+            "moss_sfx_v2",
+            "acestep_v15_turbo",
+            "openvoice_v2",
+            "chatterbox_ve",
+        ];
+        for id in audio_ids {
+            let entry = models
+                .iter()
+                .find(|m| m["id"].as_str() == Some(id))
+                .unwrap_or_else(|| panic!("seeded audio model {id} missing from the catalog"));
+            let ty = entry["type"].as_str().unwrap_or_default();
+            assert_eq!(ty, "audio", "{id} must be type:audio");
+            // `audio` is a first-class ModelKind, not degraded to Unknown().
+            let kind: crate::contracts::ModelKind =
+                serde_json::from_value(entry["type"].clone()).expect("type deserializes");
+            assert_eq!(
+                kind,
+                crate::contracts::ModelKind::Audio,
+                "{id}: `audio` must parse as ModelKind::Audio, not Unknown"
+            );
+            let audio = entry["audio"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{id} must carry a populated `audio` block"));
+            assert!(!audio.is_empty(), "{id}.audio must not be empty");
+            // Installable/downloadable like image/video models.
+            assert!(
+                entry["downloads"][0]["repo"].as_str().is_some(),
+                "{id} must define a download repo"
+            );
+        }
+
+        // Kokoro is the recommended Speech model and advertises its 28 shipped voices.
+        let kokoro = models
+            .iter()
+            .find(|m| m["id"].as_str() == Some("kokoro_82m"))
+            .expect("kokoro present");
+        assert_eq!(kokoro["recommended"].as_bool(), Some(true));
+        assert_eq!(
+            kokoro["audio"]["voices"].as_array().map(Vec::len),
+            Some(28),
+            "Kokoro advertises its 28 shipped English voices"
+        );
+    }
+
+    #[test]
     fn seeds_every_manifest_into_a_fresh_dir() {
         let temp = tempfile::tempdir().expect("temp dir");
         seed_builtin_manifests(temp.path(), SeedMode::IfMissing).expect("seeding succeeds");

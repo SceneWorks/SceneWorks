@@ -3,7 +3,7 @@ use super::*;
 use sceneworks_core::credentials::normalize_host;
 use sceneworks_core::lora_family::is_hidden_file;
 
-const ALLOWED_MODEL_TYPES: &[&str] = &["image", "video", "utility"];
+const ALLOWED_MODEL_TYPES: &[&str] = &["image", "video", "audio", "utility"];
 const MODEL_SIZE_CACHE_LIMIT: usize = 64;
 // Failed estimates (offline, rate-limited, or size-less repo metadata) are
 // negative-cached so a huggingface.co outage costs one 8s timeout per repo per
