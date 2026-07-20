@@ -18,7 +18,8 @@
 use super::*;
 
 use gen_core::{
-    AudioParams, CancelFlag, GenerationOutput, GenerationRequest, LoadSpec, Progress, WeightsSource,
+    AudioEditMode, AudioParams, CancelFlag, Conditioning, GenerationOutput, GenerationRequest,
+    LoadSpec, Progress, TimeRegion, WeightsSource,
 };
 
 use crate::video_jobs::{write_wav_pcm16, AudioTrack};
@@ -38,6 +39,35 @@ struct AudioRequest {
     voice: Option<String>,
     language: Option<String>,
     target_duration_secs: Option<f32>,
+    /// CFG guidance scale for diffusion-audio models (Sound FX / MOSS-SoundEffect). Rides the
+    /// top-level `GenerationRequest::guidance` — NOT `AudioParams` (sc-13409). `None` ⇒ the model's
+    /// sampler default.
+    guidance: Option<f32>,
+    /// Solver step count for diffusion-audio models. Rides the top-level `GenerationRequest::steps`.
+    /// `None` ⇒ the model's sampler default.
+    steps: Option<u32>,
+    /// Negative prompt for music models that advertise it. Rides the top-level
+    /// `GenerationRequest::negative_prompt` (sc-13410). `None` ⇒ unconditional. The guidance-distilled
+    /// ACE-Step turbo advertises no support, so the studio never sends one to it.
+    negative_prompt: Option<String>,
+    /// Musical tempo (BPM) — rides `AudioParams::bpm` (music models). `None` ⇒ the model's own tempo.
+    bpm: Option<f32>,
+    /// Musical key (e.g. `"C minor"`) — rides `AudioParams::musical_key`. `None` ⇒ the model's own.
+    musical_key: Option<String>,
+    /// Lyrics — rides `AudioParams::lyrics` (empty ⇒ instrumental).
+    lyrics: Option<String>,
+    /// Extend/edit source track asset id — resolved to a WAV and built into a
+    /// `Conditioning::AudioEdit` (sc-13410). `None` ⇒ plain text-to-music.
+    source_audio_asset_id: Option<String>,
+    /// Edit operation for the source track (`inpaint` / `repaint` / `extend` / `cover`).
+    edit_mode: Option<String>,
+    /// Edit-region start (seconds) — inpaint/repaint window start; for `extend` the worker defaults it
+    /// to the source clip's own length.
+    edit_region_start_secs: Option<f32>,
+    /// Edit-region end (seconds) — inpaint/repaint window end, OR (for `extend`) the new total length.
+    edit_region_end_secs: Option<f32>,
+    /// Edit strength (0..=1). `None` ⇒ the model default.
+    edit_strength: Option<f32>,
     seed: Option<i64>,
     model_manifest_entry: Value,
 }
@@ -64,6 +94,42 @@ impl AudioRequest {
             language: string("language"),
             target_duration_secs: payload
                 .get("targetDurationSecs")
+                .and_then(Value::as_f64)
+                .map(|value| value as f32),
+            guidance: payload
+                .get("guidance")
+                .and_then(Value::as_f64)
+                .map(|value| value as f32),
+            steps: payload
+                .get("steps")
+                .and_then(Value::as_u64)
+                .map(|value| value as u32),
+            negative_prompt: string("negativePrompt"),
+            bpm: payload
+                .get("bpm")
+                .and_then(Value::as_f64)
+                .map(|value| value as f32),
+            musical_key: string("musicalKey"),
+            // Lyrics are free-form and may legitimately be multi-line/whitespace-led ([verse] tags),
+            // so read them verbatim (unlike the trimmed `string()` helper) — only an entirely-absent
+            // key ⇒ None (instrumental).
+            lyrics: payload
+                .get("lyrics")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned),
+            source_audio_asset_id: string("sourceAudioAssetId"),
+            edit_mode: string("editMode").map(|mode| mode.to_lowercase()),
+            edit_region_start_secs: payload
+                .get("editRegionStartSecs")
+                .and_then(Value::as_f64)
+                .map(|value| value as f32),
+            edit_region_end_secs: payload
+                .get("editRegionEndSecs")
+                .and_then(Value::as_f64)
+                .map(|value| value as f32),
+            edit_strength: payload
+                .get("editStrength")
                 .and_then(Value::as_f64)
                 .map(|value| value as f32),
             seed: payload.get("seed").and_then(Value::as_i64),
@@ -229,6 +295,11 @@ pub(crate) async fn run_audio_generate_job(
 
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
     let model_dir = resolve_audio_model_dir(settings, &request)?;
+    // Extend/edit SOURCE band (sc-13410): resolve + decode the source track and build the
+    // `Conditioning::AudioEdit` here (in async, where the project path + store are in scope), then move
+    // it into the blocking synthesis. `None` ⇒ plain text-to-music. The per-model gates (edit mode ∈
+    // advertised, region inside the clip, 48 kHz source) run in the generator's `validate` at synthesis.
+    let audio_edit = build_audio_edit(settings, &request, &project_path)?;
 
     update_job(
         api,
@@ -249,7 +320,8 @@ pub(crate) async fn run_audio_generate_job(
     // while it runs so a long synthesis (a cold pipeline build, a 30 s clip, or a slow host) is never
     // flagged stale and marked `interrupted` mid-flight. Mirrors the video path's interval keepalive
     // for the no-progress cold-load phase.
-    let track = run_audio_synthesis(api, settings, job, backend, &request, model_dir).await?;
+    let track =
+        run_audio_synthesis(api, settings, job, backend, &request, model_dir, audio_edit).await?;
 
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
     update_job(
@@ -319,6 +391,7 @@ const AUDIO_KEEPALIVE_SECS: u64 = 15;
 /// Load the audio generator and run one synthesis on a blocking thread, emitting periodic keepalive
 /// heartbeats + progress updates while it runs. Returns the engine [`AudioTrack`] (`gen_core`'s) for
 /// the caller to write + register.
+#[allow(clippy::too_many_arguments)]
 async fn run_audio_synthesis(
     api: &ApiClient,
     settings: &Settings,
@@ -326,12 +399,28 @@ async fn run_audio_synthesis(
     backend: &str,
     request: &AudioRequest,
     model_dir: PathBuf,
+    audio_edit: Option<Conditioning>,
 ) -> WorkerResult<gen_core::AudioTrack> {
     let model_id = request.model.clone();
     let prompt = request.prompt.clone();
     let voice = request.voice.clone();
     let language = request.language.as_deref().map(normalize_audio_language);
     let target_duration = request.target_duration_secs;
+    // Diffusion-audio sampling knobs (Sound FX / MOSS-SoundEffect, sc-13409). These live on the
+    // top-level GenerationRequest — the flow-matching pipeline reads `req.guidance` (CFG scale) and
+    // `req.steps`, not `AudioParams`. `None` ⇒ the generator's own sampler default; the shared
+    // gen-core floor range-checks any value we pass. A TTS model (Kokoro) ignores them entirely, so
+    // Speech jobs — which never carry them — are unaffected.
+    let guidance = request.guidance;
+    let steps = request.steps;
+    // Music describe-the-music sub-block (ACE-Step, sc-13410). BPM/key/lyrics ride the AudioParams
+    // music fields; negative_prompt rides the top-level request. A model that doesn't consume one
+    // ignores it; a model that advertises no negative-prompt support rejects a supplied one at the
+    // gen-core floor (the studio only sends one to a model that advertises support).
+    let negative_prompt = request.negative_prompt.clone();
+    let bpm = request.bpm;
+    let musical_key = request.musical_key.clone();
+    let lyrics = request.lyrics.clone();
     let seed = request.seed.map(|seed| seed as u64);
     let handle = tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
         let spec = LoadSpec::new(WeightsSource::Dir(model_dir));
@@ -339,13 +428,22 @@ async fn run_audio_synthesis(
             .map_err(|error| crate::classify_engine_error("audio model load failed", error))?;
         let req = GenerationRequest {
             prompt,
+            negative_prompt,
             seed,
+            steps,
+            guidance,
             audio: Some(AudioParams {
                 voice,
                 language,
                 target_duration,
+                bpm,
+                musical_key,
+                lyrics,
                 ..Default::default()
             }),
+            // Extend/edit source-audio conditioning (Conditioning::AudioEdit), when a source band was
+            // supplied; empty for plain text-to-music.
+            conditioning: audio_edit.into_iter().collect(),
             cancel: CancelFlag::new(),
             ..Default::default()
         };
@@ -399,6 +497,172 @@ async fn run_audio_synthesis(
     }
 }
 
+/// Parse an edit-mode token (`inpaint` / `repaint` / `extend` / `cover`) into the gen-core
+/// [`AudioEditMode`]. The API already rejects an unknown token up front; this is the worker-side
+/// mirror so a raw-enqueued job still fails cleanly rather than mis-routing.
+fn parse_audio_edit_mode(mode: &str) -> WorkerResult<AudioEditMode> {
+    match mode {
+        "inpaint" => Ok(AudioEditMode::Inpaint),
+        "repaint" => Ok(AudioEditMode::Repaint),
+        "extend" => Ok(AudioEditMode::Extend),
+        "cover" => Ok(AudioEditMode::Cover),
+        other => Err(WorkerError::InvalidPayload(format!(
+            "unknown audio edit mode {other:?} (expected inpaint / repaint / extend / cover)"
+        ))),
+    }
+}
+
+/// Build the prompted source-audio-edit conditioning (sc-13410) from the request's source band, or
+/// `None` for plain text-to-music. Resolves the source track asset to its WAV (guarded through
+/// `resolve_clip_media_path`, the same project-scoped resolver the video source-clip path uses),
+/// decodes it into a [`gen_core::AudioTrack`], and assembles the [`Conditioning::AudioEdit`] the
+/// ACE-Step generator consumes: the source clip + the edit mode + a time region.
+///
+/// Region policy mirrors the [`AudioEditMode`] contract: `Extend` begins the appended tail at the
+/// source clip's own length (unless the request overrides `start`) and reads `end` as the new total
+/// length; `Inpaint`/`Repaint` carry the request's bounded window (`None` ⇒ the generator's own
+/// default region check fires); `Cover` is whole-clip (no region). The per-model gates (mode ∈
+/// advertised `audio_edit_modes`, region inside the clip duration, 48 kHz source) run in the
+/// generator's `validate` at synthesis, so a bad region surfaces as a clear engine error there.
+fn build_audio_edit(
+    settings: &Settings,
+    request: &AudioRequest,
+    project_path: &Path,
+) -> WorkerResult<Option<Conditioning>> {
+    let Some(source_id) = request
+        .source_audio_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let mode = request.edit_mode.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "an audio edit source was supplied without an editMode.".to_owned(),
+        )
+    })?;
+    let mode = parse_audio_edit_mode(mode)?;
+    let source_path = crate::video_jobs::resolve_clip_media_path(
+        settings,
+        &request.project_id,
+        source_id,
+        project_path,
+    )?;
+    let track = read_wav_pcm16(&source_path)?;
+    // The clip's running length in seconds (interleaved: total samples / (rate · channels)).
+    let src_secs = track.samples.len() as f32
+        / (track.sample_rate.max(1) as f32 * track.channels.max(1) as f32);
+    let region = audio_edit_region(
+        mode,
+        src_secs,
+        request.edit_region_start_secs,
+        request.edit_region_end_secs,
+    );
+    Ok(Some(Conditioning::AudioEdit {
+        audio: track,
+        mode,
+        region,
+        strength: request.edit_strength,
+    }))
+}
+
+/// The edit-region policy (sc-13410), factored out of [`build_audio_edit`] so it is unit-testable
+/// without a project store or a real clip. `Extend` begins the appended tail at the source clip's own
+/// length when the request omits a start, and reads the request `end` as the new total length;
+/// `Inpaint`/`Repaint` carry the request's bounded window (a missing start ⇒ `None`, so the
+/// generator's own "region required" check fires); `Cover` is whole-clip.
+fn audio_edit_region(
+    mode: AudioEditMode,
+    src_secs: f32,
+    start: Option<f32>,
+    end: Option<f32>,
+) -> Option<TimeRegion> {
+    match mode {
+        AudioEditMode::Extend => Some(TimeRegion {
+            start_secs: start.unwrap_or(src_secs),
+            end_secs: end,
+        }),
+        AudioEditMode::Inpaint | AudioEditMode::Repaint => start.map(|start_secs| TimeRegion {
+            start_secs,
+            end_secs: end,
+        }),
+        AudioEditMode::Cover => None,
+    }
+}
+
+/// Decode a canonical PCM-16 WAV (the format both `write_wav_pcm16` writers emit) into a
+/// [`gen_core::AudioTrack`] — the source-track reader for the extend/edit path (sc-13410). Iterates
+/// the RIFF chunk list so a file carrying extra chunks (LIST/fact) still reads, requires PCM
+/// (`audio_format == 1`) 16-bit samples, and converts interleaved `i16` to `f32` in `[-1, 1)`.
+/// Non-PCM / non-16-bit inputs are a clear `Unsupported` rather than a silent mis-decode.
+fn read_wav_pcm16(path: &Path) -> WorkerResult<gen_core::AudioTrack> {
+    let bytes = std::fs::read(path)?;
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err(WorkerError::InvalidPayload(format!(
+            "source audio {} is not a RIFF/WAVE file",
+            path.display()
+        )));
+    }
+    let le16 = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
+    let le32 = |b: &[u8], o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+    let mut pos = 12usize;
+    let mut fmt: Option<(u16, u16, u32, u16)> = None; // (audio_format, channels, sample_rate, bits)
+    let mut data: Option<(usize, usize)> = None; // (start, end)
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size = le32(&bytes, pos + 4) as usize;
+        let body = pos + 8;
+        let end = body.saturating_add(size).min(bytes.len());
+        if id == b"fmt " && size >= 16 && body + 16 <= bytes.len() {
+            fmt = Some((
+                le16(&bytes, body),
+                le16(&bytes, body + 2),
+                le32(&bytes, body + 4),
+                le16(&bytes, body + 14),
+            ));
+        } else if id == b"data" {
+            data = Some((body, end));
+        }
+        // RIFF chunks are word-aligned: an odd body is followed by a pad byte.
+        pos = body + size + (size & 1);
+    }
+    let (audio_format, channels, sample_rate, bits) = fmt.ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("source audio {} has no fmt chunk", path.display()))
+    })?;
+    if audio_format != 1 || bits != 16 {
+        return Err(WorkerError::InvalidPayload(format!(
+            "source audio {} must be PCM 16-bit (got format {audio_format}, {bits}-bit)",
+            path.display()
+        )));
+    }
+    if channels == 0 || sample_rate == 0 {
+        return Err(WorkerError::InvalidPayload(format!(
+            "source audio {} declares {channels} channels @ {sample_rate} Hz",
+            path.display()
+        )));
+    }
+    let (start, end) = data.ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("source audio {} has no data chunk", path.display()))
+    })?;
+    let samples: Vec<f32> = bytes[start..end]
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32_768.0)
+        .collect();
+    if samples.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "source audio {} decoded to zero samples",
+            path.display()
+        )));
+    }
+    Ok(gen_core::AudioTrack {
+        samples,
+        sample_rate,
+        channels,
+        stems: Vec::new(),
+    })
+}
+
 /// The `type: "audio"` asset fact the API persists into a sidecar (via
 /// `project_store::build_audio_sidecar_parts`) — the audio twin of `video_asset_fact`. Carries the
 /// MEASURED clip facts (duration / sampleRate / channels off the produced track) plus the REQUESTED
@@ -424,6 +688,27 @@ fn audio_asset_fact(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(AUDIO_ADAPTER_FALLBACK);
+    // Build the `rawAdapterSettings` sub-object separately (not inline in the outer `json!`): the audio
+    // knob set has grown wide enough (TTS + SFX + the sc-13410 music/edit fields) that a single nested
+    // `json!` literal blows past the macro recursion limit. A separate expansion keeps each within it.
+    let raw_adapter_settings = json!({
+        "model": request.model,
+        "voice": request.voice,
+        "language": request.language,
+        "targetDurationSecs": request.target_duration_secs,
+        "guidance": request.guidance,
+        "steps": request.steps,
+        "negativePrompt": request.negative_prompt,
+        "bpm": request.bpm,
+        "musicalKey": request.musical_key,
+        "lyrics": request.lyrics,
+        "sourceAudioAssetId": request.source_audio_asset_id,
+        "editMode": request.edit_mode,
+        "editRegionStartSecs": request.edit_region_start_secs,
+        "editRegionEndSecs": request.edit_region_end_secs,
+        "editStrength": request.edit_strength,
+        "sampleRate": sample_rate,
+    });
     json!({
         "type": "audio",
         "assetId": plan.asset_id,
@@ -441,18 +726,27 @@ fn audio_asset_fact(
         "adapter": adapter,
         "prompt": request.prompt,
         // REQUESTED knobs (the replay record). `null` for an omitted voice/language/duration — the
-        // studio falls back to the model's own defaults, exactly as the video recipe does.
+        // studio falls back to the model's own defaults, exactly as the video recipe does. `guidance`
+        // / `steps` are the Sound FX (diffusion) sampling knobs; `null` for a TTS run that carries none.
+        // The music sub-block (bpm / musicalKey / lyrics / negativePrompt) and the extend/edit source
+        // band (sourceAudioAssetId / editMode / editRegion* / editStrength) round-trip for replay too —
+        // `null` on a run that carries none (sc-13410).
         "voice": request.voice,
         "language": request.language,
         "targetDurationSecs": request.target_duration_secs,
+        "guidance": request.guidance,
+        "steps": request.steps,
+        "negativePrompt": request.negative_prompt,
+        "bpm": request.bpm,
+        "musicalKey": request.musical_key,
+        "lyrics": request.lyrics,
+        "sourceAudioAssetId": request.source_audio_asset_id,
+        "editMode": request.edit_mode,
+        "editRegionStartSecs": request.edit_region_start_secs,
+        "editRegionEndSecs": request.edit_region_end_secs,
+        "editStrength": request.edit_strength,
         "seed": request.seed,
-        "rawAdapterSettings": {
-            "model": request.model,
-            "voice": request.voice,
-            "language": request.language,
-            "targetDurationSecs": request.target_duration_secs,
-            "sampleRate": sample_rate,
-        },
+        "rawAdapterSettings": raw_adapter_settings,
     })
 }
 
@@ -549,6 +843,33 @@ mod tests {
         assert_eq!(request.target_duration_secs, Some(4.5));
         assert_eq!(request.seed, Some(7));
         assert_eq!(request.family(), "kokoro");
+        // A TTS payload carries no diffusion sampling knobs → None (the generator's own defaults).
+        assert_eq!(request.guidance, None);
+        assert_eq!(request.steps, None);
+    }
+
+    #[test]
+    fn from_payload_reads_the_sfx_sampling_knobs() {
+        // The Sound FX path (MOSS-SoundEffect, sc-13409) additionally carries guidance (CFG scale) +
+        // steps, which the worker maps onto the top-level GenerationRequest — not AudioParams.
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "moss_sfx_v2",
+            "prompt": "a heavy wooden door creaking open",
+            "language": "en",
+            "targetDurationSecs": 3.0,
+            "guidance": 6.5,
+            "steps": 60,
+            "seed": 11,
+        })));
+        assert_eq!(request.model, "moss_sfx_v2");
+        assert_eq!(request.prompt, "a heavy wooden door creaking open");
+        assert_eq!(request.language.as_deref(), Some("en"));
+        assert_eq!(request.target_duration_secs, Some(3.0));
+        assert_eq!(request.guidance, Some(6.5));
+        assert_eq!(request.steps, Some(60));
+        assert_eq!(request.seed, Some(11));
+        // SFX carries no voice — MOSS advertises no voice surface.
+        assert_eq!(request.voice, None);
     }
 
     #[test]
@@ -607,6 +928,9 @@ mod tests {
         assert_eq!(fact["seed"], 42);
         assert_eq!(fact["model"], "kokoro_82m");
         assert_eq!(fact["adapter"], "kokoro");
+        // A TTS run carries no diffusion sampling knobs → null in the replay record.
+        assert!(fact["guidance"].is_null());
+        assert!(fact["steps"].is_null());
         assert!(fact["mediaPath"]
             .as_str()
             .is_some_and(|path| path.starts_with("assets/audios/") && path.ends_with(".wav")));
@@ -615,5 +939,201 @@ mod tests {
         assert_eq!(result["expectedCount"], 1);
         assert_eq!(result["assetWrites"].as_array().map(Vec::len), Some(1));
         assert_eq!(result["assetWrites"][0]["type"], "audio");
+    }
+
+    #[test]
+    fn from_payload_reads_the_music_and_edit_fields() {
+        // The Music path (ACE-Step, sc-13410) carries the describe-the-music sub-block (bpm / key /
+        // lyrics), a negative prompt, and the extend/edit source band (source id + mode + region +
+        // strength). All ride verbatim onto the AudioRequest.
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "acestep_v15_turbo",
+            "prompt": "gentle lofi piano loop",
+            "language": "en",
+            "targetDurationSecs": 8.0,
+            "steps": 8,
+            "bpm": 92.0,
+            "musicalKey": "C minor",
+            "lyrics": "  [verse] la la la  ",
+            "negativePrompt": "harsh distortion",
+            "sourceAudioAssetId": "audio-src-1",
+            "editMode": "Extend",
+            "editRegionStartSecs": 3.0,
+            "editRegionEndSecs": 20.0,
+            "editStrength": 0.5,
+            "seed": 5,
+        })));
+        assert_eq!(request.model, "acestep_v15_turbo");
+        assert_eq!(request.bpm, Some(92.0));
+        assert_eq!(request.musical_key.as_deref(), Some("C minor"));
+        // Lyrics are read verbatim (interior whitespace / tags preserved), only trimmed of nothing —
+        // they may legitimately be multi-line; a purely-blank value would be None (instrumental).
+        assert_eq!(request.lyrics.as_deref(), Some("  [verse] la la la  "));
+        assert_eq!(request.negative_prompt.as_deref(), Some("harsh distortion"));
+        assert_eq!(
+            request.source_audio_asset_id.as_deref(),
+            Some("audio-src-1")
+        );
+        // The edit mode is lowercased at the parse seam so a mixed-case token still routes.
+        assert_eq!(request.edit_mode.as_deref(), Some("extend"));
+        assert_eq!(request.edit_region_start_secs, Some(3.0));
+        assert_eq!(request.edit_region_end_secs, Some(20.0));
+        assert_eq!(request.edit_strength, Some(0.5));
+        assert_eq!(request.steps, Some(8));
+        assert_eq!(request.seed, Some(5));
+        // A blank lyrics value is dropped to None (instrumental), not carried as an empty string.
+        let instrumental = AudioRequest::from_payload(&payload(json!({ "lyrics": "   " })));
+        assert_eq!(instrumental.lyrics, None);
+    }
+
+    #[test]
+    fn parse_audio_edit_mode_maps_the_tokens_and_rejects_garbage() {
+        assert_eq!(
+            parse_audio_edit_mode("inpaint").unwrap(),
+            AudioEditMode::Inpaint
+        );
+        assert_eq!(
+            parse_audio_edit_mode("repaint").unwrap(),
+            AudioEditMode::Repaint
+        );
+        assert_eq!(
+            parse_audio_edit_mode("extend").unwrap(),
+            AudioEditMode::Extend
+        );
+        assert_eq!(
+            parse_audio_edit_mode("cover").unwrap(),
+            AudioEditMode::Cover
+        );
+        assert!(parse_audio_edit_mode("bogus").is_err());
+    }
+
+    #[test]
+    fn audio_edit_region_policy_matches_the_mode_contract() {
+        // Extend: begins the appended tail at the source clip's own length when no start is given, and
+        // reads `end` as the new total length (gen_core AudioEditMode::Extend contract).
+        let region = audio_edit_region(AudioEditMode::Extend, 10.0, None, Some(20.0))
+            .expect("extend yields a region");
+        assert_eq!(region.start_secs, 10.0);
+        assert_eq!(region.end_secs, Some(20.0));
+        // An explicit start overrides the source-length default.
+        let region = audio_edit_region(AudioEditMode::Extend, 10.0, Some(8.0), Some(20.0))
+            .expect("extend region");
+        assert_eq!(region.start_secs, 8.0);
+
+        // Inpaint / Repaint: carry the request's bounded window; a MISSING start ⇒ None (so the
+        // generator's own "region required" check fires rather than the worker inventing a window).
+        let region = audio_edit_region(AudioEditMode::Inpaint, 10.0, Some(2.0), Some(5.0))
+            .expect("inpaint region");
+        assert_eq!(region.start_secs, 2.0);
+        assert_eq!(region.end_secs, Some(5.0));
+        assert!(audio_edit_region(AudioEditMode::Repaint, 10.0, None, None).is_none());
+
+        // Cover: whole-clip, no region.
+        assert!(audio_edit_region(AudioEditMode::Cover, 10.0, Some(1.0), Some(2.0)).is_none());
+    }
+
+    #[test]
+    fn build_audio_edit_is_none_without_a_source() {
+        // No source id ⇒ plain text-to-music (no Conditioning), regardless of the other edit fields.
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "acestep_v15_turbo",
+            "editMode": "extend",
+        })));
+        let settings = crate::test_env::offline_settings();
+        assert!(
+            build_audio_edit(&settings, &request, Path::new("/tmp/project"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_wav_pcm16_roundtrips_a_written_wav() {
+        // A clip written by the shared `write_wav_pcm16` (48 kHz stereo, the ACE-Step output shape) must
+        // decode back through `read_wav_pcm16` into a gen_core::AudioTrack with the same rate / channels
+        // / sample count — the source-track reader the extend/edit path resolves through.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("source.wav");
+        let track = AudioTrack {
+            samples: vec![0.0, 0.25, -0.5, 0.75, -0.1, 0.4], // 3 interleaved stereo frames
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        write_wav_pcm16(&track, &path).expect("write wav");
+        let decoded = read_wav_pcm16(&path).expect("read wav");
+        assert_eq!(decoded.sample_rate, 48_000);
+        assert_eq!(decoded.channels, 2);
+        assert_eq!(decoded.samples.len(), 6);
+        assert!(decoded.stems.is_empty());
+        // Values land in the normalized [-1, 1) range (peak-normalized on write), and are finite.
+        assert!(decoded
+            .samples
+            .iter()
+            .all(|s| s.is_finite() && (-1.0..=1.0).contains(s)));
+
+        // A non-RIFF blob is a clear error, not a silent mis-decode.
+        let junk = dir.path().join("junk.wav");
+        std::fs::write(&junk, b"not a wav file at all").expect("write junk");
+        assert!(read_wav_pcm16(&junk).is_err());
+    }
+
+    #[test]
+    fn music_asset_fact_records_the_music_and_edit_fields_for_replay() {
+        // A Music run records the describe-the-music sub-block + the extend/edit source band in both the
+        // top-level replay record and rawAdapterSettings, so a re-generate round-trips exactly (sc-13410).
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "acestep_v15_turbo",
+            "prompt": "gentle lofi piano loop",
+            "targetDurationSecs": 8.0,
+            "steps": 8,
+            "bpm": 92.0,
+            "musicalKey": "C minor",
+            "lyrics": "[verse] la la la",
+            "sourceAudioAssetId": "audio-src-1",
+            "editMode": "extend",
+            "editRegionEndSecs": 20.0,
+            "editStrength": 0.5,
+            "seed": 5,
+        })));
+        let plan = AudioPlan::new(&request, Path::new("/tmp/project"));
+        let fact = audio_asset_fact(&plan, &request, 48_000, 2, 8.0);
+        assert_eq!(fact["sampleRate"], 48_000);
+        assert_eq!(fact["channels"], 2);
+        assert_eq!(fact["bpm"], 92.0);
+        assert_eq!(fact["musicalKey"], "C minor");
+        assert_eq!(fact["lyrics"], "[verse] la la la");
+        assert_eq!(fact["sourceAudioAssetId"], "audio-src-1");
+        assert_eq!(fact["editMode"], "extend");
+        assert_eq!(fact["editRegionEndSecs"], 20.0);
+        assert_eq!(fact["editStrength"], 0.5);
+        // ...and mirrored into rawAdapterSettings so the exact request is reconstructable.
+        assert_eq!(fact["rawAdapterSettings"]["bpm"], 92.0);
+        assert_eq!(fact["rawAdapterSettings"]["editMode"], "extend");
+        assert_eq!(fact["rawAdapterSettings"]["editStrength"], 0.5);
+        // A music run carries no voice; a distilled-turbo run carries no guidance/negative.
+        assert!(fact["voice"].is_null(), "music carries no voice");
+    }
+
+    #[test]
+    fn sfx_asset_fact_records_the_sampling_knobs_for_replay() {
+        // A Sound FX run records its CFG guidance + steps in both the top-level replay record and
+        // rawAdapterSettings, so a re-generate round-trips the exact sampler settings (sc-13409).
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "moss_sfx_v2",
+            "prompt": "distant rolling thunder over a field",
+            "language": "en",
+            "targetDurationSecs": 5.0,
+            "guidance": 7.0,
+            "steps": 80,
+            "seed": 99,
+        })));
+        let plan = AudioPlan::new(&request, Path::new("/tmp/project"));
+        let fact = audio_asset_fact(&plan, &request, 48_000, 1, 5.0);
+        assert_eq!(fact["sampleRate"], 48_000);
+        assert_eq!(fact["guidance"], 7.0);
+        assert_eq!(fact["steps"], 80);
+        assert!(fact["voice"].is_null(), "SFX carries no voice");
+        assert_eq!(fact["rawAdapterSettings"]["guidance"], 7.0);
+        assert_eq!(fact["rawAdapterSettings"]["steps"], 80);
     }
 }

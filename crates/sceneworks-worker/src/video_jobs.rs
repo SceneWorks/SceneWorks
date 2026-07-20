@@ -8791,7 +8791,7 @@ fn build_video_clip_conditioning(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn resolve_clip_media_path(
+pub(crate) fn resolve_clip_media_path(
     settings: &Settings,
     project_id: &str,
     asset_id: &str,

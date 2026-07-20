@@ -875,13 +875,18 @@ pub(crate) struct VideoJobRequest {
     pub(crate) advanced: JsonObject,
 }
 
-/// A `POST /api/v1/audio/jobs` request (SceneWorks Audio Studio, epic 13400 / sc-13404). The audio
-/// analogue of [`VideoJobRequest`]: `prompt` is the script text, and the typed audio knobs (`voice`
-/// / `language` / `targetDurationSecs`) map to the worker-side [`gen_core::AudioParams`] sub-block a
-/// `Modality::Audio` generator reads. Every audio knob is optional — an omitted voice/language
-/// falls back to the model's default (Kokoro's `af_heart`, `en`), and an omitted duration lets the
-/// model synthesize its natural length. `Serialize` too so the whole request round-trips into the
-/// job payload the worker claims (mirroring how the video request is `to_json_object`'d).
+/// A `POST /api/v1/audio/jobs` request (SceneWorks Audio Studio, epic 13400 / sc-13404 + sc-13409).
+/// The audio analogue of [`VideoJobRequest`]: `prompt` is the script/sound description, and the typed
+/// audio knobs (`voice` / `language` / `targetDurationSecs`) map to the worker-side
+/// [`gen_core::AudioParams`] sub-block a `Modality::Audio` generator reads. Diffusion-audio models
+/// (MOSS-SoundEffect, the Sound FX mode) additionally read the sampling knobs `guidance` (CFG scale)
+/// and `steps` off the *top-level* [`gen_core::GenerationRequest`] — not `AudioParams` — so those two
+/// are carried here and mapped onto the request by the worker (sc-13409). Every audio knob is optional
+/// — an omitted voice/language falls back to the model's default (Kokoro's `af_heart`, `en`), an
+/// omitted duration lets the model synthesize its natural length, and an omitted guidance/steps lets
+/// the model use its own sampler default (MOSS: CFG 4.0 / 100 steps). `Serialize` too so the whole
+/// request round-trips into the job payload the worker claims (mirroring how the video request is
+/// `to_json_object`'d).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AudioJobRequest {
@@ -904,6 +909,58 @@ pub(crate) struct AudioJobRequest {
     /// the model's advertised `audio.maxDurationSecs` by the worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) target_duration_secs: Option<f32>,
+    /// CFG guidance scale for diffusion-audio models (Sound FX / MOSS-SoundEffect). Rides the
+    /// top-level [`gen_core::GenerationRequest::guidance`] the worker builds. `None` ⇒ the model's
+    /// default (MOSS: 4.0). Bounded to a blanket sane range here; the model's advertised guidance
+    /// range is the real gate the generator's `validate` applies (sc-13409).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) guidance: Option<f32>,
+    /// Solver step count for diffusion-audio models (Sound FX / MOSS-SoundEffect + Music / ACE-Step).
+    /// Rides the top-level [`gen_core::GenerationRequest::steps`]. `None` ⇒ the model's default (MOSS:
+    /// 100; ACE-Step turbo: 8). Bounded to a blanket sane ceiling here; the model's advertised step
+    /// ceiling is the real gate the generator's `validate` applies (sc-13409 / sc-13410).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) steps: Option<u32>,
+    /// Negative prompt — the traits to steer away from (music models that advertise it). Rides the
+    /// top-level [`gen_core::GenerationRequest::negative_prompt`]. `None` ⇒ unconditional. The
+    /// guidance-distilled ACE-Step turbo advertises no negative-prompt support, so the studio never
+    /// sends one to it; a value posted to such a model is a typed Unsupported at the gen-core floor
+    /// (the "honor advertised knobs, let the model gate" contract). sc-13410.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) negative_prompt: Option<String>,
+    /// Musical tempo in beats per minute (music models — ACE-Step). Rides the worker-side
+    /// [`gen_core::AudioParams::bpm`]. `None` ⇒ the model derives its own tempo. sc-13410.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) bpm: Option<f32>,
+    /// Musical key (e.g. `"C minor"`; music models). Free-form — rides
+    /// [`gen_core::AudioParams::musical_key`]; each model documents what it accepts. sc-13410.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) musical_key: Option<String>,
+    /// Lyrics to sing / condition on (music models). Free-form, distinct from `prompt` — rides
+    /// [`gen_core::AudioParams::lyrics`]; empty ⇒ instrumental. sc-13410.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) lyrics: Option<String>,
+    /// Extend/edit SOURCE track (a library `type: "audio"` asset id) for prompted source-audio editing
+    /// (music models that advertise `audio.editModes`). The worker resolves the asset's WAV and builds a
+    /// [`gen_core::Conditioning::AudioEdit`] from it. `None` ⇒ plain text-to-music. sc-13410.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source_audio_asset_id: Option<String>,
+    /// The edit operation for the source track — `"inpaint"` / `"repaint"` / `"extend"` / `"cover"`,
+    /// gated against the model's advertised [`gen_core::Capabilities::audio_edit_modes`] by the
+    /// generator's `validate`. Only consulted when `source_audio_asset_id` is set. sc-13410.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) edit_mode: Option<String>,
+    /// Edit-region start (seconds) for a bounded inpaint/repaint window. For `extend` the worker
+    /// defaults it to the source clip's own length. `None` ⇒ the provider default. sc-13410.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) edit_region_start_secs: Option<f32>,
+    /// Edit-region end (seconds): the inpaint/repaint window end, OR — for `extend` — the appended
+    /// clip's new TOTAL length. `None` ⇒ to the clip end (region modes). sc-13410.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) edit_region_end_secs: Option<f32>,
+    /// Edit strength (0..=1) for the source-audio edit. `None` ⇒ the model default. sc-13410.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) edit_strength: Option<f32>,
     #[serde(default)]
     pub(crate) seed: Option<i64>,
     #[serde(default = "default_requested_gpu")]
