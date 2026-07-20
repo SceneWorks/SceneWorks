@@ -18,8 +18,8 @@
 use super::*;
 
 use gen_core::{
-    AudioEditMode, AudioParams, CancelFlag, Conditioning, GenerationOutput, GenerationRequest,
-    LoadSpec, Progress, TimeRegion, WeightsSource,
+    AudioEditMode, AudioParams, AudioTransformRequest, CancelFlag, Conditioning, GenerationOutput,
+    GenerationRequest, LoadSpec, Progress, TimeRegion, WeightsSource,
 };
 
 use crate::video_jobs::{write_wav_pcm16, AudioTrack};
@@ -68,6 +68,21 @@ struct AudioRequest {
     edit_region_end_secs: Option<f32>,
     /// Edit strength (0..=1). `None` ⇒ the model default.
     edit_strength: Option<f32>,
+    /// Voice Clone (sc-13411 C4): the reference-voice library `type: "audio"` asset whose timbre is
+    /// transferred onto the base TTS clip. Its presence is the discriminator that routes this job onto
+    /// the two-call Kokoro→OpenVoice chain (`run_voice_clone_synthesis`) instead of the single-generator
+    /// path. `None` ⇒ an ordinary Speech/SFX/Music generation.
+    reference_audio_asset_id: Option<String>,
+    /// Voice Clone base TTS model id (the "content" generator whose speech OpenVoice re-timbres). The API
+    /// injects its manifest entry as `baseModelManifestEntry`. Defaults to Kokoro (`kokoro_82m`).
+    base_model: String,
+    /// Voice Clone match strength — overrides OpenVoice V2's posterior-sampling temperature τ (rides
+    /// `AudioTransformRequest::strength`). `None` ⇒ the converter's own default (τ = 0.3).
+    match_strength: Option<f32>,
+    /// The resolved manifest entry for [`base_model`] (the base TTS), injected by the API on a voice-clone
+    /// request so the worker resolves the base generator's snapshot without re-parsing the jsonc. `{}` on a
+    /// non-voice-clone job.
+    base_model_manifest_entry: Value,
     seed: Option<i64>,
     model_manifest_entry: Value,
 }
@@ -132,11 +147,39 @@ impl AudioRequest {
                 .get("editStrength")
                 .and_then(Value::as_f64)
                 .map(|value| value as f32),
+            reference_audio_asset_id: string("referenceAudioAssetId"),
+            base_model: string("baseModel").unwrap_or_else(|| "kokoro_82m".to_owned()),
+            match_strength: payload
+                .get("matchStrength")
+                .and_then(Value::as_f64)
+                .map(|value| value as f32),
+            base_model_manifest_entry: payload
+                .get("baseModelManifestEntry")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
             seed: payload.get("seed").and_then(Value::as_i64),
             model_manifest_entry: payload
                 .get("modelManifestEntry")
                 .cloned()
                 .unwrap_or_else(|| json!({})),
+        }
+    }
+
+    /// A voice-clone job carries a non-empty reference-voice asset id — the discriminator that routes it
+    /// onto the two-call Kokoro→OpenVoice chain rather than the single-generator path.
+    fn is_voice_clone(&self) -> bool {
+        self.reference_audio_asset_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+    }
+
+    /// The generation mode recorded on the asset + generation set — `"voice_clone"` for a reference-
+    /// driven job, else `"text_to_audio"` (Speech / SFX / Music).
+    fn mode(&self) -> &'static str {
+        if self.is_voice_clone() {
+            "voice_clone"
+        } else {
+            "text_to_audio"
         }
     }
 
@@ -205,14 +248,38 @@ fn normalize_audio_language(language: &str) -> String {
 /// `kokoro-v1_0.pth` + `voices/`). Uses the same `resolve_app_managed_model_dir` seam the other
 /// worker jobs use, so it finds the HF-cache snapshot the manifest's normal install path populated.
 fn resolve_audio_model_dir(settings: &Settings, request: &AudioRequest) -> WorkerResult<PathBuf> {
-    let repo = audio_model_repo(&request.model_manifest_entry).ok_or_else(|| {
+    resolve_audio_model_dir_for(settings, &request.model_manifest_entry, &request.model)
+}
+
+/// Resolve an audio model's cached snapshot directory from an explicit manifest entry + id — the
+/// generalization of [`resolve_audio_model_dir`] the voice-clone chain uses to resolve BOTH its base
+/// TTS model (`baseModelManifestEntry`) and its converter (`modelManifestEntry`).
+fn resolve_audio_model_dir_for(
+    settings: &Settings,
+    entry: &Value,
+    model_id: &str,
+) -> WorkerResult<PathBuf> {
+    let repo = audio_model_repo(entry).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
-            "{}: the model manifest entry declares no Hugging Face download repo, so its audio \
-             weights cannot be resolved.",
-            request.model
+            "{model_id}: the model manifest entry declares no Hugging Face download repo, so its \
+             audio weights cannot be resolved."
         ))
     })?;
     crate::paths::resolve_app_managed_model_dir(settings, &repo, "Audio model")
+}
+
+/// OpenVoice V2's converter weights (`config.json` + `checkpoint.pth`) live under a `converter/`
+/// subdirectory of its `myshell-ai/OpenVoiceV2` snapshot (the manifest downloads them as
+/// `converter/*`), whereas the transform's `load` expects the directory that directly holds those two
+/// files. Descend into `converter/` when it carries the checkpoint; otherwise pass the root through
+/// (a future flat-layout repack still loads).
+fn openvoice_converter_dir(root: PathBuf) -> PathBuf {
+    let converter = root.join("converter");
+    if converter.join("checkpoint.pth").is_file() {
+        converter
+    } else {
+        root
+    }
 }
 
 /// The Hugging Face repo hosting an audio model's weights — the first `huggingface` download entry,
@@ -294,12 +361,25 @@ pub(crate) async fn run_audio_generate_job(
     .await?;
 
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
-    let model_dir = resolve_audio_model_dir(settings, &request)?;
-    // Extend/edit SOURCE band (sc-13410): resolve + decode the source track and build the
-    // `Conditioning::AudioEdit` here (in async, where the project path + store are in scope), then move
-    // it into the blocking synthesis. `None` ⇒ plain text-to-music. The per-model gates (edit mode ∈
-    // advertised, region inside the clip, 48 kHz source) run in the generator's `validate` at synthesis.
-    let audio_edit = build_audio_edit(settings, &request, &project_path)?;
+
+    // Voice Clone (sc-13411 C4) routes onto the two-call Kokoro→OpenVoice chain; every other mode runs
+    // the single-generator path. Both resolve their snapshot dir(s) up front so a missing install fails
+    // with a clear error before the job is marked Running.
+    let synthesis: AudioSynthesis = if request.is_voice_clone() {
+        let plan = resolve_voice_clone_plan(settings, &request, &project_path)?;
+        AudioSynthesis::VoiceClone(plan)
+    } else {
+        let model_dir = resolve_audio_model_dir(settings, &request)?;
+        // Extend/edit SOURCE band (sc-13410): resolve + decode the source track and build the
+        // `Conditioning::AudioEdit` here (in async, where the project path + store are in scope), then move
+        // it into the blocking synthesis. `None` ⇒ plain text-to-music. The per-model gates (edit mode ∈
+        // advertised, region inside the clip, 48 kHz source) run in the generator's `validate` at synthesis.
+        let audio_edit = build_audio_edit(settings, &request, &project_path)?;
+        AudioSynthesis::Single {
+            model_dir,
+            audio_edit,
+        }
+    };
 
     update_job(
         api,
@@ -319,9 +399,20 @@ pub(crate) async fn run_audio_generate_job(
     // the worker's async runtime stays responsive, and emit periodic keepalive heartbeats + progress
     // while it runs so a long synthesis (a cold pipeline build, a 30 s clip, or a slow host) is never
     // flagged stale and marked `interrupted` mid-flight. Mirrors the video path's interval keepalive
-    // for the no-progress cold-load phase.
-    let track =
-        run_audio_synthesis(api, settings, job, backend, &request, model_dir, audio_edit).await?;
+    // for the no-progress cold-load phase. The voice-clone chain runs TWO backend calls (base TTS then
+    // conversion) inside one blocking task, so the single keepalive loop spans both.
+    let track = match synthesis {
+        AudioSynthesis::Single {
+            model_dir,
+            audio_edit,
+        } => {
+            run_audio_synthesis(api, settings, job, backend, &request, model_dir, audio_edit)
+                .await?
+        }
+        AudioSynthesis::VoiceClone(plan) => {
+            run_voice_clone_synthesis(api, settings, job, backend, &request, plan).await?
+        }
+    };
 
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
     update_job(
@@ -464,6 +555,22 @@ async fn run_audio_synthesis(
             )),
         }
     });
+    await_audio_blocking(api, settings, job, backend, handle).await
+}
+
+/// Await a blocking audio-synthesis join handle while emitting periodic keepalive heartbeats +
+/// progress updates, so a long synthesis (a cold pipeline build, a slow host, or — for voice clone —
+/// two chained backend calls) is never flagged stale and swept to `interrupted` mid-flight. Shared by
+/// the single-generator path ([`run_audio_synthesis`]) and the voice-clone chain
+/// ([`run_voice_clone_synthesis`]); mirrors the video path's interval keepalive for the no-progress
+/// cold-load phase.
+async fn await_audio_blocking(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    backend: &str,
+    handle: tokio::task::JoinHandle<WorkerResult<gen_core::AudioTrack>>,
+) -> WorkerResult<gen_core::AudioTrack> {
     tokio::pin!(handle);
     let mut ticker = tokio::time::interval(Duration::from_secs(AUDIO_KEEPALIVE_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -495,6 +602,152 @@ async fn run_audio_synthesis(
             }
         }
     }
+}
+
+/// Which synthesis path a resolved audio job takes — the single-generator lane (Speech / SFX / Music)
+/// or the two-call voice-clone chain (sc-13411 C4). Resolved before the job is marked Running so a
+/// missing install / reference surfaces as a clear preflight error.
+enum AudioSynthesis {
+    Single {
+        model_dir: PathBuf,
+        audio_edit: Option<Conditioning>,
+    },
+    VoiceClone(VoiceClonePlan),
+}
+
+/// A resolved voice-clone job: the base TTS snapshot dir, the OpenVoice converter snapshot dir, and
+/// the decoded reference-voice clip whose timbre is transferred. All three are resolved in async (where
+/// the settings + project path are in scope) so the blocking chain gets ready-to-load inputs.
+struct VoiceClonePlan {
+    base_model_dir: PathBuf,
+    converter_dir: PathBuf,
+    reference: gen_core::AudioTrack,
+}
+
+/// Resolve the base TTS snapshot, the OpenVoice converter snapshot, and the reference-voice clip for a
+/// voice-clone job (sc-13411 C4). Fails with a clear error when the reference asset can't be resolved to
+/// a decodable WAV, the base/converter isn't installed, or the manifest entries are missing — all before
+/// the job is marked Running.
+fn resolve_voice_clone_plan(
+    settings: &Settings,
+    request: &AudioRequest,
+    project_path: &Path,
+) -> WorkerResult<VoiceClonePlan> {
+    let base_model_dir = resolve_audio_model_dir_for(
+        settings,
+        &request.base_model_manifest_entry,
+        &request.base_model,
+    )?;
+    let converter_root = resolve_audio_model_dir(settings, request)?;
+    let converter_dir = openvoice_converter_dir(converter_root);
+    let reference_id = request
+        .reference_audio_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "a voice-clone job needs a referenceAudioAssetId.".to_owned(),
+            )
+        })?;
+    // Resolve the reference through the same project-scoped guard the extend/edit source clip uses, then
+    // decode its PCM-16 WAV into the host AudioTrack OpenVoice consumes as its tone-color target.
+    let reference_path = crate::video_jobs::resolve_clip_media_path(
+        settings,
+        &request.project_id,
+        reference_id,
+        project_path,
+    )?;
+    let reference = read_wav_pcm16(&reference_path)?;
+    Ok(VoiceClonePlan {
+        base_model_dir,
+        converter_dir,
+        reference,
+    })
+}
+
+/// Run the two-call voice-clone chain on a blocking thread (sc-13411 C4): base TTS (Kokoro) speaks the
+/// script, then OpenVoice V2 transfers the reference clip's tone color onto that speech. This is the
+/// product-layer orchestration of two backend calls — a single worker job so the library sees exactly
+/// one asset (the converted clip). Returns the converted `gen_core::AudioTrack` for the caller to write
+/// + register, exactly like [`run_audio_synthesis`].
+async fn run_voice_clone_synthesis(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    backend: &str,
+    request: &AudioRequest,
+    plan: VoiceClonePlan,
+) -> WorkerResult<gen_core::AudioTrack> {
+    let VoiceClonePlan {
+        base_model_dir,
+        converter_dir,
+        reference,
+    } = plan;
+    let base_model = request.base_model.clone();
+    let converter_model = request.model.clone();
+    let script = request.prompt.clone();
+    // The base TTS voice (which Kokoro voice speaks the script) + language ride the base generator's
+    // AudioParams exactly as a Speech job does; OpenVoice then re-timbres the result toward the reference.
+    let voice = request.voice.clone();
+    let language = request.language.as_deref().map(normalize_audio_language);
+    // Match strength overrides OpenVoice's posterior-sampling temperature τ; `None` ⇒ the converter's
+    // own default (0.3). The converter range-checks it (finite, >= 0).
+    let strength = request.match_strength;
+    let seed = request.seed.map(|seed| seed as u64);
+    let handle = tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+        // Call 1 — base TTS: synthesize the script in the requested base voice.
+        let base_spec = LoadSpec::new(WeightsSource::Dir(base_model_dir));
+        let base_generator = crate::inference_runtime::load_audio(&base_model, &base_spec)
+            .map_err(|error| {
+                crate::classify_engine_error("voice-clone base TTS load failed", error)
+            })?;
+        let base_req = GenerationRequest {
+            prompt: script,
+            audio: Some(AudioParams {
+                voice,
+                language,
+                ..Default::default()
+            }),
+            cancel: CancelFlag::new(),
+            ..Default::default()
+        };
+        let mut on_progress = |_progress: Progress| {};
+        let base_track = match base_generator
+            .generate(&base_req, &mut on_progress)
+            .map_err(|error| crate::classify_engine_error("voice-clone base TTS failed", error))?
+        {
+            GenerationOutput::Audio(track) => track,
+            _ => {
+                return Err(WorkerError::Engine(
+                    "voice-clone base TTS returned non-audio output".to_owned(),
+                ))
+            }
+        };
+
+        // Call 2 — OpenVoice V2 tone-color conversion: transfer the reference clip's timbre onto the
+        // base speech. The source (`audio`) carries content + prosody; `target_reference` is the voice.
+        let converter_spec = LoadSpec::new(WeightsSource::Dir(converter_dir));
+        let transform =
+            crate::inference_runtime::load_audio_transform(&converter_model, &converter_spec)
+                .map_err(|error| {
+                    crate::classify_engine_error("voice-clone converter load failed", error)
+                })?;
+        let transform_req = AudioTransformRequest {
+            audio: base_track,
+            target_reference: Some(reference),
+            strength,
+            seed,
+            ..Default::default()
+        };
+        transform
+            .apply(&transform_req, &mut on_progress)
+            .map_err(|error| crate::classify_engine_error("voice conversion failed", error))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| WorkerError::Engine("voice conversion produced no track".to_owned()))
+    });
+    await_audio_blocking(api, settings, job, backend, handle).await
 }
 
 /// Parse an edit-mode token (`inpaint` / `repaint` / `extend` / `cover`) into the gen-core
@@ -707,6 +960,11 @@ fn audio_asset_fact(
         "editRegionStartSecs": request.edit_region_start_secs,
         "editRegionEndSecs": request.edit_region_end_secs,
         "editStrength": request.edit_strength,
+        // Voice Clone (sc-13411 C4): the reference-voice asset, base TTS model, and match strength (τ) so a
+        // re-generate reconstructs the exact chain. `null` on a non-voice-clone run.
+        "referenceAudioAssetId": request.reference_audio_asset_id,
+        "baseModel": if request.is_voice_clone() { Some(request.base_model.as_str()) } else { None },
+        "matchStrength": request.match_strength,
         "sampleRate": sample_rate,
     });
     json!({
@@ -721,7 +979,7 @@ fn audio_asset_fact(
         "family": plan.family,
         "displayName": display_name,
         "createdAt": plan.created_at,
-        "mode": "text_to_audio",
+        "mode": request.mode(),
         "model": request.model,
         "adapter": adapter,
         "prompt": request.prompt,
@@ -745,6 +1003,10 @@ fn audio_asset_fact(
         "editRegionStartSecs": request.edit_region_start_secs,
         "editRegionEndSecs": request.edit_region_end_secs,
         "editStrength": request.edit_strength,
+        // Voice Clone replay record (sc-13411 C4) — `null` on a non-voice-clone run.
+        "referenceAudioAssetId": request.reference_audio_asset_id,
+        "baseModel": if request.is_voice_clone() { Some(request.base_model.as_str()) } else { None },
+        "matchStrength": request.match_strength,
         "seed": request.seed,
         "rawAdapterSettings": raw_adapter_settings,
     })
@@ -760,7 +1022,7 @@ fn audio_streaming_result(plan: &AudioPlan, request: &AudioRequest, fact: &Value
         "model": request.model,
         "generationSet": {
             "id": plan.genset_id,
-            "mode": "text_to_audio",
+            "mode": request.mode(),
             "model": request.model,
             "prompt": request.prompt,
             "count": 1,
@@ -1135,5 +1397,104 @@ mod tests {
         assert!(fact["voice"].is_null(), "SFX carries no voice");
         assert_eq!(fact["rawAdapterSettings"]["guidance"], 7.0);
         assert_eq!(fact["rawAdapterSettings"]["steps"], 80);
+    }
+
+    // ── Voice Clone (sc-13411 C4) ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn from_payload_reads_the_voice_clone_fields() {
+        // A voice-clone payload carries the reference-voice asset, an optional base TTS model, and the
+        // match strength (τ). Their presence flips `is_voice_clone` / `mode` onto the conversion path.
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "openvoice_v2",
+            "prompt": "Clone this into my reference voice.",
+            "referenceAudioAssetId": "ref-voice-1",
+            "baseModel": "kokoro_82m",
+            "matchStrength": 0.5,
+            "seed": 3,
+        })));
+        assert_eq!(request.model, "openvoice_v2");
+        assert_eq!(
+            request.reference_audio_asset_id.as_deref(),
+            Some("ref-voice-1")
+        );
+        assert_eq!(request.base_model, "kokoro_82m");
+        assert_eq!(request.match_strength, Some(0.5));
+        assert!(request.is_voice_clone());
+        assert_eq!(request.mode(), "voice_clone");
+
+        // A base model defaults to Kokoro when the payload omits it.
+        let defaulted = AudioRequest::from_payload(&payload(json!({
+            "model": "openvoice_v2",
+            "referenceAudioAssetId": "ref-voice-1",
+        })));
+        assert_eq!(defaulted.base_model, "kokoro_82m");
+        assert!(defaulted.is_voice_clone());
+
+        // No reference ⇒ an ordinary (non-voice-clone) run: a blank/whitespace id does not route.
+        let none = AudioRequest::from_payload(&payload(json!({ "model": "kokoro_82m" })));
+        assert!(!none.is_voice_clone());
+        assert_eq!(none.mode(), "text_to_audio");
+        let blank = AudioRequest::from_payload(&payload(json!({ "referenceAudioAssetId": "   " })));
+        assert!(!blank.is_voice_clone());
+    }
+
+    #[test]
+    fn openvoice_converter_dir_descends_into_the_converter_subdir() {
+        // The OpenVoice snapshot downloads its converter weights under `converter/`; the transform's
+        // `load` wants the dir that directly holds `checkpoint.pth`, so the resolver descends when the
+        // subdir carries the checkpoint and passes the root through otherwise.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().to_path_buf();
+        // No converter/ ⇒ pass the root through unchanged.
+        assert_eq!(openvoice_converter_dir(root.clone()), root);
+        // converter/checkpoint.pth present ⇒ descend into converter/.
+        let converter = root.join("converter");
+        std::fs::create_dir_all(&converter).unwrap();
+        std::fs::write(converter.join("checkpoint.pth"), b"stub").unwrap();
+        assert_eq!(openvoice_converter_dir(root.clone()), converter);
+    }
+
+    #[test]
+    fn voice_clone_asset_fact_records_the_reference_base_and_strength_for_replay() {
+        // A voice-clone run records the reference asset, base model, and match strength in both the
+        // top-level replay record and rawAdapterSettings, and stamps mode = "voice_clone" (sc-13411).
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "openvoice_v2",
+            "prompt": "Clone this into my reference voice.",
+            "referenceAudioAssetId": "ref-voice-1",
+            "baseModel": "kokoro_82m",
+            "matchStrength": 0.5,
+            "seed": 3,
+        })));
+        let plan = AudioPlan::new(&request, Path::new("/tmp/project"));
+        let fact = audio_asset_fact(&plan, &request, 22_050, 1, 4.2);
+        assert_eq!(fact["mode"], "voice_clone");
+        assert_eq!(fact["model"], "openvoice_v2");
+        assert_eq!(fact["referenceAudioAssetId"], "ref-voice-1");
+        assert_eq!(fact["baseModel"], "kokoro_82m");
+        assert_eq!(fact["matchStrength"], 0.5);
+        // ...mirrored into rawAdapterSettings so the exact conversion request is reconstructable.
+        assert_eq!(
+            fact["rawAdapterSettings"]["referenceAudioAssetId"],
+            "ref-voice-1"
+        );
+        assert_eq!(fact["rawAdapterSettings"]["baseModel"], "kokoro_82m");
+        assert_eq!(fact["rawAdapterSettings"]["matchStrength"], 0.5);
+        // The streaming set carries the voice_clone mode too.
+        let result = audio_streaming_result(&plan, &request, &fact);
+        assert_eq!(result["generationSet"]["mode"], "voice_clone");
+
+        // A non-voice-clone run leaves the voice-clone fields null and baseModel null (not "kokoro_82m").
+        let plain = AudioRequest::from_payload(&payload(json!({ "model": "kokoro_82m" })));
+        let plain_plan = AudioPlan::new(&plain, Path::new("/tmp/project"));
+        let plain_fact = audio_asset_fact(&plain_plan, &plain, 24_000, 1, 3.0);
+        assert_eq!(plain_fact["mode"], "text_to_audio");
+        assert!(plain_fact["referenceAudioAssetId"].is_null());
+        assert!(
+            plain_fact["baseModel"].is_null(),
+            "baseModel is null on a non-voice-clone run"
+        );
+        assert!(plain_fact["matchStrength"].is_null());
     }
 }

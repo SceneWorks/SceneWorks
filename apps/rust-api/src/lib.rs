@@ -2873,6 +2873,19 @@ fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
             return Err(ApiError::bad_request("steps must be between 1 and 10000"));
         }
     }
+    // Voice Clone (sc-13411 C4). The match strength overrides OpenVoice V2's posterior-sampling
+    // temperature τ — bounded to a blanket sane 0..=1 range here (the UI-facing knob range); the
+    // converter re-checks it (finite, >= 0). `baseModel`, when supplied, must be a well-formed model id
+    // (the route additionally asserts it is a `type: "audio"` model). `referenceAudioAssetId` is a plain
+    // library asset id resolved (project-scoped) by the worker; no membership check belongs here.
+    if let Some(strength) = payload.match_strength {
+        if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
+            return Err(ApiError::bad_request(
+                "matchStrength must be between 0 and 1",
+            ));
+        }
+    }
+    validate_model_id(&payload.base_model)?;
     Ok(())
 }
 

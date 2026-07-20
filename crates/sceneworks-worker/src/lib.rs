@@ -358,6 +358,12 @@ mod sana_mlx_smoke;
 // (the video job lane has no background heartbeat during a generation).
 #[cfg(all(test, target_os = "macos"))]
 mod mochi_mlx_smoke;
+// Real-weight smoke for the Voice Clone two-call chain (sc-13411, C4): Kokoro base TTS → OpenVoice V2
+// tone-color conversion → Chatterbox-VE evidence that the converted clip's speaker identity moved
+// toward the reference. Test-only + macOS-only; #[ignore]d — drives the exact
+// `runtime_macos::catalog().audio()` seams the worker's voice-clone job uses, minus the API/job plumbing.
+#[cfg(all(test, target_os = "macos"))]
+mod voiceclone_smoke;
 // On-device per-tier memory-footprint measurement harness (sc-8516, epic 8506). Test-only + macOS-only;
 // #[ignore]d real-weight smokes that drive `crate::inference_runtime::load(id)` + ONE generation while sampling the MLX
 // process-global memory counters (mlx_rs::memory::{reset_peak_memory, get_active_memory, get_peak_memory})

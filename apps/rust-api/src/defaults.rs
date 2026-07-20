@@ -133,6 +133,13 @@ pub(crate) fn default_audio_model() -> String {
     "kokoro_82m".to_owned()
 }
 
+/// The default base TTS model for a Voice Clone job (sc-13411 C4): the "content" generator whose speech
+/// OpenVoice V2 re-timbres toward the reference. Kokoro-82M is the recommended, always-installed Speech
+/// model — the base clip's voice is itself a knob (`voice`), but the base generator is Kokoro.
+pub(crate) fn default_audio_base_model() -> String {
+    "kokoro_82m".to_owned()
+}
+
 // No `default_video_duration` either, and for a sharper reason than fps: the blanket 6.0 that used
 // to live here is past the `hardMaxDuration` of 7 of the 10 shipped video models, so once sc-12297
 // began enforcing that cap, this default made the API reject its own duration-less requests
