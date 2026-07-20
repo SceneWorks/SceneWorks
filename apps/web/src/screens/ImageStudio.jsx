@@ -418,15 +418,6 @@ export function ImageStudio() {
     // Editing the idea clears a stale auto-expand error (sc-6501).
     setSubmitError("");
   };
-  // sc-13366: when a style is selected, replace the generic scene/character suggestion pills with a
-  // single hint pill carrying that style's tailored subject prompt (styleThumbnailPrompts.json) — a
-  // strong, style-fitting starting point. Falls back to the normal suggestions with no style.
-  const styleHint = styleHintForId(styleId);
-  const suggestions = styleHint
-    ? [styleHint]
-    : mode === "character_image"
-      ? characterSuggestions
-      : sceneSuggestions;
   const [count, setCount] = useState(saved.count ?? 4);
 
   // Batch Prompt Processing (epic 9952). Batch mode is orthogonal to the T2I/Edit/
@@ -1031,6 +1022,30 @@ export function ImageStudio() {
   // declares `structuredPrompt`, the prompt hero swaps the plain textarea for the
   // builder and the engine receives the canonically-ordered JSON caption string.
   const structuredPromptModel = Boolean(selectedModel?.structuredPrompt);
+  // Booru-tag models (Anima, Illustrious) declare `captionStyle: "tags"` — they are trained on
+  // comma-separated tags, and their own promptHint warns that "a plain sentence renders low-effort
+  // art". Every Style Catalog entry is a 600–900-char English prose paragraph, so the axis does not
+  // fit them and the picker is hidden.
+  //
+  // The gate is DERIVED, never a state clear. Two reasons:
+  //  - The user's pick survives passing through a tag model and comes back when they switch to a
+  //    prose model, matching how the picker behaves across every other model change.
+  //  - A render-time gate covers the paths a [model]-effect clear cannot: a localStorage restore and
+  //    a recipe replay both seed styleId with no model change, and on a fresh mount `selectedModel`
+  //    is briefly undefined while the catalog resolves (sc-11962 / sc-12034).
+  // Downstream consumers read `effectiveStyleId`, so the axis cannot leak into a submit.
+  const tagConventionModel = selectedModel?.captionStyle === "tags";
+  const styleAxisAvailable = !tagConventionModel;
+  const effectiveStyleId = styleAxisAvailable ? styleId : null;
+  // sc-13366: when a style is selected, replace the generic scene/character suggestion pills with a
+  // single hint pill carrying that style's tailored subject prompt (styleThumbnailPrompts.json) — a
+  // strong, style-fitting starting point. Falls back to the normal suggestions with no style.
+  const styleHint = styleHintForId(effectiveStyleId);
+  const suggestions = styleHint
+    ? [styleHint]
+    : mode === "character_image"
+      ? characterSuggestions
+      : sceneSuggestions;
   const captionValidation = useMemo(
     () => (structuredPromptModel ? validateCaption(caption, { plainText: prompt }) : null),
     [structuredPromptModel, caption, prompt],
@@ -1581,7 +1596,7 @@ export function ImageStudio() {
     } else if (hasRawStylePrompt) {
       // Styled recipe (sc-13132): seed the box with the RAW pre-style prompt, NOT the composed
       // `recipe.prompt`. With the picker re-selected above, submit recomposes the identical
-      // `Style:`/`Description:` prompt — recording the raw prompt is what prevents a double-wrap
+      // `Subject:`/`Style:` prompt — recording the raw prompt is what prevents a double-wrap
       // (composing over the already-composed prompt would nest a second `Style:` block).
       setPrompt(rawSettings.stylePrompt);
     } else {
@@ -2042,11 +2057,11 @@ export function ImageStudio() {
       // sc-13130: the selected Style Catalog entry's prompt text (or null for None). The pure
       // builder applies composeStyledPrompt as the LAST wrap — after the preset fold above has
       // produced `promptToSend` — so the style's `Style:` block wraps the already-preset-composed
-      // user prompt as `Description:`. Null → pass-through (prompt sent unchanged). Structured
+      // user prompt as `Subject:`. Null → pass-through (prompt sent unchanged). Structured
       // caption models ignore it (the builder skips composition when sendStructured is true).
-      styleText: styleTextForId(styleId),
+      styleText: styleTextForId(effectiveStyleId),
       // sc-13132: the opaque style id travels with the recipe so replay can re-select the picker.
-      styleId,
+      styleId: effectiveStyleId,
       characterId,
       characterLookId,
       multiReference,
@@ -2248,7 +2263,7 @@ export function ImageStudio() {
   // auto-write a caption per resolved prompt (sc-9980).
   const batchStructuredExpandBlocked =
     structuredPromptModel && (magicModelMissing || typeof magicPrompt !== "function");
-  const activeStyleText = styleTextForId(styleId);
+  const activeStyleText = styleTextForId(effectiveStyleId);
   const styleSelected = typeof activeStyleText === "string" && activeStyleText.trim() !== "";
   const stylePreviewActive = !structuredPromptModel && styleSelected;
   // sc-13224: structured JSON-caption models apply the Style axis by merging into the caption's
@@ -2289,10 +2304,10 @@ export function ImageStudio() {
   // the composition here — we run the SAME buildJobRequest the single Generate submit calls (with the
   // live prompt as promptToSend) and read its `.prompt`, so the previewed/measured string is
   // byte-for-byte the prompt that will be sent (preset stack folds into the prompt FIRST, the style's
-  // Style:/Description: wrap is applied LAST — see imageJobRequest.js). It recomputes every render, so
+  // Subject:/Style: wrap is applied LAST — see imageJobRequest.js). It recomputes every render, so
   // it tracks the prompt text, the selected style, and the active preset stack live. Only active for
   // free-text models with a style actually selected: structured-caption models (Ideogram) merge the
-  // style into the caption's `aesthetics` instead (sc-13224), so there's no Style:/Description: prose
+  // style into the caption's `aesthetics` instead (sc-13224), so there's no Subject:/Style: prose
   // to preview, and a null/empty styleText is a pass-through with nothing extra to preview and no
   // style-composition budget to guard.
   const styledPreviewPrompt = stylePreviewActive ? buildJobRequest({ promptToSend: prompt }).prompt : null;
@@ -2303,7 +2318,7 @@ export function ImageStudio() {
       captionHasContent,
       prompt,
       // sc-13133 / sc-13224: measure the COMPOSED outgoing prompt against the cap, but only when a
-      // style is active (styleless behavior unchanged). For prose that is the Style:/Description:
+      // style is active (styleless behavior unchanged). For prose that is the Subject:/Style:
       // composition; for a structured model it is the style-injected, re-serialized caption. Either
       // string is exactly what the run submits, so the cap is measured on IT.
       styleActive: stylePreviewActive || structuredStyleActive,
@@ -3106,12 +3121,15 @@ export function ImageStudio() {
                 model's Style presets — both are style controls, so they share one row instead of the
                 catalog picker floating in a standalone row under the composer. The Style Catalog
                 composes the prompt (free-text) or merges into the caption (Ideogram, sc-13224); "None"
-                resets to pass-through. NB: distinct from Krea's numeric "text style" (textStyleGain). */}
+                resets to pass-through. Hidden for booru-tag models, whose convention the catalog's prose
+                entries do not fit. NB: distinct from Krea's numeric "text style" (textStyleGain). */}
             <div className="settings-bar-styles settings-bar-style-axis">
-              <div className="style-axis-field style-axis-catalog">
-                <span className="settings-bar-label">Style</span>
-                <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
-              </div>
+              {styleAxisAvailable ? (
+                <div className="style-axis-field style-axis-catalog">
+                  <span className="settings-bar-label">Style</span>
+                  <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
+                </div>
+              ) : null}
               <div className="style-axis-field style-axis-presets">
                 <span className="settings-bar-label">Style preset</span>
                 <div className="preset-chips">
@@ -3154,7 +3172,7 @@ export function ImageStudio() {
             ) : null}
           </div>
 
-          {/* sc-13131: the EXACT composed prompt (Style:/Description:, preserved sibling directives,
+          {/* sc-13131: the EXACT composed prompt (Subject:/Style:, preserved sibling directives,
               and the own-`Style:` MERGE) the run will send once a style is active — reuses
               buildJobRequest so it can never drift from the payload. Sits under the Style axis row.
               Hidden when no style applies. */}

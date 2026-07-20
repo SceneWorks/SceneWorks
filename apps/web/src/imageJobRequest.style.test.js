@@ -114,18 +114,18 @@ describe("buildImageJobRequest — Style Catalog fold (sc-13130)", () => {
     const state = baseState({ styleText: STYLE_TEXT });
     const req = buildImageJobRequest(state);
     expect(req.prompt).toBe(composeStyledPrompt({ styleText: STYLE_TEXT, userPrompt: "a fox in the snow" }));
-    // Sanity: the composed prompt actually carries the Style:/Description: template.
-    expect(req.prompt).toBe(`Style: ${STYLE_TEXT}\nDescription: a fox in the snow`);
+    // Sanity: the composed prompt actually carries the Subject:/Style: template.
+    expect(req.prompt).toBe(`Subject: a fox in the snow\nStyle: ${STYLE_TEXT}`);
     expect(req.presetPromptResolvedClientSide).toBe(true);
   });
 
   it("style composes on top of an already-preset-composed prompt (composer runs LAST)", () => {
     // The caller (ImageStudio fold) passes the preset-composed prompt as promptToSend; the builder
-    // wraps THAT as the Description block — proving the ordering the story requires.
+    // wraps THAT as the Subject block — proving the ordering the story requires.
     const presetComposed = "cinematic, moody. a fox in the snow";
     const req = buildImageJobRequest(baseState({ styleText: STYLE_TEXT, promptToSend: presetComposed }));
     expect(req.prompt).toBe(composeStyledPrompt({ styleText: STYLE_TEXT, userPrompt: presetComposed }));
-    expect(req.prompt).toBe(`Style: ${STYLE_TEXT}\nDescription: ${presetComposed}`);
+    expect(req.prompt).toBe(`Subject: ${presetComposed}\nStyle: ${STYLE_TEXT}`);
   });
 
   it("preserves an existing presetPromptResolvedClientSide=true even with no style", () => {
@@ -146,14 +146,15 @@ describe("buildImageJobRequest — Style Catalog fold (sc-13130)", () => {
     );
 
     // The outgoing prompt is the caption with the style merged into style_description.aesthetics —
-    // exactly what injectStyleIntoCaption + serializeCaption produce (NOT the prose Style:/Description:
+    // exactly what injectStyleIntoCaption + serializeCaption produce (NOT the prose Subject:/Style:
     // wrap, which would be wrong for a JSON-caption model).
     const expected = serializeCaption(
       injectStyleIntoCaption(parseCaption(caption).caption, STYLE_TEXT),
     );
     expect(req.prompt).toBe(expected);
     expect(req.prompt).not.toBe(caption); // the caption was actually transformed
-    expect(req.prompt.startsWith("Style:")).toBe(false); // no prose composer
+    expect(req.prompt.startsWith("Subject:")).toBe(false); // no prose composer
+    expect(req.prompt).not.toContain("\nStyle: ");
     expect(req.prompt).toContain(STYLE_TEXT); // style folded into aesthetics
 
     // An injection actually happened, so the client is authoritative and records the picker id.
@@ -256,6 +257,6 @@ describe("buildImageJobRequest — Style Catalog recipe round-trip (sc-13132)", 
       baseState({ styleText: STYLE_TEXT, styleId: SUBSTYLE_ID, promptToSend: composed }),
     ).prompt;
     expect(doubleWrapped).not.toBe(composed);
-    expect(doubleWrapped.startsWith(`Style: ${STYLE_TEXT}, ${STYLE_TEXT}`)).toBe(true);
+    expect(doubleWrapped).toContain(`Style: ${STYLE_TEXT}, ${STYLE_TEXT}`);
   });
 });

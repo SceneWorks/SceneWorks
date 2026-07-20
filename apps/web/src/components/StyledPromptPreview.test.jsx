@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { StyledPromptPreview } from "./StyledPromptPreview.jsx";
 
 // sc-13131 — The preview component's ONE job: display the composed prompt string it is handed,
-// byte-for-byte (including the Style:/Description: newlines), and render nothing when inactive.
+// byte-for-byte (including the Subject:/Style: newlines), and render nothing when inactive.
 // The anti-drift guarantee lives one level up (ImageStudio feeds it the same buildJobRequest output
 // that is submitted); this file pins that the component itself never mangles or hides that string.
 describe("StyledPromptPreview", () => {
@@ -35,13 +35,13 @@ describe("StyledPromptPreview", () => {
   const node = () => container.querySelector('[data-testid="styled-prompt-preview"]');
 
   it("renders nothing when no style is active", () => {
-    render(<StyledPromptPreview active={false} composedPrompt={"Style: x\nDescription: y"} />);
+    render(<StyledPromptPreview active={false} composedPrompt={"Subject: y\nStyle: x"} />);
     expect(node()).toBeNull();
     expect(container.textContent).toBe("");
   });
 
-  it("shows the composed prompt byte-for-byte, preserving Style/Description line breaks", () => {
-    const composed = "Style: cinematic watercolor\nDescription: a fox in the snow";
+  it("shows the composed prompt byte-for-byte, preserving Subject/Style line breaks", () => {
+    const composed = "Subject: a fox in the snow\nStyle: cinematic watercolor";
     render(<StyledPromptPreview active composedPrompt={composed} />);
     const paragraph = node().querySelector(".preset-stack-prompt p");
     // textContent must equal the source string exactly — no trimming, no whitespace collapse,
@@ -50,7 +50,7 @@ describe("StyledPromptPreview", () => {
   });
 
   it("reflects a multi-directive merge composition verbatim", () => {
-    const composed = "Style: oil painting, moody\nLighting: soft\nDescription: a portrait";
+    const composed = "Subject: a portrait\nStyle: oil painting, moody\nLighting: soft";
     render(<StyledPromptPreview active composedPrompt={composed} />);
     expect(node().querySelector(".preset-stack-prompt p").textContent).toBe(composed);
   });
@@ -65,7 +65,7 @@ describe("StyledPromptPreview", () => {
   const budget = () => container.querySelector('[data-testid="styled-prompt-budget"]');
 
   it("shows the composed length / cap for an under-budget prompt, with no warning", () => {
-    const composed = "Style: cinematic\nDescription: a fox in the snow";
+    const composed = "Subject: a fox in the snow\nStyle: cinematic";
     render(<StyledPromptPreview active composedPrompt={composed} />);
     // Measured on the composed string the component was handed (Unicode scalar values).
     expect(budget().textContent).toContain(`${[...composed].length} / 4000`);
@@ -74,7 +74,7 @@ describe("StyledPromptPreview", () => {
   });
 
   it("flips to an over-budget warning (with alert role) when the composed prompt exceeds the cap", () => {
-    const composed = `Style: ${"x".repeat(4000)}\nDescription: a fox`;
+    const composed = `Subject: a fox\nStyle: ${"x".repeat(4000)}`;
     render(<StyledPromptPreview active composedPrompt={composed} />);
     const over = [...composed].length;
     expect(over).toBeGreaterThan(4000);

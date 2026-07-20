@@ -5,7 +5,7 @@ import { promptBudget } from "../styleComposer.js";
 // sc-13131 — Live composed-prompt preview for the selected Style Catalog entry.
 //
 // Shows the EXACT outgoing `prompt` string the run will send once a style is active — the
-// `Style:`/`Description:` composition, any preserved sibling directive lines, and (when the user
+// `Subject:`/`Style:` composition, any preserved sibling directive lines, and (when the user
 // typed their own `Style:` line) the MERGE — so the splice is never silent (R4). It updates live
 // as the user types, swaps the selected style, or changes presets because the caller recomputes
 // `composedPrompt` on every render from the SAME `buildJobRequest` the single Generate submit
@@ -16,7 +16,7 @@ import { promptBudget } from "../styleComposer.js";
 //
 // Visual idiom mirrors PresetStackPreview (generationStudio.jsx): the same framed
 // `preset-stack-preview` container + `preset-stack-prompt` monospace block, with `pre-wrap` so the
-// Style/Description line breaks stay legible (styles.css `.styled-prompt-preview`).
+// Subject/Style line breaks stay legible (styles.css `.styled-prompt-preview`).
 // sc-13133: a style wraps ~700–900 chars around the user's prompt, and the backend rejects a
 // composed prompt over the cap (see promptBudget / PROMPT_MAX_CHARS). Because a style is active
 // exactly when this preview renders, the composed length / remaining budget belongs here: a live

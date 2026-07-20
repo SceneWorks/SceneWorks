@@ -18,7 +18,7 @@ import { STYLE_GROUPS, styleTextForId } from "../data/styleCatalog.js";
 // sc-13136 — the Style axis (proven in the Image Studio) mirrored into the Video Studio. These
 // tests drive the REAL StylePicker in the rendered screen and assert the outgoing video job the
 // client submits, so they cover the DoD end-to-end: a picked style composes the video `prompt` as
-// `Style:/Description:`, sets the client-authoritative flag, records the recipe round-trip fields,
+// `Subject:/Style:`, sets the client-authoritative flag, records the recipe round-trip fields,
 // and clears back to an untouched prompt (identity). Video has no structured-caption/batch modes,
 // so the only exclusion is a promptless model (covered elsewhere).
 
@@ -141,7 +141,7 @@ describe("VideoStudio — Style Catalog integration (sc-13136)", () => {
     expect(payload.advanced.stylePrompt).toBeUndefined();
   });
 
-  it("style selected → prompt composes as Style:/Description: and sets the client flag", async () => {
+  it("style selected → prompt composes as Subject:/Style: and sets the client flag", async () => {
     const context = baseContext();
     await render(context);
     await selectStyle(container, GROUP_NAME, SUBSTYLE.name);
@@ -151,7 +151,7 @@ describe("VideoStudio — Style Catalog integration (sc-13136)", () => {
     const payload = context.createVideoJob.mock.calls[0][0];
     const styleText = styleTextForId(SUBSTYLE.id);
     expect(payload.prompt).toBe(composeStyledPrompt({ styleText, userPrompt: DEFAULT_PROMPT }));
-    expect(payload.prompt).toBe(`Style: ${styleText}\nDescription: ${DEFAULT_PROMPT}`);
+    expect(payload.prompt).toBe(`Subject: ${DEFAULT_PROMPT}\nStyle: ${styleText}`);
     // Client-authoritative: the server must not re-fold the composed prompt.
     expect(payload.presetPromptResolvedClientSide).toBe(true);
     // Recipe round-trip fields ride advanced → rawAdapterSettings.
@@ -198,7 +198,7 @@ describe("VideoStudio — Style Catalog integration (sc-13136)", () => {
 // imageJobRequest.style.test.js replay cases). A recorded video recipe carries the picked style id
 // and the RAW pre-style prompt on `rawAdapterSettings.{styleId, stylePrompt}`. On replay the
 // VideoStudio effect (VideoStudio.jsx ~L710-713) re-selects the picker to that id and seeds the box
-// with the RAW prompt — so the very next submit recomposes the byte-identical Style:/Description:
+// with the RAW prompt — so the very next submit recomposes the byte-identical Subject:/Style:
 // prompt with EXACTLY ONE Style: block (no double-wrap). These tests drive a real replay through
 // context.studioLaunch and assert the outgoing job, for a sub-style id AND a group id, plus the
 // hardening case where the id is present but the raw prompt was not recorded.

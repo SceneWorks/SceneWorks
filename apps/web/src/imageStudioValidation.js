@@ -42,7 +42,7 @@ export function imageGenerateValidation({
   editSourceMissing = false,
   editLoraMissing = false,
   // sc-13133 / sc-13224: the COMPOSED outgoing prompt and whether a Style Catalog entry is active.
-  // `composedPrompt` is the exact string that will be sent — the Style:/Description: composition for a
+  // `composedPrompt` is the exact string that will be sent — the Subject:/Style: composition for a
   // prose model, or the style-injected re-serialized caption for a structured model — so the cap is
   // measured on IT, not the raw prompt field: a ~700–900 char style wrapped around a long-but-under-cap
   // prompt, or merged into a caption, can push past 4000.

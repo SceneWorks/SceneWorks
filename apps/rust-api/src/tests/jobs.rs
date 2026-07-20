@@ -4901,6 +4901,23 @@ fn write_style_test_manifests(config_dir: &std::path::Path) {
               "limits": {},
               "loraCompatibility": { "families": ["z-image"] },
               "ui": { "label": "Img" }
+            },
+            {
+              "id": "tag-model",
+              "name": "Tag Model",
+              "family": "anima",
+              "type": "image",
+              "adapter": "anima",
+              "captionStyle": "tags",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/tag", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "loraCompatibility": { "families": ["anima"] },
+              "ui": { "label": "Tag" }
             }
           ]
         }
@@ -4920,7 +4937,7 @@ fn write_style_test_manifests(config_dir: &std::path::Path) {
         {
           "schemaVersion": 1,
           "source": "documents/style.txt",
-          "promptTemplate": "Style: {style}\nDescription: {description}",
+          "promptTemplate": "Subject: {subject}\nStyle: {style}",
           "groups": [
             {
               "id": "test-anime",
@@ -4940,9 +4957,9 @@ fn write_style_test_manifests(config_dir: &std::path::Path) {
 #[tokio::test]
 async fn styled_image_job_folds_style_server_side_from_style_id() {
     // Headless/MCP parity (sc-13134): a client that sends a `styleId` + a RAW prompt gets the
-    // exact `Style:`/`Description:` composition the web composer produces — including the
+    // exact `Subject:`/`Style:` composition the web composer produces — including the
     // directive-collision splice (a user `Setting:` line stays a top-level sibling, the free text
-    // folds into Description). This is the whole point of the story: the same styled prompt whether
+    // folds into Subject). This is the whole point of the story: the same styled prompt whether
     // the fold happens on the web or on the server.
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -4958,8 +4975,9 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
-    // Sub-style id → its `prompt` ("gentle hand-painted"); the user's `Setting:` directive is kept
-    // as a sibling and "a fox" becomes the Description — byte-identical to composeStyledPrompt.
+    // Sub-style id → its `prompt` ("gentle hand-painted"); "a fox" becomes the leading Subject and
+    // the user's `Setting:` directive is kept as a trailing sibling — byte-identical to
+    // composeStyledPrompt.
     let (status, styled) = request(
         app.clone(),
         "POST",
@@ -4983,7 +5001,7 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
     );
     assert_eq!(
         styled["payload"]["prompt"],
-        "Style: gentle hand-painted\nSetting: snowy field\nDescription: a fox",
+        "Subject: a fox\nStyle: gentle hand-painted\nSetting: snowy field",
         "server-side fold must match the web composer output"
     );
 
@@ -5007,7 +5025,7 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
     assert_eq!(status, StatusCode::CREATED, "{group_styled:?}");
     assert_eq!(
         group_styled["payload"]["prompt"],
-        "Style: broad test anime look\nDescription: a fox"
+        "Subject: a fox\nStyle: broad test anime look"
     );
 
     // An unknown styleId is a clean 400, not a silent no-op.
@@ -5031,11 +5049,75 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
 }
 
 #[tokio::test]
+async fn styled_image_job_rejects_a_style_on_a_tag_convention_model() {
+    // Booru-tag models (`captionStyle: "tags"`) take comma-separated tags, so the prose Style catalog
+    // does not apply. The studio hides the axis; a headless/MCP caller that sends a styleId anyway
+    // must get a named 400 rather than a silently prose-wrapped prompt.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_style_test_manifests(&temp_dir.path().join("config"));
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Tag Model Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let body = json!({
+        "projectId": project_id,
+        "mode": "text_to_image",
+        "prompt": "1girl, solo, pink hair",
+        "model": "tag-model",
+        "count": 1,
+        "width": 1024,
+        "height": 1024,
+        "styleId": "test-ghibli"
+    });
+    let (status, err) = request(app.clone(), "POST", "/api/v1/image/jobs", body.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err:?}");
+    let message = err["detail"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        message.contains("tag-model") && message.contains("tag-style"),
+        "the rejection must name the model and the reason: {message}"
+    );
+
+    // The gate is a MODEL capability, not a fold detail: it fires even when the caller claims the
+    // prompt was already composed client-side (the flag that otherwise short-circuits the fold).
+    let mut claimed = body;
+    claimed["presetPromptResolvedClientSide"] = json!(true);
+    let (status, err) = request(app.clone(), "POST", "/api/v1/image/jobs", claimed).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err:?}");
+
+    // Same model with NO styleId is untouched — the gate rejects the axis, not the model.
+    let (status, plain) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project["id"].as_str().expect("project id"),
+            "mode": "text_to_image",
+            "prompt": "1girl, solo, pink hair",
+            "model": "tag-model",
+            "count": 1,
+            "width": 1024,
+            "height": 1024
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{plain:?}");
+    assert_eq!(plain["payload"]["prompt"], "1girl, solo, pink hair");
+}
+
+#[tokio::test]
 async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
     // The web app composes the styled prompt CLIENT-side and sends it verbatim plus
     // presetPromptResolvedClientSide (mirroring the preset skip). The server must take the prompt
     // as-is and NOT re-fold — even when a `styleId` rides along (the studio records it for replay).
-    // Otherwise a web-submitted "Style: …\nDescription: …" would be double-wrapped.
+    // Otherwise a web-submitted "Subject: …\nStyle: …" would be double-wrapped.
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_style_test_manifests(&temp_dir.path().join("config"));
@@ -5050,7 +5132,7 @@ async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
-    let already_composed = "Style: gentle hand-painted\nDescription: a fox";
+    let already_composed = "Subject: a fox\nStyle: gentle hand-painted";
     let (status, verbatim) = request(
         app.clone(),
         "POST",

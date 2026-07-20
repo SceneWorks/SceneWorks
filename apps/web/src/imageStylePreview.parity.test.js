@@ -71,13 +71,13 @@ describe("Style preview ↔ payload prompt parity (sc-13131)", () => {
     return buildImageJobRequest(baseState({ promptToSend, styleText })).prompt;
   }
 
-  it("plain prompt: payload prompt equals the composer's Style/Description block", () => {
+  it("plain prompt: payload prompt equals the composer's Subject/Style block", () => {
     const prompt = "a fox in the snow";
     const payload = payloadPromptFor({ prompt });
     // The payload prompt IS what composeStyledPrompt produces for the same inputs — this is the
     // string the preview renders. If the builder ever stopped using composeStyledPrompt, this breaks.
     expect(payload).toBe(composeStyledPrompt({ styleText, userPrompt: prompt }));
-    expect(payload).toBe(`Style: ${styleText}\nDescription: ${prompt}`);
+    expect(payload).toBe(`Subject: ${prompt}\nStyle: ${styleText}`);
   });
 
   it("MERGE case: the user's own Style: line merges into the catalog style, visibly", () => {
@@ -85,27 +85,27 @@ describe("Style preview ↔ payload prompt parity (sc-13131)", () => {
     const payload = payloadPromptFor({ prompt });
     expect(payload).toBe(composeStyledPrompt({ styleText, userPrompt: prompt }));
     // The catalog style leads; the user's own style words follow after ", " in the SAME Style block.
-    expect(payload).toBe(`Style: ${styleText}, neon rimlight\nDescription: a fox in the snow`);
+    expect(payload).toBe(`Subject: a fox in the snow\nStyle: ${styleText}, neon rimlight`);
     expect(payload).toContain(", neon rimlight");
   });
 
-  it("sibling directive stays a top-level sibling, not demoted under Description", () => {
+  it("sibling directive stays a top-level sibling, not demoted under Subject", () => {
     const prompt = "Lighting: soft window light\na fox in the snow";
     const payload = payloadPromptFor({ prompt });
     expect(payload).toBe(composeStyledPrompt({ styleText, userPrompt: prompt }));
-    expect(payload).toBe(`Style: ${styleText}\nLighting: soft window light\nDescription: a fox in the snow`);
+    expect(payload).toBe(`Subject: a fox in the snow\nStyle: ${styleText}\nLighting: soft window light`);
   });
 
-  it("active preset: preset fragments fold into the Description FIRST, style wraps LAST", () => {
+  it("active preset: preset fragments fold into the Subject FIRST, style wraps LAST", () => {
     const stack = [{ id: "cine", name: "Cinematic", prompt: { prefix: "cinematic", suffix: "film grain" } }];
     const prompt = "a fox in the snow";
     const presetFolded = composePreset({ generalStack: stack, userText: prompt }).prompt;
     const payload = payloadPromptFor({ prompt, stack });
-    // The preset-folded prompt is what lands inside Description; the style still wraps it last.
+    // The preset-folded prompt is what lands inside Subject; the style still wraps it last.
     expect(payload).toBe(composeStyledPrompt({ styleText, userPrompt: presetFolded }));
-    expect(payload).toBe(`Style: ${styleText}\nDescription: cinematic, a fox in the snow, film grain`);
+    expect(payload).toBe(`Subject: cinematic, a fox in the snow, film grain\nStyle: ${styleText}`);
     // Discriminates a wrong composition order (style folded before the preset, or preset lost).
-    expect(payload).toContain("Description: cinematic, a fox in the snow, film grain");
+    expect(payload).toContain("Subject: cinematic, a fox in the snow, film grain");
   });
 
   it("no style selected: payload prompt is the plain prompt, unwrapped", () => {

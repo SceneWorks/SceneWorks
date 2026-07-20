@@ -106,7 +106,7 @@ export function buildImageJobRequest(state) {
   // no-op when no style is selected (empty styleText → promptToSend unchanged). There are two
   // application paths depending on the model:
   //  - PROSE models (sc-13130): composeStyledPrompt wraps the already-preset-composed prompt as the
-  //    `Description:` block under the selected style's `Style:` block.
+  //    leading `Subject:` block above the selected style's `Style:` block.
   //  - STRUCTURED JSON-caption models (Ideogram 4, sc-13224): `promptToSend` is a serialized caption,
   //    not prose. Instead of skipping the Style axis, parse the caption and MERGE the style text into
   //    `style_description.aesthetics` (the field common to both photo/non-photo variants, so the

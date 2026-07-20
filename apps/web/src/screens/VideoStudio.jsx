@@ -722,7 +722,7 @@ export function VideoStudio() {
 
     // Style Catalog round-trip (sc-13136): re-select the picker to the recorded style id ONLY when
     // the raw pre-style prompt was also recorded, and seed the box with THAT raw prompt (not the
-    // composed recipe.prompt) so the next submit recomposes the identical Style:/Description: prompt
+    // composed recipe.prompt) so the next submit recomposes the identical Subject:/Style: prompt
     // with no double-wrap. A styleless recipe clears any stale selection and uses recipe.prompt.
     const restoredStyleId = rawSettings.styleId ?? null;
     const hasRawStylePrompt = restoredStyleId != null && typeof rawSettings.stylePrompt === "string";
@@ -1061,13 +1061,17 @@ export function VideoStudio() {
 
   // Style Catalog axis (sc-13136): mirror the Image Studio's Style picker into the Video Studio.
   // composeStyledPrompt wraps the outgoing prompt LAST — AFTER the general-preset stack fold above —
-  // so the style's Style:/Description: block sits around the already-preset-composed prompt. Video
+  // so the style's Subject:/Style: block sits around the already-preset-composed prompt. Video
   // has no structured-caption or batch modes (the two the image lane gates the composer off for), so
-  // the only exclusion here is a promptless (image-conditioned) model, which sends no text prompt to
-  // wrap. `stylePromptBase` is the SAME base the styleless submit sends, so the live preview and the
-  // submit compose from one string and can never drift.
-  const activeStyleText = styleTextForId(styleId);
-  const styleApplied = !promptless && typeof activeStyleText === "string" && activeStyleText.trim() !== "";
+  // the exclusions here are a promptless (image-conditioned) model, which sends no text prompt to
+  // wrap, and a booru-tag model, whose comma-separated-tag convention the catalog's prose entries do
+  // not fit (mirrors the Image Studio gate). No video model declares `captionStyle: "tags"` today, so
+  // the tag arm is inert — it is here so a future tag-convention video model inherits the gate rather
+  // than silently acquiring a mismatched axis. `stylePromptBase` is the SAME base the styleless submit
+  // sends, so the live preview and the submit compose from one string and can never drift.
+  const styleAxisAvailable = !promptless && selectedModel?.captionStyle !== "tags";
+  const activeStyleText = styleTextForId(styleAxisAvailable ? styleId : null);
+  const styleApplied = styleAxisAvailable && typeof activeStyleText === "string" && activeStyleText.trim() !== "";
   const stylePromptBase = stackActive ? composedStack.prompt : prompt;
   const composedStylePrompt = styleApplied
     ? composeStyledPrompt({ styleText: activeStyleText, userPrompt: stylePromptBase })
@@ -1612,15 +1616,16 @@ export function VideoStudio() {
               </label>
             </div>
             {/* Style axis (sc-13135): the Style Catalog picker leads this row (hidden for promptless
-                image-conditioned models), followed by the model's Style presets — mirrors the Image
-                Studio. The catalog wraps the outgoing prompt (Style:/Description:); "None" resets. */}
+                image-conditioned models and for booru-tag models), followed by the model's Style
+                presets — mirrors the Image Studio. The catalog wraps the outgoing prompt
+                (Subject:/Style:); "None" resets. */}
             <div className="settings-bar-styles settings-bar-style-axis">
-              {promptless ? null : (
+              {styleAxisAvailable ? (
                 <div className="style-axis-field style-axis-catalog">
                   <span className="settings-bar-label">Style</span>
                   <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
                 </div>
-              )}
+              ) : null}
               <div className="style-axis-field style-axis-presets">
                 <span className="settings-bar-label">Style preset</span>
                 <div className="preset-chips">

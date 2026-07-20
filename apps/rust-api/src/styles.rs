@@ -78,7 +78,7 @@ pub(crate) fn style_text_for_id(catalog: &Value, id: &str) -> Option<String> {
 /// when the request carries a top-level `styleId` AND the client did NOT already compose the prompt
 /// (mirrors the `presetPromptResolvedClientSide` skip in `apply_recipe_preset_to_image_payload`),
 /// resolve the id to its catalog style text and apply it to the current `prompt`. A prose prompt is
-/// spliced into the `Style:`/`Description:` template with `compose_styled_prompt`; a structured
+/// spliced into the `Subject:`/`Style:` template with `compose_styled_prompt`; a structured
 /// JSON-caption prompt (Ideogram 4) has the style MERGED into `style_description.aesthetics` via
 /// `merge_style_into_caption` and re-serialized. Both are the Rust twins of the web path, so a
 /// headless/MCP client gets a byte-identical result to the studio.
@@ -100,6 +100,34 @@ pub(crate) async fn apply_style_to_image_payload(
     else {
         return Ok(());
     };
+
+    // Booru-tag models (Anima, Illustrious — `captionStyle: "tags"`) take comma-separated tags, not
+    // prose, and every catalog style is a 600–900-char English prose paragraph. The studio hides the
+    // axis for them, so a `styleId` can only reach here from a headless/MCP caller: reject it by name
+    // rather than silently dropping the field, matching the unknown-style 400 below and the audio
+    // route's type gate (`generation.rs`).
+    //
+    // This runs BEFORE the client-side-resolved skip on purpose. That skip is a *fold* detail — it
+    // says "the prompt is already composed" — whereas this is a capability gate on the model, so a
+    // caller that sets both the flag and a styleId still gets told rather than quietly rendering a
+    // prose-wrapped prompt through a tag checkpoint.
+    //
+    // Keyed off the POST-preset `job_payload["model"]`, NOT `payload.model`: the recipe-preset fold
+    // that ran before us may have substituted the preset's own model when the caller named none, and
+    // reading the stale DTO field would resolve the DEFAULT model's entry (sc-12300). An unknown id
+    // resolves to `{}`, so it falls through to the normal path instead of a spurious rejection.
+    let model_id = job_payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(payload.model.as_str())
+        .to_owned();
+    let model_entry = crate::models::resolve_model_manifest_entry(state, &model_id).await?;
+    if model_entry.get("captionStyle").and_then(Value::as_str) == Some("tags") {
+        return Err(ApiError::bad_request(format!(
+            "Model {model_id} uses tag-style prompts, so the Style catalog does not apply (remove styleId)"
+        )));
+    }
+
     // The client already composed the full prompt client-side (web path) — take it verbatim so we
     // never double-fold. Mirrors the preset skip.
     if payload.preset_prompt_resolved_client_side.unwrap_or(false) {
@@ -125,7 +153,7 @@ pub(crate) async fn apply_style_to_image_payload(
 /// unit-tested without an `AppState`. A structured JSON-caption prompt (Ideogram 4, sc-13224) gets the
 /// style MERGED into `style_description.aesthetics` and re-serialized (the server twin of the web's
 /// `injectStyleIntoCaption` → `serializeCaption`); a prose prompt is spliced into the
-/// `Style:`/`Description:` template. Byte-identical to the web path in either branch.
+/// `Subject:`/`Style:` template. Byte-identical to the web path in either branch.
 fn apply_style_text_to_prompt(style_text: &str, prompt: &str) -> String {
     if let Ok(caption) = serde_json::from_str::<Value>(prompt) {
         if sceneworks_core::ideogram_caption::is_caption(&caption) {
@@ -179,11 +207,11 @@ mod tests {
     }
 
     #[test]
-    fn prose_prompt_gets_the_style_description_template() {
-        // A non-caption prompt keeps the sc-13134 prose fold, unchanged.
+    fn prose_prompt_gets_the_subject_style_template() {
+        // A non-caption prompt keeps the sc-13134 prose fold: Subject leads, Style trails.
         assert_eq!(
             apply_style_text_to_prompt("cinematic watercolor", "a fox in the snow"),
-            "Style: cinematic watercolor\nDescription: a fox in the snow"
+            "Subject: a fox in the snow\nStyle: cinematic watercolor"
         );
     }
 

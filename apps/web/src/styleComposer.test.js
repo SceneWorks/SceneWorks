@@ -13,9 +13,10 @@ import {
 // and JSON.parsed so both languages read the exact same bytes.
 import composerFixturesRaw from "../../../documents/style-composer.fixtures.json?raw";
 
-// sc-13129: the style composer wraps an already-preset-folded userPrompt in a Style/Description
-// template, splicing around any directive lines the user typed. These pin the exact composed
-// string the studio sends. Table-driven: {name, styleText, userPrompt, want}.
+// sc-13129: the style composer wraps an already-preset-folded userPrompt in a Subject/Style
+// template — the user's prose leads, the catalog style trails it — splicing around any directive
+// lines the user typed. These pin the exact composed string the studio sends. Table-driven:
+// {name, styleText, userPrompt, want}.
 describe("composeStyledPrompt", () => {
   const cases = [
     {
@@ -37,92 +38,123 @@ describe("composeStyledPrompt", () => {
       want: "a fox in the snow",
     },
     {
-      name: "clean prompt → basic Style/Description",
+      // The template order itself: Subject block first, Style block second. Fails if the two
+      // blocks are ever emitted Style-first again.
+      name: "clean prompt → Subject leads, Style trails",
       styleText: "cinematic watercolor",
       userPrompt: "a fox in the snow",
-      want: "Style: cinematic watercolor\nDescription: a fox in the snow",
+      want: "Subject: a fox in the snow\nStyle: cinematic watercolor",
     },
     {
       name: "mid-sentence colon is NOT a directive",
       styleText: "oil painting",
       userPrompt: "a portrait: dramatic lighting on her face",
-      want: "Style: oil painting\nDescription: a portrait: dramatic lighting on her face",
+      want: "Subject: a portrait: dramatic lighting on her face\nStyle: oil painting",
     },
     {
       name: "lowercase line-start colon is NOT a directive",
       styleText: "oil painting",
       userPrompt: "style: not really a directive",
-      want: "Style: oil painting\nDescription: style: not really a directive",
+      want: "Subject: style: not really a directive\nStyle: oil painting",
     },
     {
-      name: "unrecognized capitalized key is NOT a directive (folds into Description)",
+      name: "unrecognized capitalized key is NOT a directive (folds into Subject)",
       styleText: "oil painting",
       userPrompt: "Note: this is a plain sentence",
-      want: "Style: oil painting\nDescription: Note: this is a plain sentence",
+      want: "Subject: Note: this is a plain sentence\nStyle: oil painting",
     },
     {
       // Discriminates the LINE-ANCHOR (^) rule for a RECOGNIZED key: "Lighting" appears
-      // mid-line, so it must stay prose and fold into Description, never become a sibling
+      // mid-line, so it must stay prose and fold into Subject, never become a sibling
       // directive. Fails if the `^` anchor is dropped from DIRECTIVE_LINE_RE.
       name: "recognized key mid-line is NOT a directive (stays prose)",
       styleText: "oil painting",
       userPrompt: "a photo with dramatic Lighting: soft",
-      want: "Style: oil painting\nDescription: a photo with dramatic Lighting: soft",
+      want: "Subject: a photo with dramatic Lighting: soft\nStyle: oil painting",
     },
     {
       // Same anchor rule with "Setting" preceded by a word on the same line.
       name: "recognized key after leading word is NOT a directive (stays prose)",
       styleText: "oil painting",
       userPrompt: "The Setting: was perfect",
-      want: "Style: oil painting\nDescription: The Setting: was perfect",
+      want: "Subject: The Setting: was perfect\nStyle: oil painting",
     },
     {
       // CRLF (\r\n) line breaks must classify recognized keys as directives (issue 1). A
       // trailing "\r" on the non-final lines would break the anchored regex and leak into
-      // Description. Fails if the newline normalization in parseDirectiveLines is reverted.
+      // Subject. Fails if the newline normalization in parseDirectiveLines is reverted.
       name: "CRLF directive lines classify correctly, no stray carriage return",
       styleText: "noir",
       userPrompt: "Setting: alley\r\nAngle: low\r\nsomething",
-      want: "Style: noir\nSetting: alley\nAngle: low\nDescription: something",
+      want: "Subject: something\nStyle: noir\nSetting: alley\nAngle: low",
     },
     {
       name: "CRLF prose-then-directive splices cleanly",
       styleText: "noir",
       userPrompt: "a detective\r\nSetting: a foggy alley",
-      want: "Style: noir\nSetting: a foggy alley\nDescription: a detective",
+      want: "Subject: a detective\nStyle: noir\nSetting: a foggy alley",
     },
     {
-      name: "foreign directive preserved as sibling, remainder → Description",
+      name: "foreign directive preserved as sibling, remainder → Subject",
       styleText: "noir",
       userPrompt: "a detective in the rain\nSetting: a foggy alley",
-      want: "Style: noir\nSetting: a foggy alley\nDescription: a detective in the rain",
+      want: "Subject: a detective in the rain\nStyle: noir\nSetting: a foggy alley",
     },
     {
       name: "multiple foreign directives preserved as siblings in order",
       styleText: "noir",
       userPrompt: "a detective\nSetting: a foggy alley\nAngle: low angle\nLighting: single streetlamp",
-      want: "Style: noir\nSetting: a foggy alley\nAngle: low angle\nLighting: single streetlamp\nDescription: a detective",
+      want: "Subject: a detective\nStyle: noir\nSetting: a foggy alley\nAngle: low angle\nLighting: single streetlamp",
     },
     {
       name: "own Style line merges — catalog first, user words appended after comma",
       styleText: "oil painting",
       userPrompt: "Style: loose brushwork\na castle on a hill",
-      want: "Style: oil painting, loose brushwork\nDescription: a castle on a hill",
+      want: "Subject: a castle on a hill\nStyle: oil painting, loose brushwork",
     },
     {
       name: "own Style line merges alongside other foreign directives",
       styleText: "noir",
       userPrompt: "Style: high contrast\nSetting: alley\na detective",
-      want: "Style: noir, high contrast\nSetting: alley\nDescription: a detective",
+      want: "Subject: a detective\nStyle: noir, high contrast\nSetting: alley",
     },
     {
-      name: "empty userPrompt with a style → Style only, no Description",
+      // A user-typed Subject: line folds into the prose rather than becoming a sibling, so the
+      // label is never emitted twice. Fails if "Subject" is dropped from STYLE_DIRECTIVE_KEYS
+      // (the line would stay prose → "Subject: Subject: a detective").
+      name: "own Subject line folds into the prose without doubling the label",
+      styleText: "noir",
+      userPrompt: "Subject: a detective\nunder a streetlamp",
+      want: "Subject: a detective\nunder a streetlamp\nStyle: noir",
+    },
+    {
+      name: "own Subject line keeps line order alongside surrounding prose",
+      styleText: "noir",
+      userPrompt: "in the rain\nSubject: a detective\nSetting: alley",
+      want: "Subject: in the rain\na detective\nStyle: noir\nSetting: alley",
+    },
+    {
+      name: "own bare Subject line (no user words) is dropped, no blank line",
+      styleText: "noir",
+      userPrompt: "Subject:\na detective",
+      want: "Subject: a detective\nStyle: noir",
+    },
+    {
+      // "Description" stays a RECOGNIZED key so a user-typed one is preserved verbatim as a
+      // sibling rather than being swallowed into our Subject block.
+      name: "own Description line stays a sibling (not folded into Subject)",
+      styleText: "noir",
+      userPrompt: "a detective\nDescription: shot on film",
+      want: "Subject: a detective\nStyle: noir\nDescription: shot on film",
+    },
+    {
+      name: "empty userPrompt with a style → Style only, no Subject",
       styleText: "cinematic",
       userPrompt: "",
       want: "Style: cinematic",
     },
     {
-      name: "whitespace-only userPrompt with a style → Style only, no Description",
+      name: "whitespace-only userPrompt with a style → Style only, no Subject",
       styleText: "cinematic",
       userPrompt: "   \n  \t",
       want: "Style: cinematic",
@@ -131,28 +163,28 @@ describe("composeStyledPrompt", () => {
       name: "styleText is trimmed before templating",
       styleText: "  cinematic watercolor  ",
       userPrompt: "a fox",
-      want: "Style: cinematic watercolor\nDescription: a fox",
+      want: "Subject: a fox\nStyle: cinematic watercolor",
     },
     {
-      name: "unicode content is preserved in Description",
+      name: "unicode content is preserved in Subject",
       styleText: "浮世絵",
       userPrompt: "富士山と桜、朝の光",
-      want: "Style: 浮世絵\nDescription: 富士山と桜、朝の光",
+      want: "Subject: 富士山と桜、朝の光\nStyle: 浮世絵",
     },
     {
       name: "unicode prose alongside a foreign directive",
       styleText: "浮世絵",
       userPrompt: "富士山と桜\nSetting: 早朝",
-      want: "Style: 浮世絵\nSetting: 早朝\nDescription: 富士山と桜",
+      want: "Subject: 富士山と桜\nStyle: 浮世絵\nSetting: 早朝",
     },
     {
       name: "leading whitespace before a directive key still detects it",
       styleText: "noir",
       userPrompt: "a detective\n   Angle: low",
-      want: "Style: noir\nAngle: low\nDescription: a detective",
+      want: "Subject: a detective\nStyle: noir\nAngle: low",
     },
     {
-      name: "directive-only prompt (no prose) → Style + siblings, no Description",
+      name: "directive-only prompt (no prose) → Style + siblings, no Subject",
       styleText: "noir",
       userPrompt: "Setting: alley\nAngle: low",
       want: "Style: noir\nSetting: alley\nAngle: low",
@@ -161,13 +193,13 @@ describe("composeStyledPrompt", () => {
       name: "own bare Style line (no user words) does not append a trailing comma",
       styleText: "oil painting",
       userPrompt: "Style:\na castle",
-      want: "Style: oil painting\nDescription: a castle",
+      want: "Subject: a castle\nStyle: oil painting",
     },
     {
       name: "multi-line prose remainder is preserved across lines",
       styleText: "noir",
       userPrompt: "a detective\nunder a streetlamp\nSetting: alley",
-      want: "Style: noir\nSetting: alley\nDescription: a detective\nunder a streetlamp",
+      want: "Subject: a detective\nunder a streetlamp\nStyle: noir\nSetting: alley",
     },
   ];
 
@@ -207,6 +239,7 @@ describe("STYLE_DIRECTIVE_KEYS", () => {
   it("exposes the recognized directive set", () => {
     expect(STYLE_DIRECTIVE_KEYS).toEqual([
       "Style",
+      "Subject",
       "Description",
       "Setting",
       "Environment",
