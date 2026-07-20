@@ -887,6 +887,17 @@ export function App() {
     () => restrictFoldedToScope(foldedPreviewAssets, previewScopeIds),
     [foldedPreviewAssets, previewScopeIds],
   );
+  // The source image an edit was derived from (asset.lineage.sourceAssetId), resolved
+  // from the live asset set so the Image Viewer can offer an Original↔Edited side-by-side
+  // compare (the edit stays its own separate tile — this is a view link, not a fold).
+  // Null when the previewed asset isn't a derived edit or its source is gone (purged).
+  const previewSourceAsset = useMemo(() => {
+    const sourceId = previewedAsset?.lineage?.sourceAssetId;
+    if (!sourceId) {
+      return null;
+    }
+    return assets.find((candidate) => candidate.id === sourceId) ?? null;
+  }, [assets, previewedAsset]);
   const previewNavigation = useMemo(() => {
     if (!previewedAsset || previewScopeAssets.length < 2) {
       return { previous: null, next: null };
@@ -2749,6 +2760,7 @@ export function App() {
           }}
           onUseRecipe={sendAssetRecipeToStudio}
           previousAsset={previewNavigation.previous}
+          sourceAsset={previewSourceAsset}
           purgeAsset={async (asset) => {
             await purgeAsset(asset);
             closePreview();

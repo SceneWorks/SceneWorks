@@ -131,6 +131,57 @@ fn render_and_save_writes_png_and_contract_fact() {
     );
 }
 
+/// The Image Viewer's Original↔Edited side-by-side compare needs every edit's produced asset
+/// to carry `sourceAssetId` pointing at the image it was derived from. Single-source edits pass
+/// the scalar through; the multi-image reference pickers (FLUX.2-dev multi-select, Krea
+/// two-reference) drop the scalar source in favour of `referenceAssetIds`, so the produced fact
+/// anchors to the first reference. A plain txt2img job records no source.
+#[test]
+fn edit_asset_records_its_source_for_the_viewer_compare() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+
+    let write = |req: &ImageRequest| {
+        let plan = ImagePlan::new(req);
+        let seed = resolve_seed(req, 0);
+        let pixels = stub_rgb8(req.width, req.height, seed);
+        write_image_asset(
+            &plan,
+            0,
+            seed,
+            req.width,
+            req.height,
+            pixels,
+            STUB_ADAPTER,
+            stub_raw_settings(req),
+            project_path,
+        )
+        .unwrap()
+    };
+
+    // Single-source edit: the scalar `sourceAssetId` is carried straight through.
+    let single = write(&request(json!({
+        "projectId": "p", "model": "z_image_turbo", "mode": "edit_image", "sourceAssetId": "orig_1"
+    })));
+    assert_eq!(single["sourceAssetId"], json!("orig_1"));
+
+    // Multi-image edit (no scalar source): anchor to the first reference so the edit still
+    // links back to an original for the compare.
+    let multi = write(&request(json!({
+        "projectId": "p", "model": "flux_2_dev", "mode": "edit_image",
+        "referenceAssetIds": ["ref_a", "ref_b"]
+    })));
+    assert_eq!(multi["sourceAssetId"], json!("ref_a"));
+
+    // Plain txt2img job: no source, and `referenceAssetIds` outside edit mode is never anchored.
+    let plain = write(&request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "a hillside",
+        "referenceAssetIds": ["ignored"]
+    })));
+    assert_eq!(plain["sourceAssetId"], Value::Null);
+}
+
 /// F-003 / sc-11159: a path-traversal / absolute model id in the payload must NOT let the
 /// written PNG escape the project dir. The model id becomes a filename component, so a `../`,
 /// `..\`, or `/abs` id would otherwise land the asset (and its `create_dir_all` + rename)

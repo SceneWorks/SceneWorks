@@ -74,6 +74,8 @@ export const Icon = {
     </svg>
   ),
   ChevDown: (p) => <I {...p} d="M6 9l6 6 6-6" />,
+  // Two side-by-side panes — the Image Viewer's Original↔Edited compare toggle.
+  Columns: (p) => <I {...p} d="M4 4h7v16H4zM13 4h7v16h-7z" />,
   Sliders: (p) => <I {...p} d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h14M18 18h2M14 4v4M6 10v4M16 16v4" />,
   Play: (p) => <I {...p} fill d="M7 4l13 8-13 8z" />,
   Pause: (p) => <I {...p} fill d="M7 5h4v14H7zM13 5h4v14h-4z" />,
