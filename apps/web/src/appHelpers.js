@@ -43,6 +43,12 @@ export function isVideoGenerationJob(job) {
   return ["video_generate", "video_extend", "video_bridge"].includes(job.type);
 }
 
+// SceneWorks Audio Studio (epic 13400 / sc-13404): the audio-generation job type, the audio twin of
+// isVideoGenerationJob. Powers the `audio` local-job lane (rememberLocalGenerationJob('audio', job)).
+export function isAudioGenerationJob(job) {
+  return job.type === "audio_generate";
+}
+
 export function isInterleaveJob(job) {
   return job.type === "image_interleave";
 }

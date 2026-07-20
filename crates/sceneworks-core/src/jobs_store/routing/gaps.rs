@@ -375,6 +375,13 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // is advertised only by `mlx_gpu`, so no torch/candle worker ever claims it.
         JobType::ImageSegment => Ok(()),
 
+        // Pure audio synthesis (SceneWorks Audio Studio, epic 13400 / sc-13404): Kokoro TTS runs
+        // in-process on the runtime's candle audio lane (`catalog().audio()`, shipped default-on in
+        // `runtime-macos`) — audio is candle-native on every platform, so it is not a Python-torch
+        // gap. Its real availability is the worker's `audio_generate` capability advertisement, so it
+        // queues rather than enforce-fails here.
+        JobType::AudioGenerate => Ok(()),
+
         // Real-ESRGAN image upscaling is ported to the Rust worker (sc-3489) and SeedVR2 (the
         // native-MLX one-step diffusion upscaler, epic 4811 / sc-4815) runs in-process via
         // `mlx-gen-seedvr2`, so the upscale tool runs Python-free. The AuraSR engine (`aura-sr`,
@@ -557,6 +564,10 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::DatasetFaceAnalysis
         // sc-4415: face_likeness_compare on the candle lane (candle-gen-face) routes by capability too.
         | JobType::FaceLikenessCompare
+        // sc-13404: pure audio synthesis (Kokoro TTS) runs on the runtime's candle audio lane off-Mac
+        // too (audio is candle-native on every platform); it routes by the `audio_generate` capability
+        // advertisement rather than enforce-failing here.
+        | JobType::AudioGenerate
         | JobType::Unknown(_) => Ok(()),
     }
 }

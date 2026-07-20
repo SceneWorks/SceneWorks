@@ -178,6 +178,17 @@ fn with_candle_capabilities(
                     gpu.capabilities.push(capability);
                 }
             }
+            // Pure audio synthesis (SceneWorks Audio Studio, epic 13400 / sc-13404): audio is
+            // candle-native on every platform, and `runtime-cuda` ships the same audio lane default-on
+            // as `runtime-macos` — so the off-Mac candle worker serves `audio_generate` too when the
+            // lane is linked (`inference_runtime::audio()`). Advertised explicitly like the mlx worker's
+            // carve-out (the audio generators live in a separate registry from the media graph
+            // `registry_capabilities` iterates); a build without the lane never advertises it.
+            if crate::inference_runtime::audio().is_some()
+                && !gpu.capabilities.contains(&WorkerCapability::AudioGenerate)
+            {
+                gpu.capabilities.push(WorkerCapability::AudioGenerate);
+            }
             // The lane marker the routing gate keys off (mirrors the existing `nvidia` marker).
             gpu.capabilities
                 .push(WorkerCapability::Unknown("candle".to_owned()));
@@ -830,6 +841,16 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         WorkerCapability::PersonDetect,
         WorkerCapability::PersonTrack,
     ]);
+    // Pure audio synthesis (SceneWorks Audio Studio, epic 13400 / sc-13404): Kokoro TTS (and future
+    // SFX/music) runs in-process through the runtime's candle audio lane. Advertised ONLY when the
+    // lane is actually linked (`inference_runtime::audio()` — `runtime-macos` ships it default-on, so
+    // this is true on the mlx worker), not registry-derived: the audio generators live in a SEPARATE
+    // registry (`catalog().audio()`) from the mlx media graph that `registry_capabilities` iterates,
+    // so — like the onnx/face carve-outs above — it must be advertised explicitly. A build without
+    // the lane never advertises it, so an `audio_generate` job stays queued rather than mis-claimed.
+    if crate::inference_runtime::audio().is_some() {
+        capabilities.push(WorkerCapability::AudioGenerate);
+    }
     DiscoveredGpu {
         id: "mlx".to_owned(),
         name: "Apple Silicon (MLX)".to_owned(),

@@ -124,7 +124,7 @@ use training::{
 };
 mod generation;
 use generation::{
-    create_image_job, create_interleave_job, create_video_job, create_vqa_job,
+    create_audio_job, create_image_job, create_interleave_job, create_video_job, create_vqa_job,
     parse_recipe_preset_resolution, typed_generation_route, JobCatalogSnapshot,
 };
 #[cfg(test)]
@@ -148,8 +148,8 @@ mod tickets;
 use tickets::{create_media_ticket, TicketResponse, TicketStore};
 mod dto;
 use dto::{
-    AccessResponse, AssetPurgeQuery, AssetsQuery, CatalogDeleteQuery, CharacterCreateRequest,
-    CharacterLookRequest, CharacterLookUpdateRequest, CharacterLoraRequest,
+    AccessResponse, AssetPurgeQuery, AssetsQuery, AudioJobRequest, CatalogDeleteQuery,
+    CharacterCreateRequest, CharacterLookRequest, CharacterLookUpdateRequest, CharacterLoraRequest,
     CharacterLoraUpdateRequest, CharacterReferenceRequest, CharacterReferenceUpdateRequest,
     CharacterTestRequest, CharacterUpdateRequest, CharactersQuery, DatasetAnalysisJobRequest,
     DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest, DatasetFaceRecordsBody,
@@ -1215,6 +1215,7 @@ pub(crate) fn create_app_with_state(
         .route("/api/v1/image/vqa/jobs", post(create_vqa_job))
         .route("/api/v1/image/interleave/jobs", post(create_interleave_job))
         .route("/api/v1/video/jobs", post(create_video_job))
+        .route("/api/v1/audio/jobs", post(create_audio_job))
         .route("/api/v1/prompts/refine", post(create_prompt_refine_job))
         .route(
             "/api/v1/face-likeness/compare",
@@ -2792,6 +2793,35 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         )),
         _ => Ok(()),
     }
+}
+
+/// Payload-sanity validation for a `POST /api/v1/audio/jobs` request (sc-13404), the audio analogue
+/// of [`validate_video_job`]. Bounds the script prompt + the `advanced` bag exactly as the image/
+/// video validators do; the model's own advertised audio surface (voices / languages / max
+/// duration) is enforced by the shared gen-core validation floor at generate time, so a *named*
+/// duration is only bounded to the sane blanket here (the model's `audio.maxDurationSecs` is the
+/// real cap the worker applies). Voice/language are not allow-listed here — an unknown value is
+/// rejected by the generator's `validate`, which owns the per-model surface.
+fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
+    if payload.project_id.is_empty() {
+        return Err(ApiError::bad_request("projectId is required"));
+    }
+    validate_model_id(&payload.model)?;
+    if payload.prompt.trim().is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
+        return Err(ApiError::bad_request(
+            "prompt must be between 1 and 4000 characters",
+        ));
+    }
+    // Reuse the shared `advanced`-size guard (audio carries no negative prompt, so pass an empty one).
+    validate_prompt_extras("", &payload.advanced)?;
+    if let Some(target) = payload.target_duration_secs {
+        if !target.is_finite() || !(0.0..=300.0).contains(&target) {
+            return Err(ApiError::bad_request(
+                "targetDurationSecs must be between 0 and 300",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Upper bound for image width/height. A backstop only — per-model resolution is

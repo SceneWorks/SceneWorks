@@ -56,6 +56,9 @@ async fn generic_jobs_route_rejects_generation_types_with_their_typed_route() {
         ("video_extend", "/api/v1/video/jobs"),
         ("video_bridge", "/api/v1/video/jobs"),
         ("person_replace", "/api/v1/video/jobs"),
+        // Audio Studio (sc-13404): the audio route injects the model's manifest entry too, so an
+        // `audio_generate` job enqueued raw through the generic route must be rejected the same way.
+        ("audio_generate", "/api/v1/audio/jobs"),
     ] {
         let (status, body) = request(
             app.clone(),
@@ -237,6 +240,190 @@ async fn create_video_job_rejects_over_length_negative_prompt() {
     assert!(error["detail"]
         .as_str()
         .is_some_and(|detail| detail.contains("negativePrompt")));
+}
+
+/// Seed a minimal audio + non-audio manifest into a test config dir so
+/// `resolve_model_manifest_entry` resolves a real `type: audio` entry for the audio route.
+fn write_audio_manifest(config_dir: &std::path::Path) {
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "kokoro_82m",
+              "name": "Kokoro 82M",
+              "family": "kokoro",
+              "type": "audio",
+              "audio": {
+                "voices": [{ "id": "af_heart", "language": "en-US" }, { "id": "bm_george", "language": "en-GB" }],
+                "languages": ["en-US", "en-GB"],
+                "sampleRates": [24000],
+                "maxDurationSecs": 30
+              },
+              "downloads": [
+                { "provider": "huggingface", "repo": "hexgrad/Kokoro-82M", "files": ["config.json", "kokoro-v1_0.pth", "voices/*"] }
+              ],
+              "paths": { "model": "${HF_CACHE}/hexgrad/Kokoro-82M" },
+              "ui": { "label": "Kokoro 82M" }
+            },
+            {
+              "id": "not-audio-img",
+              "name": "Not Audio",
+              "family": "z_image",
+              "type": "image",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/not-audio", "files": ["*.safetensors"] }
+              ],
+              "paths": {},
+              "ui": { "label": "Not Audio" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+}
+
+/// The audio job path (sc-13404): a well-formed `POST /api/v1/audio/jobs` maps the request into an
+/// `audio_generate` job whose payload carries the audio knobs (voice / language / targetDurationSecs
+/// / seed) verbatim and the resolved `type: audio` manifest entry — the audio twin of how the video
+/// route injects `modelManifestEntry`.
+#[tokio::test]
+async fn create_audio_job_maps_request_to_audio_generate_payload() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Audio Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "kokoro_82m",
+            "prompt": "Hello from SceneWorks audio.",
+            "voice": "bm_george",
+            "language": "en-GB",
+            "targetDurationSecs": 4.0,
+            "seed": 7,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "audio_generate");
+    let payload = &job["payload"];
+    assert_eq!(payload["model"], "kokoro_82m");
+    assert_eq!(payload["prompt"], "Hello from SceneWorks audio.");
+    assert_eq!(payload["voice"], "bm_george");
+    assert_eq!(payload["language"], "en-GB");
+    assert_eq!(payload["targetDurationSecs"], 4.0);
+    assert_eq!(payload["seed"], 7);
+    // The resolved manifest entry must travel with the job (the worker resolves weights from it),
+    // and it must be THIS model's `type: audio` entry — not `{}` (which would slip a non-audio job
+    // through) — carrying the HF download repo the worker resolves the Kokoro snapshot from.
+    let entry = &payload["modelManifestEntry"];
+    assert_eq!(entry["id"], "kokoro_82m");
+    assert_eq!(entry["type"], "audio");
+    assert_eq!(entry["downloads"][0]["repo"], "hexgrad/Kokoro-82M");
+    // requestedGpu is stripped from the payload (it rides the job envelope), mirroring the video route.
+    assert!(payload.get("requestedGpu").is_none());
+}
+
+/// The audio route is a door for `type: audio` models only: an image/video model posted here is
+/// rejected up front rather than failing deep in the worker's audio lane (sc-13404).
+#[tokio::test]
+async fn create_audio_job_rejects_non_audio_model() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Audio Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // A path-safe but non-audio model id resolves to a `type: image` entry → rejected.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "not-audio-img",
+            "prompt": "this is not audio",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("audio")));
+
+    // An unknown model resolves to `{}` (no type) and is rejected for the same reason.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "definitely-not-real",
+            "prompt": "hello",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// The audio validator bounds the script prompt exactly as the image/video validators do (sc-13404).
+#[tokio::test]
+async fn create_audio_job_rejects_empty_prompt() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Audio Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "kokoro_82m",
+            "prompt": "   ",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("prompt")));
 }
 
 // The queue-lifecycle tests below drive `POST /api/v1/jobs` — claim, cancel, retry,
