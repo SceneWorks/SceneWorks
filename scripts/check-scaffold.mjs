@@ -1,6 +1,7 @@
 import { access, constants, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { promptGuideRequiredForModel } from "../apps/web/src/promptGuideContract.js";
 
 const root = process.cwd();
 
@@ -190,6 +191,14 @@ async function assertBuiltinPromptGuides() {
   const manifestPath = "config/manifests/builtin.models.jsonc";
   const manifest = await readJsonc(manifestPath);
   for (const model of manifest.models ?? []) {
+    // Non-picker entries (type:"utility") never reach a Studio prompt-guide surface, so the schema
+    // exempts them and this gate must too — otherwise a schema-valid utility entry REDs the lane
+    // (sc-13783). The shared predicate is the single source of truth both authorities read; the
+    // schema encodes the identical exemption and promptGuideScaffoldSchemaContract.test.js asserts
+    // they can't diverge.
+    if (!promptGuideRequiredForModel(model)) {
+      continue;
+    }
     const guide = model.ui?.promptGuide;
     if (!guide?.title || !guide?.path) {
       throw new Error(`${manifestPath} model ${model.id} is missing ui.promptGuide title/path`);
