@@ -75,6 +75,17 @@ pub const GLOBAL_KEYPOINTS_PROJECT_NAME: &str = "Key Point Library";
 /// The user angle-set collections store, relative to the global keypoints project.
 const KEYPOINT_COLLECTIONS_FILE: &str = "keypoint-collections.json";
 
+/// Staging cache dir (under `<data>/cache`) for Key Point Library source uploads. One
+/// constant shared by the API staging route (`create_keypoint_sources`), the store's
+/// save-preset guard ([`ProjectStore`]'s keypoint upload check), and the worker's
+/// `kps sourcePath` confinement — sc-13713 was these drifting apart (the worker confined
+/// to the pose lane's dir, rejecting every capture).
+pub const KEYPOINT_UPLOADS_CACHE_DIR: &str = "keypoint-uploads";
+/// Staging cache dir for Pose Library source uploads (the `pose_detect` lane's sibling of
+/// [`KEYPOINT_UPLOADS_CACHE_DIR`]): API staging route, startup sweep, and the worker's
+/// `pose sourcePath` confinement + post-detect cleanup.
+pub const POSE_UPLOADS_CACHE_DIR: &str = "pose-uploads";
+
 /// One resolved angle preset for generation (sc-4450): the kps to draw + a display name + (for
 /// built-ins) the canonical angle name that drives prompt augmentation. User presets have
 /// `angle: None` (no canonical prompt clause). Produced by [`ProjectStore::resolve_angle_collection`].
@@ -1786,7 +1797,7 @@ impl ProjectStore {
     /// Guard a staged source-image path under the keypoint-uploads cache (mirrors
     /// [`Self::pose_preview_path`]) so a save can't copy an arbitrary file into the library.
     fn keypoint_upload_path(&self, path: &str) -> ProjectStoreResult<PathBuf> {
-        let cache_root = self.data_dir.join("cache").join("keypoint-uploads");
+        let cache_root = self.data_dir.join("cache").join(KEYPOINT_UPLOADS_CACHE_DIR);
         let canonical_root = fs::canonicalize(&cache_root).map_err(|_| {
             ProjectStoreError::NotFound("Key Point upload cache is unavailable".to_owned())
         })?;

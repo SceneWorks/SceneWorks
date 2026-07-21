@@ -53,7 +53,7 @@ pub(crate) async fn create_pose_sources(
             continue;
         }
         let display_name = field.file_name().unwrap_or("image").to_owned();
-        let path = write_upload_field_to_dir(&state, field, "pose-uploads").await?;
+        let path = write_upload_field_to_dir(&state, field, POSE_UPLOADS_CACHE_DIR).await?;
         sources.push(serde_json::json!({
             "path": path.to_string_lossy(),
             "displayName": display_name,
@@ -73,7 +73,7 @@ pub(crate) async fn create_pose_sources(
 /// own sources after a successful detect). Mirrors `sweep_stale_lora_uploads`.
 pub(crate) fn sweep_stale_pose_uploads(data_dir: &FsPath) -> std::io::Result<usize> {
     let cutoff = SystemTime::now() - Duration::from_secs(STALE_UPLOAD_SECONDS);
-    sweep_stale_uploads(data_dir, "pose-uploads", cutoff)
+    sweep_stale_uploads(data_dir, POSE_UPLOADS_CACHE_DIR, cutoff)
 }
 
 /// Stream a worker pose-detect skeleton preview from the cache so the Create tab

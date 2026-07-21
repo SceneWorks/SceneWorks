@@ -47,7 +47,7 @@ use sceneworks_core::project_store::{
     AssetStatusPatch, AssetTagsPatch, CharacterCreateInput, CharacterLookInput,
     CharacterLookUpdateInput, CharacterLoraInput, CharacterLoraUpdateInput,
     CharacterReferenceInput, CharacterReferenceUpdateInput, CharacterUpdateInput, ProjectStore,
-    ProjectStoreError, UploadAsset,
+    ProjectStoreError, UploadAsset, KEYPOINT_UPLOADS_CACHE_DIR, POSE_UPLOADS_CACHE_DIR,
 };
 use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
 use sceneworks_core::training::{

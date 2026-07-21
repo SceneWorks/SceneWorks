@@ -51,7 +51,7 @@ use crate::{
     update_job, ApiClient, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
-use sceneworks_core::project_store::ProjectStore;
+use sceneworks_core::project_store::{ProjectStore, KEYPOINT_UPLOADS_CACHE_DIR};
 
 /// SCRFD detection confidence floor (InsightFace / `FaceAnalysis` default). Mac only — the candle
 /// `FaceAnalysis::detect` applies the same InsightFace defaults internally, so the off-Mac path never
@@ -338,8 +338,16 @@ fn load_source_image(settings: &Settings, job: &JobSnapshot) -> WorkerResult<Ima
         // picks the codec from the extension — would reject a perfectly valid JPEG/PNG. Read
         // the bytes and let the decoder sniff the format from the magic bytes; `decode_image_bytes_any`
         // additionally transcodes a valid-but-unsupported format (AVIF/HEIC/...) to PNG (sc-6143).
-        let source_path =
-            normalize_app_managed_cache_path(settings, path, "pose-uploads", "kps sourcePath")?;
+        // Confine to `keypoint-uploads` — the cache the API's `create_keypoint_sources`
+        // actually stages kps sources into. From 2e5b5562 (2026-06-15) until sc-13713
+        // this said `pose-uploads` (the pose_detect lane's staging dir), which rejected
+        // every Key Point Library capture on every install (GitHub #1658).
+        let source_path = normalize_app_managed_cache_path(
+            settings,
+            path,
+            KEYPOINT_UPLOADS_CACHE_DIR,
+            "kps sourcePath",
+        )?;
         let bytes = std::fs::read(&source_path).map_err(|error| {
             WorkerError::InvalidPayload(format!("kps extraction source {path}: {error}"))
         })?;
@@ -468,6 +476,113 @@ pub(crate) async fn run_kps_extract_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A queued `kps_extract` job carrying `payload` (mirrors `jobs_store`'s test constructor).
+    fn kps_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_kps",
+            "type": "kps_extract",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-07-20T00:00:00Z",
+            "updatedAt": "2026-07-20T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    /// Write a tiny valid PNG at `path` (staged uploads are extensionless `upload-*.tmp`
+    /// files, so encode into a buffer and write the bytes rather than `save`, which
+    /// dispatches on the extension).
+    fn write_png(path: &Path, width: u32, height: u32) {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(width, height))
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("encode png");
+        std::fs::write(path, bytes.into_inner()).expect("write staged png");
+    }
+
+    /// sc-13713 (GitHub #1658): kps sources are staged by the API's
+    /// `create_keypoint_sources` into `<data>/cache/keypoint-uploads`, but the worker
+    /// confined `sourcePath` to the pose-detect lane's `pose-uploads` cache, so every
+    /// Key Point Library capture failed the confinement check. Pin the lane to the
+    /// directory the API actually stages into.
+    #[test]
+    fn kps_source_path_accepts_keypoint_uploads_staging() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut settings = Settings::from_env();
+        settings.data_dir = temp.path().join("data");
+        let uploads = settings.data_dir.join("cache").join("keypoint-uploads");
+        std::fs::create_dir_all(&uploads).expect("uploads dir");
+        let staged = uploads.join("upload-abc123.tmp");
+        write_png(&staged, 3, 2);
+
+        let image = load_source_image(
+            &settings,
+            &kps_job(json!({ "sourcePath": staged.to_str().unwrap() })),
+        )
+        .expect("staged keypoint-uploads source accepted");
+        assert_eq!((image.width, image.height), (3, 2));
+    }
+
+    /// The confinement itself must survive the sc-13713 fix: a readable file outside the
+    /// staging cache is still rejected (the sc-5723-style arbitrary-file-read guard).
+    #[test]
+    fn kps_source_path_rejects_unstaged_file() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut settings = Settings::from_env();
+        settings.data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&settings.data_dir).expect("data dir");
+        let outside = temp.path().join("outside.png");
+        write_png(&outside, 3, 2);
+
+        let error = load_source_image(
+            &settings,
+            &kps_job(json!({ "sourcePath": outside.to_str().unwrap() })),
+        )
+        .expect_err("unstaged source rejected");
+        // Pin the CONFINEMENT rejection specifically (the file is a readable, valid PNG,
+        // so a read/decode error here would mean the guard was bypassed).
+        assert!(
+            matches!(&error, WorkerError::InvalidPayload(message)
+                if message.contains("must be inside an app-managed directory")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    /// sc-13713's reported shape: a data dir on an external volume reached through a
+    /// symlinked mount point with spaces in the path (`/Volumes/<Drive>/scene folder`).
+    /// The staged source's canonical form diverges from the lexical payload path, and
+    /// the confinement must still accept it (both root forms are admitted).
+    #[cfg(unix)]
+    #[test]
+    fn kps_source_path_accepts_symlinked_spaced_mount_data_dir() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let real_mount = temp.path().join("real mount");
+        std::fs::create_dir_all(&real_mount).expect("real mount");
+        let mount_link = temp.path().join("Volumes SSD");
+        std::os::unix::fs::symlink(&real_mount, &mount_link).expect("mount symlink");
+
+        let mut settings = Settings::from_env();
+        settings.data_dir = mount_link.join("scene folder");
+        let uploads = settings.data_dir.join("cache").join("keypoint-uploads");
+        std::fs::create_dir_all(&uploads).expect("uploads dir");
+        let staged = uploads.join("upload-def456.tmp");
+        write_png(&staged, 2, 2);
+
+        let image = load_source_image(
+            &settings,
+            &kps_job(json!({ "sourcePath": staged.to_str().unwrap() })),
+        )
+        .expect("spaced symlinked-mount source accepted");
+        assert_eq!((image.width, image.height), (2, 2));
+    }
 
     #[test]
     fn normalize_square_image_is_plain_fraction() {
