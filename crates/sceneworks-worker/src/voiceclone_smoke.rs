@@ -1147,3 +1147,148 @@ fn chatterbox_offline_install_parity_smoke() {
         real_hub.display()
     );
 }
+
+// ── sc-13797 (epic 13678): FAST, CI-runnable fresh-install-to-custom-cache layout smoke ──────────
+// The pinned-revision hub layout (models--<repo>/snapshots/<rev>/<file> + refs/<sha>) is proven end
+// to end by `chatterbox_offline_install_parity_smoke`, but that #[ignore]d smoke pulls the ~3.2 GB
+// chatterbox repo — too heavy for routine CI. `whisper_base` is the TINY cataloged pin (three small
+// allow-listed files, ~279 MB) that exercises the SAME `downloads.rs` provisioning seam, so the
+// smoke below gives the download/layout contract a cheap regression guard on EVERY PR (worker lane)
+// instead of only the weekly real-weights lane. Pin MIRRORS the `whisper_base` builtin-manifest
+// download (config/manifests/builtin.models.jsonc, sc-13684): openai/whisper-base @ the pinned
+// commit, files = config.json + tokenizer.json + model.safetensors.
+const WHISPER_REPO: &str = "openai/whisper-base";
+const WHISPER_REVISION: &str = "e37978b90ca9030d5170a5c07aadb050351a65bb";
+const WHISPER_FILES: &[&str] = &["config.json", "tokenizer.json", "model.safetensors"];
+
+/// sc-13797 (epic 13678) — **fast, CI-runnable fresh-install-to-custom-cache layout smoke**. NOT
+/// `#[ignore]d`: it runs inside `cargo test -p sceneworks-worker` on EVERY PR (the macOS worker
+/// lane), unlike the ~3.2 GB `chatterbox_offline_install_parity_smoke` it COMPLEMENTS. It provisions
+/// the TINY `whisper_base` pin (`openai/whisper-base` @ `e37978b…`, three small allow-listed files,
+/// ~279 MB) through the SAME real download executor a Models-screen install runs
+/// ([`install_snapshot`] → `HuggingFaceSnapshot::resolve` + `download_snapshot_into_cache`) into a
+/// FRESH custom `HF_HOME` (temp dir), then asserts the pinned-revision hub layout the runtime
+/// resolver reads: `models--openai--whisper-base/snapshots/<commit>/<file>` for EACH allow-listed
+/// file, plus the `refs/<rev>` pointer (recording the resolved commit). Network is allowed at test
+/// time; only the three allow-listed files download — NOT the whole `whisper-base` repo (which ships
+/// many more upstream) — which is what keeps it fast AND is asserted as a discriminating check.
+///
+/// This is the cheap regression guard for the download/layout contract (epic 13678): a break in how
+/// `download_snapshot_into_cache` materializes the pinned layout would turn this red on every PR,
+/// rather than surfacing only when someone runs the heavy chatterbox smoke by hand.
+#[test]
+fn whisper_base_fresh_install_pinned_layout_smoke() {
+    // ── Isolate the hub the downloader writes into: HF_HOME at a fresh temp root (the desktop's
+    //    sc-1904 default HF_HOME=<temp>/.cache/huggingface ⇒ hub at <HF_HOME>/hub, per
+    //    huggingface_hub_cache_dir). Clear every other HF cache var so cache-path resolution can't
+    //    diverge to another location or the data_dir fallback. EnvVars restores on drop — even on a
+    //    panicking assert — so a leaked HF_HOME can't poison sibling tests in the shared process.
+    let home_root = tempfile::tempdir().expect("temp HF_HOME root");
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let hf_home = home_root.path().join(".cache").join("huggingface");
+    let hub = hf_home.join("hub");
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HOME", hf_home.to_str().expect("utf-8 HF_HOME")),
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HUB_OFFLINE", ""),
+    ]);
+    let repo_slug = "models--openai--whisper-base";
+    assert!(
+        !hub.join(repo_slug).exists(),
+        "the smoke requires a FRESH (empty) isolated HF hub to start: {}",
+        hub.join(repo_slug).display()
+    );
+
+    let settings = crate::Settings {
+        api_url: "http://127.0.0.1:1".to_owned(),
+        access_token: None,
+        data_dir: data_dir.path().to_path_buf(),
+        config_dir: data_dir.path().join("config"),
+        worker_id: "sc-13797".to_owned(),
+        gpu_id: "gpu-0".to_owned(),
+        is_child_worker: false,
+        poll_seconds: 1,
+        heartbeat_seconds: 5,
+        shutdown_timeout_seconds: 1,
+        huggingface_base_url: crate::DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+        huggingface_token: std::env::var("HF_TOKEN").ok(),
+        credentials: Vec::new(),
+        max_lora_url_bytes: crate::DEFAULT_MAX_LORA_URL_BYTES,
+        max_model_url_bytes: crate::DEFAULT_MAX_MODEL_URL_BYTES,
+        allow_private_lora_urls: false,
+        utility_workers: 1,
+        backend_mlx_enabled: true,
+        backend_candle_enabled: false,
+        gpu_memory_limit_bytes: 0,
+        external_model_roots: Vec::new(),
+    };
+
+    // ── Provision the pinned snapshot through the REAL download executor (online), filtered to the
+    //    manifest's three allow-listed files — NOT the whole repo. Returns the resolved commit SHA.
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let commit = rt.block_on(install_snapshot(
+        &settings,
+        WHISPER_REPO,
+        WHISPER_REVISION,
+        WHISPER_FILES,
+    ));
+    // A pinned commit-SHA revision resolves to itself: the snapshot dir the resolver reads is
+    // snapshots/<commit>, and here <commit> == the pinned <rev>.
+    assert_eq!(
+        commit, WHISPER_REVISION,
+        "a pinned commit revision must resolve to itself (got {commit})"
+    );
+
+    // ── Assert the pinned-revision hub layout the resolver reads — exactly what
+    //    download_snapshot_into_cache writes: refs/<rev> -> commit, snapshots/<commit>/<file>. ─────
+    let repo_dir = hub.join(repo_slug);
+    let snapshot_dir = repo_dir.join("snapshots").join(&commit);
+    for file in WHISPER_FILES {
+        let path = snapshot_dir.join(file);
+        assert!(
+            path.exists(),
+            "{file} must materialize at the pinned snapshot dir: {}",
+            path.display()
+        );
+    }
+    let refs_pointer = repo_dir.join("refs").join(WHISPER_REVISION);
+    assert!(
+        refs_pointer.exists(),
+        "the refs/<sha> pointer must exist: {}",
+        refs_pointer.display()
+    );
+    let recorded = std::fs::read_to_string(&refs_pointer).expect("read refs/<sha> pointer");
+    assert_eq!(
+        recorded.trim(),
+        commit,
+        "refs/<rev> must record the resolved commit SHA (the layout's rev→commit link)"
+    );
+
+    // Only the allow-listed files materialized — the smoke stays fast BECAUSE it never pulled the
+    // whole repo (whisper-base ships many more files upstream; the manifest allow-list is the lever).
+    // An exact match is the discriminating check: a regression that fetched the full repo, or dropped
+    // a requested file, would break this.
+    let mut installed: Vec<String> = std::fs::read_dir(&snapshot_dir)
+        .expect("read pinned snapshot dir")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    installed.sort();
+    let mut expected: Vec<String> = WHISPER_FILES
+        .iter()
+        .map(|file| (*file).to_owned())
+        .collect();
+    expected.sort();
+    assert_eq!(
+        installed, expected,
+        "ONLY the manifest's allow-listed files must materialize (the whole repo is NOT pulled)"
+    );
+
+    eprintln!(
+        "[whisper-layout] PASS — provisioned {WHISPER_REPO}@{WHISPER_REVISION} ({} files) into the \
+         FRESH isolated hub {}; pinned layout snapshots/<commit>/<file> + refs/<sha> verified.",
+        WHISPER_FILES.len(),
+        hub.display()
+    );
+}
