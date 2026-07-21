@@ -7,7 +7,7 @@
 Under epic 13657 / sc-13591, inference no longer self-fetches any model component: every
 primary weight **and** every co-requisite is provisioned by SceneWorks (env-correct
 `downloads.rs`) and passed into inference as an already-resolved local path. The immutable
-commit that used to live in an inference `HUB_REVISION`/`PINNED_HUB_REVISIONS` constant now
+commit that used to live in an inference `HUB_REVISION`/`HUB_PINS` constant now
 lives in the SceneWorks manifest as the download entry's `revision` (a full 40-hex SHA,
 `^[0-9a-f]{40}$`, enforced by `model-manifest.schema.json` + the Python/Rust manifest audits).
 
@@ -47,9 +47,9 @@ this table shows it has a pinned manifest home.
 | 14 | candle-audio-mmaudio · `HUB_REVISION` (model/mmdit/output) | hkchengrex/MMAudio | `eb13a1a98fdbec91753775c57b074ccdfc60587c` | `mmaudio_small_16k` + `mmaudio_large_44k` — primary + `synchformer`/`dit`/`vae`/`vocoder` coReqs | `eb13a1a9…587c` | ✅ |
 | 15 | candle-audio-mmaudio · `BIGVGAN_V2_HUB_REVISION` | nvidia/bigvgan_v2_44khz_128band_512x | `95a9d1dcb12906c03edd938d77b9333d6ded7dfb` | `mmaudio_large_44k` — `vocoder` coRequisite | `95a9d1dc…7dfb` | ✅ |
 | 16 | candle-audio-mmaudio · `CLIP_HUB_REVISION` | apple/DFN5B-CLIP-ViT-H-14-384 | `01b771ed0d1395ca5ffdd279897d665ebe00dfd2` | `mmaudio_small_16k` + `mmaudio_large_44k` — `clip` coRequisite | `01b771ed…dfd2` | ✅ |
-| 17 | candle-gen-sdxl · `PINNED_HUB_REVISIONS[VAE_FIX_REPO]` | madebyollin/sdxl-vae-fp16-fix | `207b116dae70ace3637169f1ddd2434b91b3a8cd` | `sdxl`, `realvisxl`, `realvisxl_lightning`, `illustrious_xl_v1`, `illustrious_xl_v2`, `instantid_realvisxl` — `vae_fp16_fix` coReq | `207b116d…a8cd` | ✅ |
-| 18 | candle-gen-sdxl · `PINNED_HUB_REVISIONS` (CLIP-L) | openai/clip-vit-large-patch14 | `32bd64288804d66eefd0ccbe215aa642df71cc41` | SDXL family — `tokenizer_clip_l` coReq + `clip_vit_l14` utility primary | `32bd6428…cc41` | ✅ |
-| 19 | candle-gen-sdxl · `PINNED_HUB_REVISIONS` (bigG) | laion/CLIP-ViT-bigG-14-laion2B-39B-b160k | `743c27bd53dfe508a0ade0f50698f99b39d03bec` | SDXL family — `tokenizer_clip_bigg` coRequisite | `743c27bd…03bec`… | ✅ |
+| 17 | candle-gen-sdxl · `HUB_PINS[VAE_FIX_REPO]` | madebyollin/sdxl-vae-fp16-fix | `207b116dae70ace3637169f1ddd2434b91b3a8cd` | `sdxl`, `realvisxl`, `realvisxl_lightning`, `illustrious_xl_v1`, `illustrious_xl_v2`, `instantid_realvisxl` — `vae_fp16_fix` coReq | `207b116d…a8cd` | ✅ |
+| 18 | candle-gen-sdxl · `HUB_PINS` (CLIP-L) | openai/clip-vit-large-patch14 | `32bd64288804d66eefd0ccbe215aa642df71cc41` | SDXL family — `tokenizer_clip_l` coReq + `clip_vit_l14` utility primary | `32bd6428…cc41` | ✅ |
+| 19 | candle-gen-sdxl · `HUB_PINS` (bigG) | laion/CLIP-ViT-bigG-14-laion2B-39B-b160k | `743c27bd53dfe508a0ade0f50698f99b39d03bec` | SDXL family — `tokenizer_clip_bigg` coRequisite | `743c27bd…03bec`… | ✅ |
 
 (Rows 1–3 share the single repo `ResembleAI/chatterbox`; rows 14/17/18 fan out across multiple
 manifest models. 18 distinct repo pins across 19 constant sites — every one now carries a pinned
@@ -84,6 +84,6 @@ delete any pin for them. The 5 primaries pinned by this story are **not** co-req
 
 **UNBLOCKED.** Every inference audio/mmaudio/SDXL repo-pin constant (18 distinct pins, 19 sites)
 maps to a pinned manifest `revision` carrying the identical SHA. sc-13665 may delete the
-`HUB_REPO`/`HUB_REVISION`/`PINNED_HUB_REVISIONS` pin constants; the F-029 supply-chain pin now
+`HUB_REPO`/`HUB_REVISION`/`HUB_PINS` pin constants; the F-029 supply-chain pin now
 lives in the SceneWorks manifest. (The inference-side `docs/migration/` note pointing at the
 manifest as the new pin authority is authored by sc-13665's landing, not this PR.)

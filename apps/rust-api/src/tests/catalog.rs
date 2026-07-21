@@ -3132,15 +3132,21 @@ fn builtin_manifest_pins_chatterbox_companion_corequisites() {
     let downloads = chatterbox["downloads"].as_array().expect("downloads array");
 
     // The primary download (the three files the generator loads from its snapshot dir) is NOT a
-    // co-requisite and carries NO revision — it stays on `main`, unchanged by this story.
+    // co-requisite. Under the F-029 pin migration (sc-13685) it now carries the SAME pinned SHA the
+    // inference runtime self-fetches — `5bb1f6ee…`, the exact commit the `voice_embedding` coReq in
+    // this same ResembleAI/chatterbox repo already pins — so an offline install lands the primary in
+    // the snapshot dir the resolver reads. A SHA drift here reopens the offline gap this story closed.
     let primary = downloads
         .iter()
         .find(|download| download.get("coRequisite").and_then(Value::as_bool) != Some(true))
         .expect("chatterbox_tts has a primary download");
     assert_eq!(primary["repo"], "ResembleAI/chatterbox");
-    assert!(
-        primary.get("revision").is_none(),
-        "the primary chatterbox download must stay on main (no pinned revision)"
+    let primary_revision = primary["revision"]
+        .as_str()
+        .expect("the primary chatterbox download pins a revision (F-029 migration, sc-13685)");
+    assert_eq!(
+        primary_revision, "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
+        "the primary chatterbox download must pin the F-029 revision (sc-13685) the runtime self-fetches"
     );
 
     // (repo, file, expected full-SHA revision) for each companion co-requisite. The SHAs are the exact
