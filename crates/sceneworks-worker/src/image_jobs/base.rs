@@ -2826,6 +2826,47 @@ fn attach_required_components(
         .fold(spec, |spec, (id, source)| spec.with_component(id, source)))
 }
 
+/// Resolve SDXL's three caller-staged components (`tokenizer_clip_l` / `tokenizer_clip_bigg` /
+/// `vae_fp16_fix`, epic 13657 / sc-13682) for a BESPOKE candle lane whose provider takes explicit
+/// component paths (`SdxlEditPaths` / `IpAdapterSdxlPaths` / `InstantIdPaths` — InstantID reuses the
+/// candle SDXL conditioner + VAE) rather than a [`LoadSpec`]. Rides the SAME
+/// generic [`crate::model_jobs::resolve_co_requisites`] seam the txt2img [`attach_required_components`]
+/// path uses: it reads the registered candle `sdxl` descriptor's `required_components` (the exact three
+/// ids the edit / IP-Adapter / trainer providers also consume) and maps each to this model's pinned
+/// `coRequisite` download by `componentId`. All-or-nothing — a missing component fails the job BEFORE the
+/// engine load with the seam's actionable error naming the component id + repo. Candle-only, because the
+/// bespoke `SdxlEdit` / `IpAdapterSdxl` providers are (macOS keeps the self-contained MLX SDXL lane).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_sdxl_components(
+    manifest_entry: &JsonObject,
+    settings: &Settings,
+) -> WorkerResult<(WeightsSource, WeightsSource, WeightsSource)> {
+    // The bespoke edit / IP-Adapter providers ARE the candle `sdxl` engine, so resolve that descriptor
+    // (id == "sdxl") and let its `required_components` advertisement drive the ids — never hardcoded here.
+    let descriptor = crate::inference_runtime::media_descriptor("sdxl").ok_or_else(|| {
+        WorkerError::Engine(
+            "candle SDXL generator is not registered — cannot resolve its required components"
+                .to_owned(),
+        )
+    })?;
+    let manifest_value = Value::Object(manifest_entry.clone());
+    let mut components =
+        crate::model_jobs::resolve_co_requisites(&descriptor, &manifest_value, settings)?;
+    let mut take = |id: &str| -> WorkerResult<WeightsSource> {
+        components.remove(id).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "SDXL requires the '{id}' component, but its catalog entry declares no matching \
+                 `coRequisite` download — the model manifest entry is misconfigured"
+            ))
+        })
+    };
+    Ok((
+        take("tokenizer_clip_l")?,
+        take("tokenizer_clip_bigg")?,
+        take("vae_fp16_fix")?,
+    ))
+}
+
 /// Registry-only generator load (epic 3720, sc-3724): resolve `engine_id` through the
 /// backend-neutral `crate::inference_runtime::load` seam and return a `Box<dyn gen_core::Generator>`. Optionally
 /// installs an IP-Adapter from `ip_adapter_dir` (`LoadSpec::with_ip_adapter`) — the FLUX.1 XLabs
@@ -4549,10 +4590,12 @@ async fn generate_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
-    // Named model components (epic 13657, sc-13679): dormant on the image lane at this pin — a no-op
-    // until an image provider advertises `required_components` (SDXL, sc-13682) — but the generic seam
-    // is present so it lights up with no bespoke plumbing.
-    spec = attach_required_components(spec, &request.model, &request.model_manifest_entry, settings)?;
+    // Named model components (epic 13657, sc-13682): stage a provider's caller-staged components (SDXL's
+    // `tokenizer_clip_l` / `tokenizer_clip_bigg` / `vae_fp16_fix`) via the generic seam. Keyed on the
+    // resolved `engine_id` (the DESCRIPTOR id) rather than `request.model`, so a finetune sibling that
+    // shares one engine under a distinct catalog id resolves the same descriptor (media_descriptor matches
+    // on descriptor.id). Inert on macOS: the MLX SDXL turnkey is self-contained (no `required_components`).
+    spec = attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the generic MLX lane serves
     // the remaining With-Character identity generators — Z-Image identity-init (`referenceAssetId` ⇒
@@ -5439,10 +5482,13 @@ async fn generate_candle_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
-    // Named model components (epic 13657, sc-13679): the candle twin of the mlx attach above — dormant
-    // (every current candle image descriptor advertises no components) but present so SDXL (sc-13682)
-    // reuses the same generic seam.
-    spec = attach_required_components(spec, &request.model, &request.model_manifest_entry, settings)?;
+    // Named model components (epic 13657, sc-13682): the candle twin of the mlx attach above — stages
+    // SDXL's three caller-provided components on the Windows/CUDA candle `sdxl` engine. Keyed on the
+    // resolved `engine_id` (the DESCRIPTOR id), NOT `request.model`, so the finetune siblings that share
+    // the candle `sdxl` engine under distinct catalog ids — realvisxl / illustrious_xl_v1|v2 /
+    // realvisxl_lightning — resolve the same descriptor and get the components staged. A no-op for every
+    // engine that advertises no `required_components`.
+    spec = attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
     // INT8-ConvRot LoadSpec seam (sc-9300, epic 9083): ride the ConvRot DiT single-file on the shared,
     // already-optional `LoadSpec::text_encoder` as a `WeightsSource::File` while `spec.weights` stays the
     // canonical Krea 2 bf16 snapshot `Dir` (set as `weights_dir` above). The candle-gen krea engine's

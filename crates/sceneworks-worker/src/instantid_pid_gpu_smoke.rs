@@ -203,7 +203,7 @@ fn assert_pid_output(
 }
 
 #[test]
-#[ignore = "real-weight GPU smoke; needs RealVisXL + InstantX IdentityNet + instantid-mlx face/ip + NC pid_sdxl + gemma-2-2b-it (+ optional OpenPose CN) (cap=120)"]
+#[ignore = "real-weight GPU smoke; needs RealVisXL + InstantX IdentityNet + instantid-mlx face/ip + NC pid_sdxl + gemma-2-2b-it + the CLIP-L/bigG tokenizer + fp16-fix VAE component dirs (SDXL_TOKENIZER_CLIP_{L,BIGG}_DIR / SDXL_VAE_FP16_FIX_DIR) (+ optional OpenPose CN) (cap=120)"]
 fn instantid_pid_gpu_smoke() {
     let base = env_path("INSTANTID_PID_BASE");
     assert!(
@@ -255,11 +255,16 @@ fn instantid_pid_gpu_smoke() {
     );
 
     println!("[smoke] loading InstantId from {} ...", base.display());
+    // InstantID reuses the candle SDXL conditioner + VAE, so it stages the SAME three SDXL components
+    // (epic 13657, sc-13682): CLIP-L/bigG tokenizers + fp16-fix VAE, from env dirs (mirrors inference).
     let model = InstantId::load(&InstantIdPaths {
         sdxl_base: base.clone(),
         identitynet: WeightsSource::Dir(identitynet.clone()),
         ip_adapter: ip_adapter.clone(),
         adapters: Vec::new(),
+        tokenizer_clip_l: WeightsSource::Dir(env_path("SDXL_TOKENIZER_CLIP_L_DIR")),
+        tokenizer_clip_bigg: WeightsSource::Dir(env_path("SDXL_TOKENIZER_CLIP_BIGG_DIR")),
+        vae_fp16_fix: WeightsSource::Dir(env_path("SDXL_VAE_FP16_FIX_DIR")),
     })
     .expect("load candle InstantId");
     // Attach OpenPose (pose mode) BEFORE the face stack — the engine's documented order. Harmless for

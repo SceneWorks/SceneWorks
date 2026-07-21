@@ -334,6 +334,13 @@ async fn generate_candle_sdxl_ipadapter_stream(
     let total = work.len();
     let negative_prompt = request.negative_prompt.clone();
 
+    // SDXL's three caller-staged components (epic 13657, sc-13682): the CLIP-L/bigG tokenizers + fp16-fix
+    // VAE the candle `IpAdapterSdxl` provider now REQUIRES (inference sc-13663 deleted its `hf_get`
+    // self-fetch). Resolved before the engine load in the blocking closure so a missing one fails fast
+    // with an actionable error naming the component id + repo, then moved into the closure with the paths.
+    let (tokenizer_clip_l, tokenizer_clip_bigg, vae_fp16_fix) =
+        resolve_sdxl_components(&request.model_manifest_entry, settings)?;
+
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "sdxl_ipadapter",
@@ -343,6 +350,9 @@ async fn generate_candle_sdxl_ipadapter_stream(
                 sdxl_base,
                 ip_adapter: ip_bundle,
                 image_encoder,
+                tokenizer_clip_l,
+                tokenizer_clip_bigg,
+                vae_fp16_fix,
             };
             let model = IpAdapterSdxl::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("SDXL IP-Adapter load failed: {error}"))

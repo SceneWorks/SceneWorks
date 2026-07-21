@@ -328,13 +328,25 @@ async fn generate_candle_sdxl_edit_stream(
     let total = work.len();
     let negative = request.negative_prompt.clone();
 
+    // SDXL's three caller-staged components (epic 13657, sc-13682): the CLIP-L/bigG tokenizers + fp16-fix
+    // VAE the candle `SdxlEdit` provider now REQUIRES (inference sc-13663 deleted its `hf_get` self-fetch).
+    // Resolved here — before the engine load inside the blocking closure — so a missing one fails fast with
+    // an actionable error naming the component id + repo, then moved into the closure beside `sdxl_base`.
+    let (tokenizer_clip_l, tokenizer_clip_bigg, vae_fp16_fix) =
+        resolve_sdxl_components(&request.model_manifest_entry, settings)?;
+
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "sdxl_edit",
         0,
         move || {
-            let model = SdxlEdit::load(&SdxlEditPaths { sdxl_base })
-                .map_err(|error| WorkerError::Engine(format!("SDXL edit load failed: {error}")))?;
+            let model = SdxlEdit::load(&SdxlEditPaths {
+                sdxl_base,
+                tokenizer_clip_l,
+                tokenizer_clip_bigg,
+                vae_fp16_fix,
+            })
+            .map_err(|error| WorkerError::Engine(format!("SDXL edit load failed: {error}")))?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when this generation opted in AND the
             // snapshots are cached, so a native-VAE edit is a no-op here.
             let model = match &pid_weights {

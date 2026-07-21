@@ -5084,6 +5084,51 @@
           "files": ["bf16/*"],
           "estimatedSizeBytes": 6941187536,
           "footprint": { "diskSizeBytes": 6941187536, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Candle-SDXL shared components (epic 13657, sc-13682): the two model-agnostic CLIP tokenizers
+        // (CLIP-L + OpenCLIP-bigG) + the fp16-fix VAE the Windows/CUDA candle `sdxl` engine consumes as
+        // caller-staged components (inference sc-13663 deleted the old pinned `hf_get` self-fetch, so the
+        // candle txt2img / edit / IP-Adapter / trainer lanes now REQUIRE them). Each `componentId` maps
+        // to the provider's `ModelDescriptor::required_components` via the generic `resolve_co_requisites`
+        // seam; the pinned `revision` resolves the exact snapshot cache-only (offline). Platform-gated to
+        // the candle OSes: the self-contained macOS MLX turnkey above must NOT be gated on them — a hard
+        // coReq on macOS would wrongly mark an already-installed MLX SDXL not-ready (install-state gates
+        // on hard coReqs). Shared verbatim across every candle-SDXL base (realvisxl / illustrious / …) and
+        // deduped at download by the HF-cache blob layout, so a per-model declaration is correct (settled
+        // decision — do not try to centralize). `tokenizer_clip_l` shares the `openai/clip-vit-large-patch14`
+        // repo cache with the `clip_vit_l14` utility model, which pins the SAME revision so the blobs dedup.
+        {
+          "provider": "huggingface",
+          "repo": "openai/clip-vit-large-patch14",
+          "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+          "coRequisite": true,
+          "componentId": "tokenizer_clip_l",
+          "files": ["tokenizer.json"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 2224003,
+          "footprint": { "diskSizeBytes": 2224003 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+          "revision": "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+          "coRequisite": true,
+          "componentId": "tokenizer_clip_bigg",
+          "files": ["tokenizer.json"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 2224003,
+          "footprint": { "diskSizeBytes": 2224003 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/sdxl-vae-fp16-fix",
+          "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+          "coRequisite": true,
+          "componentId": "vae_fp16_fix",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 167335590,
+          "footprint": { "diskSizeBytes": 167335590 }
         }
       ],
       "paths": {
@@ -5212,6 +5257,42 @@
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108692804,
           "footprint": { "diskSizeBytes": 7108692804, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Candle-SDXL shared components (epic 13657, sc-13682) — CLIP-L/bigG tokenizers + fp16-fix VAE the
+        // candle `sdxl` engine stages as caller-provided components; platform-gated to candle so the macOS
+        // MLX turnkey stays self-contained. See the `sdxl` entry for the full rationale.
+        {
+          "provider": "huggingface",
+          "repo": "openai/clip-vit-large-patch14",
+          "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+          "coRequisite": true,
+          "componentId": "tokenizer_clip_l",
+          "files": ["tokenizer.json"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 2224003,
+          "footprint": { "diskSizeBytes": 2224003 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+          "revision": "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+          "coRequisite": true,
+          "componentId": "tokenizer_clip_bigg",
+          "files": ["tokenizer.json"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 2224003,
+          "footprint": { "diskSizeBytes": 2224003 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/sdxl-vae-fp16-fix",
+          "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+          "coRequisite": true,
+          "componentId": "vae_fp16_fix",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 167335590,
+          "footprint": { "diskSizeBytes": 167335590 }
         }
       ],
       "paths": {
@@ -5324,6 +5405,42 @@
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108692804,
           "footprint": { "diskSizeBytes": 7108692804, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Candle-SDXL shared components (epic 13657, sc-13682) — CLIP-L/bigG tokenizers + fp16-fix VAE the
+        // candle `sdxl` engine stages as caller-provided components; platform-gated to candle so the macOS
+        // MLX turnkey stays self-contained. See the `sdxl` entry for the full rationale.
+        {
+          "provider": "huggingface",
+          "repo": "openai/clip-vit-large-patch14",
+          "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+          "coRequisite": true,
+          "componentId": "tokenizer_clip_l",
+          "files": ["tokenizer.json"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 2224003,
+          "footprint": { "diskSizeBytes": 2224003 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+          "revision": "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+          "coRequisite": true,
+          "componentId": "tokenizer_clip_bigg",
+          "files": ["tokenizer.json"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 2224003,
+          "footprint": { "diskSizeBytes": 2224003 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/sdxl-vae-fp16-fix",
+          "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+          "coRequisite": true,
+          "componentId": "vae_fp16_fix",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 167335590,
+          "footprint": { "diskSizeBytes": 167335590 }
         }
       ],
       "paths": {
@@ -5414,6 +5531,42 @@
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108498305,
           "footprint": { "diskSizeBytes": 7108498305, "residentMemoryBytes": 6954313820, "peakMemoryBytes": 22025741200 }
+        },
+        // Candle-SDXL shared components (epic 13657, sc-13682) — CLIP-L/bigG tokenizers + fp16-fix VAE the
+        // candle `sdxl` engine stages as caller-provided components; platform-gated to candle so the macOS
+        // MLX turnkey stays self-contained. See the `sdxl` entry for the full rationale.
+        {
+          "provider": "huggingface",
+          "repo": "openai/clip-vit-large-patch14",
+          "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+          "coRequisite": true,
+          "componentId": "tokenizer_clip_l",
+          "files": ["tokenizer.json"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 2224003,
+          "footprint": { "diskSizeBytes": 2224003 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+          "revision": "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+          "coRequisite": true,
+          "componentId": "tokenizer_clip_bigg",
+          "files": ["tokenizer.json"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 2224003,
+          "footprint": { "diskSizeBytes": 2224003 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/sdxl-vae-fp16-fix",
+          "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+          "coRequisite": true,
+          "componentId": "vae_fp16_fix",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 167335590,
+          "footprint": { "diskSizeBytes": 167335590 }
         }
       ],
       "paths": {
@@ -5506,6 +5659,42 @@
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108498177,
           "footprint": { "diskSizeBytes": 7108498177, "residentMemoryBytes": 6954313820, "peakMemoryBytes": 22025741200 }
+        },
+        // Candle-SDXL shared components (epic 13657, sc-13682) — CLIP-L/bigG tokenizers + fp16-fix VAE the
+        // candle `sdxl` engine stages as caller-provided components; platform-gated to candle so the macOS
+        // MLX turnkey stays self-contained. See the `sdxl` entry for the full rationale.
+        {
+          "provider": "huggingface",
+          "repo": "openai/clip-vit-large-patch14",
+          "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+          "coRequisite": true,
+          "componentId": "tokenizer_clip_l",
+          "files": ["tokenizer.json"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 2224003,
+          "footprint": { "diskSizeBytes": 2224003 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+          "revision": "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+          "coRequisite": true,
+          "componentId": "tokenizer_clip_bigg",
+          "files": ["tokenizer.json"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 2224003,
+          "footprint": { "diskSizeBytes": 2224003 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/sdxl-vae-fp16-fix",
+          "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+          "coRequisite": true,
+          "componentId": "vae_fp16_fix",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 167335590,
+          "footprint": { "diskSizeBytes": 167335590 }
         }
       ],
       "paths": {
@@ -5608,6 +5797,43 @@
           "files": ["q4/*"],
           "estimatedSizeBytes": 3911656467,
           "footprint": { "diskSizeBytes": 3911656467, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Candle-SDXL shared components (epic 13657, sc-13682) — the candle InstantID lane reuses the SDXL
+        // conditioner + VAE (candle-gen-instantid, sc-13663), so it stages the SAME CLIP-L/bigG tokenizers
+        // + fp16-fix VAE. Platform-gated to candle so the self-contained macOS MLX InstantID turnkey is
+        // NOT gated on them. See the `sdxl` entry for the full rationale.
+        {
+          "provider": "huggingface",
+          "repo": "openai/clip-vit-large-patch14",
+          "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+          "coRequisite": true,
+          "componentId": "tokenizer_clip_l",
+          "files": ["tokenizer.json"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 2224003,
+          "footprint": { "diskSizeBytes": 2224003 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+          "revision": "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+          "coRequisite": true,
+          "componentId": "tokenizer_clip_bigg",
+          "files": ["tokenizer.json"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 2224003,
+          "footprint": { "diskSizeBytes": 2224003 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/sdxl-vae-fp16-fix",
+          "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+          "coRequisite": true,
+          "componentId": "vae_fp16_fix",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 167335590,
+          "footprint": { "diskSizeBytes": 167335590 }
         }
       ],
       "paths": {
@@ -7787,6 +8013,12 @@
         {
           "provider": "huggingface",
           "repo": "openai/clip-vit-large-patch14",
+          // Pinned to align with the SDXL `tokenizer_clip_l` co-requisite (sc-13682), which pins this
+          // SAME repo @ 32bd6428… for its `tokenizer.json`. Sharing one revision means the two consumers
+          // resolve the SAME `snapshots/32bd6428…/` and share the underlying HF-cache blobs (frozen model,
+          // so an older pinned SHA is equivalent for the Dataset Doctor / FLUX IP-Adapter image encoder).
+          // Non-coRequisite entries MAY carry a revision (only coRequisites REQUIRE one, F-029 sc-13659).
+          "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
           "files": [],
           "estimatedSizeBytes": 7000000000
         }

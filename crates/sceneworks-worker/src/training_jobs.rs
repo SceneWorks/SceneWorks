@@ -618,6 +618,62 @@ fn training_text_encoder(engine_id: &str, weights_dir: &std::path::Path) -> Opti
     None
 }
 
+/// The shipped `builtin.models.jsonc` entry for `model_id`, parsed from the embedded manifest — the
+/// source of truth for a base model's pinned `coRequisite` downloads (the app seeds its live catalog
+/// from these bytes). The training plan carries the base model id, not its manifest entry, so the trainer
+/// resolves components off this. `None` when the id is not a builtin model.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn builtin_model_manifest_entry(model_id: &str) -> Option<serde_json::Value> {
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).ok()?;
+    manifest
+        .get("models")?
+        .as_array()?
+        .iter()
+        .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(model_id))
+        .cloned()
+}
+
+/// Resolve a trainer's caller-staged components (epic 13657, sc-13682) from the base model's pinned
+/// `coRequisite` downloads, so the [`LoadSpec`] handed to [`crate::inference_runtime::load_trainer`]
+/// carries them for the engine's load-time `require_component` gate. Driven by the registered GENERATOR
+/// descriptor's `required_components`: SDXL's candle trainer consumes exactly the SAME three ids its
+/// generator advertises (the CLIP-L/bigG tokenizers + fp16-fix VAE, inference sc-13663), so the generator
+/// descriptor is the correct driver at this pin. Empty for every engine that advertises none — INCLUDING
+/// the self-contained macOS MLX SDXL trainer (descriptor `&[]`), so this never reads the manifest on
+/// macOS. All-or-nothing: a missing component fails the job with an actionable error BEFORE the trainer
+/// load (never a mid-train hub fetch).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_trainer_components(
+    engine_id: &str,
+    base_model_id: &str,
+    settings: &Settings,
+) -> WorkerResult<std::collections::BTreeMap<String, WeightsSource>> {
+    let Some(descriptor) = crate::inference_runtime::media_descriptor(engine_id) else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    if descriptor.required_components.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let manifest_entry = builtin_model_manifest_entry(base_model_id).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "training base model '{base_model_id}' has no builtin catalog entry to resolve its \
+             '{engine_id}' components from"
+        ))
+    })?;
+    crate::model_jobs::resolve_co_requisites(&descriptor, &manifest_entry, settings)
+}
+
 /// Execute a real training run on the in-process native engine (mlx-gen on macOS, candle-gen
 /// off-Mac via `backend-candle`, sc-7817). Loads the (frozen) base model via a [`LoadSpec`] (exactly
 /// as inference's `load_engine`), runs the family trainer on a blocking thread, streams staged
@@ -669,6 +725,14 @@ pub(crate) async fn run_training_execution(
     // LTX-2.3's Gemma-3 text encoder lives OUTSIDE `weights_dir` — thread the bundled sibling onto the
     // trainer `LoadSpec` so a self-contained install trains without a separate gemma download (sc-9989).
     let ltx_text_encoder = training_text_encoder(engine_id, &weights_dir);
+
+    // Caller-staged model components (epic 13657, sc-13682): the base model's pinned `coRequisite`
+    // downloads the trainer's engine consumes — SDXL's CLIP-L/bigG tokenizers + fp16-fix VAE on candle.
+    // Resolved BEFORE the blocking thread (a missing one fails the job with an actionable error naming the
+    // component id + repo), then moved into the closure and folded onto the trainer `LoadSpec`. Empty for
+    // the self-contained macOS MLX SDXL trainer (its descriptor advertises none), so a no-op on macOS.
+    let train_components =
+        resolve_trainer_components(engine_id, &plan.target.base_model, settings)?;
 
     let output_dir =
         resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir")?;
@@ -733,19 +797,22 @@ pub(crate) async fn run_training_execution(
             } else {
                 Precision::Bf16
             };
-            let mut trainer = crate::inference_runtime::load_trainer(
-                engine_id,
-                &LoadSpec {
-                    precision: load_precision,
-                    // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family (TE lives
-                    // inside `weights_dir`) and for legacy/env-override LTX installs.
-                    text_encoder: ltx_text_encoder,
-                    ..LoadSpec::new(WeightsSource::Dir(weights_dir))
-                },
-            )
-            .map_err(|error| {
-                WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
-            })?;
+            let spec = LoadSpec {
+                precision: load_precision,
+                // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family (TE lives
+                // inside `weights_dir`) and for legacy/env-override LTX installs.
+                text_encoder: ltx_text_encoder,
+                ..LoadSpec::new(WeightsSource::Dir(weights_dir))
+            };
+            // Fold the caller-staged components (epic 13657, sc-13682) resolved above onto the spec — the
+            // trainer's load-time gate requires them (SDXL on candle); an empty map is a no-op otherwise.
+            let spec = train_components
+                .into_iter()
+                .fold(spec, |spec, (id, source)| spec.with_component(id, source));
+            let mut trainer =
+                crate::inference_runtime::load_trainer(engine_id, &spec).map_err(|error| {
+                    WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
+                })?;
             let request = TrainingRequest {
                 items,
                 config,
