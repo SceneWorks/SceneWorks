@@ -8726,8 +8726,12 @@
       },
       "downloads": [
         {
+          // F-029 pin (sc-13685): the manifest `revision` is the download pin authority now that
+          // inference no longer self-fetches. Full 40-hex SHA matching the sc-13591 inventory
+          // (candle-audio-kokoro HUB_REVISION); confirmed a real commit via the HF API.
           "provider": "huggingface",
           "repo": "hexgrad/Kokoro-82M",
+          "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
           "files": [
             "config.json",
             "kokoro-v1_0.pth",
@@ -8789,8 +8793,12 @@
       },
       "downloads": [
         {
+          // F-029 pin (sc-13685): the manifest `revision` is the download pin authority now that
+          // inference no longer self-fetches. Full 40-hex SHA matching the sc-13591 inventory
+          // (candle-audio-moss-sfx HUB_REVISION); confirmed a real commit via the HF API.
           "provider": "huggingface",
           "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+          "revision": "e35df4d82fbe87fcd5d14e5d100e349c0c3c076d",
           "files": [
             "model_index.json",
             "scheduler/*",
@@ -8871,8 +8879,12 @@
       },
       "downloads": [
         {
+          // F-029 pin (sc-13685): the manifest `revision` is the download pin authority now that
+          // inference no longer self-fetches. Full 40-hex SHA matching the sc-13591 inventory
+          // (candle-audio-acestep HUB_REVISION); confirmed a real commit via the HF API.
           "provider": "huggingface",
           "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+          "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0",
           "files": [
             "model_index.json",
             "scheduler/*",
@@ -9197,8 +9209,12 @@
       },
       "downloads": [
         {
+          // F-029 pin (sc-13685): the manifest `revision` is the download pin authority now that
+          // inference no longer self-fetches. Full 40-hex SHA matching the sc-13591 inventory
+          // (candle-audio-openvoice HUB_REVISION); confirmed a real commit via the HF API.
           "provider": "huggingface",
           "repo": "myshell-ai/OpenVoiceV2",
+          "revision": "f36e7edfe1684461a8343844af60babc2efbb727",
           "files": [
             "converter/config.json",
             "converter/checkpoint.pth"
@@ -9290,8 +9306,13 @@
       },
       "downloads": [
         {
+          // F-029 pin (sc-13685): the manifest `revision` is the download pin authority now that
+          // inference no longer self-fetches. Full 40-hex SHA matching the sc-13591 inventory
+          // (candle-audio-chatterbox HUB_REVISION) — the SAME snapshot the voice_embedding coRequisite
+          // below already pins, so the primary + VE share one pinned cache. Confirmed real via the HF API.
           "provider": "huggingface",
           "repo": "ResembleAI/chatterbox",
+          "revision": "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
           "files": [
             "t3_cfg.safetensors",
             "s3gen.safetensors",
