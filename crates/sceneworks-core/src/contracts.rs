@@ -1622,6 +1622,17 @@ pub struct ModelDownload {
     /// enforced by the manifest audits, not by deserialization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+    /// Optional stable component id this `coRequisite` download PROVISIONS for the
+    /// model's engine (epic 13657, sc-13679). When set, the worker stages the
+    /// resolved local path under this id in the engine's `LoadSpec::components`,
+    /// matched against the provider's `ModelDescriptor::required_components` — the
+    /// explicit repo→component mapping (never inferred from repo names) the generic
+    /// `resolve_co_requisites` seam reads. Lowercase snake_case; only meaningful on
+    /// `coRequisite: true` entries (e.g. chatterbox_tts's ve/perth →
+    /// `voice_embedding`/`perth`). A first-class typed field so it round-trips
+    /// through the contract type rather than the `extra` bag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_id: Option<String>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

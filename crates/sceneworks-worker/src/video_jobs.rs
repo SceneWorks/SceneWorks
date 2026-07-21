@@ -4069,6 +4069,9 @@ fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
         // 14B experts swap one-at-a-time and the load matches the SEQUENTIAL peak the manifest gate sized.
         // `apply_residency_policy` (the MLX cache seam) never downgrades a `Sequential` set here.
         offload_policy: input.offload_policy,
+        // Named model components (epic 13657): video providers advertise no `required_components`, so
+        // there is nothing to stage — an empty map keeps the video load path unchanged.
+        components: BTreeMap::new(),
     }
 }
 
@@ -12602,6 +12605,7 @@ mod tests {
                         backend: "probe",
                         modality: gen_core::Modality::Video,
                         capabilities: gen_core::Capabilities::default(),
+                        required_components: &[],
                     },
                     request: seen_request,
                 }))

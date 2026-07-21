@@ -665,11 +665,26 @@ async fn run_audio_synthesis_using(
     // unperturbed. The reassembled chunks equal the returned one-shot track (the gen-core reassembly
     // law), so the library asset is still the full `AudioTrack` the caller writes.
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
+    // Named model components (epic 13657, sc-13679): resolve every coRequisite-provisioned component
+    // this model's descriptor advertises (`chatterbox_tts` → `perth` + `voice_embedding`; every other
+    // audio model advertises none → an empty map, a no-op) BEFORE the blocking load, so a missing
+    // co-requisite fails the JOB here with an actionable error rather than a mid-render hub fetch. The
+    // resolved paths are staged in `LoadSpec::components` for the generator's load-time
+    // `require_component` gate. Weights-free registry read; no-op when this build ships no audio lane.
+    let components = match crate::inference_runtime::audio_descriptor(&model_id) {
+        Some(descriptor) => {
+            resolve_co_requisites(&descriptor, &request.model_manifest_entry, settings)?
+        }
+        None => BTreeMap::new(),
+    };
     let handle = {
         let cancel = cancel.clone();
         let chunk_tx = chunk_tx.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
-            let spec = LoadSpec::new(WeightsSource::Dir(model_dir));
+            let spec = components.into_iter().fold(
+                LoadSpec::new(WeightsSource::Dir(model_dir)),
+                |spec, (id, source)| spec.with_component(id, source),
+            );
             let generator = load_generator(&model_id, &spec)
                 .map_err(|error| crate::classify_engine_error("audio model load failed", error))?;
             let req = GenerationRequest {
@@ -2049,6 +2064,7 @@ mod tests {
             backend: "mlx",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
+            required_components: &[],
         }
     }
 
@@ -2123,6 +2139,7 @@ mod tests {
                 supports_streaming: true,
                 ..Default::default()
             },
+            required_components: &[],
         }
     }
 
@@ -2496,6 +2513,7 @@ mod tests {
                 max_speakers: Some(2),
                 ..Default::default()
             },
+            required_components: &[],
         }
     }
 

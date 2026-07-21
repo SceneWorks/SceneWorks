@@ -1648,6 +1648,91 @@ mod download_receipt_tests {
             }
         }
     }
+
+    /// sc-13680: the AUDIO lane's install-state now accounts for chatterbox_tts's two HARD
+    /// co-requisites (the `perth` + `voice_embedding` companion weights). Previously no audio model
+    /// used a co-requisite, so this generic gate (shared with PiD-gemma / Wan-Lightning) was untested
+    /// on the audio lane. A present primary snapshot with the perth/ve co-requisites ABSENT must NOT
+    /// report installed (it must surface as a repairable partial), and staging both must flip it to
+    /// installed — proving the perth+VE rehoming is enforced end to end.
+    #[test]
+    fn chatterbox_tts_install_state_gates_on_the_perth_and_ve_co_requisites() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        // The primary chatterbox snapshot (T3 + S3Gen + tokenizer) is present…
+        let primary_repo = "ResembleAI/chatterbox";
+        let primary_snapshot = huggingface_repo_cache_path(data_dir, primary_repo)
+            .unwrap()
+            .join("snapshots/main");
+        std::fs::create_dir_all(&primary_snapshot).unwrap();
+        for file in ["t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json"] {
+            std::fs::write(primary_snapshot.join(file), b"weights").unwrap();
+        }
+
+        // …the chatterbox_tts catalog shape: primary + the two hard co-requisites (ve + perth),
+        // mirroring builtin.models.jsonc (componentId is inert to install-state, which gates on
+        // repo/files presence).
+        let model = json!({
+            "id": "chatterbox_tts",
+            "downloads": [
+                { "provider": "huggingface", "repo": primary_repo,
+                  "files": ["t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json"] },
+                { "provider": "huggingface", "repo": "ResembleAI/chatterbox",
+                  "revision": "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18", "coRequisite": true,
+                  "componentId": "voice_embedding", "files": ["ve.safetensors"] },
+                { "provider": "huggingface", "repo": "SceneWorks/perth-implicit",
+                  "revision": "80b60f9caead09b8d3b512bda0b24038f28c08ec", "coRequisite": true,
+                  "componentId": "perth", "files": ["perth_implicit.safetensors"] }
+            ]
+        });
+
+        // Co-requisites absent → NOT installed; both missing repos surface for repair.
+        let missing = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            !missing.installed,
+            "a present primary with the perth+ve co-requisites absent must not report installed"
+        );
+        assert!(
+            missing.cache_incomplete,
+            "the missing hard co-requisites make this a repairable partial install"
+        );
+        assert!(
+            missing
+                .missing_required_files
+                .iter()
+                .any(|entry| entry.contains("SceneWorks/perth-implicit"))
+                && missing
+                    .missing_required_files
+                    .iter()
+                    .any(|entry| entry.contains("ResembleAI/chatterbox")),
+            "both missing co-requisite repos must be reported, got {:?}",
+            missing.missing_required_files
+        );
+
+        // Stage BOTH co-requisites at their pinned snapshots → install-state flips to installed.
+        let ve = huggingface_repo_cache_path(data_dir, "ResembleAI/chatterbox")
+            .unwrap()
+            .join("snapshots/5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18");
+        std::fs::create_dir_all(&ve).unwrap();
+        std::fs::write(ve.join("ve.safetensors"), b"weights").unwrap();
+        let perth = huggingface_repo_cache_path(data_dir, "SceneWorks/perth-implicit")
+            .unwrap()
+            .join("snapshots/80b60f9caead09b8d3b512bda0b24038f28c08ec");
+        std::fs::create_dir_all(&perth).unwrap();
+        std::fs::write(perth.join("perth_implicit.safetensors"), b"weights").unwrap();
+
+        let installed =
+            install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            installed.installed,
+            "primary + both hard co-requisites present must report installed"
+        );
+        assert!(
+            installed.missing_required_files.is_empty(),
+            "nothing is missing once the perth+ve co-requisites are staged, got {:?}",
+            installed.missing_required_files
+        );
+    }
 }
 
 // Resolve a model's install/cache state from its (optional) download source. A

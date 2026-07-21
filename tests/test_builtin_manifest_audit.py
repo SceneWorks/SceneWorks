@@ -444,6 +444,44 @@ def test_schema_pins_download_revision_to_a_40hex_sha():
         )
 
 
+def test_schema_accepts_a_component_id_on_a_corequisite_download():
+    """sc-13679: a coRequisite download may carry a `componentId` — the explicit repo→component
+    mapping the worker's `resolve_co_requisites` seam reads to stage `LoadSpec::components`. The
+    authoring schema constrains it to lowercase snake_case (same shape as a descriptor id), accepting
+    a valid id and rejecting capitals / hyphens / a leading digit / empty via the `pattern` keyword.
+    """
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator.check_schema(schema)
+    validator = jsonschema.Draft202012Validator(schema)
+
+    def component_errors(component_id: str) -> list:
+        manifest = {
+            "schemaVersion": 1,
+            "models": [
+                _model_entry_with_download(
+                    {
+                        "provider": "huggingface",
+                        "repo": "ResembleAI/chatterbox",
+                        "files": ["ve.safetensors"],
+                        "revision": "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
+                        "coRequisite": True,
+                        "componentId": component_id,
+                    }
+                )
+            ],
+        }
+        return list(validator.iter_errors(manifest))
+
+    assert not component_errors("voice_embedding"), "a lowercase snake_case componentId must validate"
+    for bad in ("Perth", "voice-embedding", "1codec", ""):
+        errors = component_errors(bad)
+        # Discriminate on the failing keyword so dropping the pattern turns this red rather than
+        # passing on some unrelated error.
+        assert any(error.validator == "pattern" for error in errors), (
+            f"componentId {bad!r} must be rejected by the snake_case pattern"
+        )
+
+
 def test_manifest_constraint_contract_registry_is_complete_and_live():
     """sc-12304: constraint declarations may not silently become decoration.
 

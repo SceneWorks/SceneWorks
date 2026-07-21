@@ -121,6 +121,18 @@ pub(crate) fn audio_generator_clones_from_reference(id: &str) -> bool {
     })
 }
 
+/// The audio **Generator** descriptor for `id` (epic 13657, sc-13679), or `None` when `id` is
+/// unknown or this build ships no audio lane. Weights-free — reads the registration's `descriptor`
+/// alone (like [`audio_generator_clones_from_reference`]), so the worker can read a model's
+/// [`gen_core::ModelDescriptor::required_components`] and stage its coRequisite-provisioned components
+/// BEFORE building the `LoadSpec` it loads with.
+pub(crate) fn audio_descriptor(id: &str) -> Option<gen_core::ModelDescriptor> {
+    audio()?
+        .generators()
+        .map(|registration| (registration.descriptor)())
+        .find(|descriptor| descriptor.id == id)
+}
+
 /// Load an audio [`AudioTransform`] by id from the runtime's candle audio registry — the
 /// non-prompt audio→audio lane (OpenVoice V2 tone-color voice conversion, sc-13411 C4). The audio
 /// twin of [`load_audio`]: errors clearly when this build ships no audio lane so the voice-clone job
@@ -190,6 +202,22 @@ pub(crate) fn text() -> &'static TextLlmRegistry {
 ))]
 pub(crate) fn generators() -> impl ExactSizeIterator<Item = &'static ModelRegistration> {
     media().generators()
+}
+
+/// The media (image/video) **Generator** descriptor for `id` (epic 13657, sc-13679), or `None` when
+/// `id` is unknown. The image/video twin of [`audio_descriptor`]: weights-free registry introspection
+/// so the generation harness can resolve a model's coRequisite-provisioned components before building
+/// its `LoadSpec`. Dormant until an image provider advertises `required_components` (SDXL, sc-13682);
+/// every current media descriptor advertises `&[]`, so the seam that reads this is a no-op today.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn media_descriptor(id: &str) -> Option<gen_core::ModelDescriptor> {
+    media()
+        .generators()
+        .map(|registration| (registration.descriptor)())
+        .find(|descriptor| descriptor.id == id)
 }
 
 // Only the macOS prompt-refine tests iterate the TextLlm registry; on the Windows/candle build

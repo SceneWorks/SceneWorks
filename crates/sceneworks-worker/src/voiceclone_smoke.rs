@@ -94,6 +94,18 @@ fn resolve_dir(env_key: &str, owner_repo: &str, subdir: Option<&str>) -> PathBuf
     dir
 }
 
+/// Build the `chatterbox_tts` LoadSpec at the inference pin's component contract (epic 13657 /
+/// sc-13680): the generator loads T3/S3Gen/tokenizer from `snapshot_dir` and REQUIRES the two
+/// companion weights staged as NAMED COMPONENTS — `voice_embedding` (ve.safetensors) and `perth`
+/// (perth_implicit.safetensors). At this pin the provider no longer self-fetches them mid-render, so a
+/// caller (the worker's resolve_co_requisites seam, or a by-hand smoke) MUST stage them here or the
+/// load fails fast with an actionable `with_component` error.
+fn chatterbox_load_spec(snapshot_dir: &Path, ve_file: PathBuf, perth_file: PathBuf) -> LoadSpec {
+    LoadSpec::new(WeightsSource::Dir(snapshot_dir.to_path_buf()))
+        .with_component("voice_embedding", WeightsSource::File(ve_file))
+        .with_component("perth", WeightsSource::File(perth_file))
+}
+
 /// Generate one real Kokoro clip (the base TTS call), returning the produced `gen_core::AudioTrack`.
 fn kokoro_clip(dir: &Path, script: &str, voice: &str) -> gen_core::AudioTrack {
     let audio = runtime_macos::catalog()
@@ -326,6 +338,9 @@ fn native_voiceclone_chatterbox_smoke() {
     // The chatterbox_tts generator loads its T3 + S3Gen + tokenizer from a snapshot DIR; the
     // Chatterbox-VE embedder loads the single `ve.safetensors` from that same dir.
     let chatterbox_dir = resolve_dir("VOICECLONE_CHATTERBOX_DIR", "ResembleAI/chatterbox", None);
+    // At the inference pin the generator requires ve + perth staged as named components (it no longer
+    // self-fetches). ve.safetensors rides the chatterbox snapshot; perth ships its own repo.
+    let perth_dir = resolve_dir("VOICECLONE_PERTH_DIR", "SceneWorks/perth-implicit", None);
     let out_dir = PathBuf::from(env_or("VOICECLONE_OUT_DIR", "/tmp/voiceclone_smoke"));
     std::fs::create_dir_all(&out_dir).expect("create out dir");
     let seed: u64 = 20260720;
@@ -353,7 +368,11 @@ fn native_voiceclone_chatterbox_smoke() {
         .expect("audio lane")
         .load(
             "chatterbox_tts",
-            &LoadSpec::new(WeightsSource::Dir(chatterbox_dir.clone())),
+            &chatterbox_load_spec(
+                &chatterbox_dir,
+                chatterbox_dir.join("ve.safetensors"),
+                perth_dir.join("perth_implicit.safetensors"),
+            ),
         )
         .expect("load chatterbox_tts generator");
     let mut on_progress = |_p: Progress| {};
@@ -451,6 +470,8 @@ fn saved_voice_register_render_dod() {
     }
     let data_dir = std::env::temp_dir();
     let chatterbox_dir = resolve_dir("VOICECLONE_CHATTERBOX_DIR", "ResembleAI/chatterbox", None);
+    // The generator requires ve + perth staged as named components at this pin (no self-fetch).
+    let perth_dir = resolve_dir("VOICECLONE_PERTH_DIR", "SceneWorks/perth-implicit", None);
 
     let out_dir = PathBuf::from(env_or("SAVED_VOICE_DOD_OUT", "/tmp/saved_voice_dod"));
     std::fs::create_dir_all(&out_dir).expect("out dir");
@@ -536,7 +557,11 @@ fn saved_voice_register_render_dod() {
         .expect("audio lane")
         .load(
             "chatterbox_tts",
-            &LoadSpec::new(WeightsSource::Dir(chatterbox_dir.clone())),
+            &chatterbox_load_spec(
+                &chatterbox_dir,
+                chatterbox_dir.join("ve.safetensors"),
+                perth_dir.join("perth_implicit.safetensors"),
+            ),
         )
         .expect("load chatterbox_tts generator");
     let mut on_progress = |_p: Progress| {};
@@ -804,8 +829,8 @@ fn real_cache_fingerprint(chatterbox_dir: &Path, perth_dir: &Path) -> Vec<Vec<St
     ]
 }
 
-/// sc-13541 (epic 13400 / E1 follow-up) — **offline install-parity DoD**. `#[ignore]`d; run by hand
-/// on an Apple-Silicon Mac (downloads ~3.2 GB into an ISOLATED temp HF cache):
+/// sc-13541 + sc-13680 (epic 13400 / E1 follow-up) — **offline install-parity DoD**. `#[ignore]`d;
+/// run by hand on an Apple-Silicon Mac (downloads ~3.2 GB into an ISOLATED temp HF cache):
 /// ```text
 /// cargo test -p sceneworks-worker chatterbox_offline_install_parity_smoke -- --ignored --nocapture
 /// ```
@@ -814,38 +839,39 @@ fn real_cache_fingerprint(chatterbox_dir: &Path, perth_dir: &Path) -> Vec<Vec<St
 /// machine's real `~/.cache/huggingface` (which already held ve/perth), so it passed even though the
 /// install under test was never actually exercised.
 ///
-/// Two facts — verified against the pinned inference rev and hf-hub 0.4.3 — drive the design:
-///   * The runtime resolver is `candle_audio::hub::hf_get_pinned` → hf-hub `Api::new()` →
-///     `Cache::default()`, which is HARD-CODED to `dirs::home_dir()/.cache/huggingface/hub` and reads
-///     NEITHER `HF_HOME` NOR `HF_ENDPOINT` (only `ApiBuilder::from_env()` reads those). On unix
-///     `dirs::home_dir()` is `$HOME`, so the ONLY lever that redirects the resolver's cache is `$HOME`.
-///     This test points `$HOME` at a fresh temp root ⇒ the resolver reads `<temp>/.cache/huggingface/
-///     hub` and the real `~/.cache/huggingface` is never touched (asserted). `HF_HOME` is set to
-///     `<temp>/.cache/huggingface` — exactly what the desktop injects (sc-1904) — so the SceneWorks
-///     downloader (`HF_HOME/hub`) writes the SAME hub the resolver reads: the DEFAULT shipped alignment.
-///   * hf-hub 0.4.3 has no `HF_HUB_OFFLINE` and `Api::new()` ignores `HF_ENDPOINT`, so the old
-///     black-hole `HF_ENDPOINT` was INERT. But both hf-hub agents are built with ureq
-///     `try_proxy_from_env(true)`, so a black-hole `ALL_PROXY`/`HTTPS_PROXY` DOES route (and fail)
-///     every resolver `download()`, while a cache HIT short-circuits before the agent is constructed.
-///     That makes "offline" deterministic and independent of the box's real connectivity.
+/// CONTRACT UPDATE (sc-13680, the inference component pin): the generator no longer self-fetches
+/// ve/perth mid-render — the WORKER's `resolve_co_requisites` seam resolves each from its pinned
+/// `snapshots/<sha>/` (cache-only, `huggingface_pinned_snapshot_dir`, HF_HOME-scoped) and stages it in
+/// `LoadSpec::components`. So this smoke drives the REAL production seam: the offline render is
+/// zero-network by construction, and the discrimination is that deleting a component snapshot makes
+/// `resolve_co_requisites` return the actionable job-level error (naming the missing component).
+///
+/// Two facts drive the isolation design:
+///   * The worker's cache resolver (`huggingface_hub_cache_dir`) reads `HF_HOME`/`HF_HUB_CACHE`, and the
+///     install downloader writes `HF_HOME/hub`. This test points BOTH `$HOME` and `HF_HOME` at a fresh
+///     temp root — `HF_HOME=<temp>/.cache/huggingface`, exactly what the desktop injects (sc-1904) — so
+///     install and resolution share ONE isolated hub and the real `~/.cache/huggingface` is never
+///     touched (asserted). ($HOME is pinned too so any residual `dirs::home_dir()` reader stays isolated.)
+///   * A black-hole `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` fails any residual network agent, so even if
+///     some path tried to fetch, it could not — belt-and-suspenders. At this pin the render never
+///     constructs a hub agent (the seam is cache-only + the provider consumes staged files), so a
+///     successful offline render is the "no runtime hub fetch" proof independent of connectivity.
 ///
 ///   1. **Isolate** — `$HOME` + `HF_HOME` at a fresh temp root; clear every other HF cache + proxy
 ///      var. Assert the isolated hub starts empty and differs from the real `~/.cache/huggingface`.
 ///   2. **Install** — run the REAL download executor (online) for the primary snapshot (`main`) PLUS
 ///      the two pinned companion co-requisites: `ve.safetensors` @ 5bb1f6ee… and
 ///      `perth_implicit.safetensors` @ 80b60f9c…. Assert each pinned `snapshots/<sha>/…` + `refs/<sha>`
-///      materialized where `hf_get_pinned` reads (the hf-hub layout `download_snapshot_into_cache`
-///      writes: `refs/<rev>` → commit, `snapshots/<commit>/<file>`).
-///   3. **Go offline, HARD** — black-hole `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (any resolver fetch
-///      now fails through a dead proxy). Load `chatterbox_tts` from the installed snapshot dir and
-///      `generate()` one clone from a `Conditioning::ReferenceAudio` → MUST SUCCEED: ve
-///      (embed_reference) and perth (always-on watermark) resolve cache-first with zero network. A
-///      success with the dead proxy set IS the "no runtime hub fetch" proof.
-///   4. **Discriminate** — with the dead proxy still set, delete ONLY the PerTh snapshot, RELOAD the
-///      generator (its lazy ve/perth caches reset) and re-render → MUST HARD-FAIL (perth cache-miss →
-///      dead proxy). Then delete the ve snapshot + `refs/<sha>` and re-render → MUST HARD-FAIL (ve
-///      cache-miss). Deleting from the ISOLATED cache breaking the render is the proof the resolver
-///      reads THAT cache, not the real one. The 3.2 GB primary snapshot is reused — nothing re-downloads.
+///      materialized where the seam reads (`snapshots/<commit>/<file>`).
+///   3. **Go offline, HARD** — black-hole `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY`, then render through the
+///      worker's `resolve_co_requisites` seam: it resolves ve + perth cache-first from their pinned
+///      snapshots and stages them in `LoadSpec::components`; chatterbox_tts loads + `generate()`s one
+///      clone → MUST SUCCEED with zero network.
+///   4. **Discriminate** — delete ONLY the ve snapshot file + `refs/<sha>` (perth stays) and re-render →
+///      MUST HARD-FAIL with `resolve_co_requisites`' actionable error naming `voice_embedding`; then
+///      delete the PerTh dir and re-render → MUST HARD-FAIL naming `perth`. Deleting from the ISOLATED
+///      cache breaking the render is the proof the seam reads THAT cache, not the real one. The 3.2 GB
+///      primary snapshot is reused — nothing re-downloads.
 #[test]
 #[ignore = "real-weight offline-install-parity DoD: downloads ~3.2 GB into an ISOLATED temp HF cache; run by hand on an Apple-Silicon Mac"]
 fn chatterbox_offline_install_parity_smoke() {
@@ -994,12 +1020,37 @@ fn chatterbox_offline_install_parity_smoke() {
         "primary chatterbox snapshot dir must hold the generator weights"
     );
 
-    // One offline render from the installed primary snapshot, RELOADING the generator each call: the
-    // provider caches its ve/perth embedders lazily in a Mutex on first use, so a second generate() on
-    // the SAME generator would reuse them and never re-touch the cache — the discrimination below MUST
-    // reload to force re-resolution. The primary weights load from the local DIR (no hub), so a reload
-    // never re-downloads the 3.2 GB primary.
+    // The chatterbox_tts catalog shape the worker's co-requisite seam reads — the two pinned companion
+    // downloads tagged with the component ids the generator requires at load (sc-13679/13680). Built
+    // from the same repos/revisions/files installed above, so resolve_co_requisites resolves each from
+    // its pinned `snapshots/<sha>/` (via huggingface_pinned_snapshot_dir — NOT refs/main, which points
+    // at the primary).
+    let manifest_entry = serde_json::json!({
+        "id": "chatterbox_tts",
+        "downloads": [
+            { "provider": "huggingface", "repo": CHATTERBOX_REPO, "revision": VE_REVISION,
+              "coRequisite": true, "componentId": "voice_embedding", "files": ["ve.safetensors"] },
+            { "provider": "huggingface", "repo": PERTH_REPO, "revision": PERTH_REVISION,
+              "coRequisite": true, "componentId": "perth", "files": ["perth_implicit.safetensors"] }
+        ]
+    });
+
+    // One offline render through the PRODUCTION seam, RE-RESOLVING components each call: the worker's
+    // `resolve_co_requisites` resolves ve+perth cache-first from their pinned snapshots and stages them
+    // in `LoadSpec::components` (the generator no longer self-fetches at this pin), then chatterbox_tts
+    // loads from the local primary DIR + the two staged files and renders — ZERO network by
+    // construction (the dead proxy is belt-and-suspenders). Deleting a component's snapshot below makes
+    // resolve_co_requisites return the actionable job-level error, which is the new discrimination.
     let render_offline = || -> Result<gen_core::AudioTrack, String> {
+        let descriptor = crate::inference_runtime::audio_descriptor("chatterbox_tts")
+            .ok_or_else(|| "chatterbox_tts is not in the audio registry".to_owned())?;
+        let components =
+            crate::model_jobs::resolve_co_requisites(&descriptor, &manifest_entry, &settings)
+                .map_err(|e| e.to_string())?;
+        let spec = components.into_iter().fold(
+            LoadSpec::new(WeightsSource::Dir(main_snapshot_dir.clone())),
+            |spec, (id, source)| spec.with_component(id, source),
+        );
         let request = GenerationRequest {
             prompt: "This cloned voice was rendered fully offline from a fresh install.".to_owned(),
             seed: Some(13541),
@@ -1015,10 +1066,7 @@ fn chatterbox_offline_install_parity_smoke() {
             .map_err(|e| format!("runtime catalog: {e}"))?
             .audio()
             .ok_or_else(|| "audio lane missing from the runtime catalog".to_owned())?
-            .load(
-                "chatterbox_tts",
-                &LoadSpec::new(WeightsSource::Dir(main_snapshot_dir.clone())),
-            )
+            .load("chatterbox_tts", &spec)
             .map_err(|e| format!("load chatterbox_tts: {e}"))?
             .generate(&request, &mut on_progress)
             .map_err(|e| format!("generate: {e}"))?;
@@ -1032,7 +1080,8 @@ fn chatterbox_offline_install_parity_smoke() {
     let clone = render_offline().unwrap_or_else(|e| {
         panic!(
             "offline native clone generate MUST succeed from the installed isolated cache \
-             (ve + perth resolve cache-first with zero network; the dead proxy proves no fetch): {e}"
+             (resolve_co_requisites resolves ve + perth cache-first with zero network; the dead proxy \
+             proves no fetch): {e}"
         )
     });
     assert!(!clone.samples.is_empty(), "offline clone is empty");
@@ -1051,34 +1100,38 @@ fn chatterbox_offline_install_parity_smoke() {
         out_dir.join("offline_parity_clone.wav").display()
     );
 
-    // ── Step 4b: discrimination — prove the INSTALL (not the real ~/.cache) is load-bearing ──────
-    // #1: remove ONLY the PerTh snapshot (ve stays). A reload + render must reach the always-on
-    // watermark, cache-miss PerTh, and hard-fail through the dead proxy.
-    std::fs::remove_dir_all(&perth_dir).expect("remove the isolated PerTh model dir");
-    let perth_err = render_offline().expect_err(
-        "with the PerTh snapshot deleted from the ISOLATED cache the offline render MUST hard-fail — \
-         a success would mean the resolver read some OTHER cache (e.g. the real ~/.cache): a false pass",
-    );
-    assert!(
-        perth_err.contains("PerTh"),
-        "the discrimination failure must be the missing PerTh weight resolving through the dead proxy, got: {perth_err}"
-    );
-    eprintln!(
-        "[offline-parity] step 4b#1 PASS — PerTh removed ⇒ hard-fail as required: {perth_err}"
-    );
-
-    // #2: also remove the ve snapshot pointer + its refs/<sha>. A reload + render now cache-misses ve
-    // at embed_reference (the first companion the clone path touches) and hard-fails through the proxy.
+    // ── Step 4b: discrimination — prove the INSTALL (not the real ~/.cache) is load-bearing, and that
+    //    a missing co-requisite fails at the JOB level with an actionable error (the seam's contract).
+    //    resolve_co_requisites iterates required_components as [perth, voice_embedding], so delete ve
+    //    FIRST (perth still present) to surface the voice_embedding failure, then perth.
+    // #1: remove ONLY the ve snapshot file + its refs/<sha> (perth stays). resolve_co_requisites now
+    // cache-misses voice_embedding and fails with an actionable error naming the component.
     std::fs::remove_file(&ve_snapshot).expect("remove the isolated ve.safetensors pointer");
     std::fs::remove_file(&ve_ref).expect("remove the isolated ve refs/<sha>");
     let ve_err = render_offline().expect_err(
-        "with the ve snapshot deleted from the ISOLATED cache the offline render MUST hard-fail",
+        "with the ve snapshot deleted from the ISOLATED cache the offline render MUST hard-fail at the \
+         co-requisite seam — a success would mean the resolver read some OTHER cache: a false pass",
     );
     assert!(
-        ve_err.contains("chatterbox_ve"),
-        "the discrimination failure must be the missing ve embedder resolving through the dead proxy, got: {ve_err}"
+        ve_err.contains("voice_embedding"),
+        "the discrimination failure must name the missing voice_embedding component, got: {ve_err}"
     );
-    eprintln!("[offline-parity] step 4b#2 PASS — ve removed ⇒ hard-fail as required: {ve_err}");
+    eprintln!(
+        "[offline-parity] step 4b#1 PASS — ve removed ⇒ actionable job-level failure: {ve_err}"
+    );
+
+    // #2: also remove the PerTh model dir. resolve_co_requisites hits `perth` first and fails naming it.
+    std::fs::remove_dir_all(&perth_dir).expect("remove the isolated PerTh model dir");
+    let perth_err = render_offline().expect_err(
+        "with the PerTh snapshot also deleted the offline render MUST hard-fail naming the perth component",
+    );
+    assert!(
+        perth_err.contains("perth"),
+        "the discrimination failure must name the missing perth component, got: {perth_err}"
+    );
+    eprintln!(
+        "[offline-parity] step 4b#2 PASS — PerTh removed ⇒ actionable job-level failure: {perth_err}"
+    );
 
     // ── The machine's real ~/.cache/huggingface must be neither read into nor written by any of the
     //    above: install targeted HF_HOME=<temp>/hub and the resolver's Cache::default() targeted

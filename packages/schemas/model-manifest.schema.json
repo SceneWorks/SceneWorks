@@ -577,6 +577,11 @@
                   "pattern": "^[0-9a-f]{40}$",
                   "description": "Optional pinned 40-hex git commit SHA — the F-029 pin authority for this download (sc-13659). When present the download job forwards it so the worker fetches that exact IMMUTABLE commit into snapshots/<sha>/; absent means the worker resolves `main` at install time, so the ~200 existing non-pinned models need no migration. MUST be a full 40-char lowercase-hex commit: a branch/tag/short SHA is rejected by the pattern above because it resolves online but hard-fails the offline pinned-SHA resolver (hf_get_pinned reads snapshots/<sha>/). REQUIRED on coRequisite: true entries — the F-029 guarantee that a companion weight (e.g. chatterbox_tts's ve/perth) installs to a deterministic, offline-resolvable snapshot; that conditional is enforced by tests/test_builtin_manifest_audit.py and crates/sceneworks-core/src/builtin_manifests.rs rather than JSON Schema, which cannot grandfather the sc-13591 pin migration still in flight. See sc-13541, sc-13591."
                 },
+                "componentId": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]*$",
+                  "description": "Optional stable component id this coRequisite download PROVISIONS for the model's engine (epic 13657, sc-13679). When set (only meaningful on `coRequisite: true` entries), the worker stages the resolved local path under this id in the engine's `LoadSpec::components`, matched against the provider's `ModelDescriptor::required_components` advertisement — the explicit repo→component mapping (never inferred from repo names) that the generic `resolve_co_requisites` seam reads. Lowercase snake_case, same shape as a descriptor id. Examples: chatterbox_tts's ve/perth co-requisites carry `voice_embedding`/`perth`; SDXL's carry `tokenizer_clip_l`/`tokenizer_clip_bigg`/`vae_fp16_fix` (sc-13682). Absent on a co-requisite the engine does not read as a named component (e.g. the PiD-gemma / Wan-Lightning shared weights)."
+                },
                 "default": {
                   "type": "boolean",
                   "description": "Marks the canonical alternate used for displayed size, install path, and download jobs. For a quant matrix this marks the DEFAULT tier (the one that installs when no explicit variant is requested)."

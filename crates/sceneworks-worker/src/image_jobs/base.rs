@@ -2796,6 +2796,36 @@ fn load_spec(
     spec
 }
 
+/// Stage a media model's caller-provisioned components (epic 13657, sc-13679) onto its `LoadSpec` —
+/// the image/video twin of the audio seam (`audio_jobs.rs run_audio_synthesis_using`). It reads the
+/// model's descriptor `required_components` from the media registry and resolves each declared id to
+/// its cached `coRequisite` snapshot via [`crate::model_jobs::resolve_co_requisites`] (all-or-nothing:
+/// a missing co-requisite fails the job with an actionable error BEFORE the engine load), then stages
+/// each in `LoadSpec::components` for the engine's own load-time `require_component` gate.
+///
+/// DORMANT at this pin: every current image/video descriptor advertises `required_components: &[]`, so
+/// the early return keeps this a no-op (no manifest clone, no cache probe). It is a REAL generic path,
+/// not a stub — the first image provider to advertise components (SDXL, sc-13682) is provisioned
+/// through it with no new plumbing.
+fn attach_required_components(
+    spec: LoadSpec,
+    model_id: &str,
+    manifest_entry: &JsonObject,
+    settings: &Settings,
+) -> WorkerResult<LoadSpec> {
+    let Some(descriptor) = crate::inference_runtime::media_descriptor(model_id) else {
+        return Ok(spec);
+    };
+    if descriptor.required_components.is_empty() {
+        return Ok(spec);
+    }
+    let manifest_value = Value::Object(manifest_entry.clone());
+    let components = resolve_co_requisites(&descriptor, &manifest_value, settings)?;
+    Ok(components
+        .into_iter()
+        .fold(spec, |spec, (id, source)| spec.with_component(id, source)))
+}
+
 /// Registry-only generator load (epic 3720, sc-3724): resolve `engine_id` through the
 /// backend-neutral `crate::inference_runtime::load` seam and return a `Box<dyn gen_core::Generator>`. Optionally
 /// installs an IP-Adapter from `ip_adapter_dir` (`LoadSpec::with_ip_adapter`) — the FLUX.1 XLabs
@@ -4519,6 +4549,10 @@ async fn generate_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
+    // Named model components (epic 13657, sc-13679): dormant on the image lane at this pin — a no-op
+    // until an image provider advertises `required_components` (SDXL, sc-13682) — but the generic seam
+    // is present so it lights up with no bespoke plumbing.
+    spec = attach_required_components(spec, &request.model, &request.model_manifest_entry, settings)?;
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the generic MLX lane serves
     // the remaining With-Character identity generators — Z-Image identity-init (`referenceAssetId` ⇒
@@ -5405,6 +5439,10 @@ async fn generate_candle_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
+    // Named model components (epic 13657, sc-13679): the candle twin of the mlx attach above — dormant
+    // (every current candle image descriptor advertises no components) but present so SDXL (sc-13682)
+    // reuses the same generic seam.
+    spec = attach_required_components(spec, &request.model, &request.model_manifest_entry, settings)?;
     // INT8-ConvRot LoadSpec seam (sc-9300, epic 9083): ride the ConvRot DiT single-file on the shared,
     // already-optional `LoadSpec::text_encoder` as a `WeightsSource::File` while `spec.weights` stays the
     // canonical Krea 2 bf16 snapshot `Dir` (set as `weights_dir` above). The candle-gen krea engine's

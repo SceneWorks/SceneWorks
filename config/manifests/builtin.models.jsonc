@@ -8996,17 +8996,21 @@
       // gated purely on the audio catalog's registration + Capabilities, not a hardcoded id).
       //
       // `downloads` pins the three files the generator loads from its snapshot dir, PLUS the two
-      // companion weights the provider resolves at generate time via pinned-SHA hub fetches (NOT from
-      // the snapshot dir): the 256-d speaker embedder `ve.safetensors` (candle_audio_chatterbox_ve
-      // `hf_get_pinned(ResembleAI/chatterbox @ 5bb1f6ee…, ve.safetensors)`) and the PerTh provenance
-      // watermarker `perth_implicit.safetensors` (`hf_get_pinned(SceneWorks/perth-implicit @ 80b60f9c…)`;
-      // generate() ALWAYS watermarks, so a missing PerTh weight is a hard error). Both are declared as
-      // `coRequisite` downloads (sc-9696) with an explicit pinned `revision`: the runtime's `hf_get_pinned`
-      // rejects anything but a full 40-hex commit SHA and reads `models--<org>--<name>/snapshots/<sha>/`,
-      // so a plain main-branch predownload would land in the WRONG snapshot and offline generation would
-      // fail (sc-13541). Pinning `revision` to the exact SHA the resolver uses materializes each file in
-      // the same pinned-SHA snapshot the runtime resolves — so a fresh install is fully self-contained
-      // offline, matching every other seeded audio model.
+      // companion weights the generator requires as NAMED COMPONENTS at load (epic 13657 / sc-13680):
+      // the 256-d speaker embedder `ve.safetensors` (component id `voice_embedding`) and the PerTh
+      // provenance watermarker `perth_implicit.safetensors` (component id `perth`; generate() ALWAYS
+      // watermarks, so a missing PerTh weight is a hard error). At the inference pin the provider NO
+      // LONGER self-fetches these mid-render — it declares them in `ModelDescriptor::required_components`
+      // and the worker's generic `resolve_co_requisites` seam resolves each from its cached pinned-SHA
+      // snapshot and stages it in `LoadSpec::components` (`with_component("voice_embedding"/"perth", …)`),
+      // so an unprovisioned component fails fast at load with an actionable error, never a hub fetch.
+      // Both are declared as `coRequisite` downloads (sc-9696) carrying (a) an explicit pinned `revision`
+      // — the runtime reads `models--<org>--<name>/snapshots/<sha>/`, so a plain main-branch predownload
+      // would land in the WRONG snapshot and offline generation would fail (sc-13541) — and (b) an
+      // explicit `componentId` mapping the repo to the component id the seam stages (never inferred from
+      // the repo name, sc-13679). Pinning `revision` to the exact SHA materializes each file in the
+      // snapshot the resolver reads, so a fresh install is fully self-contained offline, matching every
+      // other seeded audio model.
       "id": "chatterbox_tts",
       "name": "Chatterbox (Cloned-Voice TTS)",
       "family": "chatterbox",
@@ -9047,17 +9051,19 @@
           }
         },
         {
-          // Co-requisite (sc-13541): the 256-d speaker embedder the provider resolves at generate time
-          // via candle_audio_chatterbox_ve::resolve_pinned_file() ->
-          // hf_get_pinned(ResembleAI/chatterbox @ 5bb1f6ee…, ve.safetensors). `revision` MUST be the full
-          // 40-hex SHA the resolver pins — hf_get_pinned refuses a branch/tag and reads
-          // snapshots/<sha>/, so a main-branch fetch would populate the wrong snapshot and offline
-          // generation would fail. Shares the ResembleAI/chatterbox repo cache with the primary download
-          // above but lands in its own pinned-SHA snapshot.
+          // Co-requisite (sc-13541 / sc-13680): the 256-d speaker embedder the worker stages as the
+          // `voice_embedding` component (`componentId` below) — resolve_co_requisites resolves it from
+          // this pinned-SHA snapshot and hands it to the generator via with_component. `revision` MUST be
+          // the full 40-hex SHA the resolver reads (snapshots/<sha>/), so a main-branch fetch would
+          // populate the wrong snapshot and offline generation would fail. Shares the ResembleAI/chatterbox
+          // repo cache with the primary download above but lands in its own pinned-SHA snapshot. The
+          // standalone `chatterbox_ve` model (voice-registration embedder) pins the SAME revision so the
+          // two declarations of ve.safetensors never diverge.
           "provider": "huggingface",
           "repo": "ResembleAI/chatterbox",
           "revision": "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
           "coRequisite": true,
+          "componentId": "voice_embedding",
           "files": [
             "ve.safetensors"
           ],
@@ -9072,16 +9078,17 @@
           }
         },
         {
-          // Co-requisite (sc-13541): the PerTh provenance watermarker the provider resolves at generate
-          // time via resolve_perth_weights() -> hf_get_pinned(SceneWorks/perth-implicit @ 80b60f9c…,
-          // perth_implicit.safetensors). generate() ALWAYS watermarks (no disable flag), so a missing
-          // PerTh weight is a hard error; predownloading it at the pinned rev makes offline generation
-          // self-contained. `PERTH_SNAPSHOT` is the runtime's offline-override escape hatch, but the
-          // pinned-SHA snapshot this materializes is resolved with no override needed. MIT-licensed.
+          // Co-requisite (sc-13541 / sc-13680): the PerTh provenance watermarker the worker stages as
+          // the `perth` component (`componentId` below) — resolve_co_requisites resolves it from this
+          // pinned-SHA snapshot and hands it to the generator via with_component. generate() ALWAYS
+          // watermarks (no disable flag), so a missing PerTh weight is a hard error; predownloading it at
+          // the pinned rev makes offline generation self-contained. `revision` MUST be the full 40-hex SHA
+          // the resolver reads (snapshots/<sha>/). MIT-licensed.
           "provider": "huggingface",
           "repo": "SceneWorks/perth-implicit",
           "revision": "80b60f9caead09b8d3b512bda0b24038f28c08ec",
           "coRequisite": true,
+          "componentId": "perth",
           "files": [
             "perth_implicit.safetensors"
           ],
@@ -9123,6 +9130,16 @@
       }
     },
     {
+      // Standalone Chatterbox voice ENCODER (sc-13680 reconciliation): kept as its own catalog entry
+      // rather than retired into chatterbox_tts's coRequisite, because it is a DISTINCT registered
+      // `VoiceEmbedder` used by a different flow — the Voice Clone "register a voice" path
+      // (voice_register::embed_reference_clip → load_voice_embedder("chatterbox_ve")) maps a reference
+      // clip to a 256-d speaker vector for near-duplicate detection, NOT clone synthesis. Retiring it
+      // would break voice registration, the voiceclone_smoke harness, and the Model Manager entry. It
+      // shares the ResembleAI/chatterbox repo + `ve.safetensors` with chatterbox_tts's `voice_embedding`
+      // coRequisite, so it pins the SAME `revision` (5bb1f6ee…, the encoder crate's HUB_REVISION) — the
+      // two declarations of ve.safetensors resolve the same immutable snapshot instead of diverging
+      // (unpinned here would install into a main-branch snapshot, an offline-resolution mismatch).
       "id": "chatterbox_ve",
       "name": "Chatterbox Voice Encoder (Voice Clone)",
       "family": "voice",
@@ -9138,6 +9155,7 @@
         {
           "provider": "huggingface",
           "repo": "ResembleAI/chatterbox",
+          "revision": "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
           "files": [
             "ve.safetensors"
           ],
