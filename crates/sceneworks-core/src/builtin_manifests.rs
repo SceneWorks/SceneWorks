@@ -375,6 +375,171 @@ mod tests {
         }
     }
 
+    /// A full 40-char lowercase-hex commit SHA — the only revision shape the F-029 pin
+    /// authority accepts (`^[0-9a-f]{40}$`, mirrored from model-manifest.schema.json).
+    fn is_full_sha_revision(revision: &str) -> bool {
+        revision.len() == 40
+            && revision
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+
+    /// `(model_id, repo)` co-requisite download pairs whose F-029 pin migration is
+    /// still IN FLIGHT under sc-13591. Each is a KNOWN, tracked gap: the immutable
+    /// commit SHA lives in the sc-13591 inventory but is applied by a later
+    /// per-family story, not sc-13659 (which is schema + plumbing + enforcement only
+    /// and must not add real pins). A brand-new co-requisite may NOT join this list —
+    /// pin its `revision` instead. Kept in lockstep with the identical Python audit
+    /// allowlist in tests/test_builtin_manifest_audit.py.
+    const COREQUISITE_REVISION_MIGRATION_PENDING: &[(&str, &str)] = &[
+        (
+            "qwen_image",
+            "SceneWorks/qwen-image-2512-fun-controlnet-union",
+        ),
+        ("ltx_2_3", "SceneWorks/ltx-2.3-mlx"),
+        (
+            "ltx_2_3_eros",
+            "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
+        ),
+        ("wan_2_2_t2v_14b", "lightx2v/Wan2.2-Lightning"),
+        ("wan_2_2_i2v_14b", "lightx2v/Wan2.2-Lightning"),
+        ("pid_qwenimage", "SceneWorks/gemma-2-2b-it"),
+        ("pid_flux", "SceneWorks/gemma-2-2b-it"),
+        ("pid_flux2", "SceneWorks/gemma-2-2b-it"),
+        ("pid_sdxl", "SceneWorks/gemma-2-2b-it"),
+    ];
+
+    /// Every `(model_id, repo)` co-requisite pair in the live manifest that is NOT
+    /// pinned to a full 40-hex commit SHA. Shared by the enforcement test and its
+    /// self-cleaning allowlist audit so both read the same signal.
+    fn corequisite_revision_gaps(models: &[serde_json::Value]) -> Vec<(String, String)> {
+        let mut gaps = Vec::new();
+        for model in models {
+            let id = model["id"].as_str().unwrap_or_default();
+            let Some(downloads) = model["downloads"].as_array() else {
+                continue;
+            };
+            for download in downloads {
+                if download["coRequisite"].as_bool() != Some(true) {
+                    continue;
+                }
+                let pinned = download["revision"]
+                    .as_str()
+                    .is_some_and(is_full_sha_revision);
+                if !pinned {
+                    let repo = download["repo"].as_str().unwrap_or_default();
+                    gaps.push((id.to_owned(), repo.to_owned()));
+                }
+            }
+        }
+        gaps
+    }
+
+    #[test]
+    fn corequisite_downloads_pin_a_full_sha_revision() {
+        // F-029 (sc-13659): a coRequisite: true download is a FETCH-ALL companion the runtime
+        // resolves offline via a pinned-SHA `hf_get_pinned` reading `snapshots/<sha>/`. Leaving it
+        // on `main` lands the wrong snapshot and hard-fails offline, so every co-requisite MUST pin a
+        // full 40-hex commit — the Rust-side backstop to the identical Python manifest audit. The
+        // only tolerated gaps are the sc-13591 pins still being migrated by later stories.
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let models = manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array");
+
+        let allowlist: std::collections::HashSet<(&str, &str)> =
+            COREQUISITE_REVISION_MIGRATION_PENDING
+                .iter()
+                .copied()
+                .collect();
+        let unexpected: Vec<(String, String)> = corequisite_revision_gaps(models)
+            .into_iter()
+            .filter(|(id, repo)| !allowlist.contains(&(id.as_str(), repo.as_str())))
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "co-requisite downloads must pin a 40-hex commit SHA (F-029, sc-13659); \
+             these are unpinned and NOT tracked for the sc-13591 migration: {unexpected:?}"
+        );
+    }
+
+    #[test]
+    fn corequisite_revision_migration_allowlist_has_no_stale_entries() {
+        // Self-cleaning guard: the moment a later sc-13591 story pins one of these companions (or
+        // removes the entry), its allowlist row stops matching an actual gap and MUST be deleted —
+        // otherwise the allowlist would silently keep excusing a co-requisite that is already
+        // compliant, masking a future regression. This asserts every allowlisted pair still names a
+        // live, unpinned co-requisite. (This is why a test asserting a default value is a false green:
+        // the allowlist must be forced to shrink, not linger.)
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let models = manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array");
+
+        let gaps: std::collections::HashSet<(String, String)> =
+            corequisite_revision_gaps(models).into_iter().collect();
+        let stale: Vec<&(&str, &str)> = COREQUISITE_REVISION_MIGRATION_PENDING
+            .iter()
+            .filter(|(id, repo)| !gaps.contains(&((*id).to_owned(), (*repo).to_owned())))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "stale F-029 migration allowlist entries (now pinned or removed) must be deleted from \
+             COREQUISITE_REVISION_MIGRATION_PENDING: {stale:?}"
+        );
+    }
+
+    #[test]
+    fn model_download_revision_is_a_typed_round_tripping_field() {
+        use crate::contracts::ModelDownload;
+
+        // sc-13659: `revision` is a first-class typed field on ModelDownload, not an `extra` bag key,
+        // so the F-029 pin round-trips through the contract type. A pinned entry deserializes into the
+        // typed field (leaving `extra` free of it) and re-serializes the same key; an entry with no
+        // revision keeps it `None` and serializes no `revision` key (main-branch default preserved).
+        let sha = "80b60f9caead09b8d3b512bda0b24038f28c08ec";
+        let pinned: ModelDownload = serde_json::from_value(serde_json::json!({
+            "provider": "huggingface",
+            "repo": "SceneWorks/perth-implicit",
+            "files": ["perth_implicit.safetensors"],
+            "revision": sha,
+            "coRequisite": true,
+        }))
+        .expect("pinned co-requisite deserializes");
+        assert_eq!(pinned.revision.as_deref(), Some(sha));
+        assert!(
+            !pinned.extra.contains_key("revision"),
+            "revision must land in the typed field, not the extra bag"
+        );
+        assert_eq!(
+            pinned.extra.get("coRequisite"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            serde_json::to_value(&pinned).expect("re-serialize")["revision"],
+            serde_json::json!(sha)
+        );
+
+        let unpinned: ModelDownload = serde_json::from_value(serde_json::json!({
+            "provider": "huggingface",
+            "repo": "black-forest-labs/FLUX.1-dev",
+            "files": [],
+        }))
+        .expect("unpinned entry deserializes");
+        assert_eq!(unpinned.revision, None);
+        assert!(
+            serde_json::to_value(&unpinned)
+                .expect("re-serialize")
+                .get("revision")
+                .is_none(),
+            "an unpinned download must not serialize a revision key (main-branch default)"
+        );
+    }
+
     #[test]
     fn seeds_every_manifest_into_a_fresh_dir() {
         let temp = tempfile::tempdir().expect("temp dir");

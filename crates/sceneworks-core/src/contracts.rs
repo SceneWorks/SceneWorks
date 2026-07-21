@@ -1613,6 +1613,15 @@ pub struct ModelDownload {
     pub provider: String,
     pub repo: String,
     pub files: Vec<String>,
+    /// Optional pinned 40-hex git commit SHA — the F-029 pin authority for this
+    /// download (sc-13659). When present the API forwards it into the worker's
+    /// `ModelDownload` job so the fetch lands in `snapshots/<sha>/`; absent means
+    /// the worker resolves `main` at install time. A first-class typed field (not
+    /// an `extra` bag key) so the pin round-trips through the contract type; the
+    /// authoring-time 40-hex format and the coRequisite-requires-revision rule are
+    /// enforced by the manifest audits, not by deserialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

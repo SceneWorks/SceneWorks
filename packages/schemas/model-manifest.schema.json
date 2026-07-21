@@ -574,7 +574,8 @@
                 },
                 "revision": {
                   "type": "string",
-                  "description": "Optional pinned git revision for this entry: the download job forwards it so the worker fetches that exact commit into snapshots/<sha>/; the worker defaults to `main` when omitted. For a companion co-requisite whose weight the runtime resolves via a pinned-SHA hf_get_pinned (e.g. chatterbox_tts's ve/perth), this MUST be the full 40-hex commit SHA the resolver reads — a branch/tag/short SHA resolves online but hard-fails offline. See sc-13541."
+                  "pattern": "^[0-9a-f]{40}$",
+                  "description": "Optional pinned 40-hex git commit SHA — the F-029 pin authority for this download (sc-13659). When present the download job forwards it so the worker fetches that exact IMMUTABLE commit into snapshots/<sha>/; absent means the worker resolves `main` at install time, so the ~200 existing non-pinned models need no migration. MUST be a full 40-char lowercase-hex commit: a branch/tag/short SHA is rejected by the pattern above because it resolves online but hard-fails the offline pinned-SHA resolver (hf_get_pinned reads snapshots/<sha>/). REQUIRED on coRequisite: true entries — the F-029 guarantee that a companion weight (e.g. chatterbox_tts's ve/perth) installs to a deterministic, offline-resolvable snapshot; that conditional is enforced by tests/test_builtin_manifest_audit.py and crates/sceneworks-core/src/builtin_manifests.rs rather than JSON Schema, which cannot grandfather the sc-13591 pin migration still in flight. See sc-13541, sc-13591."
                 },
                 "default": {
                   "type": "boolean",
