@@ -36,6 +36,15 @@ function thenRequiresPromptGuide(then) {
   );
 }
 
+// The fields the `then` conditional requires INSIDE ui.promptGuide (e.g. ["title","path"]).
+// scripts/check-scaffold.mjs (assertBuiltinPromptGuides) throws when either title or path is
+// missing, so the schema must demand the same at the conditional level — otherwise a picker with an
+// empty `promptGuide: {}` could satisfy the schema yet still RED the scaffold (the exact divergence
+// class sc-13783 exists to kill).
+function thenPromptGuideRequiredFields(then) {
+  return then?.properties?.ui?.properties?.promptGuide?.required ?? [];
+}
+
 // Minimal, faithful evaluation of a property constraint used inside the schema's `if`. Handles the
 // exact keywords the promptGuide conditional uses (`const`, `not.const`). Anything else THROWS so a
 // future schema refactor forces this test to be updated instead of silently false-passing.
@@ -105,6 +114,22 @@ describe("promptGuide scaffold ↔ schema contract (sc-13783)", () => {
     const picker = { id: "probe_image", name: "Probe image", type: "image" };
     expect(promptGuideRequiredForModel(picker)).toBe(true);
     expect(schemaRequiresPromptGuide(picker)).toBe(true);
+  });
+
+  it("requires a promptGuide title AND path at the picker conditional, matching check-scaffold.mjs", () => {
+    // The scaffold gate (scripts/check-scaffold.mjs assertBuiltinPromptGuides) throws unless
+    // ui.promptGuide has BOTH a title and a path. The schema's picker `then` must demand the same at
+    // the conditional level so a picker with an empty `promptGuide: {}` cannot satisfy the schema yet
+    // still RED the scaffold. Read the required set straight out of the committed schema branch.
+    const pickerBranch = (modelItemSchema.allOf ?? []).find(
+      (branch) =>
+        thenRequiresPromptGuide(branch.then) &&
+        ifMatches(branch.if, { id: "probe", name: "Probe", type: "image" }),
+    );
+    expect(pickerBranch, "schema must carry a picker promptGuide conditional").toBeTruthy();
+    const requiredFields = thenPromptGuideRequiredFields(pickerBranch.then);
+    expect(requiredFields).toContain("title");
+    expect(requiredFields).toContain("path");
   });
 
   it("exempts a utility entry from the promptGuide requirement in BOTH authorities", () => {
