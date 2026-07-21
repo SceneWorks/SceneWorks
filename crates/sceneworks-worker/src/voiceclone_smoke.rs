@@ -652,13 +652,15 @@ const PERTH_REVISION: &str = "80b60f9caead09b8d3b512bda0b24038f28c08ec";
 /// Materialize one HF snapshot (`repo` @ `revision`, filtered to `files`) into the hub cache via the
 /// worker's REAL model-download executor — `HuggingFaceSnapshot::resolve` + `download_snapshot_into_cache`,
 /// the exact seam `run_model_download_job` drives for a Models-screen install. Returns the resolved
-/// commit SHA. Proving the pinned snapshots land here proves the install materializes them (sc-13541).
-async fn install_snapshot(
+/// commit SHA, or the [`crate::WorkerError`] the download seam surfaced (the caller decides whether a
+/// transient transport failure should skip vs. hard-fail — see [`is_transient_transport_error`]).
+/// Proving the pinned snapshots land here proves the install materializes them (sc-13541).
+async fn try_install_snapshot(
     settings: &crate::Settings,
     repo: &str,
     revision: &str,
     files: &[&str],
-) -> String {
+) -> crate::WorkerResult<String> {
     use crate::downloads::{
         download_snapshot_into_cache, DownloadContext, DownloadProgress, HuggingFaceSnapshot,
     };
@@ -667,13 +669,16 @@ async fn install_snapshot(
     let repo_dir = sceneworks_core::hf_home::huggingface_repo_cache_path(&settings.data_dir, repo)
         .expect("resolve hub cache path");
     let file_patterns: Vec<String> = files.iter().map(|f| (*f).to_owned()).collect();
-    let snapshot = HuggingFaceSnapshot::resolve(&client, settings, repo, revision, &file_patterns)
-        .await
-        .expect("resolve HF snapshot listing");
-    assert!(
-        !snapshot.files.is_empty(),
-        "{repo}@{revision} resolved zero files for {file_patterns:?}"
-    );
+    let snapshot =
+        HuggingFaceSnapshot::resolve(&client, settings, repo, revision, &file_patterns).await?;
+    if snapshot.files.is_empty() {
+        // A resolve that SUCCEEDED but matched zero files is a CONTRACT/layout break (a wrong pin or a
+        // wrong file allow-list), NOT a transport blip — return a non-transport error so the caller
+        // hard-fails on it (`is_transient_transport_error` returns `false` for `InvalidPayload`).
+        return Err(crate::WorkerError::InvalidPayload(format!(
+            "{repo}@{revision} resolved zero files for {file_patterns:?}"
+        )));
+    }
     let context = DownloadContext {
         api: &api,
         client: &client,
@@ -692,9 +697,57 @@ async fn install_snapshot(
         snapshot.total_bytes(),
         std::time::Duration::from_secs(86_400),
     );
-    download_snapshot_into_cache(&context, &repo_dir, revision, &snapshot, &mut progress)
+    download_snapshot_into_cache(&context, &repo_dir, revision, &snapshot, &mut progress).await
+}
+
+/// Panicking wrapper around [`try_install_snapshot`] for the heavy `#[ignore]d` real-weight smokes,
+/// which are run by hand on a stable network and want ANY failure to be a loud panic.
+async fn install_snapshot(
+    settings: &crate::Settings,
+    repo: &str,
+    revision: &str,
+    files: &[&str],
+) -> String {
+    try_install_snapshot(settings, repo, revision, files)
         .await
         .unwrap_or_else(|e| panic!("materialize {repo}@{revision}: {e}"))
+}
+
+/// Classify a [`crate::WorkerError`] from the model-download seam ([`HuggingFaceSnapshot::resolve`] /
+/// `download_snapshot_into_cache`) as a **transient transport failure** — the HF hub was unreachable or
+/// returned a transient server error — vs. a layout/integrity/contract failure the smoke MUST catch.
+///
+/// The set is deliberately NARROW, and by construction can NEVER match a layout regression: the
+/// pinned-layout checks in [`whisper_base_fresh_install_pinned_layout_smoke`] are plain `assert!`s in
+/// the test body (never `WorkerError`s), and every integrity failure the download seam raises is a
+/// `WorkerError::InvalidPayload` (a sha256 or a size mismatch) or the zero-files contract error above —
+/// none of which this returns `true` for. Transient means ONLY:
+///   * a `reqwest` transport error with no usable HTTP response — connection refused / DNS failure /
+///     TLS error / timeout / a reset before or mid-body (`is_connect`/`is_timeout`/`is_body`); OR
+///   * an HTTP response carrying a transient server status — 5xx, 429 Too Many Requests, or 408
+///     Request Timeout. A 4xx is NOT transient (a wrong pin/file is a 404, auth a 401/403) and stays a
+///     hard failure; OR
+///   * the download stall watchdog's hung-source signal (a `WorkerError::Io` of kind `TimedOut`).
+///
+/// Everything else — `InvalidPayload` (integrity/contract), `Json`, `Api`, `Engine`, `Canceled`, and
+/// any other `Io` (e.g. a local filesystem error) — is a real regression and returns `false`.
+fn is_transient_transport_error(error: &crate::WorkerError) -> bool {
+    match error {
+        crate::WorkerError::Http(http) => {
+            if http.is_timeout() || http.is_connect() || http.is_body() {
+                return true;
+            }
+            matches!(
+                http.status(),
+                Some(status)
+                    if status.is_server_error()
+                        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+            )
+        }
+        crate::WorkerError::Io(io) => io.kind() == std::io::ErrorKind::TimedOut,
+        _ => false,
+    }
 }
 
 /// A short, non-trivial synthetic speech-like reference clip (a vibrato'd fundamental plus two
@@ -1176,6 +1229,22 @@ const WHISPER_FILES: &[&str] = &["config.json", "tokenizer.json", "model.safeten
 /// This is the cheap regression guard for the download/layout contract (epic 13678): a break in how
 /// `download_snapshot_into_cache` materializes the pinned layout would turn this red on every PR,
 /// rather than surfacing only when someone runs the heavy chatterbox smoke by hand.
+///
+/// TRANSIENT-FAILURE POLICY (sc-13797 adversarial review, issue 1): the test's PURPOSE is to guard the
+/// cache-LAYOUT code, not the hub's uptime. It therefore SKIPS (logs + returns, no failure) when the HF
+/// hub is unreachable or returns a transient server error (connection/DNS/timeout/reset, or 5xx/429/408
+/// — see [`is_transient_transport_error`]), so a transient outage can't redden UNRELATED PRs on this
+/// merge-gating lane. The skip is upstream of EVERY layout/integrity assertion and matches ONLY
+/// transport-transient errors, so it can never mask a wrong-snapshot-path / missing-refs /
+/// wrong-file-set / corrupt-download regression — all of those still hard-fail.
+///
+/// LANE CONFINEMENT (sc-13797 adversarial review, issue 2): this test lives in the
+/// `#[cfg(all(test, target_os = "macos"))]` module, so it runs ONLY on the stable self-hosted macOS
+/// worker lane — deliberately NOT on the hosted Windows worker-test lane or untrusted fork PRs.
+/// Confining the LIVE ~279 MiB HF download to a runner with a stable network + warm cache is what keeps
+/// this guard reliable; spreading it onto hosted/fork infra we don't control would AMPLIFY the
+/// transient flakiness the skip above already has to work around. Network-free cross-platform layout
+/// coverage via a LOCAL fixture is deferred to a follow-up story.
 #[test]
 fn whisper_base_fresh_install_pinned_layout_smoke() {
     // ── Isolate the hub the downloader writes into: HF_HOME at a fresh temp root (the desktop's
@@ -1227,12 +1296,34 @@ fn whisper_base_fresh_install_pinned_layout_smoke() {
     // ── Provision the pinned snapshot through the REAL download executor (online), filtered to the
     //    manifest's three allow-listed files — NOT the whole repo. Returns the resolved commit SHA.
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let commit = rt.block_on(install_snapshot(
+    let commit = match rt.block_on(try_install_snapshot(
         &settings,
         WHISPER_REPO,
         WHISPER_REVISION,
         WHISPER_FILES,
-    ));
+    )) {
+        Ok(commit) => commit,
+        // GUARD, not gate (issue 1): a transient HF-hub transport failure (unreachable / DNS / timeout
+        // / reset / 5xx / 429) SKIPS rather than reddening this merge-gating lane on an UNRELATED PR.
+        // This arm is upstream of every layout/integrity assertion below and matches ONLY
+        // transport-transient errors, so it can never mask a wrong-snapshot-path / missing-refs /
+        // wrong-file-set / corrupt-download regression — those are non-transient and hard-fail below.
+        Err(error) if is_transient_transport_error(&error) => {
+            eprintln!(
+                "[whisper-layout] SKIP — the HF hub was unreachable or returned a transient error while \
+                 provisioning {WHISPER_REPO}@{WHISPER_REVISION}: {error}. The cache-LAYOUT assertions \
+                 were NOT exercised (this guards our download code, not the hub's uptime); re-run when \
+                 the hub is reachable."
+            );
+            return;
+        }
+        // Any NON-transient failure — a wrong pin (404), a corrupt download (sha256/size mismatch), a
+        // zero-files contract break, a local filesystem error — is a REAL regression: hard-fail.
+        Err(error) => panic!(
+            "provisioning {WHISPER_REPO}@{WHISPER_REVISION} failed with a NON-transient error \
+             (a real download/layout regression, not a hub outage): {error}"
+        ),
+    };
     // A pinned commit-SHA revision resolves to itself: the snapshot dir the resolver reads is
     // snapshots/<commit>, and here <commit> == the pinned <rev>.
     assert_eq!(
@@ -1290,5 +1381,53 @@ fn whisper_base_fresh_install_pinned_layout_smoke() {
          FRESH isolated hub {}; pinned layout snapshots/<commit>/<file> + refs/<sha> verified.",
         WHISPER_FILES.len(),
         hub.display()
+    );
+}
+
+/// sc-13797 (issue 1) — lock in the SAFETY-CRITICAL half of [`is_transient_transport_error`]: every
+/// integrity/contract error class the download seam raises (and every non-timeout local error) must
+/// classify NON-transient, so the whisper smoke's transient-SKIP can NEVER swallow a real
+/// download/layout regression. This is a mutation guard: flip the classifier to return `true` for
+/// `InvalidPayload` (masking a corrupt/zero-files install) and this test goes red. (The
+/// `WorkerError::Http` transport variants have no public `reqwest::Error` constructor to build here, so
+/// they can't be exercised without real network; they are covered by the classifier's narrow match on
+/// `is_timeout`/`is_connect`/`is_body`/transient-status and the reasoning in its doc comment.)
+#[test]
+fn transient_classifier_never_skips_integrity_or_contract_failures() {
+    use crate::WorkerError;
+
+    // An integrity failure (a sha256/size mismatch surfaces as `InvalidPayload`) MUST hard-fail.
+    assert!(
+        !is_transient_transport_error(&WorkerError::InvalidPayload(
+            "ve.safetensors failed its integrity check (sha256 …)".to_owned()
+        )),
+        "an integrity mismatch must never be classified transient (it would mask a corrupt install)"
+    );
+    // The zero-files CONTRACT break (also `InvalidPayload`) MUST hard-fail.
+    assert!(
+        !is_transient_transport_error(&WorkerError::InvalidPayload(
+            "openai/whisper-base@… resolved zero files".to_owned()
+        )),
+        "a zero-files contract break must never be classified transient"
+    );
+    // A generic local filesystem error is NOT transient.
+    assert!(!is_transient_transport_error(&WorkerError::Io(
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "fs")
+    )));
+    // Cancellation and engine failures are NOT transient.
+    assert!(!is_transient_transport_error(&WorkerError::Canceled(
+        "canceled".to_owned()
+    )));
+    assert!(!is_transient_transport_error(&WorkerError::Engine(
+        "engine".to_owned()
+    )));
+
+    // The ONLY non-Http transient signal is the download stall watchdog's hung-source `Io(TimedOut)`.
+    assert!(
+        is_transient_transport_error(&WorkerError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "download stalled: no forward progress"
+        ))),
+        "the stall watchdog's Io(TimedOut) is the one non-Http transient signal"
     );
 }
