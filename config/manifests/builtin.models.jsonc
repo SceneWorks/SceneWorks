@@ -6098,9 +6098,16 @@
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
           // Shared gemma-3-12b-it-bf16 text encoder (~26.4 GB); the worker points the engine at the
-          // sibling gemma/ (resolve_bundled_ltx_gemma_dir). Fetched with any tier, kept while any
-          // remains. Windows/Linux load Gemma from the resources.gemma repo instead, so macOS-only.
+          // sibling gemma/ (resolve_bundled_ltx_gemma_dir → LoadSpec::text_encoder). Fetched with any
+          // tier, kept while any remains. Windows/Linux load Gemma from the resources.gemma repo
+          // instead, so macOS-only. Pinned to the full 40-hex bundle commit (== the worker's
+          // LTX_BUNDLE_REVISION) so this first-install coRequisite download resolves the SAME
+          // snapshots/<sha>/ the worker's on-demand ensure_ltx_bundle_gemma_present fetches — one pinned
+          // snapshot, offline-clean. As of sc-13664 the MLX LTX provider REQUIRES this Gemma TE via
+          // LoadSpec::text_encoder (no $LTX_GEMMA_DIR / HF-cache fallback), so it MUST be provisioned;
+          // pinning keeps it reproducible + offline-resolvable.
           "coRequisite": true,
+          "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
           "files": ["gemma/*"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 26427894918

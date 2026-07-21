@@ -9,9 +9,13 @@
 // What's bespoke is only the request mapping (a reference face → an
 // id-embedding via `Conditioning::Reference`, plus the PuLID-specific
 // `idWeight` / `timestepToStartCfg` knobs) and the weight provisioning: the
-// engine resolves the PuLID adapter + EVA tower + native face stack through its
-// env-var seam (`PULID_FLUX_WEIGHTS` / `PULID_EVA_WEIGHTS` /
-// `PULID_FACE_WEIGHTS_DIR`), which the worker fills from its cache here.
+// worker resolves the PuLID adapter + EVA tower + native face stack from its
+// cache and threads them onto the engine's typed `LoadSpec::identity`
+// {encoder, eva, face_dir} sub-slots (sc-8827 / F-025 — no process-global
+// `PULID_*` env mutation on the multithreaded runtime). As of sc-13664 the
+// `pulid_flux` loader REQUIRES those three identity sub-slots (no `PULID_*`
+// env / HF-cache fallback), so the worker's cache paths ARE the provisioning
+// path; each repo is pinned via `ensure_instantid_file` → `instantid_revision`.
 // ---------------------------------------------------------------------------
 
 /// SceneWorks model id for native PuLID-FLUX (FLUX.1-dev backbone + PuLID injection).
