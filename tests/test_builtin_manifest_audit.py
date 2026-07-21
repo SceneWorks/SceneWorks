@@ -501,6 +501,79 @@ def test_schema_accepts_a_component_id_on_a_corequisite_download():
         )
 
 
+def test_schema_rejects_a_component_id_on_a_non_corequisite_download():
+    """sc-13771: a `componentId` names a component PROVISIONED by a coRequisite, so it is valid ONLY on
+    `coRequisite: true` entries. This is a MANIFEST-LOCAL invariant (checkable without any inference-side
+    descriptor knowledge), so the authoring schema enforces it via an allOf conditional — catching a
+    mis-tagged manifest at authoring time instead of only at runtime in `resolve_co_requisites`.
+
+    The COMPLEMENTARY half — that a `componentId` matches some model's `ModelDescriptor::required_components`
+    (and vice-versa) — is deliberately NOT enforced here: the manifest audit has no visibility into the
+    inference-side descriptor `required_components` sets, so that cross-check stays a runtime error (covered
+    by the `a_required_component_with_no_matching_component_id_is_a_manifest_error` unit test in
+    crates/sceneworks-worker/src/model_jobs.rs).
+    """
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator.check_schema(schema)
+    validator = jsonschema.Draft202012Validator(schema)
+
+    base = {
+        "provider": "huggingface",
+        "repo": "ResembleAI/chatterbox",
+        "files": ["ve.safetensors"],
+        "revision": "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
+    }
+
+    def errors_for(download: dict) -> list:
+        manifest = {
+            "schemaVersion": 1,
+            "models": [_model_entry_with_download(download)],
+        }
+        return list(validator.iter_errors(manifest))
+
+    # Valid: componentId ON a coRequisite: true entry.
+    assert not errors_for({**base, "coRequisite": True, "componentId": "voice_embedding"}), (
+        "a componentId on a coRequisite: true download must validate"
+    )
+
+    # Invalid: componentId with NO coRequisite flag — the allOf conditional requires coRequisite.
+    missing = errors_for({**base, "componentId": "voice_embedding"})
+    assert any(
+        error.validator == "required" and "coRequisite" in error.message for error in missing
+    ), (
+        "a componentId with no coRequisite flag must be rejected (coRequisite required); "
+        f"got {[(e.validator, e.message) for e in missing]}"
+    )
+
+    # Invalid: componentId with coRequisite: false — the allOf conditional pins coRequisite to true.
+    false_flag = errors_for({**base, "coRequisite": False, "componentId": "voice_embedding"})
+    assert any(
+        error.validator == "const" and error.absolute_path and error.absolute_path[-1] == "coRequisite"
+        for error in false_flag
+    ), (
+        "a componentId on a coRequisite: false download must be rejected (coRequisite must be true); "
+        f"got {[(e.validator, list(e.absolute_path)) for e in false_flag]}"
+    )
+
+
+def test_builtin_manifest_component_ids_are_all_on_corequisite_downloads():
+    """sc-13771 mutation guard: the schema invariant above is LIVE against the real catalog. Every
+    `componentId` in builtin.models.jsonc must sit on a `coRequisite: true` download — proving the guard
+    is not merely decoration on a synthetic fixture, and that no real entry mis-tags a componentId.
+    """
+    manifest = _load_builtin_models_manifest()
+    misplaced = [
+        (model["id"], download.get("repo"), download["componentId"])
+        for model in manifest["models"]
+        for download in model.get("downloads", [])
+        if "componentId" in download and download.get("coRequisite") is not True
+    ]
+    assert not misplaced, (
+        "a componentId may appear only on a coRequisite: true download (sc-13771); these are "
+        f"mis-tagged: {sorted(misplaced)}"
+    )
+
+
 def test_manifest_constraint_contract_registry_is_complete_and_live():
     """sc-12304: constraint declarations may not silently become decoration.
 

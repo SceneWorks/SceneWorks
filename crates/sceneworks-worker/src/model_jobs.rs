@@ -1646,8 +1646,10 @@ pub(crate) fn huggingface_pinned_snapshot_dir(
 ///
 /// Driven PURELY by `descriptor.required_components`: for each declared id it finds the manifest
 /// `coRequisite` download whose `componentId` matches (never inferred from repo names, sc-13679),
-/// then resolves that repo's cached snapshot ENV-CORRECTLY via the cache-only
-/// [`huggingface_snapshot_dir`] — the same seam the PiD-gemma / Wan-Lightning co-requisites use, so
+/// then resolves that repo's cached snapshot ENV-CORRECTLY, cache-only. A co-requisite that pins an
+/// immutable `revision` (F-029) reads that exact `snapshots/<sha>/` via
+/// [`huggingface_pinned_snapshot_dir`]; an unpinned one falls back to the `refs/main`-preferring
+/// [`huggingface_snapshot_dir`] — the same seams the PiD-gemma / Wan-Lightning co-requisites use, so
 /// a custom `HF_HOME`/hub is honored and nothing is fetched here.
 ///
 /// All-or-nothing: a declared component whose co-requisite is not installed (snapshot absent, or the
@@ -3591,11 +3593,17 @@ mod co_requisite_tests {
         )
         .expect("both co-requisites are installed, so resolution succeeds");
 
-        // The resolved map's keys are EXACTLY the descriptor's advertised component ids.
-        let keys: Vec<&str> = components.keys().map(String::as_str).collect();
+        // The resolved map's keys are EXACTLY the descriptor's advertised component ids — compared as
+        // a SET, since callers key by id (order-independent) and a future descriptor whose ids are not
+        // alphabetical must not false-fail against the BTreeMap's sorted key order. Still fully
+        // discriminating: a missing or extra component id breaks set equality.
+        let keys: std::collections::BTreeSet<&str> =
+            components.keys().map(String::as_str).collect();
+        let required: std::collections::BTreeSet<&str> =
+            descriptor.required_components.iter().copied().collect();
         assert_eq!(
-            keys, descriptor.required_components,
-            "the component map keys must match the descriptor's required_components"
+            keys, required,
+            "the component map keys must match the descriptor's required_components (as a set)"
         );
         // Each id resolves to the single-file WeightsSource at the staged snapshot path.
         // (`WeightsSource` has no `PartialEq`, so match the `File` variant and compare its path.)
