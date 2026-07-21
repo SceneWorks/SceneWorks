@@ -1096,12 +1096,32 @@ async fn run_native_voice_clone_synthesis_using(
     let model_id = request.model.clone();
     let script = request.prompt.clone();
     let seed = request.seed.map(|seed| seed as u64);
+    // Named model components (epic 13657, sc-13679/13686): the native clone generator advertises the
+    // coRequisite-provisioned components it gates on at load — `chatterbox_tts` requires `perth` +
+    // `voice_embedding` (its descriptor's `required_components`, enforced by `require_component` at the
+    // top of the provider's `load`). Resolve each from the model's manifest entry and stage it in
+    // `LoadSpec::components` BEFORE the blocking load — the SAME seam `run_audio_synthesis_using` uses
+    // (sc-13679), so a missing co-requisite fails the JOB here with an actionable error naming the
+    // component id + repo rather than at the engine's `require_component` gate (or a mid-render hub
+    // fetch), and — crucially — an INSTALLED co-requisite is actually staged so the render can load.
+    // Without this the native clone path built a component-less `LoadSpec`, so at the sc-13680 pin
+    // (generator no longer self-fetches ve/perth) chatterbox_tts could not load even fully installed.
+    // A generator that advertises no components (a future native clone) yields an empty map — a no-op.
+    let components = match crate::inference_runtime::audio_descriptor(&model_id) {
+        Some(descriptor) => {
+            resolve_co_requisites(&descriptor, &request.model_manifest_entry, settings)?
+        }
+        None => BTreeMap::new(),
+    };
     // sc-13469: ONE shared engine CancelFlag, tripped mid-synthesis by the keepalive watcher.
     let cancel = CancelFlag::new();
     let handle = {
         let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
-            let spec = LoadSpec::new(WeightsSource::Dir(model_dir));
+            let spec = components.into_iter().fold(
+                LoadSpec::new(WeightsSource::Dir(model_dir)),
+                |spec, (id, source)| spec.with_component(id, source),
+            );
             let generator = load_generator(&model_id, &spec).map_err(|error| {
                 crate::classify_engine_error("clone-TTS model load failed", error)
             })?;
@@ -2445,6 +2465,55 @@ mod tests {
         }
     }
 
+    /// Stage `chatterbox_tts`'s two component coRequisites (`voice_embedding` + `perth`) under an
+    /// isolated HF cache, point `settings.data_dir` at it, and return the matching `modelManifestEntry`.
+    /// After the inference component pin (sc-13680) the native clone path resolves these via
+    /// `resolve_co_requisites` and stages them in `LoadSpec::components` BEFORE the load; without a
+    /// staged snapshot the JOB fails with `InvalidPayload` before the behavior under test runs. Mirrors
+    /// [`stage_moss_codec`] — the pinned SHAs are chatterbox's live `ve.safetensors` @ 5bb1f6ee and
+    /// `perth_implicit.safetensors` @ 80b60f9c. The returned guard + tempdir must be kept alive for the
+    /// whole test.
+    struct StagedChatterboxComponents {
+        _env: crate::test_env::EnvVars,
+        _data_dir: tempfile::TempDir,
+        manifest_entry: Value,
+    }
+
+    fn stage_chatterbox_components(settings: &mut Settings) -> StagedChatterboxComponents {
+        let env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        stage_snapshot_file(
+            data_dir.path(),
+            "ResembleAI/chatterbox",
+            "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
+            "ve.safetensors",
+        );
+        stage_snapshot_file(
+            data_dir.path(),
+            "SceneWorks/perth-implicit",
+            "80b60f9caead09b8d3b512bda0b24038f28c08ec",
+            "perth_implicit.safetensors",
+        );
+        settings.data_dir = data_dir.path().to_path_buf();
+        let manifest_entry = json!({
+            "id": "chatterbox_tts",
+            "type": "audio",
+            "downloads": [
+                { "provider": "huggingface", "repo": "ResembleAI/chatterbox",
+                  "revision": "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18", "coRequisite": true,
+                  "componentId": "voice_embedding", "files": ["ve.safetensors"] },
+                { "provider": "huggingface", "repo": "SceneWorks/perth-implicit",
+                  "revision": "80b60f9caead09b8d3b512bda0b24038f28c08ec", "coRequisite": true,
+                  "componentId": "perth", "files": ["perth_implicit.safetensors"] }
+            ],
+        });
+        StagedChatterboxComponents {
+            _env: env,
+            _data_dir: data_dir,
+            manifest_entry,
+        }
+    }
+
     fn stub_load(
         behavior: StubBehavior,
         observed: Arc<AtomicBool>,
@@ -2763,12 +2832,17 @@ mod tests {
     #[tokio::test]
     async fn native_voice_clone_trips_shared_cancel_flag_during_generation() {
         let (base_url, progress) = spawn_audio_cancel_stub(true).await;
-        let settings = cancel_test_settings(base_url);
+        let mut settings = cancel_test_settings(base_url);
+        // chatterbox_tts advertises `required_components: [perth, voice_embedding]`, so the native clone
+        // path now resolves them before the (stub) load (sc-13686); stage them + advertise them on the
+        // payload so resolution SUCCEEDS and the cancel behavior under test runs.
+        let staged = stage_chatterbox_components(&mut settings);
         let api = ApiClient::new(&settings);
         let job = audio_test_job("audio-cancel-native");
         let request = AudioRequest::from_payload(&payload(json!({
             "model": "chatterbox_tts",
             "referenceAudioAssetId": "ref-1",
+            "modelManifestEntry": staged.manifest_entry.clone(),
         })));
 
         let observed = Arc::new(AtomicBool::new(false));
@@ -2800,6 +2874,237 @@ mod tests {
         assert!(
             posts.iter().any(|p| p["status"] == "canceled"),
             "the terminal Canceled must be posted, got {posts:?}"
+        );
+    }
+
+    /// sc-13686 walking-skeleton (chatterbox voice clone, the epic's original PR-note case): the native
+    /// clone JOB must resolve the generator's `required_components` and STAGE them in
+    /// `LoadSpec::components` BEFORE the load. This is the gap this verification story found — the native
+    /// path built a component-less `LoadSpec`, so at the sc-13680 pin (the generator no longer self-
+    /// fetches ve/perth) `chatterbox_tts` could not load even fully installed, failing at the engine's
+    /// `require_component` gate. Drives the REAL entrypoint (`run_native_voice_clone_synthesis_using`)
+    /// with both components staged and captures the spec the loader receives: BOTH `perth` and
+    /// `voice_embedding` must be present. FAILS on the pre-fix component-less spec (keys empty).
+    ///
+    /// Gated to the audio lane's own cfg (`inference_runtime::audio()`): the descriptor these tests
+    /// resolve exists only on macOS or a `backend-candle` build, so this runs on the macOS + candle test
+    /// lanes (windows-candle's `cargo test --features backend-candle`) and is compiled out on the
+    /// no-candle Linux `parity` lane, where `audio_descriptor` returns None and there is nothing to stage.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[tokio::test]
+    async fn native_voice_clone_stages_the_required_components_into_the_load_spec() {
+        let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
+        let mut settings = cancel_test_settings(base_url);
+        let staged = stage_chatterbox_components(&mut settings);
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("audio-native-components");
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "chatterbox_tts",
+            "referenceAudioAssetId": "ref-1",
+            "modelManifestEntry": staged.manifest_entry.clone(),
+        })));
+
+        // Capture the component keys the loader sees in the LoadSpec — proof the worker staged them.
+        let observed_components = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = observed_components.clone();
+        let load = move |_id: &str, spec: &LoadSpec| {
+            *sink.lock().expect("component lock") = spec.components.keys().cloned().collect();
+            Ok(Box::new(StubGenerator {
+                descriptor: stub_descriptor(),
+                behavior: StubBehavior::CompleteOk,
+                observed_cancel: Arc::new(AtomicBool::new(false)),
+            }) as Box<dyn Generator>)
+        };
+        let plan = NativeVoiceClonePlan {
+            model_dir: PathBuf::from("unused"),
+            reference: gen_core::AudioTrack {
+                samples: vec![0.05, -0.05],
+                sample_rate: 24_000,
+                channels: 1,
+                stems: Vec::new(),
+            },
+        };
+
+        run_native_voice_clone_synthesis_using(&api, &settings, &job, &request, plan, load)
+            .await
+            .expect("with both components staged the native clone render must succeed");
+
+        let mut keys = observed_components.lock().expect("component lock").clone();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["perth".to_owned(), "voice_embedding".to_owned()],
+            "the worker must stage BOTH required components in the LoadSpec the generator loads with"
+        );
+    }
+
+    /// sc-13686 end-to-end negative path (chatterbox voice clone): a native clone JOB whose `perth`
+    /// component is NOT installed must fail at `resolve_co_requisites` — BEFORE the generator load —
+    /// with an actionable `InvalidPayload` naming the missing component id + repo, never at the engine's
+    /// `require_component` gate or a mid-render fetch. Drives the REAL entrypoint; the load closure flips
+    /// a flag it must NEVER set, proving the job fails at resolution, not inside the engine. (perth is
+    /// first in `required_components`, so with only ve staged the surfaced miss is perth.) Gated to the
+    /// audio lane's cfg — compiled out on the no-candle Linux `parity` lane, run on macOS + candle.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[tokio::test]
+    async fn native_voice_clone_job_fails_before_load_when_a_component_is_absent() {
+        let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
+        let mut settings = cancel_test_settings(base_url);
+        // Stage ONLY voice_embedding; perth's snapshot stays absent.
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        stage_snapshot_file(
+            data_dir.path(),
+            "ResembleAI/chatterbox",
+            "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
+            "ve.safetensors",
+        );
+        settings.data_dir = data_dir.path().to_path_buf();
+        let manifest_entry = json!({
+            "id": "chatterbox_tts",
+            "type": "audio",
+            "downloads": [
+                { "provider": "huggingface", "repo": "ResembleAI/chatterbox",
+                  "revision": "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18", "coRequisite": true,
+                  "componentId": "voice_embedding", "files": ["ve.safetensors"] },
+                { "provider": "huggingface", "repo": "SceneWorks/perth-implicit",
+                  "revision": "80b60f9caead09b8d3b512bda0b24038f28c08ec", "coRequisite": true,
+                  "componentId": "perth", "files": ["perth_implicit.safetensors"] }
+            ],
+        });
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("audio-native-missing-perth");
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "chatterbox_tts",
+            "referenceAudioAssetId": "ref-1",
+            "modelManifestEntry": manifest_entry,
+        })));
+
+        let load_ran = Arc::new(AtomicBool::new(false));
+        let sink = load_ran.clone();
+        let load = move |_id: &str, _spec: &LoadSpec| {
+            sink.store(true, Ordering::SeqCst);
+            Ok(Box::new(StubGenerator {
+                descriptor: stub_descriptor(),
+                behavior: StubBehavior::CompleteOk,
+                observed_cancel: Arc::new(AtomicBool::new(false)),
+            }) as Box<dyn Generator>)
+        };
+        let plan = NativeVoiceClonePlan {
+            model_dir: PathBuf::from("unused"),
+            reference: gen_core::AudioTrack {
+                samples: vec![0.05, -0.05],
+                sample_rate: 24_000,
+                channels: 1,
+                stems: Vec::new(),
+            },
+        };
+
+        let result =
+            run_native_voice_clone_synthesis_using(&api, &settings, &job, &request, plan, load)
+                .await;
+
+        let Err(WorkerError::InvalidPayload(message)) = result else {
+            panic!(
+                "a missing component must fail the JOB with InvalidPayload before the load, got {result:?}"
+            );
+        };
+        assert!(
+            message.contains("perth") && message.contains("SceneWorks/perth-implicit"),
+            "the error must name the missing component id + repo, got: {message}"
+        );
+        assert!(
+            !load_ran.load(Ordering::SeqCst),
+            "the generator load must NEVER run when a required component is absent — the job must fail \
+             at resolution, not inside the engine"
+        );
+    }
+
+    /// sc-13686 end-to-end negative path (MOSS TTS): a MOSS synthesis JOB whose `codec` component is NOT
+    /// installed must fail at the worker's `resolve_co_requisites` seam — BEFORE the generator load —
+    /// with the actionable `InvalidPayload` naming the `codec` component and its repo, never a mid-render
+    /// hub fetch. Drives the REAL job entrypoint (`run_audio_synthesis_using`, which resolves the
+    /// descriptor's `required_components` before the blocking load). The load closure records whether it
+    /// ran: the discrimination is that it must NOT. Complements the resolver-seam unit test
+    /// (model_jobs::…a_missing_moss_codec_fails…) and the catalog install-state gate
+    /// (models::moss_tts_install_state_gates…) with the integration link. Gated to the audio lane's cfg —
+    /// compiled out on the no-candle Linux `parity` lane, run on macOS + candle.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[tokio::test]
+    async fn moss_synthesis_job_fails_before_load_when_the_codec_is_absent() {
+        let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
+        let mut settings = cancel_test_settings(base_url);
+        // Isolate the HF cache at a FRESH empty data_dir — the XY_Tokenizer codec is NOT staged, so the
+        // descriptor's `codec` required_component cannot resolve.
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        settings.data_dir = data_dir.path().to_path_buf();
+        // A moss_ttsd_v05 request whose manifest entry advertises the (absent) codec coRequisite — the
+        // exact pinned XY_Tokenizer snapshot the live catalog declares (sc-13681).
+        let manifest_entry = json!({
+            "id": "moss_ttsd_v05",
+            "type": "audio",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": "OpenMOSS-Team/XY_Tokenizer_TTSD_V0",
+                "revision": "c83433728e698ed0698e88cb5096bc221fb8f8c5",
+                "coRequisite": true,
+                "componentId": "codec",
+                "files": ["xy_tokenizer.ckpt"],
+            }],
+        });
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("audio-missing-codec");
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "moss_ttsd_v05",
+            "prompt": "This dialogue can never render without its codec.",
+            "modelManifestEntry": manifest_entry,
+        })));
+
+        let load_ran = Arc::new(AtomicBool::new(false));
+        let sink = load_ran.clone();
+        let load = move |_id: &str, _spec: &LoadSpec| {
+            sink.store(true, Ordering::SeqCst);
+            Ok(Box::new(StubGenerator {
+                descriptor: stub_descriptor(),
+                behavior: StubBehavior::CompleteOk,
+                observed_cancel: Arc::new(AtomicBool::new(false)),
+            }) as Box<dyn Generator>)
+        };
+
+        let result = run_audio_synthesis_using(
+            &api,
+            &settings,
+            &job,
+            &request,
+            PathBuf::from("unused"),
+            None,
+            load,
+        )
+        .await;
+
+        let Err(WorkerError::InvalidPayload(message)) = result else {
+            panic!(
+                "a missing codec must fail the JOB with InvalidPayload before the engine load, got {result:?}"
+            );
+        };
+        assert!(
+            message.contains("codec") && message.contains("OpenMOSS-Team/XY_Tokenizer_TTSD_V0"),
+            "the error must name the `codec` component + its repo, got: {message}"
+        );
+        assert!(
+            !load_ran.load(Ordering::SeqCst),
+            "the generator load must NEVER run when a hard component co-requisite is absent — the job \
+             must fail at resolution, not inside the engine"
         );
     }
 

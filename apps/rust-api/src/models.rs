@@ -1826,6 +1826,122 @@ mod download_receipt_tests {
         }
     }
 
+    /// sc-13681 / sc-13686: each MOSS TTS entry advertises its RVQ codec as a HARD component
+    /// coRequisite (`moss_ttsd_v05` → XY_Tokenizer, `moss_tts_realtime` → MOSS-Audio-Tokenizer). Because
+    /// install-state gates on hard coRequisites, a MOSS entry stays not-installed until the codec
+    /// snapshot is present — even with its primary AR snapshot on disk — so the Model Manager reports a
+    /// repairable partial install and names the missing codec repo, then flips to installed once the
+    /// codec is staged. Binds to the LIVE builtin manifest so a dropped/renamed codec coRequisite or a
+    /// lost pinned revision fails HERE, not silently at synth time. The negative path's twin at the
+    /// worker's `resolve_co_requisites` seam (model_jobs::…a_missing_moss_codec_fails…) proves the JOB
+    /// then fails at load with the actionable error; this proves the catalog never advertises it ready.
+    #[test]
+    fn moss_tts_install_state_gates_on_the_codec_co_requisite() {
+        fn builtin_models_entry(model_id: &str) -> Value {
+            let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")
+                .map(|(_, contents)| *contents)
+                .expect("builtin.models.jsonc present");
+            let manifest: Value =
+                serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                    .expect("builtin.models.jsonc parses");
+            manifest["models"]
+                .as_array()
+                .expect("models array")
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
+                .cloned()
+                .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
+        }
+
+        for model_id in ["moss_ttsd_v05", "moss_tts_realtime"] {
+            let temp = tempfile::tempdir().unwrap();
+            let data_dir = temp.path();
+            let model = builtin_models_entry(model_id);
+
+            // Exactly one hard codec coRequisite, keyed on the `codec` component id.
+            let co_requisites = model_co_requisite_downloads(&model);
+            assert_eq!(
+                co_requisites.len(),
+                1,
+                "{model_id}: MOSS advertises exactly the codec coRequisite"
+            );
+            let codec = &co_requisites[0];
+            assert_eq!(
+                codec.get("componentId").and_then(Value::as_str),
+                Some("codec"),
+                "{model_id}: the coRequisite is the `codec` component"
+            );
+            let codec_repo = codec.get("repo").and_then(Value::as_str).unwrap();
+
+            // Stage the primary AR snapshot (the manifest's non-coRequisite download) — codec absent.
+            let context = model_download_context(&model).unwrap().unwrap();
+            let primary = model
+                .get("downloads")
+                .and_then(Value::as_array)
+                .unwrap()
+                .iter()
+                .find(|entry| {
+                    is_supported_model_download(entry) && !is_co_requisite_download(entry)
+                })
+                .expect("MOSS entry has a primary download");
+            let primary_rev = primary.get("revision").and_then(Value::as_str).unwrap();
+            let primary_snapshot = huggingface_repo_cache_path(data_dir, &context.repo)
+                .unwrap()
+                .join("snapshots")
+                .join(primary_rev);
+            std::fs::create_dir_all(&primary_snapshot).unwrap();
+            for file in &context.files {
+                let path = primary_snapshot.join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"weights").unwrap();
+            }
+
+            let missing = install_state_for(Some(context.clone()), &model, data_dir);
+            assert!(
+                !missing.installed,
+                "{model_id}: primary present but codec absent must not report installed"
+            );
+            assert!(
+                missing.cache_incomplete,
+                "{model_id}: the missing hard codec makes this a repairable partial install"
+            );
+            assert!(
+                missing
+                    .missing_required_files
+                    .iter()
+                    .any(|entry| entry.contains(codec_repo)),
+                "{model_id}: the missing codec repo must be reported, got {:?}",
+                missing.missing_required_files
+            );
+
+            // Stage the codec snapshot at its pinned revision → install-state flips to installed.
+            let codec_rev = codec.get("revision").and_then(Value::as_str).unwrap();
+            let codec_snapshot = huggingface_repo_cache_path(data_dir, codec_repo)
+                .unwrap()
+                .join("snapshots")
+                .join(codec_rev);
+            std::fs::create_dir_all(&codec_snapshot).unwrap();
+            for file in string_array_field(codec, "files") {
+                let path = codec_snapshot.join(&file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"weights").unwrap();
+            }
+
+            let installed = install_state_for(Some(context), &model, data_dir);
+            assert!(
+                installed.installed,
+                "{model_id}: primary + codec present must report installed"
+            );
+            assert!(
+                installed.missing_required_files.is_empty(),
+                "{model_id}: nothing missing once the codec is staged, got {:?}",
+                installed.missing_required_files
+            );
+        }
+    }
+
     /// sc-13682: the three SDXL shared components (CLIP-L/bigG tokenizers + fp16-fix VAE) are declared as
     /// candle-only (`platforms: [windows, linux]`) hard co-requisites on every candle-SDXL base +
     /// InstantID. On macOS `retain_downloads_for_os` strips them, so the self-contained MLX turnkey's
