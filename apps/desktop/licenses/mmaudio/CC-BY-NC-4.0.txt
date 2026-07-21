@@ -1,0 +1,28 @@
+MMAudio checkpoints — Creative Commons Attribution-NonCommercial 4.0
+===================================================================
+
+The MMAudio video→audio (Foley) models SceneWorks downloads on first use
+(mmaudio_small_16k, mmaudio_large_44k) assemble several checkpoints from
+hkchengrex/MMAudio (https://huggingface.co/hkchengrex/MMAudio): the MM-DiT
+flow-matching networks (mmaudio_small_16k / mmaudio_large_44k_v2), the 16 kHz
+and 44.1 kHz mel-VAEs, and the 16 kHz in-repo BigVGAN vocoder. These are
+© Sony Research Inc. / MMAudio and released under the
+
+  Creative Commons Attribution-NonCommercial 4.0 International License
+  (CC-BY-NC-4.0): https://creativecommons.org/licenses/by-nc/4.0/legalcode
+
+RESEARCH / NON-COMMERCIAL ONLY. CC-BY-NC-4.0 permits sharing and adaptation
+for NON-COMMERCIAL purposes only, with attribution. The Synchformer visual
+encoder bundled in the same repo is separately MIT-licensed (© 2024 Vladimir
+Iashin). The DFN5B-CLIP conditioner the pipeline also requires carries Apple's
+own, stricter research-only license — see Apple-ML-Research-License.txt. The
+44.1 kHz tier's external NVIDIA BigVGAN v2 vocoder is MIT — see MIT.txt.
+
+The EFFECTIVE license of the assembled MMAudio model is the INTERSECTION
+(strictest terms) of its components: research / non-commercial use only.
+SceneWorks is non-commercial, so the weights are usable here, but this
+restriction MUST be surfaced. A legal read is warranted before any commercial
+use.
+
+The authoritative and complete terms are the license linked above; this notice
+records the obligation and does not replace it.

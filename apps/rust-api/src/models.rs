@@ -1734,6 +1734,98 @@ mod download_receipt_tests {
         );
     }
 
+    /// sc-13684: MMAudio is a PURE 5-component assembly, so each tier catalogs a non-coRequisite `dit`
+    /// primary anchor plus FIVE hard component coRequisites (clip/synchformer/dit/vae/vocoder). Because
+    /// install-state gates on the hard coRequisites, an mmaudio tier stays not-installed until ALL five
+    /// component snapshots are present — even with the primary anchor on disk. Binds to the LIVE
+    /// builtin manifest so a dropped/renamed component coRequisite (or a lost pinned revision) fails here.
+    #[test]
+    fn mmaudio_install_state_gates_on_all_five_component_co_requisites() {
+        fn builtin_models_entry(model_id: &str) -> Value {
+            let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")
+                .map(|(_, contents)| *contents)
+                .expect("builtin.models.jsonc present");
+            let manifest: Value =
+                serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                    .expect("builtin.models.jsonc parses");
+            manifest["models"]
+                .as_array()
+                .expect("models array")
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
+                .cloned()
+                .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
+        }
+
+        for model_id in ["mmaudio_small_16k", "mmaudio_large_44k"] {
+            let temp = tempfile::tempdir().unwrap();
+            let data_dir = temp.path();
+            let model = builtin_models_entry(model_id);
+
+            // Every component is a hard coRequisite, and mmaudio catalogs FIVE of them.
+            let co_requisites = model_co_requisite_downloads(&model);
+            assert_eq!(
+                co_requisites.len(),
+                5,
+                "{model_id}: MMAudio must catalog all five component coRequisites"
+            );
+
+            // Stage ONLY the primary anchor (the `dit` file) — no component coRequisite yet.
+            let context = model_download_context(&model).unwrap().unwrap();
+            let anchor_snapshot = huggingface_repo_cache_path(data_dir, &context.repo)
+                .unwrap()
+                .join("snapshots/eb13a1a98fdbec91753775c57b074ccdfc60587c");
+            std::fs::create_dir_all(&anchor_snapshot).unwrap();
+            for file in &context.files {
+                let path = anchor_snapshot.join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"weights").unwrap();
+            }
+
+            let missing = install_state_for(Some(context.clone()), &model, data_dir);
+            assert!(
+                !missing.installed,
+                "{model_id}: a present anchor with the five components absent must not report installed"
+            );
+            assert!(
+                missing.cache_incomplete,
+                "{model_id}: missing hard component coRequisites make this a repairable partial install"
+            );
+
+            // Stage every component coRequisite at its pinned snapshot → install-state flips to installed.
+            for co_requisite in &co_requisites {
+                let repo = co_requisite.get("repo").and_then(Value::as_str).unwrap();
+                let revision = co_requisite
+                    .get("revision")
+                    .and_then(Value::as_str)
+                    .unwrap();
+                let snapshot = huggingface_repo_cache_path(data_dir, repo)
+                    .unwrap()
+                    .join("snapshots")
+                    .join(revision);
+                std::fs::create_dir_all(&snapshot).unwrap();
+                for file in string_array_field(co_requisite, "files") {
+                    let path = snapshot.join(&file);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, b"weights").unwrap();
+                }
+            }
+
+            let installed = install_state_for(Some(context), &model, data_dir);
+            assert!(
+                installed.installed,
+                "{model_id}: anchor + all five component coRequisites present must report installed"
+            );
+            assert!(
+                installed.missing_required_files.is_empty(),
+                "{model_id}: nothing is missing once every component is staged, got {:?}",
+                installed.missing_required_files
+            );
+        }
+    }
+
     /// sc-13682: the three SDXL shared components (CLIP-L/bigG tokenizers + fp16-fix VAE) are declared as
     /// candle-only (`platforms: [windows, linux]`) hard co-requisites on every candle-SDXL base +
     /// InstantID. On macOS `retain_downloads_for_os` strips them, so the self-contained MLX turnkey's

@@ -1,0 +1,20 @@
+DFN5B-CLIP conditioner — Apple Machine Learning Research Model License
+======================================================================
+
+MMAudio's semantic conditioner is the DFN5B-CLIP ViT-H/14-384 encoder from
+apple/DFN5B-CLIP-ViT-H-14-384
+(https://huggingface.co/apple/DFN5B-CLIP-ViT-H-14-384), © Apple Inc. It is
+distributed under the
+
+  Apple Machine Learning Research Model License (apple-amlr)
+
+which limits use of the model and its outputs to SCIENTIFIC RESEARCH AND
+ACADEMIC DEVELOPMENT and EXCLUDES any commercial product or service. This is
+the STRICTEST of the licenses in the assembled MMAudio pipeline and is what
+makes the composite MMAudio model RESEARCH / NON-COMMERCIAL ONLY.
+
+The authoritative and complete terms are Apple's license, published with the
+model repository (the LICENSE file at the URL above); this notice records the
+research-only restriction and does not replace those terms. SceneWorks is
+non-commercial, so the weights are usable here, but the restriction MUST be
+surfaced. A legal read is warranted before any commercial use.
