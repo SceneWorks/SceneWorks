@@ -8924,13 +8924,19 @@
       // signal rather than a voice list (modelEligibility.audioModelServesMode). Apache-2.0.
       //
       // Two pinned-revision downloads (the sc-13541 co-requisite pattern). The AR checkpoint is the
-      // primary; the ~7.1 GB MOSS-Audio-Tokenizer codec is a `coRequisite` the provider resolves at
-      // generate time via resolve_pinned_codec_snapshot() -> hf_get_pinned(OpenMOSS-Team/
-      // MOSS-Audio-Tokenizer @ 3cd226ba…). hf_get_pinned reads snapshots/<sha>/ and refuses a
-      // branch/tag, so a plain main-branch fetch would land in the wrong snapshot and offline
-      // generation would fail — both entries pin the exact 40-hex SHA the runtime resolves. The AR
-      // primary is pinned too because AR and codec are a MATCHED PAIR (the AR's 16-codebook RVQ frames
-      // are decoded by this exact codec revision); pinning both keeps a fresh install reproducible.
+      // primary; the ~7.1 GB MOSS-Audio-Tokenizer codec is a `coRequisite` the worker stages as the
+      // model's `codec` component (epic 13657 / sc-13662 / sc-13681): at the inference pin the provider
+      // NO LONGER self-fetches the codec mid-render — its descriptor advertises
+      // `required_components: ["codec"]` and the worker's generic `resolve_co_requisites` seam resolves
+      // this coRequisite from its cached pinned-SHA snapshot and stages it in `LoadSpec::components`
+      // (`with_component("codec", …)`), matched to the descriptor by the `componentId` below (never
+      // inferred from the repo name, sc-13679). An unprovisioned codec fails fast at load with an
+      // actionable error, never a mid-render hub fetch. The runtime reads
+      // `models--<org>--<name>/snapshots/<sha>/`, so a plain main-branch fetch would land in the WRONG
+      // snapshot and offline generation would fail — both entries pin the exact 40-hex SHA the runtime
+      // resolves. The AR primary is pinned too because AR and codec are a MATCHED PAIR (the AR's
+      // 16-codebook RVQ frames are decoded by this exact codec revision); pinning both keeps a fresh
+      // install reproducible.
       "id": "moss_tts_realtime",
       "name": "MOSS-TTS-Realtime (Streaming Speech)",
       "family": "moss_tts_realtime",
@@ -8972,16 +8978,20 @@
           }
         },
         {
-          // Co-requisite (sc-13675): the MOSS-Audio-Tokenizer codec — the separate ~7.1 GB RLFQ
-          // streaming codec (RVQ codes -> 24 kHz waveform) the provider resolves at generate time via
-          // resolve_pinned_codec_snapshot() -> hf_get_pinned(OpenMOSS-Team/MOSS-Audio-Tokenizer @
-          // 3cd226ba…, config.json + model.safetensors.index.json + the 2 shards). `revision` MUST be
-          // the full 40-hex SHA the resolver pins; predownloading it at that rev makes offline
-          // generation self-contained. Apache-2.0.
+          // Co-requisite (sc-13675 / sc-13681): the MOSS-Audio-Tokenizer codec — the separate ~7.1 GB
+          // RLFQ streaming codec (RVQ codes -> 24 kHz waveform) the worker stages as the `codec`
+          // component (`componentId` below) — resolve_co_requisites resolves it from this pinned-SHA
+          // snapshot (config.json + model.safetensors.index.json + the 2 shards) and hands it to the
+          // generator via with_component, matched to the descriptor's `required_components: ["codec"]`.
+          // At the inference pin the provider no longer self-fetches it mid-render (epic 13657,
+          // sc-13662). `revision` MUST be the full 40-hex SHA the resolver reads (snapshots/<sha>/), so a
+          // main-branch fetch would populate the wrong snapshot and offline generation would fail;
+          // predownloading it at that rev makes offline generation self-contained. Apache-2.0.
           "provider": "huggingface",
           "repo": "OpenMOSS-Team/MOSS-Audio-Tokenizer",
           "revision": "3cd226ba2947efa357ef453bcad111b6eafba782",
           "coRequisite": true,
+          "componentId": "codec",
           "files": [
             "config.json",
             "model.safetensors.index.json",
@@ -9039,11 +9049,16 @@
       //
       // Two pinned-revision downloads (the sc-13541 / sc-13675 co-requisite pattern). The AR checkpoint
       // is the primary (single ~4.1 GB model.safetensors); the ~2.1 GB XY_Tokenizer codec is a
-      // `coRequisite` the provider resolves at generate time via resolve_pinned_codec_checkpoint() ->
-      // hf_get_pinned(OpenMOSS-Team/XY_Tokenizer_TTSD_V0 @ c8343372…, xy_tokenizer.ckpt). hf_get_pinned
-      // reads snapshots/<sha>/ and refuses a branch/tag, so both entries pin the exact 40-hex SHA the
-      // runtime resolves — the AR is pinned too because AR and codec are a MATCHED PAIR (this exact
-      // codec revision decodes the AR's delay-pattern frames), keeping a fresh install reproducible.
+      // `coRequisite` the worker stages as the model's `codec` component (epic 13657 / sc-13662 /
+      // sc-13681): at the inference pin the provider NO LONGER self-fetches it at generate time — its
+      // descriptor advertises `required_components: ["codec"]` and the worker's generic
+      // `resolve_co_requisites` seam resolves this coRequisite from its cached pinned-SHA snapshot and
+      // stages it in `LoadSpec::components` (`with_component("codec", …)`), matched to the descriptor by
+      // the `componentId` below (never inferred from the repo name, sc-13679); an unprovisioned codec
+      // fails fast at load with an actionable error. hf_get_pinned reads snapshots/<sha>/ and refuses a
+      // branch/tag, so both entries pin the exact 40-hex SHA the runtime resolves — the AR is pinned too
+      // because AR and codec are a MATCHED PAIR (this exact codec revision decodes the AR's
+      // delay-pattern frames), keeping a fresh install reproducible.
       "id": "moss_ttsd_v05",
       "name": "MOSS-TTSD v0.5 (Multi-Speaker Dialogue)",
       "family": "moss_ttsd",
@@ -9105,16 +9120,19 @@
           }
         },
         {
-          // Co-requisite (sc-13676): the XY_Tokenizer codec — a single raw-pickle ~2.1 GB
-          // xy_tokenizer.ckpt (RVQ delay-pattern frames -> 24 kHz waveform) the provider resolves at
-          // generate time via resolve_pinned_codec_checkpoint() -> hf_get_pinned(OpenMOSS-Team/
-          // XY_Tokenizer_TTSD_V0 @ c8343372…, xy_tokenizer.ckpt). `revision` MUST be the full 40-hex
-          // SHA the resolver pins; predownloading it at that rev makes offline generation
-          // self-contained. Apache-2.0.
+          // Co-requisite (sc-13676 / sc-13681): the XY_Tokenizer codec — a single raw-pickle ~2.1 GB
+          // xy_tokenizer.ckpt (RVQ delay-pattern frames -> 24 kHz waveform) the worker stages as the
+          // `codec` component (`componentId` below) — resolve_co_requisites resolves it from this
+          // pinned-SHA snapshot and hands it to the generator via with_component, matched to the
+          // descriptor's `required_components: ["codec"]`. At the inference pin the provider no longer
+          // self-fetches it at generate time (epic 13657, sc-13662). `revision` MUST be the full 40-hex
+          // SHA the resolver reads (snapshots/<sha>/); predownloading it at that rev makes offline
+          // generation self-contained. Apache-2.0.
           "provider": "huggingface",
           "repo": "OpenMOSS-Team/XY_Tokenizer_TTSD_V0",
           "revision": "c83433728e698ed0698e88cb5096bc221fb8f8c5",
           "coRequisite": true,
+          "componentId": "codec",
           "files": [
             "xy_tokenizer.ckpt"
           ],
