@@ -2941,6 +2941,281 @@ mod tests {
         );
     }
 
+    /// sc-13794 (epic 13678) VERIFICATION harness — the POSITIVE full offline render through the FIXED
+    /// production entrypoint `run_native_voice_clone_synthesis_using`, with REAL Chatterbox weights, from
+    /// a FRESH custom HF cache where `ResembleAI/chatterbox` + `SceneWorks/perth-implicit` start ABSENT,
+    /// and with NETWORK DISABLED for the render. Complements the (non-ignored) staging regression above
+    /// (which stubs the loader) by driving the SAME entrypoint with the REAL `inference_runtime::load_audio`
+    /// loader end to end, proving: (a) `resolve_co_requisites` stages BOTH `perth` + `voice_embedding` into
+    /// `LoadSpec::components`, and (b) chatterbox_tts loads from the local primary dir + those staged files
+    /// and renders a valid cloned WAV with ZERO network. `#[ignore]`d, macOS real-weight (downloads
+    /// ~3.2 GB into an ISOLATED temp cache):
+    /// ```text
+    /// cargo test -p sceneworks-worker --release native_voice_clone_offline_render_through_entrypoint -- --ignored --nocapture
+    /// ```
+    #[cfg(target_os = "macos")]
+    #[ignore = "sc-13794 real-weight offline render through the fixed entrypoint; run by hand on Apple Silicon"]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_voice_clone_offline_render_through_entrypoint() {
+        use sha2::{Digest, Sha256};
+
+        const VE_REVISION: &str = "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18";
+        const PERTH_REVISION: &str = "80b60f9caead09b8d3b512bda0b24038f28c08ec";
+
+        // The REAL model-download executor (the exact seam a Models-screen install runs), into the
+        // isolated hub. Returns the resolved commit SHA.
+        async fn install_snapshot(
+            settings: &Settings,
+            repo: &str,
+            revision: &str,
+            files: &[&str],
+        ) -> String {
+            use crate::downloads::{
+                download_snapshot_into_cache, DownloadContext, DownloadProgress,
+                HuggingFaceSnapshot,
+            };
+            let client = crate::downloads::streaming_download_client();
+            let api = ApiClient::new(settings);
+            let repo_dir =
+                sceneworks_core::hf_home::huggingface_repo_cache_path(&settings.data_dir, repo)
+                    .expect("resolve hub cache path");
+            let file_patterns: Vec<String> = files.iter().map(|f| (*f).to_owned()).collect();
+            let snapshot =
+                HuggingFaceSnapshot::resolve(&client, settings, repo, revision, &file_patterns)
+                    .await
+                    .expect("resolve HF snapshot listing");
+            assert!(
+                !snapshot.files.is_empty(),
+                "{repo}@{revision} resolved zero files for {file_patterns:?}"
+            );
+            let context = DownloadContext {
+                api: &api,
+                client: &client,
+                settings,
+                job_id: "sc-13794-offline-entrypoint",
+                cancel_message: "canceled",
+                fresh_download: false,
+            };
+            let mut progress =
+                DownloadProgress::new(repo, 0, snapshot.total_bytes(), Duration::from_secs(86_400));
+            download_snapshot_into_cache(&context, &repo_dir, revision, &snapshot, &mut progress)
+                .await
+                .unwrap_or_else(|e| panic!("materialize {repo}@{revision}: {e}"))
+        }
+
+        // A short synthetic speech-like reference clip (4 s @ 24 kHz mono) — enough for the provider to
+        // derive a speaker embedding + prompt tokens without pulling in a second TTS model.
+        fn synthetic_reference() -> gen_core::AudioTrack {
+            let sample_rate = 24_000u32;
+            let n = (sample_rate as f32 * 4.0) as usize;
+            let mut samples = Vec::with_capacity(n);
+            let mut seed = 0x2b41_53c7u32;
+            for i in 0..n {
+                let t = i as f32 / sample_rate as f32;
+                let vibrato = 1.0 + 0.02 * (2.0 * std::f32::consts::PI * 5.0 * t).sin();
+                let f0 = 165.0 * vibrato;
+                let mut s = 0.6 * (2.0 * std::f32::consts::PI * f0 * t).sin();
+                s += 0.25 * (2.0 * std::f32::consts::PI * 2.0 * f0 * t).sin();
+                s += 0.15 * (2.0 * std::f32::consts::PI * 3.0 * f0 * t).sin();
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = (seed >> 9) as f32 / (1u32 << 23) as f32 - 0.5;
+                s += 0.05 * noise;
+                let env = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * 0.5 * t).cos();
+                samples.push(0.8 * env * s);
+            }
+            gen_core::AudioTrack {
+                samples,
+                sample_rate,
+                channels: 1,
+                stems: Vec::new(),
+            }
+        }
+
+        // ── Step 1: isolate the cache the RUNTIME RESOLVER reads (HOME + HF_HOME at a fresh temp root),
+        //    clearing every other HF cache + proxy var so neither install nor resolution can diverge. ──
+        let home_root = tempfile::tempdir().expect("temp HOME root");
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let hf_home = home_root.path().join(".cache").join("huggingface");
+        let hub = hf_home.join("hub");
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HOME", home_root.path().to_str().expect("utf-8 HOME")),
+            ("HF_HOME", hf_home.to_str().expect("utf-8 HF_HOME")),
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HUB_OFFLINE", ""),
+            ("TRANSFORMERS_OFFLINE", ""),
+            ("HF_ENDPOINT", ""),
+            ("PERTH_SNAPSHOT", ""),
+            ("ALL_PROXY", ""),
+            ("all_proxy", ""),
+            ("HTTPS_PROXY", ""),
+            ("https_proxy", ""),
+            ("HTTP_PROXY", ""),
+            ("http_proxy", ""),
+            ("NO_PROXY", ""),
+            ("no_proxy", ""),
+        ]);
+        assert!(
+            !hub.join("models--ResembleAI--chatterbox").exists()
+                && !hub.join("models--SceneWorks--perth-implicit").exists(),
+            "the custom HF cache must start with BOTH repos ABSENT: {}",
+            hub.display()
+        );
+
+        // ── Step 2: heartbeat stub API + settings pointing the resolver at the isolated hub ──────────
+        let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
+        let mut settings = cancel_test_settings(base_url);
+        settings.data_dir = data_dir.path().to_path_buf();
+
+        // ── Step 3: install (online) the primary + the two pinned companion co-requisites ───────────
+        let main_commit = install_snapshot(
+            &settings,
+            "ResembleAI/chatterbox",
+            "main",
+            &["t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json"],
+        )
+        .await;
+        install_snapshot(
+            &settings,
+            "ResembleAI/chatterbox",
+            VE_REVISION,
+            &["ve.safetensors"],
+        )
+        .await;
+        install_snapshot(
+            &settings,
+            "SceneWorks/perth-implicit",
+            PERTH_REVISION,
+            &["perth_implicit.safetensors"],
+        )
+        .await;
+
+        let chatterbox_dir = hub.join("models--ResembleAI--chatterbox");
+        let main_snapshot_dir = chatterbox_dir.join("snapshots").join(&main_commit);
+        assert!(
+            main_snapshot_dir.join("s3gen.safetensors").exists(),
+            "primary chatterbox snapshot must hold the generator weights"
+        );
+        assert!(
+            chatterbox_dir
+                .join("snapshots")
+                .join(VE_REVISION)
+                .join("ve.safetensors")
+                .exists(),
+            "ve co-requisite must materialize at its pinned snapshot"
+        );
+        assert!(
+            hub.join("models--SceneWorks--perth-implicit")
+                .join("snapshots")
+                .join(PERTH_REVISION)
+                .join("perth_implicit.safetensors")
+                .exists(),
+            "perth co-requisite must materialize at its pinned snapshot"
+        );
+
+        // ── Step 4: DISABLE NETWORK for the render — offline flags PLUS a black-hole proxy that fails
+        //    any residual hub agent (belt and suspenders; at this pin a cache HIT never builds one). ──
+        std::env::set_var("HF_HUB_OFFLINE", "1");
+        std::env::set_var("TRANSFORMERS_OFFLINE", "1");
+        std::env::set_var("ALL_PROXY", "http://127.0.0.1:1");
+        std::env::set_var("HTTPS_PROXY", "http://127.0.0.1:1");
+        std::env::set_var("HTTP_PROXY", "http://127.0.0.1:1");
+
+        // ── Step 5: drive the FIXED production entrypoint with the REAL audio loader ─────────────────
+        let manifest_entry = json!({
+            "id": "chatterbox_tts",
+            "type": "audio",
+            "downloads": [
+                { "provider": "huggingface", "repo": "ResembleAI/chatterbox", "revision": VE_REVISION,
+                  "coRequisite": true, "componentId": "voice_embedding", "files": ["ve.safetensors"] },
+                { "provider": "huggingface", "repo": "SceneWorks/perth-implicit", "revision": PERTH_REVISION,
+                  "coRequisite": true, "componentId": "perth", "files": ["perth_implicit.safetensors"] }
+            ],
+        });
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("sc-13794-native-clone-offline");
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "chatterbox_tts",
+            "prompt": "This cloned voice was rendered fully offline through the fixed entrypoint.",
+            "seed": 13794,
+            "referenceAudioAssetId": "ref-1",
+            "modelManifestEntry": manifest_entry,
+        })));
+
+        // Wrap the REAL loader so we can capture the component keys the LoadSpec carries — the proof the
+        // entrypoint's `resolve_co_requisites` staged both components before the real load.
+        let observed_components = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = observed_components.clone();
+        let load = move |id: &str, spec: &LoadSpec| {
+            let mut keys: Vec<String> = spec.components.keys().cloned().collect();
+            keys.sort();
+            *sink.lock().expect("component lock") = keys;
+            crate::inference_runtime::load_audio(id, spec)
+        };
+
+        let plan = NativeVoiceClonePlan {
+            model_dir: main_snapshot_dir.clone(),
+            reference: synthetic_reference(),
+        };
+
+        let clone =
+            run_native_voice_clone_synthesis_using(&api, &settings, &job, &request, plan, load)
+                .await
+                .expect(
+                    "offline native clone render MUST succeed through the fixed entrypoint from the \
+                     installed isolated cache (resolve_co_requisites stages ve + perth cache-first; the \
+                     dead proxy proves no fetch)",
+                );
+
+        // ── Assert: BOTH components staged + a valid clone clip ──────────────────────────────────────
+        let keys = observed_components.lock().expect("component lock").clone();
+        assert_eq!(
+            keys,
+            vec!["perth".to_owned(), "voice_embedding".to_owned()],
+            "the entrypoint must stage BOTH required components into the LoadSpec the generator loads with"
+        );
+        assert!(!clone.samples.is_empty(), "clone is empty");
+        let peak = clone.samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+        assert!(peak > 1e-2, "clone is (near-)silent: peak {peak:.6}");
+        assert_eq!(clone.sample_rate, 24_000, "clone must be 24 kHz");
+        assert_eq!(clone.channels, 1, "clone must be mono");
+
+        let out_dir = PathBuf::from(
+            std::env::var("VOICECLONE_OUT_DIR")
+                .unwrap_or_else(|_| "/tmp/voiceclone_smoke".to_owned()),
+        );
+        std::fs::create_dir_all(&out_dir).expect("create out dir");
+        let wav_path = out_dir.join("entrypoint_offline_clone.wav");
+        let wav = AudioTrack {
+            samples: clone.samples.clone(),
+            sample_rate: clone.sample_rate,
+            channels: clone.channels,
+        };
+        write_wav_pcm16(&wav, &wav_path).expect("write clone wav");
+        let bytes = std::fs::read(&wav_path).expect("read clone wav");
+        let sha = Sha256::digest(&bytes);
+        let duration =
+            clone.samples.len() as f32 / (clone.sample_rate as f32 * clone.channels.max(1) as f32);
+        eprintln!(
+            "[sc-13794] PASS — entrypoint offline render: {} samples @ {} Hz, {:.2}s, peak {:.4}",
+            clone.samples.len(),
+            clone.sample_rate,
+            duration,
+            peak
+        );
+        eprintln!("[sc-13794] staged components: {keys:?}");
+        eprintln!(
+            "[sc-13794] custom HF cache (repos started ABSENT): {}",
+            hub.display()
+        );
+        eprintln!(
+            "[sc-13794] wav: {} sha256={:x} bytes={}",
+            wav_path.display(),
+            sha,
+            bytes.len()
+        );
+    }
+
     /// sc-13686 end-to-end negative path (chatterbox voice clone): a native clone JOB whose `perth`
     /// component is NOT installed must fail at `resolve_co_requisites` — BEFORE the generator load —
     /// with an actionable `InvalidPayload` naming the missing component id + repo, never at the engine's
