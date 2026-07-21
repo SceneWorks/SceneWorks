@@ -126,6 +126,24 @@
         "type": "object",
         "required": ["id", "name", "type"],
         "additionalProperties": false,
+        "allOf": [
+          {
+            "$comment": "sc-13783: reconcile with scripts/check-scaffold.mjs (which enforces ui.promptGuide WITH a title/path on every PICKER entry). A promptGuide is a picker-only surface; type:\"utility\" provisioning/validation dependencies never appear in a Studio picker, so they are EXEMPT. The exempt set here MUST match apps/web/src/promptGuideContract.js PROMPT_GUIDE_EXEMPT_TYPES — promptGuideScaffoldSchemaContract.test.js fails if the two authorities diverge. The `then` requires title/path at the CONDITIONAL level (matching check-scaffold.mjs), not only via the unconditional #/properties/ui/promptGuide definition, so a picker can never satisfy the schema with an empty promptGuide that would still RED the scaffold.",
+            "if": {
+              "required": ["type"],
+              "properties": { "type": { "not": { "const": "utility" } } }
+            },
+            "then": {
+              "required": ["ui"],
+              "properties": {
+                "ui": {
+                  "required": ["promptGuide"],
+                  "properties": { "promptGuide": { "required": ["title", "path"] } }
+                }
+              }
+            }
+          }
+        ],
         "properties": {
           "id": { "type": "string", "minLength": 1 },
           "name": { "type": "string", "minLength": 1 },

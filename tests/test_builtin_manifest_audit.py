@@ -127,6 +127,15 @@ def _sample_audio_model_entry() -> dict:
         "id": "sample_audio_speech",
         "name": "Sample Audio Speech",
         "type": "audio",
+        # `audio` is a picker (non-utility) type, so the schema now requires a
+        # `ui.promptGuide` with a title/path (sc-13783, reconciled with
+        # scripts/check-scaffold.mjs). Kept minimal; this fixture never ships.
+        "ui": {
+            "promptGuide": {
+                "title": "Sample Audio Prompt Guide",
+                "path": "/prompt-guides/sample-audio.md",
+            }
+        },
         "audio": {
             "voices": [
                 {
@@ -406,6 +415,15 @@ def _model_entry_with_download(download: dict) -> dict:
         "id": "sample_pinned_model",
         "name": "Sample Pinned Model",
         "type": "image",
+        # `image` is a picker (non-utility) type, so the schema now requires a
+        # `ui.promptGuide` with a title/path (sc-13783, reconciled with
+        # scripts/check-scaffold.mjs). Kept minimal; this fixture never ships.
+        "ui": {
+            "promptGuide": {
+                "title": "Sample Prompt Guide",
+                "path": "/prompt-guides/sample.md",
+            }
+        },
         "downloads": [download],
     }
 
