@@ -141,6 +141,18 @@
       ]
     },
     {
+      "id": "chatterbox-tts",
+      "name": "Chatterbox (Cloned-Voice TTS)",
+      "publisher": "Resemble AI",
+      "license": "MIT",
+      "homepage": "https://huggingface.co/ResembleAI/chatterbox",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "Native cloned-voice text-to-speech model (Audio Studio → VoiceClone). SceneWorks downloads the upstream MIT primary weights on first use from ResembleAI/chatterbox — the T3 speech-token LM (t3_cfg.safetensors) and the S3Gen flow-matching token→waveform + HiFTNet vocoder stack (s3gen.safetensors) — and runs them natively (Candle) on every platform. Uses the Chatterbox voice encoder (listed separately below) for speaker conditioning. Redistributed with attribution as permitted by MIT. Permissive — commercial use allowed.",
+      "documents": [
+        { "label": "MIT License", "key": "chatterbox-tts-mit" }
+      ]
+    },
+    {
       "id": "chatterbox-ve",
       "name": "Chatterbox Voice Encoder (Voice Clone)",
       "publisher": "Resemble AI",
@@ -150,6 +162,18 @@
       "usage": "Speaker voice-identity encoder for cloned-voice conditioning (Audio Studio → VoiceClone). SceneWorks downloads the upstream MIT ve.safetensors weights on first use from ResembleAI/chatterbox and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by MIT. Permissive — commercial use allowed.",
       "documents": [
         { "label": "MIT License", "key": "chatterbox-ve-mit" }
+      ]
+    },
+    {
+      "id": "chatterbox-perth",
+      "name": "Perth Watermarker (Chatterbox provenance)",
+      "publisher": "Resemble AI",
+      "license": "MIT",
+      "homepage": "https://huggingface.co/SceneWorks/perth-implicit",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "Perceptual-threshold (Perth) implicit audio watermarker that embeds a provenance watermark into every Chatterbox cloned-voice render (Audio Studio → VoiceClone). SceneWorks downloads the upstream MIT perth_implicit.safetensors weights on first use as a pinned co-requisite of the Chatterbox Cloned-Voice TTS model, re-hosted at SceneWorks/perth-implicit, and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by MIT. Permissive — commercial use allowed.",
+      "documents": [
+        { "label": "MIT License", "key": "chatterbox-perth-mit" }
       ]
     },
     {

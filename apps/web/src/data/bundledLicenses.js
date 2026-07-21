@@ -29,7 +29,14 @@ import kokoroApache from "../../../desktop/licenses/kokoro-82m/Apache-2.0.txt?ra
 import mossApache from "../../../desktop/licenses/moss-soundeffect-v2/Apache-2.0.txt?raw";
 import acestepMit from "../../../desktop/licenses/acestep-v15-turbo/MIT.txt?raw";
 import openvoiceMit from "../../../desktop/licenses/openvoice-v2/MIT.txt?raw";
+// Chatterbox (Resemble AI, epic 13678): all three components are MIT (Copyright (c)
+// 2025 Resemble AI). chatterboxTtsMit covers the PRIMARY T3/s3gen weights
+// (t3_cfg.safetensors + s3gen.safetensors from ResembleAI/chatterbox); chatterboxMit
+// covers the voice encoder (ve.safetensors, same repo); chatterboxPerthMit covers the
+// Perth provenance watermarker staged on every clone render (SceneWorks/perth-implicit).
+import chatterboxTtsMit from "../../../desktop/licenses/chatterbox-tts/MIT.txt?raw";
 import chatterboxMit from "../../../desktop/licenses/chatterbox-ve/MIT.txt?raw";
+import chatterboxPerthMit from "../../../desktop/licenses/chatterbox-perth/MIT.txt?raw";
 // MOSS TTS speech models + their pinned codec co-requisites (epic 13678, sc-13681).
 // Both the AR checkpoints and the codecs (XY_Tokenizer / MOSS-Audio-Tokenizer) are
 // Apache-2.0, downloaded on first use from the upstream OpenMOSS-Team repos.
@@ -65,7 +72,9 @@ const DOCUMENT_TEXT = {
   "moss-soundeffect-v2-apache": mossApache,
   "acestep-v15-turbo-mit": acestepMit,
   "openvoice-v2-mit": openvoiceMit,
+  "chatterbox-tts-mit": chatterboxTtsMit,
   "chatterbox-ve-mit": chatterboxMit,
+  "chatterbox-perth-mit": chatterboxPerthMit,
   "moss-ttsd-v05-apache": mossTtsdApache,
   "xy-tokenizer-ttsd-apache": xyTokenizerApache,
   "moss-tts-realtime-apache": mossTtsRealtimeApache,
