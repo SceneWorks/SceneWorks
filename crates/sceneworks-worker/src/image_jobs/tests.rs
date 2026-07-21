@@ -5325,6 +5325,29 @@ fn candle_image_route_sends_krea_img2img_to_txt2img() {
         resolve_candle_image_route(&krea_t2i, &settings),
         Some(CandleImageRoute::CandleTxt2Img),
     );
+
+    // Plain krea_2_raw txt2img (sc-9994, epic 9992) MUST reach the real candle lane, not the procedural
+    // stub. `krea_2_raw` is the undistilled full-CFG base candle generator (`render_base`); it was missing
+    // from `is_candle_engine`, so this arm returned `None` and the worker emitted a `procedural_preview`
+    // gradient (`realModelInference:false`) instead of running the model. Locks the fix + the router/worker
+    // parity (the scheduler routes it to candle via `IMAGE_MODEL_CAPS`).
+    let krea_raw_t2i = request(json!({ "projectId": "p", "model": "krea_2_raw", "count": 1 }));
+    assert_eq!(
+        resolve_candle_image_route(&krea_raw_t2i, &settings),
+        Some(CandleImageRoute::CandleTxt2Img),
+    );
+
+    // Krea 2 Raw img2img (a `referenceAssetId` in a non-edit mode, sc-10226) rides the same generic lane —
+    // `generate_candle_stream` resolves the reference init into `render_base_img2img`.
+    let krea_raw_img2img = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1,
+        "referenceAssetId": "asset_1",
+        "advanced": { "strength": 0.5 }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&krea_raw_img2img, &settings),
+        Some(CandleImageRoute::CandleTxt2Img),
+    );
 }
 
 /// Isolate the HF hub-cache env (`HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` / `HF_HOME`) to an explicit
