@@ -579,6 +579,14 @@
                     "properties": { "coRequisite": { "const": true } },
                     "required": ["coRequisite"]
                   }
+                },
+                {
+                  "$comment": "sc-13771: a componentId names a component PROVISIONED by a coRequisite download, so it is valid ONLY on coRequisite: true entries — a manifest-local invariant that JSON Schema CAN enforce without inference-descriptor knowledge (contrast the componentId ⟺ some descriptor.required_components match, which the manifest audit cannot see and stays a runtime resolve_co_requisites check).",
+                  "if": { "required": ["componentId"] },
+                  "then": {
+                    "properties": { "coRequisite": { "const": true } },
+                    "required": ["coRequisite"]
+                  }
                 }
               ],
               "properties": {
@@ -598,7 +606,7 @@
                 "componentId": {
                   "type": "string",
                   "pattern": "^[a-z][a-z0-9_]*$",
-                  "description": "Optional stable component id this coRequisite download PROVISIONS for the model's engine (epic 13657, sc-13679). When set (only meaningful on `coRequisite: true` entries), the worker stages the resolved local path under this id in the engine's `LoadSpec::components`, matched against the provider's `ModelDescriptor::required_components` advertisement — the explicit repo→component mapping (never inferred from repo names) that the generic `resolve_co_requisites` seam reads. Lowercase snake_case, same shape as a descriptor id. Examples: chatterbox_tts's ve/perth co-requisites carry `voice_embedding`/`perth`; SDXL's carry `tokenizer_clip_l`/`tokenizer_clip_bigg`/`vae_fp16_fix` (sc-13682). Absent on a co-requisite the engine does not read as a named component (e.g. the PiD-gemma / Wan-Lightning shared weights)."
+                  "description": "Optional stable component id this coRequisite download PROVISIONS for the model's engine (epic 13657, sc-13679). When set (valid ONLY on `coRequisite: true` entries — schema-enforced by the allOf conditional above, sc-13771), the worker stages the resolved local path under this id in the engine's `LoadSpec::components`, matched against the provider's `ModelDescriptor::required_components` advertisement — the explicit repo→component mapping (never inferred from repo names) that the generic `resolve_co_requisites` seam reads. Lowercase snake_case, same shape as a descriptor id. Examples: chatterbox_tts's ve/perth co-requisites carry `voice_embedding`/`perth`; SDXL's carry `tokenizer_clip_l`/`tokenizer_clip_bigg`/`vae_fp16_fix` (sc-13682). Absent on a co-requisite the engine does not read as a named component (e.g. the PiD-gemma / Wan-Lightning shared weights)."
                 },
                 "default": {
                   "type": "boolean",
