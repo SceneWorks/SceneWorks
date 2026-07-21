@@ -3987,6 +3987,11 @@ struct VideoGenInput {
     // `$LTX_GEMMA_DIR` env var (the old `set_var` seam was unsound on the multithreaded runtime,
     // F-025). `None` on every other model (they bundle their TE) and when no override resolves.
     text_encoder_dir: Option<PathBuf>,
+    /// LTX-only optional **amoral 4-bit Gemma enhancer** snapshot dir (sc-2845 `useUncensoredEnhancer`).
+    /// `Some` ⇒ staged in `LoadSpec::components["uncensored_enhancer"]` so the MLX LTX provider loads it
+    /// on demand when a request sets the flag (sc-13664 deleted the provider's `$LTX_UNCENSORED_GEMMA_DIR`
+    /// / HF-cache scan). `None` on every other model and when the enhancer is off or unprovisioned.
+    uncensored_enhancer_dir: Option<PathBuf>,
     /// In-place ComfyUI Wan MoE experts (epic 10451 Phase 2c, sc-10671). `Some` ⇒ [`generate_video`]
     /// takes the bespoke uncached load path (`load_from_comfyui_experts`) instead of the registry
     /// snapshot; `None` on every other job.
@@ -4036,6 +4041,7 @@ impl Default for VideoGenInput {
             conditioning_fps: None,
             softness: None,
             text_encoder_dir: None,
+            uncensored_enhancer_dir: None,
             comfyui: None,
             offload_policy: OffloadPolicy::Resident,
         }
@@ -4069,9 +4075,18 @@ fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
         // 14B experts swap one-at-a-time and the load matches the SEQUENTIAL peak the manifest gate sized.
         // `apply_residency_policy` (the MLX cache seam) never downgrades a `Sequential` set here.
         offload_policy: input.offload_policy,
-        // Named model components (epic 13657): video providers advertise no `required_components`, so
-        // there is nothing to stage — an empty map keeps the video load path unchanged.
-        components: BTreeMap::new(),
+        // Named model components (epic 13657). Video providers advertise no `required_components`, so the
+        // map is empty by default. The one exception is LTX-2.3's OPTIONAL `uncensored_enhancer` (sc-2845
+        // / sc-13664): when a `useUncensoredEnhancer` job resolved the amoral 4-bit Gemma snapshot, stage
+        // it here so the provider loads it on demand instead of the deleted `$LTX_UNCENSORED_GEMMA_DIR` /
+        // HF-cache scan. Absent ⇒ empty map, the video load path unchanged.
+        components: input
+            .uncensored_enhancer_dir
+            .clone()
+            .map(|dir| {
+                BTreeMap::from([("uncensored_enhancer".to_owned(), WeightsSource::Dir(dir))])
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -8267,22 +8282,39 @@ fn bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
     gemma.is_dir().then_some(gemma)
 }
 
+/// The operator `$LTX_GEMMA_DIR` override as an existence-checked gemma snapshot path (pure over the
+/// raw env value so it is unit-testable without mutating the process-global env). As of sc-13664 the MLX
+/// LTX provider no longer reads this env itself — `LoadSpec::text_encoder` is the ONLY (now required) TE
+/// source — so the worker must resolve the override HERE and thread it onto the spec, rather than
+/// returning `None` and deferring to the deleted `$LTX_GEMMA_DIR` / HF-cache fallback. A set-but-incomplete
+/// override yields `None` so a good bundled / cache gemma still wins (a bad override never shadows it).
+#[cfg(target_os = "macos")]
+fn ltx_gemma_override_path(raw: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let dir = PathBuf::from(raw?);
+    ltx_gemma_dir_is_complete(&dir).then_some(dir)
+}
+
+/// [`ltx_gemma_override_path`] applied to the live `$LTX_GEMMA_DIR`.
+#[cfg(target_os = "macos")]
+fn ltx_gemma_env_override() -> Option<PathBuf> {
+    ltx_gemma_override_path(std::env::var_os("LTX_GEMMA_DIR"))
+}
+
 /// Resolve the Gemma-3 text encoder bundled beside the resolved LTX dir (sc-5608), returning it so the
 /// caller can thread it onto `LoadSpec::text_encoder` (sc-8827) — a fresh install is self-contained (no
 /// separate `mlx-community/gemma` download) without mutating the process-global `$LTX_GEMMA_DIR` at job
-/// time on the multithreaded runtime (the old `set_var` seam was unsound, F-025). Best-effort +
-/// non-destructive: returns `None` when an explicit operator `$LTX_GEMMA_DIR` is set (the provider
-/// reads the env var itself), and `None` when no bundled `gemma/` sibling exists
-/// ([`bundled_ltx_gemma_dir`]) so the provider falls back to the HF-cache gemma snapshot.
+/// time on the multithreaded runtime (the old `set_var` seam was unsound, F-025). Resolution order: an
+/// operator `$LTX_GEMMA_DIR` override (existence-checked, [`ltx_gemma_env_override`]) — threaded onto the
+/// spec because the MLX provider dropped its own env read (sc-13664; the spec override already wins,
+/// sc-8827) — then the bundled `<parent>/gemma` sibling ([`bundled_ltx_gemma_dir`]). `None` only when
+/// neither resolves (a legacy local conversion with no co-located gemma), where the load now surfaces the
+/// provider's required-`LoadSpec::text_encoder` error rather than a silent HF-cache scan.
 ///
 /// `pub(crate)` so the LoRA trainer path reuses it (sc-9989): training resolves the TE identically to
 /// inference, so a self-contained install trains without a separate `mlx-community/gemma` download.
 #[cfg(target_os = "macos")]
 pub(crate) fn resolve_bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
-    if std::env::var_os("LTX_GEMMA_DIR").is_some() {
-        return None; // honor an explicit operator override (the provider reads the env var).
-    }
-    bundled_ltx_gemma_dir(model_dir)
+    ltx_gemma_env_override().or_else(|| bundled_ltx_gemma_dir(model_dir))
 }
 
 /// Resolve the Gemma-3 text encoder for an **eros** generation. Unlike the base model — whose turnkey
@@ -8290,13 +8322,16 @@ pub(crate) fn resolve_bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf>
 /// is a bare local conversion under `models/mlx/ltx_2_3_eros/` with no bundled TE, so gemma is
 /// provisioned separately ([`ensure_ltx_gemma_present`]) and resolved here: a `models/mlx/gemma`
 /// sibling of the checkpoint (the `<parent>/gemma` convention [`bundled_ltx_gemma_dir`] already uses)
-/// first, then the fetched [`LTX_BUNDLE_REPO`] snapshot's `gemma/`. Returns `None` when an operator
-/// `$LTX_GEMMA_DIR` is set (the provider reads the env var) or nothing complete is on disk (the
-/// provider surfaces the clear "set LTX_GEMMA_DIR" error) — a partial dir never wins.
+/// first, then the fetched [`LTX_BUNDLE_REPO`] snapshot's `gemma/`. Resolution order: an operator
+/// `$LTX_GEMMA_DIR` override (existence-checked, [`ltx_gemma_env_override`]) — threaded onto the spec
+/// because the MLX provider dropped its own env read (sc-13664) — then the complete `<parent>/gemma`
+/// sibling, then the bundle snapshot's `gemma/`. `None` only when nothing complete is on disk (the
+/// provider then surfaces its required-`LoadSpec::text_encoder` error) — a partial dir never wins.
 #[cfg(target_os = "macos")]
 fn resolve_ltx_eros_gemma_dir(settings: &Settings, model_dir: &Path) -> Option<PathBuf> {
-    if std::env::var_os("LTX_GEMMA_DIR").is_some() {
-        return None; // honor an explicit operator override (the provider reads the env var).
+    if let Some(env_dir) = ltx_gemma_env_override() {
+        // Operator override rides the spec so it survives the sc-13664 provider env-read deletion.
+        return Some(env_dir);
     }
     if let Some(sibling) = bundled_ltx_gemma_dir(model_dir) {
         if ltx_gemma_dir_is_complete(&sibling) {
@@ -8305,6 +8340,34 @@ fn resolve_ltx_eros_gemma_dir(settings: &Settings, model_dir: &Path) -> Option<P
     }
     let bundle_gemma = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO)?.join("gemma");
     ltx_gemma_dir_is_complete(&bundle_gemma).then_some(bundle_gemma)
+}
+
+/// The amoral 4-bit Gemma prompt-enhancer snapshot the OPT-IN `useUncensoredEnhancer` path loads
+/// (sc-2845; the reference `--use-uncensored-enhancer`). A standalone mlx_lm checkpoint, distinct from
+/// the always-on Gemma TE. Not a first-class SceneWorks download (it is an uncataloged power-user
+/// opt-in — a manifest catalog entry with a pinned revision + license posture is a product decision,
+/// tracked separately); the worker resolves it only if the operator has staged it.
+#[cfg(target_os = "macos")]
+const LTX_UNCENSORED_GEMMA_REPO: &str = "TheCluster/amoral-gemma-3-12B-v2-mlx-4bit";
+
+/// Resolve the optional amoral 4-bit Gemma **enhancer** snapshot for a `useUncensoredEnhancer` LTX job
+/// (sc-2845), to be staged in `LoadSpec::components["uncensored_enhancer"]`. Mirrors the resolution the
+/// MLX LTX provider deleted at sc-13664 (moved into the worker): an operator `$LTX_UNCENSORED_GEMMA_DIR`
+/// override (existence-checked) wins, else the HF-cache snapshot for [`LTX_UNCENSORED_GEMMA_REPO`] if
+/// already on disk. `None` when neither resolves — the opt-in enhancer then surfaces the provider's
+/// actionable "provision the amoral snapshot" error rather than silently degrading. Reuses
+/// [`ltx_gemma_dir_is_complete`] (an mlx_lm gemma snapshot is `config.json` + shards, same shape as the
+/// TE), so a partial/half-downloaded dir never wins.
+#[cfg(target_os = "macos")]
+fn resolve_ltx_uncensored_enhancer_dir(settings: &Settings) -> Option<PathBuf> {
+    if let Some(raw) = std::env::var_os("LTX_UNCENSORED_GEMMA_DIR") {
+        let dir = PathBuf::from(raw);
+        if ltx_gemma_dir_is_complete(&dir) {
+            return Some(dir);
+        }
+    }
+    let snapshot = huggingface_snapshot_dir(&settings.data_dir, LTX_UNCENSORED_GEMMA_REPO)?;
+    ltx_gemma_dir_is_complete(&snapshot).then_some(snapshot)
 }
 
 /// On-demand fetch of the bundle's `q8/` subdir (sc-5679). The macOS default download is lean
@@ -9070,6 +9133,13 @@ async fn generate_ltx(
     } else {
         resolve_bundled_ltx_gemma_dir(&model_dir)
     };
+    // Optional amoral 4-bit Gemma enhancer (sc-2845): when the request opts in, resolve the staged
+    // amoral snapshot so it rides `LoadSpec::components["uncensored_enhancer"]` (sc-13664 deleted the
+    // provider's own `$LTX_UNCENSORED_GEMMA_DIR` / HF-cache scan). Off ⇒ `None`, no staging, no fetch.
+    let use_uncensored_enhancer = advanced::bool(&request.advanced, "useUncensoredEnhancer");
+    let uncensored_enhancer_dir = use_uncensored_enhancer
+        .then(|| resolve_ltx_uncensored_enhancer_dir(settings))
+        .flatten();
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -9090,10 +9160,11 @@ async fn generate_ltx(
         control_scale: None,
         video_mode,
         enhance_prompt: advanced::bool(&request.advanced, "enhancePrompt"),
-        use_uncensored_enhancer: advanced::bool(&request.advanced, "useUncensoredEnhancer"),
+        use_uncensored_enhancer,
         enhance_max_tokens,
         enhance_temperature,
         text_encoder_dir,
+        uncensored_enhancer_dir,
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, &request.advanced, input).await
@@ -17491,6 +17562,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&single);
     }
 
+    /// sc-13664: the operator `$LTX_GEMMA_DIR` override now RIDES `LoadSpec::text_encoder` (the MLX LTX
+    /// provider deleted its own env read), so the worker resolves it to a path instead of returning
+    /// `None` to defer to the deleted fallback. Pure over the raw env value (no process-global mutation):
+    /// a complete dir resolves to `Some`, an incomplete dir → `None` (a bad override never shadows a good
+    /// bundled/cache gemma), and an unset override → `None`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_gemma_override_path_requires_complete_dir() {
+        let complete =
+            std::env::temp_dir().join(format!("sw_gemma_ovr_ok_{}", Uuid::new_v4().simple()));
+        write_complete_gemma_dir(&complete);
+        assert_eq!(
+            ltx_gemma_override_path(Some(complete.clone().into_os_string())).as_deref(),
+            Some(complete.as_path()),
+            "a complete $LTX_GEMMA_DIR resolves to the TE path (rides the spec)"
+        );
+
+        // A set-but-incomplete override yields None so a good bundled/cache gemma still wins.
+        std::fs::remove_file(complete.join("model-00002-of-00002.safetensors")).unwrap();
+        assert!(
+            ltx_gemma_override_path(Some(complete.clone().into_os_string())).is_none(),
+            "an incomplete $LTX_GEMMA_DIR must not win"
+        );
+
+        // Unset override → None (the bundled/cache resolution proceeds).
+        assert!(ltx_gemma_override_path(None).is_none());
+
+        let _ = std::fs::remove_dir_all(&complete);
+    }
+
     /// `resolve_ltx_eros_gemma_dir`: a complete `models/mlx/gemma` sibling of the eros checkpoint wins;
     /// an incomplete/absent sibling with no bundle snapshot → `None` (provider surfaces the clear
     /// "set LTX_GEMMA_DIR" error). Skipped when an operator `$LTX_GEMMA_DIR` is set (the override path
@@ -17548,6 +17649,11 @@ mod tests {
             video_load_spec(&base).text_encoder.is_none(),
             "no text_encoder_dir ⇒ no spec override"
         );
+        // No uncensored enhancer ⇒ empty components map (video providers stage nothing by default).
+        assert!(
+            video_load_spec(&base).components.is_empty(),
+            "no uncensored_enhancer_dir ⇒ empty components"
+        );
         // An explicit gemma dir rides the spec as a Dir source.
         let gemma = PathBuf::from("/models/ltx/gemma");
         let with_te = VideoGenInput {
@@ -17557,6 +17663,27 @@ mod tests {
         assert!(
             matches!(video_load_spec(&with_te).text_encoder, Some(WeightsSource::Dir(ref p)) if *p == gemma),
             "text_encoder_dir rides LoadSpec::text_encoder as a Dir source"
+        );
+
+        // sc-13664: a resolved amoral-enhancer dir is staged as the `uncensored_enhancer` component so
+        // the MLX LTX provider loads it on demand (the provider's `$LTX_UNCENSORED_GEMMA_DIR` / HF-cache
+        // scan is deleted); no other components are added.
+        let amoral = PathBuf::from("/models/ltx/amoral-gemma");
+        let with_enh = VideoGenInput {
+            engine_id: "ltx_2_3",
+            model_dir: PathBuf::from("/models/ltx/q4"),
+            uncensored_enhancer_dir: Some(amoral.clone()),
+            ..VideoGenInput::default()
+        };
+        let spec = video_load_spec(&with_enh);
+        assert!(
+            matches!(spec.components.get("uncensored_enhancer"), Some(WeightsSource::Dir(p)) if *p == amoral),
+            "uncensored_enhancer_dir rides LoadSpec::components as a Dir source"
+        );
+        assert_eq!(
+            spec.components.len(),
+            1,
+            "only the enhancer component is staged"
         );
     }
 

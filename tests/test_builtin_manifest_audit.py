@@ -327,7 +327,8 @@ _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _COREQUISITE_REVISION_MIGRATION_PENDING: frozenset[tuple[str, str]] = frozenset(
     {
         ("qwen_image", "SceneWorks/qwen-image-2512-fun-controlnet-union"),
-        ("ltx_2_3", "SceneWorks/ltx-2.3-mlx"),
+        # ("ltx_2_3", "SceneWorks/ltx-2.3-mlx") pinned in sc-13683 (the gemma coRequisite now carries
+        # the full 40-hex LTX_BUNDLE_REVISION); removed here + in the Rust twin to keep both green.
         ("ltx_2_3_eros", "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments"),
         ("wan_2_2_t2v_14b", "lightx2v/Wan2.2-Lightning"),
         ("wan_2_2_i2v_14b", "lightx2v/Wan2.2-Lightning"),
