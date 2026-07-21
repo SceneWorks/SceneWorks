@@ -37,6 +37,15 @@ import mossTtsdApache from "../../../desktop/licenses/moss-ttsd-v05/Apache-2.0.t
 import xyTokenizerApache from "../../../desktop/licenses/xy-tokenizer-ttsd/Apache-2.0.txt?raw";
 import mossTtsRealtimeApache from "../../../desktop/licenses/moss-tts-realtime/Apache-2.0.txt?raw";
 import mossAudioTokenizerApache from "../../../desktop/licenses/moss-audio-tokenizer/Apache-2.0.txt?raw";
+// MMAudio video→audio (Foley) — RESEARCH / NON-COMMERCIAL only (epic 13678, sc-13684). Three upstream
+// licenses across three repos: CC-BY-NC-4.0 (hkchengrex/MMAudio weights), the Apple ML Research Model
+// License (apple/DFN5B-CLIP conditioner, the research-only gate), and MIT (nvidia/bigvgan_v2 44k vocoder).
+import mmaudioCcByNc from "../../../desktop/licenses/mmaudio/CC-BY-NC-4.0.txt?raw";
+import mmaudioAppleAmlr from "../../../desktop/licenses/mmaudio/Apple-ML-Research-License.txt?raw";
+import mmaudioBigvganMit from "../../../desktop/licenses/mmaudio/MIT.txt?raw";
+// Whisper base (ASR) + LAION CLAP (audio embedder) — Apache-2.0 audio-validation utility models (sc-13684).
+import whisperBaseApache from "../../../desktop/licenses/whisper-base/Apache-2.0.txt?raw";
+import clapHtsatApache from "../../../desktop/licenses/clap-htsat-unfused/Apache-2.0.txt?raw";
 
 // Maps a manifest document `key` to its imported text. New components: add the
 // files under apps/desktop/licenses/<id>/, list them in manifest.json, and wire
@@ -61,6 +70,11 @@ const DOCUMENT_TEXT = {
   "xy-tokenizer-ttsd-apache": xyTokenizerApache,
   "moss-tts-realtime-apache": mossTtsRealtimeApache,
   "moss-audio-tokenizer-apache": mossAudioTokenizerApache,
+  "mmaudio-cc-by-nc": mmaudioCcByNc,
+  "mmaudio-apple-amlr": mmaudioAppleAmlr,
+  "mmaudio-bigvgan-mit": mmaudioBigvganMit,
+  "whisper-base-apache": whisperBaseApache,
+  "clap-htsat-unfused-apache": clapHtsatApache,
 };
 
 // Resolve each component's document keys to its actual text once, at module load.

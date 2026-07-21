@@ -9445,6 +9445,302 @@
           ]
         }
       }
+    },
+    {
+      // MMAudio video→audio (Foley) — 16 kHz "small" tier (mmaudio_small_16k). Inference sc-13666: the
+      // provider is a PURE 5-component assembly — `spec.weights` is UNUSED; it reads `clip` /
+      // `synchformer` / `dit` / `vae` / `vocoder` from `LoadSpec::components` via `require_component`.
+      // So EACH of the five checkpoints is provisioned by its OWN `coRequisite` download tagged with the
+      // matching `componentId`, and the worker's generic `resolve_co_requisites` seam (sc-13679) stages
+      // all five by id. The five span two repos: the DFN5B-CLIP conditioner (apple/DFN5B-CLIP-ViT-H-14-384)
+      // and synchformer/dit/vae + the in-repo BigVGAN vocoder (hkchengrex/MMAudio). The install/download
+      // flow requires ONE non-coRequisite primary anchor (`model_download()` returns None otherwise), yet
+      // mmaudio has no primary checkpoint — so the `dit` network doubles as the anchor (the most-primary
+      // component). Its bytes are counted once via the identical `dit` coRequisite below, so the anchor
+      // carries NO footprint (avoids double-counting the aggregate download size). type:"utility" because
+      // mmaudio is provisioning-ready but has NO SceneWorks video→audio job path yet (the user-facing
+      // render is a future epic-12833 story and runs on the inference real-weights lane) — utility keeps
+      // it installable via Model Manager without falsely surfacing it in the Audio Studio SFX picker
+      // (which requires type:"audio"). RESEARCH / NON-COMMERCIAL only (Apple ML Research + CC-BY-NC-4.0);
+      // see About → Licenses. sc-13684 (pairs with inference sc-13666).
+      "id": "mmaudio_small_16k",
+      "autoDownload": false,
+      "name": "MMAudio 16 kHz (video→audio, small)",
+      "family": "mmaudio",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          // Primary anchor: the small_16k MM-DiT network (the most-primary component). mmaudio's
+          // `spec.weights` is UNUSED (pure component assembly), so this exists ONLY to satisfy the
+          // install/download flow's non-coRequisite-primary requirement + provide the model dir. Its
+          // bytes are counted once via the identical `dit` coRequisite below — footprint omitted here so
+          // the aggregate download size is not double-counted.
+          "provider": "huggingface",
+          "repo": "hkchengrex/MMAudio",
+          "revision": "eb13a1a98fdbec91753775c57b074ccdfc60587c",
+          "files": ["weights/mmaudio_small_16k.pth"],
+          "platforms": ["macos", "windows", "linux"]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "apple/DFN5B-CLIP-ViT-H-14-384",
+          "revision": "01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
+          "coRequisite": true,
+          "componentId": "clip",
+          "files": ["open_clip_pytorch_model.bin"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 3947081637,
+          "footprint": { "diskSizeBytes": 3947081637 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "hkchengrex/MMAudio",
+          "revision": "eb13a1a98fdbec91753775c57b074ccdfc60587c",
+          "coRequisite": true,
+          "componentId": "synchformer",
+          "files": ["ext_weights/synchformer_state_dict.pth"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 950058171,
+          "footprint": { "diskSizeBytes": 950058171 }
+        },
+        {
+          // The `dit` component — same file the primary anchor above pins; this is the entry the
+          // `resolve_co_requisites` seam matches on `componentId: "dit"` and the one that carries the
+          // footprint (so the aggregate size counts the DiT exactly once).
+          "provider": "huggingface",
+          "repo": "hkchengrex/MMAudio",
+          "revision": "eb13a1a98fdbec91753775c57b074ccdfc60587c",
+          "coRequisite": true,
+          "componentId": "dit",
+          "files": ["weights/mmaudio_small_16k.pth"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 629395261,
+          "footprint": { "diskSizeBytes": 629395261 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "hkchengrex/MMAudio",
+          "revision": "eb13a1a98fdbec91753775c57b074ccdfc60587c",
+          "coRequisite": true,
+          "componentId": "vae",
+          "files": ["ext_weights/v1-16.pth"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 686652758,
+          "footprint": { "diskSizeBytes": 686652758 }
+        },
+        {
+          // 16k in-repo BigVGAN vocoder (best_netG.pt) from hkchengrex/MMAudio — the 44k tier swaps this
+          // for the external nvidia/bigvgan_v2 vocoder.
+          "provider": "huggingface",
+          "repo": "hkchengrex/MMAudio",
+          "revision": "eb13a1a98fdbec91753775c57b074ccdfc60587c",
+          "coRequisite": true,
+          "componentId": "vocoder",
+          "files": ["ext_weights/best_netG.pt"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 449217313,
+          "footprint": { "diskSizeBytes": 449217313 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/hkchengrex/MMAudio"
+      },
+      "licenseUrl": "https://huggingface.co/hkchengrex/MMAudio",
+      "ui": {
+        "label": "MMAudio 16 kHz (video→audio)",
+        "description": "MMAudio video→audio (Foley) — generates a synchronized 16 kHz soundtrack for a silent video clip. A pure 5-component assembly: DFN5B-CLIP + Synchformer conditioners → MM-DiT flow-matching → mel-VAE + BigVGAN vocoder. RESEARCH / NON-COMMERCIAL use only (Apple ML Research license on the CLIP conditioner + CC-BY-NC-4.0 on the MMAudio checkpoints). Provisioning-ready — the user-facing video→audio render lands in a later update.",
+        "recommendedFor": [],
+        "promptGuide": {
+          "title": "MMAudio (video→audio) Guide",
+          "path": "/prompt-guides/mmaudio.md",
+          "sources": [
+            { "label": "MMAudio (Hugging Face)", "url": "https://huggingface.co/hkchengrex/MMAudio" }
+          ]
+        }
+      }
+    },
+    {
+      // MMAudio video→audio (Foley) — 44.1 kHz "large" quality-ceiling tier (mmaudio_large_44k). Same
+      // 5-component contract as the 16k tier (see mmaudio_small_16k above): `dit` doubles as the primary
+      // anchor, the five components are provisioned as `componentId`-tagged coRequisites the generic
+      // `resolve_co_requisites` seam stages by id. Differences vs 16k (inference generator_44k::load):
+      // `clip` + `synchformer` are the SAME shared checkpoints; `dit` = weights/mmaudio_large_44k_v2.pth,
+      // `vae` = ext_weights/v1-44.pth, and `vocoder` = the EXTERNAL nvidia/bigvgan_v2_44khz_128band_512x
+      // (bigvgan_generator.pt) rather than the in-repo BigVGAN. RESEARCH / NON-COMMERCIAL only. type:
+      // "utility" for the same reason as the 16k tier. sc-13684 (pairs with inference sc-13666).
+      "id": "mmaudio_large_44k",
+      "autoDownload": false,
+      "name": "MMAudio 44.1 kHz (video→audio, large)",
+      "family": "mmaudio",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          // Primary anchor: the large_44k_v2 MM-DiT network. See the 16k tier's anchor note — footprint
+          // omitted; carried once by the `dit` coRequisite below.
+          "provider": "huggingface",
+          "repo": "hkchengrex/MMAudio",
+          "revision": "eb13a1a98fdbec91753775c57b074ccdfc60587c",
+          "files": ["weights/mmaudio_large_44k_v2.pth"],
+          "platforms": ["macos", "windows", "linux"]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "apple/DFN5B-CLIP-ViT-H-14-384",
+          "revision": "01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
+          "coRequisite": true,
+          "componentId": "clip",
+          "files": ["open_clip_pytorch_model.bin"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 3947081637,
+          "footprint": { "diskSizeBytes": 3947081637 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "hkchengrex/MMAudio",
+          "revision": "eb13a1a98fdbec91753775c57b074ccdfc60587c",
+          "coRequisite": true,
+          "componentId": "synchformer",
+          "files": ["ext_weights/synchformer_state_dict.pth"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 950058171,
+          "footprint": { "diskSizeBytes": 950058171 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "hkchengrex/MMAudio",
+          "revision": "eb13a1a98fdbec91753775c57b074ccdfc60587c",
+          "coRequisite": true,
+          "componentId": "dit",
+          "files": ["weights/mmaudio_large_44k_v2.pth"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 4122474715,
+          "footprint": { "diskSizeBytes": 4122474715 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "hkchengrex/MMAudio",
+          "revision": "eb13a1a98fdbec91753775c57b074ccdfc60587c",
+          "coRequisite": true,
+          "componentId": "vae",
+          "files": ["ext_weights/v1-44.pth"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 1221942998,
+          "footprint": { "diskSizeBytes": 1221942998 }
+        },
+        {
+          // 44k vocoder — the EXTERNAL NVIDIA BigVGAN v2 (bigvgan_generator.pt), its own repo + pinned
+          // revision (MIT). This is the one component whose repo differs from the 16k tier.
+          "provider": "huggingface",
+          "repo": "nvidia/bigvgan_v2_44khz_128band_512x",
+          "revision": "95a9d1dcb12906c03edd938d77b9333d6ded7dfb",
+          "coRequisite": true,
+          "componentId": "vocoder",
+          "files": ["bigvgan_generator.pt"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 489041291,
+          "footprint": { "diskSizeBytes": 489041291 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/hkchengrex/MMAudio"
+      },
+      "licenseUrl": "https://huggingface.co/hkchengrex/MMAudio",
+      "ui": {
+        "label": "MMAudio 44.1 kHz (video→audio)",
+        "description": "MMAudio video→audio (Foley) — the 44.1 kHz quality-ceiling tier. Same pipeline as the 16 kHz model with the larger large_44k_v2 MM-DiT, the 44k mel-VAE, and the external NVIDIA BigVGAN v2 vocoder. RESEARCH / NON-COMMERCIAL use only (Apple ML Research + CC-BY-NC-4.0; the NVIDIA vocoder is MIT). Provisioning-ready — the user-facing video→audio render lands in a later update.",
+        "recommendedFor": [],
+        "promptGuide": {
+          "title": "MMAudio (video→audio) Guide",
+          "path": "/prompt-guides/mmaudio.md",
+          "sources": [
+            { "label": "MMAudio (Hugging Face)", "url": "https://huggingface.co/hkchengrex/MMAudio" }
+          ]
+        }
+      }
+    },
+    {
+      // OpenAI Whisper base — ASR transcriber (audio→text). Inference sc-12850: a candle Transcriber
+      // (candle-audio-whisper) that loads config.json + tokenizer.json + model.safetensors from a
+      // passed-in snapshot dir (LoadSpec::weights) — NEVER self-resolved by inference. Cataloged here so
+      // it is installable + pinned; it backs audio-validation / ASR round-trip gates (sc-13433). No
+      // SceneWorks generation job consumes it today (the validation harness lives on the inference
+      // real-weights lane), so it is provisioning-ready. type:"utility" (a validation dependency, not a
+      // generation model). Apache-2.0. sc-13684.
+      "id": "whisper_base",
+      "autoDownload": false,
+      "name": "Whisper base (ASR)",
+      "family": "whisper",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "openai/whisper-base",
+          "revision": "e37978b90ca9030d5170a5c07aadb050351a65bb",
+          "files": ["config.json", "tokenizer.json", "model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 292886385,
+          "footprint": { "diskSizeBytes": 292886385 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/openai/whisper-base"
+      },
+      "licenseUrl": "https://huggingface.co/openai/whisper-base",
+      "ui": {
+        "label": "Whisper base (ASR)",
+        "description": "OpenAI Whisper base speech-to-text transcriber. A small utility dependency used for audio validation / ASR round-trip checks — not a generation model. Apache-2.0, commercial-use OK.",
+        "recommendedFor": [],
+        "promptGuide": {
+          "title": "Whisper base (ASR)",
+          "path": "/prompt-guides/whisper-base.md",
+          "sources": [
+            { "label": "openai/whisper-base model card", "url": "https://huggingface.co/openai/whisper-base" }
+          ]
+        }
+      }
+    },
+    {
+      // LAION CLAP (HTSAT-unfused) — semantic audio↔text embedder. Inference sc-12851: a candle
+      // AudioEmbedder (candle-audio-clap) that loads config.json + tokenizer.json + pytorch_model.bin
+      // from a passed-in snapshot DIR (LoadSpec::weights → WeightsSource::Dir) — NEVER self-resolved.
+      // Cataloged for install + pinning; backs semantic audio validation (sc-13433). No SceneWorks
+      // generation job consumes it today — provisioning-ready. type:"utility". Apache-2.0. sc-13684.
+      "id": "clap_htsat_unfused",
+      "autoDownload": false,
+      "name": "CLAP HTSAT (audio embedder)",
+      "family": "clap",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "laion/clap-htsat-unfused",
+          "revision": "8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a",
+          "files": ["config.json", "tokenizer.json", "pytorch_model.bin"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 616639969,
+          "footprint": { "diskSizeBytes": 616639969 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/laion/clap-htsat-unfused"
+      },
+      "licenseUrl": "https://huggingface.co/laion/clap-htsat-unfused",
+      "ui": {
+        "label": "CLAP HTSAT (audio embedder)",
+        "description": "LAION CLAP (HTSAT-unfused) joint audio-text embedding model. A small utility dependency used for semantic audio validation (audio↔text similarity) — not a generation model. Apache-2.0, commercial-use OK.",
+        "recommendedFor": [],
+        "promptGuide": {
+          "title": "CLAP HTSAT (audio embedder)",
+          "path": "/prompt-guides/clap-htsat-unfused.md",
+          "sources": [
+            { "label": "laion/clap-htsat-unfused model card", "url": "https://huggingface.co/laion/clap-htsat-unfused" }
+          ]
+        }
+      }
     }
   ]
 }

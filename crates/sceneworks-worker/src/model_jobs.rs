@@ -3546,6 +3546,12 @@ mod co_requisite_tests {
             .join(revision);
         std::fs::create_dir_all(&snapshot).expect("create snapshot dir");
         let path = snapshot.join(file);
+        // Some component files live under a subdir of the snapshot (mmaudio's `weights/…`,
+        // `ext_weights/…` — sc-13684); create the parent so the write succeeds. A no-op for the
+        // single-level component files (ve.safetensors, tokenizer.json) whose parent is the snapshot.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create component parent dir");
+        }
         std::fs::write(&path, b"weights").expect("write staged component file");
         path
     }
@@ -3913,6 +3919,184 @@ mod co_requisite_tests {
                 message.contains("codec") && message.contains(repo),
                 "{model_id}: the error must name the `codec` component + its repo BEFORE engine load, \
                  got: {message}"
+            );
+        }
+    }
+
+    // --- MMAudio video→audio 5-component assembly (epic 13678, sc-13684) ------------------------------
+
+    /// A candle MMAudio generator descriptor shape at the inference pin: it advertises the FIVE
+    /// caller-staged components mmaudio assembles (`candle-audio-mmaudio` `generator::REQUIRED_COMPONENTS`
+    /// / `generator_44k` both declare `required_components: &["clip", "synchformer", "dit", "vae",
+    /// "vocoder"]`). mmaudio is a PURE assembly — `spec.weights` is unused — so ALL FIVE must resolve
+    /// from `componentId`-tagged coRequisites via the generic `resolve_co_requisites` seam.
+    fn mmaudio_descriptor(id: &'static str) -> gen_core::ModelDescriptor {
+        gen_core::ModelDescriptor {
+            id,
+            family: "mmaudio",
+            backend: "candle",
+            modality: gen_core::Modality::Audio,
+            capabilities: gen_core::Capabilities::default(),
+            required_components: &["clip", "synchformer", "dit", "vae", "vocoder"],
+        }
+    }
+
+    /// `(model_id, [(componentId, repo, pinned revision, file)])` — the exact five component snapshots
+    /// each SHIPPED MMAudio tier pins (sc-13684). Binds these tests to the LIVE `builtin.models.jsonc`,
+    /// so a dropped component coRequisite or a `componentId` that stops matching the descriptor's
+    /// `required_components` fails HERE, not silently at a future video→audio render. The 44k tier shares
+    /// `clip` + `synchformer`, has its own `dit`/`vae`, and swaps the in-repo 16k BigVGAN `vocoder` for
+    /// the external NVIDIA BigVGAN v2 repo.
+    #[allow(clippy::type_complexity)]
+    fn mmaudio_component_snapshots() -> Vec<(
+        &'static str,
+        Vec<(&'static str, &'static str, &'static str, &'static str)>,
+    )> {
+        const MMAUDIO_REV: &str = "eb13a1a98fdbec91753775c57b074ccdfc60587c";
+        const CLIP: (&str, &str, &str, &str) = (
+            "clip",
+            "apple/DFN5B-CLIP-ViT-H-14-384",
+            "01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
+            "open_clip_pytorch_model.bin",
+        );
+        let synchformer = (
+            "synchformer",
+            "hkchengrex/MMAudio",
+            MMAUDIO_REV,
+            "ext_weights/synchformer_state_dict.pth",
+        );
+        vec![
+            (
+                "mmaudio_small_16k",
+                vec![
+                    CLIP,
+                    synchformer,
+                    (
+                        "dit",
+                        "hkchengrex/MMAudio",
+                        MMAUDIO_REV,
+                        "weights/mmaudio_small_16k.pth",
+                    ),
+                    (
+                        "vae",
+                        "hkchengrex/MMAudio",
+                        MMAUDIO_REV,
+                        "ext_weights/v1-16.pth",
+                    ),
+                    (
+                        "vocoder",
+                        "hkchengrex/MMAudio",
+                        MMAUDIO_REV,
+                        "ext_weights/best_netG.pt",
+                    ),
+                ],
+            ),
+            (
+                "mmaudio_large_44k",
+                vec![
+                    CLIP,
+                    synchformer,
+                    (
+                        "dit",
+                        "hkchengrex/MMAudio",
+                        MMAUDIO_REV,
+                        "weights/mmaudio_large_44k_v2.pth",
+                    ),
+                    (
+                        "vae",
+                        "hkchengrex/MMAudio",
+                        MMAUDIO_REV,
+                        "ext_weights/v1-44.pth",
+                    ),
+                    (
+                        "vocoder",
+                        "nvidia/bigvgan_v2_44khz_128band_512x",
+                        "95a9d1dcb12906c03edd938d77b9333d6ded7dfb",
+                        "bigvgan_generator.pt",
+                    ),
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn mmaudio_co_requisites_resolve_all_five_components_from_every_live_tier() {
+        for (model_id, components) in mmaudio_component_snapshots() {
+            let _env = isolate_hf_cache();
+            let data_dir = tempfile::tempdir().expect("temp data dir");
+            for (_id, repo, revision, file) in &components {
+                stage_snapshot_file(data_dir.path(), repo, revision, file);
+            }
+
+            let resolved = resolve_co_requisites(
+                &mmaudio_descriptor(model_id),
+                &builtin_manifest_entry(model_id),
+                &settings_at(data_dir.path().to_path_buf()),
+            )
+            .unwrap_or_else(|error| {
+                panic!("{model_id}: all five components are staged, so resolution must succeed: {error:?}")
+            });
+
+            // The map keys are EXACTLY the descriptor's five advertised ids (order-independent BTreeMap).
+            let mut keys: Vec<&str> = resolved.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            let mut want = mmaudio_descriptor(model_id).required_components.to_vec();
+            want.sort_unstable();
+            assert_eq!(
+                keys, want,
+                "{model_id}: the component map keys must match the descriptor's required_components"
+            );
+            // Each single-file component resolves to a `File` at the staged snapshot path — the exact
+            // file the tier's `componentId` download pins (matched on `componentId`, never repo name).
+            for (id, _repo, _revision, file) in &components {
+                match resolved.get(*id) {
+                    Some(gen_core::WeightsSource::File(path)) => assert!(
+                        path.ends_with(file),
+                        "{model_id}: component `{id}` must resolve to {file}, got {path:?}"
+                    ),
+                    other => {
+                        panic!("{model_id}: component `{id}` must resolve to a File, got {other:?}")
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_mmaudio_component_fails_with_an_actionable_error_naming_id_and_repo() {
+        for (model_id, components) in mmaudio_component_snapshots() {
+            let _env = isolate_hf_cache();
+            let data_dir = tempfile::tempdir().expect("temp data dir");
+            // Stage every component EXCEPT the vocoder, whose snapshot is ABSENT — install-state gates on
+            // the hard component coRequisites, so the job must fail HERE (before the engine load), naming
+            // the missing id + its repo, not with a mid-render hub fetch.
+            let (_vid, vocoder_repo, _vrev, _vfile) = *components
+                .iter()
+                .find(|(id, _, _, _)| *id == "vocoder")
+                .expect("vocoder component present");
+            for (id, repo, revision, file) in &components {
+                if *id == "vocoder" {
+                    continue;
+                }
+                stage_snapshot_file(data_dir.path(), repo, revision, file);
+            }
+
+            let error = resolve_co_requisites(
+                &mmaudio_descriptor(model_id),
+                &builtin_manifest_entry(model_id),
+                &settings_at(data_dir.path().to_path_buf()),
+            )
+            .expect_err("a missing mmaudio component must fail the job before the engine load");
+
+            let WorkerError::InvalidPayload(message) = error else {
+                panic!(
+                    "{model_id}: a missing component must surface as InvalidPayload, got {error:?}"
+                );
+            };
+            assert!(
+                message.contains("vocoder") && message.contains(vocoder_repo),
+                "{model_id}: the error must name the missing `vocoder` component + its repo BEFORE engine \
+                 load, got: {message}"
             );
         }
     }

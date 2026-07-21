@@ -199,6 +199,44 @@
       "documents": [
         { "label": "Apache License 2.0", "key": "moss-audio-tokenizer-apache" }
       ]
+    },
+    {
+      "id": "mmaudio",
+      "name": "MMAudio (video→audio / Foley)",
+      "publisher": "MMAudio / Sony Research · Apple · NVIDIA · V. Iashin",
+      "license": "Research / Non-Commercial (CC-BY-NC-4.0 · Apple ML Research · MIT)",
+      "homepage": "https://huggingface.co/hkchengrex/MMAudio",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "Video→audio (Foley) model — RESEARCH / NON-COMMERCIAL USE ONLY. SceneWorks downloads on first use a five-checkpoint assembly across three repos: the MM-DiT / mel-VAE / in-repo BigVGAN weights (hkchengrex/MMAudio — CC-BY-NC-4.0, © Sony Research Inc.) with a bundled MIT Synchformer encoder (© V. Iashin), the DFN5B-CLIP conditioner (apple/DFN5B-CLIP-ViT-H-14-384 — Apple ML Research Model License, research-only), and the 44.1 kHz tier's external NVIDIA BigVGAN v2 vocoder (nvidia/bigvgan_v2_44khz_128band_512x — MIT). The EFFECTIVE license is the intersection (strictest) of these: research / non-commercial only, gated by the Apple ML Research license. SceneWorks is non-commercial, so the weights are usable, but this restriction is recorded and surfaced here — a legal read is warranted before any commercial use.",
+      "documents": [
+        { "label": "Creative Commons BY-NC 4.0 (MMAudio MM-DiT / VAE / BigVGAN weights)", "key": "mmaudio-cc-by-nc" },
+        { "label": "Apple ML Research Model License (DFN5B-CLIP conditioner — research-only)", "key": "mmaudio-apple-amlr" },
+        { "label": "MIT License (NVIDIA BigVGAN v2 vocoder, 44.1 kHz tier)", "key": "mmaudio-bigvgan-mit" }
+      ]
+    },
+    {
+      "id": "whisper-base",
+      "name": "Whisper base (ASR)",
+      "publisher": "OpenAI",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/openai/whisper-base",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "Speech-to-text transcriber used as a utility dependency for audio validation / ASR round-trip checks (not a generation model). SceneWorks downloads the upstream Apache-2.0 weights on first use from openai/whisper-base and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
+      "documents": [
+        { "label": "Apache License 2.0", "key": "whisper-base-apache" }
+      ]
+    },
+    {
+      "id": "clap-htsat-unfused",
+      "name": "CLAP HTSAT-unfused (audio embedder)",
+      "publisher": "LAION",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/laion/clap-htsat-unfused",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "Joint audio-text embedding model used as a utility dependency for semantic audio validation (audio↔text similarity) — not a generation model. SceneWorks downloads the upstream Apache-2.0 weights on first use from laion/clap-htsat-unfused and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
+      "documents": [
+        { "label": "Apache License 2.0", "key": "clap-htsat-unfused-apache" }
+      ]
     }
   ]
 }
