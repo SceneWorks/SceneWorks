@@ -1906,6 +1906,7 @@ mod tests {
             backend: "mlx",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            required_components: &[],
         }
     }
     fn stub_mlx_load(_spec: &gen_core::LoadSpec) -> gen_core::Result<Box<dyn gen_core::Generator>> {
@@ -1927,6 +1928,7 @@ mod tests {
             backend: "candle",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            required_components: &[],
         }
     }
     fn stub_candle_load(
@@ -1949,6 +1951,7 @@ mod tests {
             backend: "mlx",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            required_components: &[],
         }
     }
     fn stub_unknown_load(

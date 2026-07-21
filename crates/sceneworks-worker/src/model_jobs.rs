@@ -1613,6 +1613,130 @@ pub(crate) fn huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<Pa
     Some(dir)
 }
 
+/// Resolve the local HF snapshot dir for a repo PINNED to an exact commit (`snapshots/<revision>/`) —
+/// the cache-only twin of [`huggingface_snapshot_dir`] for a download that carries an immutable
+/// `revision` (F-029). Unlike [`huggingface_snapshot_dir`] (which prefers `refs/main`), this reads the
+/// EXACT pinned snapshot, so a co-requisite pinned to a non-main commit in a SHARED repo (e.g.
+/// chatterbox's `ve.safetensors` @ 5bb1f6ee living alongside the primary `refs/main` snapshot) resolves
+/// to the right snapshot — mirroring the inference-side `hf_get_pinned`. Returns `None` when that
+/// pinned snapshot is not cached.
+pub(crate) fn huggingface_pinned_snapshot_dir(
+    data_dir: &Path,
+    repo: &str,
+    revision: &str,
+) -> Option<PathBuf> {
+    let dir = huggingface_repo_cache_path(data_dir, repo)?
+        .join("snapshots")
+        .join(revision);
+    if !dir.is_dir() {
+        return None;
+    }
+    #[cfg(windows)]
+    materialize_snapshot_hardlinks(&dir);
+    Some(dir)
+}
+
+/// Resolve a model's **caller-provisioned components** (epic 13657, sc-13679) — the generic worker
+/// seam that turns a provider's [`gen_core::ModelDescriptor::required_components`] advertisement into
+/// the resolved local paths a caller stages in [`gen_core::LoadSpec::components`] (via
+/// `LoadSpec::with_component`). It is the SceneWorks-side complement of the engine's own load-time
+/// [`gen_core::require_component`] gate: the descriptor advertises which component ids a model needs,
+/// the manifest declares WHERE each comes from (a `coRequisite` download tagged with an explicit
+/// `componentId`), and this resolves each to a local [`gen_core::WeightsSource`].
+///
+/// Driven PURELY by `descriptor.required_components`: for each declared id it finds the manifest
+/// `coRequisite` download whose `componentId` matches (never inferred from repo names, sc-13679),
+/// then resolves that repo's cached snapshot ENV-CORRECTLY via the cache-only
+/// [`huggingface_snapshot_dir`] — the same seam the PiD-gemma / Wan-Lightning co-requisites use, so
+/// a custom `HF_HOME`/hub is honored and nothing is fetched here.
+///
+/// All-or-nothing: a declared component whose co-requisite is not installed (snapshot absent, or the
+/// named file missing) returns a caller-actionable [`WorkerError::InvalidPayload`] naming the
+/// component id + repo, so the JOB fails BEFORE the engine load — never a mid-render hub fetch. An
+/// empty `required_components` (every image/video model and every single-file audio model except
+/// chatterbox today) returns an empty map with no filesystem access, so every existing lane is a
+/// no-op. A single-file co-requisite (`files: ["x.safetensors"]`, e.g. chatterbox
+/// `perth`/`voice_embedding`) resolves to `WeightsSource::File(<snapshot>/x.safetensors)`; a
+/// multi-file / whole-repo co-requisite resolves to `WeightsSource::Dir(<snapshot>)`.
+pub(crate) fn resolve_co_requisites(
+    descriptor: &gen_core::ModelDescriptor,
+    manifest_entry: &Value,
+    settings: &Settings,
+) -> WorkerResult<BTreeMap<String, gen_core::WeightsSource>> {
+    let mut components = BTreeMap::new();
+    if descriptor.required_components.is_empty() {
+        return Ok(components);
+    }
+    let model_id = descriptor.id;
+    let downloads: &[Value] = manifest_entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    for &component_id in descriptor.required_components {
+        // The `coRequisite` download that PROVISIONS this component id — matched on the explicit
+        // `componentId` field the manifest sets (never inferred from repo names, sc-13679).
+        let download = downloads
+            .iter()
+            .find(|download| {
+                download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+                    && download.get("componentId").and_then(Value::as_str) == Some(component_id)
+            })
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "{model_id} requires the model component '{component_id}', but its catalog entry \
+                     declares no `coRequisite` download tagged `componentId: \"{component_id}\"` — \
+                     the model manifest entry is misconfigured"
+                ))
+            })?;
+        let repo = download
+            .get("repo")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "{model_id}: the '{component_id}' co-requisite download declares no `repo`"
+                ))
+            })?;
+        // Resolve the co-requisite's snapshot cache-only. A co-requisite pins an immutable `revision`
+        // (F-029, required by sc-13659) — read THAT exact `snapshots/<sha>/` (like the inference-side
+        // `hf_get_pinned`), never `refs/main`, so a companion weight pinned to a non-main commit in a
+        // SHARED repo (chatterbox's `ve.safetensors` @ 5bb1f6ee, alongside the primary `refs/main`
+        // snapshot) resolves correctly. An unpinned co-requisite falls back to the `refs/main`-preferring
+        // resolver.
+        let snapshot = match download.get("revision").and_then(Value::as_str) {
+            Some(revision) => huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision),
+            None => huggingface_snapshot_dir(&settings.data_dir, repo),
+        }
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "{model_id}: the '{component_id}' component ({repo}) is not installed — install \
+                 {model_id} from the Model Manager (installing it pulls this co-requisite), or \
+                 predownload {repo} for an offline install"
+            ))
+        })?;
+        let files: Vec<&str> = download
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|files| files.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let source = match files.as_slice() {
+            [file] => {
+                let path = snapshot.join(file);
+                if !path.is_file() {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "{model_id}: the '{component_id}' component file {repo}/{file} is missing \
+                         from the cached snapshot — reinstall {model_id} to repair it"
+                    )));
+                }
+                gen_core::WeightsSource::File(path)
+            }
+            _ => gen_core::WeightsSource::Dir(snapshot),
+        };
+        components.insert(component_id.to_owned(), source);
+    }
+    Ok(components)
+}
+
 /// Resolve the exact snapshot/tier recorded by a completed model-download receipt.
 ///
 /// A manifest may rename files after an install.  In that case the catalog deliberately keeps the
@@ -3343,5 +3467,229 @@ mod tier_builder {
             deref_symlinks(&out);
         }
         eprintln!("[sc-8513] DONE {tier} at {}", out.display());
+    }
+}
+
+/// Generic co-requisite → component-provisioning seam (epic 13657, sc-13679). Weights-free and
+/// platform-neutral: it drives off a synthetic `ModelDescriptor` + manifest `Value` + an isolated
+/// temp HF cache, so it runs on every lane (macOS `cargo test` AND the Linux parity clippy build).
+#[cfg(test)]
+mod co_requisite_tests {
+    use super::*;
+
+    /// A `Settings` whose only field `resolve_co_requisites` reads is `data_dir`; everything else is
+    /// inert (no network, no engine).
+    fn settings_at(data_dir: PathBuf) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1:0".to_owned(),
+            access_token: None,
+            data_dir,
+            config_dir: PathBuf::from("config"),
+            worker_id: "sc-13679".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            is_child_worker: true,
+            poll_seconds: 1,
+            heartbeat_seconds: 5,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: 0,
+            max_model_url_bytes: 0,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+            backend_mlx_enabled: false,
+            backend_candle_enabled: false,
+            gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
+        }
+    }
+
+    /// The chatterbox descriptor shape the resolver is driven by: it advertises the two named
+    /// components (`perth`, `voice_embedding`) exactly as the real `chatterbox_tts` descriptor does at
+    /// the inference pin (`required_components: &["perth", "voice_embedding"]`).
+    fn chatterbox_descriptor() -> gen_core::ModelDescriptor {
+        gen_core::ModelDescriptor {
+            id: "chatterbox_tts",
+            family: "chatterbox",
+            backend: "candle",
+            modality: gen_core::Modality::Audio,
+            capabilities: gen_core::Capabilities::default(),
+            required_components: &["perth", "voice_embedding"],
+        }
+    }
+
+    /// The chatterbox manifest entry shape the resolver reads: the two `coRequisite` downloads carry
+    /// an explicit `componentId` mapping repo → component id (never inferred from the repo name).
+    fn chatterbox_manifest_entry() -> Value {
+        json!({
+            "id": "chatterbox_tts",
+            "downloads": [
+                { "provider": "huggingface", "repo": "ResembleAI/chatterbox",
+                  "files": ["t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json"] },
+                { "provider": "huggingface", "repo": "ResembleAI/chatterbox",
+                  "revision": "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18", "coRequisite": true,
+                  "componentId": "voice_embedding", "files": ["ve.safetensors"] },
+                { "provider": "huggingface", "repo": "SceneWorks/perth-implicit",
+                  "revision": "80b60f9caead09b8d3b512bda0b24038f28c08ec", "coRequisite": true,
+                  "componentId": "perth", "files": ["perth_implicit.safetensors"] }
+            ]
+        })
+    }
+
+    /// Materialize `<file>` inside `repo`'s cached HF snapshot under `data_dir`, so the cache-only
+    /// `huggingface_snapshot_dir` resolves it — the disk state a completed co-requisite install leaves.
+    fn stage_snapshot_file(data_dir: &Path, repo: &str, revision: &str, file: &str) -> PathBuf {
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .expect("repo cache path resolves")
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).expect("create snapshot dir");
+        let path = snapshot.join(file);
+        std::fs::write(&path, b"weights").expect("write staged component file");
+        path
+    }
+
+    /// Neutralize the ambient HF cache env so `huggingface_repo_cache_path` resolves under the
+    /// supplied `data_dir` (else a developer's real `HF_HOME` would win — sc-13679 traps).
+    fn isolate_hf_cache() -> crate::test_env::EnvVars {
+        crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ])
+    }
+
+    #[test]
+    fn present_co_requisites_resolve_to_a_component_map_matching_the_descriptor() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let ve = stage_snapshot_file(
+            data_dir.path(),
+            "ResembleAI/chatterbox",
+            "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
+            "ve.safetensors",
+        );
+        let perth = stage_snapshot_file(
+            data_dir.path(),
+            "SceneWorks/perth-implicit",
+            "80b60f9caead09b8d3b512bda0b24038f28c08ec",
+            "perth_implicit.safetensors",
+        );
+
+        let descriptor = chatterbox_descriptor();
+        let components = resolve_co_requisites(
+            &descriptor,
+            &chatterbox_manifest_entry(),
+            &settings_at(data_dir.path().to_path_buf()),
+        )
+        .expect("both co-requisites are installed, so resolution succeeds");
+
+        // The resolved map's keys are EXACTLY the descriptor's advertised component ids.
+        let keys: Vec<&str> = components.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys, descriptor.required_components,
+            "the component map keys must match the descriptor's required_components"
+        );
+        // Each id resolves to the single-file WeightsSource at the staged snapshot path.
+        // (`WeightsSource` has no `PartialEq`, so match the `File` variant and compare its path.)
+        let file_path = |source: Option<&gen_core::WeightsSource>| match source {
+            Some(gen_core::WeightsSource::File(path)) => Some(path.clone()),
+            _ => None,
+        };
+        assert_eq!(
+            file_path(components.get("voice_embedding")),
+            Some(ve),
+            "voice_embedding maps to the staged ve.safetensors"
+        );
+        assert_eq!(
+            file_path(components.get("perth")),
+            Some(perth),
+            "perth maps to the staged perth_implicit.safetensors"
+        );
+    }
+
+    #[test]
+    fn a_missing_co_requisite_fails_with_an_actionable_error_before_the_engine() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        // Stage ONLY voice_embedding; perth's snapshot is absent.
+        stage_snapshot_file(
+            data_dir.path(),
+            "ResembleAI/chatterbox",
+            "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
+            "ve.safetensors",
+        );
+
+        let error = resolve_co_requisites(
+            &chatterbox_descriptor(),
+            &chatterbox_manifest_entry(),
+            &settings_at(data_dir.path().to_path_buf()),
+        )
+        .expect_err("a missing co-requisite must fail the job before the engine load");
+
+        let WorkerError::InvalidPayload(message) = error else {
+            panic!(
+                "a missing co-requisite must surface as user-facing InvalidPayload, got {error:?}"
+            );
+        };
+        // Actionable: names the missing component id AND the repo to install/predownload.
+        assert!(
+            message.contains("perth") && message.contains("SceneWorks/perth-implicit"),
+            "the error must name the missing component id + repo, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_required_component_with_no_matching_component_id_is_a_manifest_error() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        // A manifest entry whose co-requisites carry NO componentId → the perth id can't be mapped.
+        let manifest_entry = json!({
+            "id": "chatterbox_tts",
+            "downloads": [
+                { "provider": "huggingface", "repo": "SceneWorks/perth-implicit",
+                  "revision": "80b60f9caead09b8d3b512bda0b24038f28c08ec", "coRequisite": true,
+                  "files": ["perth_implicit.safetensors"] }
+            ]
+        });
+        let error = resolve_co_requisites(
+            &chatterbox_descriptor(),
+            &manifest_entry,
+            &settings_at(data_dir.path().to_path_buf()),
+        )
+        .expect_err("a required id with no componentId mapping is a manifest misconfiguration");
+        let WorkerError::InvalidPayload(message) = error else {
+            panic!("expected InvalidPayload, got {error:?}");
+        };
+        assert!(
+            message.contains("componentId") && message.contains("perth"),
+            "the error must name the unmapped component id + the missing componentId tag, got: {message}"
+        );
+    }
+
+    #[test]
+    fn an_empty_required_components_set_is_a_no_op() {
+        let _env = isolate_hf_cache();
+        // Every current image/video model + single-file audio model advertises no components: the
+        // resolver must return an empty map WITHOUT touching the filesystem (a nonexistent data_dir).
+        let descriptor = gen_core::ModelDescriptor {
+            id: "kokoro_82m",
+            family: "kokoro",
+            backend: "candle",
+            modality: gen_core::Modality::Audio,
+            capabilities: gen_core::Capabilities::default(),
+            required_components: &[],
+        };
+        let components = resolve_co_requisites(
+            &descriptor,
+            &json!({ "id": "kokoro_82m", "downloads": [] }),
+            &settings_at(PathBuf::from("/nonexistent/sc-13679")),
+        )
+        .expect("an empty required_components set never fails");
+        assert!(
+            components.is_empty(),
+            "no components are staged for a model that requires none"
+        );
     }
 }

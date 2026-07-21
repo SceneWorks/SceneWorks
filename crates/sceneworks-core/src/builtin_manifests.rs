@@ -508,6 +508,7 @@ mod tests {
             "files": ["perth_implicit.safetensors"],
             "revision": sha,
             "coRequisite": true,
+            "componentId": "perth",
         }))
         .expect("pinned co-requisite deserializes");
         assert_eq!(pinned.revision.as_deref(), Some(sha));
@@ -523,6 +524,17 @@ mod tests {
             serde_json::to_value(&pinned).expect("re-serialize")["revision"],
             serde_json::json!(sha)
         );
+        // sc-13679: `componentId` is likewise a first-class typed field (the repo→component mapping the
+        // co-requisite provisioning seam reads), so it round-trips through the typed slot, not `extra`.
+        assert_eq!(pinned.component_id.as_deref(), Some("perth"));
+        assert!(
+            !pinned.extra.contains_key("componentId"),
+            "componentId must land in the typed field, not the extra bag"
+        );
+        assert_eq!(
+            serde_json::to_value(&pinned).expect("re-serialize")["componentId"],
+            serde_json::json!("perth")
+        );
 
         let unpinned: ModelDownload = serde_json::from_value(serde_json::json!({
             "provider": "huggingface",
@@ -531,12 +543,20 @@ mod tests {
         }))
         .expect("unpinned entry deserializes");
         assert_eq!(unpinned.revision, None);
+        assert_eq!(unpinned.component_id, None);
         assert!(
             serde_json::to_value(&unpinned)
                 .expect("re-serialize")
                 .get("revision")
                 .is_none(),
             "an unpinned download must not serialize a revision key (main-branch default)"
+        );
+        assert!(
+            serde_json::to_value(&unpinned)
+                .expect("re-serialize")
+                .get("componentId")
+                .is_none(),
+            "a non-component download must not serialize a componentId key"
         );
     }
 
