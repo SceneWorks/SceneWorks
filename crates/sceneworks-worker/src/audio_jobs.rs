@@ -2372,6 +2372,79 @@ mod tests {
         settings
     }
 
+    /// Neutralize the ambient HF cache env so a co-requisite snapshot resolves under the test's own
+    /// `data_dir` rather than a developer's real `HF_HOME` (sc-13679 trap) — the audio twin of the
+    /// model_jobs co_requisite seam tests' `isolate_hf_cache`.
+    fn isolate_hf_cache() -> crate::test_env::EnvVars {
+        crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ])
+    }
+
+    /// Stage a co-requisite component file at `models--<repo>/snapshots/<revision>/<file>` under
+    /// `data_dir`, mirroring the model_jobs seam tests' `stage_snapshot_file`.
+    fn stage_snapshot_file(data_dir: &Path, repo: &str, revision: &str, file: &str) {
+        let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir, repo)
+            .expect("repo cache path resolves")
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).expect("create snapshot dir");
+        std::fs::write(snapshot.join(file), b"weights").expect("write staged component file");
+    }
+
+    /// The staged `codec` component for a MOSS TTS model: the isolated HF-cache env guard + tempdir
+    /// (both must be kept alive for the whole test) and the `modelManifestEntry` — carrying the codec
+    /// `coRequisite` download — the payload must advertise.
+    struct StagedCodec {
+        _env: crate::test_env::EnvVars,
+        _data_dir: tempfile::TempDir,
+        manifest_entry: Value,
+    }
+
+    /// Stage a MOSS model's `codec` component under an isolated HF cache, point `settings.data_dir` at
+    /// it, and return the matching `modelManifestEntry`. After the inference codec-component pin bump
+    /// (sc-13681) the real MOSS descriptors advertise `required_components: ["codec"]`, so
+    /// `run_audio_synthesis_using` calls `resolve_co_requisites`, which resolves the codec from its
+    /// cached pinned-SHA snapshot; without a staged snapshot the JOB fails with `InvalidPayload`
+    /// BEFORE the behavior under test runs. This mirrors the model_jobs co_requisite seam tests'
+    /// `isolate_hf_cache` / `stage_snapshot_file` pattern — codec resolution actually SUCCEEDS here
+    /// (the seam is exercised, not stubbed), and the loaded generator is still the test's own stub, so
+    /// the staged bytes are never read. The returned guard + tempdir must be kept alive for the whole
+    /// test.
+    fn stage_moss_codec(
+        settings: &mut Settings,
+        model_id: &str,
+        codec_repo: &str,
+        codec_revision: &str,
+        codec_files: &[&str],
+    ) -> StagedCodec {
+        let env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        for file in codec_files {
+            stage_snapshot_file(data_dir.path(), codec_repo, codec_revision, file);
+        }
+        settings.data_dir = data_dir.path().to_path_buf();
+        let manifest_entry = json!({
+            "id": model_id,
+            "type": "audio",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": codec_repo,
+                "revision": codec_revision,
+                "coRequisite": true,
+                "componentId": "codec",
+                "files": codec_files,
+            }],
+        });
+        StagedCodec {
+            _env: env,
+            _data_dir: data_dir,
+            manifest_entry,
+        }
+    }
+
     fn stub_load(
         behavior: StubBehavior,
         observed: Arc<AtomicBool>,
@@ -2534,7 +2607,17 @@ mod tests {
     #[tokio::test]
     async fn single_synthesis_forwards_the_multi_speaker_script_to_audio_params() {
         let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
-        let settings = cancel_test_settings(base_url);
+        let mut settings = cancel_test_settings(base_url);
+        // moss_ttsd_v05 now advertises `required_components: ["codec"]` (sc-13681), so the synthesis
+        // seam resolves the XY_Tokenizer codec co-requisite before the stub load — stage it (and
+        // advertise it on the payload) so resolution SUCCEEDS and the script-forwarding behavior runs.
+        let staged = stage_moss_codec(
+            &mut settings,
+            "moss_ttsd_v05",
+            "OpenMOSS-Team/XY_Tokenizer_TTSD_V0",
+            "c83433728e698ed0698e88cb5096bc221fb8f8c5",
+            &["xy_tokenizer.ckpt"],
+        );
         let api = ApiClient::new(&settings);
         let job = audio_test_job("audio-script");
         let request = AudioRequest::from_payload(&payload(json!({
@@ -2544,6 +2627,7 @@ mod tests {
                 { "text": "Hello, how are you today?", "speaker": "S1" },
                 { "text": "I'm doing great, thanks for asking!", "speaker": "S2" },
             ],
+            "modelManifestEntry": staged.manifest_entry.clone(),
         })));
 
         let captured = Arc::new(Mutex::new(None));
@@ -2727,10 +2811,29 @@ mod tests {
     #[tokio::test]
     async fn streaming_synthesis_forwards_per_chunk_progress_and_returns_reassembled_track() {
         let (base_url, progress) = spawn_audio_cancel_stub(false).await;
-        let settings = cancel_test_settings(base_url);
+        let mut settings = cancel_test_settings(base_url);
+        // moss_tts_realtime now advertises `required_components: ["codec"]` (sc-13681), so the
+        // synthesis seam resolves the MOSS-Audio-Tokenizer codec co-requisite before the stub load —
+        // stage it (and advertise it on the payload) so resolution SUCCEEDS and the streaming behavior
+        // runs.
+        let staged = stage_moss_codec(
+            &mut settings,
+            "moss_tts_realtime",
+            "OpenMOSS-Team/MOSS-Audio-Tokenizer",
+            "3cd226ba2947efa357ef453bcad111b6eafba782",
+            &[
+                "config.json",
+                "model.safetensors.index.json",
+                "model-00001-of-00002.safetensors",
+                "model-00002-of-00002.safetensors",
+            ],
+        );
         let api = ApiClient::new(&settings);
         let job = audio_test_job("audio-stream");
-        let request = AudioRequest::from_payload(&payload(json!({ "model": "moss_tts_realtime" })));
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "moss_tts_realtime",
+            "modelManifestEntry": staged.manifest_entry.clone(),
+        })));
 
         let expected = StreamingStubGenerator {
             descriptor: streaming_stub_descriptor(),

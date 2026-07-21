@@ -283,6 +283,12 @@ mod tests {
             Some(40),
             "the codec co-requisite pins a full 40-hex commit SHA (hf_get_pinned reads snapshots/<sha>/)"
         );
+        assert_eq!(
+            codec["componentId"].as_str(),
+            Some("codec"),
+            "the codec co-requisite is tagged componentId: \"codec\" (sc-13681) so the worker's generic \
+             resolve_co_requisites seam stages it under the descriptor's required_components: [\"codec\"]"
+        );
 
         // MOSS-TTSD v0.5 (sc-13676) is the audio lane's first MULTI-SPEAKER model: it advertises
         // `audio.supportsMultiSpeaker: true` + `audio.maxSpeakers: 2` (mirroring the backend
@@ -328,6 +334,12 @@ mod tests {
             ttsd_codec["revision"].as_str().map(str::len),
             Some(40),
             "the codec co-requisite pins a full 40-hex commit SHA (hf_get_pinned reads snapshots/<sha>/)"
+        );
+        assert_eq!(
+            ttsd_codec["componentId"].as_str(),
+            Some("codec"),
+            "the codec co-requisite is tagged componentId: \"codec\" (sc-13681) so the worker's generic \
+             resolve_co_requisites seam stages it under the descriptor's required_components: [\"codec\"]"
         );
 
         for model in [

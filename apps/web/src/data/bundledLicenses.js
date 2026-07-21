@@ -30,6 +30,13 @@ import mossApache from "../../../desktop/licenses/moss-soundeffect-v2/Apache-2.0
 import acestepMit from "../../../desktop/licenses/acestep-v15-turbo/MIT.txt?raw";
 import openvoiceMit from "../../../desktop/licenses/openvoice-v2/MIT.txt?raw";
 import chatterboxMit from "../../../desktop/licenses/chatterbox-ve/MIT.txt?raw";
+// MOSS TTS speech models + their pinned codec co-requisites (epic 13678, sc-13681).
+// Both the AR checkpoints and the codecs (XY_Tokenizer / MOSS-Audio-Tokenizer) are
+// Apache-2.0, downloaded on first use from the upstream OpenMOSS-Team repos.
+import mossTtsdApache from "../../../desktop/licenses/moss-ttsd-v05/Apache-2.0.txt?raw";
+import xyTokenizerApache from "../../../desktop/licenses/xy-tokenizer-ttsd/Apache-2.0.txt?raw";
+import mossTtsRealtimeApache from "../../../desktop/licenses/moss-tts-realtime/Apache-2.0.txt?raw";
+import mossAudioTokenizerApache from "../../../desktop/licenses/moss-audio-tokenizer/Apache-2.0.txt?raw";
 
 // Maps a manifest document `key` to its imported text. New components: add the
 // files under apps/desktop/licenses/<id>/, list them in manifest.json, and wire
@@ -50,6 +57,10 @@ const DOCUMENT_TEXT = {
   "acestep-v15-turbo-mit": acestepMit,
   "openvoice-v2-mit": openvoiceMit,
   "chatterbox-ve-mit": chatterboxMit,
+  "moss-ttsd-v05-apache": mossTtsdApache,
+  "xy-tokenizer-ttsd-apache": xyTokenizerApache,
+  "moss-tts-realtime-apache": mossTtsRealtimeApache,
+  "moss-audio-tokenizer-apache": mossAudioTokenizerApache,
 };
 
 // Resolve each component's document keys to its actual text once, at module load.

@@ -151,6 +151,54 @@
       "documents": [
         { "label": "MIT License", "key": "chatterbox-ve-mit" }
       ]
+    },
+    {
+      "id": "moss-ttsd-v05",
+      "name": "MOSS-TTSD v0.5 (Multi-Speaker Dialogue)",
+      "publisher": "OpenMOSS Team",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/OpenMOSS-Team/MOSS-TTSD-v0.5",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "Multi-speaker / long-form dialogue text-to-speech model (Audio Studio → Speech). SceneWorks downloads the upstream Apache-2.0 AR weights on first use from OpenMOSS-Team/MOSS-TTSD-v0.5 and runs them natively (Candle) on every platform. Requires the XY_Tokenizer codec (listed separately below) as a pinned co-requisite. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
+      "documents": [
+        { "label": "Apache License 2.0", "key": "moss-ttsd-v05-apache" }
+      ]
+    },
+    {
+      "id": "xy-tokenizer-ttsd",
+      "name": "XY_Tokenizer (MOSS-TTSD codec)",
+      "publisher": "OpenMOSS Team",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/OpenMOSS-Team/XY_Tokenizer_TTSD_V0",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "RVQ delay-pattern audio codec that decodes MOSS-TTSD v0.5's frames into a 24 kHz waveform (Audio Studio → Speech). SceneWorks downloads the upstream Apache-2.0 xy_tokenizer.ckpt on first use from OpenMOSS-Team/XY_Tokenizer_TTSD_V0 as a pinned co-requisite of MOSS-TTSD v0.5 and runs it natively (Candle) on every platform. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
+      "documents": [
+        { "label": "Apache License 2.0", "key": "xy-tokenizer-ttsd-apache" }
+      ]
+    },
+    {
+      "id": "moss-tts-realtime",
+      "name": "MOSS-TTS-Realtime (Streaming Speech)",
+      "publisher": "OpenMOSS Team",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Realtime",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "Streaming text-to-speech model (Audio Studio → Speech). SceneWorks downloads the upstream Apache-2.0 AR weights on first use from OpenMOSS-Team/MOSS-TTS-Realtime and runs them natively (Candle) on every platform. Requires the MOSS-Audio-Tokenizer codec (listed separately below) as a pinned co-requisite. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
+      "documents": [
+        { "label": "Apache License 2.0", "key": "moss-tts-realtime-apache" }
+      ]
+    },
+    {
+      "id": "moss-audio-tokenizer",
+      "name": "MOSS-Audio-Tokenizer (MOSS-TTS-Realtime codec)",
+      "publisher": "OpenMOSS Team",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "RLFQ streaming audio codec that decodes MOSS-TTS-Realtime's RVQ frames into a 24 kHz waveform (Audio Studio → Speech). SceneWorks downloads the upstream Apache-2.0 codec weights on first use from OpenMOSS-Team/MOSS-Audio-Tokenizer as a pinned co-requisite of MOSS-TTS-Realtime and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
+      "documents": [
+        { "label": "Apache License 2.0", "key": "moss-audio-tokenizer-apache" }
+      ]
     }
   ]
 }

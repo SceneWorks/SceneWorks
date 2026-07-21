@@ -3820,4 +3820,100 @@ mod co_requisite_tests {
             "the error must name the missing component id + repo BEFORE engine load, got: {message}"
         );
     }
+
+    // --- MOSS TTS codec component (epic 13678, sc-13681) ---------------------------------------------
+
+    /// A candle MOSS TTS descriptor shape at the inference pin: it advertises the single caller-staged
+    /// `codec` component (`candle-audio-moss-tts` / `candle-audio-moss-tts-realtime` both declare
+    /// `required_components: &["codec"]`, `CODEC_COMPONENT_ID = "codec"`), which the worker resolves
+    /// from the model's codec coRequisite instead of the provider self-fetching it (sc-13662).
+    fn moss_descriptor(id: &'static str, family: &'static str) -> gen_core::ModelDescriptor {
+        gen_core::ModelDescriptor {
+            id,
+            family,
+            backend: "candle",
+            modality: gen_core::Modality::Audio,
+            capabilities: gen_core::Capabilities::default(),
+            required_components: &["codec"],
+        }
+    }
+
+    /// `(model_id, family, codec repo, pinned revision, a file in the codec snapshot)` — the exact codec
+    /// coRequisite each SHIPPED MOSS TTS entry pins (sc-13681). MOSS-TTSD's XY_Tokenizer is a single-file
+    /// checkpoint (resolves to a `File`); MOSS-TTS-Realtime's MOSS-Audio-Tokenizer is a multi-file
+    /// snapshot directory (resolves to a `Dir`). Binds these tests to the LIVE `builtin.models.jsonc`, so
+    /// a dropped codec coRequisite or a `componentId` that stops matching `required_components: ["codec"]`
+    /// fails HERE, not silently at candle synth time.
+    const MOSS_CODEC_SNAPSHOTS: &[(&str, &str, &str, &str, &str)] = &[
+        (
+            "moss_ttsd_v05",
+            "moss_ttsd",
+            "OpenMOSS-Team/XY_Tokenizer_TTSD_V0",
+            "c83433728e698ed0698e88cb5096bc221fb8f8c5",
+            "xy_tokenizer.ckpt",
+        ),
+        (
+            "moss_tts_realtime",
+            "moss_tts_realtime",
+            "OpenMOSS-Team/MOSS-Audio-Tokenizer",
+            "3cd226ba2947efa357ef453bcad111b6eafba782",
+            "config.json",
+        ),
+    ];
+
+    #[test]
+    fn moss_codec_co_requisite_resolves_from_every_live_moss_tts_entry() {
+        for &(model_id, family, repo, revision, file) in MOSS_CODEC_SNAPSHOTS {
+            let _env = isolate_hf_cache();
+            let data_dir = tempfile::tempdir().expect("temp data dir");
+            stage_snapshot_file(data_dir.path(), repo, revision, file);
+
+            let components = resolve_co_requisites(
+                &moss_descriptor(model_id, family),
+                &builtin_manifest_entry(model_id),
+                &settings_at(data_dir.path().to_path_buf()),
+            )
+            .unwrap_or_else(|error| {
+                panic!("{model_id}: the codec is staged, so resolution must succeed: {error:?}")
+            });
+
+            // The single key is EXACTLY the descriptor's advertised `codec` id — matched on the
+            // manifest's explicit `componentId`, never inferred from the repo name (sc-13679).
+            let keys: Vec<&str> = components.keys().map(String::as_str).collect();
+            assert_eq!(
+                keys,
+                vec!["codec"],
+                "{model_id}: the component map must carry exactly the `codec` id"
+            );
+            assert!(
+                components.contains_key("codec"),
+                "{model_id}: the `codec` component resolves to its staged snapshot"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_moss_codec_fails_with_an_actionable_error_naming_codec_and_repo() {
+        for &(model_id, family, repo, _revision, _file) in MOSS_CODEC_SNAPSHOTS {
+            let _env = isolate_hf_cache();
+            let data_dir = tempfile::tempdir().expect("temp data dir");
+            // The codec snapshot is ABSENT — install-state gates on the hard codec coRequisite, so the
+            // job must fail HERE (before the engine load), not with a mid-render hub fetch.
+            let error = resolve_co_requisites(
+                &moss_descriptor(model_id, family),
+                &builtin_manifest_entry(model_id),
+                &settings_at(data_dir.path().to_path_buf()),
+            )
+            .expect_err("a missing codec must fail the job before the engine load");
+
+            let WorkerError::InvalidPayload(message) = error else {
+                panic!("{model_id}: a missing codec must surface as InvalidPayload, got {error:?}");
+            };
+            assert!(
+                message.contains("codec") && message.contains(repo),
+                "{model_id}: the error must name the `codec` component + its repo BEFORE engine load, \
+                 got: {message}"
+            );
+        }
+    }
 }
