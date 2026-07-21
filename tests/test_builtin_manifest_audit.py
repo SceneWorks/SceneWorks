@@ -304,6 +304,146 @@ def test_download_default_guard_rejects_an_ambiguous_platform_mutation():
     assert _duplicate_default_downloads(manifest) == ["wan_2_2:windows", "wan_2_2:linux"]
 
 
+# ---------------------------------------------------------------------------
+# F-029 download-revision pin authority (sc-13659).
+#
+# A download entry's optional `revision` is the immutable-commit pin the worker
+# fetches into `snapshots/<sha>/`; absent means the worker resolves `main`. The
+# JSON Schema constrains its FORMAT (`^[0-9a-f]{40}$`), but the
+# "coRequisite: true REQUIRES a revision" invariant lives here (and in the Rust
+# builtin_manifests.rs backstop) because JSON Schema cannot grandfather the
+# sc-13591 pin migration still in flight.
+# ---------------------------------------------------------------------------
+
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+# `(model_id, repo)` co-requisite download pairs whose F-029 pin migration is
+# still IN FLIGHT under sc-13591. Each is a KNOWN, tracked gap: the immutable
+# commit SHA lives in the sc-13591 inventory but is applied by a later per-family
+# story, not sc-13659 (schema + plumbing + enforcement only — it must not add
+# real pins). A brand-new co-requisite may NOT join this list; pin its `revision`
+# instead. Kept in lockstep with the identical Rust allowlist in
+# crates/sceneworks-core/src/builtin_manifests.rs.
+_COREQUISITE_REVISION_MIGRATION_PENDING: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("qwen_image", "SceneWorks/qwen-image-2512-fun-controlnet-union"),
+        ("ltx_2_3", "SceneWorks/ltx-2.3-mlx"),
+        ("ltx_2_3_eros", "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments"),
+        ("wan_2_2_t2v_14b", "lightx2v/Wan2.2-Lightning"),
+        ("wan_2_2_i2v_14b", "lightx2v/Wan2.2-Lightning"),
+        ("pid_qwenimage", "SceneWorks/gemma-2-2b-it"),
+        ("pid_flux", "SceneWorks/gemma-2-2b-it"),
+        ("pid_flux2", "SceneWorks/gemma-2-2b-it"),
+        ("pid_sdxl", "SceneWorks/gemma-2-2b-it"),
+    }
+)
+
+
+def _corequisite_revision_gaps(manifest: dict) -> set[tuple[str, str]]:
+    """`(model_id, repo)` co-requisite pairs NOT pinned to a full 40-hex SHA."""
+    gaps: set[tuple[str, str]] = set()
+    for model in manifest["models"]:
+        for download in model.get("downloads", []):
+            if download.get("coRequisite") is not True:
+                continue
+            revision = download.get("revision")
+            if not (isinstance(revision, str) and _FULL_SHA_RE.match(revision)):
+                gaps.add((model["id"], download.get("repo", "")))
+    return gaps
+
+
+def test_corequisite_downloads_pin_a_full_sha_revision():
+    """F-029 (sc-13659): every coRequisite download pins an immutable 40-hex commit.
+
+    A co-requisite is a FETCH-ALL companion the runtime resolves offline via a
+    pinned-SHA `hf_get_pinned` reading `snapshots/<sha>/`; leaving it on `main`
+    lands the wrong snapshot and hard-fails offline. The only tolerated gaps are
+    the sc-13591 pins still being migrated by later stories.
+    """
+    manifest = _load_builtin_models_manifest()
+    unexpected = _corequisite_revision_gaps(manifest) - _COREQUISITE_REVISION_MIGRATION_PENDING
+    assert not unexpected, (
+        "co-requisite downloads must pin a 40-hex commit SHA (F-029, sc-13659); these are "
+        f"unpinned and NOT tracked for the sc-13591 migration: {sorted(unexpected)}"
+    )
+
+
+def test_corequisite_revision_migration_allowlist_has_no_stale_entries():
+    """Self-cleaning guard: an allowlist row that no longer names an unpinned
+    co-requisite must be deleted, so pinning one in a later sc-13591 story forces
+    its removal instead of the allowlist silently excusing an already-compliant
+    entry (a test asserting a default is a false green — the allowlist must shrink).
+    """
+    manifest = _load_builtin_models_manifest()
+    stale = _COREQUISITE_REVISION_MIGRATION_PENDING - _corequisite_revision_gaps(manifest)
+    assert not stale, (
+        "stale F-029 migration allowlist entries (now pinned or removed) must be deleted from "
+        f"_COREQUISITE_REVISION_MIGRATION_PENDING: {sorted(stale)}"
+    )
+
+
+def test_corequisite_revision_guard_flags_a_new_unpinned_corequisite():
+    """Mutation guard: the rule is LIVE for new entries, not decoration. A brand-new
+    co-requisite with no revision (and not on the migration allowlist) is caught.
+    """
+    manifest = _load_builtin_models_manifest()
+    kokoro = next(model for model in manifest["models"] if model["id"] == "kokoro_82m")
+    kokoro.setdefault("downloads", []).append(
+        {"provider": "huggingface", "repo": "example/new-corequisite", "coRequisite": True}
+    )
+    new_pair = ("kokoro_82m", "example/new-corequisite")
+    assert new_pair in _corequisite_revision_gaps(manifest)
+    assert new_pair not in _COREQUISITE_REVISION_MIGRATION_PENDING
+    unexpected = _corequisite_revision_gaps(manifest) - _COREQUISITE_REVISION_MIGRATION_PENDING
+    assert new_pair in unexpected
+
+
+def _model_entry_with_download(download: dict) -> dict:
+    """A minimal schema-valid model entry carrying a single `downloads` entry, for
+    exercising the download-item schema in isolation."""
+    return {
+        "id": "sample_pinned_model",
+        "name": "Sample Pinned Model",
+        "type": "image",
+        "downloads": [download],
+    }
+
+
+def test_schema_pins_download_revision_to_a_40hex_sha():
+    """sc-13659: the authoring schema constrains `revision` to a full 40-hex commit
+    (the F-029 pin authority), accepting a valid SHA and rejecting a branch/tag/
+    short/uppercase/wrong-length value via the `pattern` keyword.
+    """
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator.check_schema(schema)
+    validator = jsonschema.Draft202012Validator(schema)
+
+    def revision_errors(revision: str) -> list:
+        manifest = {
+            "schemaVersion": 1,
+            "models": [
+                _model_entry_with_download(
+                    {
+                        "provider": "huggingface",
+                        "repo": "namespace/model",
+                        "files": [],
+                        "revision": revision,
+                    }
+                )
+            ],
+        }
+        return list(validator.iter_errors(manifest))
+
+    assert not revision_errors("a" * 40), "a full 40-hex SHA must satisfy the schema"
+    for bad in ("main", "v1.0", "abc123", "A" * 40, "g" * 40, "a" * 39, "a" * 41):
+        errors = revision_errors(bad)
+        # Discriminate on the failing keyword so a full schema revert (dropping the
+        # pattern) turns this red rather than passing on some unrelated error.
+        assert any(error.validator == "pattern" for error in errors), (
+            f"revision {bad!r} must be rejected by the 40-hex pattern"
+        )
+
+
 def test_manifest_constraint_contract_registry_is_complete_and_live():
     """sc-12304: constraint declarations may not silently become decoration.
 
