@@ -123,7 +123,7 @@ fn inpaint(model: &SdxlEdit, source: &Image, mask: &Image, w: u32, h: u32, use_p
 }
 
 #[test]
-#[ignore = "real-weight GPU smoke; needs the SDXL base + NC pid_sdxl + gemma-2-2b-it snapshots (cap=120)"]
+#[ignore = "real-weight GPU smoke; needs the SDXL base + NC pid_sdxl + gemma-2-2b-it snapshots + the CLIP-L/bigG tokenizer + fp16-fix VAE component dirs (SDXL_TOKENIZER_CLIP_{L,BIGG}_DIR / SDXL_VAE_FP16_FIX_DIR) (cap=120)"]
 fn sdxl_edit_pid_gpu_smoke() {
     let base = env_path("SDXL_PID_BASE");
     assert!(
@@ -144,8 +144,14 @@ fn sdxl_edit_pid_gpu_smoke() {
     let mask = center_box_mask(w, h);
 
     println!("[smoke] loading SdxlEdit from {} ...", base.display());
+    // SDXL's three caller-staged components (epic 13657, sc-13682): CLIP-L/bigG tokenizers + fp16-fix VAE
+    // the provider now requires (never self-fetched). Staged from env dirs (a `tokenizer.json`/`.safetensors`
+    // file or its dir both resolve), mirroring the inference-side edit harness.
     let model = SdxlEdit::load(&SdxlEditPaths {
         sdxl_base: base.clone(),
+        tokenizer_clip_l: WeightsSource::Dir(env_path("SDXL_TOKENIZER_CLIP_L_DIR")),
+        tokenizer_clip_bigg: WeightsSource::Dir(env_path("SDXL_TOKENIZER_CLIP_BIGG_DIR")),
+        vae_fp16_fix: WeightsSource::Dir(env_path("SDXL_VAE_FP16_FIX_DIR")),
     })
     .expect("load candle SdxlEdit");
     let model = model

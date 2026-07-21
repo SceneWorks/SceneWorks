@@ -3692,4 +3692,132 @@ mod co_requisite_tests {
             "no components are staged for a model that requires none"
         );
     }
+
+    // --- SDXL shared components (epic 13657, sc-13682) -----------------------------------------------
+
+    /// The candle `sdxl` generator descriptor shape at the inference pin: it advertises the three
+    /// caller-staged SDXL components the edit / IP-Adapter / InstantID / trainer providers also consume.
+    fn sdxl_descriptor() -> gen_core::ModelDescriptor {
+        gen_core::ModelDescriptor {
+            id: "sdxl",
+            family: "sdxl",
+            backend: "candle",
+            modality: gen_core::Modality::Image,
+            capabilities: gen_core::Capabilities::default(),
+            required_components: &["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"],
+        }
+    }
+
+    /// The LIVE `builtin.models.jsonc` entry for `model_id` — binds these tests to the SHIPPED manifest so
+    /// a dropped/renamed SDXL co-requisite (or a `componentId` that stops matching the descriptor's
+    /// `required_components`) fails HERE, not silently at candle render time.
+    fn builtin_manifest_entry(model_id: &str) -> Value {
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .expect("builtin.models.jsonc present");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin.models.jsonc parses");
+        manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
+            .cloned()
+            .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
+    }
+
+    /// `(repo, pinned revision, single file)` for each of the three SDXL components — the exact
+    /// snapshots the manifest co-requisites pin (sc-13682, sc-13658 registry).
+    const SDXL_COMPONENT_SNAPSHOTS: &[(&str, &str, &str)] = &[
+        (
+            "openai/clip-vit-large-patch14",
+            "32bd64288804d66eefd0ccbe215aa642df71cc41",
+            "tokenizer.json",
+        ),
+        (
+            "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+            "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+            "tokenizer.json",
+        ),
+        (
+            "madebyollin/sdxl-vae-fp16-fix",
+            "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+            "diffusion_pytorch_model.safetensors",
+        ),
+    ];
+
+    #[test]
+    fn sdxl_co_requisites_resolve_all_three_from_every_live_candle_sdxl_entry() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        for (repo, revision, file) in SDXL_COMPONENT_SNAPSHOTS {
+            stage_snapshot_file(data_dir.path(), repo, revision, file);
+        }
+
+        // Every candle-SDXL base + InstantID declares the SAME three coRequisites by `componentId`, so
+        // resolving the candle `sdxl` descriptor against each live entry must map ALL THREE.
+        for model_id in [
+            "sdxl",
+            "realvisxl",
+            "realvisxl_lightning",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+            "instantid_realvisxl",
+        ] {
+            let components = resolve_co_requisites(
+                &sdxl_descriptor(),
+                &builtin_manifest_entry(model_id),
+                &settings_at(data_dir.path().to_path_buf()),
+            )
+            .unwrap_or_else(|error| {
+                panic!("{model_id}: all three components are staged, so resolution must succeed: {error:?}")
+            });
+
+            // The map keys are EXACTLY the descriptor's advertised ids (order-independent — a BTreeMap).
+            let mut keys: Vec<&str> = components.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            let mut want = sdxl_descriptor().required_components.to_vec();
+            want.sort_unstable();
+            assert_eq!(
+                keys, want,
+                "{model_id}: the component map keys must match the descriptor's required_components"
+            );
+            // Each single-file component resolves to a `File` at the staged snapshot path.
+            assert!(
+                matches!(
+                    components.get("vae_fp16_fix"),
+                    Some(gen_core::WeightsSource::File(_))
+                ),
+                "{model_id}: vae_fp16_fix resolves to its single-file snapshot"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_sdxl_component_fails_with_an_actionable_error_naming_id_and_repo() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        // Stage only the two tokenizers; the fp16-fix VAE snapshot is ABSENT.
+        for (repo, revision, file) in &SDXL_COMPONENT_SNAPSHOTS[..2] {
+            stage_snapshot_file(data_dir.path(), repo, revision, file);
+        }
+
+        let error = resolve_co_requisites(
+            &sdxl_descriptor(),
+            &builtin_manifest_entry("sdxl"),
+            &settings_at(data_dir.path().to_path_buf()),
+        )
+        .expect_err("a missing SDXL component must fail the job before the engine load");
+
+        let WorkerError::InvalidPayload(message) = error else {
+            panic!("a missing component must surface as user-facing InvalidPayload, got {error:?}");
+        };
+        assert!(
+            message.contains("vae_fp16_fix") && message.contains("madebyollin/sdxl-vae-fp16-fix"),
+            "the error must name the missing component id + repo BEFORE engine load, got: {message}"
+        );
+    }
 }

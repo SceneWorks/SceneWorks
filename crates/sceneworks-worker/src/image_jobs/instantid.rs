@@ -850,6 +850,14 @@ async fn generate_instantid_stream(
         allow(unused_variables)
     )]
     let face_likeness_source_ref = reference_id.to_owned();
+    // InstantID reuses the candle SDXL conditioner + VAE (candle-gen-instantid, sc-13663), so it stages
+    // the SAME three SDXL components (epic 13657, sc-13682): CLIP-L/bigG tokenizers + fp16-fix VAE.
+    // Resolved before the blocking closure (a missing one fails fast) and moved in. `InstantIdPaths`
+    // carries these fields ONLY on the candle build — the macOS MLX InstantID lane is self-contained — so
+    // both the resolve and the struct fields are candle-gated.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let (tokenizer_clip_l, tokenizer_clip_bigg, vae_fp16_fix) =
+        resolve_sdxl_components(&request.model_manifest_entry, settings)?;
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "instantid",
@@ -864,6 +872,13 @@ async fn generate_instantid_stream(
                 // pin now 19d5522, candle pin c98609f). Populated for BOTH backends — superseding the
                 // earlier candle-only `Vec::new()` stopgap from #730.
                 adapters,
+                // The three caller-staged SDXL components (candle only — see above).
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                tokenizer_clip_l,
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                tokenizer_clip_bigg,
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                vae_fp16_fix,
             };
             let model = InstantId::load(&paths)
                 .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;

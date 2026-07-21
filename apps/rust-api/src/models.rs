@@ -1733,6 +1733,77 @@ mod download_receipt_tests {
             installed.missing_required_files
         );
     }
+
+    /// sc-13682: the three SDXL shared components (CLIP-L/bigG tokenizers + fp16-fix VAE) are declared as
+    /// candle-only (`platforms: [windows, linux]`) hard co-requisites on every candle-SDXL base +
+    /// InstantID. On macOS `retain_downloads_for_os` strips them, so the self-contained MLX turnkey's
+    /// install state does NOT gate on them; on the candle OSes all three are retained and gate the entry.
+    /// Binds to the LIVE builtin manifest so a lost platform tag or a dropped component fails here.
+    #[test]
+    fn sdxl_shared_components_are_candle_only_and_gate_install_state_off_macos() {
+        use std::collections::BTreeSet;
+
+        fn builtin_models_entry(model_id: &str) -> Value {
+            let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")
+                .map(|(_, contents)| *contents)
+                .expect("builtin.models.jsonc present");
+            let manifest: Value =
+                serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                    .expect("builtin.models.jsonc parses");
+            manifest["models"]
+                .as_array()
+                .expect("models array")
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
+                .cloned()
+                .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
+        }
+
+        let want: BTreeSet<String> = ["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"]
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect();
+
+        for model_id in [
+            "sdxl",
+            "realvisxl",
+            "realvisxl_lightning",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+            "instantid_realvisxl",
+        ] {
+            let entry = builtin_models_entry(model_id);
+
+            // macOS: the candle-only components are filtered out, so the MLX turnkey gates on NO coReq.
+            let mut macos = entry.clone();
+            retain_downloads_for_os(&mut macos, "macos");
+            assert!(
+                model_co_requisite_downloads(&macos).is_empty(),
+                "{model_id}: the SDXL CLIP/VAE components must not gate the macOS MLX turnkey install state",
+            );
+
+            // Windows + Linux: all three components are retained and gate the candle entry.
+            for os in ["windows", "linux"] {
+                let mut candle = entry.clone();
+                retain_downloads_for_os(&mut candle, os);
+                let ids: BTreeSet<String> = model_co_requisite_downloads(&candle)
+                    .iter()
+                    .filter_map(|download| {
+                        download
+                            .get("componentId")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .collect();
+                assert_eq!(
+                    ids, want,
+                    "{model_id} on {os}: the candle SDXL entry must gate on all three shared components",
+                );
+            }
+        }
+    }
 }
 
 // Resolve a model's install/cache state from its (optional) download source. A
