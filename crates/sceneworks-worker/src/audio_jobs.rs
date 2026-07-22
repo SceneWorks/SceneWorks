@@ -3695,6 +3695,8 @@ mod tests {
     /// ```text
     /// SCENEWORKS_MOSS_TTS_AR_DIR=~/.cache/huggingface/hub/models--OpenMOSS-Team--MOSS-TTS-Realtime/\
     ///   snapshots/6acbc7f161a0db71c291f2d0aaa9eee59334cab2 \
+    /// SCENEWORKS_MOSS_TTS_CODEC_DIR=~/.cache/huggingface/hub/models--OpenMOSS-Team--MOSS-Audio-Tokenizer/\
+    ///   snapshots/3cd226ba2947efa357ef453bcad111b6eafba782 \
     /// HF_HUB_OFFLINE=1 \
     /// cargo test --release -p sceneworks-worker -- --ignored --nocapture \
     ///   moss_tts_realtime_streams_a_real_clip
@@ -3710,11 +3712,23 @@ mod tests {
         let ar_dir = std::env::var("SCENEWORKS_MOSS_TTS_AR_DIR").expect(
             "set SCENEWORKS_MOSS_TTS_AR_DIR to the cached MOSS-TTS-Realtime snapshot directory",
         );
+        // moss_tts_realtime advertises `required_components: ["codec"]` (sc-13681); on the self-fetch-free
+        // inference pin (sc-13818) the loader HARD-FAILS unless the MOSS-Audio-Tokenizer codec is staged in
+        // the LoadSpec — it no longer self-fetches it. The codec is a multi-file component, so it resolves
+        // to `WeightsSource::Dir` (the whole snapshot dir), matching production `resolve_co_requisites`
+        // (model_jobs.rs:1685). Silently broken by the pin bump because the smoke is `#[ignore]`d.
+        let codec_dir = std::env::var("SCENEWORKS_MOSS_TTS_CODEC_DIR").expect(
+            "set SCENEWORKS_MOSS_TTS_CODEC_DIR to the cached MOSS-Audio-Tokenizer snapshot directory \
+             (moss_tts_realtime's required `codec` component)",
+        );
         let generator = crate::inference_runtime::load_audio(
             "moss_tts_realtime",
-            &LoadSpec::new(WeightsSource::Dir(PathBuf::from(&ar_dir))),
+            &LoadSpec::new(WeightsSource::Dir(PathBuf::from(&ar_dir)))
+                .with_component("codec", WeightsSource::Dir(PathBuf::from(&codec_dir))),
         )
-        .expect("load the real moss_tts_realtime generator from the cached snapshot");
+        .expect(
+            "load the real moss_tts_realtime generator from the cached snapshot + staged codec",
+        );
         assert!(
             generator.descriptor().capabilities.supports_streaming,
             "moss_tts_realtime must advertise supports_streaming"
@@ -3843,6 +3857,8 @@ mod tests {
     ///   snapshots/8527b9136b6afefe2252ae597cecea2e80e7ebeb \
     /// SCENEWORKS_CHATTERBOX_VE_FILE=~/.cache/huggingface/hub/models--ResembleAI--chatterbox/\
     ///   snapshots/5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18/ve.safetensors \
+    /// SCENEWORKS_MOSS_TTSD_CODEC_FILE=~/.cache/huggingface/hub/models--OpenMOSS-Team--XY_Tokenizer_TTSD_V0/\
+    ///   snapshots/c83433728e698ed0698e88cb5096bc221fb8f8c5/xy_tokenizer.ckpt \
     /// HF_HUB_OFFLINE=1 \
     /// cargo test --release -p sceneworks-worker -- --ignored --nocapture \
     ///   moss_ttsd_renders_a_multi_speaker_dialogue
@@ -3864,12 +3880,22 @@ mod tests {
         let ve_file = std::env::var("SCENEWORKS_CHATTERBOX_VE_FILE").expect(
             "set SCENEWORKS_CHATTERBOX_VE_FILE to the cached chatterbox ve.safetensors path",
         );
+        // moss_ttsd_v05 advertises `required_components: ["codec"]` (sc-13681); on the self-fetch-free
+        // inference pin (sc-13818) the loader HARD-FAILS unless the XY_Tokenizer codec is staged in the
+        // LoadSpec — it no longer self-fetches it. Stage it exactly as production `resolve_co_requisites`
+        // does: a single-file co-requisite (`xy_tokenizer.ckpt`) resolves to `WeightsSource::File`
+        // (model_jobs.rs:1684). This was silently broken by the pin bump because the smoke is `#[ignore]`d.
+        let codec_file = std::env::var("SCENEWORKS_MOSS_TTSD_CODEC_FILE").expect(
+            "set SCENEWORKS_MOSS_TTSD_CODEC_FILE to the cached XY_Tokenizer_TTSD_V0 xy_tokenizer.ckpt path \
+             (moss_ttsd_v05's required `codec` component)",
+        );
 
         let generator = crate::inference_runtime::load_audio(
             "moss_ttsd_v05",
-            &LoadSpec::new(WeightsSource::Dir(PathBuf::from(&ar_dir))),
+            &LoadSpec::new(WeightsSource::Dir(PathBuf::from(&ar_dir)))
+                .with_component("codec", WeightsSource::File(PathBuf::from(&codec_file))),
         )
-        .expect("load the real moss_ttsd_v05 generator from the cached snapshot");
+        .expect("load the real moss_ttsd_v05 generator from the cached snapshot + staged codec");
         assert!(
             generator.descriptor().capabilities.supports_multi_speaker,
             "moss_ttsd_v05 must advertise supports_multi_speaker"

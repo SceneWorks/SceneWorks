@@ -1587,21 +1587,11 @@ fn pulid_flux_real_weights_holds_identity() {
     for p in [&pulid_adapter, &eva, &scrfd, &arcface, &bisenet] {
         assert!(p.exists(), "missing PuLID weight: {}", p.display());
     }
-    // Fill the engine's env-var weight seam from the local caches (exactly what
-    // `generate_pulid_flux_stream` does before the cached load). Through the crate-wide seam so the
-    // three vars are RESTORED on drop — the bare `set_var`s this replaces leaked them into every
-    // later test in the process, and took no lock while doing it (sc-12380).
-    let _env = EnvVars::set(&[
-        (
-            "PULID_FLUX_WEIGHTS",
-            pulid_adapter.to_str().expect("utf-8 pulid adapter path"),
-        ),
-        ("PULID_EVA_WEIGHTS", eva.to_str().expect("utf-8 eva path")),
-        (
-            "PULID_FACE_WEIGHTS_DIR",
-            bundle.to_str().expect("utf-8 face bundle dir"),
-        ),
-    ]);
+    // The self-fetch-free `pulid_flux` loader (sc-13818 pin) reads the PuLID adapter + EVA tower +
+    // native face stack from the typed `LoadSpec::identity` sub-slots — the process-global `PULID_*`
+    // env / HF-cache fallback was REMOVED (the loader now errors "no PULID_* env or HF-cache fallback"
+    // if identity is unset). Stage them on the spec below, mirroring `generate_pulid_flux_stream`
+    // (pulid.rs); nothing here mutates env.
 
     // Reference face: a portrait PNG (`SCENEWORKS_TEST_FACE`) if present, else the real face image
     // embedded in the face-align golden (`<bundle>/face_align_goldens.safetensors`, the same
@@ -1661,14 +1651,16 @@ fn pulid_flux_real_weights_holds_identity() {
     // Load via the worker's registry seam at the production default quant (Q8 — near-lossless for
     // PuLID identity per engine sc-3076, the manifest `mlx.quantize`) + generate with the worker's
     // request mapping. The PuLID conditioning (EVA/IDFormer/CA) stays f32 regardless of quant.
-    let generator = load_engine(
-        "pulid_flux",
-        flux_base,
-        Some(gen_core::Quant::Q8),
-        Vec::new(),
-        None,
-    )
-    .unwrap();
+    // Stage the three identity sub-slots exactly as production does (pulid.rs:184): encoder =
+    // File(PuLID adapter), eva = File(EVA tower), face_dir = Dir(the native face stack — scrfd +
+    // arcface + bisenet). They ride the LoadSpec into the load; no env involved.
+    let mut spec = load_spec(flux_base, Some(gen_core::Quant::Q8), Vec::new(), None);
+    spec.identity = Some(IdentityWeights {
+        encoder: Some(WeightsSource::File(pulid_adapter.clone())),
+        eva: Some(WeightsSource::File(eva.clone())),
+        face_dir: Some(WeightsSource::Dir(bundle.clone())),
+    });
+    let generator = load_control_engine("pulid_flux", &spec).unwrap();
     let cancel = gen_core::CancelFlag::new();
     let req = gen_core::GenerationRequest {
         prompt: "a portrait photo of a person, headshot, looking at the camera".to_owned(),
