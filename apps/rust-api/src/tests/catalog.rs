@@ -95,6 +95,7 @@ fn repo_slug_functions_match_cross_language_contract() {
 
 #[test]
 fn mlx_catalog_status_reports_turnkey_and_conversion_states() {
+    let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().join("data");
 
@@ -1348,6 +1349,7 @@ async fn imported_model_catalog_uses_paths_model_install_marker() {
 
 #[tokio::test]
 async fn downloadable_model_catalog_uses_huggingface_cache_install_state() {
+    let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -1445,6 +1447,7 @@ async fn downloadable_model_catalog_uses_huggingface_cache_install_state() {
 
 #[tokio::test]
 async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
+    let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -1537,6 +1540,7 @@ async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components
     // doesn't use, which have no files on disk by design. The health check must
     // not report them as missing, otherwise a fully-installed model is flagged
     // incomplete on every platform.
+    let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -1635,6 +1639,7 @@ async fn downloadable_model_catalog_treats_processor_components_as_weightless() 
     // The health check must not demand `processor/config.json` + `processor/<weights>`
     // (which the repo never contains), otherwise a fully-installed model is flagged
     // incomplete forever and the "Fix" download can never satisfy it.
+    let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -1732,6 +1737,7 @@ async fn downloadable_model_catalog_reports_incomplete_cache_for_installed_manag
     // A model can have SceneWorks' managed completion marker while its Hugging
     // Face cache snapshot is partial. Keep those states independent so the UI
     // can offer "Fix" instead of disabling the primary action as "Ready".
+    let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let repo = "owner/mixed";
@@ -1920,6 +1926,7 @@ async fn quant_matrix_model_with_single_tier_reads_installed_not_incomplete() {
     // valid tier (here q8, NOT the default q4) previously tripped the top-level default-tier check
     // and surfaced a false "Cached files are incomplete" + Fix button. The card must read installed,
     // never incomplete/repairable, and the per-tier states must show q8 installed / q4+bf16 missing.
+    let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -2020,6 +2027,7 @@ async fn quant_matrix_empty_cache_skeleton_reads_missing_not_incomplete() {
     // skeleton (bare blobs/, no snapshots) PLUS a stale repo-level completion marker. That must read
     // as a clean not-installed model — NOT a false "installed" (from the marker) and NOT the confusing
     // "Cached files are incomplete: snapshots/<revision>" repair banner.
+    let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -2109,6 +2117,7 @@ async fn downloadable_model_catalog_accepts_weightless_component_with_nonstandar
     // "the directory exists and holds a file", not a hard-coded config filename.
     // A processor that ships an unexpected config name must still read complete,
     // so future class variants can't re-trigger a permanent false "incomplete".
+    let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     single_model_manifest(
@@ -2150,6 +2159,7 @@ async fn downloadable_model_catalog_accepts_weightless_component_with_nonstandar
 async fn downloadable_model_catalog_flags_empty_weightless_component_dir() {
     // The hardening must not silently pass everything: a genuinely absent/empty
     // weightless component directory still reports incomplete (partial download).
+    let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     single_model_manifest(
@@ -2445,6 +2455,7 @@ async fn model_catalog_gates_install_state_on_co_requisite() {
     // sc-9696: the entry is "installed" only when the primary AND every co-requisite are cached.
     // Primary present but the gemma-2-2b-it caption encoder missing → not-installed + repairable, so
     // the web PiD toggle stays hidden and the user still has a path to fetch the missing dependency.
+    let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -2531,6 +2542,7 @@ async fn model_catalog_gates_install_state_on_co_requisite() {
 
 #[tokio::test]
 async fn lora_catalog_uses_huggingface_cache_install_state() {
+    let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
