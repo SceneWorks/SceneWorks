@@ -1459,6 +1459,46 @@ mod tests {
         .expect("a snapshot dir")
     }
 
+    /// Resolve whichever packed tier subdir is on disk under a SenseNova turnkey `root` for the
+    /// real-weight smokes (sc-13968): prefer `q4/`, fall back to `q8/`. Both tiers ship the whole
+    /// unified backbone as a flat `q{4,8}/model.safetensors` (the `_fast` re-host also drops its
+    /// `distill_merged.json` marker in each). Hosts commonly cache only ONE tier — this dev box has
+    /// only `q8` for both `sensenova-u1-8b-mlx` and `-fast-mlx` — so pinning `q4/` made the smokes
+    /// panic before they could render. A `SCENEWORKS_SENSENOVA_FAST_TIER` override (the env name the
+    /// story fixed on) forces an exact tier subdir when set & non-empty; it governs BOTH sensenova
+    /// packed-tier smokes despite the `FAST` in its name. Panics with a `hf download` hint naming
+    /// `repo` when the selected / probed tiers carry no `model.safetensors`.
+    #[cfg(target_os = "macos")]
+    fn resolve_packed_tier_dir(root: &Path, repo: &str) -> PathBuf {
+        let has_packed = |dir: &Path| dir.join("model.safetensors").is_file();
+        if let Ok(raw) = std::env::var("SCENEWORKS_SENSENOVA_FAST_TIER") {
+            let tier = raw.trim();
+            if !tier.is_empty() {
+                let dir = root.join(tier);
+                assert!(
+                    has_packed(&dir),
+                    "SCENEWORKS_SENSENOVA_FAST_TIER={tier:?} selects {} but it has no packed \
+                     model.safetensors — download it: hf download {repo} --include '{tier}/*'",
+                    dir.display()
+                );
+                return dir;
+            }
+        }
+        // No override → prefer the distilled-default q4, fall back to the clean q8 (the tier this
+        // dev host actually caches; sc-13795 rendered q8).
+        for tier in ["q4", "q8"] {
+            let dir = root.join(tier);
+            if has_packed(&dir) {
+                return dir;
+            }
+        }
+        panic!(
+            "no packed q4/ or q8/ tier found under {} — download one (q4 is preferred when both \
+             are present): hf download {repo} --include 'q8/*'",
+            root.display()
+        );
+    }
+
     /// A synthetic RGB8 gradient (test source image).
     #[cfg(target_os = "macos")]
     fn gradient_image(width: u32, height: u32) -> Image {
@@ -1648,31 +1688,28 @@ mod tests {
     }
 
     /// sc-8771 on-device verify (MLX, epic 8506 Group-B): drive the ACTUAL packed worker seam against
-    /// the downloaded SceneWorks/sensenova-u1-8b-mlx **q4** turnkey tier. SenseNova-U1 is a unified MoT
-    /// (no separate TE/VAE) whose whole backbone packs into a flat `q4/model.safetensors`; the worker's
-    /// `standard_tier_subdir` (covered by `resolves_flat_unified_backbone_tiers`) resolves the `q4/`
-    /// subdir from the tier root, then `load_sensenova_model` loads it — the shared `load_raw` +
-    /// `T2iModel::from_weights` auto-detect the packed `.scales` sidecars (mlx-gen #623) and build the
-    /// quantized decoder stack with NO dense bf16 transient. A short think-mode interleave rollout then
-    /// renders a real image, proving the packed q4 tier both loads AND generates non-degenerately.
+    /// a downloaded SceneWorks/sensenova-u1-8b-mlx packed turnkey tier (q4 preferred, q8 fallback —
+    /// sc-13968). SenseNova-U1 is a unified MoT (no separate TE/VAE) whose whole backbone packs into a
+    /// flat `q{4,8}/model.safetensors`; the worker's `standard_tier_subdir` (covered by
+    /// `resolves_flat_unified_backbone_tiers`) resolves the packed subdir from the tier root, then
+    /// `load_sensenova_model` loads it — the shared `load_raw` + `T2iModel::from_weights` auto-detect
+    /// the packed `.scales` sidecars (mlx-gen #623) and build the quantized decoder stack with NO dense
+    /// bf16 transient. A short think-mode interleave rollout then renders a real image, proving the
+    /// packed tier both loads AND generates non-degenerately.
     /// Small 512² + 8 steps for speed (production is 1536²+/50 steps). Run on demand:
     /// `cargo test -p sceneworks-worker --lib -- --ignored sensenova_q4_tier_real_weights`.
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "real-weight MLX smoke; needs the SceneWorks/sensenova-u1-8b-mlx q4 tier cached + a Metal device"]
+    #[ignore = "real-weight MLX smoke; needs a SceneWorks/sensenova-u1-8b-mlx packed tier (q4 or q8) cached + a Metal device"]
     fn sensenova_q4_tier_real_weights_produces_image() {
-        // Resolve the packed `q4/` tier subdir from the turnkey root — the same selection the worker's
-        // `standard_tier_subdir` makes for a default job when only the q4 tier is installed (the q8
-        // default, sc-10726, clamps down to the sole installed tier here).
+        // Resolve whichever packed tier the host cached (sc-13968): prefer `q4/`, fall back to `q8/`
+        // (or the `SCENEWORKS_SENSENOVA_FAST_TIER` override). Like a production default job this clamps
+        // down to the sole installed tier (this dev box has only `q8`); it diverges only when BOTH are
+        // present — this smoke then exercises q4, whereas `standard_tier_subdir`'s default resolves q8
+        // (its fallback order is q8 → bf16 → q4).
         let root = hf_snapshot("models--SceneWorks--sensenova-u1-8b-mlx");
-        let q4_dir = root.join("q4");
-        assert!(
-            q4_dir.join("model.safetensors").is_file(),
-            "packed q4 tier not found at {} — download it: \
-             hf download SceneWorks/sensenova-u1-8b-mlx --include 'q4/*'",
-            q4_dir.display()
-        );
-        let (model, tokenizer) = load_sensenova_model(&q4_dir).expect("load packed q4 model");
+        let tier_dir = resolve_packed_tier_dir(&root, "SceneWorks/sensenova-u1-8b-mlx");
+        let (model, tokenizer) = load_sensenova_model(&tier_dir).expect("load packed model");
         let opts = T2iOptions {
             cfg_scale: 4.0,
             img_cfg_scale: 1.0,
@@ -1700,7 +1737,7 @@ mod tests {
             .expect("interleave_gen");
         assert!(
             !out.images.is_empty(),
-            "packed q4 tier should render >= 1 image"
+            "packed tier should render >= 1 image"
         );
         let decoded = decoded_to_image(&out.images[0]).expect("decode");
         assert_eq!(
@@ -1719,15 +1756,17 @@ mod tests {
             .sqrt();
         assert!(
             std > 10.0,
-            "packed q4 render looks degenerate (std {std:.2}, mean {mean:.2}) — possible NaN / all-black / flat decode"
+            "packed render at {} looks degenerate (std {std:.2}, mean {mean:.2}) — possible NaN / all-black / flat decode",
+            tier_dir.display()
         );
     }
 
     /// sc-8775 on-device verify (MLX, epic 8506 Group-B): the DISTILLED `_fast` variant's own packed
     /// re-host. `SceneWorks/sensenova-u1-8b-fast-mlx` ships the 8-step distill LoRA PRE-MERGED into the
-    /// generation path and then packed, so its `q4/model.safetensors` is a distinct checkpoint from the
-    /// base re-host. The worker's `standard_tier_subdir` resolves the flat `q4/` subdir identically to
-    /// the base (covered by `resolves_flat_unified_backbone_tiers`); `load_sensenova_model`'s shared
+    /// generation path and then packed, so its packed `q{4,8}/model.safetensors` is a distinct
+    /// checkpoint from the base re-host. The worker's `standard_tier_subdir` resolves the flat packed
+    /// subdir (q4 preferred, q8 fallback — sc-13968) identically to the base (covered by
+    /// `resolves_flat_unified_backbone_tiers`); `load_sensenova_model`'s shared
     /// `load_raw` + `T2iModel::from_weights` auto-detect the packed `.scales` sidecars and build the
     /// quantized decoder stack with the merged gen-path weights (NO dense transient, NO load-time
     /// merge). A short 8-NFE / CFG-1.0 T2I rollout — the distilled defaults — then renders a real image,
@@ -1738,23 +1777,21 @@ mod tests {
     /// `cargo test -p sceneworks-worker --lib -- --ignored sensenova_fast_q4_tier_real_weights`.
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "real-weight MLX smoke; needs the SceneWorks/sensenova-u1-8b-fast-mlx q4 tier cached + a Metal device"]
+    #[ignore = "real-weight MLX smoke; needs a SceneWorks/sensenova-u1-8b-fast-mlx packed tier (q4 or q8) cached + a Metal device"]
     fn sensenova_fast_q4_tier_real_weights_produces_image() {
         let root = hf_snapshot("models--SceneWorks--sensenova-u1-8b-fast-mlx");
-        let q4_dir = root.join("q4");
+        // Tier-flexible (sc-13968): prefer `q4/`, fall back to `q8/` (or the
+        // `SCENEWORKS_SENSENOVA_FAST_TIER` override), so the smoke runs on a host that cached only one
+        // tier. Both tiers ship the same flat packed checkpoint; q8 is the tier sc-13795 rendered.
+        let tier_dir = resolve_packed_tier_dir(&root, "SceneWorks/sensenova-u1-8b-fast-mlx");
+        // The distill LoRA is baked in; the marker rides WHICHEVER packed tier resolves, for
+        // provenance/loader gating (both `q4/` and `q8/` ship it).
         assert!(
-            q4_dir.join("model.safetensors").is_file(),
-            "packed fast q4 tier not found at {} — download it: \
-             hf download SceneWorks/sensenova-u1-8b-fast-mlx --include 'q4/*'",
-            q4_dir.display()
-        );
-        // The distill LoRA is baked in; the marker rides the tier for provenance/loader gating.
-        assert!(
-            q4_dir.join("distill_merged.json").is_file(),
+            tier_dir.join("distill_merged.json").is_file(),
             "pre-merged fast tier missing its distill_merged.json marker at {}",
-            q4_dir.display()
+            tier_dir.display()
         );
-        let (model, tokenizer) = load_sensenova_model(&q4_dir).expect("load packed fast q4 model");
+        let (model, tokenizer) = load_sensenova_model(&tier_dir).expect("load packed fast model");
         // Distilled defaults: 8 NFE at CFG 1.0 (the `_fast` variant's manifest defaults).
         let opts = T2iOptions {
             cfg_scale: 1.0,
@@ -1792,7 +1829,8 @@ mod tests {
             .sqrt();
         assert!(
             std > 10.0,
-            "packed fast q4 render looks degenerate (std {std:.2}, mean {mean:.2}) — possible NaN / all-black / flat decode or a bad distill merge"
+            "packed fast render at {} looks degenerate (std {std:.2}, mean {mean:.2}) — possible NaN / all-black / flat decode or a bad distill merge",
+            tier_dir.display()
         );
     }
 
