@@ -96,6 +96,15 @@ enum ImageRoute {
     /// MODEL_TABLE, so `mlx_available` would otherwise render it as plain Raw t2i (52-step true-CFG)
     /// and never accelerate. The t2i sibling of [`ImageRoute::KreaEdit`].
     KreaTurboOnRaw,
+    /// A Krea 2 **Raw** t2i job carrying an explicit `advanced.phases` list (epic 13879 S4, sc-13884)
+    /// → the multi-phase denoise driver: ONE Raw trajectory over ONE global sigma schedule, each phase
+    /// a contiguous step slice with its own guidance (per-phase CFG on/off) and its own active subset of
+    /// the job's load-time LoRA stack (per-phase toggling). Wins over [`ImageRoute::KreaTurboOnRaw`] and
+    /// the generic `Mlx` arm — an explicit phase list is the FINER-GRAINED control and takes precedence
+    /// over S3's whole-job turbo-on-Raw regime. Loads the `krea_2_raw` engine (the multi-phase driver
+    /// keys on that descriptor id), unlike S3 which swaps to `krea_2_turbo`. Reference/edit/pose/PiD
+    /// shapes are rejected loudly by the lane (multi-phase renders from pure noise).
+    KreaMultiPhase,
     InstantId,
     PulidFlux,
     SdxlAdvanced,
@@ -175,6 +184,15 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         Some(ImageRoute::Flux2Edit)
     } else if qwen_edit_available(request, settings) {
         Some(ImageRoute::QwenEdit)
+    } else if krea_multiphase_available(request, settings) {
+        // Krea 2 Raw t2i + an explicit `advanced.phases` list (epic 13879 S4, sc-13884) → the
+        // multi-phase denoise lane. Placed FIRST among the `krea_2_raw` lanes so an explicit phase list
+        // takes precedence over the S3 whole-job turbo-on-Raw regime (`krea_turbo_on_raw_available`
+        // below) AND the generic Raw t2i (`mlx_available`): multi-phase is the finer-grained control.
+        // Only claims `krea_2_raw` + a present `advanced.phases`, so every non-phases job is unaffected;
+        // the lane itself rejects edit/pose/reference/PiD shapes loudly (multi-phase renders from noise),
+        // so claiming a conflicting shape here surfaces a clear error rather than diverting it silently.
+        Some(ImageRoute::KreaMultiPhase)
     } else if krea_edit_available(request, settings) {
         // Krea 2 Raw Kontext-style edit (mode edit_image + a source) → the `krea_2_edit` engine
         // (epic 10871). Wins over the generic MLX arm below — `krea_2_raw` is in MODEL_TABLE, so
@@ -267,6 +285,9 @@ impl ImageRoute {
             // Turbo-on-Raw is plain per-image (like Krea edit + the base MLX path): `count` renders of
             // the base prompt, each its own seed. No angle/pose grouping.
             | ImageRoute::KreaTurboOnRaw
+            // Multi-phase (S4) is likewise plain per-image: `count` renders, each its own seed, driven
+            // through the phase plan. No angle/pose grouping.
+            | ImageRoute::KreaMultiPhase
             | ImageRoute::PoseControlBaseMissing
             | ImageRoute::PoseReject
             | ImageRoute::Mlx => request.count,

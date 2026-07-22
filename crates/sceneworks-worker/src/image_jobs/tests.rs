@@ -5315,6 +5315,300 @@ fn krea_turbo_on_raw_routes_only_with_accelerator_lora() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// sc-13884 (epic 13879 S4): Krea 2 Raw multi-phase denoise wiring.
+// ---------------------------------------------------------------------------
+
+// A `krea_2_raw` t2i job carrying an explicit `advanced.phases` list routes to the multi-phase lane —
+// AND takes precedence over the S3 turbo-on-Raw regime (an explicit phase list is the finer-grained
+// control). The over-routing guards: the SAME shape WITHOUT `advanced.phases` is UNCHANGED (plain Raw
+// t2i → `Mlx`; accelerator LoRA + no phases → `KreaTurboOnRaw`), so a non-phases job is never diverted.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_multiphase_routes_only_with_phases_and_takes_precedence_over_turbo() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    let model_path = dir.path().to_string_lossy().to_string();
+
+    // Raw t2i + an explicit `advanced.phases` list → the multi-phase lane.
+    let with_phases = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1,
+        "advanced": {
+            "modelPath": model_path.clone(),
+            "phases": [
+                { "steps": 20, "guidance": 3.5 },
+                { "steps": 8, "guidance": 0.0 }
+            ]
+        }
+    }));
+    assert_eq!(
+        resolve_image_route(&with_phases, &settings),
+        Some(ImageRoute::KreaMultiPhase),
+        "krea_2_raw t2i + advanced.phases must route to the multi-phase lane",
+    );
+
+    // Precedence over S3: the SAME job also carrying the accelerator LoRA still routes to multi-phase —
+    // an explicit phase list wins over the whole-job turbo-on-Raw regime.
+    let phases_and_accel = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1,
+        "loras": [{ "id": "krea2_turbo_accel", "family": "krea_2", "role": "accelerator" }],
+        "advanced": {
+            "modelPath": model_path.clone(),
+            "phases": [
+                { "steps": 20, "guidance": 3.5 },
+                { "steps": 8, "guidance": 0.0, "loras": [{ "index": 0, "weight": 1.0 }] }
+            ]
+        }
+    }));
+    assert_eq!(
+        resolve_image_route(&phases_and_accel, &settings),
+        Some(ImageRoute::KreaMultiPhase),
+        "an explicit advanced.phases list must take precedence over the S3 turbo-on-Raw lane",
+    );
+
+    // Over-routing guard 1: accelerator LoRA but NO phases → the S3 turbo-on-Raw lane, UNCHANGED.
+    let accel_no_phases = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1,
+        "loras": [{ "id": "krea2_turbo_accel", "family": "krea_2", "role": "accelerator" }],
+        "advanced": { "modelPath": model_path.clone() }
+    }));
+    assert_eq!(
+        resolve_image_route(&accel_no_phases, &settings),
+        Some(ImageRoute::KreaTurboOnRaw),
+        "an accelerator LoRA without advanced.phases must stay on the S3 turbo-on-Raw lane",
+    );
+
+    // Over-routing guard 2: plain Raw t2i, no phases → the generic `Mlx` (single-phase) lane, UNCHANGED.
+    let plain = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1,
+        "advanced": { "modelPath": model_path }
+    }));
+    assert_eq!(
+        resolve_image_route(&plain, &settings),
+        Some(ImageRoute::Mlx),
+        "a plain Raw t2i without advanced.phases must stay on the single-phase Mlx lane",
+    );
+}
+
+// The `advanced.phases` presence check drives the router gate: present + non-null ⇒ the lane claims the
+// job (even an empty array, so a malformed list fails loudly in the lane rather than being dropped);
+// absent or explicit null ⇒ unaffected.
+#[cfg(target_os = "macos")]
+#[test]
+fn request_has_multiphase_detects_presence() {
+    let with = request(json!({ "model": "krea_2_raw", "advanced": { "phases": [] } }));
+    assert!(
+        request_has_multiphase(&with),
+        "an empty phases array is still 'present'"
+    );
+    let without = request(json!({ "model": "krea_2_raw", "advanced": {} }));
+    assert!(!request_has_multiphase(&without));
+    let null = request(json!({ "model": "krea_2_raw", "advanced": { "phases": null } }));
+    assert!(
+        !request_has_multiphase(&null),
+        "an explicit null is not 'present'"
+    );
+}
+
+// A valid `advanced.phases` parses into the SceneWorks plan with concrete steps / guidance / lora
+// selectors, and `build_generation_phases` maps that plan to gen-core `phases` VERBATIM — each phase's
+// lora `index` becomes `PhaseAdapter.adapter` (the index into `LoadSpec::adapters`), `weight`/`steps`/
+// `guidance` pass through. Pinned to concrete values so it discriminates a mis-map.
+#[cfg(target_os = "macos")]
+#[test]
+fn multiphase_parses_and_maps_to_gen_core_phases() {
+    // Two job LoRAs → the load-time adapter stack the phases reference by index (0 and 1).
+    let req = request(json!({
+        "model": "krea_2_raw",
+        "loras": [
+            { "id": "style", "installedPath": "/style.safetensors" },
+            { "id": "turbo", "installedPath": "/turbo.safetensors" }
+        ],
+        "advanced": {
+            "phases": [
+                { "steps": 20, "guidance": 3.5 },
+                { "steps": 8, "guidance": 0.0, "loras": [{ "index": 1, "weight": 0.9 }, { "index": 0 }] }
+            ]
+        }
+    }));
+
+    let specs = parse_multiphase_specs(&req).expect("valid phases parse");
+    assert_eq!(
+        specs,
+        vec![
+            MultiPhaseSpec {
+                steps: 20,
+                guidance: Some(3.5),
+                loras: vec![]
+            },
+            MultiPhaseSpec {
+                steps: 8,
+                guidance: Some(0.0),
+                loras: vec![
+                    PhaseLoraRef {
+                        index: 1,
+                        weight: Some(0.9)
+                    },
+                    PhaseLoraRef {
+                        index: 0,
+                        weight: None
+                    },
+                ],
+            },
+        ],
+    );
+
+    // Mapping: SceneWorks plan → gen-core phases. Phase 0 is base-only (no adapters); phase 1 activates
+    // load-time adapter #1 @ 0.9 then #0 @ its load-time scale (weight None), in the listed order.
+    let phases = build_generation_phases(&specs);
+    assert_eq!(
+        phases,
+        vec![
+            gen_core::GenerationPhase {
+                steps: 20,
+                guidance: Some(3.5),
+                adapters: vec![]
+            },
+            gen_core::GenerationPhase {
+                steps: 8,
+                guidance: Some(0.0),
+                adapters: vec![
+                    gen_core::PhaseAdapter {
+                        adapter: 1,
+                        weight: Some(0.9)
+                    },
+                    gen_core::PhaseAdapter {
+                        adapter: 0,
+                        weight: None
+                    },
+                ],
+            },
+        ],
+    );
+
+    // A base-only phase list with a numeric-string step (matching the rest of the advanced knobs) and
+    // no loras key still parses; an absent `loras` is a base-only phase.
+    let base_only = request(json!({
+        "model": "krea_2_raw", "loras": [],
+        "advanced": { "phases": [{ "steps": "12" }] }
+    }));
+    let specs = parse_multiphase_specs(&base_only).expect("string steps + no loras parse");
+    assert_eq!(
+        specs,
+        vec![MultiPhaseSpec {
+            steps: 12,
+            guidance: None,
+            loras: vec![]
+        }]
+    );
+}
+
+// The parse rejects — loudly, with a clear message — exactly the shapes the engine rejects (plus the
+// SceneWorks-side lora-index bound + sanity caps), so a bad list fails fast before the heavy load.
+#[cfg(target_os = "macos")]
+#[test]
+fn multiphase_parse_rejects_malformed_lists() {
+    let with_two_loras = |phases: serde_json::Value| {
+        request(json!({
+            "model": "krea_2_raw",
+            "loras": [
+                { "id": "a", "installedPath": "/a.safetensors" },
+                { "id": "b", "installedPath": "/b.safetensors" }
+            ],
+            "advanced": { "phases": phases }
+        }))
+    };
+    let err = |req: &ImageRequest| parse_multiphase_specs(req).unwrap_err().to_string();
+
+    // Non-array phases.
+    assert!(err(&with_two_loras(json!({ "steps": 8 }))).contains("must be an array"));
+    // Empty phase list.
+    assert!(err(&with_two_loras(json!([]))).contains("at least one phase"));
+    // A phase that is not an object.
+    assert!(err(&with_two_loras(json!([5]))).contains("must be a JSON object"));
+    // Missing steps.
+    assert!(err(&with_two_loras(json!([{ "guidance": 3.5 }]))).contains("'steps' is required"));
+    // 0-step phase.
+    assert!(err(&with_two_loras(json!([{ "steps": 0 }]))).contains("at least 1"));
+    // Non-finite / negative guidance.
+    assert!(
+        err(&with_two_loras(json!([{ "steps": 8, "guidance": -1.0 }])))
+            .contains("finite value >= 0")
+    );
+    // A lora index out of range of the job's TWO loras (valid indices 0..1; index 2 is out of range).
+    let oor = err(&with_two_loras(
+        json!([{ "steps": 8, "loras": [{ "index": 2 }] }]),
+    ));
+    assert!(oor.contains("out of range"), "got: {oor}");
+    assert!(
+        oor.contains("2 LoRA(s)"),
+        "the bound is the job's loras count: got: {oor}"
+    );
+    // A lora entry missing `index`.
+    assert!(err(&with_two_loras(
+        json!([{ "steps": 8, "loras": [{ "weight": 0.5 }] }])
+    ))
+    .contains("'index' is required"));
+    // Total step budget over the sanity cap.
+    assert!(err(&with_two_loras(json!([{ "steps": 200 }]))).contains("total step budget"));
+    // More than the max phase count.
+    let many: Vec<serde_json::Value> = (0..9).map(|_| json!({ "steps": 1 })).collect();
+    assert!(err(&with_two_loras(json!(many))).contains("at most"));
+}
+
+// The lane rejects the job SHAPES the engine rejects (multi-phase renders from pure noise): edit mode,
+// strict poses, an img2img reference, and the PiD decoder — each surfaced loudly BEFORE the heavy load.
+#[cfg(target_os = "macos")]
+#[test]
+fn multiphase_job_shape_rejects_non_t2i_conditioning() {
+    // A plain t2i job passes the shape guard.
+    let ok = request(json!({ "model": "krea_2_raw", "advanced": { "phases": [{ "steps": 8 }] } }));
+    assert!(ensure_multiphase_job_shape(&ok).is_ok());
+
+    // Edit mode.
+    let edit = request(json!({
+        "model": "krea_2_raw", "mode": "edit_image",
+        "advanced": { "phases": [{ "steps": 8 }] }
+    }));
+    assert!(ensure_multiphase_job_shape(&edit)
+        .unwrap_err()
+        .to_string()
+        .contains("edit mode"));
+
+    // Strict poses.
+    let pose = request(json!({
+        "model": "krea_2_raw",
+        "advanced": { "phases": [{ "steps": 8 }], "poses": [{ "keypoints": [] }] }
+    }));
+    assert!(ensure_multiphase_job_shape(&pose)
+        .unwrap_err()
+        .to_string()
+        .contains("strict-pose"));
+
+    // Img2img reference (`ui.img2img: true` + a non-empty referenceAssetId).
+    let img2img = request(json!({
+        "model": "krea_2_raw",
+        "modelManifestEntry": { "ui": { "img2img": true } },
+        "referenceAssetId": "asset-1",
+        "advanced": { "phases": [{ "steps": 8 }] }
+    }));
+    assert!(ensure_multiphase_job_shape(&img2img)
+        .unwrap_err()
+        .to_string()
+        .contains("img2img reference"));
+
+    // PiD decoder.
+    let pid = request(json!({
+        "model": "krea_2_raw",
+        "advanced": { "phases": [{ "steps": 8 }], "usePid": true }
+    }));
+    assert!(ensure_multiphase_job_shape(&pid)
+        .unwrap_err()
+        .to_string()
+        .contains("PiD"));
+}
+
 // sc-13883: the accelerator role detector recognizes `role: accelerator` (case- and separator-
 // normalized, mirroring `lora_declares_image_edit_role`) and rejects everything else — including the
 // `conditioningRole` sibling, which is a DIFFERENT axis (how a job is conditioned, not how it samples).
