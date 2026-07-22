@@ -887,7 +887,15 @@ async fn ensure_one(
     // transfer length, so verify the fetched bundle against the pinned SHA-256 before
     // extracting the weights it contains (sc-8879). A mismatch removes the file and
     // fails the job with the integrity-check error.
-    verify_file_sha256(&zip_path, zip_sha256, &format!("DWPose {file} bundle")).await?;
+    verify_file_sha256(
+        context.api,
+        context.settings,
+        context.job_id,
+        &zip_path,
+        zip_sha256,
+        &format!("DWPose {file} bundle"),
+    )
+    .await?;
     // The openmmlab bundle is a .zip containing a single .onnx; extract it.
     let target_clone = target.clone();
     let zip_for_extract = zip_path.clone();

@@ -388,6 +388,48 @@ pub(crate) fn no_cancel_ack() -> Option<fn() -> std::future::Ready<WorkerResult<
     None
 }
 
+/// Await a bounded blocking task while keeping the worker's heartbeat alive on the progress
+/// interval. Cross-platform, cancel-free sibling of [`run_blocking_with_heartbeat`]: use it for a
+/// SINGLE bounded pass with nothing to interrupt — the post-download SHA-256 of one file, or one
+/// blob copy — where the only hazard is that the pass can outlast the stale-worker timeout
+/// (`jobs_store::mark_stale_workers_interrupted`) and get the still-healthy worker swept to
+/// `interrupted` mid-op. A multi-GB weight hash routinely exceeds that 90s window, which is exactly
+/// how a model import froze with "No heartbeat from the worker for 90s" even though the worker was
+/// alive and hashing (sc-13856 / GitHub #1690, the verify/finalize half the sc-11939 transfer
+/// watchdog didn't cover).
+///
+/// It carries NO [`gen_core::CancelFlag`]/teardown machinery precisely because there is no per-step
+/// loop to trip: the task runs to its natural end either way (same posture as the `None`-cancel
+/// bounded callers of [`run_blocking_with_heartbeat`]). Unlike a long GPU/training run, a read-only
+/// hash or a file copy holds no GPU/unified-memory contention, so on the early-return path (a
+/// heartbeat POST transport failure, or a 409 from the stale sweep having already reclaimed the job)
+/// the bounded task is simply left to finish on the blocking pool rather than force-joined. For work
+/// that MUST wind down on cancel, use [`run_blocking_with_heartbeat`] instead.
+pub(crate) async fn heartbeat_while_blocking<R: Send + 'static>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    task_label: &'static str,
+    task: tokio::task::JoinHandle<WorkerResult<R>>,
+) -> WorkerResult<R> {
+    let mut task = task;
+    let mut interval = tokio::time::interval(progress_report_interval(settings));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // A tokio interval's first tick is immediate; consume it so a sub-interval task (a small
+    // file's fast hash) resolves without firing a redundant heartbeat POST.
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            result = &mut task => {
+                return result.map_err(|error| task_join_error(task_label, error))?;
+            }
+            _ = interval.tick() => {
+                heartbeat(api, settings, WorkerStatus::Busy, Some(job_id)).await?;
+            }
+        }
+    }
+}
+
 /// Check-only cancel poll (sc-5515): returns `true` when the user requested
 /// cancellation, WITHOUT posting any status. Unlike [`check_cancel`] this never
 /// writes the terminal `Canceled`. In-loop generation/training pollers that sit in

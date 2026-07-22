@@ -575,6 +575,38 @@ async fn spawn_no_user_cancel_capture_stub(
     (format!("http://{address}"), posts)
 }
 
+/// sc-13856 — stub that counts worker heartbeat POSTs (and answers them), used to prove the
+/// post-download verify/finalize keepalive (`heartbeat_while_blocking`) actually pumps heartbeats
+/// while a bounded blocking pass runs.
+async fn spawn_heartbeat_counting_stub() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>)
+{
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    type Beats = Arc<AtomicUsize>;
+    async fn heartbeat_route(
+        State(beats): State<Beats>,
+        axum::extract::Path(worker_id): axum::extract::Path<String>,
+    ) -> Response {
+        beats.fetch_add(1, Ordering::SeqCst);
+        Json(worker_snapshot_json(&worker_id)).into_response()
+    }
+    let beats: Beats = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_route),
+        )
+        .with_state(beats.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    (format!("http://{address}"), beats)
+}
+
 fn placeholder_job_snapshot() -> JobSnapshot {
     serde_json::from_value(json!({
         "id": "job-1",
