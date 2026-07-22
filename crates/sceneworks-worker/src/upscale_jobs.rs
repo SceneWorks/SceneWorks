@@ -246,6 +246,16 @@ fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
         }
         #[cfg(not(target_os = "macos"))]
         {
+            // Preload the CUDA-12 runtime + cuDNN-9 DLLs the loaded onnxruntime-gpu's CUDA
+            // provider depends on, before registering the EP — with the Python/torch stack
+            // retired off-Mac nothing else puts them on the loader path. Without this, an
+            // upscale that is the process's *first* `ort` CUDA surface (no prior pose/person
+            // job to preload) fails to initialise the CUDA EP and silently caches a CPU
+            // session in `UPSCALERS` for the process lifetime — ~9× slower and stuck on CPU
+            // even after a later pose job preloads the DLLs (sc-5499). Shared helper (runs
+            // once per process, also used by `pose_jobs`/`person_jobs`); best-effort, see
+            // `ort_cuda`.
+            crate::ort_cuda::preload_cuda_dylibs();
             // `error_on_failure` so a CUDA provider that can't initialise (no GPU, or a
             // cuDNN/CUDA mismatch in the loaded onnxruntime) surfaces as an error here —
             // `Upscaler::load` then falls back to a CPU session and reports `device = "cpu"`
