@@ -1382,6 +1382,207 @@ async fn lora_download_fails_when_one_of_several_declared_files_is_absent() {
     assert!(!blames_present, "only the absent file should be named");
 }
 
+// ---------------------------------------------------------------------------
+// sc-13583 / F-002: HF repo/revision/pattern validation on the user-facing jobs
+// ---------------------------------------------------------------------------
+//
+// `validate_hf_download_inputs` was called from ONLY `ensure_hf_files_cached` (the on-demand tier
+// fetch). The four user-facing entry points — model/LoRA download and model/LoRA import — passed a
+// payload `repo`/`revision`/`files` straight to the HF URL builder and, for the downloads, to the
+// `refs/<rev>` / `snapshots/<rev>` cache joins with no validation, giving a LAN-API caller (epic
+// 4484) an arbitrary-path write/read primitive. Each entry point must now reject a path-escaping
+// revision UP FRONT. Every assertion below pins the validator's own "traversal components are not
+// allowed" message, so a test stays RED if ONLY the entry-point call is removed — the downstream
+// `safe_join` join-guard would otherwise still error, but with a distinct "Unsafe snapshot path"
+// message, masking the entry-point regression (the false-green trap).
+
+#[tokio::test]
+async fn model_download_rejects_a_path_escaping_revision_before_any_network() {
+    let _env = isolate_hf_cache();
+    let temp = tempdir().expect("tempdir creates");
+    // An unreachable API proves validation fires BEFORE any heartbeat / tree-resolve I/O: with the
+    // guard the job errors on the revision; without it, the first thing that happens is a heartbeat
+    // that can't connect — never the traversal message.
+    let mut settings = test_settings("http://127.0.0.1:1".to_owned(), None);
+    settings.data_dir = temp.path().to_path_buf();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+
+    let mut job_json = job_snapshot_json("job-1", false);
+    job_json["type"] = json!("model_download");
+    job_json["payload"] = json!({
+        "modelId": "sdxl",
+        "repo": "SceneWorks/sdxl-base-mlx",
+        "revision": "../../evil",
+        "files": ["*.safetensors"],
+    });
+    let job: JobSnapshot = serde_json::from_value(job_json).expect("job deserializes");
+
+    let error = super::model_jobs::run_model_download_job(&api, &settings, &client, &job)
+        .await
+        .expect_err("a path-escaping revision is rejected at the entry point");
+    assert!(
+        error
+            .to_string()
+            .contains("traversal components are not allowed"),
+        "expected the revision validator to fire, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn lora_download_rejects_a_path_escaping_revision_before_any_network() {
+    let _env = isolate_hf_cache();
+    let temp = tempdir().expect("tempdir creates");
+    let mut settings = test_settings("http://127.0.0.1:1".to_owned(), None);
+    settings.data_dir = temp.path().to_path_buf();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+
+    let mut job_json = job_snapshot_json("job-1", false);
+    job_json["type"] = json!("lora_download");
+    job_json["payload"] = json!({
+        "loraId": "probe",
+        "repo": "owner/adapter",
+        "revision": "../../evil",
+        "files": ["*.safetensors"],
+    });
+    let job: JobSnapshot = serde_json::from_value(job_json).expect("job deserializes");
+
+    let error = super::model_jobs::run_lora_download_job(&api, &settings, &client, &job)
+        .await
+        .expect_err("a path-escaping revision is rejected at the entry point");
+    assert!(
+        error
+            .to_string()
+            .contains("traversal components are not allowed"),
+        "expected the revision validator to fire, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn lora_import_rejects_a_path_escaping_revision() {
+    let _env = isolate_hf_cache();
+    let temp = tempdir().expect("tempdir creates");
+    // Imports heartbeat / post progress BEFORE the HF branch validates, so give them a live stub; the
+    // rejection must still come from the revision validator, not a transport error.
+    let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url.clone();
+    settings.data_dir = temp.path().to_path_buf();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+
+    let mut job_json = job_snapshot_json("job-1", false);
+    job_json["type"] = json!("lora_import");
+    job_json["payload"] = json!({
+        "loraId": "probe",
+        "repo": "owner/adapter",
+        "revision": "../../evil",
+        "files": ["*.safetensors"],
+    });
+    let job: JobSnapshot = serde_json::from_value(job_json).expect("job deserializes");
+
+    let error = super::model_jobs::run_lora_import_job(&api, &settings, &client, &job)
+        .await
+        .expect_err("a path-escaping revision is rejected in the HF import branch");
+    assert!(
+        error
+            .to_string()
+            .contains("traversal components are not allowed"),
+        "expected the revision validator to fire, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn model_import_rejects_a_path_escaping_revision() {
+    let _env = isolate_hf_cache();
+    let temp = tempdir().expect("tempdir creates");
+    let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url.clone();
+    settings.data_dir = temp.path().to_path_buf();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+
+    let mut job_json = job_snapshot_json("job-1", false);
+    job_json["type"] = json!("model_import");
+    job_json["payload"] = json!({
+        "modelId": "probe",
+        "repo": "owner/model",
+        "revision": "../../evil",
+        "files": ["*.safetensors"],
+    });
+    let job: JobSnapshot = serde_json::from_value(job_json).expect("job deserializes");
+
+    let error = super::model_jobs::run_model_import_job(&api, &settings, &client, &job)
+        .await
+        .expect_err("a path-escaping revision is rejected in the HF import branch");
+    assert!(
+        error
+            .to_string()
+            .contains("traversal components are not allowed"),
+        "expected the revision validator to fire, got {error:?}"
+    );
+}
+
+/// The join-level twin of the entry-point guards: `download_snapshot_into_cache` joins `revision`
+/// into `refs/<rev>` (and, via the `commit` fallback, `snapshots/<rev>`). A `..` revision must be
+/// confined by `safe_join`, so the receipt pointer can never be written ABOVE the repo cache dir —
+/// defense in depth for any caller that reaches this without the entry validator.
+#[tokio::test]
+async fn download_snapshot_into_cache_confines_a_path_escaping_revision() {
+    let temp = tempdir().expect("tempdir creates");
+    let base_url = spawn_binary_stub(b"weights!!".to_vec()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base_url.clone();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    // Nest the repo dir two levels deep so an un-guarded `../../` revision would land at
+    // `temp/cache/pwned` — outside the repo cache dir.
+    let repo_dir = temp.path().join("cache").join("models--owner--model");
+
+    let snapshot = HuggingFaceSnapshot {
+        files: vec![SnapshotFile {
+            path: "model.safetensors".to_owned(),
+            size: Some(9),
+            download_url: format!("{base_url}/owner/model/resolve/main/model.safetensors"),
+            sha256: None,
+        }],
+    };
+    let mut progress = DownloadProgress::new(
+        "owner/model",
+        0,
+        snapshot.total_bytes(),
+        Duration::from_secs(3600),
+    );
+
+    let error = download_snapshot_into_cache(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "job-1",
+            cancel_message: "canceled",
+            fresh_download: false,
+        },
+        &repo_dir,
+        "../../pwned",
+        &snapshot,
+        &mut progress,
+    )
+    .await
+    .expect_err("a path-escaping revision is rejected");
+    assert!(
+        error.to_string().contains("Unsafe snapshot path"),
+        "expected a safe_join rejection, got {error:?}"
+    );
+    // The escaped `refs/<rev>` pointer must never have been written above the cache dir.
+    assert!(
+        !temp.path().join("cache").join("pwned").exists(),
+        "the refs/<rev> write must stay confined to the repo cache dir"
+    );
+}
+
 /// A tree stub that paginates: page 1 (no cursor) returns bf16/q4 files plus a `Link: rel="next"`
 /// header pointing at page 2; page 2 (cursor=next) returns the q8 file and no further link.
 async fn spawn_paginated_tree_stub() -> String {
