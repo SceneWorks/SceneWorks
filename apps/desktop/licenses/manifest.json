@@ -129,6 +129,18 @@
       ]
     },
     {
+      "id": "acestep-v15-sft-cover",
+      "name": "ACE-Step v1.5 XL SFT (Cover restyle)",
+      "publisher": "ACE Studio · StepFun",
+      "license": "MIT",
+      "homepage": "https://huggingface.co/ACE-Step/acestep-v15-xl-sft-diffusers",
+      "platforms": ["macos", "windows", "linux"],
+      "usage": "Cover-restyle checkpoint for the ACE-Step Music model (Audio Studio → Music → Cover). SceneWorks downloads the upstream MIT weights on first use as a co-requisite of ACE-Step v1.5 XL Turbo, from ACE-Step/acestep-v15-xl-sft-diffusers — the non-distilled reference cover DiT (transformer) plus the FSQ audio_tokenizer and audio_token_detokenizer conditioning modules — and runs them natively (Candle) on every platform. Used only for the Cover edit mode; text-to-music and the inpaint/repaint/extend edits use the Turbo weights above. Redistributed with attribution as permitted by MIT. Permissive — commercial use allowed.",
+      "documents": [
+        { "label": "MIT License", "key": "acestep-v15-sft-cover-mit" }
+      ]
+    },
+    {
       "id": "openvoice-v2",
       "name": "OpenVoice V2 (Voice Conversion)",
       "publisher": "MyShell.ai",

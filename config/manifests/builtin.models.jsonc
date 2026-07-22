@@ -8870,7 +8870,8 @@
         "editModes": [
           "inpaint",
           "repaint",
-          "extend"
+          "extend",
+          "cover"
         ],
         "conditioning": [
           "AudioEdit"
@@ -8903,6 +8904,56 @@
           "estimatedSizeBytes": 11100883579,
           "footprint": {
             "diskSizeBytes": 11100883579
+          }
+        },
+        {
+          // Cover restyle co-requisite (sc-13821, epic 13678) — the acestep SFT checkpoint, a SECOND,
+          // distinct snapshot from the turbo/text2music primary above. The turbo checkpoint ships no
+          // `audio_tokenizer` / `audio_token_detokenizer`; this sibling `-sft-diffusers` checkpoint (same
+          // MIT org, same 64-ch/25 Hz acoustic latent space) does, and it carries the non-distilled
+          // reference cover DiT (`transformer/`) the Cover restyle needs. The Cover path pulls the two
+          // FSQ component dirs AND the sft `transformer` (~8.76 GB total); everything else — text-to-music
+          // and the Inpaint/Repaint/Extend region edits — stays on the turbo DiT + its Oobleck VAE.
+          //
+          // This is an OPTIONAL, on-demand component the worker stages as the model's `sft_cover`
+          // component (`componentId` below) ONLY for a Cover edit request — mirroring LTX's
+          // `uncensored_enhancer` / sensenova's `distill_lora`, NOT the always-loaded chatterbox/MOSS
+          // codec pattern. Because it is Cover-only it is `required: "soft"` (never install-gating for
+          // base text2music) and it is deliberately NOT a `descriptor.required_components` id — so the
+          // generic `resolve_co_requisites` seam (required-components-only) does not stage it; the audio
+          // worker attaches it explicitly on a Cover request (audio_jobs.rs, `resolve_optional_component`
+          // → `LoadSpec::with_component("sft_cover", Dir)`, matched to `candle_audio_acestep`'s
+          // `COVER_COMPONENT_ID = "sft_cover"`). An unprovisioned Cover fails fast at load with an
+          // actionable error naming the component; inference never self-fetches (epic 13657).
+          //
+          // `revision` MUST be the full 40-hex SHA the runtime resolves (snapshots/<sha>/), so a
+          // main-branch fetch would populate the wrong snapshot and offline Cover would fail. Pinned to
+          // the exact commit candle-audio-acestep was ported against (SFT_HUB_REVISION). Provisioned
+          // alongside the turbo primary on install; the HF blob layout dedups for users who already have
+          // it (no surprise re-download). Cross-repo coupling: the adopted inference pin (sc-13756, PR
+          // #186) reads this snapshot ONLY from the `sft_cover` component seam — the earlier
+          // `ACESTEP_SFT_SNAPSHOT` env read + self-fetch were removed — so this coRequisite + the worker
+          // attach are what make Cover render offline. All three modules (cover DiT transformer + FSQ
+          // audio_tokenizer + audio_token_detokenizer) are MIT.
+          "provider": "huggingface",
+          "repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+          "revision": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "sft_cover",
+          "files": [
+            "transformer/*",
+            "audio_tokenizer/*",
+            "audio_token_detokenizer/*"
+          ],
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "estimatedSizeBytes": 8758016981,
+          "footprint": {
+            "diskSizeBytes": 8758016981
           }
         }
       ],

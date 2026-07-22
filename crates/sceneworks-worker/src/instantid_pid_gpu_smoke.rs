@@ -43,8 +43,11 @@
 use std::path::{Path, PathBuf};
 
 use gen_core::runtime::CancelFlag;
-use gen_core::{Image, PidWeights, WeightsSource};
-use runtime_cuda::providers::instantid::{BodyPoint, InstantId, InstantIdPaths, InstantIdRequest};
+use gen_core::{Image, LoadSpec, PidWeights, WeightsSource};
+use runtime_cuda::providers::instantid::{
+    BodyPoint, InstantId, InstantIdPaths, InstantIdRequest, SdxlComponents,
+    COMPONENT_TOKENIZER_CLIP_BIGG, COMPONENT_TOKENIZER_CLIP_L, COMPONENT_VAE_FP16_FIX,
+};
 
 /// The InstantID identity-preservation floor. InstantID's target envelope is ArcFace-cosine ~0.82
 /// @1024²; a conservative 0.35 floor proves the reference identity clearly transferred (an unrelated
@@ -262,9 +265,25 @@ fn instantid_pid_gpu_smoke() {
         identitynet: WeightsSource::Dir(identitynet.clone()),
         ip_adapter: ip_adapter.clone(),
         adapters: Vec::new(),
-        tokenizer_clip_l: WeightsSource::Dir(env_path("SDXL_TOKENIZER_CLIP_L_DIR")),
-        tokenizer_clip_bigg: WeightsSource::Dir(env_path("SDXL_TOKENIZER_CLIP_BIGG_DIR")),
-        vae_fp16_fix: WeightsSource::Dir(env_path("SDXL_VAE_FP16_FIX_DIR")),
+        // The three SDXL components (sc-13739) now flow through LoadSpec::components rather than flat
+        // InstantIdPaths fields: stage them from the same env dirs and let SdxlComponents::from_spec
+        // resolve + gate them (the load-time contract InstantID's own load runs).
+        sdxl: SdxlComponents::from_spec(
+            &LoadSpec::new(WeightsSource::Dir(base.clone()))
+                .with_component(
+                    COMPONENT_TOKENIZER_CLIP_L,
+                    WeightsSource::Dir(env_path("SDXL_TOKENIZER_CLIP_L_DIR")),
+                )
+                .with_component(
+                    COMPONENT_TOKENIZER_CLIP_BIGG,
+                    WeightsSource::Dir(env_path("SDXL_TOKENIZER_CLIP_BIGG_DIR")),
+                )
+                .with_component(
+                    COMPONENT_VAE_FP16_FIX,
+                    WeightsSource::Dir(env_path("SDXL_VAE_FP16_FIX_DIR")),
+                ),
+        )
+        .expect("stage SDXL components"),
     })
     .expect("load candle InstantId");
     // Attach OpenPose (pose mode) BEFORE the face stack — the engine's documented order. Harmless for
