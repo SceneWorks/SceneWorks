@@ -446,6 +446,59 @@ where
     })?
 }
 
+/// Evict the resident cached generator (if any) from the single-slot cache, freeing its cudarc pool
+/// pages, and wait for the eviction to complete. Returns `true` if a generator was evicted, `false`
+/// when the slot was already empty (both are success). The evict-then-reclaim primitive for the
+/// bespoke candle edit/control lanes (sc-13960).
+///
+/// Those lanes load a bespoke `runtime_cuda` provider (`QwenEdit` / `KreaStrictControl`) off the cache
+/// thread through `start_gen_stream`, so — unlike the txt2img gate (base.rs, which loads THROUGH
+/// [`with_cached_generator`], evicting on a cold miss) or the video comfyui lane ([`with_uncached_generator`])
+/// — nothing frees the resident txt2img generator's pages before their load. That is why they budget
+/// against RAW free (sc-13588): a live co-resident generator's cudarc pool pages are NOT reclaimable,
+/// so crediting them would over-admit an OOM. This gives them the missing lever: evict FIRST — freeing
+/// the resident generator's VRAM back for the incoming load — then the caller may safely fold
+/// [`crate::vram_gate::with_reclaimable`]. (Whether the freed VRAM returns to the driver or stays in
+/// cudarc's in-process pool depends on device ownership; measured on the RTX PRO 6000, a full generator
+/// drop returns most of it to the driver — either way it is available to the next load, the same
+/// property the shipped video [`with_uncached_generator`] lane relies on.) The eviction is the exact
+/// `cache.evict()` + [`cache_thread::release_backend_cache_after_evict`] pair [`with_uncached_generator`]
+/// performs before its in-place load; on CUDA the release is a no-op (cudarc has no `empty_cache`).
+///
+/// **Concurrency.** The evict runs as a job on the single cache thread, so it serializes with every
+/// cache load/evict; there is no window where a load observes a half-evicted slot. The worker processes
+/// one generation at a time, so no concurrent job re-populates the cache between this evict and the
+/// bespoke lane's subsequent `start_gen_stream` load — the same single-in-flight assumption base.rs's
+/// reclaim already relies on. (Idle-timeout eviction only ever *evicts*, never loads, so it cannot
+/// re-occupy the pool either.)
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) async fn evict_cached_generator() -> WorkerResult<bool> {
+    evict_cached_generator_on(generator_worker()).await
+}
+
+/// [`evict_cached_generator`] against a caller-supplied cache-worker sender — the seam a unit test drives
+/// its own seeded [`GeneratorCache`] worker through (the production entry point uses the process-global
+/// [`generator_worker`]).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn evict_cached_generator_on(worker: &mpsc::Sender<GeneratorJob>) -> WorkerResult<bool> {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<bool>();
+    let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let evicted = cache.evict().is_some();
+        if evicted {
+            // On CUDA a no-op (cudarc has no empty_cache); the evicted generator's drop already
+            // returned its allocation to the process pool for the incoming bespoke load to reuse.
+            cache_thread::release_backend_cache_after_evict();
+        }
+        let _ = reply_tx.send(evicted);
+    });
+    worker
+        .send(job)
+        .map_err(|_| crate::WorkerError::Engine("MLX generator cache worker stopped".to_owned()))?;
+    reply_rx.await.map_err(|_| {
+        crate::WorkerError::Engine("MLX generator cache worker dropped the job result".to_owned())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -878,6 +931,64 @@ mod tests {
                 .expect("cache state reply"),
             "expected disabled idle timeout to keep the resident generator"
         );
+        drop(tx);
+        worker.join().expect("cache worker exits");
+    }
+
+    // sc-13960: the evict-then-reclaim primitive frees the single resident slot on demand (the
+    // bespoke edit/control lanes call it before folding `with_reclaimable`). It must (1) evict a
+    // resident generator and report `true`, (2) leave the slot empty, and (3) no-op with `false` when
+    // the slot is already empty — so a lane that evicts on an already-cold worker neither errors nor
+    // lies about having freed pages. Drives a locally-seeded worker through the `_on` seam rather than
+    // the process-global cache. Candle-gated to match the primitive.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[tokio::test]
+    async fn evict_cached_generator_frees_the_resident_slot_and_no_ops_when_empty() {
+        let (tx, rx) = mpsc::channel::<GeneratorJob>();
+        let worker = thread::spawn(move || {
+            run_generator_cache_worker(rx, None);
+        });
+
+        // Seed a resident stub generator (the test replacement for a warm txt2img generator).
+        let (seed_tx, seed_rx) = mpsc::channel();
+        tx.send(Box::new(move |cache: &mut GeneratorCache| {
+            seed_stub_entry(cache);
+            seed_tx.send(()).expect("ack cache seed");
+        }))
+        .expect("seed cache entry");
+        seed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cache seed ack");
+
+        // First evict frees the resident slot and reports it evicted something.
+        assert!(
+            evict_cached_generator_on(&tx)
+                .await
+                .expect("evict succeeds"),
+            "evicting a resident generator must report true"
+        );
+
+        // The slot is now empty.
+        let (reply_tx, reply_rx) = mpsc::channel();
+        tx.send(Box::new(move |cache: &mut GeneratorCache| {
+            reply_tx.send(cache.is_empty()).expect("send cache state");
+        }))
+        .expect("check cache state");
+        assert!(
+            reply_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("cache state reply"),
+            "the resident generator must be gone after an evict"
+        );
+
+        // A second evict on the now-empty slot is a no-op that reports false (never an error).
+        assert!(
+            !evict_cached_generator_on(&tx)
+                .await
+                .expect("evict on empty succeeds"),
+            "evicting an empty slot must report false, not error"
+        );
+
         drop(tx);
         worker.join().expect("cache worker exits");
     }

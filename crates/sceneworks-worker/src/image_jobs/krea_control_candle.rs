@@ -445,9 +445,17 @@ async fn generate_candle_krea_control_stream(
     // quality penalty. On a constrained card (or one emulated via `SCENEWORKS_CUDA_VRAM_CAP_GB`) the ladder
     // first stages the text and heavy phases sequentially (sc-12176), then engages VAE-decode tiling
     // (sc-11744), activation chunking / res-cap (sc-11745), and finally the last-resort branch-quant rung
-    // (q8 near-lossless, then q4 pose-locked) until it fits, else rejects-before-OOM. NB: this lane uses
-    // the UNcached `start_gen_stream` (it doesn't evict the single-slot generator cache), so budget against
-    // raw live free VRAM — the cache's pages are NOT reclaimable by this load, unlike the base.rs gate.
+    // (q8 near-lossless, then q4 pose-locked) until it fits, else rejects-before-OOM.
+    //
+    // sc-13588 / sc-13960: this lane loads through the UNcached `start_gen_stream` (it never evicts the
+    // single-slot generator cache), so a resident txt2img generator stays co-resident and its cudarc pool
+    // pages are NOT free — the ladder gates against RAW live free first (crediting those pages against a
+    // raw gate would over-admit an OOM). `gate_with_evict_reclaim` (base.rs) adds the missing lever: only
+    // when reclaiming the pool would readmit this render at a higher residency does it EVICT that
+    // generator (making the credit honest, at the cost of the warm txt2img cache) and act on the reclaimed
+    // plan — fixing the repeated-control-render needless downtier / reject. Same treatment as
+    // `qwen_edit_candle.rs`; base.rs already gets it for free via the evicting cache. The admitted peak is
+    // recorded (`note_loaded_peak` below) so a repeated control render can reclaim these pooled pages.
     // sc-11042: `base` is the tier dir this lane resolved (`krea_model_subdir`'s output when the user has
     // the packed MLX turnkey; a dense diffusers snapshot root otherwise, which is never an `nvfp4/` dir),
     // so the NVFP4 tier is sized only when it is the tier that actually resolved.
@@ -456,23 +464,57 @@ async fn generate_candle_krea_control_stream(
         &request.model_manifest_entry,
         nvfp4_selected(request, nvfp4_host_eligible(), Some(&base)),
     );
-    let budget = crate::vram_gate::apply_vram_cap(
+    // Fit-ladder inputs are budget-independent; resolve them once, then run the two-pass gate below.
+    let peak = crate::krea_control_fit::predicted_control_peak_gb(&request.model_manifest_entry, tier);
+    let sequential_peak = crate::krea_control_fit::predicted_control_sequential_peak_gb(
+        &request.model_manifest_entry,
+        tier,
+    );
+    let decode_tile_save =
+        crate::krea_control_fit::decode_tile_save_gb(&request.model_manifest_entry, tier);
+    let chunk_attn_save = crate::krea_control_fit::chunk_attn_save_gb(&request.model_manifest_entry);
+    let q8_save = crate::krea_control_fit::branch_quant_save_gb(&request.model_manifest_entry, "q8");
+    let q4_save = crate::krea_control_fit::branch_quant_save_gb(&request.model_manifest_entry, "q4");
+    let raw_budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),
     );
-    let (offload_policy, tile_vae_decode, chunk_attention, branch_quant) =
-        match crate::krea_control_fit::fit_ladder(
-        crate::krea_control_fit::predicted_control_peak_gb(&request.model_manifest_entry, tier),
-        crate::krea_control_fit::predicted_control_sequential_peak_gb(
-            &request.model_manifest_entry,
-            tier,
-        ),
-        budget,
-        crate::krea_control_fit::decode_tile_save_gb(&request.model_manifest_entry, tier),
-        crate::krea_control_fit::chunk_attn_save_gb(&request.model_manifest_entry),
-        crate::krea_control_fit::branch_quant_save_gb(&request.model_manifest_entry, "q8"),
-        crate::krea_control_fit::branch_quant_save_gb(&request.model_manifest_entry, "q4"),
-    ) {
+    // sc-13960 two-pass: walk the ladder against raw free, then — only if reclaiming the cudarc pool
+    // would step it off a needless rung (a strict improvement; the reclaimed budget only grows) — evict
+    // the resident generator and act on the reclaimed walk.
+    let (fit, _budget) = gate_with_evict_reclaim(
+        &settings.gpu_id,
+        raw_budget,
+        |budget| {
+            crate::krea_control_fit::fit_ladder(
+                peak,
+                sequential_peak,
+                budget,
+                decode_tile_save,
+                chunk_attn_save,
+                q8_save,
+                q4_save,
+            )
+        },
+        // Two rejects differing only in their reported free number are the same non-outcome — a reclaim
+        // that still won't fit must NOT trigger a pointless evict. Any other change is a strict
+        // improvement, worth evicting the warm txt2img cache for.
+        |raw, reclaimed| {
+            !matches!(
+                (raw, reclaimed),
+                (
+                    crate::krea_control_fit::KreaControlFit::TooBig { .. },
+                    crate::krea_control_fit::KreaControlFit::TooBig { .. }
+                )
+            ) && raw != reclaimed
+        },
+    )
+    .await?;
+    // The peak this admitted load actually leaves in the cudarc pool (sc-13960) — recorded below as the
+    // reclaimable high-water. Computed before the by-value match consumes `fit`; `None` on a reject.
+    let incurred_peak =
+        crate::krea_control_fit::incurred_peak_gb(&fit, &request.model_manifest_entry, tier);
+    let (offload_policy, tile_vae_decode, chunk_attention, branch_quant) = match fit {
         // Big-card fast path (or no signal): monolithic full-speed decode, unchunked attention, bf16 branch.
         crate::krea_control_fit::KreaControlFit::Unknown
         | crate::krea_control_fit::KreaControlFit::Fits {
@@ -519,6 +561,13 @@ async fn generate_candle_krea_control_stream(
             )));
         }
     };
+    // sc-13960: record the admitted control peak so a repeated control render (or a following
+    // txt2img/edit gate) can reclaim these pooled pages — the control lane recorded nothing before this,
+    // which is why its own repeated renders could not reclaim. Dropped when `run_candle_strict_control`
+    // returns; `None` (unmeasured / rejected) ⇒ no-op.
+    if let Some(peak_gb) = incurred_peak {
+        crate::vram_gate::note_loaded_peak(&settings.gpu_id, peak_gb);
+    }
 
     let provider = KreaStrictControl {
         base,

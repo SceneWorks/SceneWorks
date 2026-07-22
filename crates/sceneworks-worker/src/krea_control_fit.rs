@@ -278,6 +278,54 @@ pub(crate) fn fit_ladder(
     }
 }
 
+/// The VRAM peak (GB) a Krea control render actually incurs under `fit`, for the reclaimable high-water
+/// ([`crate::vram_gate::note_loaded_peak`], sc-13960 — the control lane, unlike the txt2img/edit lanes,
+/// recorded NO peak before this, so a repeated control render could not reclaim the first render's
+/// dropped-but-pooled pages). Mirrors [`fit_ladder`]'s own arithmetic: the resident or staged base
+/// peak, less each engaged speed/quality rung's measured saving.
+///
+/// Returns `None` for a non-admit (`Unknown` / `TooBig`) or an admitted-but-unmeasured peak — there is
+/// nothing honest to record, exactly as base.rs records nothing for an unmeasured tier. Never
+/// OVER-counts the pool the load leaves behind: an over-count would let a LATER gate credit more than is
+/// actually free and over-admit an OOM, so only the ENGAGED rungs' MEASURED savings are subtracted (a
+/// rung the ladder could not have engaged has an unmeasured, `None` saving and contributes no phantom
+/// reduction). The base peak carries [`HEADROOM_GB`] like the txt2img `predicted_peak_gb` this mirrors,
+/// so the small headroom over-count is the same one base.rs's reclaim already tolerates (bounded by the
+/// next load's own headroom).
+pub(crate) fn incurred_peak_gb(
+    fit: &KreaControlFit,
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+) -> Option<f64> {
+    let KreaControlFit::Fits {
+        offload_policy,
+        tile_vae_decode,
+        chunk_attention,
+        branch_quant,
+    } = fit
+    else {
+        return None; // Unknown / TooBig — no admitted load to record.
+    };
+    // The base peak the ladder admitted at: the resident whole-model peak, or the staged working set.
+    let mut peak = if *offload_policy == OffloadPolicy::Resident {
+        predicted_control_peak_gb(manifest_entry, tier_key)?
+    } else {
+        predicted_control_sequential_peak_gb(manifest_entry, tier_key)?
+    };
+    if *tile_vae_decode {
+        peak -= decode_tile_save_gb(manifest_entry, tier_key).unwrap_or(0.0);
+    }
+    if *chunk_attention {
+        peak -= chunk_attn_save_gb(manifest_entry).unwrap_or(0.0);
+    }
+    match branch_quant {
+        Some(Quant::Q8) => peak -= branch_quant_save_gb(manifest_entry, "q8").unwrap_or(0.0),
+        Some(Quant::Q4) => peak -= branch_quant_save_gb(manifest_entry, "q4").unwrap_or(0.0),
+        _ => {}
+    }
+    Some(peak.max(0.0))
+}
+
 /// Parse a JSON float from either a number or a numeric string (mirrors [`crate::vram_gate`]'s helper).
 fn json_f64(value: &Value) -> Option<f64> {
     value
@@ -718,6 +766,132 @@ mod tests {
                 chunk_attention: true,
                 branch_quant: None,
             }
+        );
+    }
+
+    /// sc-13960: [`incurred_peak_gb`] records the peak a control render actually leaves in the cudarc
+    /// pool — the resident/staged base peak less every ENGAGED rung's measured saving — so a later gate's
+    /// reclaim credit is honest. It must mirror the ladder and never OVER-count (which would let a later
+    /// gate over-admit an OOM).
+    #[test]
+    fn incurred_peak_mirrors_the_ladder_and_never_over_counts() {
+        let m = krea_manifest_with_chunking();
+        let tier = "q4";
+
+        // Fast-path resident admit → exactly the resident control peak (with headroom).
+        let resident = KreaControlFit::Fits {
+            offload_policy: OffloadPolicy::Resident,
+            tile_vae_decode: false,
+            chunk_attention: false,
+            branch_quant: None,
+        };
+        assert_eq!(
+            incurred_peak_gb(&resident, &m, tier),
+            predicted_control_peak_gb(&m, tier) // 32.9
+        );
+
+        // Staged + tiled + chunked + q4: the sequential peak (27.0) less every engaged measured saving.
+        let laddered = KreaControlFit::Fits {
+            offload_policy: OffloadPolicy::Sequential,
+            tile_vae_decode: true,
+            chunk_attention: true,
+            branch_quant: Some(Quant::Q4),
+        };
+        let expected = predicted_control_sequential_peak_gb(&m, tier).unwrap()
+            - decode_tile_save_gb(&m, tier).unwrap()
+            - chunk_attn_save_gb(&m).unwrap()
+            - branch_quant_save_gb(&m, "q4").unwrap(); // 27 − 6.9 − 2.43 − 10.2 = 7.47
+        assert!((incurred_peak_gb(&laddered, &m, tier).unwrap() - expected).abs() < 1e-6);
+
+        // Non-admits record nothing (no pooled pages to reclaim).
+        assert_eq!(incurred_peak_gb(&KreaControlFit::Unknown, &m, tier), None);
+        assert_eq!(
+            incurred_peak_gb(
+                &KreaControlFit::TooBig {
+                    needed_gb: 50.0,
+                    available_gb: 10.0
+                },
+                &m,
+                tier
+            ),
+            None
+        );
+
+        // An admitted-but-unmeasured staged peak → None, not a guess (mirrors base.rs's None ⇒ no-op).
+        let no_seq = obj(json!({ "candle": { "control": { "peakGbByTier": { "q4": 30.9 } } } }));
+        let staged = KreaControlFit::Fits {
+            offload_policy: OffloadPolicy::Sequential,
+            tile_vae_decode: false,
+            chunk_attention: false,
+            branch_quant: None,
+        };
+        assert_eq!(incurred_peak_gb(&staged, &no_seq, "q4"), None);
+
+        // Safety: whatever the ladder ADMITS, the peak recorded for it never exceeds the budget it was
+        // admitted against — so the pool the load leaves behind is never over-reported.
+        let b = budget(24.0);
+        let fit = super::fit_ladder(
+            predicted_control_peak_gb(&m, tier),
+            predicted_control_sequential_peak_gb(&m, tier),
+            Some(b),
+            decode_tile_save_gb(&m, tier),
+            chunk_attn_save_gb(&m),
+            branch_quant_save_gb(&m, "q8"),
+            branch_quant_save_gb(&m, "q4"),
+        );
+        if let Some(p) = incurred_peak_gb(&fit, &m, tier) {
+            assert!(
+                p <= b.free_gb + 1e-6,
+                "incurred peak {p} must not exceed the admitting budget {}",
+                b.free_gb
+            );
+        }
+    }
+
+    /// sc-13960: on a warm worker, crediting the cudarc pool the previous control render left behind
+    /// FLIPS the ladder off its needless rungs — the repeated-control-render scenario the story names.
+    /// Pins the arithmetic the two-pass evict-reclaim gate performs (`fit_ladder(raw)` vs
+    /// `fit_ladder(with_reclaimable(raw, pool))`).
+    #[test]
+    fn reclaim_flips_a_warm_control_gate_back_to_resident() {
+        let m = krea_manifest();
+        let tier = "bf16"; // control peak 48.2, sequential 42.0, no tiling rung for this tier
+        let peak = predicted_control_peak_gb(&m, tier);
+        let seq = predicted_control_sequential_peak_gb(&m, tier);
+        let tile = decode_tile_save_gb(&m, tier); // None
+        let chunk = chunk_attn_save_gb(&m); // None
+        let q8 = branch_quant_save_gb(&m, "q8");
+        let q4 = branch_quant_save_gb(&m, "q4");
+
+        // Second bf16 control render on a 96 GB card: the first (48.2 peak) dropped but its pages are
+        // pooled, so RAW free is ~47.8 GB — the resident peak no longer fits, so the ladder needlessly
+        // stages sequentially.
+        let raw = VramBudget {
+            free_gb: 47.8,
+            total_gb: 96.0,
+        };
+        assert_eq!(
+            super::fit_ladder(peak, seq, Some(raw), tile, chunk, q8, q4),
+            KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
+                tile_vae_decode: false,
+                chunk_attention: false,
+                branch_quant: None,
+            }
+        );
+        // Crediting the 48.2 GB the first render left in-pool readmits it at the big-card fast path.
+        let reclaimed = crate::vram_gate::with_reclaimable(raw, 48.2);
+        assert_eq!(
+            super::fit_ladder(peak, seq, Some(reclaimed), tile, chunk, q8, q4),
+            fits_untiled_bf16()
+        );
+
+        // A cold pool (reclaimable 0) is a no-op: the raw plan stands (a genuine first-load on a
+        // constrained card is gated exactly as before).
+        let reclaimed_cold = crate::vram_gate::with_reclaimable(raw, 0.0);
+        assert_eq!(
+            super::fit_ladder(peak, seq, Some(reclaimed_cold), tile, chunk, q8, q4),
+            super::fit_ladder(peak, seq, Some(raw), tile, chunk, q8, q4)
         );
     }
 }

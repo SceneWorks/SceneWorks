@@ -465,23 +465,22 @@ async fn generate_candle_qwen_edit_stream(
     // measure-sibling of the qwen txt2img sc-10969 + flux2 sc-10920; before it, unmeasured tiers made this
     // Unknown → resident (inert).
     //
-    // sc-13588: this gate budgets against RAW live free VRAM and deliberately does NOT fold
-    // `with_reclaimable` the way the txt2img `generate_candle_stream` gate (base.rs, sc-11023) and the
-    // candle video gate do. Those lanes load THROUGH the single-slot generator cache
-    // (`with_cached_generator` / `with_uncached_generator`), which EVICTS its resident occupant before the
-    // incoming load — so that occupant's cudarc pool pages ARE reclaimable by the load being gated. This
-    // edit lane instead loads through the UNcached `start_gen_stream` below: it never touches the generator
-    // cache, so any resident txt2img generator stays live and CO-RESIDENT with the QwenEdit load. Its pages
-    // are NOT reclaimable here; crediting them would over-admit a load that then OOMs alongside the
-    // still-resident model. Raw free correctly reject-before-OOMs when the edit peak + the resident won't
-    // co-fit. Same reasoning — and the same deliberate omission — as `krea_control_candle.rs` (the other
-    // `start_gen_stream` lane); see its note. The reclaimable *high-water* is still recorded after an admit
-    // (see `note_loaded_peak` below), which is the half of sc-11023 that DOES apply cross-lane.
+    // sc-13588 / sc-13960: this gate budgets against RAW live free VRAM FIRST — deliberately not
+    // folding `with_reclaimable` up front, unlike the txt2img `generate_candle_stream` gate (base.rs,
+    // sc-11023) and the candle video gate. Those load THROUGH the single-slot generator cache
+    // (`with_cached_generator` / `with_uncached_generator`), which EVICTS its resident occupant before
+    // the incoming load — so the occupant's cudarc pool pages ARE reclaimable by the load being gated.
+    // This edit lane instead loads through the UNcached `start_gen_stream` below: it never touches the
+    // generator cache, so any resident txt2img generator stays live and CO-RESIDENT with the QwenEdit
+    // load, and crediting its pages against a raw gate would over-admit an OOM. sc-13960 adds the missing
+    // lever: `gate_with_evict_reclaim` re-gates against `free + reclaimable_pool` only when that would
+    // readmit this render at a higher residency, and — before it does — EVICTS the resident generator so
+    // its pages are genuinely free, making the credit honest (freeing a warm txt2img cache is the
+    // deliberate tradeoff, taken only when it changes the outcome). This fixes the repeated-edit
+    // warm-swap false-reject / needless sequential downtier; base.rs already gets it for free via the
+    // evicting cache. Same treatment as `krea_control_candle.rs` (the other `start_gen_stream` lane).
+    // The reclaimable high-water is still recorded after an admit (`note_loaded_peak` below).
     let use_sequential = {
-        let budget = crate::vram_gate::apply_vram_cap(
-            crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-            crate::vram_gate::cuda_vram_cap_gb(),
-        );
         // sc-13534: key the budget off the tier `resolve_qwen_edit_candle_base` ACTUALLY landed on, not
         // the bits the request asked for — this lane now grows the tier layout the old `nvfp4 = false`
         // note said to wire when it did. `gate_tier_key` is the shared txt2img helper (sc-12090 /
@@ -506,21 +505,54 @@ async fn generate_candle_qwen_edit_stream(
             nvfp4_selected(request, nvfp4_host_eligible(), Some(&qwen_base)),
         );
         let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
-        match crate::vram_gate::resolve_offload(
-            crate::vram_gate::fit_decision(needed, budget),
-            /* sequential_capable */ true,
-        ) {
-            crate::vram_gate::FitDecision::Offload {
-                needed_gb,
-                available_gb,
-            } => {
-                // Second-stage gate (sc-10856): if this tier's MEASURED sequential peak is known and STILL
-                // exceeds the budget, reject before load instead of a reactive OOM. Absent the number
-                // (unmeasured edit tier) keep the best-effort sequential run.
-                let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb(
-                    &request.model_manifest_entry,
+        // Second-stage gate input (sc-10856): the tier's MEASURED sequential peak (the largest single
+        // working set once the VL encoder is dropped). `None` for an unmeasured tier ⇒ best-effort stage.
+        let sequential_needed =
+            crate::vram_gate::predicted_sequential_peak_gb(&request.model_manifest_entry, tier);
+        let raw_budget = crate::vram_gate::apply_vram_cap(
+            crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+            crate::vram_gate::cuda_vram_cap_gb(),
+        );
+        // sc-13960 two-pass: resolve the plan against raw free, then — only if reclaiming the pool would
+        // change (improve) it — evict the resident generator and act on the reclaimed plan. The edit lane
+        // is always sequential-capable (sc-10968 wired `QwenEdit::generate_sequential`).
+        let (plan, budget) = gate_with_evict_reclaim(
+            &settings.gpu_id,
+            raw_budget,
+            |budget| {
+                crate::vram_gate::load_plan(
+                    needed,
+                    sequential_needed,
+                    budget,
+                    /* sequential_capable */ true,
+                )
+            },
+            |raw, reclaimed| raw != reclaimed,
+        )
+        .await?;
+        let available_gb = budget.map_or(0.0, |b| b.free_gb);
+        match plan {
+            crate::vram_gate::LoadPlan::Sequential => {
+                tracing::info!(
+                    model = %request.model,
                     tier,
+                    available_gb = available_gb.round() as i64,
+                    "candle Qwen-Edit VRAM fit-gate: resident peak exceeds free VRAM — loading with \
+                     sequential component residency (VL encoder dropped before the DiT)"
                 );
+                // sc-13588: record the admitted SEQUENTIAL peak as the reclaimable high-water for the next
+                // gate — the QwenEdit this admits is dropped when `start_gen_stream`'s closure returns, so
+                // its pages return to cudarc's process pool; a later gate (base.rs / video, or a repeated
+                // edit via `gate_with_evict_reclaim`) that evicts + reclaims must credit this peak or it
+                // under-counts the pool and false-rejects a load that fits.
+                if let Some(peak_gb) = sequential_needed {
+                    crate::vram_gate::note_loaded_peak(&settings.gpu_id, peak_gb);
+                }
+                true
+            }
+            crate::vram_gate::LoadPlan::Reject => {
+                // For the always-sequential-capable edit lane a reject is the sc-10856 second-stage
+                // sequential overflow: even staged, the measured peak won't fit the (post-reclaim) budget.
                 if let Some(seq_gb) =
                     crate::vram_gate::sequential_overflow_gb(sequential_needed, budget)
                 {
@@ -535,35 +567,15 @@ async fn generate_candle_qwen_edit_stream(
                         gpu = settings.gpu_id,
                     )));
                 }
-                tracing::info!(
-                    model = %request.model,
-                    needed_gb = needed_gb.round() as i64,
-                    available_gb = available_gb.round() as i64,
-                    "candle Qwen-Edit VRAM fit-gate: resident peak exceeds free VRAM — loading with \
-                     sequential component residency (VL encoder dropped before the DiT)"
-                );
-                // sc-13588: record the admitted SEQUENTIAL peak as the reclaimable high-water for the next
-                // gate — the missing half of the sc-11023 backport (see the header note). The QwenEdit this
-                // admits is dropped when `start_gen_stream`'s closure returns, so its pages return to
-                // cudarc's process pool; a later CACHED gate (base.rs / video) that evicts + reclaims must
-                // credit this peak or it under-counts the pool and false-rejects a load that fits.
-                // `sequential_needed` is the measured sequential peak just checked above (`None` for an
-                // unmeasured tier ⇒ no-op).
-                if let Some(peak_gb) = sequential_needed {
-                    crate::vram_gate::note_loaded_peak(&settings.gpu_id, peak_gb);
-                }
-                true
-            }
-            crate::vram_gate::FitDecision::TooBig {
-                needed_gb,
-                available_gb,
-            } => {
+                // Defensive: a resident overflow with no staging — unreachable for this lane (it is always
+                // sequential-capable, so `load_plan` never reaches `Reject` via `TooBig`), but keep an
+                // honest message rather than an unwrap if that ever changes.
                 return Err(WorkerError::InvalidPayload(format!(
                     "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU \
                      {gpu} has ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
                      resolution, or run on a card with more VRAM.",
                     model = request.model,
-                    needed = needed_gb.round() as i64,
+                    needed = needed.unwrap_or(0.0).round() as i64,
                     available = available_gb.round() as i64,
                     gpu = settings.gpu_id,
                 )));
@@ -571,7 +583,7 @@ async fn generate_candle_qwen_edit_stream(
             // Resident admit (`Fits`) — or `Unknown` when a tier is unmeasured. Record the RESIDENT peak
             // as the reclaimable high-water (sc-13588); `needed` is `None` for an unmeasured tier, so this
             // no-ops there exactly as the gate itself does.
-            _ => {
+            crate::vram_gate::LoadPlan::Resident => {
                 if let Some(peak_gb) = needed {
                     crate::vram_gate::note_loaded_peak(&settings.gpu_id, peak_gb);
                 }

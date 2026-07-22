@@ -251,6 +251,55 @@ pub(crate) fn sequential_overflow_gb(
     (budget.free_gb + f64::EPSILON < needed_gb).then_some(needed_gb)
 }
 
+/// The resolved residency PLAN for a sequential-capable candle image lane: the pure composition of
+/// [`fit_decision`] → [`resolve_offload`] → [`sequential_overflow_gb`] that base.rs's txt2img gate and
+/// the bespoke Qwen-Edit gate share. Carries only the ACTION — never a budget-derived number — so two
+/// plans computed against different budgets compare equal **iff they take the same action**. That is
+/// the invariant the sc-13960 evict-then-reclaim two-pass leans on: gate once against raw free and once
+/// against `free + reclaimable_pool`, and evict only when the plan actually improves (never for two
+/// rejects that differ only in their reported free-VRAM number).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LoadPlan {
+    /// Load at full residency — the whole-model resident peak fits (or the tier is unmeasured, so the
+    /// gate never blocks).
+    Resident,
+    /// Load with sequential component residency — the resident peak overflows but the staged working
+    /// set fits (or its peak is unmeasured, so best-effort staging).
+    Sequential,
+    /// Reject before OOM — the resident peak overflows AND either the measured sequential peak also
+    /// overflows or the engine cannot stage.
+    Reject,
+}
+
+/// Resolve the [`LoadPlan`] for `needed` (resident peak) and `sequential_needed` (measured staged peak,
+/// [`predicted_sequential_peak_gb`]) against `budget`. `None` peaks are unmeasured ⇒ never block (admit
+/// resident, or stage best-effort). `sequential_capable` is the provider's staging capability: a lane
+/// that cannot stage turns a resident overflow straight into [`LoadPlan::Reject`].
+///
+/// Monotonic in the budget: a larger `free_gb` can only move the plan `Reject → Sequential → Resident`,
+/// never the other way — which is what makes "plan changed after reclaim ⇒ plan improved" sound.
+pub(crate) fn load_plan(
+    needed: Option<f64>,
+    sequential_needed: Option<f64>,
+    budget: Option<VramBudget>,
+    sequential_capable: bool,
+) -> LoadPlan {
+    match resolve_offload(fit_decision(needed, budget), sequential_capable) {
+        FitDecision::Offload { .. } => {
+            if sequential_overflow_gb(sequential_needed, budget).is_some() {
+                LoadPlan::Reject
+            } else {
+                LoadPlan::Sequential
+            }
+        }
+        // Reached only when the engine cannot stage (resolve_offload leaves TooBig intact); a
+        // sequential-capable lane rewrites TooBig → Offload above.
+        FitDecision::TooBig { .. } => LoadPlan::Reject,
+        // Fits (resident) or Unknown (unmeasured / no budget) — admit resident, never block.
+        _ => LoadPlan::Resident,
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Mochi 1: the FRAME-DEPENDENT decode fit gate, candle/CUDA half (epic 1788 / sc-12306)
 // ---------------------------------------------------------------------------------------------
@@ -1069,6 +1118,97 @@ mod tests {
                 free_gb: 96.0,
                 total_gb: 96.0,
             }
+        );
+    }
+
+    /// [`load_plan`] resolves the residency ACTION for a sequential-capable lane and ignores the
+    /// budget's reported numbers in its identity — the invariant the sc-13960 two-pass relies on.
+    #[test]
+    fn load_plan_resolves_resident_sequential_and_reject() {
+        let needed = Some(56.7); // resident peak
+        let seq = Some(30.0); // measured staged peak
+        let big = Some(VramBudget {
+            free_gb: 90.0,
+            total_gb: 96.0,
+        });
+        let mid = Some(VramBudget {
+            free_gb: 40.0,
+            total_gb: 96.0,
+        });
+        let tiny = Some(VramBudget {
+            free_gb: 10.0,
+            total_gb: 96.0,
+        });
+        // Resident peak fits ⇒ Resident.
+        assert_eq!(load_plan(needed, seq, big, true), LoadPlan::Resident);
+        // Resident overflows but the staged peak fits ⇒ Sequential.
+        assert_eq!(load_plan(needed, seq, mid, true), LoadPlan::Sequential);
+        // Even the staged peak overflows ⇒ Reject.
+        assert_eq!(load_plan(needed, seq, tiny, true), LoadPlan::Reject);
+        // A NON-sequential-capable lane rejects a resident overflow outright (no staging).
+        assert_eq!(load_plan(needed, seq, mid, false), LoadPlan::Reject);
+        // Unmeasured peak or no budget ⇒ never block (Resident).
+        assert_eq!(load_plan(None, seq, mid, true), LoadPlan::Resident);
+        assert_eq!(load_plan(needed, seq, None, true), LoadPlan::Resident);
+        // Two Rejects against different budgets are the SAME plan (no budget number in the identity),
+        // so the two-pass never evicts for a reclaim that still can't fit.
+        assert_eq!(
+            load_plan(needed, seq, tiny, true),
+            load_plan(needed, seq, mid, false)
+        );
+    }
+
+    /// sc-13960: on a warm worker, folding the reclaimable pool FLIPS a bespoke edit lane's plan from a
+    /// needless sequential downtier (and from an outright reject) back to a full-residency admit — the
+    /// exact repeated-render scenarios the story names. Pins the arithmetic the two-pass evict-reclaim
+    /// gate performs (`load_plan(raw)` vs `load_plan(with_reclaimable(raw, pool))`).
+    #[test]
+    fn reclaim_flips_a_warm_edit_gate_back_to_resident() {
+        // Two q4 Qwen-Edits (peak 56.7) back-to-back on a 96 GB card: after edit #1 drops, cudarc holds
+        // ~56.7 GB in-pool, so edit #2's RAW free is ~39.3 GB.
+        let q4_needed = Some(56.7);
+        let q4_seq = Some(30.0);
+        let raw = Some(VramBudget {
+            free_gb: 39.3,
+            total_gb: 96.0,
+        });
+        // RAW free needlessly downtiers to sequential…
+        assert_eq!(
+            load_plan(q4_needed, q4_seq, raw, true),
+            LoadPlan::Sequential
+        );
+        // …but crediting the 56.7 GB pool the first edit left behind readmits it RESIDENT.
+        let reclaimed = raw.map(|b| with_reclaimable(b, 56.7));
+        assert_eq!(
+            load_plan(q4_needed, q4_seq, reclaimed, true),
+            LoadPlan::Resident
+        );
+
+        // A repeated bf16 edit (81.7 resident / 52.2 sequential): after edit #1 drops, RAW free ~14.3 GB
+        // — the staged 52.2 overflows, so RAW REJECTS the second render.
+        let bf16_needed = Some(81.7);
+        let bf16_seq = Some(52.2);
+        let raw = Some(VramBudget {
+            free_gb: 14.3,
+            total_gb: 96.0,
+        });
+        assert_eq!(
+            load_plan(bf16_needed, bf16_seq, raw, true),
+            LoadPlan::Reject
+        );
+        // Reclaiming the 81.7 GB pool the first edit left behind readmits it RESIDENT.
+        let reclaimed = raw.map(|b| with_reclaimable(b, 81.7));
+        assert_eq!(
+            load_plan(bf16_needed, bf16_seq, reclaimed, true),
+            LoadPlan::Resident
+        );
+
+        // A cold pool (reclaimable 0) is a no-op: the raw plan stands, so a genuine first-load on a
+        // constrained card is gated exactly as before.
+        let reclaimed_cold = raw.map(|b| with_reclaimable(b, 0.0));
+        assert_eq!(
+            load_plan(bf16_needed, bf16_seq, reclaimed_cold, true),
+            load_plan(bf16_needed, bf16_seq, raw, true)
         );
     }
 
