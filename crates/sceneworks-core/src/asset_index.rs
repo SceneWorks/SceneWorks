@@ -6,7 +6,9 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;
 
 use crate::project_store::{ProjectStoreError, ProjectStoreResult};
-use crate::store_util::{optional_bool, optional_str, optional_u64, read_json, relative_string};
+use crate::store_util::{
+    is_safe_id, optional_bool, optional_str, optional_u64, read_json, relative_string,
+};
 
 pub(crate) const ASSET_SIDECAR_PATTERN: &str = "*.sceneworks.json";
 
@@ -240,7 +242,15 @@ pub(crate) fn normalize_asset_cached(
             }
         }
     }
-    if let Some(generation_set_id) = asset.get("generationSetId").and_then(Value::as_str) {
+    // The id comes from the on-disk sidecar and is joined into the
+    // generation-sets read path below; skip anything that isn't a plain id so a
+    // tampered sidecar can't pull JSON from outside the project into API
+    // responses (sc-13582).
+    if let Some(generation_set_id) = asset
+        .get("generationSetId")
+        .and_then(Value::as_str)
+        .filter(|id| is_safe_id(id))
+    {
         let cached = generation_sets
             .entries
             .entry(generation_set_id.to_owned())
