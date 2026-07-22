@@ -15057,3 +15057,92 @@ textarea[aria-invalid="true"]:focus {
   border-color: var(--danger);
   box-shadow: 0 0 0 4px color-mix(in oklch, var(--danger) 18%, transparent);
 }
+
+/* Krea 2 multi-phase denoise editor (epic 13879 S5, sc-13885). Its own experimental
+   AdvancedSection, so it renders as a plain column (not the .advanced-panel override grid). */
+.multiphase-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.multiphase-editor .multiphase-intro {
+  margin-top: 0;
+}
+.multiphase-presets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.multiphase-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+  color: var(--text);
+  cursor: pointer;
+}
+.multiphase-btn:hover {
+  border-color: var(--accent);
+}
+.multiphase-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.multiphase-effective {
+  margin-top: 0;
+}
+.multiphase-phase-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.multiphase-phase {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 10px;
+  background: var(--bg-1);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.multiphase-phase-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.multiphase-phase-actions {
+  display: flex;
+  gap: 4px;
+}
+.multiphase-phase-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.multiphase-phase-loras {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.multiphase-lora-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.multiphase-lora-weight {
+  width: 92px;
+}
+.multiphase-accel-badge {
+  margin-left: 6px;
+}
+.multiphase-cfg-hint {
+  margin-top: 2px;
+}

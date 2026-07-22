@@ -152,6 +152,43 @@ describe("buildImageJobRequest", () => {
     expect(request.referenceAssetId).toBe("character-ref");
     expect(request.advanced).not.toHaveProperty("strength");
   });
+
+  // Krea 2 multi-phase denoise round-trip (epic 13879 S5, sc-13885): a krea_2_raw t2i job with the
+  // editor active carries the serialized `advanced.phases` verbatim, and the phase LoRA indices
+  // point into the request's OWN `loras` array — the SAME order the worker resolves to
+  // `LoadSpec::adapters`. The canonical S4 example: 4 steps Raw CFG-on base-only, then 4 steps Raw +
+  // the turbo LoRA (index 1) CFG off.
+  it("round-trips advanced.phases only when multi-phase is active, indexing the request's own loras", () => {
+    const loras = [
+      { id: "style-lora", name: "Watercolor" },
+      { id: "krea2_turbo_accel", name: "Krea Turbo" },
+    ];
+    const canonicalPhases = [
+      { steps: 4, guidance: 3.5, loras: [] },
+      { steps: 4, guidance: 0, loras: [{ index: 1 }] },
+    ];
+    const state = img2imgPidState({
+      model: "krea_2_raw",
+      supportsImg2img: false,
+      img2imgReferenceAssetId: null,
+      showPidToggle: false,
+      usePid: false,
+      loras,
+      multiPhaseActive: true,
+      phases: canonicalPhases,
+    });
+
+    const request = buildImageJobRequest(state);
+    // The phase list rides advanced.phases unchanged (the worker parse shape).
+    expect(request.advanced.phases).toEqual(canonicalPhases);
+    // Index 1 in the phase's loras resolves to the turbo LoRA in the request's own loras array.
+    expect(request.loras[request.advanced.phases[1].loras[0].index].id).toBe("krea2_turbo_accel");
+
+    // Inactive editor → NO advanced.phases (a single-phase Raw job is byte-for-byte unchanged).
+    expect(
+      buildImageJobRequest({ ...state, multiPhaseActive: false }).advanced,
+    ).not.toHaveProperty("phases");
+  });
 });
 
 // sc-13224: the Style axis applied to a structured JSON-caption model (Ideogram 4). The style is

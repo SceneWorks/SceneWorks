@@ -4,6 +4,13 @@ import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia, assetUrl } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
+import { MultiPhaseEditor } from "../components/MultiPhaseEditor.jsx";
+import {
+  buildTurboFinishPhases,
+  modelSupportsMultiPhase,
+  multiPhaseIssues as computeMultiPhaseIssues,
+  serializePhases,
+} from "../imageMultiPhase.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
@@ -574,6 +581,15 @@ export function ImageStudio() {
   // 1.0 = no-op; >1 warmer/richer (early Qwen3-VL taps), <1 late-biased. Resets to the model default on
   // model change like the other tuning knobs; emitted to advanced.textStyleGain only when off default.
   const [textStyleGain, setTextStyleGain] = useState(saved.textStyleGain ?? 1.0);
+  // Krea 2 multi-phase denoise (epic 13879 S5, sc-13885). `multiPhaseEnabled` opts the job into the
+  // multi-phase lane; `multiPhasePhases` is the editor's ordered phase list (LoRA refs stored by
+  // stable id — serializePhases resolves them to indices at emit time). `multiPhaseOpen` is the
+  // experimental disclosure's collapsed/expanded state (default collapsed, busy-page guidance).
+  const [multiPhaseEnabled, setMultiPhaseEnabled] = useState(saved.multiPhaseEnabled ?? false);
+  const [multiPhasePhases, setMultiPhasePhases] = useState(
+    Array.isArray(saved.multiPhasePhases) ? saved.multiPhasePhases : [],
+  );
+  const [multiPhaseOpen, setMultiPhaseOpen] = useState(saved.multiPhaseOpen ?? false);
   const [controlnetScale, setControlnetScale] = useState(saved.controlnetScale ?? 0.8);
   // Variation knob for backbones whose CFG is decoupled from IP-Adapter:
   // FLUX (true_cfg_scale alongside ipAdapterScale) and Qwen-Image-Edit (true_cfg_scale
@@ -1523,6 +1539,34 @@ export function ImageStudio() {
   const pickerSelectedLoraIds = managedEditLoraId
     ? selectedLoraIds.filter((id) => id !== managedEditLoraId)
     : selectedLoraIds;
+
+  // ---- Krea 2 multi-phase denoise (epic 13879 S5, sc-13885) ----
+  // Shown only for the model that advertises the "acceleration" LoRA compat (krea_2_raw, sc-13882)
+  // AND in text-to-image mode — matching the worker gate (`request.model == krea_2_raw`, t2i only;
+  // multi-phase renders from pure noise, so edit/pose/reference are rejected). `multiPhaseActive`
+  // additionally requires the editor toggle to be on: only then does `advanced.phases` ride the
+  // request, so every other job is byte-for-byte unchanged. The per-phase LoRA toggles reference the
+  // job's OWN selected LoRAs (`buildLorasPayload` order == `request.loras` == the worker's
+  // `LoadSpec::adapters`); serializePhases resolves each stored LoRA id to its current index there,
+  // so the emitted `loras:[{ index, weight? }]` is always valid, reindexed on reorder, pruned on
+  // deselect. Weighed against the SAME `selectedLoras` the payload maps, so the indices line up.
+  const supportsMultiPhase = modelSupportsMultiPhase(selectedModel);
+  const multiPhaseAvailable = supportsMultiPhase && mode === "text_to_image";
+  const multiPhaseActive = multiPhaseAvailable && multiPhaseEnabled;
+  const serializedPhases = useMemo(
+    () => serializePhases(multiPhasePhases, selectedLoras),
+    [multiPhasePhases, selectedLoras],
+  );
+  const multiPhaseValidationIssues = useMemo(
+    () => computeMultiPhaseIssues({ enabled: multiPhaseActive, phases: multiPhasePhases }),
+    [multiPhaseActive, multiPhasePhases],
+  );
+  const applyTurboFinishPreset = useCallback(() => {
+    setMultiPhasePhases(buildTurboFinishPhases(selectedLoras));
+    setMultiPhaseEnabled(true);
+    setMultiPhaseOpen(true);
+  }, [selectedLoras]);
+
   // sc-10516: a preset launch (Presets → "Use in Studio"). `availablePresets` filters on
   // mode + model, so the preset only resolves once both match — set them alongside the id.
   // Changing the model otherwise wipes the steps/guidance overrides (the advanced-defaults
@@ -1892,6 +1936,12 @@ export function ImageStudio() {
     selectedLoraIds,
     loraWeights,
     showIncompatibleLoras,
+    // Krea 2 multi-phase denoise (sc-13885): persist the editor toggle, phase list, and disclosure
+    // state alongside the rest of the studio snapshot (LoRA refs are by stable id, so they survive
+    // reload regardless of the selected-LoRA list's async hydration).
+    multiPhaseEnabled,
+    multiPhasePhases,
+    multiPhaseOpen,
     selectedPresetId,
     generalStackIds,
     batchMode,
@@ -2134,6 +2184,11 @@ export function ImageStudio() {
       controlPassthroughId,
       effectiveControlScale,
       controlOverlayId,
+      // Krea 2 multi-phase denoise (sc-13885): the resolved gate + the serialized phase list. The
+      // advanced builder emits `advanced.phases` only when active + non-empty, so a normal
+      // single-phase Raw job (editor off, or any other model/mode) stays byte-for-byte unchanged.
+      multiPhaseActive,
+      phases: serializedPhases,
     });
   };
 
@@ -2345,6 +2400,8 @@ export function ImageStudio() {
       presetIncompatible: presetValidationResult.incompatible,
       loraIncompatible: selectedLoraValidationResult.incompatible,
       modelName: selectedModel?.name,
+      // Multi-phase denoise problems (sc-13885): an enabled-but-broken phase list blocks Generate.
+      multiPhaseIssues: multiPhaseValidationIssues,
     }),
     [
       activeProject,
@@ -2364,6 +2421,7 @@ export function ImageStudio() {
       presetValidationResult,
       selectedLoraValidationResult,
       selectedModel,
+      multiPhaseValidationIssues,
     ],
   );
   const batchValidity = useValidation(imageBatchValidation, batchDraft, undefined);
@@ -3524,6 +3582,29 @@ export function ImageStudio() {
               />
             </div>
           </AdvancedSection>
+
+          {/* Krea 2 multi-phase denoise (epic 13879 S5, sc-13885). Its own EXPERIMENTAL disclosure,
+              default collapsed (busy-page guidance), shown only for the model that advertises the
+              acceleration LoRA compat (krea_2_raw) in text-to-image mode — matching the worker gate.
+              The phase editor references the LoRAs picked in the Advanced section above by index. */}
+          {multiPhaseAvailable ? (
+            <AdvancedSection
+              className="multiphase-section"
+              hint="experimental — split the Raw denoise into phases"
+              label="Multi-phase denoise (experimental)"
+              onToggle={() => setMultiPhaseOpen((value) => !value)}
+              open={multiPhaseOpen}
+            >
+              <MultiPhaseEditor
+                enabled={multiPhaseEnabled}
+                onApplyTurboFinish={applyTurboFinishPreset}
+                onChange={setMultiPhasePhases}
+                onToggleEnabled={setMultiPhaseEnabled}
+                phases={multiPhasePhases}
+                selectedLoras={selectedLoras}
+              />
+            </AdvancedSection>
+          ) : null}
 
           {/* The preset/LoRA problems that used to be three separate .inline-warning
               paragraphs (sc-10649). Requirements — no project, empty prompt — stay silent. */}

@@ -2087,3 +2087,115 @@ describe("Image Studio batch — New batch clears a restored loaded batch", () =
     expect(snap.batchName).toBe("");
   });
 });
+
+// Krea 2 multi-phase denoise Studio UI (epic 13879 S5, sc-13885). The editor is an experimental
+// disclosure (default collapsed) shown ONLY for the model that advertises the "acceleration" LoRA
+// compat (krea_2_raw) in text-to-image mode — matching the worker gate. The load-bearing acceptance
+// is the ROUND-TRIP: the Turbo finish (4+4) preset builds a request whose `advanced.phases` equals
+// the exact shape the worker's parse_multiphase_specs consumes, indexed into the job's own loras.
+describe("ImageStudio multi-phase denoise (epic 13879 S5, sc-13885)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  const KREA_RAW_MP = {
+    ...Z_IMAGE,
+    id: "krea_2_raw",
+    name: "Krea 2 Raw",
+    family: "krea_2",
+    capabilities: ["text_to_image", "edit_image"],
+    loraCompatibility: { families: ["krea_2"], types: ["character", "style", "acceleration"] },
+  };
+  const TURBO_LORA = {
+    id: "krea2_turbo_accel",
+    name: "Krea Turbo",
+    family: "krea_2",
+    role: "accelerator",
+    scope: "builtin",
+    installState: "installed",
+    installedPath: "/loras/krea2_turbo_accel",
+  };
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const MULTI_PHASE_LABEL = "Multi-phase denoise (experimental)";
+  const hasMultiPhaseSection = () => document.body.textContent.includes(MULTI_PHASE_LABEL);
+  // Open the AdvancedSection disclosure whose header label matches `label`.
+  const openSection = async (label) => {
+    const section = [...document.body.querySelectorAll(".advanced-section")].find((node) =>
+      node.querySelector(".advanced-section-label")?.textContent.trim() === label,
+    );
+    await click(section.querySelector(".advanced-section-toggle"));
+  };
+
+  it("shows the multi-phase disclosure only for an acceleration-compat model in text mode", async () => {
+    // A model without the acceleration compat → no multi-phase disclosure.
+    await render(baseContext({ imageModels: [Z_IMAGE] }));
+    expect(hasMultiPhaseSection()).toBe(false);
+
+    // krea_2_raw (advertises acceleration) in the default text-to-image mode → the disclosure shows,
+    // collapsed (header only — the editor body is not rendered until expanded).
+    await render(baseContext({ imageModels: [KREA_RAW_MP], loras: [TURBO_LORA] }));
+    expect(hasMultiPhaseSection()).toBe(true);
+    expect(document.body.textContent).not.toContain("Enable multi-phase denoise");
+
+    // Switching to Edit mode hides it — multi-phase renders from pure noise (worker rejects edits).
+    await click([...document.body.querySelectorAll(".mode-tabs button")].find((b) => b.textContent === "Edit"));
+    expect(hasMultiPhaseSection()).toBe(false);
+  });
+
+  it("builds the canonical Turbo finish (4+4) request end-to-end and round-trips advanced.phases", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(baseContext({ createImageJob, imageModels: [KREA_RAW_MP], loras: [TURBO_LORA] }));
+
+    // Select the turbo accelerator LoRA in the Advanced LoRA picker (it becomes request.loras[0]).
+    await openSection("Advanced");
+    await click(document.body.querySelector(".lora-add"));
+    await click(document.body.querySelector(".lora-pick-row"));
+
+    // Open the experimental disclosure and apply the Turbo finish (4+4) preset.
+    await openSection(MULTI_PHASE_LABEL);
+    expect(document.body.textContent).toContain("Enable multi-phase denoise");
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Turbo finish (4+4)"));
+
+    // Generate — the request must carry the phase list the worker parses, unchanged.
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+
+    const payload = createImageJob.mock.calls[0][0];
+    // request.loras carries the turbo LoRA; the phase index points back into it.
+    const turboIndex = payload.loras.findIndex((l) => l.id === "krea2_turbo_accel");
+    expect(turboIndex).toBeGreaterThanOrEqual(0);
+    expect(payload.advanced.phases).toEqual([
+      { steps: 4, guidance: 3.5, loras: [] },
+      { steps: 4, guidance: 0, loras: [{ index: turboIndex }] },
+    ]);
+  });
+
+  it("omits advanced.phases when the editor is left off (single-phase Raw is unchanged)", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(baseContext({ createImageJob, imageModels: [KREA_RAW_MP], loras: [TURBO_LORA] }));
+    // Do NOT enable multi-phase — just generate a plain Raw job.
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.advanced).not.toHaveProperty("phases");
+  });
+});
