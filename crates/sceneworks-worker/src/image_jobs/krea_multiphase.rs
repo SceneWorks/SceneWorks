@@ -23,11 +23,17 @@
 //
 // Multi-phase is the Raw t2i variant only: it renders from PURE NOISE, so the engine
 // (`mlx-gen-krea`'s `validate_phases`) rejects phases combined with reference/edit conditioning
-// or the PiD decoder, and rejects an empty list / a 0-step phase. It also loud-rejects a
-// multi-phase request on a model loaded with a ComfyUI `.diff`/`.diff_b` diff-patch adapter (that
-// delta folds irreversibly into the base and cannot be toggled off per phase). This lane mirrors
-// those rejects on the SceneWorks side ([`ensure_multiphase_job_shape`] + [`parse_multiphase_specs`])
-// so a bad shape fails fast with a clear error BEFORE the heavy load, rather than deep in the engine.
+// or the PiD decoder, and rejects an empty list / a 0-step phase. This lane mirrors THOSE rejects
+// early on the SceneWorks side ([`ensure_multiphase_job_shape`] + [`parse_multiphase_specs`]) so a
+// bad shape fails fast with a clear error BEFORE the heavy load, rather than deep in the engine.
+//
+// NOT mirrored here: the engine ALSO loud-rejects a multi-phase request on a model loaded with a
+// ComfyUI `.diff`/`.diff_b` diff-patch adapter (that delta folds irreversibly into the base and
+// cannot be toggled off for a base-only phase). That reject is ENGINE-enforced only — it fires LATE,
+// after the adapters load, in the engine's `ensure_multiphase_allowed_for` (which sniffs the adapter
+// file headers). There is deliberately no early SceneWorks-side probe: the engine already rejects it
+// loudly, and the canonical workflow uses the ALLOWED low-rank turbo LoRA/LoKr (which toggles cleanly),
+// so an early header sniff here would be redundant work on the happy path.
 //
 // The lane loads the `krea_2_raw` ENGINE (unlike S3's turbo-on-Raw, which swaps to the `krea_2_turbo`
 // engine): multi-phase is a Raw-trajectory decomposition, and the engine keys the driver on the
@@ -99,6 +105,14 @@ fn krea_multiphase_available(request: &ImageRequest, settings: &Settings) -> boo
 /// here keeps a conflicting request from being silently rendered as bare-noise multi-phase (dropping
 /// the reference/pose/edit the user asked for) — the router sends any `krea_2_raw` + `advanced.phases`
 /// job to this lane, so this is where the conflict is caught.
+///
+/// AUTHORITATIVE guard, not a convenience: [`generate_krea_multiphase_stream`] builds a t2i-only
+/// `GenerationRequest` (empty `conditioning`, no `use_pid`), so the engine's own conditioning backstop
+/// (`validate_phases`' `!req.conditioning.is_empty()` / `use_pid` rejects) can NEVER fire — the engine
+/// only ever sees a clean t2i request from this lane. That makes THESE checks the sole protection
+/// against silently dropping a Raw conditioning source. Any future Raw conditioning entry point
+/// (a new img2img/edit/mask/reference shape that reaches multi-phase) MUST add its reject here, or it
+/// will be dropped with no error.
 fn ensure_multiphase_job_shape(request: &ImageRequest) -> WorkerResult<()> {
     if request.mode == "edit_image" {
         return Err(WorkerError::InvalidPayload(
