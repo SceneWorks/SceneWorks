@@ -417,9 +417,10 @@ where
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<WorkerResult<R>>();
     let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Free the resident cached generator (if any) before loading the fresh one, so the pool has
-            // room for the large in-place weights. On CUDA `release_backend_cache_after_evict` is a
-            // no-op (cudarc has no empty_cache); the drop returns the tensors' allocation to the pool.
+            // Free the resident cached generator (if any) before loading the fresh one, so the process
+            // has room for the large in-place weights. On CUDA `release_backend_cache_after_evict` is a
+            // no-op (cudarc has no empty_cache); the drop itself frees the VRAM (GPU-measured sc-13960:
+            // a full generator drop returns most of it to the driver — `nvidia-smi` free rises).
             if cache.evict().is_some() {
                 cache_thread::release_backend_cache_after_evict();
             }

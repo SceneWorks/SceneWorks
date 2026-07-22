@@ -5340,10 +5340,12 @@ async fn generate_candle_stream(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),
     );
-    // sc-11023: the single-slot generator cache evicts its current occupant BEFORE the incoming load,
-    // and cudarc's caching allocator reuses those freed pages in-process — nvidia-smi `free` never rises
-    // after an in-process evict (the epic 10765 caching-allocator note). So the VRAM this process already
-    // holds is RECLAIMABLE by the incoming load; budget against `free + reclaimable` (capped to total),
+    // sc-11023: the single-slot generator cache evicts its current occupant BEFORE the incoming load.
+    // This gate reads `free` while that occupant is still resident (so raw `free` still counts the model
+    // it is about to replace); crediting the reclaimable pool predicts the `free` the imminent evict will
+    // PRODUCE. That prediction is right whether evicting returns the VRAM to the driver (GPU-measured
+    // sc-13960: a full generator drop frees most of it back, `nvidia-smi` free RISES) or a within-device
+    // component free keeps it pooled in-process. So budget against `free + reclaimable` (capped to total),
     // else a warm/swap re-gate falsely rejects a load that will actually fit (the "even with sequential
     // residency" 2nd-run reject a resident bf16 tier hits on the next generation).
     let budget = budget.map(|budget| {

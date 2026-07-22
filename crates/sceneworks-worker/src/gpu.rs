@@ -445,10 +445,12 @@ pub(crate) async fn gpu_utilization(gpu_id: &str) -> Option<WorkerUtilizationSna
 /// (`memory.free`/`memory.total`, MiB → GiB). `None` off-NVIDIA (CPU / macOS with no visible NVIDIA
 /// GPU) or when the probe fails — the gate then no-ops.
 ///
-/// NOTE (caching allocator): candle's CUDA backend uses cudarc's stream-ordered caching allocator with
-/// no `empty_cache`, so `memory.free` reflects DRIVER-resident free and does NOT drop back after an
-/// in-process component is freed. Treat this as a pre-load admission signal, not a post-free accounting
-/// number (see `crate::vram_gate` module docs).
+/// NOTE (caching allocator): `memory.free` reflects DRIVER-resident free. Under sequential residency a
+/// freed WITHIN-DEVICE component (device still alive) returns to cudarc's in-process pool, so `free`
+/// does NOT drop back for it — but a full generator DROP (a cache evict) does return its VRAM to the
+/// driver (GPU-measured sc-13960: `free` rises). Either way, treat this as a pre-load admission signal,
+/// not a post-free accounting number; the gate predicts the post-evict `free` via `reclaimable_pool_gb`
+/// (see `crate::vram_gate` module docs).
 ///
 /// Gated to the candle lane (its only consumer, `generate_candle_stream`) so it isn't dead code under
 /// `-D warnings` in the non-candle / macOS builds.
