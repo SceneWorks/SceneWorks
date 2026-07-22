@@ -72,6 +72,29 @@ pub fn sana_tier_complete(dir: &Path) -> bool {
         && dir.join("text_encoder/tokenizer.json").is_file()
 }
 
+/// Whether a Wan2.2 MLX turnkey tier `dir` is COMPLETE and loadable by the native MLX Wan trainer
+/// (sc-13878). The `SceneWorks/wan2.2-{ti2v-5b,t2v-a14b,i2v-a14b}-mlx` turnkeys ship a FLAT MLX layout
+/// (a `config.json` + top-level `*.safetensors`, NOT a diffusers `model_index.json` / `transformer/`
+/// component tree), so both the shared `model_index.json` guard and rust-api's diffusers-shaped
+/// training-base checks (`bf16_component_tree_present`, which probes `transformer/`|`unet/` dirs) are a
+/// no-op for them: a torn tier clears the coarse `<tier>/*` glob yet the trainer
+/// (mlx-gen-wan `build_trainer_concrete`) dies on the first absent flat file. A tier is complete when the
+/// UMT5 T5 encoder, the Wan VAE, the tokenizer, the `config.json`, and the DiT are all present — the DiT
+/// being either the single-expert `model.safetensors` (dense TI2V-5B) OR both MoE experts
+/// `low_noise_model.safetensors` + `high_noise_model.safetensors` (A14B T2V/I2V). Exact-path `.is_file()`
+/// checks are AppleDouble-safe by construction — a hidden `._name` sidecar has a different name
+/// (SceneWorks#1333) — and pin the exact filenames the trainer's `LoadSpec` dir must contain.
+pub fn wan_tier_complete(dir: &Path) -> bool {
+    let shared = dir.join("config.json").is_file()
+        && dir.join("t5_encoder.safetensors").is_file()
+        && dir.join("vae.safetensors").is_file()
+        && dir.join("tokenizer.json").is_file();
+    let dense_expert = dir.join("model.safetensors").is_file();
+    let dual_expert = dir.join("low_noise_model.safetensors").is_file()
+        && dir.join("high_noise_model.safetensors").is_file();
+    shared && (dense_expert || dual_expert)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +127,25 @@ mod tests {
         touch(&dir.join("vae/diffusion_pytorch_model.safetensors"));
         touch(&dir.join("text_encoder/gemma-2-2b-it.safetensors"));
         touch(&dir.join("text_encoder/tokenizer.json"));
+    }
+
+    /// Write a COMPLETE dense (single-expert, TI2V-5B) Wan MLX tier tree.
+    fn seed_wan_dense(dir: &Path) {
+        touch(&dir.join("config.json"));
+        touch(&dir.join("t5_encoder.safetensors"));
+        touch(&dir.join("vae.safetensors"));
+        touch(&dir.join("tokenizer.json"));
+        touch(&dir.join("model.safetensors"));
+    }
+
+    /// Write a COMPLETE dual-expert (A14B MoE) Wan MLX tier tree.
+    fn seed_wan_moe(dir: &Path) {
+        touch(&dir.join("config.json"));
+        touch(&dir.join("t5_encoder.safetensors"));
+        touch(&dir.join("vae.safetensors"));
+        touch(&dir.join("tokenizer.json"));
+        touch(&dir.join("low_noise_model.safetensors"));
+        touch(&dir.join("high_noise_model.safetensors"));
     }
 
     #[test]
@@ -214,6 +256,74 @@ mod tests {
     }
 
     #[test]
+    fn wan_dense_complete_true_each_component_load_bearing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bf16");
+        seed_wan_dense(&dir);
+        assert!(
+            wan_tier_complete(&dir),
+            "fully-seeded dense tier is complete"
+        );
+
+        // Mutation check: removing ANY single component must flip the verdict to incomplete.
+        for component in [
+            "config.json",
+            "t5_encoder.safetensors",
+            "vae.safetensors",
+            "tokenizer.json",
+            "model.safetensors",
+        ] {
+            let torn = tmp.path().join("torn");
+            seed_wan_dense(&torn);
+            fs::remove_file(torn.join(component)).unwrap();
+            assert!(
+                !wan_tier_complete(&torn),
+                "removing {component} must read incomplete"
+            );
+            fs::remove_dir_all(&torn).ok();
+        }
+    }
+
+    #[test]
+    fn wan_moe_complete_true_each_component_load_bearing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bf16");
+        seed_wan_moe(&dir);
+        assert!(wan_tier_complete(&dir), "fully-seeded MoE tier is complete");
+
+        // Mutation check: BOTH experts are load-bearing (a single-expert dir is not a valid A14B tier)
+        // alongside every shared component.
+        for component in [
+            "config.json",
+            "t5_encoder.safetensors",
+            "vae.safetensors",
+            "tokenizer.json",
+            "low_noise_model.safetensors",
+            "high_noise_model.safetensors",
+        ] {
+            let torn = tmp.path().join("torn");
+            seed_wan_moe(&torn);
+            fs::remove_file(torn.join(component)).unwrap();
+            assert!(
+                !wan_tier_complete(&torn),
+                "removing {component} must read incomplete"
+            );
+            fs::remove_dir_all(&torn).ok();
+        }
+    }
+
+    #[test]
+    fn wan_ignores_appledouble_expert_sidecar() {
+        // A hidden `._` DiT sidecar is not a real weight (SceneWorks#1333); exact-path checks reject it.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bf16");
+        seed_wan_dense(&dir);
+        fs::remove_file(dir.join("model.safetensors")).unwrap();
+        touch(&dir.join("._model.safetensors"));
+        assert!(!wan_tier_complete(&dir));
+    }
+
+    #[test]
     fn missing_tier_dir_is_incomplete_for_every_family() {
         // A tier subdir that does not exist at all (never converted / never downloaded) is incomplete,
         // not a panic — the catalog treats it as a clean "missing".
@@ -222,5 +332,6 @@ mod tests {
         assert!(!anima_tier_complete(&absent));
         assert!(!boogu_tier_complete(&absent));
         assert!(!sana_tier_complete(&absent));
+        assert!(!wan_tier_complete(&absent));
     }
 }
