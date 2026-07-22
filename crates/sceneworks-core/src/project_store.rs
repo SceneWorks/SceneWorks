@@ -2216,6 +2216,15 @@ impl ProjectStore {
             .ok_or_else(|| {
                 ProjectStoreError::BadRequest("generation set fact missing id".to_owned())
             })?;
+        // The id comes from the worker-reported fact and is joined into the
+        // generation-sets path below, so charset-check it before path use — the
+        // worker->API boundary must not write outside the project root
+        // (sc-13582; mirrors the persist_generated_asset guards, sc-5721/sc-4211).
+        if !is_safe_id(id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid generation set id".to_owned(),
+            ));
+        }
         let get = |key: &str| generation_set.get(key).cloned().unwrap_or(Value::Null);
         let record = json!({
             "schemaVersion": 1,
@@ -5255,6 +5264,90 @@ mod tests {
             json!(1024)
         );
         assert_eq!(written["recipe"]["rawAdapterSettings"]["steps"], json!(8));
+    }
+
+    /// sc-13582 / F-001: the generation-set id is worker-reported and joined
+    /// into the generation-sets write path; a traversal id must be rejected
+    /// before any directory/file is created, mirroring the
+    /// persist_generated_asset guards (sc-5721/sc-4211).
+    #[test]
+    fn write_generation_set_rejects_traversal_id() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Fixture").expect("project creates");
+        let generation_set = json!({
+            "id": "../../escaped",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": "city",
+            "count": 1,
+            "createdAt": "2026-05-25T00:00:00Z",
+        });
+
+        let error = store
+            .write_generation_set(&project.id, "job-1", &generation_set, None)
+            .expect_err("traversal id is rejected");
+        assert!(
+            matches!(&error, ProjectStoreError::BadRequest(message) if message.contains("generation set id")),
+            "expected invalid-id BadRequest, got {error:?}"
+        );
+        // The atomic-rename writer must never have produced the escaped file
+        // (generation-sets/../../escaped.json resolves above the project root).
+        let project_path = std::path::Path::new(&project.path);
+        assert!(!project_path
+            .join("generation-sets/../../escaped.json")
+            .exists());
+    }
+
+    /// sc-13582 / F-001 (read half): a sidecar-supplied `generationSetId` is
+    /// joined into the generation-sets read path at list time; a tampered
+    /// traversal id must be skipped, not resolved to a file outside the
+    /// project and embedded into the API response.
+    #[test]
+    fn list_assets_skips_traversal_generation_set_id() {
+        use crate::store_util::{read_json, write_json};
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Gallery").expect("project creates");
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "genset_ok",
+                &json!({
+                    "assetId": "asset_one",
+                    "mediaPath": "assets/images/genset_ok/asset_one.png",
+                    "mimeType": "image/png",
+                    "displayName": "city #1",
+                    "createdAt": "2026-05-25T00:00:00Z",
+                    "mode": "text_to_image",
+                    "model": "z_image_turbo",
+                    "adapter": "z_image_diffusers",
+                    "prompt": "city",
+                }),
+            )
+            .expect("asset persists");
+
+        // Tamper the on-disk sidecar the way a compromised worker/file could,
+        // and plant the traversal target outside the project root.
+        let project_path = std::path::Path::new(&project.path);
+        let sidecar_path = project_path.join("assets/images/genset_ok/asset_one.sceneworks.json");
+        let mut sidecar = read_json(&sidecar_path).expect("sidecar reads");
+        sidecar["generationSetId"] = json!("../../leak");
+        write_json(&sidecar_path, &sidecar).expect("tampered sidecar writes");
+        let leak_path = project_path.join("generation-sets/../../leak.json");
+        std::fs::create_dir_all(project_path.join("generation-sets")).expect("sets dir");
+        write_json(&leak_path, &json!({"secret": "outside-project"})).expect("leak plant writes");
+
+        let assets = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("list");
+        assert_eq!(assets.len(), 1);
+        assert!(
+            assets[0].get("generationSet").is_none(),
+            "traversal generationSetId must not resolve/embed a file from outside the project: {:?}",
+            assets[0].get("generationSet")
+        );
     }
 
     /// sc-4270 / F-CORE-10: list_assets resolves the embedded `generationSet`
