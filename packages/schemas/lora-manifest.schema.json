@@ -25,6 +25,11 @@
             "type": "string",
             "description": "How the worker must condition a job for this LoRA to function. 'ic_lora' = LTX in-context video conditioning (source clip). 'image_edit' = Kontext-style image edit (source image as in-context VAE tokens + vision-tower grounding); selecting such a LoRA auto-activates the model's edit recipe. A base without the matching conditioning leaves these weights inert.",
             "enum": ["ic_lora", "image_edit"]
+          },
+          "role": {
+            "type": "string",
+            "description": "Sampling-regime role marker (the sibling of 'conditioningRole', which is about how a job is CONDITIONED). 'accelerator' = a step-distill / turbo LoRA (e.g. the Krea 2 turbo adapter, sc-13882) whose weights load additively like any other LoRA but whose intent is to change the sampler regime — fewer steps, CFG off. Selecting one auto-switching the model to that regime is separately wired per model; absent that wiring the weights still stack as a plain residual.",
+            "enum": ["accelerator"]
           }
         },
         "additionalProperties": true

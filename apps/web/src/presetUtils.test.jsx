@@ -96,6 +96,20 @@ describe("loraMatchesModel", () => {
   it("normalizes separators/underscores on both sides before comparing", () => {
     expect(loraMatchesModel({ id: "l", family: "Z_Image" }, { id: "z", loraCompatibility: { families: ["z-image"] } })).toBe(true);
   });
+
+  it("surfaces the Krea 2 turbo accelerator LoRA under Krea 2 Raw (sc-13882)", () => {
+    // The manifest-shaped accelerator (family krea_2, role accelerator) must be picker-compatible
+    // with the Raw model, whose loraCompatibility.families is ["krea_2"]. The `role` marker is inert
+    // to this gate (family is the only signal) — it exists for the S3 sampling-regime routing.
+    const turboAccel = {
+      id: "krea2_turbo_accel",
+      family: "krea_2",
+      role: "accelerator",
+      compatibility: { families: ["krea_2"] },
+    };
+    const kreaRaw = { id: "krea_2_raw", loraCompatibility: { families: ["krea_2"], types: ["character", "style", "acceleration"] } };
+    expect(loraMatchesModel(turboAccel, kreaRaw)).toBe(true);
+  });
 });
 
 describe("loraHasResolvableFamily", () => {
