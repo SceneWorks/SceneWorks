@@ -136,6 +136,28 @@ fn serialize_job_lora_carries_network_type_to_payload() {
 }
 
 #[test]
+fn serialize_job_lora_carries_accelerator_role_to_payload() {
+    // The Krea 2 turbo accelerator LoRA (sc-13882) records `role: accelerator`; the generation payload
+    // must carry it so the worker can switch a Krea 2 Raw t2i job to the turbo sampling regime (epic
+    // 13879 S3, sc-13883) — the sampling-regime sibling of `conditioningRole`.
+    let lora = json!({
+        "id": "krea2_turbo_accel",
+        "family": "krea_2",
+        "role": "accelerator",
+        "source": { "provider": "huggingface" },
+    });
+    let payload = serialize_job_lora(&lora, &json!({}), "krea2_turbo_accel");
+    assert_eq!(
+        payload.get("role").and_then(Value::as_str),
+        Some("accelerator")
+    );
+
+    // A plain LoRA without the field stays absent/null (a plain additive residual downstream).
+    let plain = serialize_job_lora(&json!({ "id": "x", "family": "krea_2" }), &json!({}), "x");
+    assert!(plain.get("role").map(Value::is_null).unwrap_or(true));
+}
+
+#[test]
 fn person_readiness_reflects_live_worker_capabilities() {
     let workers = vec![
         readiness_worker(

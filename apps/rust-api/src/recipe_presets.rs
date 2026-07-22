@@ -1027,6 +1027,9 @@ pub(crate) fn serialize_preset_lora(lora: &Value, preset_lora: &Value, lora_id: 
         "compatibility": lora.get("compatibility").cloned().unwrap_or_else(|| Value::Object(JsonObject::new())),
         "icLora": lora.get("icLora").cloned().unwrap_or(Value::Bool(false)),
         "conditioningRole": lora.get("conditioningRole").cloned().unwrap_or(Value::Null),
+        // Sampling-regime role (`accelerator`, sc-13882) — round-tripped alongside `conditioningRole`
+        // so a preset-managed accelerator LoRA switches Krea 2 Raw to the turbo regime (epic 13879 S3).
+        "role": lora.get("role").cloned().unwrap_or(Value::Null),
         "installedPath": lora.get("installedPath").cloned().unwrap_or(Value::Null),
         // Carry the declared adapter filename(s) so the worker loads the record's final
         // adapter from its folder rather than an arbitrary sibling — e.g. a trained

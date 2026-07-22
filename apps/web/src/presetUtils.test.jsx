@@ -362,6 +362,21 @@ describe("serializeLora round-trips the conditioning role (epic 10871)", () => {
   });
 });
 
+describe("serializeLora round-trips the sampling-regime role (sc-13883)", () => {
+  it("forwards role: accelerator so the worker can select the turbo regime", () => {
+    // The Krea 2 turbo accelerator LoRA (sc-13882). Without this round-trip the worker never sees the
+    // `role` marker and a picked accelerator runs only as a plain additive residual — Raw stays 52-step.
+    const out = serializeLora({ id: "krea2_turbo_accel", family: "krea_2", role: "accelerator" });
+    expect(out.role).toBe("accelerator");
+  });
+
+  it("defaults role to null for a LoRA that declares no sampling-regime role", () => {
+    expect(serializeLora({ id: "plain" }).role).toBe(null);
+    // The conditioning-axis sibling does not backfill `role` (they are orthogonal markers).
+    expect(serializeLora({ id: "edit", conditioningRole: "image_edit" }).role).toBe(null);
+  });
+});
+
 describe("loraLooksLikeImageEditLora (epic 10871)", () => {
   it("matches the image_edit conditioning role (case / separator insensitive)", () => {
     expect(loraLooksLikeImageEditLora({ conditioningRole: "image_edit" })).toBe(true);

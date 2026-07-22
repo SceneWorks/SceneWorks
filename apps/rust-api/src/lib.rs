@@ -2008,6 +2008,10 @@ fn serialize_job_lora(lora: &Value, selected_lora: &Value, lora_id: &str) -> Val
         "compatibility": preferred_lora_object(selected_lora, lora, "compatibility"),
         "icLora": preferred_lora_value(selected_lora, lora, "icLora"),
         "conditioningRole": preferred_lora_value(selected_lora, lora, "conditioningRole"),
+        // Sampling-regime role (`accelerator`, sc-13882): carried into the generation payload so the
+        // worker can switch a Krea 2 Raw t2i job to the turbo sampling regime (epic 13879 S3, sc-13883)
+        // — the sibling of `conditioningRole`, round-tripped identically.
+        "role": preferred_lora_value(selected_lora, lora, "role"),
         "installedPath": preferred_lora_value(selected_lora, lora, "installedPath"),
         "sourcePath": preferred_lora_value(selected_lora, lora, "sourcePath"),
         // Declared adapter filename(s): lets the worker load the record's final adapter

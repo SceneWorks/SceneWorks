@@ -89,6 +89,13 @@ enum ImageRoute {
     Flux2Edit,
     QwenEdit,
     KreaEdit,
+    /// A Krea 2 **Raw** t2i job carrying the accelerator (turbo) LoRA (`role: accelerator`, sc-13882)
+    /// → the single-phase turbo-on-Raw lane (epic 13879 S3, sc-13883): the Raw base + LoRA additive,
+    /// sampled through the distilled Turbo regime (fixed mu 1.15 / ~8 steps / CFG-off) by routing to
+    /// the `krea_2_turbo` engine. Wins over the generic `Mlx` arm below — `krea_2_raw` is in
+    /// MODEL_TABLE, so `mlx_available` would otherwise render it as plain Raw t2i (52-step true-CFG)
+    /// and never accelerate. The t2i sibling of [`ImageRoute::KreaEdit`].
+    KreaTurboOnRaw,
     InstantId,
     PulidFlux,
     SdxlAdvanced,
@@ -173,6 +180,17 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         // (epic 10871). Wins over the generic MLX arm below — `krea_2_raw` is in MODEL_TABLE, so
         // `mlx_available` would otherwise render it as plain t2i and silently drop the source.
         Some(ImageRoute::KreaEdit)
+    } else if krea_turbo_on_raw_available(request, settings) {
+        // Krea 2 Raw t2i + the accelerator (turbo) LoRA (sc-13882) → the single-phase turbo-on-Raw
+        // lane (epic 13879 S3, sc-13883): the Raw base + LoRA additive, sampled as Turbo (fixed mu
+        // 1.15 / ~8 steps / CFG-off) by routing to the `krea_2_turbo` engine. Wins over the generic
+        // `mlx_available` arm below for PLAIN t2i — a plain Raw t2i would otherwise run the 52-step
+        // true-CFG regime and ignore the accelerator's intent. A `krea_2_raw` job that ALSO carries an
+        // img2img reference (`ui.img2img` + `referenceAssetId`) is EXCLUDED by the gate and falls
+        // through to the generic `mlx_available` img2img arm (reference honored, accelerator LoRA still
+        // additive) — turbo-on-Raw img2img is out of scope for this t2i story (sc-13883). The t2i
+        // sibling of the `krea_edit_available` arm above.
+        Some(ImageRoute::KreaTurboOnRaw)
     } else if instantid_available(request, settings) {
         Some(ImageRoute::InstantId)
     } else if pulid_flux_available(request, settings) {
@@ -246,6 +264,9 @@ impl ImageRoute {
             | ImageRoute::SdxlAdvanced
             | ImageRoute::Bernini
             | ImageRoute::KreaEdit
+            // Turbo-on-Raw is plain per-image (like Krea edit + the base MLX path): `count` renders of
+            // the base prompt, each its own seed. No angle/pose grouping.
+            | ImageRoute::KreaTurboOnRaw
             | ImageRoute::PoseControlBaseMissing
             | ImageRoute::PoseReject
             | ImageRoute::Mlx => request.count,

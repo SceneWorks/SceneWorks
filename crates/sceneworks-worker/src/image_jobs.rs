@@ -442,6 +442,22 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::KreaTurboOnRaw => {
+                // Krea 2 Raw t2i + the accelerator (turbo) LoRA (sc-13882) → the distilled Turbo
+                // sampling regime (fixed mu 1.15 / ~8 steps / CFG-off) on the Raw base + LoRA additive
+                // (epic 13879 S3, sc-13883). Routes to the `krea_2_turbo` engine while loading the Raw
+                // weights — the engine-id sibling of the `krea_2_turbo_edit` vs `krea_2_edit` edit pick.
+                generate_krea_turbo_on_raw_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::InstantId => {
                 // InstantID identity-preserving character image (sc-3345): single identity or
                 // grouped angle/pose sets, on RealVisXL + IdentityNet + the native face stack.
@@ -1676,6 +1692,10 @@ include!("image_jobs/qwen.rs");
 #[cfg(target_os = "macos")]
 // Krea 2 Kontext-style image-edit routing (epic 10871).
 include!("image_jobs/krea_edit.rs");
+#[cfg(target_os = "macos")]
+// Krea 2 single-phase turbo-on-Raw routing (epic 13879 S3, sc-13883): the accelerator LoRA on a
+// `krea_2_raw` t2i job → the distilled Turbo sampling regime (fixed mu 1.15 / ~8 steps / CFG-off).
+include!("image_jobs/krea_turbo_raw.rs");
 #[cfg(target_os = "macos")]
 // Krea 2 pose-ControlNet (MLX) strict-pose routing (sc-8465, epic 8459 S5).
 include!("image_jobs/krea_control.rs");

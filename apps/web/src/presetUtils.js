@@ -356,6 +356,9 @@ export function serializePresetLora(lora, presetLora = {}) {
     compatibility: lora?.compatibility ?? presetLora?.compatibility ?? {},
     icLora: lora?.icLora ?? presetLora?.icLora ?? false,
     conditioningRole: lora?.conditioningRole ?? presetLora?.conditioningRole ?? null,
+    // Sampling-regime role (`accelerator`, sc-13882) — round-tripped alongside `conditioningRole` so a
+    // preset-managed accelerator LoRA still switches Krea 2 Raw to the turbo regime (epic 13879 S3).
+    role: lora?.role ?? presetLora?.role ?? null,
     installedPath: lora?.installedPath ?? presetLora?.installedPath ?? null,
     source: lora?.source ?? presetLora?.source ?? null,
     presetManaged: true,
@@ -385,6 +388,13 @@ export function serializeLora(lora, override = {}) {
     // edit lane's role check (R5) even though the user picked it. `icLora` rides along for
     // the flag-based half of the same test.
     conditioningRole: lora.conditioningRole ?? null,
+    // The sampling-regime role (`accelerator`, sc-13882) is the sibling of `conditioningRole`: it
+    // tells the worker a selected LoRA is a step-distill / turbo adapter, switching a Krea 2 Raw t2i
+    // job to the turbo sampling regime (fixed mu 1.15 / ~8 steps / CFG-off — epic 13879 S3, sc-13883).
+    // The worker reads it straight off the payload `loras` entry, so it MUST round-trip here — without
+    // it a picked accelerator loads only as a plain additive residual and Raw still runs its 52-step
+    // true-CFG regime.
+    role: lora.role ?? null,
     icLora: lora.icLora ?? false,
     // `installedPath` points at the LoRA directory; for trained LoRAs that
     // directory also holds step checkpoints, so the worker must be told the
