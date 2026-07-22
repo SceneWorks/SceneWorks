@@ -5,9 +5,30 @@
         <!-- WKWebView / Tauri IPC -->
         <key>com.apple.security.network.client</key><true/>
         <key>com.apple.security.network.server</key><true/>
-        <!-- The worker dlopens onnxruntime + spawns uv/python that load unsigned dylibs -->
-        <key>com.apple.security.cs.disable-library-validation</key><true/>
-        <!-- setup.rs sets ORT_DYLIB_PATH and friends; needed if any DYLD_* is used for subprocesses -->
-        <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
+        <!--
+          Hardened-runtime weakenings removed (sc-13609) — do NOT re-add without cause:
+            * com.apple.security.cs.disable-library-validation
+            * com.apple.security.cs.allow-dyld-environment-variables
+          Their former justification (the app spawned uv/python that loaded unsigned
+          dylibs and set DYLD_* for subprocesses) is obsolete:
+            - The Python venv was retired app-wide (epic 3482 — "no Python venv on any
+              platform"); the shipped Mac app spawns only the sceneworks-api sidecar.
+            - The ONLY dylib the shipped app dlopens on macOS is the bundled CoreML
+              libonnxruntime.dylib (ort `load-dynamic`, sc-3487). build-sidecar.mjs
+              re-signs it (`codesign --force --options runtime`) with the SAME
+              Developer ID / Team ID as the .app, so library validation permits the
+              load — the CoreML EP is compiled into that one dylib and talks only to
+              Apple's system CoreML.framework (no third-party provider dylib on Mac).
+            - No DYLD_* env var is set anywhere (Rust/JS/shell/CI). ORT_DYLIB_PATH and
+              PMETAL_METALLIB_PATH are plain application env vars read by the ort crate
+              and the pmetal resolver — NOT dynamic-linker (DYLD_*) variables.
+          Full hardened runtime now blocks same-team-unsigned dylib injection and
+          DYLD_INSERT_LIBRARIES attacks on every process.
+          VALIDATION GATE: dropping disable-library-validation must be confirmed by a
+          notarized smoke build (the release lane) that verifies ort/CoreML pose
+          detection still loads. If that load fails under library validation, re-add
+          ONLY disable-library-validation here with this real (CoreML dlopen) reason —
+          never restore allow-dyld-environment-variables.
+        -->
     </dict>
 </plist>
