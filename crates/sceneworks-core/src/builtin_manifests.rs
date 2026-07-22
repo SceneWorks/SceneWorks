@@ -704,4 +704,83 @@ mod tests {
             "overwrite refreshes the builtin manifest to the embedded copy"
         );
     }
+
+    #[test]
+    fn krea_turbo_accelerator_lora_is_registered_and_sha_pinned() {
+        // sc-13882 (epic 13879 S2): the Krea 2 turbo LoRA registers as a weight-load-only builtin
+        // accelerator. Pin every NON-default field so this discriminates a real registration from an
+        // empty/renamed one: repo + exact file, a FULL 40-hex commit SHA revision (a floating `main`
+        // would silently drift the accelerator weights under the frozen Raw DiT), family `krea_2`
+        // (what surfaces it in the Raw picker), and `role: accelerator` (the sampling-regime marker
+        // S3 routes on).
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.loras.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.loras.jsonc parses as JSON");
+        let loras = manifest["loras"]
+            .as_array()
+            .expect("builtin.loras.jsonc has a loras array");
+        let lora = loras
+            .iter()
+            .find(|l| l["id"] == serde_json::json!("krea2_turbo_accel"))
+            .expect("krea2_turbo_accel is registered in builtin.loras.jsonc");
+
+        assert_eq!(lora["family"], serde_json::json!("krea_2"));
+        assert_eq!(lora["role"], serde_json::json!("accelerator"));
+        assert_eq!(
+            lora["compatibility"]["families"],
+            serde_json::json!(["krea_2"])
+        );
+        assert_eq!(lora["source"]["provider"], serde_json::json!("huggingface"));
+        assert_eq!(
+            lora["source"]["repo"],
+            serde_json::json!("Comfy-Org/Krea-2")
+        );
+        assert_eq!(
+            lora["source"]["file"],
+            serde_json::json!("loras/krea2_turbo_lora_rank_64_bf16.safetensors")
+        );
+        let revision = lora["source"]["revision"]
+            .as_str()
+            .expect("the accelerator LoRA pins a source.revision");
+        assert!(
+            is_full_sha_revision(revision),
+            "the accelerator LoRA must pin a full 40-hex commit SHA (not a floating branch); got \
+             {revision:?}"
+        );
+        assert_eq!(revision, "952f49d49653cb42e7d6cf7cbfad74738073ec7d");
+    }
+
+    #[test]
+    fn krea_2_raw_advertises_the_acceleration_lora_compat_type() {
+        // sc-13882: Raw must advertise "acceleration" as a compatible LoRA type so the turbo adapter
+        // is offered under Raw. Assert the NEW value is present AND the pre-existing trainable tiers
+        // survive the edit (a replacement, not an addition, would be the likely regression).
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let models = manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array");
+        let raw = models
+            .iter()
+            .find(|m| m["id"] == serde_json::json!("krea_2_raw"))
+            .expect("krea_2_raw is present");
+        let types = raw["loraCompatibility"]["types"]
+            .as_array()
+            .expect("krea_2_raw declares loraCompatibility.types");
+        assert!(
+            types.contains(&serde_json::json!("acceleration")),
+            "krea_2_raw must advertise the acceleration compat type (sc-13882); got {types:?}"
+        );
+        assert!(
+            types.contains(&serde_json::json!("character"))
+                && types.contains(&serde_json::json!("style")),
+            "the trainable character/style tiers must survive the edit; got {types:?}"
+        );
+        // The family match that actually surfaces the LoRA in the Raw picker is unchanged.
+        assert_eq!(
+            raw["loraCompatibility"]["families"],
+            serde_json::json!(["krea_2"])
+        );
+    }
 }

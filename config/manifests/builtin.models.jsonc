@@ -3047,9 +3047,13 @@
       },
       "loraCompatibility": {
         // Krea LoRAs (family krea_2) apply at Raw inference too (family match, no base-model gating —
-        // lora_family.rs), and Raw's bf16 tier is their training base. `types` lists what trains here.
+        // lora_family.rs), and Raw's bf16 tier is their training base. `types` advertises what applies
+        // here: "character"/"style" are the trainable tiers; "acceleration" (sc-13882, epic 13879)
+        // advertises the shipped Krea 2 Turbo accelerator LoRA (`krea2_turbo_accel`, family krea_2) —
+        // a weight-load-only step-distill adapter, not a training tier. Its sampling-regime routing is
+        // S3 (sc-13883); registering the type here surfaces the accelerator as Raw-compatible.
         "families": ["krea_2"],
-        "types": ["character", "style"]
+        "types": ["character", "style", "acceleration"]
       },
       "mlx": {
         // Pre-quantized Q8 turnkey (`q8/` subdir) is the default. Raw runs TRUE CFG (two DiT forwards per

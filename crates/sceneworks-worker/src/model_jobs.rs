@@ -348,9 +348,10 @@ pub(crate) async fn run_lora_download_job(
     // repo" (apps/rust-api `create_lora_download_job`) — but that only widens the filter, so resolving
     // zero files still means there was nothing to fetch.
     //
-    // Safe to hard-fail: swept every entry in builtin.loras.jsonc against its repo — 7 entries, all
-    // declaring an explicit `source.file`, all 7 present, no whole-repo entries. Nothing shipping
-    // relies on this silently passing.
+    // Safe to hard-fail: swept every entry in builtin.loras.jsonc against its repo — 8 entries, all
+    // declaring an explicit `source.file`, all 8 present, no whole-repo entries. Nothing shipping
+    // relies on this silently passing. (The 8th, `krea2_turbo_accel` sc-13882, pins a SHA revision;
+    // its file was confirmed present at that snapshot.)
     if snapshot.files.is_empty() {
         let scope = if files.is_empty() {
             String::new()

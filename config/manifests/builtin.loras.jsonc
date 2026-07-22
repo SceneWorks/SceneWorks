@@ -132,6 +132,36 @@
         "repo": "conradlocke/krea2-identity-edit",
         "file": "krea2_identity_edit_v1_2.safetensors"
       }
+    },
+    {
+      // Krea 2 Turbo accelerator LoRA (epic 13879 S2, sc-13882). The rank-64 bf16 step-distill
+      // ("turbo") adapter Krea ships in Comfy-Org/Krea-2 (`loras/krea2_turbo_lora_rank_64_bf16.
+      // safetensors`) — the low-rank residual that turns the full-fidelity Raw DiT into the fast,
+      // CFG-free Turbo regime. `role: accelerator` is the sampling-regime sibling of
+      // `conditioningRole`: it marks a LoRA that changes HOW the sampler runs (fewer steps, CFG off),
+      // not how the job is CONDITIONED (ic_lora / image_edit). This slice registers it WEIGHT-LOAD
+      // ONLY: family `krea_2` makes it surface in the Raw LoRA picker (family match, no base-model
+      // gating — lora_family.rs), and the additive-LoRA core reads the rank straight off the tensor
+      // shapes at load (mlx-gen `adapters/loader.rs::apply_lora_peft`, `factor_rank = a.shape()[1]`),
+      // so rank 64 is a drop-in on the frozen Raw DiT with no code change. Selecting it today only
+      // stacks the residual — Raw STILL runs its 52-step true-CFG regime; the auto-switch to the turbo
+      // sampling recipe (fewer steps, guidance off) is S3 (sc-13883), and candle is S6. Pinned to the
+      // current Comfy-Org/Krea-2 commit (an immutable snapshot; the file is confirmed present at this
+      // SHA). Krea 2 Community License — the SAME license we already ship Krea 2 Raw/Turbo under, so no
+      // new gating/consent beyond the base.
+      "id": "krea2_turbo_accel",
+      "name": "Krea 2 Turbo (accelerator)",
+      "family": "krea_2",
+      "triggerWords": [],
+      "compatibility": { "families": ["krea_2"] },
+      "role": "accelerator",
+      "defaultWeight": 1.0,
+      "source": {
+        "provider": "huggingface",
+        "repo": "Comfy-Org/Krea-2",
+        "file": "loras/krea2_turbo_lora_rank_64_bf16.safetensors",
+        "revision": "952f49d49653cb42e7d6cf7cbfad74738073ec7d"
+      }
     }
   ]
 }
