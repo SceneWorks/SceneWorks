@@ -152,6 +152,7 @@ import { readLastTier, writeLastTier } from "../lastTierStore.js";
 import { readDefaultGenerationQuality } from "../generationQuality.js";
 import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
+import { fitsResolutionOptions } from "../resolutionMemory.js";
 import { finiteRecipeNumber, recipeLoraSelection, recipeResolution } from "../recipeFields.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
@@ -1202,13 +1203,22 @@ export function ImageStudio() {
     setPrompt(promptSeedFor(ui));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, model]);
-  const resolutionOptions = useMemo(
-    () =>
-      selectedModel?.limits?.resolutions?.length
-        ? selectedModel.limits.resolutions
-        : DEFAULT_RESOLUTION_OPTIONS,
-    [selectedModel],
-  );
+  // The model's advertised buckets, MEMORY-GATED for this host (sc-13959): a resolution above the
+  // historical 1536² ceiling is hidden when its predicted peak won't fit `unifiedMemoryGb` (unified
+  // memory on a Mac / GPU VRAM off Mac) on the active backend — so a 48 GB Mac isn't offered a 2048²
+  // that OOMs while a 128 GB Mac gets the full range. A no-op for ≤1536²-only models, an unknown
+  // memory reading, and models with no declared memory floor (see resolutionMemory.js). The
+  // downstream snap/default effects keep the selection valid within the gated list.
+  const resolutionOptions = useMemo(() => {
+    const declared = selectedModel?.limits?.resolutions?.length
+      ? selectedModel.limits.resolutions
+      : DEFAULT_RESOLUTION_OPTIONS;
+    const backend = macCapabilities?.macGatingActive ? "mlx" : "candle";
+    const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, { backend });
+    // Never collapse to an empty picker: if the gate somehow trims everything (it never trims
+    // ≤1536², so this is defensive), fall back to the declared list.
+    return gated.length > 0 ? gated : declared;
+  }, [selectedModel, unifiedMemoryGb, macCapabilities]);
   // Reference-image auto-preset (sc-8109, epic 8102): when a captioning reference
   // image's natural dimensions become known, snap the resolution picker to whichever
   // option best matches its aspect ratio. The caption's bboxes are normalized 0–1000

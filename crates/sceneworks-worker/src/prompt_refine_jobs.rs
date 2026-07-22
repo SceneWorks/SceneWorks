@@ -223,6 +223,19 @@ fn base_rules(medium: &str) -> String {
             .to_owned(),
         "- Follow the guide's recommended structure, phrasing, and what-to-avoid guidance."
             .to_owned(),
+        // sc-13881 (epic 13879): a refined PHOTOGRAPHIC prompt must keep the concrete camera/lens/
+        // film-stock specifications the user wrote — they carry real visual meaning to modern image
+        // models (Krea, for one, honors "Kodak Portra"). The refiner used to strip the whole trailing
+        // comma-list when trimming for concision, taking the camera/lens specs with the empty praise —
+        // a net-negative edit. Trim ONLY the empty praise; preserve the specifications.
+        "- Keep concrete photographic specifications the user wrote — camera body, lens and focal \
+         length, film stock, and aperture (e.g. \"85mm f/1.4\", \"Kodak Portra 400\", \"shot on a \
+         50mm lens\"). These carry real visual meaning; do not drop them when trimming."
+            .to_owned(),
+        "- When trimming for concision, remove ONLY empty praise that adds no visual information \
+         (\"masterpiece\", \"stunning\", \"premium\", \"gorgeous\", \"award-winning\", \
+         \"ultra-detailed\"), never the concrete camera, lens, film-stock, or lighting details."
+            .to_owned(),
         "- Match the user's language: if their prompt is not in English, respond in the same \
          language."
             .to_owned(),
@@ -1486,6 +1499,40 @@ mod tests {
         assert!(
             build_refine_system_prompt(None, Some(" VIDEO ")).contains("generative video model")
         );
+    }
+
+    #[test]
+    fn refine_rules_preserve_photographic_specs_and_strip_only_empty_praise() {
+        // sc-13881 (epic 13879): the refiner used to trim the whole trailing comma-list for concision,
+        // taking camera/lens/film-stock specs (meaningful to Krea) along with the empty praise — a
+        // net-negative edit on a photographic prompt. The rewrite itself is LLM-driven, so the
+        // deterministic contract is that the system prompt INSTRUCTS both halves: keep the concrete
+        // specifications, strip ONLY empty praise. This guards against a future edit dropping either.
+        let system = build_refine_system_prompt(None, Some("image"));
+        // Keep the concrete photographic specifications.
+        assert!(system.contains("camera body"), "keeps camera body spec");
+        assert!(system.contains("focal"), "keeps focal length spec");
+        assert!(system.contains("film stock"), "keeps film-stock spec");
+        assert!(
+            system.contains("Kodak Portra"),
+            "the film-stock example is named as something to keep, not strip"
+        );
+        assert!(
+            system.contains("do not drop them when trimming"),
+            "explicitly forbids dropping the specs"
+        );
+        // Strip ONLY empty praise, with the removable words named so the model knows what to cut.
+        assert!(system.contains("empty praise"), "names the trim target");
+        for praise in ["masterpiece", "stunning", "premium", "award-winning"] {
+            assert!(
+                system.contains(praise),
+                "empty-praise example {praise} is listed as removable"
+            );
+        }
+        // The rules apply model-agnostically, whether or not a per-model guide is attached.
+        let bare = base_rules("image");
+        assert!(bare.contains("camera body"));
+        assert!(bare.contains("empty praise"));
     }
 
     #[test]

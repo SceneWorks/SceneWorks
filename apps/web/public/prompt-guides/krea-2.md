@@ -25,9 +25,13 @@ The goal is a clear prompt, not a long one:
 - **Already clear → barely change it.** A short, well-defined prompt ("a cup of coffee on a windowsill")
   needs little more than maybe one style or lighting word. Don't invent scenes, props, or mood the
   prompt didn't mention.
-- **Be concise.** Short sentences; don't repeat ideas, pile up synonyms ("realistic, photographic,
-  ultra-real"), or add empty praise ("stunning", "premium", "masterpiece"). Concrete quality words like
-  `cinematic` or `soft window light` are fine.
+- **Be concise, but keep the concrete specifications.** Short sentences; don't repeat ideas or pile up
+  synonyms ("realistic, photographic, ultra-real"). Drop only *empty praise* — subjective filler like
+  "stunning", "premium", "masterpiece", "gorgeous", "award-winning" — which adds no visual information.
+  **Keep the concrete photographic specifications:** camera body, lens and focal length (`50mm`,
+  `85mm f/1.4`), film stock (`Kodak Portra 400`), and aperture. Krea understands and honors these, so
+  dropping them makes a photographic prompt worse. Concrete quality words like `cinematic` or `soft
+  window light` are fine.
 - **Describe what you want, not what you don't.** Krea Turbo is CFG-free and takes **no negative
   prompt**, so avoid negations ("no people", "without text") — state the positive scene instead; a thing
   you don't name simply won't appear.
