@@ -184,6 +184,53 @@ mod tests {
     }
 
     #[test]
+    fn krea_2_raw_declares_the_sc13881_default_negative_and_raw_guide() {
+        // sc-13881 (epic 13879): Raw's UX/defaults fix set (NOT a pipeline fix — S0 sc-13880 proved the
+        // pipeline is faithful). Two source-of-truth manifest facts:
+        //   1. Raw seeds a MILD quality negative (biggest lever: Raw is TRUE-CFG and uses a negative,
+        //      unlike CFG-free Turbo). The aggressive "plastic skin" variant over-corrected, so the
+        //      shipped default is deliberately the conservative string.
+        //   2. Raw points at its OWN guide krea-2-raw.md (the shared krea-2.md is Turbo-specific — "no
+        //      negative", "~8 steps", "CFG-off" — all wrong for Raw); Turbo keeps krea-2.md.
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let models = manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array");
+        let find = |id: &str| {
+            models
+                .iter()
+                .find(|model| model["id"].as_str() == Some(id))
+                .unwrap_or_else(|| panic!("{id} present in the builtin models catalog"))
+        };
+
+        let raw = find("krea_2_raw");
+        assert_eq!(
+            raw["ui"]["defaultNegativePrompt"].as_str(),
+            Some("blurry, soft focus, low detail, low quality"),
+            "krea_2_raw seeds the sc-13881 mild quality negative"
+        );
+        assert_eq!(
+            raw["ui"]["promptGuide"]["path"].as_str(),
+            Some("/prompt-guides/krea-2-raw.md"),
+            "krea_2_raw points at the Raw-specific prompt guide"
+        );
+
+        // Turbo is CFG-free — it must NOT carry a default negative, and it keeps the Turbo guide.
+        let turbo = find("krea_2_turbo");
+        assert!(
+            turbo["ui"]["defaultNegativePrompt"].is_null(),
+            "krea_2_turbo (CFG-free) declares no default negative"
+        );
+        assert_eq!(
+            turbo["ui"]["promptGuide"]["path"].as_str(),
+            Some("/prompt-guides/krea-2.md"),
+            "krea_2_turbo keeps the shared Turbo prompt guide"
+        );
+    }
+
+    #[test]
     fn ships_the_seeded_audio_models_with_populated_capability_blocks() {
         // sc-13402 (epic 13400) + sc-13412 + sc-13675 + sc-13676: the shipped catalog the API serves
         // carries the live audio providers as first-class `type: "audio"` entries, each with a populated
