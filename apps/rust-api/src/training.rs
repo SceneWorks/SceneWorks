@@ -1284,11 +1284,11 @@ pub(crate) async fn create_training_job(
     // model installed and room on disk. A dry run only resolves the plan, so it
     // is exempt — that is how you preview a plan before installing the model.
     if !payload.dry_run {
-        if !training_base_model_installed(&data_dir, target) {
-            return Err(ApiError::bad_request(format!(
-                "Base model '{}' is not installed. Install it from the model catalog before starting a real training run (dry runs work without it).",
-                target.base_model
-            )));
+        if let Some(message) = training_base_unavailable_message(
+            training_base_model_status(&data_dir, target),
+            &target.base_model,
+        ) {
+            return Err(ApiError::bad_request(message));
         }
         if let Some(message) = training_disk_space_error(&output_dir) {
             return Err(ApiError::bad_request(message));
@@ -1708,11 +1708,29 @@ pub(crate) fn validate_lora_id_component(lora_id: &str) -> Result<(), ApiError> 
     Ok(())
 }
 
+/// Outcome of the pre-flight training-base check. Splitting "nothing on disk" from "the model is
+/// installed for generation but its dense training tier isn't" lets the run-gate give the second case
+/// an actionable "install the training tier" message instead of a bare "not installed" — the exact
+/// confusion the #1694 fix surfaced (sc-13860, AC #4). Both non-`Ready` states block a real run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrainingBaseStatus {
+    /// The dense training weights are present on disk — a real run can proceed.
+    Ready,
+    /// The base repo IS on disk (a tiered turnkey is installed — e.g. the q4 generation default) but
+    /// its dense `bf16/` training tier is absent. Training needs the full-precision tier specifically.
+    TrainingTierMissing,
+    /// Nothing for this base is on disk — the model was never installed.
+    Missing,
+}
+
 /// Whether the training target's base model weights are present on disk, using
 /// the same resolution `model_catalog` reports: the shared Hugging Face hub
 /// cache for the target's repo, or a SceneWorks-managed `data/models/<id>`
-/// install marker. A real run requires this; a dry run does not.
-pub(crate) fn training_base_model_installed(data_dir: &FsPath, target: &TrainingTarget) -> bool {
+/// install marker. A real run requires [`TrainingBaseStatus::Ready`]; a dry run does not.
+pub(crate) fn training_base_model_status(
+    data_dir: &FsPath,
+    target: &TrainingTarget,
+) -> TrainingBaseStatus {
     if let Some(repo) = target
         .base_model_repo
         .as_deref()
@@ -1721,27 +1739,69 @@ pub(crate) fn training_base_model_installed(data_dir: &FsPath, target: &Training
     {
         if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
             // Tiered-turnkey re-host (epic 9992 Krea 2 Raw): training reads the DENSE `bf16/` tier, but
-            // generation may have installed only the q8 default. The repo-level completion marker does
+            // generation may have installed only the q4/q8 default. The repo-level completion marker does
             // NOT certify a tier (sc-9909), so require the bf16 component tree specifically — otherwise
-            // the run-gate would green-light training on a repo that has no dense weights to train.
+            // the run-gate would green-light training on a repo that has no dense weights to train. A
+            // turnkey on disk without that tier is `TrainingTierMissing`, not `Missing`.
             if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
                 if snapshot_is_tiered_turnkey(&snapshot) {
-                    return bf16_component_tree_present(&snapshot.join("bf16"));
+                    return if bf16_component_tree_present(&snapshot.join("bf16")) {
+                        TrainingBaseStatus::Ready
+                    } else {
+                        TrainingBaseStatus::TrainingTierMissing
+                    };
                 }
             }
             if models::huggingface_cache_health(&cache_path, &[]).installed {
-                return true;
+                return TrainingBaseStatus::Ready;
             }
         }
         let managed = data_dir.join("models").join(safe_download_dir(repo));
         if model_is_installed(&managed) {
-            return true;
+            return TrainingBaseStatus::Ready;
         }
     }
     let managed = data_dir
         .join("models")
         .join(safe_download_dir(&target.base_model));
-    model_is_installed(&managed)
+    if model_is_installed(&managed) {
+        return TrainingBaseStatus::Ready;
+    }
+    TrainingBaseStatus::Missing
+}
+
+/// Thin boolean wrapper over [`training_base_model_status`]: `true` only when the dense training
+/// weights are ready. Test-only — production wants the richer status for its actionable messages
+/// (sc-13860); the readiness tests only care ready-or-not.
+#[cfg(test)]
+pub(crate) fn training_base_model_installed(data_dir: &FsPath, target: &TrainingTarget) -> bool {
+    matches!(
+        training_base_model_status(data_dir, target),
+        TrainingBaseStatus::Ready
+    )
+}
+
+/// The 400 detail to reject a real run whose base model isn't training-ready, or `None` when it is.
+/// The two blocking states get DISTINCT messages: `Missing` keeps the historical "not installed …
+/// install it from the model catalog" wording, while `TrainingTierMissing` says the model IS installed
+/// (for generation) but training needs the dense bf16 tier — the actionable message the flat #1694 error
+/// lacked (sc-13860, AC #4). Split out as a pure fn so the wording is unit-testable without the API.
+pub(crate) fn training_base_unavailable_message(
+    status: TrainingBaseStatus,
+    base_model: &str,
+) -> Option<String> {
+    match status {
+        TrainingBaseStatus::Ready => None,
+        TrainingBaseStatus::TrainingTierMissing => Some(format!(
+            "The training tier for base model '{base_model}' is not installed. It's installed for \
+             generation, but training needs the full-precision (bf16) tier — install that tier from \
+             the model catalog before starting a real training run (dry runs work without it)."
+        )),
+        TrainingBaseStatus::Missing => Some(format!(
+            "Base model '{base_model}' is not installed. Install it from the model catalog before \
+             starting a real training run (dry runs work without it)."
+        )),
+    }
 }
 
 /// Minimum free space we require at the output location before queuing a real

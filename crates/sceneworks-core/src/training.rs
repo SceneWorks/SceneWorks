@@ -1254,7 +1254,14 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
         output_kind: TrainingOutputKind::Lora,
         family: "z-image".to_owned(),
         base_model: "z_image_turbo".to_owned(),
-        base_model_repo: Some("Tongyi-MAI/Z-Image-Turbo".to_owned()),
+        // Point at the SceneWorks quant-matrix turnkey the catalog + engine actually install
+        // (`z_image_turbo` catalog entry / engines.rs `default_repo`), NOT the flat upstream
+        // `Tongyi-MAI/Z-Image-Turbo` — the epic-8506 re-host stopped downloading the latter, so the
+        // pre-flight install gate reported the installed base as missing and blocked every real run
+        // (sc-13860; same class as the SDXL #1694 fix). Z-Image-Turbo is the DEFAULT training base,
+        // so this was the highest-impact instance. Training resolves the dense `bf16/` tier via
+        // `tiered_turnkey_train_dir`.
+        base_model_repo: Some("SceneWorks/z-image-turbo-mlx".to_owned()),
         kernel: "z_image_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
@@ -1346,6 +1353,12 @@ fn lens_turbo_lora_target() -> TrainingTarget {
         output_kind: TrainingOutputKind::Lora,
         family: "lens".to_owned(),
         base_model: "lens".to_owned(),
+        // sc-13860: intentionally the flat `SceneWorks/Lens` diffusers re-host, NOT the `SceneWorks/lens-mlx`
+        // inference turnkey. The catalog `lens` entry installs BOTH — `lens-mlx` (q4/q8/bf16 packed MLX
+        // subdirs) for generation AND `SceneWorks/Lens` as a `training` variant (builtin.models.jsonc). The
+        // flat-diffusers LoRA trainer cannot read the packed turnkey subdirs, and training on the distilled
+        // Lens-Turbo drifts (see the doc comment above), so this must stay `SceneWorks/Lens`. It IS
+        // catalog-installable, so this is not the false-"not installed" class the sibling targets hit.
         base_model_repo: Some("SceneWorks/Lens".to_owned()),
         kernel: "lens_lora".to_owned(),
         defaults: TrainingConfig {
@@ -1636,7 +1649,12 @@ fn sd3_large_lora_target() -> TrainingTarget {
         output_kind: TrainingOutputKind::Lora,
         family: "sd3".to_owned(),
         base_model: "sd3_5_large".to_owned(),
-        base_model_repo: Some("stabilityai/stable-diffusion-3.5-large".to_owned()),
+        // Point at the SceneWorks turnkey the catalog + engine install (`sd3_5_large` catalog entry /
+        // engines.rs `default_repo`), NOT the flat upstream `stabilityai/stable-diffusion-3.5-large` —
+        // the epic-8506 re-host stopped downloading the latter, so the pre-flight install gate reported
+        // the installed base as missing and blocked every real run (sc-13860). The native-MLX `sd3_lora`
+        // trainer reads the dense `bf16/` tier (resolved via `tiered_turnkey_train_dir`), like LTX.
+        base_model_repo: Some("SceneWorks/sd3.5-large-mlx".to_owned()),
         kernel: "sd3_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
@@ -1729,7 +1747,12 @@ fn sd3_medium_lora_target() -> TrainingTarget {
         output_kind: TrainingOutputKind::Lora,
         family: "sd3".to_owned(),
         base_model: "sd3_5_medium".to_owned(),
-        base_model_repo: Some("stabilityai/stable-diffusion-3.5-medium".to_owned()),
+        // Point at the SceneWorks turnkey the catalog + engine install (`sd3_5_medium` catalog entry /
+        // engines.rs `default_repo`), NOT the flat upstream `stabilityai/stable-diffusion-3.5-medium` —
+        // the epic-8506 re-host stopped downloading the latter, so the pre-flight install gate reported
+        // the installed base as missing and blocked every real run (sc-13860). Same native-MLX bf16-tier
+        // resolution as the Large target above.
+        base_model_repo: Some("SceneWorks/sd3.5-medium-mlx".to_owned()),
         kernel: "sd3_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
@@ -1895,6 +1918,15 @@ fn wan_lora_target() -> TrainingTarget {
         output_kind: TrainingOutputKind::Lora,
         family: "wan-video".to_owned(),
         base_model: "wan_2_2".to_owned(),
+        // sc-13860: intentionally the `Wan-AI/Wan2.2-TI2V-5B-Diffusers` diffusers snapshot, NOT the
+        // `SceneWorks/wan2.2-ti2v-5b-mlx` turnkey. The `wan_lora` kernel is torch/diffusers, so it needs
+        // DIFFUSERS weights — not the MLX-packed turnkey. On Windows/Linux the catalog installs exactly
+        // this repo as the `bf16` variant (builtin.models.jsonc), so the install gate finds it there
+        // (that torch/CUDA path is where #1694 was reported). This is NOT the epic-8506 mis-naming class
+        // the sibling targets hit — the repo is correct — so pointing at the MLX turnkey would only hand
+        // the torch trainer weights it can't load. NOTE the diffusers download is gated to Windows/Linux;
+        // whether macOS should run this trainer at all (and if so, get a Mac-installable diffusers base)
+        // is the SEPARATE gap tracked in sc-13878, not fixable by a repo rename here.
         base_model_repo: Some("Wan-AI/Wan2.2-TI2V-5B-Diffusers".to_owned()),
         kernel: "wan_lora".to_owned(),
         defaults: TrainingConfig {
@@ -2327,7 +2359,14 @@ fn kolors_lora_target() -> TrainingTarget {
         output_kind: TrainingOutputKind::Lora,
         family: "kolors".to_owned(),
         base_model: "kolors".to_owned(),
-        base_model_repo: Some("Kwai-Kolors/Kolors-diffusers".to_owned()),
+        // Point at the SceneWorks quant-matrix turnkey the catalog + engine install (`kolors` catalog
+        // entry / engines.rs `default_repo`), NOT the flat upstream `Kwai-Kolors/Kolors-diffusers` — the
+        // epic-8506 re-host stopped downloading the latter, so the pre-flight install gate reported the
+        // installed base as missing and blocked every real run (sc-13860). Structurally identical to the
+        // SDXL #1694 fix: SDXL-arch U-Net packed under `unet/`, dense `bf16/` tier resolved via
+        // `tiered_turnkey_train_dir`. (The ChatGLM3 tokenizer-materialization prereq, sc-4764, is a
+        // separate worker-side step, unaffected by the base repo name.)
+        base_model_repo: Some("SceneWorks/kolors-mlx".to_owned()),
         kernel: "kolors_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,

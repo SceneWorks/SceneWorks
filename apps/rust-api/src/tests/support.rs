@@ -9,6 +9,7 @@ pub(crate) use crate::events::{EventHub, EventMessage};
 
 pub(crate) use crate::training::{
     insufficient_disk_space, resolve_base_model_path, training_base_model_installed,
+    training_base_model_status, training_base_unavailable_message, TrainingBaseStatus,
 };
 
 pub(crate) use crate::workers::person_readiness_from_workers;
@@ -448,9 +449,14 @@ pub(crate) async fn drain_event_names(
 /// Seeds the Z-Image-Turbo base model as installed (a managed-download
 /// marker) so a real training run clears the missing-model guardrail.
 pub(crate) fn seed_installed_base_model(data_dir: &std::path::Path) {
+    // Seed the SceneWorks-managed install marker under the target's `base_model` id
+    // (`models/z_image_turbo`), which `training_base_model_installed` checks as its final fallback
+    // regardless of `base_model_repo`. Keying on the stable base_model (not the repo slug) keeps this
+    // helper from breaking whenever a target's `base_model_repo` is re-homed — as it just was when
+    // z_image_turbo moved off the flat `Tongyi-MAI/Z-Image-Turbo` upstream to its turnkey (sc-13860).
     let model_dir = data_dir
         .join("models")
-        .join(safe_download_dir("Tongyi-MAI/Z-Image-Turbo"));
+        .join(safe_download_dir("z_image_turbo"));
     std::fs::create_dir_all(&model_dir).expect("model dir creates");
     std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
         .expect("model marker writes");
