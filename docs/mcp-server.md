@@ -150,8 +150,9 @@ What the API enforces, and where it lives in code:
     operator declares them in `SCENEWORKS_MCP_ALLOWED_HOSTS`. With that set the
     check stays **enforced** (loopback + declared hosts); left empty it is
     **disabled** (rmcp allow-all) rather than lock out real LAN clients — safe
-    because a wildcard bind always carries an access token (open-bind guard) and
-    a browser doing DNS rebinding is a non-loopback peer that cannot present it.
+    because a wildcard bind normally carries an access token (open-bind guard),
+    unless `SCENEWORKS_ALLOW_OPEN_BIND` is set for a fully trusted network, and a
+    browser doing DNS rebinding is a non-loopback peer that cannot present it.
 
   Practical consequence: behind a **reverse proxy** that forwards the public
   hostname as `Host` (e.g. `proxy_set_header Host $host`) to a loopback- or
