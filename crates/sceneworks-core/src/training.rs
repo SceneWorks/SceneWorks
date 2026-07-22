@@ -2078,6 +2078,9 @@ fn wan_i2v_14b_lora_target() -> TrainingTarget {
 /// separate `to_q`/`to_k`/`to_v` attention projections plus the `to_out.0`
 /// output projection; the output registers as an `sdxl` family LoRA the SDXL
 /// adapter loads at generation time.
+///
+/// The base weights come from the same `SceneWorks/sdxl-base-mlx` turnkey the
+/// catalog installs; training reads its dense `bf16/` tier.
 fn sdxl_lora_target() -> TrainingTarget {
     TrainingTarget {
         id: "sdxl_lora".to_owned(),
@@ -2086,7 +2089,14 @@ fn sdxl_lora_target() -> TrainingTarget {
         output_kind: TrainingOutputKind::Lora,
         family: "sdxl".to_owned(),
         base_model: "sdxl".to_owned(),
-        base_model_repo: Some("stabilityai/stable-diffusion-xl-base-1.0".to_owned()),
+        // Point at the SceneWorks quant-matrix turnkey the catalog + engine actually install
+        // (`sdxl` catalog entry / engines.rs `default_repo`), NOT the flat upstream
+        // `stabilityai/stable-diffusion-xl-base-1.0` — nothing downloads the latter, so the
+        // pre-flight install gate reported the installed base as missing and blocked every real
+        // SDXL run (issue #1694). Mirrors the Illustrious/RealVisXL SDXL-family targets, which
+        // already name their turnkey. Training resolves the dense `bf16/` tier via
+        // `tiered_turnkey_train_dir`.
+        base_model_repo: Some("SceneWorks/sdxl-base-mlx".to_owned()),
         kernel: "sdxl_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
