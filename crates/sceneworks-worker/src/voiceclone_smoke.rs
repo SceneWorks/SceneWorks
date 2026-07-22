@@ -462,12 +462,17 @@ fn saved_voice_register_render_dod() {
         SavedVoiceCreateInput, SavedVoiceStore, DEFAULT_VOICE_DEDUP_THRESHOLD,
     };
 
-    // The register embed path resolves ve.safetensors from the HF cache; point it at the OS hub cache.
-    if std::env::var_os("HF_HOME").is_none() {
-        if let Some(home) = sceneworks_core::hf_home::os_huggingface_home() {
-            std::env::set_var("HF_HOME", home);
-        }
-    }
+    // The register embed path resolves ve.safetensors from the HF cache; point it at the OS hub cache
+    // when the caller hasn't pinned HF_HOME. Via the `test_env` seam so it is restored on drop (and
+    // lock-serialized) instead of leaking to sibling tests in the shared process (sc-13909); `None`
+    // (a no-op, matching the old guard) when HF_HOME is already set or no home dir resolves.
+    let _hf_home = std::env::var_os("HF_HOME")
+        .is_none()
+        .then(sceneworks_core::hf_home::os_huggingface_home)
+        .flatten()
+        .map(|home| {
+            crate::test_env::EnvVars::set(&[("HF_HOME", home.to_str().expect("utf-8 OS HF home"))])
+        });
     let data_dir = std::env::temp_dir();
     let chatterbox_dir = resolve_dir("VOICECLONE_CHATTERBOX_DIR", "ResembleAI/chatterbox", None);
     // The generator requires ve + perth staged as named components at this pin (no self-fetch).
@@ -821,12 +826,16 @@ fn distinct_reference() -> gen_core::AudioTrack {
 #[ignore = "real-weight audio smoke: needs the cached ResembleAI/chatterbox ve.safetensors"]
 fn voice_register_embed_path_smoke() {
     // Point HF cache resolution at the OS hub cache so embed_reference_clip's data_dir-based
-    // resolution finds the installed snapshot regardless of the (unused) data dir passed below.
-    if std::env::var_os("HF_HOME").is_none() {
-        if let Some(home) = sceneworks_core::hf_home::os_huggingface_home() {
-            std::env::set_var("HF_HOME", home);
-        }
-    }
+    // resolution finds the installed snapshot regardless of the (unused) data dir passed below — when
+    // the caller hasn't pinned HF_HOME. Via the `test_env` seam so it is restored on drop instead of
+    // leaking to sibling tests (sc-13909); `None` (a no-op) when HF_HOME is set or no home dir resolves.
+    let _hf_home = std::env::var_os("HF_HOME")
+        .is_none()
+        .then(sceneworks_core::hf_home::os_huggingface_home)
+        .flatten()
+        .map(|home| {
+            crate::test_env::EnvVars::set(&[("HF_HOME", home.to_str().expect("utf-8 OS HF home"))])
+        });
     let data_dir = std::env::temp_dir();
 
     let tmp = std::env::temp_dir().join(format!("sw-voice-register-{}", std::process::id()));
@@ -1062,7 +1071,8 @@ fn chatterbox_offline_install_parity_smoke() {
     // ── Step 3: go offline, HARD — a black-hole proxy fails EVERY resolver download() (both hf-hub
     //    agents are built with ureq try_proxy_from_env), while a cache HIT never constructs the agent.
     //    Set AFTER install (which needed the real hub). Api::new() ignores HF_ENDPOINT, so the proxy —
-    //    not an endpoint — is the lever that actually blocks the resolver. ────────────────────────
+    //    not an endpoint — is the lever that actually blocks the resolver. These three keys are
+    //    pre-registered by the `_env` guard above, so they restore on drop — no leak (sc-13909). ─────
     std::env::set_var("ALL_PROXY", "http://127.0.0.1:1");
     std::env::set_var("HTTPS_PROXY", "http://127.0.0.1:1");
     std::env::set_var("HTTP_PROXY", "http://127.0.0.1:1");
