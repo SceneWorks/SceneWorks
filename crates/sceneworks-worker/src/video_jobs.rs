@@ -1575,10 +1575,10 @@ pub(crate) fn seedvr2_estimated_output_bytes(frame_count: u64, out_w: u64, out_h
 }
 
 /// Bytes currently AVAILABLE on the volume backing `path`, best-effort and portable with NO new crate
-/// dependency (mirrors the removed `total_physical_ram_bytes`, which likewise shelled out): macOS +
-/// Linux run POSIX `df -k -P <path>` and read the 4th column (available 1K blocks); Windows (candle
-/// lane) runs `fsutil volume diskfree <path>`. Returns `None` if the probe fails; the caller then
-/// skips the guard rather than falsely rejecting a job.
+/// dependency: macOS + Linux run POSIX `df -k -P <path>` and read the 4th column (available 1K
+/// blocks); Windows (candle lane) uses `fs2::available_space` (a safe wrapper over the Win32
+/// `GetDiskFreeSpaceExW`) for the free bytes available to this process. Returns `None` if the probe
+/// fails; the caller then skips the guard rather than falsely rejecting a job.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1605,30 +1605,16 @@ pub(crate) fn available_disk_bytes(path: &Path) -> Option<u64> {
     }
     #[cfg(not(unix))]
     {
-        // Windows (candle lane): `fsutil volume diskfree <path>` prints the free bytes; the
-        // "Total # of avail free bytes" line is the per-user available figure. Dependency-free.
-        let out = std::process::Command::new("fsutil")
-            .args(["volume", "diskfree"])
-            .arg(path)
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let text = String::from_utf8_lossy(&out.stdout);
-        for line in text.lines() {
-            let lower = line.to_ascii_lowercase();
-            if lower.contains("avail") && lower.contains("free bytes") {
-                // Grab the last whitespace-separated token, stripping thousands separators.
-                if let Some(token) = line.split_whitespace().next_back() {
-                    let digits: String = token.chars().filter(|c| c.is_ascii_digit()).collect();
-                    if let Ok(bytes) = digits.parse::<u64>() {
-                        return Some(bytes);
-                    }
-                }
-            }
-        }
-        None
+        // Windows (candle lane): `fs2::available_space` wraps `GetDiskFreeSpaceExW`, returning the
+        // free bytes available to this process on the volume backing `path` (honoring any per-user
+        // quota — the same figure the old code's "avail" line meant to read). Safe (the crate forbids
+        // `unsafe` and fs2 is already a worker dependency) and — unlike scraping localized `fsutil`
+        // text — locale-independent, so the sc-9646 guard is armed on every Windows install (sc-13585:
+        // the old branch matched an `fsutil` line with both "avail" and "free bytes", which no modern
+        // Windows 11 layout — "Total free bytes" / "Total quota free bytes" — prints, so the probe
+        // returned `None` and the guard silently fail-opened into a no-op). A probe error (e.g. the
+        // path does not exist) becomes `None`, so the guard fail-opens rather than falsely rejecting.
+        fs2::available_space(path).ok()
     }
 }
 
@@ -11256,6 +11242,40 @@ mod tests {
 
     fn request(value: Value) -> VideoRequest {
         VideoRequest::from_payload(&value.as_object().cloned().unwrap())
+    }
+
+    /// sc-13585: on Windows the free-space probe was inert — the old code matched an `fsutil` output
+    /// line containing both "avail" and "free bytes", which no modern Windows 11 layout prints, so
+    /// `available_disk_bytes` returned `None` and the sc-9646 disk-exhaustion guard silently
+    /// fail-opened on the primary candle platform. The fix uses `fs2::available_space` (a safe wrapper
+    /// over Win32 `GetDiskFreeSpaceExW`, no localized `fsutil` text to mis-parse), so the probe returns
+    /// a real, positive figure on every Windows locale — exactly where the pre-fix code returned
+    /// `None`. Reverting to the old scrape makes this `expect` panic (the dev box prints the modern
+    /// layout the matcher misses). `seedvr2_disk_guard_rejects_an_impossibly_large_clip` then exercises
+    /// the full guard on Windows — its rejection assertion only runs once this probe returns `Some` —
+    /// so together they prove the guard is armed, not just present.
+    ///
+    /// Windows-only, gated to the candle lane that compiles it — runs in the `windows-candle.yml` CI
+    /// job (`cargo test -p sceneworks-worker --features backend-candle`).
+    #[cfg(all(not(unix), feature = "backend-candle"))]
+    #[test]
+    fn available_disk_bytes_reports_real_free_space_on_windows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A real, mounted scratch volume must report positive free space — the whole point of the fix
+        // (the pre-fix probe returned None here, disarming the guard).
+        let free = available_disk_bytes(dir.path())
+            .expect("the Windows free-space probe must return a value for a real directory");
+        assert!(
+            free > 0,
+            "a mounted scratch volume has free space, got {free}"
+        );
+        // Sanity bound: available space can never exceed the volume's total — pins that we read a
+        // coherent volume figure rather than an arbitrary non-zero number.
+        let total = fs2::total_space(dir.path()).expect("total volume space");
+        assert!(
+            free <= total,
+            "available {free} must not exceed total {total}"
+        );
     }
 
     /// sc-12297: the worker's backstop refuses a clip past the model's declared
