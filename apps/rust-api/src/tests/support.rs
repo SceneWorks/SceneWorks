@@ -39,6 +39,59 @@ pub(crate) use tower::ServiceExt;
 
 pub(crate) const PNG_32X32: &[u8] = include_bytes!("../../../desktop/icons/32x32.png");
 
+/// The single process-global lock every rust-api test that mutates HF-cache env serializes on.
+/// rust-api's `#[test]`s run as threads in ONE binary, so a `set_var`/`remove_var` in one is visible
+/// to all the others; mutual exclusion must therefore be crate-wide — a per-module lock serializes
+/// nothing against the rest (mirrors `sceneworks_worker::test_env::ENV_LOCK`, sc-12380). Do NOT add a
+/// second one.
+static HF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The HF-cache env vars neutralized (removed) for as long as this guard lives, restored on drop,
+/// under [`HF_ENV_LOCK`]. `huggingface_repo_cache_path` reads `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE`
+/// / `HF_HOME` BEFORE `data_dir`, so a test that seeds a snapshot under a tempdir `data_dir` writes
+/// into the developer's REAL cache unless these are cleared first — clobbering a real repo's
+/// `refs/main` (the krea-2-raw-mlx pollution, sc-13834). The runner strips `HF_HOME` for `cargo test`,
+/// but that does not cover ad-hoc / IDE runs; this makes the tempdir hermetic regardless. Restoring on
+/// `Drop` (not around a closure) keeps a panicking assertion from leaking a cleared cache var into
+/// every later test in the process.
+#[must_use = "bind to a named `_env` local; dropping it immediately restores the env and pins nothing"]
+pub(crate) struct HfCacheEnvGuard {
+    restore: Vec<(&'static str, Option<String>)>,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+/// Take [`HF_ENV_LOCK`] and clear the HF-cache env vars until the returned guard drops, so
+/// `huggingface_repo_cache_path` / `resolve_base_model_path` resolve under the test's own `data_dir`
+/// instead of the developer's real cache. See [`HfCacheEnvGuard`].
+pub(crate) fn isolate_hf_cache() -> HfCacheEnvGuard {
+    let guard = HF_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let restore = ["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME"]
+        .into_iter()
+        .map(|key| {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            (key, previous)
+        })
+        .collect();
+    HfCacheEnvGuard {
+        restore,
+        _guard: guard,
+    }
+}
+
+impl Drop for HfCacheEnvGuard {
+    fn drop(&mut self) {
+        for (key, previous) in &self.restore {
+            match previous {
+                Some(prior) => std::env::set_var(key, prior),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 pub(crate) fn readiness_worker(
     id: &str,
     status: WorkerStatus,

@@ -1164,11 +1164,26 @@ async fn spawn_tree_stub_with_files(
     (format!("http://{address}"), posts)
 }
 
+/// Neutralize the ambient HF-cache env so a download job's `ensure_hf_files_cached` writes under the
+/// test's tempdir `data_dir`, not a developer's real `HF_HOME` (sc-13834). `huggingface_hub_cache_dir`
+/// reads `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` / `HF_HOME` BEFORE `data_dir`, so `run_model_download_job`
+/// / `run_lora_download_job` (which fetch into `snapshots/main` via `ensure_hf_files_cached(…, "main", …)`)
+/// otherwise land in the real cache — this is what wrote the krea-2-raw-mlx `snapshots/main` dummy
+/// weights. Mirrors the model_jobs / audio_jobs co-requisite seam tests' `isolate_hf_cache`.
+fn isolate_hf_cache() -> crate::test_env::EnvVars {
+    crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ])
+}
+
 #[tokio::test]
 async fn model_download_fails_when_the_tier_resolves_no_files() {
     // sc-9909: installing a quant tier whose weights aren't published yet (sc-8513 rollout) resolves
     // ZERO files. That must FAIL with a clear message rather than silently "succeed" and leave an
     // empty cache + a stale completion marker.
+    let _env = isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
     let temp = tempdir().expect("tempdir creates");
     let (base_url, posts) = spawn_empty_tree_stub().await;
     let mut settings = test_settings(base_url.clone(), None);
@@ -1215,6 +1230,7 @@ async fn model_download_fails_when_one_declared_pattern_matches_nothing() {
     // sc-12283: `allow_pattern_matches` ORs across the filter, so a tier whose transformer matched but
     // whose `tokenizer/*` matched NOTHING passed the aggregate zero-file check, downloaded, completed
     // and wrote an install marker — an "installed" tier that cannot load. This is the #850 shape.
+    let _env = isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
     let temp = tempdir().expect("tempdir creates");
     // The repo satisfies q8/transformer/* and q8/vae/* but has NO q8/tokenizer/* at all. Sizes are
     // token — the stub serves them verbatim, and this test is about the filter, not the transfer.
@@ -1278,6 +1294,7 @@ async fn lora_download_fails_when_the_declared_adapter_is_absent() {
     // the repo (renamed upstream / typo'd entry / unpublished) resolved zero files, downloaded
     // nothing, and reported the job COMPLETED — while the catalog still read "not installed", because
     // the install probe finds an empty cache. A success post for a fetch of nothing is the bug.
+    let _env = isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
     let temp = tempdir().expect("tempdir creates");
     // The repo exists but holds a DIFFERENT adapter than the one declared.
     let (base_url, posts) =
@@ -1322,6 +1339,7 @@ async fn lora_download_fails_when_one_of_several_declared_files_is_absent() {
     // sc-12288: `create_lora_download_job` accepts an explicit `files` LIST and the filter ORs across
     // it, so a multi-file adapter that landed one half and not the other passes the aggregate
     // zero-file check and completes as a torn install. Same gap as sc-12283, LoRA side.
+    let _env = isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
     let temp = tempdir().expect("tempdir creates");
     let (base_url, posts) = spawn_tree_stub_with_files(vec![("high_noise.safetensors", 8)]).await;
     let mut settings = test_settings(base_url.clone(), None);
