@@ -879,6 +879,18 @@ pub fn restart_gpu_worker(app: &AppHandle) {
         .take();
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     if let Some(child) = child {
+        // macOS runs a single MLX worker process — CommandChild::kill() (TerminateProcess
+        // on Windows / a plain kill here) reaps it fully. Windows runs the candle `auto`
+        // supervisor, which spawns one child per GPU plus a CPU child, each inheriting
+        // SCENEWORKS_PARENT_PID = this desktop PID. Unlike a quit, a restart leaves the
+        // desktop alive, so plain-killing only the supervisor orphans those children:
+        // their parent-death watchdog still sees the live desktop and never fires, and the
+        // respawned supervisor spawns a duplicate set contending for the same GPUs and
+        // worker IDs. Tree-kill the whole group by PID instead (taskkill /T /F), mirroring
+        // `begin_shutdown` and `stop_sidecars_for_update`.
+        #[cfg(target_os = "windows")]
+        kill_pid(child.pid());
+        #[cfg(target_os = "macos")]
         let _ = child.kill();
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
