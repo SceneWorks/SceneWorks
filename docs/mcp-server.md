@@ -57,6 +57,7 @@ All knobs are on the API process (`Settings::from_env` in
 | `SCENEWORKS_API_URL` | derived from bind host/port | Base URL the MCP server uses to call back into its own API, and the **fallback** base for `get_job_result`'s ticket URLs (which now default to the incoming request's `Host` — see below). Defaults to the bound interface (`sc-10260`); override for reverse-proxy/container setups. |
 | `SCENEWORKS_TRUST_LOOPBACK` | off | `1`/`true` = requests from `127.0.0.1`/`::1` bypass the token. The desktop sets it; never set it behind a reverse proxy or on a shared multi-user machine. |
 | `SCENEWORKS_ALLOW_OPEN_BIND` | off | `1`/`true`/`yes` = allow a non-loopback bind with **no** token (the API refuses to start otherwise). Only for fully trusted networks. |
+| `SCENEWORKS_MCP_ALLOWED_HOSTS` | *(empty)* | Extra `Host`-header authorities the `/mcp` DNS-rebinding allow-list accepts, on top of the always-allowed loopback set — comma-separated `host` or `host:port` entries (whitespace trimmed, empties dropped). Consulted in every *enforced* posture; **required** on a wildcard bind (`SCENEWORKS_API_HOST=0.0.0.0`/`::`) to keep the check on, and needed to admit a reverse-proxy/public hostname. See the DNS-rebinding note below. |
 | `SCENEWORKS_MCP_JOB_POLL_INTERVAL` | `1` | Seconds between status polls for the blocking `generate_image` tool. A zero value falls back to the default. |
 | `SCENEWORKS_MCP_JOB_TIMEOUT` | `1800` | Seconds the blocking `generate_image` tool waits for a job before returning a timeout error (the job itself keeps running / is not canceled). Clamped to ≥ the poll interval. |
 
@@ -125,9 +126,40 @@ What the API enforces, and where it lives in code:
   an auth header — but only for `GET` on the read-only media routes, and only
   for the ticket TTL (**300 s**, sliding). A leaked URL dies at most one TTL
   after the last refresh; call `get_job_result` again for fresh links.
-- **DNS-rebinding note**: rmcp's built-in `allowed_hosts` check is
-  deliberately disabled (its loopback-only default would 403 the supported
-  LAN deployment); the token gate above is the access control for `/mcp`.
+- **DNS-rebinding defense** (F-040, sc-11236;
+  `crates/sceneworks-mcp/src/lib.rs::mcp_allowed_hosts`): `/mcp` rides
+  `access_control`, but that gate does **no** `Host`/`Origin` validation, so in
+  the loopback/loopback-trust/no-token desktop posture a malicious web page could
+  DNS-rebind a victim's browser onto `/mcp` and drive job submission / ticketed
+  reads. rmcp's transport re-validates each request's `Host` header against an
+  allow-list and returns `403` on a mismatch (the canonical DNS-rebinding
+  defense). That allow-list is derived per-bind from `SCENEWORKS_API_HOST` /
+  `SCENEWORKS_API_PORT` (plus any `SCENEWORKS_MCP_ALLOWED_HOSTS` entries),
+  yielding three postures:
+  - **Loopback bind** (default desktop — `127.0.0.1` / `::1` / `localhost`):
+    **enforced**. Allow-list = `localhost`, `127.0.0.1`, `::1` (bare entries, so
+    they match *any* port — the desktop's OS-assigned dynamic port is covered)
+    plus any extras. A rebinding page sending `Host: attacker.example` is
+    `403`'d; the local UI and workers pass.
+  - **Concrete-interface bind** (e.g. `SCENEWORKS_API_HOST=192.168.4.97`):
+    **enforced**. Allow-list = the loopback set + that host, both bare and as
+    `host:port`, plus any extras. LAN clients dialing that address pass; every
+    other `Host` is `403`'d.
+  - **Wildcard LAN bind** (`0.0.0.0` / `::`, the desktop's remote-access mode):
+    a wildcard's reachable interface addresses can't be enumerated, so the
+    operator declares them in `SCENEWORKS_MCP_ALLOWED_HOSTS`. With that set the
+    check stays **enforced** (loopback + declared hosts); left empty it is
+    **disabled** (rmcp allow-all) rather than lock out real LAN clients — safe
+    because a wildcard bind normally carries an access token (open-bind guard),
+    unless `SCENEWORKS_ALLOW_OPEN_BIND` is set for a fully trusted network, and a
+    browser doing DNS rebinding is a non-loopback peer that cannot present it.
+
+  Practical consequence: behind a **reverse proxy** that forwards the public
+  hostname as `Host` (e.g. `proxy_set_header Host $host`) to a loopback- or
+  concrete-bound API, that hostname is *not* in the allow-list, so rmcp `403`s
+  the proxied MCP requests until you add it to `SCENEWORKS_MCP_ALLOWED_HOSTS`.
+  The token gate above remains the primary access control for `/mcp`; the Host
+  check is the DNS-rebinding layer on top of it.
 
 ## Server setup
 
