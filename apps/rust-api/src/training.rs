@@ -1497,6 +1497,11 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
     if converted.join("config.json").is_file() {
         return converted.display().to_string();
     }
+    // macOS Wan: the trainer loads the installed MLX turnkey's dense tier, NOT the Windows/Linux
+    // diffusers `base_model_repo` below (never installed on macOS) — sc-13878. Inert off-Mac / non-Wan.
+    if let Some(path) = macos_wan_base_path(data_dir, target) {
+        return path;
+    }
     if let Some(repo) = target
         .base_model_repo
         .as_deref()
@@ -1560,6 +1565,113 @@ fn tiered_turnkey_train_dir(snapshot: std::path::PathBuf) -> std::path::PathBuf 
         return snapshot.join("bf16");
     }
     snapshot
+}
+
+// ---- macOS Wan training-base resolution (sc-13878) ----
+//
+// The three Wan targets (`wan_lora` 5B + the two A14B MoE) name a Windows/Linux torch/diffusers
+// `base_model_repo` (`Wan-AI/Wan2.2-*-Diffusers`). That repo is gated to `platforms:[windows,linux]`
+// in the manifest, so macOS NEVER installs it — macOS installs the pre-converted MLX turnkey
+// (`SceneWorks/wan2.2-*-mlx`, `platforms:[macos]`) and routes the job to the in-process native MLX
+// trainer (`MLX_ROUTED_TRAINING_KERNELS` → mlx-gen-wan). So on macOS the pre-flight gate and the
+// base-path resolver must key off the MLX turnkey, not the diffusers repo, or every real Wan train
+// click 400s "not installed" against a repo that cannot exist there while the weights the trainer
+// actually loads sit installed. Off-Mac and for non-Wan targets these overrides are inert (`None`),
+// so the shared diffusers-turnkey logic below is unchanged.
+
+/// The macOS MLX turnkey repo the native Wan trainer loads for a Wan `base_model`, or `None` for a
+/// non-Wan base. The per-platform counterpart to the target's diffusers `base_model_repo`. Mirrors the
+/// worker's generation-side `resolve_wan_model_dir` (video_jobs.rs) 1:1; a manifest-parity test
+/// (`macos_wan_repos_match_manifest_macos_downloads`) pins each pair so the two cannot drift.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_wan_mlx_repo(base_model: &str) -> Option<&'static str> {
+    match base_model {
+        "wan_2_2" => Some("SceneWorks/wan2.2-ti2v-5b-mlx"),
+        "wan_2_2_t2v_14b" => Some("SceneWorks/wan2.2-t2v-a14b-mlx"),
+        "wan_2_2_i2v_14b" => Some("SceneWorks/wan2.2-i2v-a14b-mlx"),
+        _ => None,
+    }
+}
+
+/// The resolved MLX turnkey snapshot dir for a Wan `base_model` on macOS, or `None` when the turnkey
+/// is not materialized (nor a Wan base). Same HF-cache resolution the shared logic uses.
+#[cfg(target_os = "macos")]
+fn macos_wan_turnkey_snapshot(data_dir: &FsPath, base_model: &str) -> Option<PathBuf> {
+    let repo = macos_wan_mlx_repo(base_model)?;
+    huggingface_repo_cache_path(data_dir, repo)
+        .and_then(|cache| huggingface_snapshot_dirs(&cache).into_iter().next())
+}
+
+/// The dense (bf16) MLX Wan training weights inside a resolved turnkey `snapshot`, or `None` when only
+/// a quantized generation tier (q4/q8) is present. Training needs full precision — the trainer freezes
+/// the bf16 DiT and learns f32 adapter factors, so a q4/q8-only install is present-but-not-trainable.
+/// The turnkey ships the dense tier either as a `bf16/` subdir (the quant-matrix layout) or, on legacy
+/// installs, as the flat snapshot root itself; both are the flat MLX layout the trainer reads directly,
+/// so prefer the `bf16/` subdir and fall back to the root. The `q4/`/`q8/` subdirs are never selected.
+#[cfg(target_os = "macos")]
+fn wan_mlx_dense_train_dir(snapshot: &FsPath) -> Option<PathBuf> {
+    use sceneworks_core::mlx_tier_completeness::wan_tier_complete;
+    let bf16 = snapshot.join("bf16");
+    if wan_tier_complete(&bf16) {
+        return Some(bf16);
+    }
+    if wan_tier_complete(snapshot) {
+        return Some(snapshot.to_path_buf());
+    }
+    None
+}
+
+/// macOS Wan override for the pre-flight training-base status, or `None` (fall through to the shared
+/// diffusers-turnkey logic) off-Mac or for a non-Wan target. `Ready` when the turnkey's dense tier is
+/// present; `TrainingTierMissing` when the turnkey is installed for generation (e.g. only q4) but has no
+/// dense tier; `Missing` when the turnkey is not installed at all.
+fn macos_wan_base_status(data_dir: &FsPath, target: &TrainingTarget) -> Option<TrainingBaseStatus> {
+    #[cfg(target_os = "macos")]
+    {
+        if macos_wan_mlx_repo(&target.base_model).is_some() {
+            // A locally-converted dir (`<data>/models/mlx/<id>`, keyed on config.json) is what
+            // `resolve_base_model_path` returns FIRST, so honor it here too or the gate and resolver
+            // disagree. This is the legacy local-conversion tree; the turnkey is the standard install.
+            let converted = data_dir.join("models").join("mlx").join(&target.base_model);
+            if converted.join("config.json").is_file() {
+                return Some(TrainingBaseStatus::Ready);
+            }
+            return Some(
+                match macos_wan_turnkey_snapshot(data_dir, &target.base_model) {
+                    Some(snapshot) if wan_mlx_dense_train_dir(&snapshot).is_some() => {
+                        TrainingBaseStatus::Ready
+                    }
+                    Some(_) => TrainingBaseStatus::TrainingTierMissing,
+                    None => TrainingBaseStatus::Missing,
+                },
+            );
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (data_dir, target);
+    }
+    None
+}
+
+/// macOS Wan override for the base-model path the trainer loads, or `None` (fall through) off-Mac or
+/// for a non-Wan target. Prefers the dense tier; when only a quant tier is present (a real run is gated
+/// `TrainingTierMissing` anyway) falls back to the snapshot root so a dry run still resolves a real path.
+fn macos_wan_base_path(data_dir: &FsPath, target: &TrainingTarget) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        if macos_wan_mlx_repo(&target.base_model).is_some() {
+            if let Some(snapshot) = macos_wan_turnkey_snapshot(data_dir, &target.base_model) {
+                let dir = wan_mlx_dense_train_dir(&snapshot).unwrap_or(snapshot);
+                return Some(dir.display().to_string());
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (data_dir, target);
+    }
+    None
 }
 
 /// GPU selection for a training job, read from the config's advanced bag (the
@@ -1731,6 +1843,11 @@ pub(crate) fn training_base_model_status(
     data_dir: &FsPath,
     target: &TrainingTarget,
 ) -> TrainingBaseStatus {
+    // macOS Wan: certify the installed MLX turnkey the native trainer loads, NOT the Windows/Linux
+    // diffusers `base_model_repo` below (never installed on macOS) — sc-13878. Inert off-Mac / non-Wan.
+    if let Some(status) = macos_wan_base_status(data_dir, target) {
+        return status;
+    }
     if let Some(repo) = target
         .base_model_repo
         .as_deref()

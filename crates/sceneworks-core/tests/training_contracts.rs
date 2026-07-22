@@ -373,6 +373,122 @@ fn every_training_base_repo_is_installed_by_its_catalog_entry() {
     }
 }
 
+/// sc-13878 — platform-aware training-base guard (the sc-13860 guard above is platform-BLIND).
+///
+/// The three Wan video targets name a Windows/Linux torch/diffusers `base_model_repo`
+/// (`Wan-AI/Wan2.2-*-Diffusers`) the manifest gates to `platforms:[windows,linux]`. macOS installs a
+/// DIFFERENT repo — the pre-converted MLX turnkey (`SceneWorks/wan2.2-*-mlx`, `platforms:[macos]`) — and
+/// runs the native MLX trainer against it. The sc-13860 guard only checks `base_model_repo ∈ downloads`
+/// (which PASSES here — the diffusers repo IS a win/linux download), so it structurally cannot catch that
+/// on macOS the gate/resolver must key off a DIFFERENT repo; that mismatch was this bug. This guard
+/// asserts, per Wan target, that the manifest offers a macOS-installable MLX turnkey for the base AND that
+/// the diffusers repo is win/linux-only — the platform split the rust-api `macos_wan_*` gate/resolver
+/// depend on. A dropped macOS turnkey download, or the diffusers repo (wrongly) tagged for macOS, fails
+/// here regardless of which OS runs CI.
+#[test]
+fn macos_wan_targets_have_a_macos_installable_mlx_turnkey_base() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded in BUILTIN_MANIFESTS");
+    let catalog: Value = serde_json::from_str(&strip_jsonc_comments(raw))
+        .expect("builtin.models.jsonc parses as JSON");
+    let models = catalog["models"]
+        .as_array()
+        .expect("catalog has a models array");
+    assert!(
+        models.len() > 20,
+        "catalog parsed to only {} models — the manifest parse likely broke",
+        models.len()
+    );
+
+    // A download applies to an OS when it has no `platforms` key (all OSes) or lists that OS.
+    fn download_targets_os(download: &Value, os: &str) -> bool {
+        match download.get("platforms").and_then(Value::as_array) {
+            None => true,
+            Some(platforms) => platforms.iter().any(|p| p.as_str() == Some(os)),
+        }
+    }
+    let model_entry = |id: &str| -> Value {
+        models
+            .iter()
+            .find(|m| m["id"].as_str() == Some(id))
+            .unwrap_or_else(|| panic!("builtin.models.jsonc has a `{id}` entry"))
+            .clone()
+    };
+
+    // The macOS MLX turnkey each Wan base installs — the per-platform counterpart the rust-api
+    // `macos_wan_mlx_repo` map returns. Kept in lockstep with that map (a typo here or there fails).
+    let expected_macos_turnkey = |base_model: &str| -> &'static str {
+        match base_model {
+            "wan_2_2" => "SceneWorks/wan2.2-ti2v-5b-mlx",
+            "wan_2_2_t2v_14b" => "SceneWorks/wan2.2-t2v-a14b-mlx",
+            "wan_2_2_i2v_14b" => "SceneWorks/wan2.2-i2v-a14b-mlx",
+            other => panic!("unexpected Wan base_model `{other}` — extend the macOS turnkey map"),
+        }
+    };
+
+    let wan_targets: Vec<_> = builtin_training_targets()
+        .targets
+        .into_iter()
+        .filter(|t| t.family == "wan-video")
+        .collect();
+    // Anti-vacuous: the dense 5B + both A14B MoE targets. A silently-empty filter must not pass.
+    assert_eq!(
+        wan_targets.len(),
+        3,
+        "expected the 3 wan-video training targets (5B + T2V/I2V A14B), got {}",
+        wan_targets.len()
+    );
+
+    for target in wan_targets {
+        let entry = model_entry(&target.base_model);
+        let downloads = entry["downloads"]
+            .as_array()
+            .unwrap_or_else(|| panic!("`{}` has a downloads array", target.base_model));
+
+        // 1) macOS installs the MLX turnkey the native trainer loads.
+        let turnkey = expected_macos_turnkey(&target.base_model);
+        assert!(
+            downloads.iter().any(|d| d["repo"].as_str() == Some(turnkey)
+                && download_targets_os(d, "macos")),
+            "training target `{}` (base `{}`) has no macOS-installable `{}` download — macOS Wan LoRA \
+             training has no base to run against (sc-13878)",
+            target.id,
+            target.base_model,
+            turnkey
+        );
+
+        // 2) The diffusers `base_model_repo` is the Windows/Linux torch base — NOT installed on macOS.
+        //    This is exactly why keying the gate on `base_model_repo` (sc-13860) breaks on macOS.
+        let diffusers = target
+            .base_model_repo
+            .as_deref()
+            .expect("wan target names a diffusers base_model_repo");
+        let diffusers_downloads: Vec<_> = downloads
+            .iter()
+            .filter(|d| d["repo"].as_str() == Some(diffusers))
+            .collect();
+        assert!(
+            !diffusers_downloads.is_empty(),
+            "`{}` diffusers base `{diffusers}` must still be a catalog download (the off-Mac torch base)",
+            target.base_model
+        );
+        assert!(
+            diffusers_downloads
+                .iter()
+                .all(|d| !download_targets_os(d, "macos")),
+            "`{}` diffusers base `{diffusers}` is tagged for macOS — it must be Windows/Linux only, or the \
+             sc-13860 gate would (wrongly) look for it on macOS (sc-13878)",
+            target.base_model
+        );
+    }
+}
+
 #[test]
 fn builtin_registry_exposes_kolors_target() {
     // Kolors (epic 1929) is an SDXL-architecture U-Net target served by the
@@ -626,8 +742,8 @@ fn builtin_registry_exposes_wan_target() {
     assert_eq!(target.kernel, "wan_lora");
     assert_eq!(target.defaults.rank, 32);
     assert_eq!(target.defaults.resolution, 512);
-    // Cross-platform torch trainer: plain AdamW (adamw8bit is CUDA-only and falls
-    // back), unlike the MLX LTX target which is also adamw but MPS-only.
+    // Cross-platform default: plain AdamW (adamw8bit is CUDA-only and falls back off it). The
+    // backend is per-platform — off-Mac torch/CUDA, on macOS the native MLX trainer (sc-13878).
     assert_eq!(target.defaults.optimizer, "adamw");
     // Wan transformer attention projections drive the LoRA injection.
     assert_eq!(
@@ -639,7 +755,10 @@ fn builtin_registry_exposes_wan_target() {
         target.defaults.advanced.get("numFrames"),
         Some(&serde_json::json!(1))
     );
-    // Not MLX/Apple-Silicon-gated — runs on CUDA and MPS.
+    // Not Apple-Silicon-gated: it runs off-Mac (torch/CUDA) AND on macOS (the native MLX trainer
+    // against the installed MLX turnkey, sc-13878), so it carries no `appleSiliconOnly` marker —
+    // unlike the MLX-only LTX target. The macOS base-weight resolution lives in the rust-api
+    // `macos_wan_*` gate/resolver, guarded by `macos_wan_targets_have_a_macos_installable_mlx_turnkey_base`.
     assert_eq!(target.limits.get("appleSiliconOnly"), None);
 }
 

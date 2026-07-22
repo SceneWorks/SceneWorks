@@ -3293,7 +3293,9 @@ mod tests {
         );
 
         // ── Step 4: DISABLE NETWORK for the render — offline flags PLUS a black-hole proxy that fails
-        //    any residual hub agent (belt and suspenders; at this pin a cache HIT never builds one). ──
+        //    any residual hub agent (belt and suspenders; at this pin a cache HIT never builds one).
+        //    All five keys are pre-registered by the `_env` guard above, so they restore on drop —
+        //    no leak (sc-13909). ──
         std::env::set_var("HF_HUB_OFFLINE", "1");
         std::env::set_var("TRANSFORMERS_OFFLINE", "1");
         std::env::set_var("ALL_PROXY", "http://127.0.0.1:1");
