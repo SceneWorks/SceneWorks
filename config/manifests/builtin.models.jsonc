@@ -2733,7 +2733,19 @@
         "scheduler": "default"
       },
       "limits": {
-        "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280", "1536x1536"],
+        // sc-13959 (epic 13879): raised to Krea's real 2048² ceiling (model card + guide: any ÷16
+        // multiple up to 2048²), adding the aspect ratios Krea itself ships (3:2 1216×832 / 832×1216,
+        // ~9:7 1152×896 / 896×1152) plus their 2048-scale variants (16:9 2048×1152 / 1152×2048, ~3:2
+        // 2048×1408 / 1408×2048, square 2048×2048). Every bucket is ÷16-aligned and ≤2048², i.e. inside
+        // the PINNED Krea engine envelope (RES_MIN 256 / RES_MAX 2048 / ÷16) — asserted by
+        // `engines.rs::shipped_image_geometry_is_within_the_pinned_engine_envelope`. The buckets ABOVE
+        // the old 1536² cap are MEMORY-GATED client-side (apps/web/src/resolutionMemory.js) against the
+        // host's unified/GPU memory so a 48 GB Mac is never offered a size that OOMs while a 128 GB Mac
+        // gets the full range; ≤1536² is unchanged. `minMemoryGb` below stays the DEFAULT-tier /
+        // ≤1536² VISIBILITY floor — the extra single-pass VAE-decode spike at 2048² is what the
+        // client gate covers, not this floor (raising it would wrongly hide the model on 48 GB Macs
+        // that run ≤1536² fine).
+        "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280", "1216x832", "832x1216", "1152x896", "896x1152", "1536x1536", "2048x1152", "1152x2048", "2048x1408", "1408x2048", "2048x2048"],
         "count": [1, 2, 4],
         // Krea Turbo routes the per-generation sampler/scheduler knobs through the unified framework
         // (run_flow_sampler / resolve_flow_schedule), exactly like z_image_turbo — so it advertises the
@@ -3013,7 +3025,19 @@
         "scheduler": "default"
       },
       "limits": {
-        "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280", "1536x1536"],
+        // sc-13959 (epic 13879): raised to Krea's real 2048² ceiling (model card + guide: any ÷16
+        // multiple up to 2048²), adding the aspect ratios Krea itself ships (3:2 1216×832 / 832×1216,
+        // ~9:7 1152×896 / 896×1152) plus their 2048-scale variants (16:9 2048×1152 / 1152×2048, ~3:2
+        // 2048×1408 / 1408×2048, square 2048×2048). Every bucket is ÷16-aligned and ≤2048², i.e. inside
+        // the PINNED Krea engine envelope (RES_MIN 256 / RES_MAX 2048 / ÷16) — asserted by
+        // `engines.rs::shipped_image_geometry_is_within_the_pinned_engine_envelope`. The buckets ABOVE
+        // the old 1536² cap are MEMORY-GATED client-side (apps/web/src/resolutionMemory.js) against the
+        // host's unified/GPU memory so a 48 GB Mac is never offered a size that OOMs while a 128 GB Mac
+        // gets the full range; ≤1536² is unchanged. `minMemoryGb` below stays the DEFAULT-tier /
+        // ≤1536² VISIBILITY floor — the extra single-pass VAE-decode spike at 2048² is what the
+        // client gate covers, not this floor (raising it would wrongly hide the model on 48 GB Macs
+        // that run ≤1536² fine).
+        "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280", "1216x832", "832x1216", "1152x896", "896x1152", "1536x1536", "2048x1152", "1152x2048", "2048x1408", "1408x2048", "2048x2048"],
         "count": [1, 2, 4],
         // Raw routes the per-generation sampler/scheduler knobs through the unified framework, exactly
         // like Turbo — the `krea_2_raw` descriptor advertises curated_sampler_names()/
