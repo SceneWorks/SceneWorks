@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { summarize } from "./validation/issues.js";
+import { issue, summarize } from "./validation/issues.js";
 import {
   batchPromptBudgetOverages,
   imageBatchValidation,
@@ -42,6 +42,21 @@ describe("imageGenerateValidation", () => {
     const issues = imageGenerateValidation({ ...whole, prompt: "   " });
     expect(kinds(issues, "prompt")).toEqual(["requirement"]);
     expect(summarize(issues).surfaced).toEqual([]);
+  });
+
+  it("surfaces multi-phase denoise errors and stays silent when there are none (sc-13885)", () => {
+    // No multi-phase issues (editor off / valid) → nothing added, draft still ready.
+    expect(summarize(imageGenerateValidation({ ...whole, multiPhaseIssues: [] })).ready).toBe(true);
+    // A multi-phase error blocks Generate AND surfaces (it is an error, not a silent requirement).
+    const withError = imageGenerateValidation({
+      ...whole,
+      multiPhaseIssues: [issue.error("multiPhase", "Add at least one phase, or turn off multi-phase denoise.")],
+    });
+    const rolled = summarize(withError);
+    expect(rolled.ready).toBe(false);
+    expect(rolled.surfaced.map((i) => i.message)).toContain(
+      "Add at least one phase, or turn off multi-phase denoise.",
+    );
   });
 
   it("requires caption content on a structured model, silently", () => {

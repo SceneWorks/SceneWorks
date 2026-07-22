@@ -74,6 +74,12 @@ export function buildImageJobAdvanced(state) {
     // Style Catalog recipe round-trip (sc-13132). Both are undefined unless a style is applied.
     styleId,
     styleUserPrompt,
+    // Krea 2 multi-phase denoise (epic 13879 S5, sc-13885). `multiPhaseActive` is the resolved gate
+    // (model advertises the acceleration compat + text-to-image mode + the editor enabled); `phases`
+    // is the ALREADY-SERIALIZED emit-shape list (serializePhases runs in ImageStudio, where the
+    // selected-LoRA list resolves each phase LoRA id → index). Emitted only when active AND non-empty.
+    multiPhaseActive,
+    phases,
   } = state;
 
   return {
@@ -251,5 +257,13 @@ export function buildImageJobAdvanced(state) {
     // block. Emitted ONLY when a style is applied (styleId set), so styleless recipes stay
     // byte-identical. `stylePrompt` may be "" (a style with no user prose still round-trips exactly).
     ...(styleId ? { styleId, stylePrompt: styleUserPrompt ?? "" } : {}),
+    // Krea 2 multi-phase denoise (epic 13879 S5, sc-13885): the ordered `advanced.phases` list the
+    // worker's `parse_multiphase_specs` consumes (crates/sceneworks-worker/.../krea_multiphase.rs).
+    // Emitted ONLY when the multi-phase editor is active (krea_2_raw + text-to-image + enabled) AND
+    // carries at least one phase — so a normal single-phase Raw job (editor off/empty, or any other
+    // model) adds NOTHING new and stays byte-for-byte unchanged. `phases` is already in the exact
+    // { steps, guidance, loras:[{ index, weight? }] } shape the worker parses; the omit-when-inactive
+    // rule keeps the round-trip lossless.
+    ...(multiPhaseActive && Array.isArray(phases) && phases.length ? { phases } : {}),
   };
 }

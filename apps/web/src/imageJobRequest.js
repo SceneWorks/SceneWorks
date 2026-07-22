@@ -100,6 +100,9 @@ export function buildImageJobRequest(state) {
     controlPassthroughId,
     effectiveControlScale,
     controlOverlayId,
+    // Krea 2 multi-phase denoise (epic 13879 S5, sc-13885) — delegated to buildImageJobAdvanced.
+    multiPhaseActive,
+    phases,
   } = state;
 
   // sc-13130 / sc-13224: apply the Style Catalog as the LAST wrap on the outgoing prompt. It is a
@@ -268,6 +271,10 @@ export function buildImageJobRequest(state) {
       //    store "" — the raw prompt lives in the caption blob, not here.
       styleId: styleApplied ? styleId : undefined,
       styleUserPrompt: styleApplied ? (structuredInjected ? "" : promptToSend) : undefined,
+      // Krea 2 multi-phase denoise (epic 13879 S5, sc-13885): the resolved gate + the editor's phase
+      // list. buildImageJobAdvanced emits `advanced.phases` only when active + non-empty.
+      multiPhaseActive,
+      phases,
     }),
   };
 }

@@ -107,6 +107,28 @@ describe("buildImageJobAdvanced", () => {
     ).toBe(1.5);
   });
 
+  it("emits advanced.phases only when multi-phase is active AND non-empty (sc-13885)", () => {
+    // The canonical S4 example is ALREADY serialized (index-shaped) by the time it reaches the
+    // builder — serializePhases runs in ImageStudio, where the selected-LoRA list resolves ids.
+    const canonicalPhases = [
+      { steps: 4, guidance: 3.5, loras: [] },
+      { steps: 4, guidance: 0, loras: [{ index: 0 }] },
+    ];
+    // Inactive (editor off / non-Krea model) → NOTHING emitted even with a phase list present, so a
+    // single-phase Raw job is byte-for-byte unchanged.
+    expect(
+      buildImageJobAdvanced(offState({ multiPhaseActive: false, phases: canonicalPhases })),
+    ).toEqual({ resolution: "1024x1024" });
+    // Active but empty → still omitted.
+    expect(
+      buildImageJobAdvanced(offState({ multiPhaseActive: true, phases: [] })),
+    ).not.toHaveProperty("phases");
+    // Active + non-empty → the phase list rides advanced.phases VERBATIM (the worker's parse shape).
+    expect(
+      buildImageJobAdvanced(offState({ multiPhaseActive: true, phases: canonicalPhases })).phases,
+    ).toEqual(canonicalPhases);
+  });
+
   it("omits guidanceMethod for the engine no-op 'cfg' and rides a non-default method", () => {
     expect(buildImageJobAdvanced(offState({ guidanceMethod: "cfg" }))).not.toHaveProperty("guidanceMethod");
     expect(buildImageJobAdvanced(offState({ guidanceMethod: "cfg_pp" })).guidanceMethod).toBe("cfg_pp");

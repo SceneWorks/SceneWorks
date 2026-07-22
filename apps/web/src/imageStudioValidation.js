@@ -52,6 +52,10 @@ export function imageGenerateValidation({
   presetIncompatible = [],
   loraIncompatible = [],
   modelName,
+  // Krea 2 multi-phase denoise (epic 13879 S5, sc-13885): pre-computed issues from
+  // imageMultiPhase.multiPhaseIssues (an enabled-but-broken phase list blocks Generate with an
+  // error). Empty when the editor is off or the model has no multi-phase lane.
+  multiPhaseIssues = [],
 } = {}) {
   const issues = [];
   if (!activeProject) {
@@ -98,6 +102,8 @@ export function imageGenerateValidation({
     issues.push(issue.requirement("editLora", "Download the required edit LoRA to run edits"));
   }
   issues.push(...presetLoraIssues({ presetMissing, presetIncompatible, loraIncompatible, modelName }));
+  // Multi-phase denoise problems (sc-13885) — already kinded (errors) by multiPhaseIssues.
+  issues.push(...multiPhaseIssues);
   return issues;
 }
 
