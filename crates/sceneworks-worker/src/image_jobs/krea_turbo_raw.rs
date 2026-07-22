@@ -52,16 +52,36 @@ fn request_has_accelerator_lora(request: &ImageRequest) -> bool {
     request.loras.iter().any(lora_declares_accelerator_role)
 }
 
+/// True when this Raw job carries an img2img reference — a `ui.img2img` model (`krea_2_raw` ships
+/// `ui.img2img: true`) plus a non-empty `referenceAssetId`. This is exactly the shape the generic Mlx
+/// img2img arm (`resolve_generic_lane_conditioning`, base.rs) claims: `model_supports_img2img(request)
+/// && has_reference` (the turbo gate already excludes `edit_image`, so that clause of the generic arm is
+/// implied here). A reference-bearing Raw job MUST fall through to that arm — which VAE-encodes the
+/// reference into the Raw denoise AND still applies the accelerator LoRA additively — rather than be
+/// hijacked by this turbo-t2i lane, which resolves no reference/conditioning and would silently drop it.
+/// Turbo-on-Raw img2img is out of scope for this t2i story (sc-13883): the correct S3 behavior is for
+/// img2img reference jobs to keep running normally (Raw regime, LoRA additive), only plain t2i +
+/// accelerator taking the turbo regime.
+fn request_carries_img2img_reference(request: &ImageRequest) -> bool {
+    model_supports_img2img(request) && non_empty(&request.reference_asset_id)
+}
+
 /// True when this is a plain Krea 2 **Raw** t2i job carrying the accelerator (turbo) LoRA — the
 /// single-phase turbo-on-Raw lane (S3). Keyed on model `krea_2_raw`, a plain t2i shape (NOT
-/// `edit_image`, and no strict poses — those divert to the Krea edit / reject lanes ABOVE this arm),
-/// a selected accelerator-role LoRA, and resolvable Raw weights. Mirrors [`krea_edit_available`]'s
-/// job-shape gate; placed AFTER the edit/control lanes and BEFORE the generic `mlx_available` arm so
-/// it wins over plain Raw t2i (which would run the 52-step true-CFG regime and never accelerate).
+/// `edit_image`, no strict poses, and NO img2img reference — those divert to the Krea edit / reject /
+/// generic img2img lanes: `edit_image` + strict poses to the arms ABOVE this one, an img2img reference
+/// FALLS THROUGH to the generic `mlx_available` img2img arm BELOW), a selected accelerator-role LoRA,
+/// and resolvable Raw weights. Excluding the img2img reference here (sc-13883 review fix) keeps a
+/// `krea_2_raw` + reference + accelerator job on the generic img2img path (reference honored, LoRA
+/// additive) instead of hijacking it into a plain turbo-t2i render that drops the reference. Mirrors
+/// [`krea_edit_available`]'s job-shape gate; placed AFTER the edit/control lanes and BEFORE the generic
+/// `mlx_available` arm so it wins over plain Raw t2i (which would run the 52-step true-CFG regime and
+/// never accelerate).
 fn krea_turbo_on_raw_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model == KREA_RAW_MODEL_ID
         && request.mode != "edit_image"
         && pose_entries(request).is_empty()
+        && !request_carries_img2img_reference(request)
         && request_has_accelerator_lora(request)
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }

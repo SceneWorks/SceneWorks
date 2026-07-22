@@ -5275,6 +5275,31 @@ fn krea_turbo_on_raw_routes_only_with_accelerator_lora() {
         "krea_2_raw t2i + an accelerator-role LoRA must route to the turbo-on-Raw lane",
     );
 
+    // The img2img over-routing guard (sc-13883 review fix): a `krea_2_raw` job that carries an img2img
+    // reference (`ui.img2img: true` + a non-empty `referenceAssetId`) AND the accelerator LoRA must NOT
+    // be hijacked by the turbo-t2i lane — that lane resolves no reference/conditioning and would
+    // SILENTLY DROP the reference. It falls THROUGH to the generic `Mlx` img2img arm, which VAE-encodes
+    // the reference into the Raw denoise AND still applies the accelerator LoRA additively (Raw regime).
+    // Turbo-on-Raw img2img is out of scope for this t2i story.
+    let with_reference = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1,
+        "modelManifestEntry": { "ui": { "img2img": true } },
+        "referenceAssetId": "asset-1",
+        "loras": [{ "id": "krea2_turbo_accel", "family": "krea_2", "role": "accelerator" }],
+        "advanced": { "modelPath": model_path.clone(), "strength": 0.6 }
+    }));
+    let with_reference_route = resolve_image_route(&with_reference, &settings);
+    assert_ne!(
+        with_reference_route,
+        Some(ImageRoute::KreaTurboOnRaw),
+        "a krea_2_raw job carrying an img2img reference must NOT route to the turbo-on-Raw lane (its reference would be silently dropped)",
+    );
+    assert_eq!(
+        with_reference_route,
+        Some(ImageRoute::Mlx),
+        "a krea_2_raw + img2img reference + accelerator job falls through to the generic Mlx img2img arm (reference honored, LoRA additive)",
+    );
+
     // The over-routing guard: the SAME Raw t2i WITHOUT the accelerator stays on the generic MLX lane
     // (the plain 52-step true-CFG Raw regime), and a plain (character/style) Raw LoRA does NOT trigger
     // the accelerator lane — only the `role: accelerator` marker does.
@@ -5380,6 +5405,42 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         resolve_negative_prompt(&req, &raw),
         Some("blurry, low quality".to_owned()),
         "control: the Raw path forwards the user's negative prompt",
+    );
+
+    // Seam-level proof that the lane resolves against the RAW weights/model while selecting the TURBO
+    // engine for the sampler — the exact split `generate_krea_turbo_on_raw_stream` relies on: it passes
+    // `&turbo` (regime source) to `resolve_steps`, but loads the RAW weights + repo + telemetry label
+    // via `&raw_model`. This asserts the lane's OWN constants + resolved settings (not the turbo
+    // descriptor directly), so a future rename that pointed the sampler at the wrong engine, or the
+    // loader at the turbo repo, FAILS here rather than only being caught by code-reading.
+    assert_eq!(
+        KREA_RAW_MODEL_ID, "krea_2_raw",
+        "the lane's base model is Raw"
+    );
+    assert_eq!(
+        KREA_TURBO_ENGINE_ID, "krea_2_turbo",
+        "the lane samples with the Turbo engine",
+    );
+    let base_model = mlx_model(KREA_RAW_MODEL_ID).expect("krea_2_raw engine registered");
+    let sampler = mlx_model(KREA_TURBO_ENGINE_ID).expect("krea_2_turbo engine registered");
+    // The sampler engine (regime source) IS Turbo; the base model (weights + repo + telemetry) IS Raw.
+    assert_eq!(sampler.engine_id(), "krea_2_turbo");
+    assert_eq!(base_model.engine_id(), "krea_2_raw");
+    // The lane loads the RAW repo (off `&raw_model`), NOT the turbo engine's repo — the fidelity base
+    // stays Raw even though the sampler runs the turbo regime. `model_repo` falls back to the model's
+    // default repo when the request carries no manifest override (as here), so this discriminates.
+    assert_eq!(model_repo(&req, &base_model), "SceneWorks/krea-2-raw-mlx");
+    assert_ne!(
+        model_repo(&req, &base_model),
+        model_repo(&req, &sampler),
+        "turbo-on-Raw must load the RAW repo, not the turbo engine's repo",
+    );
+    // And the regime knobs resolve against the TURBO descriptor (8 steps) via the seam's own handle —
+    // the sampler side of the split, pinned against the lane constant rather than a local `turbo` alias.
+    assert_eq!(
+        resolve_steps(&req, &sampler),
+        8,
+        "the lane resolves the turbo 8-step regime against the KREA_TURBO_ENGINE_ID descriptor",
     );
 }
 

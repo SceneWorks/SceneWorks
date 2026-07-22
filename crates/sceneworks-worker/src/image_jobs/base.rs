@@ -184,8 +184,12 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         // Krea 2 Raw t2i + the accelerator (turbo) LoRA (sc-13882) → the single-phase turbo-on-Raw
         // lane (epic 13879 S3, sc-13883): the Raw base + LoRA additive, sampled as Turbo (fixed mu
         // 1.15 / ~8 steps / CFG-off) by routing to the `krea_2_turbo` engine. Wins over the generic
-        // `mlx_available` arm below — a plain Raw t2i would otherwise run the 52-step true-CFG regime
-        // and ignore the accelerator's intent. The t2i sibling of the `krea_edit_available` arm above.
+        // `mlx_available` arm below for PLAIN t2i — a plain Raw t2i would otherwise run the 52-step
+        // true-CFG regime and ignore the accelerator's intent. A `krea_2_raw` job that ALSO carries an
+        // img2img reference (`ui.img2img` + `referenceAssetId`) is EXCLUDED by the gate and falls
+        // through to the generic `mlx_available` img2img arm (reference honored, accelerator LoRA still
+        // additive) — turbo-on-Raw img2img is out of scope for this t2i story (sc-13883). The t2i
+        // sibling of the `krea_edit_available` arm above.
         Some(ImageRoute::KreaTurboOnRaw)
     } else if instantid_available(request, settings) {
         Some(ImageRoute::InstantId)
