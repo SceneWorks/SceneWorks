@@ -66,6 +66,12 @@ pub(crate) async fn run_model_download_job(
     let files = payload_string_array(&job.payload, "files");
     let revision = optional_payload_string(&job.payload, "revision").unwrap_or("main");
     let fresh_download = optional_payload_string(&job.payload, "downloadAction") == Some("fresh");
+    // The jobs API is the worker's trust boundary (unauthenticated for local use, LAN-exposed via
+    // epic 4484), so reject any repo / revision / include-pattern that could escape the intended
+    // Hugging Face path before it reaches `HuggingFaceSnapshot::resolve`'s URL builder or the
+    // `download_snapshot_into_cache` refs/snapshot joins below — the on-demand tier fetches already
+    // gate this in `ensure_hf_files_cached`, but this user-facing entry point did not (sc-13583).
+    validate_hf_download_inputs(repo, revision, &files)?;
     // The worker is the trust boundary (jobs API is unauthenticated for local use), so a
     // client-supplied targetDir must be constrained to app-managed data/models the same way
     // import jobs are, not used verbatim.
@@ -296,6 +302,10 @@ pub(crate) async fn run_lora_download_job(
     };
     let files = payload_string_array(&job.payload, "files");
     let revision = optional_payload_string(&job.payload, "revision").unwrap_or("main");
+    // Trust-boundary validation for the LAN-exposed jobs API (epic 4484), mirroring
+    // `run_model_download_job`: reject a path-escaping repo/revision/pattern before the URL builder
+    // and the `download_snapshot_into_cache` refs/snapshot joins downstream (sc-13583).
+    validate_hf_download_inputs(repo, revision, &files)?;
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
@@ -426,7 +436,12 @@ pub(crate) async fn run_lora_download_job(
         &mut progress,
     )
     .await?;
-    let resolved_revision = tokio::fs::read_to_string(repo_dir.join("refs").join(revision))
+    // Symmetric with the `refs/<rev>` write in `download_snapshot_into_cache`: confine the read path
+    // so this receipt-facing lookup can't be turned into an arbitrary-file read by a `..`/absolute
+    // revision (sc-13583). `revision` is already validated at the entry point above; this is the
+    // defense-in-depth twin of the write-side `safe_join`.
+    let refs_path = safe_join(&repo_dir.join("refs"), revision)?;
+    let resolved_revision = tokio::fs::read_to_string(refs_path)
         .await
         .ok()
         .map(|value| value.trim().to_owned())
@@ -1625,9 +1640,17 @@ pub(crate) fn huggingface_pinned_snapshot_dir(
     repo: &str,
     revision: &str,
 ) -> Option<PathBuf> {
-    let dir = huggingface_repo_cache_path(data_dir, repo)?
-        .join("snapshots")
-        .join(revision);
+    // `revision` reaches here straight from the job payload's `modelManifestEntry` (the co-requisite
+    // seam, `resolve_co_requisites` / `resolve_optional_component`), which is unvalidated over the LAN
+    // jobs API (epic 4484). A `..`/absolute revision would otherwise join OUTSIDE `snapshots/` — a dir
+    // that passes `is_dir()` and, on Windows, gets its symlinks rewritten to hardlinks by
+    // `materialize_snapshot_hardlinks`. A pinned revision is a single 40-hex commit component, so
+    // confine it with `safe_join`; a traversal value yields `None` ("not installed") (sc-13583).
+    let dir = safe_join(
+        &huggingface_repo_cache_path(data_dir, repo)?.join("snapshots"),
+        revision,
+    )
+    .ok()?;
     if !dir.is_dir() {
         return None;
     }
@@ -1723,7 +1746,10 @@ pub(crate) fn resolve_co_requisites(
             .unwrap_or_default();
         let source = match files.as_slice() {
             [file] => {
-                let path = snapshot.join(file);
+                // `file` comes from the payload `modelManifestEntry`; confine it under the snapshot so
+                // a `..`/absolute entry can't stage an arbitrary host file as this component's weights
+                // (on Windows `join` with an absolute path replaces the base entirely) (sc-13583).
+                let path = safe_join(&snapshot, file)?;
                 if !path.is_file() {
                     return Err(WorkerError::InvalidPayload(format!(
                         "{model_id}: the '{component_id}' component file {repo}/{file} is missing \
@@ -1780,7 +1806,10 @@ pub(crate) fn resolve_optional_component(
     // `audio_token_detokenizer/` under the staged dir).
     match files.as_slice() {
         [file] if !file.contains('*') => {
-            let path = snapshot.join(file);
+            // Confine the payload-supplied file under the snapshot (sc-13583) — the optional-component
+            // twin of the `resolve_co_requisites` guard above; a `..`/absolute entry yields `None`
+            // (component simply not staged), never an out-of-snapshot host file.
+            let path = safe_join(&snapshot, file).ok()?;
             path.is_file()
                 .then_some(gen_core::WeightsSource::File(path))
         }
@@ -2368,6 +2397,10 @@ pub(crate) async fn run_lora_import_job(
     if let Some(repo) = repo {
         let files = payload_string_array(&job.payload, "files");
         let revision = optional_payload_string(&job.payload, "revision").unwrap_or("main");
+        // Trust-boundary validation for the LAN-exposed jobs API (epic 4484): a LoRA HF import takes a
+        // caller-supplied repo/revision/files and resolves them into download URLs and on-disk paths,
+        // so reject anything that could escape the intended Hugging Face path (sc-13583).
+        validate_hf_download_inputs(repo, revision, &files)?;
         let snapshot =
             HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
         let mut progress = DownloadProgress::new(
@@ -2725,6 +2758,10 @@ pub(crate) async fn run_model_import_job(
     if let Some(repo) = repo {
         let files = payload_string_array(&job.payload, "files");
         let revision = optional_payload_string(&job.payload, "revision").unwrap_or("main");
+        // Trust-boundary validation for the LAN-exposed jobs API (epic 4484): a model HF import takes a
+        // caller-supplied repo/revision/files and resolves them into download URLs and on-disk paths,
+        // so reject anything that could escape the intended Hugging Face path (sc-13583).
+        validate_hf_download_inputs(repo, revision, &files)?;
         let snapshot =
             HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
         let mut progress = DownloadProgress::new(
@@ -3713,6 +3750,111 @@ mod co_requisite_tests {
             ),
             other => panic!("an installed sft_cover resolves to a Dir, got {other:?}"),
         }
+    }
+
+    /// sc-13583 / F-002 (co-requisite seam, 5th site): `revision` reaches
+    /// [`huggingface_pinned_snapshot_dir`] straight from the payload `modelManifestEntry`. A `..`
+    /// revision must NOT resolve to a directory OUTSIDE `snapshots/`, even when that directory exists
+    /// on disk (it would pass `is_dir()` and, on Windows, get its symlinks rewritten to hardlinks).
+    #[test]
+    fn huggingface_pinned_snapshot_dir_confines_a_traversal_revision() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let repo = "ResembleAI/chatterbox";
+
+        // A real pinned snapshot still resolves — proving the guard is a confinement, not a blanket
+        // reject of every non-`main` revision.
+        let revision = "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18";
+        stage_snapshot_file(data_dir.path(), repo, revision, "ve.safetensors");
+        assert!(
+            huggingface_pinned_snapshot_dir(data_dir.path(), repo, revision).is_some(),
+            "a real pinned snapshot must still resolve"
+        );
+
+        // Plant a real directory a level ABOVE snapshots/ that a `../` revision would land on …
+        let escaped = huggingface_repo_cache_path(data_dir.path(), repo)
+            .expect("repo cache path resolves")
+            .join("escaped");
+        std::fs::create_dir_all(&escaped).expect("escaped dir");
+        // … and confirm the traversal revision does not resolve to it.
+        assert_eq!(
+            huggingface_pinned_snapshot_dir(data_dir.path(), repo, "../escaped"),
+            None,
+            "a `..` revision must not resolve to a dir outside snapshots/"
+        );
+    }
+
+    /// sc-13583 (co-requisite seam): a single-entry `files: ["<../.. path>"]` in the payload
+    /// `modelManifestEntry` must not be joined onto the snapshot to stage an arbitrary host file as a
+    /// required component's weights — `resolve_co_requisites` must reject it via `safe_join`.
+    #[test]
+    fn resolve_co_requisites_confines_a_traversal_component_file() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let repo = "ResembleAI/chatterbox";
+        let revision = "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18";
+        // Snapshot present, plus a target file one level ABOVE the snapshot that a `../` entry hits.
+        stage_snapshot_file(data_dir.path(), repo, revision, "placeholder.bin");
+        let outside = huggingface_repo_cache_path(data_dir.path(), repo)
+            .expect("repo cache path resolves")
+            .join("snapshots")
+            .join("outside.bin");
+        std::fs::write(&outside, b"secret").expect("plant outside file");
+
+        let descriptor = gen_core::ModelDescriptor {
+            id: "trav_probe",
+            family: "chatterbox",
+            backend: "candle",
+            modality: gen_core::Modality::Audio,
+            capabilities: gen_core::Capabilities::default(),
+            required_components: &["voice_embedding"],
+        };
+        let manifest = json!({
+            "id": "trav_probe",
+            "downloads": [
+                { "provider": "huggingface", "repo": repo, "revision": revision, "coRequisite": true,
+                  "componentId": "voice_embedding", "files": ["../outside.bin"] }
+            ]
+        });
+        let settings = settings_at(data_dir.path().to_path_buf());
+        // The outside file EXISTS, so without the guard the join would resolve it to a real File
+        // (Ok), not the missing-file error — `expect_err` therefore discriminates the guard itself.
+        let error = resolve_co_requisites(&descriptor, &manifest, &settings)
+            .expect_err("a `..` component file entry is rejected");
+        assert!(
+            matches!(&error, WorkerError::InvalidPayload(message) if message.contains("Unsafe snapshot path")),
+            "expected a safe_join rejection, got {error:?}"
+        );
+    }
+
+    /// sc-13583 (co-requisite seam): the optional-component twin of the guard above — a `..` file
+    /// entry resolves to `None` (component simply not staged), never an out-of-snapshot host file.
+    #[test]
+    fn resolve_optional_component_confines_a_traversal_component_file() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let repo = "ACE-Step/acestep-v15-xl-sft-diffusers";
+        let revision = "4bf7b60a63b27144f539f980927eeb89f5f912b0";
+        stage_snapshot_file(data_dir.path(), repo, revision, "placeholder.bin");
+        let outside = huggingface_repo_cache_path(data_dir.path(), repo)
+            .expect("repo cache path resolves")
+            .join("snapshots")
+            .join("outside.bin");
+        std::fs::write(&outside, b"secret").expect("plant outside file");
+
+        let manifest = json!({
+            "id": "acestep_v15_turbo",
+            "downloads": [
+                { "provider": "huggingface", "repo": repo, "revision": revision,
+                  "coRequisite": true, "required": "soft", "componentId": "sft_cover",
+                  "files": ["../outside.bin"] }
+            ]
+        });
+        let settings = settings_at(data_dir.path().to_path_buf());
+        assert!(
+            resolve_optional_component(&manifest, "sft_cover", &settings).is_none(),
+            "a `..` file entry must not stage a host file outside the snapshot"
+        );
     }
 
     #[test]
