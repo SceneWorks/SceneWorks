@@ -238,6 +238,13 @@ fn builtin_registry_exposes_z_image_turbo_target() {
     assert_eq!(target.output_kind, TrainingOutputKind::Lora);
     assert_eq!(target.family, "z-image");
     assert_eq!(target.base_model, "z_image_turbo");
+    // sc-13860: the DEFAULT training base trains off the SceneWorks/z-image-turbo-mlx turnkey the
+    // catalog + engine install, NOT the flat upstream `Tongyi-MAI/Z-Image-Turbo` the epic-8506 re-host
+    // stopped downloading (false "not installed"); the trainer reads its dense `bf16/` tier.
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("SceneWorks/z-image-turbo-mlx")
+    );
     assert_eq!(target.kernel, "z_image_lora");
     assert_eq!(target.defaults.rank, 16);
     assert_eq!(target.defaults.resolution, 1024);
@@ -261,6 +268,13 @@ fn builtin_registry_exposes_sdxl_target() {
     assert_eq!(target.output_kind, TrainingOutputKind::Lora);
     assert_eq!(target.family, "sdxl");
     assert_eq!(target.base_model, "sdxl");
+    // Trains off the SceneWorks turnkey the catalog + engine install, NOT the flat upstream
+    // `stabilityai/stable-diffusion-xl-base-1.0` nothing downloads (issue #1694); the trainer
+    // reads its dense `bf16/` tier (rust-api resolve_base_model_path descends into it).
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("SceneWorks/sdxl-base-mlx")
+    );
     assert_eq!(target.kernel, "sdxl_lora");
     assert_eq!(target.defaults.rank, 16);
     assert_eq!(target.defaults.resolution, 1024);
@@ -276,11 +290,94 @@ fn builtin_registry_exposes_sdxl_target() {
     );
 }
 
+/// sc-13860 — registry↔catalog parity guard.
+///
+/// Every training target's `base_model_repo` must be a repo the target's own model CATALOG entry
+/// actually downloads. The pre-flight install gate (`training_base_model_installed`, rust-api) keys on
+/// `base_model_repo` in the HF cache; if a target names an UPSTREAM repo the app no longer downloads
+/// (the epic-8506 MLX re-host moved the catalog to `SceneWorks/*-mlx` turnkeys), the gate never finds
+/// it and 400s "not installed" on every real run — even when the model IS installed for generation.
+/// That was issue #1694 (SDXL) and this whole class (z-image / sd3.5 / kolors). Reading the SHIPPED
+/// `builtin.models.jsonc` and asserting the invariant here means the class can't silently drift again.
+///
+/// The join is per-target (target `base_model` == catalog `id`), so it catches "named the wrong repo",
+/// not merely "named a dead one". NOTE lens (`SceneWorks/Lens` flat-diffusers training variant) and wan
+/// (`Wan-AI/Wan2.2-TI2V-5B-Diffusers`, the Windows/Linux torch bf16 variant) INTENTIONALLY do not name
+/// their `*-mlx` inference turnkey — the guard still passes because the catalog installs those exact
+/// repos as separate download variants (verified sc-13860; do NOT "fix" them to the turnkey).
+#[test]
+fn every_training_base_repo_is_installed_by_its_catalog_entry() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+    use std::collections::BTreeSet;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded in BUILTIN_MANIFESTS");
+    let catalog: Value = serde_json::from_str(&strip_jsonc_comments(raw))
+        .expect("builtin.models.jsonc parses as JSON");
+    let models = catalog["models"]
+        .as_array()
+        .expect("catalog has a models array");
+    // Mutation-check on the parser itself: a silently-empty catalog would make every assertion below
+    // vacuously pass. The real catalog has dozens of models.
+    assert!(
+        models.len() > 20,
+        "catalog parsed to only {} models — the manifest parse likely broke, not a real result",
+        models.len()
+    );
+
+    // model id -> the set of every repo any of its download variants pulls.
+    let mut downloads_by_id: std::collections::BTreeMap<&str, BTreeSet<&str>> =
+        std::collections::BTreeMap::new();
+    for model in models {
+        let Some(id) = model["id"].as_str() else {
+            continue;
+        };
+        let repos = downloads_by_id.entry(id).or_default();
+        if let Some(downloads) = model["downloads"].as_array() {
+            for download in downloads {
+                if let Some(repo) = download["repo"].as_str() {
+                    repos.insert(repo);
+                }
+            }
+        }
+    }
+
+    for target in builtin_training_targets().targets {
+        let Some(repo) = target.base_model_repo.as_deref() else {
+            // A target with no explicit repo resolves via the app-managed models dir, not the HF-cache
+            // gate keyed on `base_model_repo`, so there is nothing to reconcile against the catalog.
+            continue;
+        };
+        let catalog_repos = downloads_by_id.get(target.base_model.as_str()).unwrap_or_else(|| {
+            panic!(
+                "training target `{}` trains base `{}`, but no model in builtin.models.jsonc has that \
+                 id — the training base has no catalog entry to install it from (sc-13860)",
+                target.id, target.base_model
+            )
+        });
+        assert!(
+            catalog_repos.contains(repo),
+            "training target `{}` names base_model_repo `{}`, which the `{}` catalog entry does NOT \
+             download (it installs: {:?}). The pre-flight install gate keys on this repo, so it would \
+             report the installed base as missing and 400 every real run (sc-13860). Point it at the \
+             repo the catalog installs.",
+            target.id,
+            repo,
+            target.base_model,
+            catalog_repos
+        );
+    }
+}
+
 #[test]
 fn builtin_registry_exposes_kolors_target() {
     // Kolors (epic 1929) is an SDXL-architecture U-Net target served by the
     // `kolors_lora` kernel; it reuses the SDXL attention modules + LoKr support
-    // (epic 2193 / sc-2217) and resolves the Kolors-diffusers base.
+    // (epic 2193 / sc-2217) and resolves the SceneWorks/kolors-mlx turnkey's dense bf16 tier.
     let registry = builtin_training_targets();
     let target = registry
         .targets
@@ -293,9 +390,12 @@ fn builtin_registry_exposes_kolors_target() {
     assert_eq!(target.family, "kolors");
     assert_eq!(target.base_model, "kolors");
     assert_eq!(target.kernel, "kolors_lora");
+    // sc-13860: trains off the SceneWorks/kolors-mlx turnkey the catalog + engine install, NOT the flat
+    // upstream `Kwai-Kolors/Kolors-diffusers` the epic-8506 re-host stopped downloading (false
+    // "not installed"); the trainer reads its dense `bf16/` tier.
     assert_eq!(
         target.base_model_repo.as_deref(),
-        Some("Kwai-Kolors/Kolors-diffusers")
+        Some("SceneWorks/kolors-mlx")
     );
     // SDXL-shared attention modules + LoKr advertised (sc-2217).
     assert_eq!(
@@ -370,16 +470,19 @@ fn builtin_registry_exposes_sd3_targets() {
         "to_add_out"
     ]);
 
+    // sc-13860: both train off the SceneWorks/sd3.5-*-mlx turnkeys the catalog + engine install, NOT
+    // the flat upstream `stabilityai/stable-diffusion-3.5-*` the epic-8506 re-host stopped downloading
+    // (false "not installed"); the native-MLX trainer reads each turnkey's dense `bf16/` tier.
     for (id, base_model, repo) in [
         (
             "sd3_5_large_lora",
             "sd3_5_large",
-            "stabilityai/stable-diffusion-3.5-large",
+            "SceneWorks/sd3.5-large-mlx",
         ),
         (
             "sd3_5_medium_lora",
             "sd3_5_medium",
-            "stabilityai/stable-diffusion-3.5-medium",
+            "SceneWorks/sd3.5-medium-mlx",
         ),
     ] {
         let target = registry

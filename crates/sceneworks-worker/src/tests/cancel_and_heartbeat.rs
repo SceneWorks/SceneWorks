@@ -1022,3 +1022,44 @@ async fn stdin_close_latch_retained_across_zero_receiver_window() {
     );
 }
 
+/// sc-13856 / GitHub #1690 — a post-download verify/finalize pass that outlasts the heartbeat
+/// interval (in production a multi-GB SHA-256 or blob copy that runs past the 90s stale-worker
+/// timeout) must keep the worker heartbeating for its whole duration, so the stale sweep does NOT
+/// mark the still-healthy import `interrupted`. Before the `heartbeat_while_blocking` keepalive,
+/// the hash ran with no heartbeat between the download loop's last tick and the next file, and a
+/// slow hash tripped the sweep — the "No heartbeat from the worker for 90s" freeze in the issue.
+/// The heartbeat interval floors at 5s (`progress_report_interval`), so a task that runs just past
+/// it must produce at least one heartbeat; a discriminator that a no-op await could not satisfy.
+#[tokio::test]
+async fn heartbeat_while_blocking_keeps_worker_live_through_a_long_pass() {
+    let (base_url, beats) = spawn_heartbeat_counting_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    settings.heartbeat_seconds = 5; // progress_report_interval floor
+
+    let api = ApiClient::new(&settings);
+
+    // A bounded blocking pass that runs past one heartbeat interval (~5s), standing in for a
+    // multi-GB hash/copy. `std::thread::sleep` on the blocking pool keeps it off the runtime,
+    // exactly like the real hash loop.
+    let task = tokio::task::spawn_blocking(|| {
+        std::thread::sleep(Duration::from_millis(5_400));
+        Ok::<(), WorkerError>(())
+    });
+
+    let started = std::time::Instant::now();
+    heartbeat_while_blocking(&api, &settings, "job-1", "test blocking pass", task)
+        .await
+        .expect("the bounded task's Ok result is returned once it finishes");
+
+    assert!(
+        started.elapsed() >= Duration::from_millis(5_300),
+        "the wrapper must await the WHOLE blocking pass, not return early"
+    );
+    assert!(
+        beats.load(Ordering::SeqCst) >= 1,
+        "at least one heartbeat must fire while a >interval pass runs (got {})",
+        beats.load(Ordering::SeqCst)
+    );
+}
+

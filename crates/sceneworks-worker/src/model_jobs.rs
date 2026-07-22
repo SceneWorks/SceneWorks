@@ -2454,7 +2454,16 @@ pub(crate) async fn run_lora_import_job(
     // mismatch, so a corrupt artifact is never left behind.
     if let Some(expected_sha256) = optional_payload_string(&job.payload, "expectedSha256") {
         if let Some(file) = first_safetensors_path(&target_dir) {
-            if let Err(error) = verify_file_sha256(&file, expected_sha256, "Imported LoRA").await {
+            if let Err(error) = verify_file_sha256(
+                api,
+                settings,
+                &job.id,
+                &file,
+                expected_sha256,
+                "Imported LoRA",
+            )
+            .await
+            {
                 return fail_job(api, &job.id, "LoRA import failed.", Some(error.to_string()))
                     .await;
             }
@@ -2784,7 +2793,16 @@ pub(crate) async fn run_model_import_job(
     // file is removed and the job fails with an actionable message.
     if let Some(expected_sha256) = optional_payload_string(&job.payload, "expectedSha256") {
         if let Some(file) = first_safetensors_path(&target_dir) {
-            if let Err(error) = verify_file_sha256(&file, expected_sha256, "Imported model").await {
+            if let Err(error) = verify_file_sha256(
+                api,
+                settings,
+                &job.id,
+                &file,
+                expected_sha256,
+                "Imported model",
+            )
+            .await
+            {
                 return fail_job(
                     api,
                     &job.id,

@@ -8,7 +8,7 @@
       "outputKind": "lora",
       "family": "z-image",
       "baseModel": "z_image_turbo",
-      "baseModelRepo": "Tongyi-MAI/Z-Image-Turbo",
+      "baseModelRepo": "SceneWorks/z-image-turbo-mlx",
       "kernel": "z_image_lora",
       "defaults": {
         "rank": 16,
@@ -99,7 +99,7 @@
       "outputKind": "lora",
       "family": "sdxl",
       "baseModel": "sdxl",
-      "baseModelRepo": "stabilityai/stable-diffusion-xl-base-1.0",
+      "baseModelRepo": "SceneWorks/sdxl-base-mlx",
       "kernel": "sdxl_lora",
       "defaults": {
         "rank": 16,
@@ -382,7 +382,7 @@
       "outputKind": "lora",
       "family": "kolors",
       "baseModel": "kolors",
-      "baseModelRepo": "Kwai-Kolors/Kolors-diffusers",
+      "baseModelRepo": "SceneWorks/kolors-mlx",
       "kernel": "kolors_lora",
       "defaults": {
         "rank": 16,
@@ -759,7 +759,7 @@
       "outputKind": "lora",
       "family": "sd3",
       "baseModel": "sd3_5_large",
-      "baseModelRepo": "stabilityai/stable-diffusion-3.5-large",
+      "baseModelRepo": "SceneWorks/sd3.5-large-mlx",
       "kernel": "sd3_lora",
       "defaults": {
         "rank": 16,
@@ -865,7 +865,7 @@
       "outputKind": "lora",
       "family": "sd3",
       "baseModel": "sd3_5_medium",
-      "baseModelRepo": "stabilityai/stable-diffusion-3.5-medium",
+      "baseModelRepo": "SceneWorks/sd3.5-medium-mlx",
       "kernel": "sd3_lora",
       "defaults": {
         "rank": 16,

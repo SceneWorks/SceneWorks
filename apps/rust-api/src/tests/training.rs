@@ -1628,6 +1628,7 @@ async fn create_training_job_rejects_unknown_target_and_missing_dataset() {
 
 #[tokio::test]
 async fn create_training_job_queues_real_run_when_not_dry_run() {
+    let _env = isolate_hf_cache(); // hermetic: resolve the seeded base under the tempdir, never a dev's real HF cache (sc-13834/sc-13860)
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
@@ -1707,6 +1708,7 @@ async fn create_training_job_queues_real_run_when_not_dry_run() {
 
 #[tokio::test]
 async fn completed_training_job_registers_lora_with_provenance() {
+    let _env = isolate_hf_cache(); // hermetic: resolve the seeded base under the tempdir, never a dev's real HF cache (sc-13834/sc-13860)
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
@@ -1820,6 +1822,7 @@ async fn completed_training_job_registers_lora_with_provenance() {
 
 #[tokio::test]
 async fn failed_or_unwritten_training_job_registers_no_lora() {
+    let _env = isolate_hf_cache(); // hermetic: resolve the seeded base under the tempdir, never a dev's real HF cache (sc-13834/sc-13860)
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
@@ -1891,6 +1894,7 @@ async fn failed_or_unwritten_training_job_registers_no_lora() {
 /// ownership + terminal status are confirmed, not before.
 #[tokio::test]
 async fn terminal_training_job_completed_report_registers_no_lora_and_409s() {
+    let _env = isolate_hf_cache(); // hermetic: resolve the seeded base under the tempdir, never a dev's real HF cache (sc-13834/sc-13860)
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
@@ -1966,6 +1970,7 @@ async fn terminal_training_job_completed_report_registers_no_lora_and_409s() {
 /// the completion side-effects, not fire too late.
 #[tokio::test]
 async fn non_owner_completed_report_registers_no_lora_and_409s() {
+    let _env = isolate_hf_cache(); // hermetic: resolve the seeded base under the tempdir, never a dev's real HF cache (sc-13834/sc-13860)
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
@@ -2030,6 +2035,7 @@ async fn non_owner_completed_report_registers_no_lora_and_409s() {
 /// registers the trained LoRA into the catalog exactly as before.
 #[tokio::test]
 async fn winning_completed_report_still_registers_lora() {
+    let _env = isolate_hf_cache(); // hermetic: resolve the seeded base under the tempdir, never a dev's real HF cache (sc-13834/sc-13860)
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
@@ -2579,24 +2585,25 @@ fn sdxl_family_tiered_turnkey_trains_on_its_bf16_unet_tier() {
 }
 
 #[test]
-fn flat_sdxl_snapshot_is_not_treated_as_a_tiered_turnkey() {
-    // Backward-compat guard for sc-10613: `unet/` at the snapshot root marks a FLAT diffusers tree
-    // (stabilityai/stable-diffusion-xl-base-1.0, Kwai-Kolors/Kolors-diffusers). It must resolve
-    // unchanged, never descend into a `bf16/` subdir — even if a stray tier dir sits alongside it.
+fn flat_diffusers_snapshot_is_not_treated_as_a_tiered_turnkey() {
+    // Backward-compat guard for sc-10613: `unet/` at the snapshot root marks a FLAT diffusers tree.
+    // It must resolve unchanged, never descend into a `bf16/` subdir — even if a stray tier dir sits
+    // alongside it. Driven off a synthetic flat repo rather than a shipped target's `base_model_repo`
+    // so it exercises the resolution branch itself, independent of which targets ship a flat repo
+    // (the stock `sdxl` target moved to its tiered turnkey in issue #1694 — see
+    // `stock_sdxl_target_points_at_installed_turnkey`).
     let _env = isolate_hf_cache(); // seed under the tempdir, never a developer's real HF cache (sc-13834)
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().join("data");
 
-    let target = crate::builtin_training_targets()
+    // A real SDXL-family target struct with its repo overridden to a flat upstream diffusers repo,
+    // so only the resolution branch under test — not the shipped repo string — drives the assertion.
+    let mut target = crate::builtin_training_targets()
         .targets
         .into_iter()
         .find(|t| t.base_model == "sdxl")
         .expect("sdxl target");
-    assert_eq!(
-        target.base_model_repo.as_deref(),
-        Some("stabilityai/stable-diffusion-xl-base-1.0"),
-        "the stock SDXL target still trains off the flat upstream diffusers repo"
-    );
+    target.base_model_repo = Some("stabilityai/stable-diffusion-xl-base-1.0".to_owned());
     let repo = target.base_model_repo.clone().expect("repo set");
 
     let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
@@ -2611,7 +2618,194 @@ fn flat_sdxl_snapshot_is_not_treated_as_a_tiered_turnkey() {
     assert_eq!(
         resolve_base_model_path(&target, &data_dir),
         snapshot.display().to_string(),
-        "a flat SDXL snapshot resolves to the snapshot root, not a bf16 tier"
+        "a flat diffusers snapshot resolves to the snapshot root, not a bf16 tier"
+    );
+}
+
+#[test]
+fn stock_sdxl_target_points_at_installed_turnkey() {
+    // Regression guard for issue #1694: the stock `sdxl` training target must name the same
+    // `SceneWorks/sdxl-base-mlx` turnkey the catalog + engine install — pointing at the flat
+    // upstream `stabilityai/stable-diffusion-xl-base-1.0` (which nothing downloads) made the
+    // pre-flight gate report the installed base as missing and block every real SDXL run.
+    // A dense `bf16/` tier resolves for training and passes the install gate; a q4-only install
+    // (the generation default) carries no dense weights and must NOT be reported training-ready.
+    let _env = isolate_hf_cache(); // seed under the tempdir, never a developer's real HF cache (sc-13834)
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    let target = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "sdxl")
+        .expect("sdxl target");
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("SceneWorks/sdxl-base-mlx"),
+        "the stock SDXL target trains off the installed SceneWorks turnkey"
+    );
+    let repo = target.base_model_repo.clone().expect("repo set");
+
+    let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
+    let revision = "def456";
+    let snapshot = repo_root.join("snapshots").join(revision);
+    // Only the q4 GENERATION tier installed so far (no dense weights).
+    std::fs::create_dir_all(snapshot.join("q4").join("unet")).expect("q4 tree");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("create refs");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("write refs/main");
+
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        snapshot.join("bf16").display().to_string(),
+        "the SDXL tiered turnkey resolves training to its dense bf16 tier"
+    );
+    assert!(
+        !training_base_model_installed(&data_dir, &target),
+        "a q4-only SDXL turnkey carries no dense weights → not training-ready"
+    );
+
+    std::fs::create_dir_all(snapshot.join("bf16").join("unet")).expect("bf16 unet");
+    std::fs::create_dir_all(snapshot.join("bf16").join("text_encoder")).expect("bf16 te");
+    std::fs::create_dir_all(snapshot.join("bf16").join("vae")).expect("bf16 vae");
+    assert!(
+        training_base_model_installed(&data_dir, &target),
+        "a bf16 tier with a unet/ backbone is training-ready"
+    );
+}
+
+#[test]
+fn epic_8506_rehost_targets_point_at_their_installed_turnkeys() {
+    // sc-13860: the epic-8506 MLX re-host moved the catalog to `SceneWorks/*-mlx` turnkeys, but these
+    // four targets still named the flat UPSTREAM repos the app no longer downloads, so the pre-flight
+    // gate reported the installed base as missing and 400'd every real run (the SDXL #1694 class). Pin
+    // that each now names its turnkey AND resolves training to the dense `bf16/` tier the trainer needs,
+    // gating on that tier (a q4-only generation install must NOT read as training-ready). One case per
+    // backbone shape: DiT turnkeys pack `transformer/` (z-image, SD3.5), the SDXL-arch Kolors packs
+    // `unet/` — the same split `bf16_component_tree_present` probes.
+    for (base_model, expected_repo, backbone) in [
+        (
+            "z_image_turbo",
+            "SceneWorks/z-image-turbo-mlx",
+            "transformer",
+        ),
+        ("sd3_5_large", "SceneWorks/sd3.5-large-mlx", "transformer"),
+        ("sd3_5_medium", "SceneWorks/sd3.5-medium-mlx", "transformer"),
+        ("kolors", "SceneWorks/kolors-mlx", "unet"),
+    ] {
+        let _env = isolate_hf_cache(); // seed under the tempdir, never a developer's real HF cache (sc-13834)
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path().join("data");
+
+        let target = crate::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|t| t.base_model == base_model)
+            .unwrap_or_else(|| panic!("{base_model} target present"));
+        assert_eq!(
+            target.base_model_repo.as_deref(),
+            Some(expected_repo),
+            "{base_model} trains off the installed SceneWorks turnkey, not the dead upstream repo"
+        );
+        let repo = target.base_model_repo.clone().expect("repo set");
+
+        let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
+        let revision = "rev13860";
+        let snapshot = repo_root.join("snapshots").join(revision);
+        // Only the q4 GENERATION tier installed so far (no dense weights).
+        std::fs::create_dir_all(snapshot.join("q4").join(backbone)).expect("q4 tree");
+        std::fs::create_dir_all(repo_root.join("refs")).expect("create refs");
+        std::fs::write(repo_root.join("refs").join("main"), revision).expect("write refs/main");
+
+        assert_eq!(
+            resolve_base_model_path(&target, &data_dir),
+            snapshot.join("bf16").display().to_string(),
+            "{base_model}: a tiered turnkey resolves training to its dense bf16 tier"
+        );
+        assert!(
+            !training_base_model_installed(&data_dir, &target),
+            "{base_model}: a q4-only turnkey carries no dense weights → not training-ready"
+        );
+
+        std::fs::create_dir_all(snapshot.join("bf16").join(backbone)).expect("bf16 backbone");
+        std::fs::create_dir_all(snapshot.join("bf16").join("text_encoder")).expect("bf16 te");
+        std::fs::create_dir_all(snapshot.join("bf16").join("vae")).expect("bf16 vae");
+        assert!(
+            training_base_model_installed(&data_dir, &target),
+            "{base_model}: a bf16 tier with the backbone + TE + VAE is training-ready"
+        );
+    }
+}
+
+#[test]
+fn training_base_status_distinguishes_missing_from_tier_missing() {
+    // sc-13860 AC #4: a tiered turnkey installed for GENERATION (q4 only, no dense bf16) must gate as
+    // `TrainingTierMissing` — an actionable "install the training tier (bf16)" message — NOT the bare
+    // `Missing` "not installed", which sent #1694 reporters in circles trying to reinstall a base they
+    // already had. A repo with nothing on disk stays `Missing`; a full bf16 tree is `Ready`.
+    let _env = isolate_hf_cache(); // seed under the tempdir, never a developer's real HF cache (sc-13834)
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    let target = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "z_image_turbo")
+        .expect("z_image_turbo target");
+    let repo = target.base_model_repo.clone().expect("repo set");
+    let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
+
+    // Nothing on disk → Missing, with the original "not installed / install it from the catalog" text.
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Missing
+    );
+    let missing =
+        training_base_unavailable_message(TrainingBaseStatus::Missing, &target.base_model)
+            .expect("Missing blocks a real run");
+    assert!(missing.contains("is not installed"), "{missing}");
+    assert!(
+        missing.contains("Install it from the model catalog"),
+        "{missing}"
+    );
+    assert!(
+        !missing.contains("training tier"),
+        "the Missing message must not claim a tier is installed: {missing}"
+    );
+
+    // The q4 GENERATION tier installed, no dense bf16 → TrainingTierMissing, with the tier-specific text.
+    let revision = "rev13860";
+    let snapshot = repo_root.join("snapshots").join(revision);
+    std::fs::create_dir_all(snapshot.join("q4").join("transformer")).expect("q4 tree");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("create refs");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("write refs/main");
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::TrainingTierMissing
+    );
+    let tier = training_base_unavailable_message(
+        TrainingBaseStatus::TrainingTierMissing,
+        &target.base_model,
+    )
+    .expect("TrainingTierMissing blocks a real run");
+    assert!(tier.contains("training tier"), "{tier}");
+    assert!(tier.contains("bf16"), "{tier}");
+    assert!(
+        tier.contains("installed for generation"),
+        "the tier message tells the user their generation install is fine: {tier}"
+    );
+
+    // Dense bf16 component tree present → Ready, no error message.
+    std::fs::create_dir_all(snapshot.join("bf16").join("transformer")).expect("bf16 transformer");
+    std::fs::create_dir_all(snapshot.join("bf16").join("text_encoder")).expect("bf16 te");
+    std::fs::create_dir_all(snapshot.join("bf16").join("vae")).expect("bf16 vae");
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Ready
+    );
+    assert_eq!(
+        training_base_unavailable_message(TrainingBaseStatus::Ready, &target.base_model),
+        None,
+        "a ready base does not block the run"
     );
 }
 
