@@ -460,9 +460,23 @@ async fn generate_candle_qwen_edit_stream(
     // resident peak won't fit the card, load with sequential component residency (`QwenEdit` loads the
     // VL encoder + VAE encoder → encodes + VAE-encodes the references → DROPS them before the DiT loads)
     // instead of OOMing; and if even the MEASURED sequential peak won't fit, reject-before-OOM. The edit
-    // lane IS sequential-capable (sc-10968 wired `QwenEdit::generate_sequential`). Inert (Unknown →
-    // resident) until the edit manifest tiers carry a `candle` block with measured peaks (the sc-10969 /
-    // sc-10920 measure sibling for edit) — mirroring flux2 / qwen txt2img before their measure stories.
+    // lane IS sequential-capable (sc-10968 wired `QwenEdit::generate_sequential`). LIVE since sc-11019
+    // measured the edit tiers' `candle` block (`vramGbByTier` / `sequentialPeakGb`) — the edit
+    // measure-sibling of the qwen txt2img sc-10969 + flux2 sc-10920; before it, unmeasured tiers made this
+    // Unknown → resident (inert).
+    //
+    // sc-13588: this gate budgets against RAW live free VRAM and deliberately does NOT fold
+    // `with_reclaimable` the way the txt2img `generate_candle_stream` gate (base.rs, sc-11023) and the
+    // candle video gate do. Those lanes load THROUGH the single-slot generator cache
+    // (`with_cached_generator` / `with_uncached_generator`), which EVICTS its resident occupant before the
+    // incoming load — so that occupant's cudarc pool pages ARE reclaimable by the load being gated. This
+    // edit lane instead loads through the UNcached `start_gen_stream` below: it never touches the generator
+    // cache, so any resident txt2img generator stays live and CO-RESIDENT with the QwenEdit load. Its pages
+    // are NOT reclaimable here; crediting them would over-admit a load that then OOMs alongside the
+    // still-resident model. Raw free correctly reject-before-OOMs when the edit peak + the resident won't
+    // co-fit. Same reasoning — and the same deliberate omission — as `krea_control_candle.rs` (the other
+    // `start_gen_stream` lane); see its note. The reclaimable *high-water* is still recorded after an admit
+    // (see `note_loaded_peak` below), which is the half of sc-11023 that DOES apply cross-lane.
     let use_sequential = {
         let budget = crate::vram_gate::apply_vram_cap(
             crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
@@ -528,6 +542,16 @@ async fn generate_candle_qwen_edit_stream(
                     "candle Qwen-Edit VRAM fit-gate: resident peak exceeds free VRAM — loading with \
                      sequential component residency (VL encoder dropped before the DiT)"
                 );
+                // sc-13588: record the admitted SEQUENTIAL peak as the reclaimable high-water for the next
+                // gate — the missing half of the sc-11023 backport (see the header note). The QwenEdit this
+                // admits is dropped when `start_gen_stream`'s closure returns, so its pages return to
+                // cudarc's process pool; a later CACHED gate (base.rs / video) that evicts + reclaims must
+                // credit this peak or it under-counts the pool and false-rejects a load that fits.
+                // `sequential_needed` is the measured sequential peak just checked above (`None` for an
+                // unmeasured tier ⇒ no-op).
+                if let Some(peak_gb) = sequential_needed {
+                    crate::vram_gate::note_loaded_peak(&settings.gpu_id, peak_gb);
+                }
                 true
             }
             crate::vram_gate::FitDecision::TooBig {
@@ -544,7 +568,15 @@ async fn generate_candle_qwen_edit_stream(
                     gpu = settings.gpu_id,
                 )));
             }
-            _ => false,
+            // Resident admit (`Fits`) — or `Unknown` when a tier is unmeasured. Record the RESIDENT peak
+            // as the reclaimable high-water (sc-13588); `needed` is `None` for an unmeasured tier, so this
+            // no-ops there exactly as the gate itself does.
+            _ => {
+                if let Some(peak_gb) = needed {
+                    crate::vram_gate::note_loaded_peak(&settings.gpu_id, peak_gb);
+                }
+                false
+            }
         }
     };
 
