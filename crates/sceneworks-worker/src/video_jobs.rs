@@ -13684,7 +13684,8 @@ mod tests {
     ))]
     use crate::test_env::{offline_settings, temp_env_var, temp_env_vars};
 
-    // Only the macOS-gated eros fixture pins a var for a whole test body — see the cfg note above.
+    // The macOS-gated adapter fixtures (wan Lightning + ltx distill) pin a var for a whole test body —
+    // see the cfg note above.
     #[cfg(target_os = "macos")]
     use crate::test_env::EnvVars;
 
@@ -16134,20 +16135,24 @@ mod tests {
     /// toggle. Toggle on (default) → the high/low Lightning pair is prepended (per-expert tagged),
     /// then user LoRAs. Toggle off → NO Lightning adapters, but user LoRAs are still honored. Only an
     /// explicit `lightning:false` opts out; absent defaults to on (backward compatible). This test is
-    /// hermetic: env vars pointing HF cache elsewhere would break the fixture, so skip when set.
+    /// hermetic: it pins `HF_HUB_CACHE` at its own fixture hub for the whole body (sc-13898), so the
+    /// fake snapshot resolves regardless of the ambient HF cache env.
     #[cfg(target_os = "macos")]
     #[test]
     fn wan_adapters_gate_lightning_on_toggle() {
-        // The fake HF snapshot only resolves when the cache-dir env overrides are unset (else the
-        // real cache is consulted). Skip rather than assert-false in that unusual local config.
-        if std::env::var_os("HF_HUB_CACHE").is_some()
-            || std::env::var_os("HUGGINGFACE_HUB_CACHE").is_some()
-            || std::env::var_os("HF_HOME").is_some()
-        {
-            return;
-        }
         let dir = std::env::temp_dir().join(format!("sw_wan_light_{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
+        // PIN the hub cache at this fixture's own dir for the whole test. `huggingface_hub_cache_dir`
+        // reads `HF_HUB_CACHE` (then `HUGGINGFACE_HUB_CACHE` / `HF_HOME`) BEFORE `data_dir`, so the old
+        // "skip if any HF var is set" guard raced a concurrent test's `EnvVars::set` writer: a real HF
+        // path landing between the guard and the resolve pointed the cache elsewhere and the fake
+        // Lightning snapshot went missing (sc-13898, the "env locks protect writers, not readers"
+        // class). `EnvVars` holds the crate-wide env lock until it drops at end of test, closing the
+        // window; pinning the value also means this never silently no-ops on a box with an HF var set.
+        let _env = EnvVars::set(&[(
+            "HF_HUB_CACHE",
+            fake_hf_hub_dir(&dir).to_str().expect("utf-8 fixture hub"),
+        )]);
         let (high, low) = write_fake_wan_lightning(&dir, "wan2_2_t2v_14b");
         // A user LoRA lives under data_dir so the confinement check passes.
         let user_lora = dir.join("style.safetensors");
@@ -18414,14 +18419,18 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn ltx_distill_lora_missing_errors_and_base_model_is_noop() {
-        if std::env::var_os("HF_HUB_CACHE").is_some()
-            || std::env::var_os("HUGGINGFACE_HUB_CACHE").is_some()
-            || std::env::var_os("HF_HOME").is_some()
-        {
-            return;
-        }
         let dir = std::env::temp_dir().join(format!("sw_eros_missing_{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
+        // PIN the hub cache at this fixture's own (empty) dir for the whole test, the hermetic pattern
+        // of `ltx_eros_auto_injects_distill_lora_per_pass`. Nothing is staged under it, so the distill
+        // LoRA is genuinely missing → the resolver must error. The old "skip if any HF var is set"
+        // guard both raced a concurrent `EnvVars::set` writer (sc-13898) and was a silent PASS on any
+        // box with an ambient HF cache set; pinning removes both. `EnvVars` holds the crate-wide env
+        // lock until it drops, so no concurrent writer can retarget the resolver mid-test.
+        let _env = EnvVars::set(&[(
+            "HF_HUB_CACHE",
+            fake_hf_hub_dir(&dir).to_str().expect("utf-8 fixture hub"),
+        )]);
         let settings = Settings {
             data_dir: dir.clone(),
             ..Settings::from_env()
