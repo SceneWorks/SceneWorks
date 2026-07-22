@@ -5541,12 +5541,15 @@ fn wan_vram_preflight(
 /// `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card emulation folded over it, then this process's reclaimable
 /// cudarc pool added back (sc-11023).
 ///
-/// The reclaimable fold IS correct here, unlike `krea_control_candle.rs` which deliberately omits it:
-/// video routes through `generator_cache::with_cached_generator` (the `comfyui` in-place MoE is the one
-/// uncached exception, and it is not Mochi), so the single exclusive cache slot evicts its occupant
-/// BEFORE the incoming load and cudarc reuses those pages in-process. Without the fold, a warm re-gate
-/// would be measured against a `free` that still counts the model it is about to replace. Matches
-/// `generate_candle_stream` (image_jobs/base.rs).
+/// The reclaimable fold IS correct here: video routes through `generator_cache::with_cached_generator`
+/// (the `comfyui` in-place MoE is the one uncached exception, and it is not Mochi), so the single
+/// exclusive cache slot evicts its occupant BEFORE the incoming load. This budget is read while that
+/// occupant is still resident, so raw `free` still counts the model it is about to replace; the fold
+/// predicts the `free` the imminent evict will produce (whether that VRAM returns to the driver — a full
+/// generator drop does, GPU-measured sc-13960 — or is reused in-process). Matches `generate_candle_stream`
+/// (image_jobs/base.rs). The bespoke edit/control lanes reached the same result differently: they load
+/// off the UNcached `start_gen_stream`, so they gate raw free and only EVICT-then-reclaim when it flips a
+/// downtier/reject (sc-13960 `gate_with_evict_reclaim`) — before sc-13960 they omitted the fold entirely.
 ///
 /// The reverse direction is deliberately NOT wired: an admitted Mochi job does not call
 /// [`crate::vram_gate::note_loaded_peak`], so it contributes nothing to the reclaimable high-water the

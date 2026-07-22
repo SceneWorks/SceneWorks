@@ -8,12 +8,14 @@
 //! box's 96 GB RTX PRO 6000s.
 //!
 //! ## Caching-allocator caveat (why this budgets on PREDICTED peak, not resident deltas)
-//! candle's CUDA backend uses cudarc's stream-ordered caching allocator: there is no `empty_cache`, and
-//! `Device::synchronize()` does not reclaim. So a freed component's pages return to candle's in-process
-//! pool (reused by the next allocation — which is what keeps a small card from OOMing under Phase 1
-//! sequential residency), but the DRIVER-resident `nvidia-smi` free number does NOT drop back. This
-//! gate is therefore a pre-load ADMISSION check keyed off the manifest's measured per-tier peak, never
-//! a post-free accounting number.
+//! candle's CUDA backend uses cudarc, with no `empty_cache` and no reclaim on `Device::synchronize()`.
+//! A freed WITHIN-DEVICE component — the text encoders dropped before the DiT under Phase 1 sequential
+//! residency, with the device still alive — returns to candle's in-process pool (reused by the next
+//! allocation, which is what keeps a small card from OOMing) WITHOUT the DRIVER-resident `nvidia-smi`
+//! free number dropping back. A full generator/device DROP is different: it destroys the device's pool
+//! and returns its VRAM to the driver, so `free` RISES (GPU-measured, sc-13960). Either way this gate is
+//! a pre-load ADMISSION check keyed off the manifest's measured per-tier peak — never a post-free
+//! accounting number, since it runs while the model it is about to replace is still resident.
 //!
 //! Everything here is pure and unit-tested; the live `nvidia-smi` reading lives in [`crate::gpu`] and
 //! the wiring is in `generate_candle_stream` (image_jobs/base.rs).
@@ -70,13 +72,15 @@ pub(crate) fn apply_vram_cap(real: Option<VramBudget>, cap: Option<f64>) -> Opti
     }
 }
 
-/// Fold this process's RECLAIMABLE in-process VRAM pool into the live budget (sc-11023): add
-/// `reclaimable_gb` to `free_gb`, clamped to the physical `total_gb`. The candle generator cache is a
-/// single exclusive slot that evicts its current occupant BEFORE loading the incoming model, and
-/// cudarc's caching allocator reuses the freed pages in-process (nvidia-smi `free` never rises after an
-/// evict — see the module caveat). So the VRAM this process already holds will be available to the next
-/// load; without this, a warm same-model re-gate or a swap-in is measured against `free` that still
-/// counts the model it is about to replace, falsely rejecting a load that fits. A no-op when
+/// Fold this process's RECLAIMABLE VRAM into the live budget (sc-11023): add `reclaimable_gb` to
+/// `free_gb`, clamped to the physical `total_gb`. The candle generator cache is a single exclusive slot
+/// that evicts its current occupant BEFORE loading the incoming model. This budget is read while that
+/// occupant is still resident (so raw `free` still counts the model it is about to replace); crediting
+/// the reclaimable pool predicts the `free` the imminent evict will PRODUCE, so a warm same-model
+/// re-gate or a swap-in isn't falsely rejected. That prediction holds whether evicting returns the VRAM
+/// to the driver (GPU-measured sc-13960: a full generator drop frees most of it back — `nvidia-smi`
+/// `free` rises) or a within-device component free keeps it pooled in-process — and the clamp to
+/// `total_gb` is the safety net that keeps it honest against a stale high-water. A no-op when
 /// `reclaimable_gb == 0` (nothing loaded yet), so a genuine cold first-load is gated exactly as before.
 pub(crate) fn with_reclaimable(budget: VramBudget, reclaimable_gb: f64) -> VramBudget {
     VramBudget {
@@ -85,10 +89,11 @@ pub(crate) fn with_reclaimable(budget: VramBudget, reclaimable_gb: f64) -> VramB
     }
 }
 
-/// Per-GPU high-water of the peak VRAM (GB) this process has admitted a load at — the size of the
-/// reclaimable cudarc pool (sc-11023). Keyed by `gpu_id` (a worker process is pinned to one card, but
-/// keying is defensive + explicit). The pool only ever grows (no `empty_cache`/trim), so the running
-/// MAX is exactly what a later swap-in can reuse.
+/// Per-GPU high-water of the peak VRAM (GB) this process has admitted a load at (sc-11023) — a bound on
+/// what evicting the current resident can free back for a swap-in. Keyed by `gpu_id` (a worker process
+/// is pinned to one card, but keying is defensive + explicit). It only ever grows (monotonic MAX), and
+/// [`with_reclaimable`] clamps the credit to `total_gb`, so a later gate can only under-credit, never
+/// over-admit — the safety that holds whether an evict frees to the driver or pools in-process.
 fn reclaimable_pool_store() -> &'static std::sync::Mutex<std::collections::HashMap<String, f64>> {
     static STORE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, f64>>> =
         std::sync::OnceLock::new();

@@ -326,12 +326,15 @@ pub(crate) fn release_backend_cache_after_evict() {
 }
 
 /// Off-Mac (candle/CUDA) this is intentionally a no-op (epic 10765, sc-10766). candle's CUDA backend
-/// uses cudarc's stream-ordered caching allocator, which exposes no `empty_cache` and does not reclaim
-/// on `Device::synchronize()`: dropping the evicted model already returns its pages to candle's
-/// in-process pool (where the next load reuses them), but there is no supported way to hand those pages
-/// back to the driver — so `nvidia-smi` resident VRAM stays flat across an evict regardless. A real
-/// driver-level trim would need a candle/cudarc fork (tracked as a separate optional spike under epic
-/// 10765), not this seam. The VRAM fit-gate therefore budgets on predicted peak, not resident deltas.
+/// uses cudarc, which exposes no `empty_cache`/trim to call here — but none is needed: dropping the
+/// evicted model is what frees its VRAM. GPU-measured (sc-13960, RTX PRO 6000): a full generator drop
+/// returns most of that VRAM to the DRIVER — `nvidia-smi` free RISES (a resident ~45.7 GB QwenEdit's
+/// drop gave ~45 GB back) — so the incoming load has room without any separate driver-level trim. (The
+/// stronger "cudarc keeps the freed pages pooled in-process so `nvidia-smi` free stays flat" framing
+/// holds at most for a WITHIN-DEVICE component free under sequential residency, where the device stays
+/// alive; it does NOT hold for a full evict, which drops the device.) The VRAM fit-gate therefore
+/// budgets on predicted peak, not resident deltas — and predicts the post-evict `free` via
+/// `reclaimable_pool_gb` rather than trying to read it (the gate runs before the evict).
 #[cfg(any(not(target_os = "macos"), test))]
 pub(crate) fn release_backend_cache_after_evict() {}
 
