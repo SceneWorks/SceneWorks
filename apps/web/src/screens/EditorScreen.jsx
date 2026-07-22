@@ -125,16 +125,24 @@ export function EditorScreen() {
     return () => cancelAnimationFrame(raf);
   }, [isPlaying, screenActive, duration]);
 
-  const shortcutStateRef = useRef({ undo, redo, removeSelectedItem, selectedItemId });
-  shortcutStateRef.current = { undo, redo, removeSelectedItem, selectedItemId };
+  const shortcutStateRef = useRef({ undo, redo, removeSelectedItem, selectedItemId, screenActive });
+  shortcutStateRef.current = { undo, redo, removeSelectedItem, selectedItemId, screenActive };
 
   useEffect(() => {
     function onKeyDown(event) {
+      const { undo, redo, removeSelectedItem, selectedItemId, screenActive } = shortcutStateRef.current;
+      // Under selective keep-alive (sc-11959) this editor stays mounted and this window
+      // listener stays subscribed even when another view is foregrounded, so gate every
+      // shortcut on the active flag — a backgrounded timeline must never eat Space (play),
+      // undo/redo, or Delete meant for the visible screen (sc-13589). Read it from the ref
+      // so the once-subscribed listener always sees the latest value.
+      if (!screenActive) {
+        return;
+      }
       const target = event.target;
       if (["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName)) {
         return;
       }
-      const { undo, redo, removeSelectedItem, selectedItemId } = shortcutStateRef.current;
       if (event.code === "Space") {
         event.preventDefault();
         setIsPlaying((value) => !value);
