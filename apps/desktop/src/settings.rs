@@ -7,7 +7,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::setup::{app_support_dir, default_data_dir, shared_huggingface_home};
 
@@ -444,12 +444,47 @@ pub fn get_remote_access() -> RemoteAccessStatus {
     remote_access_status()
 }
 
+/// Whether a `set_remote_access(enabled, ..)` call is a deliberate LAN-exposure action that
+/// warrants a native confirmation (sc-13610). Only *enabling* binds the API to the LAN and
+/// widens the attack surface; *disabling* is fail-safe and never needs confirmation.
+fn remote_access_change_needs_confirmation(enabled: bool) -> bool {
+    enabled
+}
+
+/// Show a native OS confirmation for a deliberate remote-access admin action (sc-13610).
+/// Returns `true` only when the user explicitly confirms. This is defense-in-depth against a
+/// compromised/XSS'd webview: enabling LAN remote access and setting the LAN password are rare,
+/// intentional actions, and this dialog is drawn by the OS — a script that has hijacked
+/// `window.__TAURI__` on the loopback origin cannot forge, pre-answer, or dismiss it, so it
+/// cannot silently bind the API to the LAN or plant a password it knows. `body` names the
+/// specific action so the user can make an informed choice.
+fn confirm_remote_access_action(app: &AppHandle, title: &str, body: &str) -> bool {
+    app.dialog()
+        .message(body)
+        .title(title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Continue".to_string(),
+            "Cancel".to_string(),
+        ))
+        .blocking_show()
+}
+
 /// Enable/disable LAN remote access and set the port (story 4). Fail-closed: enabling
 /// is rejected unless a password is already set (mirrors the launcher guard, story 3),
 /// and a privileged/low port the app can't bind is rejected up front rather than
 /// bricking startup. The change takes effect on the next launch (sidecar relaunch).
+///
+/// Enabling additionally requires a native OS confirmation (sc-13610): binding the API to
+/// the LAN is a deliberate admin action, and the native dialog is a defense-in-depth gate a
+/// compromised webview cannot forge (unlike an in-page confirm). `async` so the blocking
+/// dialog runs off the main thread (same pattern as `save_asset_as`).
 #[tauri::command]
-pub fn set_remote_access(enabled: bool, port: u16) -> Result<RemoteAccessStatus, String> {
+pub async fn set_remote_access(
+    app: AppHandle,
+    enabled: bool,
+    port: u16,
+) -> Result<RemoteAccessStatus, String> {
     let mut settings = load_settings();
     if enabled && !settings.remote_password_set {
         return Err("Set a password before enabling remote access.".to_owned());
@@ -459,6 +494,16 @@ pub fn set_remote_access(enabled: bool, port: u16) -> Result<RemoteAccessStatus,
             "Choose a port between 1024 and 65535 — lower ports need administrator privileges."
                 .to_owned(),
         );
+    }
+    if remote_access_change_needs_confirmation(enabled)
+        && !confirm_remote_access_action(
+            &app,
+            "Enable remote access?",
+            "This binds SceneWorks to your local network so other devices can reach it \
+             after the next restart. Continue only if you started this from Settings.",
+        )
+    {
+        return Err("Remote access was not enabled — confirmation was declined.".to_owned());
     }
     settings.remote_access_enabled = enabled;
     // Persist a valid port choice even while disabled, so it's remembered for next time.
@@ -470,8 +515,24 @@ pub fn set_remote_access(enabled: bool, port: u16) -> Result<RemoteAccessStatus,
 }
 
 /// Set/change the LAN password (story 4). Stored in the OS keychain; never echoed back.
+///
+/// Gated behind a native OS confirmation (sc-13610): the LAN password protects remote access,
+/// and planting a known password is the first half of an XSS enable-remote-access chain, so
+/// the same native, un-forgeable confirmation as `set_remote_access` guards it. `async` so the
+/// blocking dialog runs off the main thread.
 #[tauri::command]
-pub fn set_remote_access_password(password: String) -> Result<RemoteAccessStatus, String> {
+pub async fn set_remote_access_password(
+    app: AppHandle,
+    password: String,
+) -> Result<RemoteAccessStatus, String> {
+    if !confirm_remote_access_action(
+        &app,
+        "Set remote-access password?",
+        "This sets the password that protects LAN access to SceneWorks. Continue only if \
+         you started this from Settings.",
+    ) {
+        return Err("Password was not changed — confirmation was declined.".to_owned());
+    }
     set_remote_password(&password)?;
     Ok(remote_access_status())
 }
@@ -1338,5 +1399,21 @@ mod tests {
         assert!(!settings.remote_access_enabled);
         // Port choice is preserved across a clear (the user's preference persists).
         assert_eq!(settings.remote_port, Some(DEFAULT_REMOTE_PORT));
+    }
+
+    /// sc-13610: the native confirmation gates only *enabling* remote access. Disabling is
+    /// fail-safe (it narrows exposure) and must never be blocked behind a dialog — otherwise a
+    /// user could get stuck unable to turn the LAN bind back off. Discriminating on both arms so
+    /// flipping the predicate can't pass.
+    #[test]
+    fn remote_access_confirmation_gates_enable_only() {
+        assert!(
+            remote_access_change_needs_confirmation(true),
+            "enabling the LAN bind must require native confirmation"
+        );
+        assert!(
+            !remote_access_change_needs_confirmation(false),
+            "disabling is fail-safe and must not be gated"
+        );
     }
 }
