@@ -30,6 +30,7 @@ use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 
+use crate::cuda_provision_check::{component_provisioned, dir_has_dll, write_component_marker};
 use crate::setup::{app_support_dir, emit};
 
 /// Bump this when the pinned manifest changes so an existing install re-provisions.
@@ -59,6 +60,10 @@ enum Dest {
 struct Component {
     /// Human label for progress UI ("cuDNN", "cuBLAS", …).
     label: &'static str,
+    /// Stable, filename-safe id used for this component's per-run completion marker
+    /// (`.component-<slug>.ok`). Kept separate from `label` so tweaking the display
+    /// string never silently orphans an on-disk marker.
+    slug: &'static str,
     /// Approximate download size, shown in the progress message.
     approx: &'static str,
     /// Pinned win_amd64 wheel URL (files.pythonhosted.org).
@@ -70,6 +75,15 @@ struct Component {
     /// Specific DLL basenames to extract, or `None` to extract every `*.dll` in the
     /// wheel (used for the single-purpose nvidia-*-cu12 wheels).
     dlls: Option<&'static [&'static str]>,
+    /// Sentinel DLL name(s) whose presence in `dest` marks this component's extracted
+    /// output. Matched by `dir_has_dll`: an exact filename when it ends in `.dll` (the
+    /// onnxruntime DLLs), else a case-insensitive, version-agnostic prefix (`cudart64_`
+    /// still resolves a `cudart64_13`). Drives both the pre-staged completeness check
+    /// (`is_staged_complete`) and the retry-skip guard (`component_provisioned`,
+    /// sc-13614). For a multi-DLL wheel a single prefix here is deliberate: the skip
+    /// guard pairs it with a completion marker written only after a verified full
+    /// extraction, so a partial unzip is never mistaken for complete.
+    sentinels: &'static [&'static str],
 }
 
 /// The pinned redist set — matches what the build previously bundled (CUDA 12.9 gen
@@ -83,61 +97,79 @@ const COMPONENTS: &[Component] = &[
     // build-sidecar.mjs used to copy). Extract every DLL in each single-purpose wheel.
     Component {
         label: "CUDA runtime",
+        slug: "cuda-runtime",
         approx: "≈3 MB",
         url: "https://files.pythonhosted.org/packages/59/df/e7c3a360be4f7b93cee39271b792669baeb3846c58a4df6dfcf187a7ffab/nvidia_cuda_runtime_cu12-12.9.79-py3-none-win_amd64.whl",
         sha256: "8e018af8fa02363876860388bd10ccb89eb9ab8fb0aa749aaf58430a9f7c4891",
         dest: Dest::Cuda,
         dlls: None,
+        sentinels: &["cudart64_"],
     },
     Component {
         label: "cuBLAS",
+        slug: "cublas",
         approx: "≈530 MB",
         url: "https://files.pythonhosted.org/packages/45/a1/a17fade6567c57452cfc8f967a40d1035bb9301db52f27808167fbb2be2f/nvidia_cublas_cu12-12.9.1.4-py3-none-win_amd64.whl",
         sha256: "1e5fee10662e6e52bd71dec533fbbd4971bb70a5f24f3bc3793e5c2e9dc640bf",
         dest: Dest::Cuda,
         dlls: None,
+        // `cublasLt` ships inside this same wheel, so `cublas64_` covers the component.
+        sentinels: &["cublas64_"],
     },
     Component {
         label: "cuRAND",
+        slug: "curand",
         approx: "≈66 MB",
         url: "https://files.pythonhosted.org/packages/e5/98/1bd66fd09cbe1a5920cb36ba87029d511db7cca93979e635fd431ad3b6c0/nvidia_curand_cu12-10.3.10.19-py3-none-win_amd64.whl",
         sha256: "e8129e6ac40dc123bd948e33d3e11b4aa617d87a583fa2f21b3210e90c743cde",
         dest: Dest::Cuda,
         dlls: None,
+        sentinels: &["curand64_"],
     },
     Component {
         label: "NVRTC",
+        slug: "nvrtc",
         approx: "≈73 MB",
         url: "https://files.pythonhosted.org/packages/52/de/823919be3b9d0ccbf1f784035423c5f18f4267fb0123558d58b813c6ec86/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-win_amd64.whl",
         sha256: "72972ebdcf504d69462d3bcd67e7b81edd25d0fb85a2c46d3ea3517666636349",
         dest: Dest::Cuda,
         dlls: None,
+        sentinels: &["nvrtc64_"],
     },
     // onnxruntime's CUDA execution provider needs cuDNN-9 (incl. its lazily-loaded
     // sub-engine DLLs), cuFFT, nvJitLink. Extract every DLL.
     Component {
         label: "cuDNN",
+        slug: "cudnn",
         approx: "≈660 MB",
         url: "https://files.pythonhosted.org/packages/b7/ec/d95cc4204dd45f40f2d1512f8ff0d4c3fb1810a893fecc79fcea05dfec0e/nvidia_cudnn_cu12-9.23.0.39-py3-none-win_amd64.whl",
         sha256: "357e5d59a1b79d27eef754aa79b3d9e7adf11baf86dc928dc114df0033c2c912",
         dest: Dest::Cuda,
         dlls: None,
+        // The wheel also ships cuDNN's lazily-loaded sub-engine DLLs; `cudnn64_` marks
+        // the component and the completion marker guarantees the rest extracted.
+        sentinels: &["cudnn64_"],
     },
     Component {
         label: "cuFFT",
+        slug: "cufft",
         approx: "≈190 MB",
         url: "https://files.pythonhosted.org/packages/20/ee/29955203338515b940bd4f60ffdbc073428f25ef9bfbce44c9a066aedc5c/nvidia_cufft_cu12-11.4.1.4-py3-none-win_amd64.whl",
         sha256: "8e5bfaac795e93f80611f807d42844e8e27e340e0cde270dcb6c65386d795b80",
         dest: Dest::Cuda,
         dlls: None,
+        sentinels: &["cufft64_"],
     },
     Component {
         label: "nvJitLink",
+        slug: "nvjitlink",
         approx: "≈34 MB",
         url: "https://files.pythonhosted.org/packages/dd/7e/2eecb277d8a98184d881fb98a738363fd4f14577a4d2d7f8264266e82623/nvidia_nvjitlink_cu12-12.9.86-py3-none-win_amd64.whl",
         sha256: "cc6fcec260ca843c10e34c936921a1c426b351753587fdd638e8cff7b16bb9db",
         dest: Dest::Cuda,
         dlls: None,
+        // nvJitLink_120_0.dll.
+        sentinels: &["nvjitlink"],
     },
     // onnxruntime-gpu's own DLLs. The cp312 wheel: the native DLLs are identical
     // across the cp311/cp312/cp313/cp314 ABI wheels (the cp tag only versions the
@@ -145,6 +177,7 @@ const COMPONENTS: &[Component] = &[
     // exactly the three the worker dlopens (TensorRT is deliberately not staged).
     Component {
         label: "onnxruntime (GPU)",
+        slug: "onnxruntime",
         approx: "≈216 MB",
         url: "https://files.pythonhosted.org/packages/a4/e4/9b378a5466ea0bed65e5beb8e09254973c580a6522810a38afbcc45e5105/onnxruntime_gpu-1.26.0-cp312-cp312-win_amd64.whl",
         sha256: "5f49c44689894650990e4c8a857d2edafc276fbd79bba57ceb224bd18d25d491",
@@ -154,6 +187,13 @@ const COMPONENTS: &[Component] = &[
             "onnxruntime_providers_cuda.dll",
             "onnxruntime_providers_shared.dll",
         ]),
+        // The exact three DLLs the worker dlopens — the full extracted set for this
+        // component, so all three double as its sentinels.
+        sentinels: &[
+            "onnxruntime.dll",
+            "onnxruntime_providers_cuda.dll",
+            "onnxruntime_providers_shared.dll",
+        ],
     },
 ];
 
@@ -201,57 +241,25 @@ fn already_provisioned(root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// One sentinel per pinned CUDA component whose presence in the `cuda\` dir marks a
-/// complete CUDA redist. Matched case-insensitively by *prefix* so a CUDA point-release
-/// (`cudart64_12` → `cudart64_13`) still resolves — the version-agnostic match the
-/// sc-5560 bundling resolver used. `cublasLt` ships inside the cuBLAS wheel, so
-/// `cublas64_` covers it.
-const CUDA_DLL_SENTINELS: &[&str] = &[
-    "cudart64_", // CUDA runtime
-    "cublas64_", // cuBLAS (+ cublasLt)
-    "curand64_", // cuRAND
-    "nvrtc64_",  // NVRTC
-    "cudnn64_",  // cuDNN
-    "cufft64_",  // cuFFT
-    "nvjitlink", // nvJitLink (nvJitLink_120_0.dll)
-];
-
-/// The three onnxruntime DLLs the worker dlopens — exact names (no version suffix).
-const ORT_DLL_SENTINELS: &[&str] = &[
-    "onnxruntime.dll",
-    "onnxruntime_providers_cuda.dll",
-    "onnxruntime_providers_shared.dll",
-];
-
-/// True when `dir` holds a `*.dll` matching `needle`: an exact filename check when
-/// `needle` ends in `.dll`, else a case-insensitive prefix match (version-agnostic).
-fn dir_has_dll(dir: &Path, needle: &str) -> bool {
-    if needle.ends_with(".dll") {
-        return dir.join(needle).is_file();
+/// Which provisioned dir a component's sentinels live in.
+fn dest_dir<'a>(component: &Component, cuda: &'a Path, ort: &'a Path) -> &'a Path {
+    match component.dest {
+        Dest::Cuda => cuda,
+        Dest::Onnxruntime => ort,
     }
-    let needle = needle.to_ascii_lowercase();
-    let Ok(entries) = fs::read_dir(dir) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        entry
-            .file_name()
-            .to_str()
-            .map(|name| {
-                let name = name.to_ascii_lowercase();
-                name.starts_with(&needle) && name.ends_with(".dll")
-            })
-            .unwrap_or(false)
-    })
 }
 
-/// True when both provisioned dirs hold the full sentinel set — i.e. a pre-staged redist
-/// is complete enough to run without downloading. Deliberately stricter than the single-
-/// DLL `*_if_present` resolver probes (which only gate the candle lane): a partial stage
+/// True when both provisioned dirs hold every component's sentinel DLL(s) — i.e. a
+/// pre-staged redist is complete enough to run without downloading. Derived from the
+/// single `COMPONENTS` table (one source of truth for what a component's DLLs are), so
+/// adding a component can't skew this check. Deliberately stricter than the single-DLL
+/// `*_if_present` resolver probes (which only gate the candle lane): a partial stage
 /// that passed a one-DLL probe but was missing cuDNN/nvJitLink would hard-fail at load.
 fn is_staged_complete(cuda: &Path, ort: &Path) -> bool {
-    CUDA_DLL_SENTINELS.iter().all(|dll| dir_has_dll(cuda, dll))
-        && ORT_DLL_SENTINELS.iter().all(|dll| dir_has_dll(ort, dll))
+    COMPONENTS.iter().all(|component| {
+        let dir = dest_dir(component, cuda, ort);
+        component.sentinels.iter().all(|dll| dir_has_dll(dir, dll))
+    })
 }
 
 /// Copy every `*.dll` from `src` into `dst` (flat). Returns how many were copied. Used
@@ -524,6 +532,36 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
 
     let mut outcome: Result<(), String> = Ok(());
     for (index, component) in COMPONENTS.iter().enumerate() {
+        let dest = dest_dir(component, &cuda, &ort);
+
+        // Retry-skip (sc-13614): a component that a prior (partial) run already fully
+        // provisioned carries a current-version completion marker AND its sentinel DLL(s)
+        // on disk — skip it instead of re-downloading. Without this, a failure on any one
+        // of the ~8 components aborted the run and left no per-component state, so the
+        // next launch re-fetched the whole ~2.7 GB set. Requiring the marker (written
+        // only after a verified full extraction) means a partial/truncated extract is
+        // never mistaken for complete.
+        if component_provisioned(
+            &root,
+            dest,
+            component.slug,
+            REDIST_VERSION,
+            component.sentinels,
+        ) {
+            emit(
+                app,
+                "provision",
+                format!(
+                    "GPU runtime [{}/{}]: {} already present; skipping.",
+                    index + 1,
+                    COMPONENTS.len(),
+                    component.label
+                ),
+                false,
+            );
+            continue;
+        }
+
         emit(
             app,
             "provision",
@@ -551,6 +589,15 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
                     outcome = Err(format!("{}: no DLLs found in wheel", component.label));
                     break;
                 }
+                // Download + sha256 + extraction all succeeded with the expected DLL count.
+                // Record the per-component completion marker LAST (only here) so a retry
+                // after a *later* component fails skips re-downloading this one (sc-13614).
+                // A partial/truncated extract never reaches this point, so the marker is a
+                // trustworthy completion witness.
+                if let Err(error) = write_component_marker(&root, component.slug, REDIST_VERSION) {
+                    outcome = Err(error);
+                    break;
+                }
             }
             Err(error) => {
                 outcome = Err(error);
@@ -575,10 +622,13 @@ mod tests {
     use super::*;
 
     /// The pinned set must stay internally consistent: every component has a non-empty
-    /// pinned URL pointing at the PyPI CDN and a 64-hex-char sha256. Cheap, offline.
+    /// pinned URL pointing at the PyPI CDN and a 64-hex-char sha256, plus a filename-safe,
+    /// UNIQUE slug and at least one sentinel (both load-bearing for the per-component
+    /// completion marker + retry-skip guard, sc-13614). Cheap, offline.
     #[test]
     fn manifest_is_well_formed() {
         assert!(!COMPONENTS.is_empty());
+        let mut slugs = std::collections::HashSet::new();
         for component in COMPONENTS {
             assert!(
                 component.url.starts_with("https://files.pythonhosted.org/"),
@@ -604,6 +654,43 @@ mod tests {
                 "{}: sha256 must be lowercase hex",
                 component.label
             );
+            // Slug is the marker-filename identity: non-empty, filename-safe, and unique
+            // so two components can't collide on `.component-<slug>.ok`.
+            assert!(
+                !component.slug.is_empty(),
+                "{}: empty slug",
+                component.label
+            );
+            assert!(
+                component
+                    .slug
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                "{}: slug must be filename-safe (alnum/-): {:?}",
+                component.label,
+                component.slug
+            );
+            assert!(
+                slugs.insert(component.slug),
+                "{}: duplicate slug {:?} would collide markers",
+                component.label,
+                component.slug
+            );
+            // At least one sentinel — the retry-skip guard needs something to probe.
+            assert!(
+                !component.sentinels.is_empty(),
+                "{}: needs at least one sentinel",
+                component.label
+            );
+            // When an explicit DLL allow-list is given, its exact names double as the
+            // sentinels (nothing else identifies the component's output on disk).
+            if let Some(dlls) = component.dlls {
+                assert_eq!(
+                    component.sentinels, dlls,
+                    "{}: explicit-DLL component sentinels must equal its dll list",
+                    component.label
+                );
+            }
         }
     }
 
@@ -640,26 +727,6 @@ mod tests {
         "onnxruntime_providers_cuda.dll",
         "onnxruntime_providers_shared.dll",
     ];
-
-    /// `dir_has_dll` matches exact `.dll` names directly and everything else by
-    /// case-insensitive prefix (so a CUDA point-release still resolves).
-    #[test]
-    fn dir_has_dll_exact_and_prefix() {
-        let dir = scratch("has-dll");
-        touch(&dir, &["cudart64_13.dll", "onnxruntime.dll", "notes.txt"]);
-
-        // Exact name (ends in .dll).
-        assert!(dir_has_dll(&dir, "onnxruntime.dll"));
-        assert!(!dir_has_dll(&dir, "onnxruntime_providers_cuda.dll"));
-        // Version-agnostic prefix: a 13.x cudart still satisfies the `cudart64_` sentinel.
-        assert!(dir_has_dll(&dir, "cudart64_"));
-        // Case-insensitive.
-        assert!(dir_has_dll(&dir, "CUDART64_"));
-        // Absent component.
-        assert!(!dir_has_dll(&dir, "cudnn64_"));
-
-        let _ = fs::remove_dir_all(&dir);
-    }
 
     /// `is_staged_complete` requires the FULL sentinel set in both dirs — a stage
     /// missing even one component (here cuDNN) is rejected, unlike the one-DLL probes.
