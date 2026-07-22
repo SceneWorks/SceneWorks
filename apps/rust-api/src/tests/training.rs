@@ -2477,6 +2477,48 @@ fn resolve_base_model_path_descends_into_hf_snapshot() {
 }
 
 #[test]
+fn huggingface_snapshot_dirs_ranks_materialized_over_torn_refs_main() {
+    // sc-13915: a torn/empty `refs/main` (or a partial download) must not front an empty snapshot over a
+    // fully-materialized sibling — the `.into_iter().next()` callers (training gate/resolver, model
+    // catalog) would otherwise report an installed base as missing. Ports the worker's sc-13834 file-count
+    // hardening to the rust-api resolver. No HF-cache env here: this drives the helper on an explicit root.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo_root = temp.path().join("models--Foo--bar");
+    let snapshots = repo_root.join("snapshots");
+
+    let full = snapshots.join("full_rev");
+    let empty = snapshots.join("empty_rev");
+    std::fs::create_dir_all(&empty).expect("empty snapshot dir");
+    std::fs::create_dir_all(full.join("transformer")).expect("full snapshot tree");
+    std::fs::write(full.join("config.json"), "{}").expect("config");
+    std::fs::write(full.join("transformer").join("model.safetensors"), "x").expect("weight");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs dir");
+
+    // `refs/main` points at the EMPTY (torn) snapshot → the materialized one must still be first.
+    std::fs::write(repo_root.join("refs").join("main"), "empty_rev").expect("refs/main");
+    let ordered = crate::huggingface_snapshot_dirs(&repo_root);
+    assert_eq!(
+        ordered.first(),
+        Some(&full),
+        "a materialized snapshot must outrank an empty one a torn refs/main points to"
+    );
+
+    // A `refs/main` that names a materialized snapshot is authoritative (stays first); the empty sibling
+    // is deprioritized, NOT dropped, so iterate-all scans still see it.
+    std::fs::write(repo_root.join("refs").join("main"), "full_rev").expect("refs/main");
+    let ordered = crate::huggingface_snapshot_dirs(&repo_root);
+    assert_eq!(
+        ordered.first(),
+        Some(&full),
+        "a materialized refs/main is authoritative"
+    );
+    assert!(
+        ordered.contains(&empty),
+        "empty snapshots are deprioritized, not removed from the list"
+    );
+}
+
+#[test]
 fn tiered_turnkey_base_trains_on_bf16_tier() {
     // epic 9992 Krea 2 Raw (Path 1): SceneWorks/krea-2-raw-mlx ships bf16/ q8/ q4/ tier subdirs with NO
     // component tree at the snapshot root. Training reads the DENSE bf16 tier; a repo with only the q8

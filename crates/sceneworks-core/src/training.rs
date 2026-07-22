@@ -2421,7 +2421,7 @@ fn kolors_lora_target() -> TrainingTarget {
         })),
         ui: object(json!({
             "label": "Kolors LoRA",
-            "description": "Train an image LoRA for Kolors (Kwai-Kolors). Runs the SDXL-UNet trainer with the Kolors pipeline + ChatGLM3 text encoder, on CUDA and Apple Silicon (MPS).",
+            "description": "Train an image LoRA for Kolors (Kwai-Kolors). Runs the SDXL-UNet trainer with the Kolors pipeline + ChatGLM3 text encoder, on CUDA and Apple Silicon.",
             "recommendedFor": ["character", "style"]
         })),
         extra: ExtraFields::new(),

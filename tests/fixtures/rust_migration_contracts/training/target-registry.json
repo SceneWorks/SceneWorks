@@ -461,7 +461,7 @@
         ]
       },
       "ui": {
-        "description": "Train an image LoRA for Kolors (Kwai-Kolors). Runs the SDXL-UNet trainer with the Kolors pipeline + ChatGLM3 text encoder, on CUDA and Apple Silicon (MPS).",
+        "description": "Train an image LoRA for Kolors (Kwai-Kolors). Runs the SDXL-UNet trainer with the Kolors pipeline + ChatGLM3 text encoder, on CUDA and Apple Silicon.",
         "label": "Kolors LoRA",
         "recommendedFor": [
           "character",

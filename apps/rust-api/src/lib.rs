@@ -2284,26 +2284,52 @@ fn huggingface_repo_cache_exists(path: &FsPath) -> bool {
 
 fn huggingface_snapshot_dirs(repo_root: &FsPath) -> Vec<PathBuf> {
     let snapshots = repo_root.join("snapshots");
-    let mut snapshot_dirs = std::fs::read_dir(&snapshots)
+    // Rank by materialization (most files first) so the `.into_iter().next()` / `.find()` callers — the
+    // training gate/resolver, `model_catalog`, download-state scans — get the FULLEST snapshot and never
+    // an empty/torn one; a partial download or a test that clobbered `refs/main` must not win over a
+    // fully-materialized sibling (sc-13915, porting the worker's sc-13834 `resolve_huggingface_snapshot_dir`
+    // hardening to the rust-api side). Empty dirs are deprioritized, NOT dropped, so iterate-all callers
+    // (dir scans) still see every snapshot; their order is irrelevant to them. Deterministic path tiebreak.
+    let mut counted: Vec<(usize, PathBuf)> = std::fs::read_dir(&snapshots)
         .map(|entries| {
             entries
                 .flatten()
                 .map(|entry| entry.path())
                 .filter(|path| path.is_dir())
+                .map(|path| (snapshot_file_count(&path), path))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    snapshot_dirs.sort();
+    counted.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let mut snapshot_dirs: Vec<PathBuf> = counted.into_iter().map(|(_, path)| path).collect();
+    // `refs/main` fronts the list ONLY when the snapshot it names is materialized (holds files); a
+    // polluted/empty `refs/main` must not front an empty dir over a full one.
     if let Some(main_snapshot) = huggingface_main_snapshot_dir(repo_root) {
-        let mut ordered = vec![main_snapshot.clone()];
-        ordered.extend(
-            snapshot_dirs
-                .into_iter()
-                .filter(|path| path != &main_snapshot),
-        );
-        return ordered;
+        if snapshot_file_count(&main_snapshot) > 0 {
+            snapshot_dirs.retain(|path| path != &main_snapshot);
+            snapshot_dirs.insert(0, main_snapshot);
+        }
     }
     snapshot_dirs
+}
+
+/// Recursively count regular files under `dir` (symlinks counted — HF snapshots symlink into `blobs/`);
+/// `0` when the dir is absent, unreadable, or holds only empty subdirectories. Lets
+/// [`huggingface_snapshot_dirs`] rank a fully materialized snapshot above an empty/torn placeholder
+/// (sc-13915; mirrors the worker's `snapshot_file_count`, sc-13834).
+fn snapshot_file_count(dir: &FsPath) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        match entry.file_type() {
+            Ok(file_type) if file_type.is_dir() => count += snapshot_file_count(&entry.path()),
+            Ok(_) => count += 1,
+            Err(_) => {}
+        }
+    }
+    count
 }
 
 fn huggingface_main_snapshot_dir(repo_root: &FsPath) -> Option<PathBuf> {
