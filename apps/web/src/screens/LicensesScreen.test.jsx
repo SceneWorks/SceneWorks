@@ -68,6 +68,21 @@ describe("LicensesScreen", () => {
     );
   });
 
+  it("records the ACE-Step SFT Cover-restyle co-requisite under MIT (sc-13821)", async () => {
+    await render();
+    const sftCover = [...container.querySelectorAll(".licenses-item")].find((b) =>
+      b.textContent.includes("ACE-Step v1.5 XL SFT"),
+    );
+    expect(sftCover).toBeTruthy();
+    await act(async () => sftCover.click());
+    // The usage copy names the Cover-only role and the three re-hosted modules.
+    expect(container.textContent).toContain("Cover");
+    expect(container.querySelector(".licenses-text").textContent).toContain("MIT License");
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "ACE Studio and StepFun",
+    );
+  });
+
   it("surfaces both LTX-2 and Gemma notices for the LTX bundle", async () => {
     await render();
     const ltx = [...container.querySelectorAll(".licenses-item")].find((b) =>

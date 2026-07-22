@@ -51,7 +51,7 @@ const ACESTEP = {
     languages: ["en", "zh"],
     sampleRates: [48000],
     maxDurationSecs: 600,
-    editModes: ["inpaint", "repaint", "extend"],
+    editModes: ["inpaint", "repaint", "extend", "cover"],
     conditioning: ["AudioEdit"],
   },
   ui: { label: "ACE-Step v1.5 XL Turbo" },
@@ -243,7 +243,7 @@ describe("AudioStudio shell (sc-13407)", () => {
     const editChips = [...container.querySelectorAll(".settings-bar-styles .preset-chip")].map((b) =>
       b.textContent.trim(),
     );
-    expect(editChips).toEqual(["inpaint", "repaint", "extend"]);
+    expect(editChips).toEqual(["inpaint", "repaint", "extend", "cover"]);
     // Music has no voice bank, so the Speech-only voice field is absent.
     expect(fieldByLabelStart(container, "Voice")).toBeFalsy();
   });
@@ -788,7 +788,7 @@ describe("AudioStudio Music generation (sc-13410)", () => {
     expect(band).toBeTruthy();
     expect(band.textContent).toContain("Source track");
     const editChips = [...band.querySelectorAll(".preset-chip")].map((b) => b.textContent.trim());
-    expect(editChips).toEqual(["inpaint", "repaint", "extend"]);
+    expect(editChips).toEqual(["inpaint", "repaint", "extend", "cover"]);
   });
 
   it("hides the music fields + source band on Speech / Sound FX (no editModes advertised)", async () => {
@@ -945,6 +945,47 @@ describe("AudioStudio Music generation (sc-13410)", () => {
     expect(payload.editRegionStartSecs).toBe(2);
     expect(payload.editRegionEndSecs).toBe(5);
     expect(payload.editStrength).toBe(0.7);
+  });
+
+  it("rides a cover restyle through as a whole-clip AudioEdit: source + editMode=cover, no region (sc-13821)", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-audio-project_1",
+      JSON.stringify({ sourceAudioAssetId: "audio-src-1" }),
+    );
+    const sourceAsset = { id: "audio-src-1", type: "audio", displayName: "Base loop" };
+    const createAudioJob = vi.fn(async () => ({ id: "cover-1" }));
+    await render(
+      baseContext({
+        assets: [sourceAsset],
+        createAudioJob,
+        rememberLocalGenerationJob: vi.fn(),
+      }),
+    );
+    await click(modeTab(container, "Music"));
+    await setTextarea(container.querySelector(".prompt-input"), "a brass ensemble of trumpets");
+    // Default op is "inpaint", which reveals the region window: set a region FIRST, then switch to
+    // cover. This is the mutation guard — without cover's region-less payload branch the stale 2..5
+    // region would leak onto the whole-clip restyle.
+    await setNumber(container.querySelector(".settings-field-region-start input"), "2");
+    await setNumber(container.querySelector(".settings-field-region-end input"), "5");
+    // Pick the "cover" edit op — the whole-clip restyle backed by the sft_cover coRequisite.
+    const band = container.querySelector(".studio-source-band");
+    const coverChip = [...band.querySelectorAll(".preset-chip")].find(
+      (b) => b.textContent.trim() === "cover",
+    );
+    expect(coverChip).toBeTruthy();
+    await click(coverChip);
+    // Cover is whole-clip: the interior region window must NOT be shown (only inpaint/repaint reveal it).
+    expect(container.querySelector(".settings-field-region-start")).toBeNull();
+    expect(container.querySelector(".settings-field-region-end")).toBeNull();
+    await submitForm();
+
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.sourceAudioAssetId).toBe("audio-src-1");
+    expect(payload.editMode).toBe("cover");
+    // No region for a whole-clip restyle (the worker's audio_edit_region returns None for Cover).
+    expect(payload.editRegionStartSecs).toBeUndefined();
+    expect(payload.editRegionEndSecs).toBeUndefined();
   });
 });
 

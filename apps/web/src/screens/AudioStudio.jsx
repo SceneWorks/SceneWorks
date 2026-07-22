@@ -636,7 +636,7 @@ export function AudioStudio() {
             // Extend: the appended tail's new TOTAL length is the Length field; the worker defaults the
             // region start to the source clip's own length (where generation begins).
             payload.editRegionEndSecs = clampedDuration;
-          } else {
+          } else if (editMode === "inpaint" || editMode === "repaint") {
             // Inpaint / repaint: a bounded interior window (seconds). Cleared bounds are omitted so the
             // worker/provider apply their own defaults (end unset ⇒ to the clip end).
             payload.editRegionStartSecs =
@@ -644,6 +644,8 @@ export function AudioStudio() {
             payload.editRegionEndSecs =
               editRegionEndSecs === "" ? undefined : Number(editRegionEndSecs);
           }
+          // Cover (sc-13821) is a whole-clip restyle — no region (the worker's audio_edit_region
+          // returns None for Cover); the source track + prompt are the whole input.
           payload.editStrength = editStrength === "" ? undefined : Number(editStrength);
         }
       } else if (mode === "voiceclone") {

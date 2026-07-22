@@ -265,11 +265,14 @@ def test_builtin_manifest_ships_the_seeded_audio_models():
     assert all(isinstance(v, dict) and v.get("id") for v in kokoro_voices)
     assert by_id["kokoro_82m"].get("recommended") is True, "Kokoro is the recommended Speech model"
 
-    # ACE-Step's real edit surface (Conditioning::AudioEdit → repaint task modes).
+    # ACE-Step's real edit surface (Conditioning::AudioEdit → repaint task modes). `cover` (sc-13821)
+    # is the whole-clip restyle backed by the `sft_cover` coRequisite — advertised here so the Music
+    # studio surfaces it, matching the backend descriptor's audio_edit_modes (Inpaint/Repaint/Extend/Cover).
     assert set(by_id["acestep_v15_turbo"]["audio"]["editModes"]) == {
         "inpaint",
         "repaint",
         "extend",
+        "cover",
     }
     assert "AudioEdit" in by_id["acestep_v15_turbo"]["audio"]["conditioning"]
 

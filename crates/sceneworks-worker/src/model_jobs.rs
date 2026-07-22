@@ -1739,6 +1739,55 @@ pub(crate) fn resolve_co_requisites(
     Ok(components)
 }
 
+/// Resolve an OPTIONAL, on-demand model component the caller stages only for specific requests — the
+/// counterpart to [`resolve_co_requisites`] for a component deliberately kept OUT of the descriptor's
+/// `required_components` so the generic seam never stages it. The motivating case is acestep's
+/// `sft_cover` Cover snapshot (sc-13821): a ~8.76 GB checkpoint read only for a Cover restyle, Cover-only
+/// and lazy, mirroring LTX's `uncensored_enhancer` / sensenova's `distill_lora`.
+///
+/// Returns `Some(source)` when the manifest declares a `coRequisite` download tagged
+/// `componentId: <component_id>` AND its pinned snapshot is installed on disk; `None` when the manifest
+/// declares no such component (an older inference pin, or a different model) OR its snapshot is not
+/// installed. `None` is a deliberate no-op: an optional component is never install-gating (a `soft`
+/// co-requisite leaves text2music + the region edit modes usable), and the engine surfaces its own
+/// actionable "component not staged" error on the one request that actually needs the component — so
+/// the worker does not pre-empt that with a hard error here (which on the pre-adoption inference pin,
+/// whose Cover path still self-fetches, would be a regression). Snapshot resolution mirrors
+/// [`resolve_co_requisites`]: a pinned `revision` reads the exact `snapshots/<sha>/` (never `refs/main`).
+pub(crate) fn resolve_optional_component(
+    manifest_entry: &Value,
+    component_id: &str,
+    settings: &Settings,
+) -> Option<gen_core::WeightsSource> {
+    let downloads = manifest_entry.get("downloads").and_then(Value::as_array)?;
+    let download = downloads.iter().find(|download| {
+        download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+            && download.get("componentId").and_then(Value::as_str) == Some(component_id)
+    })?;
+    let repo = download.get("repo").and_then(Value::as_str)?;
+    let snapshot = match download.get("revision").and_then(Value::as_str) {
+        Some(revision) => huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision),
+        None => huggingface_snapshot_dir(&settings.data_dir, repo),
+    }?;
+    let files: Vec<&str> = download
+        .get("files")
+        .and_then(Value::as_array)
+        .map(|files| files.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    // A single concrete file resolves to that file; a multi-file / glob component (sft_cover's
+    // `transformer/*` + the two FSQ dirs) resolves to the snapshot ROOT — the provider joins its own
+    // internal subpaths (candle-audio-acestep reads `transformer/`, `audio_tokenizer/`,
+    // `audio_token_detokenizer/` under the staged dir).
+    match files.as_slice() {
+        [file] if !file.contains('*') => {
+            let path = snapshot.join(file);
+            path.is_file()
+                .then_some(gen_core::WeightsSource::File(path))
+        }
+        _ => Some(gen_core::WeightsSource::Dir(snapshot)),
+    }
+}
+
 /// Resolve the exact snapshot/tier recorded by a completed model-download receipt.
 ///
 /// A manifest may rename files after an install.  In that case the catalog deliberately keeps the
@@ -3566,6 +3615,57 @@ mod co_requisite_tests {
             ("HUGGINGFACE_HUB_CACHE", ""),
             ("HF_HOME", ""),
         ])
+    }
+
+    /// The optional, on-demand `sft_cover` component seam (sc-13821): acestep's Cover snapshot is a
+    /// `coRequisite` deliberately kept OUT of `required_components`, so [`resolve_co_requisites`] never
+    /// stages it. [`resolve_optional_component`] resolves it on demand — `Some(Dir)` when installed,
+    /// `None` (never an error) when undeclared or absent, so an optional component is never
+    /// install-gating (a `soft` co-requisite keeps text2music + the region edits usable).
+    #[test]
+    fn resolve_optional_component_resolves_sft_cover_only_when_declared_and_installed() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let repo = "ACE-Step/acestep-v15-xl-sft-diffusers";
+        let revision = "4bf7b60a63b27144f539f980927eeb89f5f912b0";
+        let manifest = json!({
+            "id": "acestep_v15_turbo",
+            "downloads": [
+                { "provider": "huggingface", "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+                  "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0" },
+                { "provider": "huggingface", "repo": repo, "revision": revision,
+                  "coRequisite": true, "required": "soft", "componentId": "sft_cover",
+                  "files": ["transformer/*", "audio_tokenizer/*", "audio_token_detokenizer/*"] }
+            ]
+        });
+        let settings = settings_at(data_dir.path().to_path_buf());
+
+        // Declared but NOT installed → None (the caller no-ops; never a hard error that would pre-empt
+        // the engine's own on-demand Cover error and, on the pre-adoption pin, its self-fetch).
+        assert!(
+            resolve_optional_component(&manifest, "sft_cover", &settings).is_none(),
+            "an absent optional component resolves to None, not an error"
+        );
+        // A component the manifest does not declare → None.
+        assert!(
+            resolve_optional_component(&manifest, "not_a_component", &settings).is_none(),
+            "an undeclared component resolves to None"
+        );
+
+        // Install it → resolves to the PINNED snapshot dir (a multi-file/glob component ⇒ Dir root).
+        stage_snapshot_file(
+            data_dir.path(),
+            repo,
+            revision,
+            "transformer/diffusion_pytorch_model.safetensors.index.json",
+        );
+        match resolve_optional_component(&manifest, "sft_cover", &settings) {
+            Some(gen_core::WeightsSource::Dir(dir)) => assert!(
+                dir.ends_with(revision),
+                "an installed sft_cover resolves to the pinned snapshots/<sha>/ dir, got {dir:?}"
+            ),
+            other => panic!("an installed sft_cover resolves to a Dir, got {other:?}"),
+        }
     }
 
     #[test]

@@ -28,6 +28,9 @@ import ltxGemma from "../../../desktop/licenses/ltx-2.3/Gemma-Terms.txt?raw";
 import kokoroApache from "../../../desktop/licenses/kokoro-82m/Apache-2.0.txt?raw";
 import mossApache from "../../../desktop/licenses/moss-soundeffect-v2/Apache-2.0.txt?raw";
 import acestepMit from "../../../desktop/licenses/acestep-v15-turbo/MIT.txt?raw";
+// ACE-Step SFT Cover-restyle checkpoint (sc-13821, epic 13678): the Cover-only co-requisite of the
+// Turbo Music model (transformer cover DiT + FSQ audio_tokenizer/detokenizer), MIT, same ACE-Step org.
+import acestepSftCoverMit from "../../../desktop/licenses/acestep-v15-sft-cover/MIT.txt?raw";
 import openvoiceMit from "../../../desktop/licenses/openvoice-v2/MIT.txt?raw";
 // Chatterbox (Resemble AI, epic 13678): all three components are MIT (Copyright (c)
 // 2025 Resemble AI). chatterboxTtsMit covers the PRIMARY T3/s3gen weights
@@ -71,6 +74,7 @@ const DOCUMENT_TEXT = {
   "kokoro-82m-apache": kokoroApache,
   "moss-soundeffect-v2-apache": mossApache,
   "acestep-v15-turbo-mit": acestepMit,
+  "acestep-v15-sft-cover-mit": acestepSftCoverMit,
   "openvoice-v2-mit": openvoiceMit,
   "chatterbox-tts-mit": chatterboxTtsMit,
   "chatterbox-ve-mit": chatterboxMit,

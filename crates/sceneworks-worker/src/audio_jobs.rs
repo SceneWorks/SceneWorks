@@ -671,12 +671,31 @@ async fn run_audio_synthesis_using(
     // co-requisite fails the JOB here with an actionable error rather than a mid-render hub fetch. The
     // resolved paths are staged in `LoadSpec::components` for the generator's load-time
     // `require_component` gate. Weights-free registry read; no-op when this build ships no audio lane.
-    let components = match crate::inference_runtime::audio_descriptor(&model_id) {
+    let mut components = match crate::inference_runtime::audio_descriptor(&model_id) {
         Some(descriptor) => {
             resolve_co_requisites(&descriptor, &request.model_manifest_entry, settings)?
         }
         None => BTreeMap::new(),
     };
+    // Optional, on-demand Cover component (sc-13821): acestep's ~8.76 GB `sft_cover` snapshot — the
+    // non-distilled reference cover DiT plus the FSQ audio_tokenizer/detokenizer — is staged ONLY for a
+    // Cover restyle request. It is deliberately NOT a `required_components` id (Cover-only, lazy,
+    // mirroring LTX `uncensored_enhancer`), so the generic `resolve_co_requisites` above never stages
+    // it; text2music and the Inpaint/Repaint/Extend region edits load without it. The id matches
+    // `candle_audio_acestep::COVER_COMPONENT_ID` ("sft_cover"); resolve it from the model's own soft
+    // `sft_cover` coRequisite in the manifest. At the adopted inference pin (sc-13756) the Cover path
+    // reads this snapshot ONLY from `LoadSpec::components["sft_cover"]` (the env-var/self-fetch read was
+    // removed), so this attach is the sole offline Cover source. An absent snapshot stages nothing; the
+    // engine then surfaces the actionable Cover-needs-`sft_cover` error on the request that needs it.
+    if request.edit_mode.as_deref() == Some("cover") {
+        if let Some(source) = crate::model_jobs::resolve_optional_component(
+            &request.model_manifest_entry,
+            "sft_cover",
+            settings,
+        ) {
+            components.insert("sft_cover".to_string(), source);
+        }
+    }
     let handle = {
         let cancel = cancel.clone();
         let chunk_tx = chunk_tx.clone();
@@ -2607,6 +2626,166 @@ mod tests {
         assert!(
             posts.iter().all(|p| p["status"] != "canceled"),
             "a clean completion posts no terminal Canceled, got {posts:?}"
+        );
+    }
+
+    // acestep's Cover snapshot pin (sc-13821), matching the `sft_cover` soft coRequisite in
+    // config/manifests/builtin.models.jsonc and candle-audio-acestep's SFT_HUB_REVISION.
+    const SFT_COVER_REPO: &str = "ACE-Step/acestep-v15-xl-sft-diffusers";
+    const SFT_COVER_REVISION: &str = "4bf7b60a63b27144f539f980927eeb89f5f912b0";
+
+    /// Stage acestep's `sft_cover` Cover snapshot (sc-13821) under an isolated HF cache with the three
+    /// component subdirs the provider joins (`transformer/`, `audio_tokenizer/`,
+    /// `audio_token_detokenizer/`), point `settings.data_dir` at it, and return the acestep
+    /// `modelManifestEntry` carrying the soft `sft_cover` coRequisite. Mirrors
+    /// [`stage_chatterbox_components`]; the staged bytes are never read (the loaded generator is a stub)
+    /// — the test asserts the RESOLVED PATH reaches the LoadSpec. Guard + tempdir must outlive the test.
+    struct StagedSftCover {
+        _env: crate::test_env::EnvVars,
+        _data_dir: tempfile::TempDir,
+        manifest_entry: Value,
+    }
+
+    fn stage_sft_cover(settings: &mut Settings) -> StagedSftCover {
+        let env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let snapshot =
+            sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir.path(), SFT_COVER_REPO)
+                .expect("repo cache path resolves")
+                .join("snapshots")
+                .join(SFT_COVER_REVISION);
+        for (subdir, file) in [
+            (
+                "transformer",
+                "diffusion_pytorch_model.safetensors.index.json",
+            ),
+            ("audio_tokenizer", "config.json"),
+            ("audio_token_detokenizer", "config.json"),
+        ] {
+            let dir = snapshot.join(subdir);
+            std::fs::create_dir_all(&dir).expect("create component subdir");
+            std::fs::write(dir.join(file), b"weights").expect("write staged component file");
+        }
+        settings.data_dir = data_dir.path().to_path_buf();
+        let manifest_entry = json!({
+            "id": "acestep_v15_turbo",
+            "type": "audio",
+            "downloads": [
+                { "provider": "huggingface", "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+                  "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0" },
+                { "provider": "huggingface", "repo": SFT_COVER_REPO, "revision": SFT_COVER_REVISION,
+                  "coRequisite": true, "required": "soft", "componentId": "sft_cover",
+                  "files": ["transformer/*", "audio_tokenizer/*", "audio_token_detokenizer/*"] }
+            ],
+        });
+        StagedSftCover {
+            _env: env,
+            _data_dir: data_dir,
+            manifest_entry,
+        }
+    }
+
+    /// A loader that records the `LoadSpec::components` it receives before returning a completing stub —
+    /// the audio twin of [`stub_load`], used to assert which components a request stages on the spec the
+    /// engine load actually sees (the seam the multi-entrypoint bug hid, sc-13686).
+    fn spec_capture_load(
+        captured: Arc<Mutex<Option<BTreeMap<String, gen_core::WeightsSource>>>>,
+    ) -> impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static {
+        move |_id: &str, spec: &LoadSpec| {
+            *captured.lock().expect("spec capture lock") = Some(spec.components.clone());
+            Ok(Box::new(StubGenerator {
+                descriptor: stub_descriptor(),
+                behavior: StubBehavior::CompleteOk,
+                observed_cancel: Arc::new(AtomicBool::new(false)),
+            }) as Box<dyn Generator>)
+        }
+    }
+
+    /// sc-13821: a Cover request stages the pinned `sft_cover` snapshot into the LoadSpec the loader
+    /// receives — the OPTIONAL, on-demand component the generic `resolve_co_requisites` seam does NOT
+    /// stage (sft_cover is deliberately not a `required_components` id). This drives the REAL
+    /// `run_audio_synthesis_using` entrypoint (not the resolver in isolation), matching
+    /// [[coreq_seam_has_multiple_loadspec_entrypoints]].
+    #[tokio::test]
+    async fn cover_request_stages_the_sft_cover_component_on_the_loadspec() {
+        let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
+        let mut settings = cancel_test_settings(base_url);
+        let staged = stage_sft_cover(&mut settings);
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("audio-sft-cover");
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "acestep_v15_turbo",
+            "editMode": "cover",
+            "modelManifestEntry": staged.manifest_entry.clone(),
+        })));
+
+        let captured = Arc::new(Mutex::new(None));
+        run_audio_synthesis_using(
+            &api,
+            &settings,
+            &job,
+            &request,
+            PathBuf::from("unused"),
+            None,
+            spec_capture_load(captured.clone()),
+        )
+        .await
+        .expect("the stub Cover synthesis completes");
+
+        let comps = captured
+            .lock()
+            .expect("capture lock")
+            .take()
+            .expect("the loader captured a LoadSpec");
+        match comps.get("sft_cover") {
+            Some(gen_core::WeightsSource::Dir(dir)) => assert!(
+                dir.ends_with(SFT_COVER_REVISION),
+                "sft_cover must resolve to the PINNED snapshot dir (snapshots/<sha>/), got {dir:?}"
+            ),
+            other => panic!(
+                "a Cover request must stage sft_cover as a Dir on the LoadSpec, got {other:?}"
+            ),
+        }
+    }
+
+    /// Mutation guard for [`cover_request_stages_the_sft_cover_component_on_the_loadspec`]: with the SAME
+    /// model + manifest and the snapshot present, a NON-Cover (text-to-music) request must NOT stage
+    /// `sft_cover` — an unconditional attach (or one via the always-run required-components seam) would
+    /// false-green the positive test.
+    #[tokio::test]
+    async fn non_cover_request_does_not_stage_the_sft_cover_component() {
+        let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
+        let mut settings = cancel_test_settings(base_url);
+        let staged = stage_sft_cover(&mut settings);
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("audio-sft-no-cover");
+        let request = AudioRequest::from_payload(&payload(json!({
+            "model": "acestep_v15_turbo",
+            "modelManifestEntry": staged.manifest_entry.clone(),
+        })));
+
+        let captured = Arc::new(Mutex::new(None));
+        run_audio_synthesis_using(
+            &api,
+            &settings,
+            &job,
+            &request,
+            PathBuf::from("unused"),
+            None,
+            spec_capture_load(captured.clone()),
+        )
+        .await
+        .expect("the stub text-to-music synthesis completes");
+
+        let comps = captured
+            .lock()
+            .expect("capture lock")
+            .take()
+            .expect("the loader captured a LoadSpec");
+        assert!(
+            !comps.contains_key("sft_cover"),
+            "a non-Cover request must NOT stage sft_cover, got {:?}",
+            comps.get("sft_cover")
         );
     }
 
