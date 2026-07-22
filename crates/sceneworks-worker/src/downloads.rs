@@ -973,10 +973,17 @@ pub(crate) async fn download_snapshot_into_cache(
     // Materialize the snapshot once every blob is present: refs/<rev> -> commit and
     // snapshots/<commit>/<path> -> ../../blobs/<etag>.
     let commit = commit.unwrap_or_else(|| revision.to_owned());
+    // Confine both the `refs/<rev>` pointer and the `snapshots/<commit>` root to the repo cache dir
+    // before writing anything: `revision` is payload-supplied over the LAN jobs API (epic 4484), and
+    // `commit` falls back to it when the upstream omits `X-Repo-Commit`, so a `..`/absolute value
+    // would otherwise write the receipt pointer and materialize the snapshot tree OUTSIDE the cache
+    // (sc-13583). Real revisions are `main` or a 40-hex commit — a single, traversal-free component —
+    // so `safe_join` (which rejects any non-`Normal` component, exactly like the per-file join below)
+    // is a no-op for every legitimate download.
     let refs_dir = repo_dir.join("refs");
     tokio::fs::create_dir_all(&refs_dir).await?;
-    tokio::fs::write(refs_dir.join(revision), commit.as_bytes()).await?;
-    let snapshot_dir = repo_dir.join("snapshots").join(&commit);
+    tokio::fs::write(safe_join(&refs_dir, revision)?, commit.as_bytes()).await?;
+    let snapshot_dir = safe_join(&repo_dir.join("snapshots"), &commit)?;
     for (relpath, etag) in &placements {
         let link = safe_join(&snapshot_dir, relpath)?;
         if let Some(parent) = link.parent() {
