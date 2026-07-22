@@ -1902,14 +1902,15 @@ fn ltx_video_lora_target() -> TrainingTarget {
 /// models.
 ///
 /// Like the LTX video LoRA it trains from a still-image dataset (each item
-/// encodes to a single Wan-VAE latent frame, `numFrames: 1`), but the `wan_lora`
-/// kernel is torch/diffusers — CUDA *and* Apple-Silicon MPS — not MLX: a
-/// flow-matching velocity loop on the `WanTransformer3DModel` attention
-/// projections (`to_q`/`to_k`/`to_v`/`to_out.0`). On MPS it runs in fp32 (Wan's
-/// Conv3d patch embedding has no bf16 Metal kernel; the kernel forces it). The
-/// output registers as a `wan-video` family LoRA the Wan video adapter loads at
-/// generation. This dense 5B target is the base the 14B (A14B MoE) trainer
-/// extends for the two-expert (high/low-noise) case.
+/// encodes to a single Wan-VAE latent frame, `numFrames: 1`) with a flow-matching
+/// velocity loop on the `WanTransformer3DModel` attention projections
+/// (`to_q`/`to_k`/`to_v`/`to_out.0`). The trainer is per-platform: off-Mac the
+/// `wan_lora` kernel is torch/diffusers (CUDA), while on macOS the job routes to
+/// the native in-process MLX trainer (`mlx-gen-wan`'s `wan2_2_ti2v_5b`), which
+/// loads the installed `SceneWorks/wan2.2-ti2v-5b-mlx` turnkey's dense bf16 tier —
+/// NOT torch/MPS (sc-13878). The output registers as a `wan-video` family LoRA the
+/// Wan video adapter loads at generation. This dense 5B target is the base the 14B
+/// (A14B MoE) trainer extends for the two-expert (high/low-noise) case.
 fn wan_lora_target() -> TrainingTarget {
     TrainingTarget {
         id: "wan_lora".to_owned(),
@@ -1919,14 +1920,16 @@ fn wan_lora_target() -> TrainingTarget {
         family: "wan-video".to_owned(),
         base_model: "wan_2_2".to_owned(),
         // sc-13860: intentionally the `Wan-AI/Wan2.2-TI2V-5B-Diffusers` diffusers snapshot, NOT the
-        // `SceneWorks/wan2.2-ti2v-5b-mlx` turnkey. The `wan_lora` kernel is torch/diffusers, so it needs
-        // DIFFUSERS weights — not the MLX-packed turnkey. On Windows/Linux the catalog installs exactly
-        // this repo as the `bf16` variant (builtin.models.jsonc), so the install gate finds it there
-        // (that torch/CUDA path is where #1694 was reported). This is NOT the epic-8506 mis-naming class
-        // the sibling targets hit — the repo is correct — so pointing at the MLX turnkey would only hand
-        // the torch trainer weights it can't load. NOTE the diffusers download is gated to Windows/Linux;
-        // whether macOS should run this trainer at all (and if so, get a Mac-installable diffusers base)
-        // is the SEPARATE gap tracked in sc-13878, not fixable by a repo rename here.
+        // `SceneWorks/wan2.2-ti2v-5b-mlx` turnkey. The off-Mac `wan_lora` kernel is torch/diffusers, so it
+        // needs DIFFUSERS weights — not the MLX-packed turnkey. On Windows/Linux the catalog installs
+        // exactly this repo as the `bf16` variant (builtin.models.jsonc), so the install gate finds it
+        // there (that torch/CUDA path is where #1694 was reported). This is NOT the epic-8506 mis-naming
+        // class the sibling targets hit — the repo is correct — so pointing at the MLX turnkey would only
+        // hand the off-Mac torch trainer weights it can't load. The diffusers download is gated to
+        // Windows/Linux; on macOS the job runs the native MLX trainer against the installed
+        // `SceneWorks/wan2.2-ti2v-5b-mlx` turnkey instead, which the platform-aware training gate +
+        // base-path resolver select (apps/rust-api/src/training.rs `macos_wan_*`, sc-13878) — so
+        // `base_model_repo` stays the diffusers repo and is simply not consulted on macOS.
         base_model_repo: Some("Wan-AI/Wan2.2-TI2V-5B-Diffusers".to_owned()),
         kernel: "wan_lora".to_owned(),
         defaults: TrainingConfig {
@@ -1991,7 +1994,7 @@ fn wan_lora_target() -> TrainingTarget {
         })),
         ui: object(json!({
             "label": "Wan2.2 Video LoRA",
-            "description": "Train a Wan2.2 video LoRA from still images (Wan2.2-TI2V-5B). Runs on CUDA and Apple Silicon (MPS).",
+            "description": "Train a Wan2.2 video LoRA from still images (Wan2.2-TI2V-5B). Runs on CUDA and Apple Silicon.",
             "recommendedFor": ["character", "style"],
             "datasetModality": "image"
         })),
@@ -2004,10 +2007,12 @@ fn wan_lora_target() -> TrainingTarget {
 /// A14B is a two-expert mixture: a high-noise expert (`transformer`) and a
 /// low-noise expert (`transformer_2`), so the `wan_moe_lora` kernel trains a
 /// separate LoRA on each, split at the pipeline `boundary_ratio` (0.875), and
-/// saves two `wan-video` family files. Same diffusers flow-matching recipe as the
-/// dense 5B `wan_lora` target (still-image dataset, fp32 on MPS), but the A14B
-/// bf16 base is GPU-only (~56GB of transformers); the Q8_0 GGUF base path fits
-/// memory-bound hosts. `base_model` records the specific A14B variant so the
+/// saves two `wan-video` family files. Same flow-matching recipe as the dense 5B
+/// `wan_lora` target (still-image dataset), and the same per-platform backend split —
+/// off-Mac torch/diffusers (CUDA), on macOS the native MLX trainer against the
+/// installed `SceneWorks/wan2.2-{t2v,i2v}-a14b-mlx` turnkey's dense tier (sc-13878).
+/// The A14B bf16 base is GPU-only (~56GB of transformers); the Q8_0 GGUF base path
+/// fits memory-bound hosts. `base_model` records the specific A14B variant so the
 /// inference loader gates the LoRA to the matching model (not the 5B).
 fn wan_moe_lora_target(
     id: &str,
@@ -2086,7 +2091,7 @@ fn wan_t2v_14b_lora_target() -> TrainingTarget {
         "Wan2.2 14B T2V Video LoRA",
         "wan_2_2_t2v_14b",
         "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-        "Train a Wan2.2 14B (A14B MoE, text-to-video) LoRA from still images. Trains both noise experts; GPU-only at bf16 (Q8_0 GGUF base fits smaller hosts).",
+        "Train a Wan2.2 14B (A14B MoE, text-to-video) LoRA from still images. Trains both noise experts against the full-size bf16 base (large; on Windows/Linux a Q8_0 GGUF base fits smaller hosts).",
     )
 }
 
@@ -2096,7 +2101,7 @@ fn wan_i2v_14b_lora_target() -> TrainingTarget {
         "Wan2.2 14B I2V Video LoRA",
         "wan_2_2_i2v_14b",
         "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
-        "Train a Wan2.2 14B (A14B MoE, image-to-video) LoRA from still images. Trains both noise experts; GPU-only at bf16 (Q8_0 GGUF base fits smaller hosts).",
+        "Train a Wan2.2 14B (A14B MoE, image-to-video) LoRA from still images. Trains both noise experts against the full-size bf16 base (large; on Windows/Linux a Q8_0 GGUF base fits smaller hosts).",
     )
 }
 

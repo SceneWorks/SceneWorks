@@ -1231,7 +1231,7 @@
       },
       "ui": {
         "datasetModality": "image",
-        "description": "Train a Wan2.2 video LoRA from still images (Wan2.2-TI2V-5B). Runs on CUDA and Apple Silicon (MPS).",
+        "description": "Train a Wan2.2 video LoRA from still images (Wan2.2-TI2V-5B). Runs on CUDA and Apple Silicon.",
         "label": "Wan2.2 Video LoRA",
         "recommendedFor": [
           "character",
@@ -1326,7 +1326,7 @@
       },
       "ui": {
         "datasetModality": "image",
-        "description": "Train a Wan2.2 14B (A14B MoE, text-to-video) LoRA from still images. Trains both noise experts; GPU-only at bf16 (Q8_0 GGUF base fits smaller hosts).",
+        "description": "Train a Wan2.2 14B (A14B MoE, text-to-video) LoRA from still images. Trains both noise experts against the full-size bf16 base (large; on Windows/Linux a Q8_0 GGUF base fits smaller hosts).",
         "label": "Wan2.2 14B T2V Video LoRA",
         "recommendedFor": [
           "character",
@@ -1421,7 +1421,7 @@
       },
       "ui": {
         "datasetModality": "image",
-        "description": "Train a Wan2.2 14B (A14B MoE, image-to-video) LoRA from still images. Trains both noise experts; GPU-only at bf16 (Q8_0 GGUF base fits smaller hosts).",
+        "description": "Train a Wan2.2 14B (A14B MoE, image-to-video) LoRA from still images. Trains both noise experts against the full-size bf16 base (large; on Windows/Linux a Q8_0 GGUF base fits smaller hosts).",
         "label": "Wan2.2 14B I2V Video LoRA",
         "recommendedFor": [
           "character",

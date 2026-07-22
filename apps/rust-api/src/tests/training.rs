@@ -2809,6 +2809,277 @@ fn training_base_status_distinguishes_missing_from_tier_missing() {
     );
 }
 
+// ---- macOS Wan training-base resolution (sc-13878) ----
+//
+// On macOS the Wan targets' diffusers `base_model_repo` is never installed; the native MLX trainer
+// loads the `SceneWorks/wan2.2-*-mlx` turnkey instead, so the gate + resolver must key off THAT repo.
+// These pin the macOS behavior; the platform-blind manifest side is guarded in sceneworks-core's
+// `macos_wan_targets_have_a_macos_installable_mlx_turnkey_base`. macOS-only: off-Mac the overrides are
+// inert (`None`) and the shared diffusers-turnkey path — covered above — runs unchanged.
+
+/// Seed a flat MLX Wan tier (the layout the native trainer reads) at `dir`.
+#[cfg(target_os = "macos")]
+fn seed_wan_mlx_tier(dir: &std::path::Path, dual_expert: bool) {
+    std::fs::create_dir_all(dir).expect("tier dir");
+    for file in [
+        "config.json",
+        "t5_encoder.safetensors",
+        "vae.safetensors",
+        "tokenizer.json",
+    ] {
+        std::fs::write(dir.join(file), "{}").expect("seed shared component");
+    }
+    if dual_expert {
+        std::fs::write(dir.join("low_noise_model.safetensors"), "x").expect("low expert");
+        std::fs::write(dir.join("high_noise_model.safetensors"), "x").expect("high expert");
+    } else {
+        std::fs::write(dir.join("model.safetensors"), "x").expect("dense expert");
+    }
+}
+
+/// Materialize an HF-cache snapshot for `repo` under `data_dir` and return the snapshot dir.
+#[cfg(target_os = "macos")]
+fn materialize_snapshot(
+    data_dir: &std::path::Path,
+    repo: &str,
+    revision: &str,
+) -> std::path::PathBuf {
+    let repo_root = huggingface_repo_cache_path(data_dir, repo).expect("repo cache path");
+    let snapshot = repo_root.join("snapshots").join(revision);
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs dir");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("refs/main");
+    snapshot
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_wan_5b_dense_flat_root_is_ready_and_resolves_to_root() {
+    // The installed 5B turnkey ships its dense (bf16) weights as flat MLX files at the snapshot ROOT
+    // (legacy layout, `quantization: None`), with q4 as a generation subdir. The gate must read Ready
+    // and the resolver must hand the trainer the ROOT (its flat files), NOT the diffusers repo.
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    let target = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "wan_2_2")
+        .expect("wan_lora target");
+    // Independently pin the turnkey repo (not read from the map) so a map typo is caught: the gate
+    // resolves via `macos_wan_mlx_repo`, and if that drifts from this seed location it finds nothing.
+    let snapshot = materialize_snapshot(&data_dir, "SceneWorks/wan2.2-ti2v-5b-mlx", "revwan5b");
+    seed_wan_mlx_tier(&snapshot, false); // dense flat root
+    seed_wan_mlx_tier(&snapshot.join("q4"), false); // a generation tier that must NOT be selected
+
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Ready,
+        "the dense flat-root turnkey is training-ready on macOS"
+    );
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        snapshot.display().to_string(),
+        "the trainer loads the dense flat root, not the q4 tier or the diffusers repo"
+    );
+
+    // Mutation check: tear one dense component from the root → the dense tier is gone, and with only the
+    // q4 generation tier left the gate is TrainingTierMissing (proves `wan_tier_complete` is load-bearing).
+    std::fs::remove_file(snapshot.join("model.safetensors")).expect("remove dense DiT");
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::TrainingTierMissing,
+        "a torn dense tier with only q4 present is not training-ready"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_wan_5b_q4_only_is_training_tier_missing() {
+    // A macOS Wan install for GENERATION is q4 by default (no dense bf16). Training needs full precision,
+    // so a q4-only turnkey gates as TrainingTierMissing with the actionable "install the bf16 tier" text —
+    // NOT the bare Missing that would send the user to reinstall a base they already have.
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    let target = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "wan_2_2")
+        .expect("wan_lora target");
+    let snapshot = materialize_snapshot(&data_dir, "SceneWorks/wan2.2-ti2v-5b-mlx", "revwan5bq4");
+    seed_wan_mlx_tier(&snapshot.join("q4"), false); // only the generation tier
+
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::TrainingTierMissing
+    );
+    let message = training_base_unavailable_message(
+        TrainingBaseStatus::TrainingTierMissing,
+        &target.base_model,
+    )
+    .expect("TrainingTierMissing blocks a real run");
+    assert!(message.contains("bf16"), "{message}");
+    assert!(message.contains("installed for generation"), "{message}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_wan_5b_uninstalled_turnkey_is_missing() {
+    // No turnkey on disk → Missing (the base was never installed), NOT a resolve against the diffusers
+    // repo that can't exist on macOS.
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    let target = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "wan_2_2")
+        .expect("wan_lora target");
+
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Missing
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_wan_a14b_bf16_subdir_dual_expert_is_ready() {
+    // The A14B MoE turnkeys ship their dense tier as a `bf16/` SUBDIR of dual-expert files
+    // (low_noise + high_noise). The resolver descends into `bf16/`; the gate reads Ready. Covers BOTH
+    // A14B siblings (T2V + I2V) — the story is titled "5B" but the fix must cover all three Wan targets.
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    for (base_model, repo, revision) in [
+        (
+            "wan_2_2_t2v_14b",
+            "SceneWorks/wan2.2-t2v-a14b-mlx",
+            "revt2v14b",
+        ),
+        (
+            "wan_2_2_i2v_14b",
+            "SceneWorks/wan2.2-i2v-a14b-mlx",
+            "revi2v14b",
+        ),
+    ] {
+        let target = crate::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|t| t.base_model == base_model)
+            .unwrap_or_else(|| panic!("{base_model} training target present"));
+        let snapshot = materialize_snapshot(&data_dir, repo, revision);
+        seed_wan_mlx_tier(&snapshot.join("q4"), true); // generation tier (not selected)
+        seed_wan_mlx_tier(&snapshot.join("bf16"), true); // dense training tier
+
+        assert_eq!(
+            training_base_model_status(&data_dir, &target),
+            TrainingBaseStatus::Ready,
+            "{base_model}: dense bf16 dual-expert tier is training-ready"
+        );
+        assert_eq!(
+            resolve_base_model_path(&target, &data_dir),
+            snapshot.join("bf16").display().to_string(),
+            "{base_model}: the dual-expert trainer loads the dense bf16 subdir"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real weights: needs the SceneWorks/wan2.2-ti2v-5b-mlx turnkey (dense/bf16 tier) in the HF cache"]
+fn macos_wan_5b_real_turnkey_is_training_ready() {
+    // Walking-skeleton proof against REAL installed weights: run the production gate + resolver against
+    // the developer's actual HF hub cache and confirm the installed Wan 5B turnkey is training-ready and
+    // the resolved dir holds the flat MLX files the native trainer loads. Run with:
+    //   cargo test -p sceneworks-rust-api --lib macos_wan_5b_real_turnkey_is_training_ready -- --ignored
+    // (In production the app defaults HF_HOME to ~/.cache/huggingface at startup, server.rs; the test
+    // runner strips it, so pin the real hub explicitly.)
+    let home = std::path::PathBuf::from(std::env::var("HOME").expect("HOME"));
+    let _env = pin_hf_hub_cache(&home.join(".cache").join("huggingface").join("hub"));
+    let data_dir = home.join("SceneWorks").join("data");
+    let target = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "wan_2_2")
+        .expect("wan_lora target");
+
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Ready,
+        "the installed Wan 5B turnkey must be training-ready (install its dense bf16 tier if this fails)"
+    );
+
+    let resolved = resolve_base_model_path(&target, &data_dir);
+    let dir = std::path::Path::new(&resolved);
+    for file in [
+        "model.safetensors",
+        "config.json",
+        "t5_encoder.safetensors",
+        "vae.safetensors",
+        "tokenizer.json",
+    ] {
+        assert!(
+            dir.join(file).exists(),
+            "resolved training dir {resolved} must hold the flat MLX file `{file}` the trainer reads"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_wan_repos_match_manifest_macos_downloads() {
+    // Pin the rust-api `macos_wan_mlx_repo` map to the manifest's macOS download repo for each Wan base,
+    // so the two cannot drift (the gate/resolver only work if they resolve the repo macOS actually
+    // installs). Complements the platform-blind sceneworks-core guard.
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+    use std::collections::BTreeSet;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded");
+    let catalog: Value = serde_json::from_str(&strip_jsonc_comments(raw)).expect("manifest parses");
+    let models = catalog["models"].as_array().expect("models array");
+
+    // The BASE download repos macOS installs, excluding co-requisites — the A14B entries carry a
+    // `lightx2v/Wan2.2-Lightning` co-requisite (sc-10030) that installs ALONGSIDE the base, not AS it,
+    // so it is not the training base the map resolves.
+    let macos_base_download_repos = |base_model: &str| -> BTreeSet<String> {
+        models
+            .iter()
+            .find(|m| m["id"].as_str() == Some(base_model))
+            .and_then(|m| m["downloads"].as_array())
+            .expect("base model entry with downloads")
+            .iter()
+            .filter(|d| !crate::models::is_co_requisite_download(d))
+            .filter(|d| match d.get("platforms").and_then(Value::as_array) {
+                None => true,
+                Some(platforms) => platforms.iter().any(|p| p.as_str() == Some("macos")),
+            })
+            .filter_map(|d| d["repo"].as_str().map(str::to_owned))
+            .collect()
+    };
+
+    for base_model in ["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"] {
+        let mapped = crate::training::macos_wan_mlx_repo(base_model)
+            .unwrap_or_else(|| panic!("{base_model} is mapped to a macOS turnkey"));
+        assert_eq!(
+            macos_base_download_repos(base_model),
+            BTreeSet::from([mapped.to_owned()]),
+            "{base_model}: the rust-api macOS turnkey map ({mapped}) must equal the manifest's macOS \
+             base download repo(s) — they drifted"
+        );
+    }
+}
+
 #[test]
 fn resolve_base_model_path_prefers_converted_mlx_dir_for_conversion_models() {
     // `requiresConversion` models (Wan) keep usable weights in <data>/models/mlx/<id>, while the
