@@ -1915,17 +1915,46 @@ pub(crate) fn huggingface_receipt_weights_dir(
 fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathBuf> {
     let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
     let snapshots = repo_dir.join("snapshots");
+    // Prefer `refs/main`, but ONLY when the snapshot it names actually holds files. A polluted
+    // `refs/main` — e.g. a test that clobbered it to an empty placeholder snapshot (sc-13834) —
+    // must not strand the model on an empty dir. This is best-effort defense in depth, not a
+    // substitute for a correct `refs/main`: it distinguishes a materialized snapshot from an
+    // empty/torn one, not dummy fixture weights from real ones.
     if let Ok(rev) = std::fs::read_to_string(repo_dir.join("refs").join("main")) {
         let candidate = snapshots.join(rev.trim());
-        if candidate.is_dir() {
+        if snapshot_file_count(&candidate) > 0 {
             return Some(candidate);
         }
     }
+    // Fallback: the cached snapshot with the most files, so an empty/partial one never wins over a
+    // fully materialized sibling (the old "first dir wins" scan happily returned an empty snapshot).
     std::fs::read_dir(&snapshots)
         .ok()?
         .flatten()
         .map(|entry| entry.path())
-        .find(|path| path.is_dir())
+        .filter(|path| path.is_dir())
+        .map(|path| (snapshot_file_count(&path), path))
+        .filter(|(count, _)| *count > 0)
+        .max_by_key(|(count, _)| *count)
+        .map(|(_, path)| path)
+}
+
+/// Recursively count regular files under `dir` (symlinks counted as files — HF snapshots link into
+/// `blobs/`), returning 0 when it is absent, unreadable, or holds only empty subdirectories. Lets
+/// [`resolve_huggingface_snapshot_dir`] tell a fully materialized snapshot from an empty placeholder.
+fn snapshot_file_count(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        match entry.file_type() {
+            Ok(file_type) if file_type.is_dir() => count += snapshot_file_count(&entry.path()),
+            Ok(_) => count += 1,
+            Err(_) => {}
+        }
+    }
+    count
 }
 
 /// Replace the relative `snapshots/<rev>/… -> ../blobs/<etag>` symlinks under a resolved
@@ -3666,6 +3695,51 @@ mod co_requisite_tests {
             ),
             other => panic!("an installed sft_cover resolves to a Dir, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn snapshot_resolution_skips_an_empty_refs_main_and_falls_back_to_the_populated_snapshot() {
+        // A `refs/main` clobbered to an empty placeholder snapshot (the sc-13834 cache-pollution
+        // shape) must NOT strand the model on that empty dir; the resolver falls back to the
+        // most-populated cached sibling instead. Regression guard for the old "first dir wins" scan,
+        // which happily returned an empty snapshot the moment `refs/main` pointed at one.
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let repo = "SceneWorks/krea-2-raw-mlx";
+        let repo_dir =
+            huggingface_repo_cache_path(data_dir.path(), repo).expect("repo cache path resolves");
+        let snapshots = repo_dir.join("snapshots");
+
+        // The real, fully materialized snapshot …
+        let populated = snapshots.join("b88090c7");
+        std::fs::create_dir_all(populated.join("q8/transformer")).expect("populated tree");
+        std::fs::write(
+            populated.join("q8/transformer/diffusion_pytorch_model.safetensors"),
+            b"real",
+        )
+        .expect("write real weight");
+        // … alongside an EMPTY placeholder snapshot (tier dirs only, no files) …
+        std::fs::create_dir_all(snapshots.join("abc123/q8/transformer"))
+            .expect("empty placeholder");
+        // … with `refs/main` clobbered to point at the empty one.
+        std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
+        std::fs::write(repo_dir.join("refs").join("main"), "abc123").expect("write refs/main");
+
+        let resolved = resolve_huggingface_snapshot_dir(data_dir.path(), repo)
+            .expect("a populated snapshot exists, so resolution must succeed");
+        assert_eq!(
+            resolved, populated,
+            "a refs/main pointing at an empty snapshot must fall back to the populated sibling"
+        );
+
+        // Sanity: a VALID `refs/main` (populated) is still honored on the fast path — the fallback
+        // only engages when `refs/main` names an empty/absent snapshot.
+        std::fs::write(repo_dir.join("refs").join("main"), "b88090c7").expect("repoint refs/main");
+        assert_eq!(
+            resolve_huggingface_snapshot_dir(data_dir.path(), repo).expect("still resolves"),
+            populated,
+            "a populated refs/main must resolve to exactly that snapshot"
+        );
     }
 
     #[test]

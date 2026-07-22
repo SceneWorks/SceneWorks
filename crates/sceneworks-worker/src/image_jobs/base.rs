@@ -425,9 +425,10 @@ fn resolve_candle_image_route(
         Some(CandleImageRoute::KreaControl)
     } else if krea_edit_candle_available(request, settings) {
         // Krea 2 Kontext-style edit (epic 10871): `krea_2_raw` + `edit_image` + a source is the bespoke
-        // candle `KreaEdit` lane (`generate_candle_krea_edit_stream`), NOT txt2img — `krea_2_raw` is
-        // MLX-only for t2i (absent from `is_candle_engine`), so without this arm an off-Mac Krea edit had
-        // no candle lane. Mirrors `jobs_store::krea_edit_candle_eligible`.
+        // candle `KreaEdit` lane (`generate_candle_krea_edit_stream`), NOT the generic t2i stream. Diverted
+        // BEFORE the generic `is_candle_engine` t2i arm below (which `krea_2_raw` now matches, sc-9994/epic
+        // 9992) so an edit job runs the dual-conditioning Kontext render instead of being flattened to plain
+        // txt2img. Mirrors `jobs_store::krea_edit_candle_eligible`.
         Some(CandleImageRoute::KreaEdit)
     } else if zimage_comfyui_available(request, settings) {
         // In-place ComfyUI Z-Image base (sc-10668): an `external_base_*` id, so it matches no
@@ -4811,6 +4812,20 @@ fn is_candle_engine(model: &str) -> bool {
             // shapes; on-the-fly quant stays descriptor-gated (`supported_quants` still `&[]` — the
             // packed turnkey self-describes its tier at load).
             | "krea_2_turbo"
+            // Krea 2 Raw (sc-9994, epic 9992): the UNDISTILLED full-CFG base sibling of Turbo, now a
+            // registered candle txt2img generator (`candle-gen-krea` `render_base` — two DiT forwards/step,
+            // 52 steps, resolution-dynamic mu). Arch-identical to Turbo (only the DiT weights differ), so it
+            // rides the SAME generic candle lane: `generate_candle_stream` resolves its repo/tier/steps/
+            // guidance/negative from the descriptor + the shared `krea_model_subdir` turnkey resolver, and
+            // the img2img `Reference` init (sc-10226 `render_base_img2img`). It is ALSO the LoRA-training
+            // base (Path 1). This entry was MISSING when epic 9992 landed the generator — the scheduler
+            // routes `krea_2_raw` to candle (`IMAGE_MODEL_CAPS` candle_routed=true, mirroring Turbo), but
+            // `resolve_candle_image_route`'s generic arm gates on THIS list, so plain Raw t2i fell through to
+            // `None` and the worker emitted a `procedural_preview` STUB gradient (`realModelInference:false`)
+            // instead of running the real model — the classic router/worker list skew. Turbo was unaffected
+            // (it was in the list); the Raw edit lane (`krea_edit_candle_available`, checked first) hid the
+            // gap for edit jobs, and there was no `krea_2_raw` t2i routing test to catch it.
+            | "krea_2_raw"
             // Stable Diffusion 3.5 (sc-7880, epic 7982): Large / Large Turbo / Medium all ride the generic
             // candle txt2img lane (the `candle-gen-sd3` provider). `generate_candle_stream` resolves Q4/Q8
             // from the descriptor + manifest (`mlx.quantize` 8) — the dense MMDiT folds to Q4_0/Q8_0 at
@@ -6201,6 +6216,9 @@ mod candle_label_tests {
             "boogu_image_edit",
             // Krea 2 Turbo (sc-7581): pure txt2img on the generic candle lane.
             "krea_2_turbo",
+            // Krea 2 Raw (sc-9994, epic 9992): the undistilled full-CFG base rides the SAME generic candle
+            // lane as Turbo (`render_base`). Was missing here, so plain Raw t2i stubbed a procedural gradient.
+            "krea_2_raw",
             // SD3.5 (sc-7880): Large / Large Turbo / Medium ride the generic candle txt2img lane.
             "sd3_5_large",
             "sd3_5_large_turbo",

@@ -2433,6 +2433,7 @@ fn resolve_base_model_path_descends_into_hf_snapshot() {
     // the HF snapshot dir, not the repo cache root. Resolving to the repo root made every
     // HF-cache base model fail at trainer load — z-image "tokenizer: No such file or directory",
     // sdxl "read vocab.json: No such file or directory", ltx "Path must point to a local file".
+    let _env = isolate_hf_cache(); // seed under the tempdir, never a developer's real HF cache (sc-13834)
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().join("data");
 
@@ -2474,6 +2475,7 @@ fn tiered_turnkey_base_trains_on_bf16_tier() {
     // epic 9992 Krea 2 Raw (Path 1): SceneWorks/krea-2-raw-mlx ships bf16/ q8/ q4/ tier subdirs with NO
     // component tree at the snapshot root. Training reads the DENSE bf16 tier; a repo with only the q8
     // GENERATION tier installed is NOT training-ready (no dense weights to LoRA-train on).
+    let _env = isolate_hf_cache(); // seed under the tempdir, never a developer's real HF cache (sc-13834)
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().join("data");
 
@@ -2526,6 +2528,7 @@ fn sdxl_family_tiered_turnkey_trains_on_its_bf16_unet_tier() {
     // gate tested `transformer/` only, so a fully-installed SDXL tiered turnkey (Illustrious) read as
     // un-installed forever and Training Studio blocked submit — while the resolver happily pointed at
     // the bf16 tier. Krea/LTX never caught this: they are DiTs and really do have `transformer/`.
+    let _env = isolate_hf_cache(); // seed under the tempdir, never a developer's real HF cache (sc-13834)
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().join("data");
 
@@ -2580,6 +2583,7 @@ fn flat_sdxl_snapshot_is_not_treated_as_a_tiered_turnkey() {
     // Backward-compat guard for sc-10613: `unet/` at the snapshot root marks a FLAT diffusers tree
     // (stabilityai/stable-diffusion-xl-base-1.0, Kwai-Kolors/Kolors-diffusers). It must resolve
     // unchanged, never descend into a `bf16/` subdir — even if a stray tier dir sits alongside it.
+    let _env = isolate_hf_cache(); // seed under the tempdir, never a developer's real HF cache (sc-13834)
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().join("data");
 
@@ -2617,6 +2621,7 @@ fn resolve_base_model_path_prefers_converted_mlx_dir_for_conversion_models() {
     // HF cache holds only the native *source* checkpoint the converter consumes. Resolving Wan
     // training to the HF source made the trainer fail ("wan umt5 tokenizer: No such file"); it
     // must read the converted dir, mirroring inference's local_mlx_dir.
+    let _env = isolate_hf_cache(); // seed under the tempdir, never a developer's real HF cache (sc-13834)
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().join("data");
 
