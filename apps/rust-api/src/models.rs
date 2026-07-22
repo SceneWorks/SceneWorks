@@ -1426,6 +1426,10 @@ fn backfill_current_receipt(
 #[cfg(test)]
 mod download_receipt_tests {
     use super::*;
+    // Reuse the ONE crate-wide HF-cache guard (sc-13834): tests here seed/resolve the cache via the
+    // env-first `huggingface_repo_cache_path`, so without this they would resolve into a developer's
+    // real HF cache when HF_HOME is set. Serialize on the same `HF_ENV_LOCK`; never add a second lock.
+    use crate::tests::support::isolate_hf_cache;
 
     #[test]
     fn multi_repo_marker_filters_nested_receipts_by_requested_repo() {
@@ -1460,6 +1464,7 @@ mod download_receipt_tests {
 
     #[test]
     fn complete_pre_receipt_install_is_backfilled_and_protected_after_rename() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();
         let repo = "owner/backfill";
@@ -1499,6 +1504,7 @@ mod download_receipt_tests {
 
     #[test]
     fn receipt_remains_usable_when_current_manifest_file_changes() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();
         let repo = "owner/model";
@@ -1541,6 +1547,7 @@ mod download_receipt_tests {
 
     #[test]
     fn catalog_distinguishes_usable_stale_from_torn_and_points_at_cache() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();
         let repo = "owner/model";
@@ -1578,6 +1585,7 @@ mod download_receipt_tests {
 
     #[test]
     fn breaking_and_corequisite_softness_matrix() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         for breaking in [false, true] {
             for soft in [false, true] {
                 let temp = tempfile::tempdir().unwrap();
@@ -1657,6 +1665,7 @@ mod download_receipt_tests {
     /// installed — proving the perth+VE rehoming is enforced end to end.
     #[test]
     fn chatterbox_tts_install_state_gates_on_the_perth_and_ve_co_requisites() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();
         // The primary chatterbox snapshot (T3 + S3Gen + tokenizer) is present…
@@ -1741,6 +1750,7 @@ mod download_receipt_tests {
     /// builtin manifest so a dropped/renamed component coRequisite (or a lost pinned revision) fails here.
     #[test]
     fn mmaudio_install_state_gates_on_all_five_component_co_requisites() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         fn builtin_models_entry(model_id: &str) -> Value {
             let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
                 .iter()
@@ -1837,6 +1847,7 @@ mod download_receipt_tests {
     /// then fails at load with the actionable error; this proves the catalog never advertises it ready.
     #[test]
     fn moss_tts_install_state_gates_on_the_codec_co_requisite() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         fn builtin_models_entry(model_id: &str) -> Value {
             let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
                 .iter()
@@ -3803,6 +3814,10 @@ mod gated_credential_tests {
 mod variant_install_tests {
     use super::*;
     use serde_json::json;
+    // Reuse the ONE crate-wide HF-cache guard (sc-13834) so these tests resolve the cache under
+    // their tempdir `data_dir`, never a developer's real HF cache — and serialize on the same
+    // `HF_ENV_LOCK` as the `crate::tests` suite (a second lock would defeat the mutual exclusion).
+    use crate::tests::support::isolate_hf_cache;
 
     /// Seed a HuggingFace repo cache snapshot under `data_dir` containing `files` (repo-relative
     /// paths). Mirrors the on-disk layout `model_variant_states` probes.
@@ -3886,6 +3901,7 @@ mod variant_install_tests {
         // Two unlabeled download entries (alternate sources / co-requisite TE repo) must NOT be
         // treated as a quant matrix: both would otherwise collapse to a duplicate "default" key.
         // The dedup guard emits exactly one "default" variant, matching the single-variant contract.
+        let _env = isolate_hf_cache(); // resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let model = json!({
@@ -3906,6 +3922,7 @@ mod variant_install_tests {
         // Every emitted variant key must be unique. A manifest that duplicates a variant (or maps
         // two entries to the same key) keeps only the first; downstream tracking never emits two
         // same-keyed states (sc-8508).
+        let _env = isolate_hf_cache(); // resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
@@ -3932,6 +3949,7 @@ mod variant_install_tests {
 
     #[test]
     fn single_variant_model_yields_one_default_variant() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let model = json!({
@@ -3963,6 +3981,7 @@ mod variant_install_tests {
     /// so the cache is the proxy). Generic: keys only off the manifest fields.
     #[test]
     fn mlx_update_available_tracks_source_file_in_cache() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo = "TenStrip/LTX2.3-10Eros";
@@ -4008,6 +4027,7 @@ mod variant_install_tests {
     /// degrades to a no-op rather than misfiring, so it's safe to leave enabled for all models.
     #[test]
     fn mlx_update_unavailable_without_convert_source_file() {
+        let _env = isolate_hf_cache(); // resolve the convert-source cache under the tempdir, never a dev's real HF cache (sc-13835)
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let model = json!({
@@ -4032,6 +4052,7 @@ mod variant_install_tests {
 
     #[test]
     fn per_variant_tracking_reports_which_tiers_are_on_disk() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo = "SceneWorks/matrix";
@@ -4102,6 +4123,7 @@ mod variant_install_tests {
     /// weights; an absent tier stays a clean "missing", not a repairable "incomplete".
     #[test]
     fn torn_diffusers_tier_reads_incomplete_not_installed() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo = "SceneWorks/matrix";
@@ -4177,6 +4199,7 @@ mod variant_install_tests {
     /// stays a clean `missing`.
     #[test]
     fn torn_sana_tier_reads_incomplete_not_installed() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo = "SceneWorks/Sana_Sprint_1.6B_1024px_mlx";
@@ -4247,6 +4270,7 @@ mod variant_install_tests {
 
     #[test]
     fn torn_boogu_default_reads_incomplete_not_installed() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo = "SceneWorks/boogu-image-mlx";
@@ -4281,6 +4305,7 @@ mod variant_install_tests {
     /// torn install. The shared predicate must downgrade it there too.
     #[test]
     fn torn_boogu_top_level_badge_reads_incomplete_not_installed() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo = "SceneWorks/boogu-image-mlx";
@@ -4312,6 +4337,7 @@ mod variant_install_tests {
     /// check folds across snapshots with `any`, not `all` (guards the epic-13075 multi-snapshot trap).
     #[test]
     fn sana_tier_complete_in_one_of_two_snapshots_reads_installed() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo = "SceneWorks/Sana_1600M_1024px_mlx";
@@ -4348,6 +4374,7 @@ mod variant_install_tests {
     /// pinned filenames surfaces as a RED test, not a silent false-incomplete on the Anima source badge.
     #[test]
     fn anima_source_download_variant_stays_installed_predicate_is_noop() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo = "circlestone-labs/Anima";
@@ -4386,6 +4413,7 @@ mod variant_install_tests {
     /// so a metadata-only tier produced a receipt whose files all exist yet cannot load).
     #[test]
     fn model_with_only_a_torn_tier_is_not_installed() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo = "SceneWorks/matrix";
