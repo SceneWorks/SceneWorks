@@ -99,7 +99,7 @@
       "outputKind": "lora",
       "family": "sdxl",
       "baseModel": "sdxl",
-      "baseModelRepo": "stabilityai/stable-diffusion-xl-base-1.0",
+      "baseModelRepo": "SceneWorks/sdxl-base-mlx",
       "kernel": "sdxl_lora",
       "defaults": {
         "rank": 16,

@@ -2579,24 +2579,25 @@ fn sdxl_family_tiered_turnkey_trains_on_its_bf16_unet_tier() {
 }
 
 #[test]
-fn flat_sdxl_snapshot_is_not_treated_as_a_tiered_turnkey() {
-    // Backward-compat guard for sc-10613: `unet/` at the snapshot root marks a FLAT diffusers tree
-    // (stabilityai/stable-diffusion-xl-base-1.0, Kwai-Kolors/Kolors-diffusers). It must resolve
-    // unchanged, never descend into a `bf16/` subdir — even if a stray tier dir sits alongside it.
+fn flat_diffusers_snapshot_is_not_treated_as_a_tiered_turnkey() {
+    // Backward-compat guard for sc-10613: `unet/` at the snapshot root marks a FLAT diffusers tree.
+    // It must resolve unchanged, never descend into a `bf16/` subdir — even if a stray tier dir sits
+    // alongside it. Driven off a synthetic flat repo rather than a shipped target's `base_model_repo`
+    // so it exercises the resolution branch itself, independent of which targets ship a flat repo
+    // (the stock `sdxl` target moved to its tiered turnkey in issue #1694 — see
+    // `stock_sdxl_target_points_at_installed_turnkey`).
     let _env = isolate_hf_cache(); // seed under the tempdir, never a developer's real HF cache (sc-13834)
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().join("data");
 
-    let target = crate::builtin_training_targets()
+    // A real SDXL-family target struct with its repo overridden to a flat upstream diffusers repo,
+    // so only the resolution branch under test — not the shipped repo string — drives the assertion.
+    let mut target = crate::builtin_training_targets()
         .targets
         .into_iter()
         .find(|t| t.base_model == "sdxl")
         .expect("sdxl target");
-    assert_eq!(
-        target.base_model_repo.as_deref(),
-        Some("stabilityai/stable-diffusion-xl-base-1.0"),
-        "the stock SDXL target still trains off the flat upstream diffusers repo"
-    );
+    target.base_model_repo = Some("stabilityai/stable-diffusion-xl-base-1.0".to_owned());
     let repo = target.base_model_repo.clone().expect("repo set");
 
     let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
@@ -2611,7 +2612,58 @@ fn flat_sdxl_snapshot_is_not_treated_as_a_tiered_turnkey() {
     assert_eq!(
         resolve_base_model_path(&target, &data_dir),
         snapshot.display().to_string(),
-        "a flat SDXL snapshot resolves to the snapshot root, not a bf16 tier"
+        "a flat diffusers snapshot resolves to the snapshot root, not a bf16 tier"
+    );
+}
+
+#[test]
+fn stock_sdxl_target_points_at_installed_turnkey() {
+    // Regression guard for issue #1694: the stock `sdxl` training target must name the same
+    // `SceneWorks/sdxl-base-mlx` turnkey the catalog + engine install — pointing at the flat
+    // upstream `stabilityai/stable-diffusion-xl-base-1.0` (which nothing downloads) made the
+    // pre-flight gate report the installed base as missing and block every real SDXL run.
+    // A dense `bf16/` tier resolves for training and passes the install gate; a q4-only install
+    // (the generation default) carries no dense weights and must NOT be reported training-ready.
+    let _env = isolate_hf_cache(); // seed under the tempdir, never a developer's real HF cache (sc-13834)
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    let target = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "sdxl")
+        .expect("sdxl target");
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("SceneWorks/sdxl-base-mlx"),
+        "the stock SDXL target trains off the installed SceneWorks turnkey"
+    );
+    let repo = target.base_model_repo.clone().expect("repo set");
+
+    let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
+    let revision = "def456";
+    let snapshot = repo_root.join("snapshots").join(revision);
+    // Only the q4 GENERATION tier installed so far (no dense weights).
+    std::fs::create_dir_all(snapshot.join("q4").join("unet")).expect("q4 tree");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("create refs");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("write refs/main");
+
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        snapshot.join("bf16").display().to_string(),
+        "the SDXL tiered turnkey resolves training to its dense bf16 tier"
+    );
+    assert!(
+        !training_base_model_installed(&data_dir, &target),
+        "a q4-only SDXL turnkey carries no dense weights → not training-ready"
+    );
+
+    std::fs::create_dir_all(snapshot.join("bf16").join("unet")).expect("bf16 unet");
+    std::fs::create_dir_all(snapshot.join("bf16").join("text_encoder")).expect("bf16 te");
+    std::fs::create_dir_all(snapshot.join("bf16").join("vae")).expect("bf16 vae");
+    assert!(
+        training_base_model_installed(&data_dir, &target),
+        "a bf16 tier with a unet/ backbone is training-ready"
     );
 }
 

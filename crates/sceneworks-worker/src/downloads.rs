@@ -63,6 +63,15 @@ pub(crate) const DOWNLOAD_STALL_MIN_PROGRESS: u64 = 1024 * 1024;
 /// instead of looping forever.
 const MAX_STALL_RESUMES_WITHOUT_PROGRESS: u32 = 3;
 
+/// A file whose declared size is at least this large gets a visible "Verifying…" progress line
+/// while its post-download SHA-256 runs, because hashing it can approach or exceed the stale-worker
+/// timeout — the phase that would otherwise look like a frozen "Downloading" bar (sc-13856 / GitHub
+/// #1690). Smaller files (configs/tokenizers) hash in well under one heartbeat interval, so their
+/// verify never risks the sweep and needs no separate line; the heartbeat keepalive still wraps
+/// every hash regardless, and simply resolves before its first tick for those. 256 MiB is comfortably
+/// below any single weight shard yet above the small-file noise.
+const VERIFY_PROGRESS_MIN_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Resolve the stall-watchdog window: [`DOWNLOAD_STALL_TIMEOUT`] by default,
 /// overridable via `SCENEWORKS_DOWNLOAD_STALL_TIMEOUT_SECONDS`. An explicit `0`
 /// disables the watchdog (returns `None`), matching the "no total timeout" posture of
@@ -296,14 +305,30 @@ pub(crate) async fn ensure_cached_file_verified(
             // A cached file that already matches the expected length still gets its
             // digest checked so a size-colliding tampered artifact can't be reused.
             if let Some(expected) = expected_sha256 {
-                verify_file_sha256(target, expected, label).await?;
+                verify_file_sha256(
+                    context.api,
+                    context.settings,
+                    context.job_id,
+                    target,
+                    expected,
+                    label,
+                )
+                .await?;
             }
             return Ok(target.to_path_buf());
         }
     }
     if expected_size.is_none() && target.exists() {
         if let Some(expected) = expected_sha256 {
-            verify_file_sha256(target, expected, label).await?;
+            verify_file_sha256(
+                context.api,
+                context.settings,
+                context.job_id,
+                target,
+                expected,
+                label,
+            )
+            .await?;
         }
         return Ok(target.to_path_buf());
     }
@@ -576,7 +601,26 @@ async fn download_file(
 ) -> WorkerResult<()> {
     download_file_inner(context, url, dest, expected_size, label, progress).await?;
     if let Some(expected) = expected_sha256 {
-        verify_file_sha256(dest, expected, label).await?;
+        // Surface a "Verifying…" line for a large shard whose hash can outlast the stale-worker
+        // timeout, holding the bar at the transfer's current fraction so it doesn't regress
+        // (sc-13856). Best-effort — a failed progress POST must not fail the download.
+        if expected_size.is_some_and(|size| size >= VERIFY_PROGRESS_MIN_BYTES) {
+            let _ = update_job(
+                context.api,
+                context.job_id,
+                progress.verifying_payload(label),
+            )
+            .await;
+        }
+        verify_file_sha256(
+            context.api,
+            context.settings,
+            context.job_id,
+            dest,
+            expected,
+            label,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -585,6 +629,9 @@ async fn download_file(
 /// an actionable error. A malformed/absent `expected` (not 64 hex) is treated as "no
 /// digest available" and skipped — only a real content digest is enforced.
 pub(crate) async fn verify_file_sha256(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
     path: &Path,
     expected: &str,
     label: &str,
@@ -592,7 +639,7 @@ pub(crate) async fn verify_file_sha256(
     let Some(expected) = normalize_sha256(expected) else {
         return Ok(());
     };
-    let actual = sha256_file(path).await?;
+    let actual = sha256_file(api, settings, job_id, path).await?;
     if actual != expected {
         let _ = tokio::fs::remove_file(path).await;
         return Err(WorkerError::InvalidPayload(format!(
@@ -603,31 +650,35 @@ pub(crate) async fn verify_file_sha256(
     Ok(())
 }
 
-/// Stream `path` through SHA-256 on the blocking pool (weights are multi-GB; hashing
-/// on the async runtime would stall heartbeats/cancel checks).
-async fn sha256_file(path: &Path) -> WorkerResult<String> {
+/// Stream `path` through SHA-256 on the blocking pool (weights are multi-GB; hashing on the async
+/// runtime would stall heartbeats/cancel checks) AND keep the worker heartbeating while it runs.
+/// Hashing a multi-GB weight routinely takes longer than the 90s stale-worker timeout, so without
+/// the [`heartbeat_while_blocking`] keepalive the sweep would mark the still-healthy import
+/// `interrupted` the moment the byte-streaming loop's own heartbeats stop — the exact "No heartbeat
+/// from the worker for 90s" freeze the transfer-only sc-11939 watchdog left uncovered (sc-13856 /
+/// GitHub #1690).
+async fn sha256_file(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    path: &Path,
+) -> WorkerResult<String> {
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || -> std::io::Result<String> {
+    let handle = tokio::task::spawn_blocking(move || -> WorkerResult<String> {
         use std::io::Read;
-        let mut file = std::fs::File::open(&path)?;
+        let mut file = std::fs::File::open(&path).map_err(WorkerError::Io)?;
         let mut hasher = Sha256::new();
         let mut buffer = vec![0_u8; 1024 * 1024];
         loop {
-            let read = file.read(&mut buffer)?;
+            let read = file.read(&mut buffer).map_err(WorkerError::Io)?;
             if read == 0 {
                 break;
             }
             hasher.update(&buffer[..read]);
         }
         Ok(format!("{:x}", hasher.finalize()))
-    })
-    .await
-    .map_err(|error| {
-        WorkerError::Io(std::io::Error::other(format!(
-            "sha256 task failed: {error}"
-        )))
-    })?
-    .map_err(WorkerError::Io)
+    });
+    heartbeat_while_blocking(api, settings, job_id, "sha256 verify", handle).await
 }
 
 /// Download a single file to `dest` (resumable via HTTP Range), reporting transfer
@@ -953,7 +1004,25 @@ pub(crate) async fn download_snapshot_into_cache(
         rel_target.push("blobs");
         rel_target.push(etag);
         if !link_blob(&blobs_dir.join(etag), &rel_target, &link).await {
-            tokio::fs::copy(blobs_dir.join(etag), &link).await?;
+            // Copy fallback (a Windows hardlink failure across the blob/snapshot pair): a multi-GB
+            // blob copy can outlast the stale-worker timeout just like the hash above, so keep the
+            // worker heartbeating through it rather than letting the finalize phase get swept
+            // (sc-13856 / GitHub #1690).
+            let blob = blobs_dir.join(etag);
+            let dest = link.clone();
+            let handle = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+                std::fs::copy(&blob, &dest)
+                    .map(|_| ())
+                    .map_err(WorkerError::Io)
+            });
+            heartbeat_while_blocking(
+                context.api,
+                context.settings,
+                context.job_id,
+                "blob copy",
+                handle,
+            )
+            .await?;
         }
     }
     Ok(commit)
@@ -1491,6 +1560,32 @@ impl<'a> DownloadProgress<'a> {
             self.total_bytes,
             self.started_bytes,
             self.started_at.elapsed(),
+        )
+    }
+
+    /// Progress payload for the post-download integrity check of one shard: the SAME transfer
+    /// fraction [`Self::payload`] would report (so the bar holds where the download left it, never
+    /// regressing) but with a "Verifying…" message, so a multi-GB SHA-256 that outlasts the
+    /// stale-worker timeout reads as an active phase rather than a frozen "Downloading" bar
+    /// (sc-13856 / GitHub #1690). Mirrors the fraction formula in [`download_progress_payload`].
+    fn verifying_payload(&self, label: &str) -> ProgressRequest {
+        let fraction = match self.total_bytes {
+            Some(total) if total > 0 => {
+                0.1 + (self.downloaded_bytes() as f64 / total as f64).clamp(0.0, 1.0) * 0.85
+            }
+            // No known total (or a zero-byte total): the transfer bar sits at its floor/complete
+            // marker; keep verify near the top rather than snapping it around.
+            Some(_) => 0.95,
+            None => 0.1,
+        };
+        progress_payload(
+            JobStatus::Downloading,
+            ProgressStage::Downloading,
+            fraction,
+            &format!("Verifying {label} integrity."),
+            None,
+            None,
+            None,
         )
     }
 }

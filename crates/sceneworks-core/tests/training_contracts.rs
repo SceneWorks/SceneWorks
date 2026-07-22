@@ -261,6 +261,13 @@ fn builtin_registry_exposes_sdxl_target() {
     assert_eq!(target.output_kind, TrainingOutputKind::Lora);
     assert_eq!(target.family, "sdxl");
     assert_eq!(target.base_model, "sdxl");
+    // Trains off the SceneWorks turnkey the catalog + engine install, NOT the flat upstream
+    // `stabilityai/stable-diffusion-xl-base-1.0` nothing downloads (issue #1694); the trainer
+    // reads its dense `bf16/` tier (rust-api resolve_base_model_path descends into it).
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("SceneWorks/sdxl-base-mlx")
+    );
     assert_eq!(target.kernel, "sdxl_lora");
     assert_eq!(target.defaults.rank, 16);
     assert_eq!(target.defaults.resolution, 1024);
