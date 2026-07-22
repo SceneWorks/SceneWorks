@@ -5250,6 +5250,139 @@ fn image_route_rejects_pose_on_unwired_mlx_family() {
     );
 }
 
+// sc-13883 (epic 13879 S3): a `krea_2_raw` t2i job carrying the accelerator (turbo) LoRA
+// (`role: accelerator`, sc-13882) routes to the single-phase turbo-on-Raw lane — NOT the generic
+// `Mlx` (plain 52-step true-CFG Raw) arm. The SAME Raw job WITHOUT the accelerator stays on `Mlx`
+// (the over-routing guard). Keyed on the role marker + resolvable Raw weights (`modelPath`), so it
+// locks the ROUTE decision the lane depends on.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_turbo_on_raw_routes_only_with_accelerator_lora() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    let model_path = dir.path().to_string_lossy().to_string();
+
+    // Raw t2i + the accelerator LoRA selected → the turbo-on-Raw lane.
+    let with_accel = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1,
+        "loras": [{ "id": "krea2_turbo_accel", "family": "krea_2", "role": "accelerator" }],
+        "advanced": { "modelPath": model_path.clone() }
+    }));
+    assert_eq!(
+        resolve_image_route(&with_accel, &settings),
+        Some(ImageRoute::KreaTurboOnRaw),
+        "krea_2_raw t2i + an accelerator-role LoRA must route to the turbo-on-Raw lane",
+    );
+
+    // The over-routing guard: the SAME Raw t2i WITHOUT the accelerator stays on the generic MLX lane
+    // (the plain 52-step true-CFG Raw regime), and a plain (character/style) Raw LoRA does NOT trigger
+    // the accelerator lane — only the `role: accelerator` marker does.
+    let without_accel = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1,
+        "loras": [{ "id": "my_character", "family": "krea_2" }],
+        "advanced": { "modelPath": model_path }
+    }));
+    assert_eq!(
+        resolve_image_route(&without_accel, &settings),
+        Some(ImageRoute::Mlx),
+        "a Raw job without an accelerator LoRA must stay on the plain Raw (Mlx) lane",
+    );
+}
+
+// sc-13883: the accelerator role detector recognizes `role: accelerator` (case- and separator-
+// normalized, mirroring `lora_declares_image_edit_role`) and rejects everything else — including the
+// `conditioningRole` sibling, which is a DIFFERENT axis (how a job is conditioned, not how it samples).
+#[cfg(target_os = "macos")]
+#[test]
+fn lora_declares_accelerator_role_matches_only_the_accelerator_marker() {
+    assert!(lora_declares_accelerator_role(
+        &json!({ "id": "a", "role": "accelerator" })
+    ));
+    // Normalized: mixed case + a dash separator still match.
+    assert!(lora_declares_accelerator_role(
+        &json!({ "id": "a", "role": "Accelerator" })
+    ));
+    // Not an accelerator: no role, a different role, or the conditioning-axis sibling.
+    assert!(!lora_declares_accelerator_role(&json!({ "id": "a" })));
+    assert!(!lora_declares_accelerator_role(
+        &json!({ "id": "a", "role": "style" })
+    ));
+    assert!(!lora_declares_accelerator_role(
+        &json!({ "id": "a", "conditioningRole": "image_edit" })
+    ));
+}
+
+// sc-13883 (epic 13879 S3) — the DISCRIMINATING param-selection test. The turbo-on-Raw lane resolves
+// its sampling regime against the `krea_2_turbo` descriptor (while loading Raw weights), so the whole
+// regime falls out for free: fixed-mu engine, ~8 steps, guidance off, no negative forwarded. Pinning
+// the NON-default turbo values here makes the test FAIL if the lane ever reverts to the Raw defaults
+// (52 steps / guidance 3.5 / dynamic-mu / negative forwarded). mu itself is engine-internal
+// (`TURBO_MU = 1.15` in the pinned Krea engine's `turbo_sigmas`), reached by selecting the
+// `krea_2_turbo` engine id — so asserting that engine id IS the worker-observable proof of fixed mu.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
+    let raw = mlx_model("krea_2_raw").expect("krea_2_raw engine registered");
+    let turbo = mlx_model("krea_2_turbo").expect("krea_2_turbo engine registered");
+
+    // The lane routes to the `krea_2_turbo` engine — the FIXED mu 1.15 / CFG-free `render_turbo`
+    // regime — NOT the `krea_2_raw` engine (resolution-DYNAMIC mu, true-CFG `render_base`). This engine
+    // swap IS the mu-1.15 mechanism (the pinned engine keys the schedule on the descriptor id).
+    assert_eq!(turbo.engine_id(), "krea_2_turbo");
+    assert_ne!(
+        turbo.engine_id(),
+        raw.engine_id(),
+        "turbo-on-Raw must route to the turbo engine (fixed mu), not the raw engine (dynamic mu)",
+    );
+
+    // A Raw-shaped request (a negative prompt set, NO explicit step override) resolved against the
+    // turbo descriptor yields the full turbo regime; the SAME request against the raw descriptor yields
+    // the Raw defaults — the contrast the lane relies on.
+    let req = request(json!({
+        "projectId": "p", "model": "krea_2_raw",
+        "negativePrompt": "blurry, low quality",
+        "loras": [{ "id": "krea2_turbo_accel", "family": "krea_2", "role": "accelerator" }]
+    }));
+
+    // Steps: the turbo default is ~8 (the distilled few-step student), NOT the Raw 52.
+    assert_eq!(
+        resolve_steps(&req, &turbo),
+        8,
+        "turbo-on-Raw defaults to the distilled 8 steps, not the Raw 52",
+    );
+    assert_eq!(
+        resolve_steps(&req, &raw),
+        52,
+        "control: the Raw default is 52"
+    );
+
+    // Guidance: CFG off (the turbo descriptor advertises no guidance → None), NOT the Raw 3.5.
+    assert_eq!(
+        resolve_guidance(&req, &turbo),
+        None,
+        "turbo-on-Raw forwards no guidance (CFG off)",
+    );
+    assert_eq!(
+        resolve_guidance(&req, &raw),
+        Some(3.5),
+        "control: the Raw default guidance is 3.5",
+    );
+
+    // Negative prompt: NOT forwarded under turbo (the descriptor advertises no negative), even though
+    // the request carries one; the Raw path DOES forward it.
+    assert_eq!(
+        resolve_negative_prompt(&req, &turbo),
+        None,
+        "turbo-on-Raw must not forward the negative prompt (CFG off)",
+    );
+    assert_eq!(
+        resolve_negative_prompt(&req, &raw),
+        Some("blurry, low quality".to_owned()),
+        "control: the Raw path forwards the user's negative prompt",
+    );
+}
+
 // sc-8828 (F-026): `resolve_candle_image_route` is the extracted candle dispatch decision — the
 // `else if settings.backend_candle_enabled && <predicate>` ladder pulled out of `run_image_generate_job`
 // into a table (the candle sibling of `resolve_image_route`/`ImageRoute`). Locks the flag gate + the
