@@ -4984,6 +4984,61 @@ fn tier_to_quant(tier: &str) -> (Option<Quant>, Option<i64>) {
     }
 }
 
+/// sc-13960 — the evict-then-reclaim gate driver the bespoke (non-cache-evicting) candle image lanes
+/// (`qwen_edit_candle` / `krea_control_candle`) share. Runs the lane's PURE `gate(budget)` against a
+/// **two-pass** budget and returns the plan to act on plus the budget it was resolved against:
+///
+///  1. **Raw pass.** Gate against raw live free VRAM (no reclaim). Correct as-is: a resident txt2img
+///     generator stays live and co-resident with the bespoke load, so its cudarc pool pages are NOT
+///     free — crediting them would over-admit an OOM (sc-13588's documented reason these lanes budget
+///     raw). If nothing is reclaimable (cold pool) — or the plan the raw budget yields already stands
+///     after folding the pool — return it here, and **the warm txt2img generator cache is preserved**
+///     (the deliberate tradeoff: we do NOT evict on every render, only when it changes the outcome).
+///  2. **Reclaim pass.** Otherwise gate again against `free + reclaimable_pool` and, when that yields a
+///     BETTER plan (`reclaim_improves` — the budget only ever grows, so a changed plan is always a
+///     higher residency / an admit-instead-of-reject), EVICT the single-slot generator cache so the
+///     resident generator's pages become genuinely free, making the reclaim credit honest, then act on
+///     the reclaimed plan. This is the missing half of sc-11023 for the bespoke lanes: a second
+///     edit/control render in the same worker no longer sees the first render's dropped-but-pooled
+///     pages as unavailable.
+///
+/// `reclaim_improves(&raw, &reclaimed)` returns whether the reclaimed plan is worth an evict — `false`
+/// when it is the same action as raw (including two rejects that differ only in their reported
+/// free-VRAM number, which must NOT trigger a pointless evict). Mirrors the candle video comfyui lane's
+/// `generator_cache::with_uncached_generator` precedent (evict, then reclaim) — see that function and
+/// `video_jobs::candle_video_vram_budget`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn gate_with_evict_reclaim<D>(
+    gpu_id: &str,
+    raw_budget: Option<crate::vram_gate::VramBudget>,
+    gate: impl Fn(Option<crate::vram_gate::VramBudget>) -> D,
+    reclaim_improves: impl Fn(&D, &D) -> bool,
+) -> WorkerResult<(D, Option<crate::vram_gate::VramBudget>)> {
+    let raw = gate(raw_budget);
+    let reclaimable = crate::vram_gate::reclaimable_pool_gb(gpu_id);
+    // Cold pool: nothing this process pooled to reclaim, hence nothing resident to evict — gate exactly
+    // as the pre-sc-13960 lanes did.
+    if reclaimable <= 0.0 {
+        return Ok((raw, raw_budget));
+    }
+    let reclaimed_budget =
+        raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable));
+    let reclaimed = gate(reclaimed_budget);
+    if !reclaim_improves(&raw, &reclaimed) {
+        // Reclaim would not change the plan — keep the warm txt2img cache rather than evict for nothing.
+        return Ok((raw, raw_budget));
+    }
+    let evicted = crate::generator_cache::evict_cached_generator().await?;
+    tracing::info!(
+        gpu_id,
+        evicted,
+        reclaimable_gb = reclaimable,
+        "candle bespoke-lane VRAM gate: evicted the resident generator to reclaim its cudarc pool so \
+         this render admits at a higher residency (sc-13960)"
+    );
+    Ok((reclaimed, reclaimed_budget))
+}
+
 /// Windows/CUDA candle execution path (sc-3675 SDXL, generalized in sc-5096). The macOS dispatch is
 /// MLX-bound; candle is a narrow **txt2img-only** lane, so this is a trimmed sibling of
 /// [`generate_stream`] that drives the SAME neutral streaming harness (`start_cached_gen_stream` →

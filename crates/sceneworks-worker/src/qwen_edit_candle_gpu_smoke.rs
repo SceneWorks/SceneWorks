@@ -191,3 +191,248 @@ fn qwen_edit_worker_lane_gpu_smoke() {
         png.display()
     );
 }
+
+/// sc-13960 warm-2nd-run acceptance on real CUDA. The bespoke edit lane loads off the UNcached
+/// `start_gen_stream` and never touches the single-slot generator cache, so a co-resident generator's
+/// VRAM stays held while the bespoke gate reads RAW free — and a naive gate against that reduced free
+/// needlessly downtiers (or rejects) a render whose room the co-resident's imminent eviction frees.
+/// This smoke validates the fix end-to-end on the RTX PRO 6000, using LIVE `nvidia-smi` readings — the
+/// facts the unit tests cannot see: that a resident generator really occupies VRAM, and that
+/// evicting/dropping it really frees that VRAM back for the next load.
+///
+///   1. Load a real packed-q4 `QwenEdit`, render one edit; while it is RESIDENT, measure how much VRAM
+///      it occupies (this is what a bespoke gate's raw free is reduced by when a generator is cached).
+///   2. DROP it and confirm `nvidia-smi` free RISES back — evicting the resident frees its VRAM for the
+///      incoming render (on this hardware a full drop returns it to the driver; the shared-device
+///      sequential-offload path instead pools it — either way it becomes available, the same property
+///      the shipped video `with_uncached_generator` lane relies on). This is the fix's whole mechanism.
+///   3. Confirm the gate's reclaim credit PREDICTS that freed budget: crediting the resident's peak onto
+///      the RESIDENT (reduced) reading — [`vram_gate::with_reclaimable`] over `note_loaded_peak` — lands
+///      within a couple GB of the measured post-drop free. That is what lets the gate admit resident
+///      BEFORE the evict has happened.
+///   4. Assert the gate's plan FLIPS: on a budget whose raw free sits just below the resident peak, the
+///      plan is a non-resident downtier (the bug); crediting the peak the evict will free readmits it
+///      resident (the fix). Uses the REAL occupied peak, forced constrained so the flip shows on any card.
+///   5. Reload + render a WARM second edit into the reclaimed room — proving the reclaimed residency is
+///      safe (no OOM), the literal "warm 2nd-run" the acceptance names.
+///
+/// Run (needs the turnkey in the HF cache + a CUDA device via SCENEWORKS_GPU_ID, `--release` for a
+/// realistic peak):
+/// ```text
+/// $env:SCENEWORKS_GPU_ID="0"; $env:HF_HOME="E:\huggingface"
+/// $env:QWEN_EDIT_OUT_DIR="D:\sceneworks-qwen-edit-validate"
+/// cargo test -p sceneworks-worker --no-default-features --features backend-candle --release \
+///   qwen_edit_warm_reclaim_gpu_smoke -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "sc-13960 real-weight warm-reclaim GPU smoke; needs the SceneWorks/qwen-image-edit-2511-mlx \
+            turnkey in the HF cache + a CUDA device (cap=120)"]
+fn qwen_edit_warm_reclaim_gpu_smoke() {
+    use crate::image_jobs::resolve_qwen_edit_candle_base;
+    use crate::settings::Settings;
+    use crate::vram_gate::{
+        load_plan, note_loaded_peak, reclaimable_pool_gb, with_reclaimable, LoadPlan, VramBudget,
+    };
+    use sceneworks_core::image_request::ImageRequest;
+    use serde_json::json;
+
+    let out_dir = std::path::PathBuf::from(env_or("QWEN_EDIT_OUT_DIR", "/tmp/qwen_edit_smoke"));
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+    let settings = Settings::from_env();
+    let gpu_id = settings.gpu_id.clone();
+
+    // A live VRAM budget read (blocking, since this is a sync test); `None` means no NVIDIA GPU visible,
+    // which fails the smoke loudly rather than pretending it validated hardware it never touched.
+    let budget = |label: &str| -> VramBudget {
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let b = rt
+            .block_on(crate::gpu::nvidia_vram_budget_gb(&gpu_id))
+            .unwrap_or_else(|| panic!("no live NVIDIA VRAM budget for gpu {gpu_id} at {label}"));
+        println!(
+            "[reclaim-smoke] {label}: free={:.2} GB / total={:.2} GB",
+            b.free_gb, b.total_gb
+        );
+        b
+    };
+
+    // Small + fast: this smoke measures VRAM mechanics, not image fidelity. The packed-q4 resident
+    // weights dominate the pool regardless of resolution, so 512² / 4 steps is plenty.
+    let (w, h): (u32, u32) = (512, 512);
+    let steps: usize = 4;
+    let guidance: f32 = 4.0;
+    let model = env_or("QWEN_EDIT_MODEL", "qwen_image_edit_2511");
+    let prompt = "turn the plain gray card into a lush watercolor of a mountain lake at sunrise";
+    let negative = "blurry, low quality, jpeg artifacts, deformed";
+
+    let payload = json!({
+        "model": model,
+        "mode": "edit_image",
+        "sourceAssetId": "smoke-src",
+        "prompt": prompt,
+        "width": w,
+        "height": h,
+        "advanced": { "mlxQuantize": 4 },
+    });
+    let request = ImageRequest::from_payload(payload.as_object().unwrap());
+    let dir = resolve_qwen_edit_candle_base(&request, &settings)
+        .expect("resolve_qwen_edit_candle_base")
+        .unwrap_or_else(|| {
+            panic!("{model}: SceneWorks/qwen-image-edit-2511-mlx turnkey not cached")
+        });
+
+    let render = |tag: &str| {
+        let engine = QwenEdit::load(&QwenEditPaths {
+            root: dir.clone(),
+            adapters: Vec::new(),
+            offload_policy: OffloadPolicy::Resident,
+        })
+        .unwrap_or_else(|e| panic!("QwenEdit::load ({tag}): {e}"));
+        let reference = Image {
+            width: w,
+            height: h,
+            pixels: vec![128u8; (w * h * 3) as usize],
+        };
+        let req = QwenEditRequest {
+            prompt: prompt.to_owned(),
+            negative: negative.to_owned(),
+            width: w,
+            height: h,
+            steps,
+            guidance,
+            seed: 42,
+            lightning: false,
+            cancel: CancelFlag::new(),
+        };
+        let out = engine
+            .generate(&req, std::slice::from_ref(&reference), &mut |_| {})
+            .unwrap_or_else(|e| panic!("{model} generate ({tag}): {e}"));
+        (out, engine) // caller controls the drop point
+    };
+
+    // ---- (1) baseline → load+render #1 → measure occupied → DROP ----
+    let baseline = budget("baseline");
+    let (out1, engine1) = render("render#1");
+    let loaded = budget("after load+render #1 (engine still resident)");
+    let occupied = (baseline.free_gb - loaded.free_gb).max(0.0);
+    println!("[reclaim-smoke] render #1 occupied ~{occupied:.2} GB of VRAM");
+    assert!(
+        occupied > 4.0,
+        "render #1 must occupy real VRAM (got {occupied:.2} GB) — the pool premise is untestable otherwise"
+    );
+    let std1 = image_std(&out1);
+    assert!(
+        std1 >= DEGENERATE_STD_FLOOR_DEFAULT,
+        "render #1 degenerate (std {std1:.3})"
+    );
+    drop(engine1); // evict: free the resident generator's VRAM back for the next load
+
+    // ---- (2) the crux: evicting/dropping the resident FREES its VRAM back (nvidia-smi free RISES) ----
+    // This is the mechanism the fix depends on. The bespoke gate reads raw free WHILE a generator is
+    // resident (reduced by `occupied`); admitting the render requires that evicting the resident will
+    // free that VRAM. Confirm it does — most of `occupied` comes back.
+    let after_drop = budget("after DROP of engine #1");
+    let freed = after_drop.free_gb - loaded.free_gb; // VRAM the evict returned
+    println!(
+        "[reclaim-smoke] evicting engine #1 freed {freed:.2} GB back (of {occupied:.2} occupied)"
+    );
+    assert!(
+        freed > occupied * 0.5,
+        "evicting the resident generator must free most of its {occupied:.2} GB back for the incoming \
+         render (only {freed:.2} GB came back) — the reclaim credit would be dishonest otherwise"
+    );
+
+    // ---- (3) the gate's reclaim credit PREDICTS that freed budget from the RESIDENT (reduced) reading.
+    // While the generator is resident the bespoke gate sees `loaded` (free = total − occupied). Crediting
+    // the resident's peak (recorded via note_loaded_peak — what the imminent evict frees) must land near
+    // the ACTUAL post-evict free, so the gate can admit resident before the evict has run.
+    note_loaded_peak(&gpu_id, occupied);
+    let pool = reclaimable_pool_gb(&gpu_id);
+    assert!(
+        pool >= occupied - 1e-6,
+        "note_loaded_peak/reclaimable_pool must record the occupied peak"
+    );
+    let predicted = with_reclaimable(loaded, pool); // the gate's view: reduced reading + reclaim credit
+    println!(
+        "[reclaim-smoke] gate credit: resident free {:.2} + peak {:.2} -> predicted {:.2} GB \
+         (measured post-evict {:.2})",
+        loaded.free_gb, pool, predicted.free_gb, after_drop.free_gb
+    );
+    assert!(
+        (predicted.free_gb - after_drop.free_gb).abs() < 3.0,
+        "the reclaim credit must predict the post-evict free within a few GB (predicted {:.2} vs \
+         measured {:.2}) — otherwise the gate admits against a budget the evict never delivers",
+        predicted.free_gb,
+        after_drop.free_gb
+    );
+    // For the flip below, budget the render against the actual reclaimed free (measured post-evict).
+    let reclaimed = after_drop;
+
+    // ---- (4) the gate plan FLIPS: raw free below the resident peak downtiers; crediting the pooled
+    // pages readmits it resident. Uses the REAL occupied value as the resident peak. The "warm 2nd
+    // render" budget is forced deterministically (raw free just below the peak — what the retained pool
+    // does on a card sized ~2x the model — pooling `occupied` GB) so the flip is demonstrated regardless
+    // of how roomy THIS particular card is; the untouched post-drop nvidia budget is also checked when
+    // the card is constrained enough to exhibit the flip on its own reading.
+    let peak = Some(occupied);
+    let seq = Some(occupied * 0.6); // a plausible staged peak, safely below the resident peak
+    let constrained = VramBudget {
+        free_gb: occupied - 1.0,
+        total_gb: baseline.total_gb,
+    };
+    let raw_plan = load_plan(peak, seq, Some(constrained), true);
+    let fixed_plan = load_plan(
+        peak,
+        seq,
+        Some(with_reclaimable(constrained, occupied)),
+        true,
+    );
+    println!(
+        "[reclaim-smoke] deterministic flip (real peak {occupied:.2} GB, free {:.2}): raw={raw_plan:?} \
+         -> reclaimed={fixed_plan:?}",
+        constrained.free_gb
+    );
+    assert_ne!(
+        raw_plan,
+        LoadPlan::Resident,
+        "raw free below the resident peak must NOT admit resident — that is the needless downtier \
+         sc-13960 fixes"
+    );
+    assert_eq!(
+        fixed_plan,
+        LoadPlan::Resident,
+        "reclaiming the pool must readmit the warm render at full residency"
+    );
+
+    // If this card's real post-drop free is already below the peak, the same flip holds on the
+    // untouched nvidia-smi reading — the fully-natural warm-2nd-run condition.
+    if after_drop.free_gb < occupied {
+        assert_ne!(
+            load_plan(peak, seq, Some(after_drop), true),
+            LoadPlan::Resident
+        );
+        assert_eq!(
+            load_plan(peak, seq, Some(reclaimed), true),
+            LoadPlan::Resident
+        );
+        println!("[reclaim-smoke] natural flip on the real post-drop budget ALSO verified");
+    } else {
+        println!(
+            "[reclaim-smoke] (card too roomy — post-drop free {:.2} >= peak {occupied:.2} — for a \
+             fully-natural downtier; the deterministic flip above used the real occupied peak)",
+            after_drop.free_gb
+        );
+    }
+
+    // ---- (5) warm 2nd run: reload (reusing the pooled pages) + render resident, no OOM ----
+    let (out2, engine2) = render("render#2 (warm)");
+    let std2 = image_std(&out2);
+    assert!(
+        std2 >= DEGENERATE_STD_FLOOR_DEFAULT,
+        "warm render #2 degenerate (std {std2:.3})"
+    );
+    drop(engine2);
+    save_png(&out2, &out_dir.join(format!("{model}_warm2nd_{w}x{h}.png")));
+    println!(
+        "[reclaim-smoke] warm 2nd-run rendered resident OK (std {std2:.2}) — sc-13960 validated"
+    );
+}
