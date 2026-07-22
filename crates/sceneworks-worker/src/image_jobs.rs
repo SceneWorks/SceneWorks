@@ -78,7 +78,9 @@ use runtime_macos::providers::instantid::{
 // the exact type `InstantId::generate` consumes.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use runtime_cuda::providers::instantid::{
-    BodyPoint, InstantId, InstantIdPaths, InstantIdRequest, FACE_RESTORE_PROMPT,
+    BodyPoint, InstantId, InstantIdPaths, InstantIdRequest, SdxlComponents,
+    COMPONENT_TOKENIZER_CLIP_BIGG, COMPONENT_TOKENIZER_CLIP_L, COMPONENT_VAE_FP16_FIX,
+    FACE_RESTORE_PROMPT,
 };
 // SDXL IP-Adapter-Plus reference provider (sc-5488, epic 5480) — the candle (Windows/CUDA) reference-
 // conditioning sibling of the InstantID lane, living in `candle-gen-sdxl` (it composes that crate's

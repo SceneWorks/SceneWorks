@@ -855,9 +855,24 @@ async fn generate_instantid_stream(
     // Resolved before the blocking closure (a missing one fails fast) and moved in. `InstantIdPaths`
     // carries these fields ONLY on the candle build — the macOS MLX InstantID lane is self-contained — so
     // both the resolve and the struct fields are candle-gated.
+    // sc-13739: the candle `InstantIdPaths` no longer takes the three SDXL components as flat fields —
+    // it takes an `SdxlComponents` built from a `LoadSpec` (the same load-time gate the SDXL engine
+    // runs). Resolve the three from the manifest coRequisites, stage them under their component ids, and
+    // build the gated `SdxlComponents` here; a missing/misconfigured one fails the job before the load.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let (tokenizer_clip_l, tokenizer_clip_bigg, vae_fp16_fix) =
-        resolve_sdxl_components(&request.model_manifest_entry, settings)?;
+    let sdxl = {
+        let (tokenizer_clip_l, tokenizer_clip_bigg, vae_fp16_fix) =
+            resolve_sdxl_components(&request.model_manifest_entry, settings)?;
+        SdxlComponents::from_spec(
+            &gen_core::LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::new()))
+                .with_component(COMPONENT_TOKENIZER_CLIP_L, tokenizer_clip_l)
+                .with_component(COMPONENT_TOKENIZER_CLIP_BIGG, tokenizer_clip_bigg)
+                .with_component(COMPONENT_VAE_FP16_FIX, vae_fp16_fix),
+        )
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("InstantID SDXL components: {error}"))
+        })?
+    };
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "instantid",
@@ -872,13 +887,9 @@ async fn generate_instantid_stream(
                 // pin now 19d5522, candle pin c98609f). Populated for BOTH backends — superseding the
                 // earlier candle-only `Vec::new()` stopgap from #730.
                 adapters,
-                // The three caller-staged SDXL components (candle only — see above).
+                // The caller-staged SDXL components as an `SdxlComponents` (candle only — see above).
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-                tokenizer_clip_l,
-                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-                tokenizer_clip_bigg,
-                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-                vae_fp16_fix,
+                sdxl,
             };
             let model = InstantId::load(&paths)
                 .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;
