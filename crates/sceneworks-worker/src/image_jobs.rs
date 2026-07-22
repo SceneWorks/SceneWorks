@@ -458,6 +458,23 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::KreaMultiPhase => {
+                // Krea 2 Raw t2i + an explicit `advanced.phases` list (epic 13879 S4, sc-13884) → the
+                // multi-phase denoise driver: ONE Raw trajectory / global sigma schedule, per-phase
+                // guidance (CFG on/off) + per-phase toggling of the job's load-time LoRA stack (by
+                // index). Reference/edit/pose/PiD shapes are rejected loudly before the load (renders
+                // from pure noise). Takes precedence over the S3 turbo-on-Raw regime above.
+                generate_krea_multiphase_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::InstantId => {
                 // InstantID identity-preserving character image (sc-3345): single identity or
                 // grouped angle/pose sets, on RealVisXL + IdentityNet + the native face stack.
@@ -1696,6 +1713,11 @@ include!("image_jobs/krea_edit.rs");
 // Krea 2 single-phase turbo-on-Raw routing (epic 13879 S3, sc-13883): the accelerator LoRA on a
 // `krea_2_raw` t2i job → the distilled Turbo sampling regime (fixed mu 1.15 / ~8 steps / CFG-off).
 include!("image_jobs/krea_turbo_raw.rs");
+#[cfg(target_os = "macos")]
+// Krea 2 multi-phase denoise routing (epic 13879 S4, sc-13884): a `krea_2_raw` t2i job carrying an
+// explicit `advanced.phases` list → the multi-phase driver (one Raw trajectory / global schedule,
+// per-phase guidance + per-phase toggling of the job's load-time LoRA stack by index).
+include!("image_jobs/krea_multiphase.rs");
 #[cfg(target_os = "macos")]
 // Krea 2 pose-ControlNet (MLX) strict-pose routing (sc-8465, epic 8459 S5).
 include!("image_jobs/krea_control.rs");
