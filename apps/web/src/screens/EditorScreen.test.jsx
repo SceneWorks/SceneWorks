@@ -245,3 +245,118 @@ describe("EditorScreen preview playback keep-alive gating (sc-11961)", () => {
     expect(pause).toHaveBeenCalled();
   });
 });
+
+// sc-13589 (F-008): under keep-alive the editor stays mounted and its window keydown
+// listener stays subscribed while another view is foregrounded. These tests assert the
+// timeline shortcuts fire only when the screen is the ACTIVE view — a backgrounded editor
+// must never mutate the hidden timeline in response to keys meant for the visible screen.
+// Mutation guard: with the screenActive gate removed, the "HIDDEN" case would run
+// removeSelectedItem -> commit -> setActiveTimeline and the assertion below goes red.
+describe("EditorScreen keep-alive keydown gating (sc-13589)", () => {
+  function makeVideoAsset() {
+    return {
+      id: "asset_v1",
+      type: "video",
+      displayName: "Clip A",
+      url: "/api/v1/files/v1.mp4",
+      file: { mimeType: "video/mp4", duration: 4 },
+    };
+  }
+
+  function makeTimelineWithVideoItem() {
+    return {
+      id: "tl_1",
+      name: "Main",
+      aspectRatio: "16:9",
+      fps: 30,
+      width: 1280,
+      height: 720,
+      tracks: [
+        {
+          id: "track_main",
+          name: "Main",
+          items: [
+            {
+              id: "item_1",
+              trackId: "track_main",
+              assetId: "asset_v1",
+              type: "video",
+              displayName: "Clip A",
+              sourceIn: 0,
+              sourceOut: 4,
+              timelineStart: 0,
+              timelineEnd: 4,
+              speed: 1,
+              fit: "fit",
+              volume: 1,
+              versionAssetIds: ["asset_v1"],
+              currentVersionAssetId: "asset_v1",
+              versionHistory: [{ assetId: "asset_v1", createdAt: null, source: "original", jobId: null, note: null }],
+              transitionIn: { id: "t_in", type: "cut", duration: 0 },
+              transitionOut: { id: "t_out", type: "cut", duration: 0 },
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  function renderEditor(screenActive) {
+    const setActiveTimeline = vi.fn();
+    const timeline = makeTimelineWithVideoItem();
+    const value = {
+      activeProject: { id: "proj_1", name: "Proj" },
+      activeTimeline: timeline,
+      mediaAssets: [makeVideoAsset()],
+      timelines: [timeline],
+      selectedTimelineId: "tl_1",
+      setSelectedTimelineId: vi.fn(),
+      setActiveTimeline,
+      setPreviewAsset: vi.fn(),
+      sendAssetToImage: vi.fn(),
+      sendAssetToVideo: vi.fn(),
+      createTimeline: vi.fn(),
+      extractTimelineFrame: vi.fn(),
+      exportTimeline: vi.fn(),
+      queueTimelineVideoJob: vi.fn(),
+      saveTimeline: vi.fn(),
+      isActiveTimelineDirty: () => false,
+    };
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <AppContext.Provider value={value}>
+          <ScreenActiveContext.Provider value={screenActive}>
+            <EditorScreen />
+          </ScreenActiveContext.Provider>
+        </AppContext.Provider>,
+      );
+    });
+    return { setActiveTimeline };
+  }
+
+  // Clicking the clip sets selectedItemId; Delete then routes through removeSelectedItem.
+  function selectClipAndPressDelete() {
+    const clip = container.querySelector(".ve-clip");
+    act(() => clip.dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    act(() => window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Delete", bubbles: true })));
+  }
+
+  it("deletes the selected clip on Delete while it is the ACTIVE view", () => {
+    const { setActiveTimeline } = renderEditor(true);
+    selectClipAndPressDelete();
+
+    // removeSelectedItem -> commit -> setActiveTimeline with the selected clip filtered out.
+    expect(setActiveTimeline).toHaveBeenCalledTimes(1);
+    expect(setActiveTimeline.mock.calls[0][0].tracks[0].items).toHaveLength(0);
+  });
+
+  it("ignores Delete while the editor is HIDDEN under keep-alive", () => {
+    const { setActiveTimeline } = renderEditor(false);
+    selectClipAndPressDelete();
+
+    // The backgrounded editor's keydown handler early-returns, so the hidden timeline is
+    // never mutated by a Delete meant for the visible screen.
+    expect(setActiveTimeline).not.toHaveBeenCalled();
+  });
+});

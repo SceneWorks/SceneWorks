@@ -13,6 +13,7 @@ vi.mock("react-konva", async () => {
 });
 
 import { AppContext } from "../context/AppContext.js";
+import { ScreenActiveContext } from "../context/ScreenActiveContext.js";
 import {
   ImageEditor,
   cropRatioForKey,
@@ -207,6 +208,41 @@ describe("ImageEditor scaffold", () => {
     await press("?", input);
     expect(container.querySelector(".image-editor-shortcuts")).toBeNull();
     input.remove();
+  });
+
+  // sc-13589 (F-008): under keep-alive the editor stays mounted and its window keydown
+  // listener stays subscribed while another view is foregrounded. The `?` reference toggle
+  // is the jsdom-reachable shortcut (the tool hotkeys need the Konva stage), so it stands in
+  // for the whole handler: it must fire only when the screen is the active view. Mutation
+  // guard: drop the screenActive gate and the backgrounded assertion below goes red.
+  async function renderWithScreenActive(context, active) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ScreenActiveContext.Provider value={active}>
+            <ImageEditor />
+          </ScreenActiveContext.Provider>
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  it("gates the '?' shortcut on screen activity under keep-alive (sc-13589)", async () => {
+    const press = async () =>
+      act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "?", bubbles: true })));
+
+    // Backgrounded: the window listener is still subscribed, but the handler early-returns,
+    // so `?` does NOT open the reference on the hidden editor.
+    await renderWithScreenActive(baseContext(), false);
+    await press();
+    expect(container.querySelector(".image-editor-shortcuts")).toBeNull();
+
+    // Flip to the active view (the real keep-alive transition): the same key now opens the
+    // reference, proving the gate — not a broken handler — suppressed it while hidden.
+    await renderWithScreenActive(baseContext(), true);
+    await press();
+    expect(container.querySelector(".image-editor-shortcuts")).not.toBeNull();
   });
 
   // sc-8730: the editorLaunch channel routes an asset into the editor canvas from

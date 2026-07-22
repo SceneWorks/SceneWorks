@@ -5,6 +5,7 @@ import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "reac
 import { apiFetch } from "../api.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
+import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
@@ -681,6 +682,10 @@ export function ImageEditor() {
     theme = "light",
     changeTheme,
   } = useAppContext();
+  // Selective keep-alive (sc-11959): this editor stays mounted (merely hidden) once visited,
+  // so it must consult this flag to avoid acting while it is the backgrounded view — the
+  // window keydown handler below is gated on it (sc-13589).
+  const screenActive = useScreenActive();
   // Mac UI gating (sc-3486): the upscale tool itself runs in-process on Rust (Real-ESRGAN,
   // sc-3489), so it is available on a gated Mac — this block is a defensive guard that stays
   // null. The second engine (AuraSR) is dropped on Mac (sc-3668) and gated per-engine below.
@@ -1317,6 +1322,12 @@ export function ImageEditor() {
   // zoom bar. `?` toggles the quick reference and works before an image is open.
   const onEditorKeyDownRef = useRef(null);
   onEditorKeyDownRef.current = (event) => {
+    // Under selective keep-alive (sc-11959) this editor stays mounted and this window
+    // listener stays subscribed even when another view is foregrounded, so gate every
+    // shortcut on the active flag — a backgrounded editor must never undo/redo, delete a
+    // box, switch tools, or toggle the reference in response to keys meant for the visible
+    // screen (sc-13589). The handler is reassigned each render, so `screenActive` is fresh.
+    if (!screenActive) return;
     const tag = event.target?.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || event.target?.isContentEditable) return;
 
