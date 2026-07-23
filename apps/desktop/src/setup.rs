@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use sceneworks_core::session_log::{LogEntry, LogQuery, SessionLog};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_shell::process::{CommandChild, CommandEvent};
+use tauri_plugin_shell::process::{Command, CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 /// Process-global in-app session log (sc-3451). Every captured sidecar line
@@ -1078,36 +1078,70 @@ pub fn restart_gpu_worker(app: &AppHandle) {
     let _ = app;
 }
 
-/// Spawn and supervise the Apple-Silicon MLX GPU worker (sc-3289): the same
-/// `sceneworks-api` sidecar binary re-launched in worker mode
-/// (`SCENEWORKS_WORKER_ONLY=1`) with `SCENEWORKS_GPU_ID=mlx`, so MLX-eligible
-/// image/video jobs run on the in-process Rust mlx-gen engine instead of the
-/// Python torch/MPS path. A crash-isolated sibling of the API process; restarted
-/// with exponential backoff while the app is open. Output goes to mlx-worker.log.
+/// Per-spawn context handed to a worker's `env_builder` (sc-13615). Bundles the
+/// values the skeleton computes each iteration that the env block needs: the app
+/// handle (for the bundled-resource / credential lookups), the CURRENT API url
+/// (re-read every attempt, never captured — sc-13605), the per-launch worker id,
+/// and the shared HF cache root. Passed by value (all borrows) so the closure
+/// bound stays a simple `for<'a> Fn(Command, WorkerSpawnCtx<'a>)`.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+struct WorkerSpawnCtx<'a> {
+    app: &'a AppHandle,
+    api_url: &'a str,
+    worker_id: &'a str,
+    hf_home: &'a str,
+}
+
+/// Shared spawn-and-supervise skeleton for the native GPU worker (F-053,
+/// sc-13615). `supervise_mlx_worker` (macOS/MLX) and `supervise_candle_worker`
+/// (Windows/candle) were ~230-line near-verbatim twins; the only real
+/// differences are the child's env block, which `Managed` slot + pidfile field
+/// holds the child, the log/id naming, and how a stale child is killed. This owns
+/// everything else so a backoff/restart/logging change (or the sc-13605
+/// lease/seam/recheck fix) lands once, in one place.
 ///
-/// Without this worker registered, `jobs_store::should_defer_image_to_mlx_worker`
-/// has nowhere to defer and the Python `mps` worker is the fallback — which is
-/// why image/video jobs reported MPS before this landed.
-#[cfg(target_os = "macos")]
-fn supervise_mlx_worker(app: AppHandle) {
+/// Behavior is identical to the old pair: the sole-supervisor lease, the
+/// per-iteration `resolve_supervisor_action` port re-read, the post-store
+/// correlated-death recheck + KillAndRetry throttle, the pipe pump, and the
+/// exponential backoff are unchanged — only the differing axes are parameterized:
+/// * `label` — names the log file (`<label>-worker.log`) and every log line.
+/// * `id_prefix` — the jobs.db worker-id prefix (`<id_prefix>-<pid>-<millis>`).
+/// * `slot` — the `Managed` mutex that holds this worker's child.
+/// * `record_pid` — persists the child PID to the pidfile.
+/// * `kill_stale` — how the post-store recheck kills a stale child: MLX kills the
+///   single child directly (`CommandChild::kill`); candle TREE-kills by PID
+///   (`kill_pid` → `taskkill /T /F`) because it is the `auto` multi-GPU
+///   supervisor whose per-GPU children would otherwise be orphaned. Collapsing
+///   these two would regress the orphan-process class this file guards.
+/// * `env_builder` — builds the child's env block from the located sidecar.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn supervise_worker(
+    app: AppHandle,
+    label: &'static str,
+    id_prefix: &'static str,
+    slot: fn(&Managed) -> &Mutex<Option<CommandChild>>,
+    record_pid: fn(&AppHandle, Option<u32>),
+    kill_stale: fn(CommandChild),
+    env_builder: impl Fn(Command, WorkerSpawnCtx) -> Command + Send + 'static,
+) {
     std::thread::spawn(move || {
-        // sc-13605: exactly one supervisor owns the single mlx_worker slot. If
-        // one is already live (e.g. an API-crash → Retry re-ran gate_window),
-        // don't stack a second — return, letting the live supervisor keep the
-        // slot and re-read the current port. The lease clears the liveness flag
-        // on every exit path below (return / break-out / panic).
+        // sc-13605: exactly one supervisor owns the single worker slot. If one is
+        // already live (e.g. an API-crash → Retry re-ran gate_window), don't stack
+        // a second — return, letting the live supervisor keep the slot and re-read
+        // the current port. The lease clears the liveness flag on every exit path
+        // below (return / break-out / panic).
         let Some(_lease) = SupervisorLease::acquire(&app) else {
             return;
         };
-        let log_path = logs_dir().join("mlx-worker.log");
+        let log_path = logs_dir().join(format!("{label}-worker.log"));
         // Match the API sidecar's HF cache root so the engine reads the same
         // downloaded weights the catalog tracks.
         let hf_home = huggingface_home().to_string_lossy().to_string();
         // Unique per launch (distinct prefix from the Python `worker-local-*` and
-        // the in-process `rust-utility-worker`) so the three workers never collide
-        // in the shared jobs.db.
+        // the in-process `rust-utility-worker`) so the workers never collide in the
+        // shared jobs.db.
         let worker_id = format!(
-            "mlx-worker-local-{}-{}",
+            "{id_prefix}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1134,18 +1168,169 @@ fn supervise_mlx_worker(app: AppHandle) {
                 Err(error) => {
                     append_log(
                         &log_path,
-                        &format!("[desktop] mlx worker: locate sidecar failed: {error}\n"),
+                        &format!("[desktop] {label} worker: locate sidecar failed: {error}\n"),
                     );
                     return;
                 }
             };
+            // The ONLY substantive per-worker difference: build the child's env
+            // block. Everything around it (spawn, PID record, recheck, backoff) is
+            // identical across workers.
+            let command = env_builder(
+                sidecar,
+                WorkerSpawnCtx {
+                    app: &app,
+                    api_url: &api_url,
+                    worker_id: &worker_id,
+                    hf_home: &hf_home,
+                },
+            );
+            let spawned = command.spawn();
+            let (mut events, child) = match spawned {
+                Ok(pair) => pair,
+                Err(error) => {
+                    append_log(
+                        &log_path,
+                        &format!("[desktop] {label} worker spawn failed: {error}\n"),
+                    );
+                    std::thread::sleep(Duration::from_secs(backoff));
+                    backoff = (backoff * 2).min(30);
+                    continue;
+                }
+            };
+            record_pid(&app, Some(child.pid()));
+            slot(&app.state::<Managed>())
+                .lock()
+                .expect("worker lock")
+                .replace(child);
+            // sc-13605 correlated-death guard: re-read the target AFTER storing the
+            // child. If the API port changed/cleared in the window between the read
+            // above and this store, `handle_api_exit`'s `restart_gpu_worker` kill may
+            // have run while the slot was still empty and missed this child — so the
+            // worker would sit pointed at a dead port and the supervisor would block
+            // on its (never-terminating) event stream. Kill+retry (or exit) instead.
+            let verdict = verify_spawned_target(
+                &api_url,
+                &resolve_supervisor_action(&app.state::<Managed>()),
+            );
+            if !matches!(verdict, SpawnVerdict::Keep) {
+                // Take the stale child out of the slot and DROP the guard before the
+                // kill (mirrors `restart_gpu_worker`) so the worker mutex is never
+                // held across the kill and a concurrent handle_api_exit isn't blocked.
+                // `kill_stale` preserves each worker's kill semantics (MLX direct,
+                // candle tree-kill).
+                let stale = slot(&app.state::<Managed>())
+                    .lock()
+                    .expect("worker lock")
+                    .take();
+                if let Some(child) = stale {
+                    kill_stale(child);
+                }
+                record_pid(&app, None);
+                if matches!(verdict, SpawnVerdict::KillAndExit) {
+                    return;
+                }
+                append_log(
+                    &log_path,
+                    &format!(
+                        "[desktop] {label} worker target port changed before start; respawning\n"
+                    ),
+                );
+                // sc-13605: brief defensive throttle so a pathological rapid
+                // crash-loop can't hot-spin on spawns via this recheck path, which
+                // `continue`s past the bottom-of-loop exponential backoff. Short
+                // fixed delay (the minimum backoff), NOT the exponential.
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+            let started = Instant::now();
+            loop {
+                match tauri::async_runtime::block_on(events.recv()) {
+                    Some(CommandEvent::Stdout(bytes)) | Some(CommandEvent::Stderr(bytes)) => {
+                        append_log(&log_path, &String::from_utf8_lossy(&bytes));
+                    }
+                    Some(CommandEvent::Terminated(payload)) => {
+                        append_log(
+                            &log_path,
+                            &format!(
+                                "[desktop] {label} worker terminated: code={:?} signal={:?}\n",
+                                payload.code, payload.signal
+                            ),
+                        );
+                        break;
+                    }
+                    Some(CommandEvent::Error(error)) => {
+                        append_log(
+                            &log_path,
+                            &format!("[desktop] {label} worker error: {error}\n"),
+                        );
+                        break;
+                    }
+                    None => break,
+                    _ => {}
+                }
+            }
+            let _ = slot(&app.state::<Managed>())
+                .lock()
+                .expect("worker lock")
+                .take();
+            record_pid(&app, None);
+            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            if started.elapsed() > Duration::from_secs(20) {
+                backoff = 1;
+            }
+            append_log(
+                &log_path,
+                &format!("[desktop] restarting {label} worker in {backoff}s\n"),
+            );
+            std::thread::sleep(Duration::from_secs(backoff));
+            backoff = (backoff * 2).min(30);
+        }
+    });
+}
+
+/// The `Managed` slot holding the MLX worker child (sc-13615). A named fn so it
+/// coerces to the `fn(&Managed) -> &Mutex<..>` `supervise_worker` takes with the
+/// right higher-ranked lifetime.
+#[cfg(target_os = "macos")]
+fn mlx_worker_slot(managed: &Managed) -> &Mutex<Option<CommandChild>> {
+    &managed.mlx_worker
+}
+
+/// Spawn and supervise the Apple-Silicon MLX GPU worker (sc-3289): the same
+/// `sceneworks-api` sidecar binary re-launched in worker mode
+/// (`SCENEWORKS_WORKER_ONLY=1`) with `SCENEWORKS_GPU_ID=mlx`, so MLX-eligible
+/// image/video jobs run on the in-process Rust mlx-gen engine instead of the
+/// Python torch/MPS path. A crash-isolated sibling of the API process; restarted
+/// with exponential backoff while the app is open. Output goes to mlx-worker.log.
+///
+/// Without this worker registered, `jobs_store::should_defer_image_to_mlx_worker`
+/// has nowhere to defer and the Python `mps` worker is the fallback — which is
+/// why image/video jobs reported MPS before this landed.
+#[cfg(target_os = "macos")]
+fn supervise_mlx_worker(app: AppHandle) {
+    supervise_worker(
+        app,
+        "mlx",
+        "mlx-worker-local",
+        mlx_worker_slot,
+        record_mlx_worker_pid,
+        // macOS runs a single MLX worker process — CommandChild::kill() (a plain
+        // kill here) reaps it fully. There are no auto-spawned children to orphan,
+        // so a direct kill is correct (contrast candle's tree-kill).
+        |child| {
+            let _ = child.kill();
+        },
+        |sidecar, ctx| {
             let mut command = sidecar
                 // Dispatches `main` to `run_worker()` (HTTP API never starts).
                 .env("SCENEWORKS_WORKER_ONLY", "1")
                 .env("SCENEWORKS_GPU_ID", "mlx")
-                .env("SCENEWORKS_WORKER_ID", &worker_id)
-                .env("SCENEWORKS_API_URL", &api_url)
-                .env("HF_HOME", &hf_home)
+                .env("SCENEWORKS_WORKER_ID", ctx.worker_id)
+                .env("SCENEWORKS_API_URL", ctx.api_url)
+                .env("HF_HOME", ctx.hf_home)
                 // Parent-death watchdog (run_worker() honours this): a force-quit
                 // self-terminates the worker so its multi-GB MLX model isn't
                 // orphaned to launchd.
@@ -1167,19 +1352,19 @@ fn supervise_mlx_worker(app: AppHandle) {
             }
             // The worker muxes generated video with ffmpeg; the desktop ships no
             // system ffmpeg, so point it at the bundled binary (as spawn_api does).
-            if let Some(ffmpeg) = resolve_bundled_ffmpeg(&app) {
+            if let Some(ffmpeg) = resolve_bundled_ffmpeg(ctx.app) {
                 command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
             }
             // This is the worker that advertises `pose_detect` (epic 3482, sc-3487);
             // point `ort` at the bundled CoreML onnxruntime dylib it dlopens.
-            if let Some(ort_dylib) = resolve_bundled_onnxruntime(&app) {
+            if let Some(ort_dylib) = resolve_bundled_onnxruntime(ctx.app) {
                 command = command.env("ORT_DYLIB_PATH", ort_dylib);
             }
             // This is the process that runs MLX generation; point the pmetal resolver
             // at the bundled Metal shader library so a packaged Mac (no build tree, no
             // ~/.cache/pmetal) finds it instead of failing "Failed to load the default
             // metallib" on first MLX use (sc-10349, as spawn_api does).
-            if let Some(metallib) = resolve_bundled_metallib(&app) {
+            if let Some(metallib) = resolve_bundled_metallib(ctx.app) {
                 command = command.env("PMETAL_METALLIB_PATH", metallib);
             }
             // Lazy credentials (sc-5891): instead of reading the keychain here and
@@ -1189,7 +1374,7 @@ fn supervise_mlx_worker(app: AppHandle) {
             // recorded host needs it, so nothing-recorded ⇒ no socket call ⇒ no
             // keychain touch. Credential changes still take effect on worker restart.
             {
-                let managed = app.state::<Managed>();
+                let managed = ctx.app.state::<Managed>();
                 let guard = managed.cred_ipc.lock().expect("cred_ipc lock");
                 if let Some(ipc) = guard.as_ref() {
                     command = command
@@ -1211,108 +1396,9 @@ fn supervise_mlx_worker(app: AppHandle) {
             if let Some(token) = lan_access_token() {
                 command = command.env("SCENEWORKS_ACCESS_TOKEN", token);
             }
-            let spawned = command.spawn();
-            let (mut events, child) = match spawned {
-                Ok(pair) => pair,
-                Err(error) => {
-                    append_log(
-                        &log_path,
-                        &format!("[desktop] mlx worker spawn failed: {error}\n"),
-                    );
-                    std::thread::sleep(Duration::from_secs(backoff));
-                    backoff = (backoff * 2).min(30);
-                    continue;
-                }
-            };
-            record_mlx_worker_pid(&app, Some(child.pid()));
-            app.state::<Managed>()
-                .mlx_worker
-                .lock()
-                .expect("mlx worker lock")
-                .replace(child);
-            // sc-13605 correlated-death guard: re-read the target AFTER storing the
-            // child. If the API port changed/cleared in the window between the read
-            // above and this store, `handle_api_exit`'s `restart_gpu_worker` kill may
-            // have run while the slot was still empty and missed this child — so the
-            // worker would sit pointed at a dead port and the supervisor would block
-            // on its (never-terminating) event stream. Kill+retry (or exit) instead.
-            let verdict = verify_spawned_target(
-                &api_url,
-                &resolve_supervisor_action(&app.state::<Managed>()),
-            );
-            if !matches!(verdict, SpawnVerdict::Keep) {
-                // Take the stale child out of the slot and DROP the guard before the
-                // kill (mirrors `restart_gpu_worker`) so the worker mutex is never
-                // held across the kill and a concurrent handle_api_exit isn't blocked.
-                let stale = app
-                    .state::<Managed>()
-                    .mlx_worker
-                    .lock()
-                    .expect("mlx worker lock")
-                    .take();
-                if let Some(child) = stale {
-                    let _ = child.kill();
-                }
-                record_mlx_worker_pid(&app, None);
-                if matches!(verdict, SpawnVerdict::KillAndExit) {
-                    return;
-                }
-                append_log(
-                    &log_path,
-                    "[desktop] mlx worker target port changed before start; respawning\n",
-                );
-                // sc-13605: brief defensive throttle so a pathological rapid
-                // crash-loop can't hot-spin on spawns via this recheck path, which
-                // `continue`s past the bottom-of-loop exponential backoff. Short
-                // fixed delay (the minimum backoff), NOT the exponential.
-                std::thread::sleep(Duration::from_secs(1));
-                continue;
-            }
-            let started = Instant::now();
-            loop {
-                match tauri::async_runtime::block_on(events.recv()) {
-                    Some(CommandEvent::Stdout(bytes)) | Some(CommandEvent::Stderr(bytes)) => {
-                        append_log(&log_path, &String::from_utf8_lossy(&bytes));
-                    }
-                    Some(CommandEvent::Terminated(payload)) => {
-                        append_log(
-                            &log_path,
-                            &format!(
-                                "[desktop] mlx worker terminated: code={:?} signal={:?}\n",
-                                payload.code, payload.signal
-                            ),
-                        );
-                        break;
-                    }
-                    Some(CommandEvent::Error(error)) => {
-                        append_log(&log_path, &format!("[desktop] mlx worker error: {error}\n"));
-                        break;
-                    }
-                    None => break,
-                    _ => {}
-                }
-            }
-            let _ = app
-                .state::<Managed>()
-                .mlx_worker
-                .lock()
-                .expect("mlx worker lock")
-                .take();
-            record_mlx_worker_pid(&app, None);
-            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
-                return;
-            }
-            if started.elapsed() > Duration::from_secs(20) {
-                backoff = 1;
-            }
-            append_log(
-                &log_path,
-                &format!("[desktop] restarting mlx worker in {backoff}s\n"),
-            );
-            std::thread::sleep(Duration::from_secs(backoff));
-            backoff = (backoff * 2).min(30);
-        }
-    });
+            command
+        },
+    );
 }
 
 /// Spawn and supervise the Windows candle (CUDA) GPU worker(s) (sc-5561): the same
@@ -1333,55 +1419,20 @@ fn supervise_mlx_worker(app: AppHandle) {
 /// (`resolve_bundled_cuda_dir`), so a plain desktop build never starts it.
 #[cfg(target_os = "windows")]
 fn supervise_candle_worker(app: AppHandle) {
-    std::thread::spawn(move || {
-        // sc-13605: exactly one supervisor owns the single candle_worker slot.
-        // If one is already live (e.g. an API-crash → Retry re-ran gate_window),
-        // don't stack a second — return, letting the live supervisor keep the
-        // slot and re-read the current port. The lease clears the liveness flag
-        // on every exit path below (return / break-out / panic).
-        let Some(_lease) = SupervisorLease::acquire(&app) else {
-            return;
-        };
-        let log_path = logs_dir().join("candle-worker.log");
-        // Match the API sidecar's HF cache root so the engine reads the same
-        // downloaded weights the catalog tracks.
-        let hf_home = huggingface_home().to_string_lossy().to_string();
-        // Unique per launch (distinct prefix from the Python `worker-local-*`, the
-        // macOS `mlx-worker-local-*`, and the in-process utility worker) so the
-        // workers never collide in the shared jobs.db.
-        let worker_id = format!(
-            "candle-worker-local-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_millis())
-                .unwrap_or_default()
-        );
-        let mut backoff = 1u64;
-        loop {
-            // sc-13605: re-read shutdown + the CURRENT API url every iteration
-            // (never a URL captured at spawn) through the shared
-            // `resolve_supervisor_action` seam, so after an API-crash → Retry the
-            // worker points at the NEW port. Park (not exit) while no port is
-            // published; exit only on shutdown.
-            let api_url = match resolve_supervisor_action(&app.state::<Managed>()) {
-                SupervisorAction::Exit => return,
-                SupervisorAction::WaitForPort => {
-                    std::thread::sleep(Duration::from_millis(300));
-                    continue;
-                }
-                SupervisorAction::Spawn(url) => url,
-            };
-            let sidecar = match app.shell().sidecar("sceneworks-api") {
-                Ok(command) => command,
-                Err(error) => {
-                    append_log(
-                        &log_path,
-                        &format!("[desktop] candle worker: locate sidecar failed: {error}\n"),
-                    );
-                    return;
-                }
-            };
+    supervise_worker(
+        app,
+        "candle",
+        "candle-worker-local",
+        candle_worker_slot,
+        record_candle_worker_pid,
+        // Tree-kill by PID (as `restart_gpu_worker` does): this is the candle
+        // `auto` multi-GPU supervisor, whose per-GPU children would otherwise be
+        // orphaned by a plain kill of only the supervisor. `kill_pid` runs
+        // `taskkill /T /F` to reap the whole process group. Preserving this vs the
+        // MLX direct kill is the behavioral difference this refactor must NOT
+        // collapse.
+        |child| kill_pid(child.pid()),
+        |sidecar, ctx| {
             let mut command = sidecar
                 // Dispatches `main` to `run_worker()` (HTTP API never starts).
                 .env("SCENEWORKS_WORKER_ONLY", "1")
@@ -1399,9 +1450,9 @@ fn supervise_candle_worker(app: AppHandle) {
                 // Light up the candle lane on each discovered NVIDIA GPU
                 // (gpu::with_candle_capabilities + engines::registry_capabilities).
                 .env("SCENEWORKS_BACKEND_CANDLE_ENABLED", "true")
-                .env("SCENEWORKS_WORKER_ID", &worker_id)
-                .env("SCENEWORKS_API_URL", &api_url)
-                .env("HF_HOME", &hf_home)
+                .env("SCENEWORKS_WORKER_ID", ctx.worker_id)
+                .env("SCENEWORKS_API_URL", ctx.api_url)
+                .env("HF_HOME", ctx.hf_home)
                 // Parent-death watchdog (run_worker() honours this): a force-quit
                 // self-terminates the worker so its multi-GB model + CUDA context
                 // isn't orphaned.
@@ -1417,7 +1468,7 @@ fn supervise_candle_worker(app: AppHandle) {
             // cudarc dynamic-linking `LoadLibrary`s the CUDA runtime DLLs by name;
             // prepend the bundled redist dir to this worker's PATH so they resolve
             // without a CUDA Toolkit on the machine (sc-5560).
-            if let Some(cuda_dir) = resolve_bundled_cuda_dir(&app) {
+            if let Some(cuda_dir) = resolve_bundled_cuda_dir(ctx.app) {
                 let existing = std::env::var_os("PATH").unwrap_or_default();
                 let mut paths = vec![cuda_dir.clone()];
                 paths.extend(std::env::split_paths(&existing));
@@ -1433,7 +1484,7 @@ fn supervise_candle_worker(app: AppHandle) {
                 // version-matched CUDA-12 runtime + cuDNN-9 (staged by build-sidecar.mjs);
                 // `ort_cuda::preload_cuda_dylibs` preloads them + puts the dir on the
                 // loader search path so cuDNN's lazily-loaded sub-engine DLLs resolve.
-                if let Some(ort_dylib) = resolve_bundled_onnxruntime(&app) {
+                if let Some(ort_dylib) = resolve_bundled_onnxruntime(ctx.app) {
                     let cuda = cuda_dir.to_string_lossy().to_string();
                     command = command
                         .env("ORT_DYLIB_PATH", ort_dylib)
@@ -1443,7 +1494,7 @@ fn supervise_candle_worker(app: AppHandle) {
             }
             // The worker muxes generated video with ffmpeg; point it at the bundled
             // binary when staged (else it falls back to PATH ffmpeg), as spawn_api does.
-            if let Some(ffmpeg) = resolve_bundled_ffmpeg(&app) {
+            if let Some(ffmpeg) = resolve_bundled_ffmpeg(ctx.app) {
                 command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
             }
             if let Some(token) = crate::settings::read_hf_token() {
@@ -1458,114 +1509,16 @@ fn supervise_candle_worker(app: AppHandle) {
             if let Some(token) = lan_access_token() {
                 command = command.env("SCENEWORKS_ACCESS_TOKEN", token);
             }
-            let spawned = command.spawn();
-            let (mut events, child) = match spawned {
-                Ok(pair) => pair,
-                Err(error) => {
-                    append_log(
-                        &log_path,
-                        &format!("[desktop] candle worker spawn failed: {error}\n"),
-                    );
-                    std::thread::sleep(Duration::from_secs(backoff));
-                    backoff = (backoff * 2).min(30);
-                    continue;
-                }
-            };
-            record_candle_worker_pid(&app, Some(child.pid()));
-            app.state::<Managed>()
-                .candle_worker
-                .lock()
-                .expect("candle worker lock")
-                .replace(child);
-            // sc-13605 correlated-death guard: re-read the target AFTER storing the
-            // child. If the API port changed/cleared in the window between the read
-            // above and this store, `handle_api_exit`'s `restart_gpu_worker` kill may
-            // have run while the slot was still empty and missed this child — so the
-            // worker would sit pointed at a dead port and the supervisor would block
-            // on its (never-terminating) event stream. Kill+retry (or exit) instead.
-            // Tree-kill by PID (as `restart_gpu_worker` does): this is the candle
-            // `auto` supervisor, whose per-GPU children would otherwise be orphaned.
-            let verdict = verify_spawned_target(
-                &api_url,
-                &resolve_supervisor_action(&app.state::<Managed>()),
-            );
-            if !matches!(verdict, SpawnVerdict::Keep) {
-                // Take the stale child out of the slot and DROP the guard before the
-                // (blocking) tree-kill (mirrors `restart_gpu_worker`) so the worker
-                // mutex is never held across `kill_pid` and a concurrent
-                // handle_api_exit isn't blocked on the guard.
-                let stale = app
-                    .state::<Managed>()
-                    .candle_worker
-                    .lock()
-                    .expect("candle worker lock")
-                    .take();
-                if let Some(child) = stale {
-                    kill_pid(child.pid());
-                }
-                record_candle_worker_pid(&app, None);
-                if matches!(verdict, SpawnVerdict::KillAndExit) {
-                    return;
-                }
-                append_log(
-                    &log_path,
-                    "[desktop] candle worker target port changed before start; respawning\n",
-                );
-                // sc-13605: brief defensive throttle so a pathological rapid
-                // crash-loop can't hot-spin on spawns via this recheck path, which
-                // `continue`s past the bottom-of-loop exponential backoff. Short
-                // fixed delay (the minimum backoff), NOT the exponential.
-                std::thread::sleep(Duration::from_secs(1));
-                continue;
-            }
-            let started = Instant::now();
-            loop {
-                match tauri::async_runtime::block_on(events.recv()) {
-                    Some(CommandEvent::Stdout(bytes)) | Some(CommandEvent::Stderr(bytes)) => {
-                        append_log(&log_path, &String::from_utf8_lossy(&bytes));
-                    }
-                    Some(CommandEvent::Terminated(payload)) => {
-                        append_log(
-                            &log_path,
-                            &format!(
-                                "[desktop] candle worker terminated: code={:?} signal={:?}\n",
-                                payload.code, payload.signal
-                            ),
-                        );
-                        break;
-                    }
-                    Some(CommandEvent::Error(error)) => {
-                        append_log(
-                            &log_path,
-                            &format!("[desktop] candle worker error: {error}\n"),
-                        );
-                        break;
-                    }
-                    None => break,
-                    _ => {}
-                }
-            }
-            let _ = app
-                .state::<Managed>()
-                .candle_worker
-                .lock()
-                .expect("candle worker lock")
-                .take();
-            record_candle_worker_pid(&app, None);
-            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
-                return;
-            }
-            if started.elapsed() > Duration::from_secs(20) {
-                backoff = 1;
-            }
-            append_log(
-                &log_path,
-                &format!("[desktop] restarting candle worker in {backoff}s\n"),
-            );
-            std::thread::sleep(Duration::from_secs(backoff));
-            backoff = (backoff * 2).min(30);
-        }
-    });
+            command
+        },
+    );
+}
+
+/// The `Managed` slot holding the candle worker child (sc-13615). Named fn for
+/// the same higher-ranked-lifetime coercion reason as `mlx_worker_slot`.
+#[cfg(target_os = "windows")]
+fn candle_worker_slot(managed: &Managed) -> &Mutex<Option<CommandChild>> {
+    &managed.candle_worker
 }
 
 #[cfg(unix)]
