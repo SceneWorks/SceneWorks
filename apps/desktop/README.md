@@ -114,6 +114,55 @@ format), so the first launch downloads it — see [First run](#first-run).
 2. Launch it. The app is signed with a Developer ID and notarized, so it opens
    without a Gatekeeper override.
 
+### Linux
+
+Choose either Linux x86_64 package:
+
+- Install the `.deb` on Ubuntu 22.04 or 24.04 with
+  `sudo apt install ./SceneWorks_*.deb`. APT installs the declared
+  `libwebkit2gtk-4.1-0` and `libgtk-3-0` runtime dependencies.
+- Make the AppImage executable with `chmod +x SceneWorks_*.AppImage`, then run
+  it directly. The AppImage carries its GTK/WebKitGTK runtime and does not
+  require a package-manager install.
+
+Both packages require an NVIDIA driver, but not a system CUDA toolkit. SceneWorks
+downloads its pinned CUDA user-space runtime on first launch.
+
+#### Build Linux packages locally
+
+Linux bundles must be built on Linux. Use Ubuntu 22.04 as the baseline so the
+AppImage remains compatible with both Ubuntu 22.04 and 24.04. Install the
+[Tauri v2 Linux prerequisites](https://v2.tauri.app/start/prerequisites/), the
+repository's normal Node/Rust prerequisites, and dependencies for both apps,
+then run the opt-in package command:
+
+```sh
+npm --prefix apps/web ci
+npm --prefix apps/desktop ci
+npm --prefix apps/desktop run build:linux
+```
+
+This writes the AppImage and Debian package under
+`target/release/bundle/{appimage,deb}/`. The ordinary
+`npm --prefix apps/desktop run build` command produces the same two formats on
+Linux because Tauri automatically merges `tauri.linux.conf.json`.
+
+An Ubuntu 22.04 WSL2/WSLg distro can run the same commands for iterative
+packaging and GUI checks. It does not replace the final install and launch smoke
+test on a native Ubuntu 22.04/24.04 desktop.
+
+The Debian package intentionally uses the host's WebKitGTK 4.1 and GTK 3 through
+the package dependencies above. The AppImage follows Tauri's portable model:
+WebKitGTK and GTK are bundled from the Ubuntu 22.04 build host. Additional
+GStreamer multimedia plugins remain disabled (`bundleMediaFramework: false`);
+they are separate from the WebKitGTK runtime needed to launch and show the UI.
+
+Inspect a built Debian package's dependency declaration with:
+
+```sh
+dpkg-deb -f target/release/bundle/deb/*.deb Depends
+```
+
 ---
 
 ## First run

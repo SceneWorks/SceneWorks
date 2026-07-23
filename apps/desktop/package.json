@@ -6,9 +6,12 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
+    "build:linux": "tauri build --bundles appimage,deb",
+    "test": "node --test scripts/*.test.mjs",
     "release:mac": "tauri build && node scripts/staple-dmg.mjs"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2"
+    "@tauri-apps/cli": "^2",
+    "ajv": "8.20.0"
   }
 }

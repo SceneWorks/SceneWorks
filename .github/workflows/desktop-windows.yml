@@ -4,11 +4,12 @@ name: Desktop (Windows)
 # sc-10456, follow-on to sc-10432):
 #
 #   build-windows  (pull_request, GitHub-hosted windows-2022) — CHEAP (~3–5 min):
-#     desktop-crate test + clippy + the gen-core skew guard. No CUDA Toolkit, no
-#     candle build, no packaging — the `sceneworks-desktop` crate is the Tauri host
-#     shell and links neither candle nor CUDA, so nvcc isn't needed to check it. This
-#     is the PR gate: the Linux `parity` job (check.yml) excludes the desktop crate,
-#     so this is the only lane that exercises it (epic 1330 Phase 3 / sc-1356).
+#     desktop-crate test + clippy + bundle-config tests + the gen-core skew guard.
+#     No CUDA Toolkit, candle build, or packaging — the `sceneworks-desktop` crate
+#     is the Tauri host shell and links neither candle nor CUDA, so nvcc isn't needed
+#     to check it. This is the PR gate: the Linux `parity` job (check.yml) excludes
+#     the desktop crate, so this is the only lane that exercises it
+#     (epic 1330 Phase 3 / sc-1356).
 #
 #   package-windows  (push:main + workflow_dispatch, SELF-HOSTED cuda box) — the full
 #     candle/CUDA sidecar build + NSIS/MSI packaging, as an UNSIGNED smoke so a
@@ -92,6 +93,12 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
+          cache: "npm"
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Install desktop CLI and config-test dependencies
+        run: npm ci --prefix apps/desktop
+      - name: Validate desktop bundle configuration
+        run: npm --prefix apps/desktop test
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: stable
