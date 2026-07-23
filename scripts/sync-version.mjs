@@ -89,8 +89,39 @@ if (cargoPatchedSection !== cargoSection) {
       cargoPatchedSection +
       cargoBefore.slice(cargoSectionEnd),
   );
+
+  // Cargo.lock records each workspace member's resolved version (they inherit
+  // `version.workspace = true`), so the rewrite above leaves the lockfile stale.
+  // A stale lock hard-fails the `cargo fetch --locked` that ~8 CI lanes run
+  // (parity / release / candle / windows), which would defeat the atomic-bump
+  // guarantee on the very first real `npm version`. Refresh ONLY the workspace
+  // members, offline (no registry access, no external-dep churn), in this same
+  // run so the bump commit carries a consistent lock. Gated on the version
+  // actually changing: an already-aligned re-run does no cargo work and needs no
+  // toolchain (idempotency is preserved on cargo-less machines).
+  try {
+    execFileSync("cargo", ["update", "--workspace", "--offline"], {
+      cwd: repoRoot,
+      stdio: "inherit",
+    });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      console.error(
+        "sync-version: bumped Cargo.toml but `cargo` is not on PATH, so Cargo.lock " +
+          "is now STALE. Install the Rust toolchain and run " +
+          "`cargo update --workspace --offline` (then commit Cargo.lock) — otherwise " +
+          "CI's `cargo fetch --locked` will fail on the version skew.",
+      );
+    } else {
+      console.error(
+        `sync-version: \`cargo update --workspace --offline\` failed to refresh ` +
+          `Cargo.lock: ${error?.message ?? error}`,
+      );
+    }
+    process.exit(1);
+  }
 }
 
 console.log(
-  `sync-version: apps/desktop + apps/web + tauri.conf.json + Cargo.toml synced to ${version}`,
+  `sync-version: apps/desktop + apps/web + tauri.conf.json + Cargo.toml (+ Cargo.lock) synced to ${version}`,
 );
