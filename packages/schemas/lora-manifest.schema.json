@@ -4,13 +4,80 @@
   "title": "SceneWorks LoRA Manifest",
   "type": "object",
   "required": ["schemaVersion", "loras"],
+  "$defs": {
+    "hfRevision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Optional pinned 40-hex git commit SHA the download job forwards so the worker fetches that exact IMMUTABLE commit into snapshots/<sha>/ (parity with the model schema's F-029 pin, sc-13659). Absent means the worker resolves `main` at install time. A branch/tag/short/uppercase value is rejected by the pattern because it resolves online but hard-fails the offline pinned-SHA resolver."
+    },
+    "loraSource": {
+      "type": "object",
+      "description": "How the runtime resolves a LoRA's weights (apps/rust-api/src/loras.rs::download_lora). A hosted adapter carries provider + repo (+ an optional file/files narrowing filter and an optional pinned revision); a local adapter carries a path. Closed keys so a typo'd `repo`/`file`/`files` — the sc-12288 field class that silently produced a failed download — fails CI instead of at runtime.",
+      "additionalProperties": false,
+      "required": ["provider", "repo"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Download provider identifier; hosted catalog LoRAs use `huggingface`."
+        },
+        "repo": {
+          "type": "string",
+          "description": "Provider repository the adapter weights are fetched from."
+        },
+        "file": {
+          "type": "string",
+          "description": "Single adapter file to narrow the snapshot to (the common case). The runtime reads `file` first, then falls back to the `files` list."
+        },
+        "files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Explicit allow-list of provider file patterns to fetch. An empty list lets the worker fetch the (small) repo."
+        },
+        "revision": { "$ref": "#/$defs/hfRevision" },
+        "path": {
+          "type": "string",
+          "description": "Local filesystem path for a non-hosted adapter (external/studio-installed LoRAs). Hosted catalog entries use provider + repo instead."
+        }
+      }
+    }
+  },
   "properties": {
     "schemaVersion": { "type": "integer", "minimum": 1 },
     "loras": {
       "type": "array",
       "items": {
         "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
         "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]*$",
+            "description": "Stable catalog id the picker, job payloads, and compatibility checks key on."
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Human-facing display name shown in the LoRA picker."
+          },
+          "family": {
+            "type": "string",
+            "description": "Model family this adapter is compatible with (the compatibility gate reads this and `compatibility.families`)."
+          },
+          "compatibility": {
+            "type": "object",
+            "description": "Which model families this LoRA may attach to (validate_job_lora_compatibility). Left open (additionalProperties:true) because callers may carry richer compatibility metadata.",
+            "properties": {
+              "families": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          },
+          "defaultWeight": {
+            "type": "number",
+            "description": "Default residual weight applied when the LoRA is selected."
+          },
           "triggerWords": {
             "type": "array",
             "items": { "type": "string" },
@@ -30,9 +97,9 @@
             "type": "string",
             "description": "Sampling-regime role marker (the sibling of 'conditioningRole', which is about how a job is CONDITIONED). 'accelerator' = a step-distill / turbo LoRA (e.g. the Krea 2 turbo adapter, sc-13882) whose weights load additively like any other LoRA but whose intent is to change the sampler regime — fewer steps, CFG off. Selecting one auto-switching the model to that regime is separately wired per model; absent that wiring the weights still stack as a plain residual.",
             "enum": ["accelerator"]
-          }
-        },
-        "additionalProperties": true
+          },
+          "source": { "$ref": "#/$defs/loraSource" }
+        }
       }
     }
   }
