@@ -15,7 +15,7 @@
               platform"); the shipped Mac app spawns only the sceneworks-api sidecar.
             - The ONLY dylib the shipped app dlopens on macOS is the bundled CoreML
               libonnxruntime.dylib (ort `load-dynamic`, sc-3487). build-sidecar.mjs
-              re-signs it (`codesign --force --options runtime`) with the SAME
+              re-signs it (via codesign under hardened runtime) with the SAME
               Developer ID / Team ID as the .app, so library validation permits the
               load — the CoreML EP is compiled into that one dylib and talks only to
               Apple's system CoreML.framework (no third-party provider dylib on Mac).

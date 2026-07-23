@@ -2,6 +2,7 @@ import { access, constants, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { promptGuideRequiredForModel } from "../apps/web/src/promptGuideContract.js";
+import { describeXmlCommentDefect, findXmlCommentDefects } from "../apps/web/src/entitlementsPlistContract.js";
 
 const root = process.cwd();
 
@@ -363,6 +364,41 @@ async function assertCharacterImageTuningSurface() {
   }
 }
 
+// The macOS entitlements plist(s) the desktop app ships. codesign/AMFI reads these at
+// signing time with a STRICT XML parser; this list is validated as a class (not a single
+// hard-coded line). Add any new desktop entitlements/plist here so it inherits the guard.
+const desktopEntitlementsPlistPaths = ["apps/desktop/Entitlements.plist"];
+
+async function assertEntitlementsPlistsWellFormed() {
+  // Guard the sc-13609 class: an XML comment body containing `--` (e.g.
+  // `codesign --force --options runtime`) is illegal XML. codesign's AMFI parser
+  // (AMFIUnserializeXML) rejects it at real signing time, but `plutil -lint` is lenient
+  // and NO CI lane codesigns — so it merges green and only breaks the release/notarize
+  // lane. This runs in the PR-time scaffold gate (parity lane) so it can never reach
+  // signing again. findXmlCommentDefects encodes the exact XML rule (`--` legal only as
+  // the leading two chars of the closing `-->`); the shared module is unit-tested.
+  for (const relativePath of desktopEntitlementsPlistPaths) {
+    const body = await readFile(path.join(root, relativePath), "utf8");
+    // Basic plist sanity: it must actually be an XML property list.
+    if (!body.includes("<?xml") || !body.includes("<plist")) {
+      throw new Error(
+        `${relativePath} does not look like an XML property list (missing <?xml or <plist).`,
+      );
+    }
+    const defects = findXmlCommentDefects(body);
+    if (defects.length) {
+      const detail = defects.map(describeXmlCommentDefect).join("; ");
+      throw new Error(
+        `${relativePath} is not codesign/AMFI-safe XML — ${detail}. codesign/AMFI ` +
+          `(AMFIUnserializeXML) rejects \`--\` (double-hyphen) inside an XML comment body ` +
+          `("Comment must not contain double-hyphen"), which breaks macOS app signing even ` +
+          `though plutil -lint passes and no CI lane codesigns (sc-13609). Reword the comment ` +
+          `so no comment body contains \`--\`.`,
+      );
+    }
+  }
+}
+
 for (const requiredPath of requiredPaths) {
   await assertReadable(requiredPath);
 }
@@ -395,5 +431,6 @@ await assertManifestRootsMatchSchemas();
 await assertVersionsAligned();
 await assertBuiltinPromptGuides();
 await assertCharacterImageTuningSurface();
+await assertEntitlementsPlistsWellFormed();
 
 console.log("SceneWorks scaffold check passed.");
