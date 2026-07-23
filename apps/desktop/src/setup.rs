@@ -2576,6 +2576,66 @@ fn cuda_preflight() -> Result<(), String> {
     evaluate_nvidia_preflight(Some(&stdout))
 }
 
+#[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+const MIN_LINUX_NVIDIA_DRIVER: (u32, u32, u32) = (575, 51, 3);
+
+#[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+fn parse_driver_version(value: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = value.split('.');
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next().unwrap_or("0").parse().ok()?,
+    ))
+}
+
+/// Linux counterpart of the Windows CUDA preflight. CUDA 12.9 requires the
+/// 575-series Linux driver; missing `nvidia-smi`, no GPU rows, and an old driver
+/// map to actionable setup errors before the multi-GB first-run download.
+#[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+fn evaluate_linux_nvidia_preflight(smi_output: Option<&str>) -> Result<(), String> {
+    let Some(line) =
+        smi_output.and_then(|out| out.lines().map(str::trim).find(|line| !line.is_empty()))
+    else {
+        return Err(
+            "SceneWorks on Linux requires an NVIDIA GPU with driver 575.51.03 or newer. \
+             No NVIDIA GPU was detected (nvidia-smi is missing or returned no devices); \
+             the GPU worker will remain disabled."
+                .to_owned(),
+        );
+    };
+    let mut parts = line.split(',').map(str::trim);
+    let name = parts.next().unwrap_or("NVIDIA GPU");
+    let driver = parts.next().unwrap_or("");
+    if let Some(version) = parse_driver_version(driver) {
+        if version < MIN_LINUX_NVIDIA_DRIVER {
+            return Err(format!(
+                "SceneWorks on Linux requires NVIDIA driver 575.51.03 or newer for CUDA 12.9 \
+                 (found {driver} on {name}). Update the NVIDIA driver; the GPU worker will \
+                 remain disabled."
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_cuda_preflight() -> Result<(), String> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,driver_version",
+            "--format=csv,noheader,nounits",
+        ])
+        .output();
+    let stdout = match output {
+        Ok(output) if output.status.success() => {
+            Some(String::from_utf8_lossy(&output.stdout).into_owned())
+        }
+        _ => None,
+    };
+    evaluate_linux_nvidia_preflight(stdout.as_deref())
+}
+
 /// Apple-Silicon Metal preflight (sc-8411): the macOS counterpart of the Windows
 /// `cuda_preflight`. The desktop crate doesn't link MLX, so probe by re-launching the
 /// bundled `sceneworks-api` sidecar in its one-shot `SCENEWORKS_GPU_CHECK=1` mode — a
@@ -2645,6 +2705,11 @@ async fn run_startup(app: AppHandle) {
         emit(&app, "error", error, true);
         return;
     }
+    #[cfg(target_os = "linux")]
+    if let Err(error) = linux_cuda_preflight() {
+        emit(&app, "error", error, true);
+        return;
+    }
     // First-run GPU runtime provisioning (Windows candle build): the CUDA runtime +
     // cuDNN + onnxruntime-gpu DLLs are no longer bundled (they exceeded NSIS's ~2 GB
     // datablock limit), so download them once into %APPDATA%\SceneWorks\gpu-runtime and
@@ -2660,6 +2725,20 @@ async fn run_startup(app: AppHandle) {
                 "GPU runtime setup failed: {error}. To install on a disconnected machine, \
                  pre-stage the runtime and set SCENEWORKS_GPU_RUNTIME_DIR — see \
                  docs/offline-install.md."
+            ),
+            true,
+        );
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if let Err(error) = crate::linux_cuda_provision::provision(&app).await {
+        emit(
+            &app,
+            "error",
+            format!(
+                "Linux GPU runtime setup failed: {error}. The GPU worker will remain disabled. \
+                 For an offline install, pre-stage a provisioned Linux gpu-runtime directory \
+                 and set SCENEWORKS_GPU_RUNTIME_DIR; see apps/desktop/docs/offline-install.md."
             ),
             true,
         );
@@ -3135,6 +3214,77 @@ mod preflight_tests {
     fn unparseable_driver_does_not_block_a_present_gpu() {
         // The GPU is present; an odd version string shouldn't hard-block startup.
         assert!(evaluate_nvidia_preflight(Some("NVIDIA RTX, not-a-version")).is_ok());
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
+mod linux_preflight_tests {
+    use super::evaluate_linux_nvidia_preflight;
+
+    #[test]
+    fn absent_linux_nvidia_runtime_maps_to_dormant_message() {
+        for output in [None, Some(""), Some(" \n")] {
+            let error = evaluate_linux_nvidia_preflight(output).expect_err("missing GPU must fail");
+            assert!(error.contains("575.51.03"));
+            assert!(error.contains("remain disabled"));
+        }
+    }
+
+    #[test]
+    fn linux_driver_floor_is_compared_by_version_components() {
+        assert!(evaluate_linux_nvidia_preflight(Some("NVIDIA RTX 4090, 575.51.03\n")).is_ok());
+        assert!(evaluate_linux_nvidia_preflight(Some("NVIDIA RTX 4090, 580.1.0\n")).is_ok());
+        let error = evaluate_linux_nvidia_preflight(Some("NVIDIA RTX 4090, 575.50.99\n"))
+            .expect_err("old driver must fail");
+        assert!(error.contains("575.50.99"));
+        assert!(error.contains("CUDA 12.9"));
+    }
+
+    #[test]
+    fn unusual_linux_driver_text_defers_to_runtime_instead_of_false_negative() {
+        assert!(
+            evaluate_linux_nvidia_preflight(Some("NVIDIA Datacenter GPU, vendor-build")).is_ok()
+        );
+    }
+}
+
+/// Opt-in real-host validation seam for Linux packaging/CI. Normal tests remain
+/// fixture-only and never need an NVIDIA host or the multi-GB runtime.
+#[cfg(all(test, target_os = "linux"))]
+mod linux_runtime_smoke_tests {
+    use super::{
+        find_linux_shared_object, linux_candle_runtime, linux_cuda_preflight, prepend_loader_paths,
+    };
+
+    #[test]
+    #[ignore = "manual/CI: requires a provisioned Linux NVIDIA runtime"]
+    fn provisioned_runtime_resolves_every_onnxruntime_dependency() {
+        linux_cuda_preflight().expect("NVIDIA driver preflight");
+        let runtime = linux_candle_runtime().expect("complete XDG gpu-runtime");
+        let provider = runtime
+            .loader_dirs
+            .iter()
+            .find_map(|dir| find_linux_shared_object(dir, "libonnxruntime_providers_cuda.so"))
+            .expect("onnxruntime CUDA provider");
+        let inherited = std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default();
+        let loader_paths =
+            prepend_loader_paths(&runtime.loader_dirs, std::env::split_paths(&inherited));
+        let joined = std::env::join_paths(loader_paths).expect("join LD_LIBRARY_PATH");
+        let output = std::process::Command::new("ldd")
+            .arg(provider)
+            .env("LD_LIBRARY_PATH", joined)
+            .output()
+            .expect("run ldd");
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "ldd failed:\n{report}");
+        assert!(
+            !report.contains("not found"),
+            "onnxruntime CUDA dependency missing:\n{report}"
+        );
     }
 }
 

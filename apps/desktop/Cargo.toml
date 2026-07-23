@@ -41,7 +41,7 @@ tauri-plugin-updater = "2"
 # SIGTERM the Python worker / API sidecar for graceful shutdown before force-kill.
 nix = { version = "0.29", default-features = false, features = ["signal"] }
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 # First-run CUDA/onnxruntime redist downloader (cuda_provision.rs): the heavy GPU
 # runtime DLLs are no longer bundled (NSIS ~2 GB limit) — they're fetched on first run
 # from pinned PyPI wheels (zips), sha256-verified, and unzipped into %APPDATA%. Feature
@@ -54,6 +54,8 @@ sha2 = "0.10"
 # buffered whole in RAM (F-129, sc-8931). Already in the workspace lock (0.3.x), so no
 # new locked version is pulled; `alloc` is needed for the stream combinators.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+
+[target.'cfg(windows)'.dependencies]
 # Confine the API sidecar (and any child processes it spawns) to a kill-on-close Job
 # Object, so no orphan can outlive the desktop and pin the API's listening port on the
 # next launch (sc-11946). Already in the workspace lock (pulled transitively by tauri),

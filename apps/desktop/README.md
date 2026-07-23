@@ -7,6 +7,7 @@ the SceneWorks API and runs generation on a native, platform-specific engine:
 
 - **macOS** runs on Apple's **MLX** engine (Apple Silicon only).
 - **Windows** runs on the native **candle / CUDA** engine (NVIDIA only).
+- **Linux** runs on the native **candle / CUDA** engine (NVIDIA x86_64 only).
 
 There is **no Python virtual environment** on either platform — the generation
 engine is linked into the app, so first run starts straight on the native engine.
@@ -48,6 +49,19 @@ generate.
 
 Blackwell (sm_120) GPUs are supported. The bundled CUDA 12.9 runtime forward-JITs
 older PTX, so recent NVIDIA architectures work with a current driver.
+
+### Linux
+
+| Requirement | Detail |
+| --- | --- |
+| OS | x86_64 Linux desktop with glibc 2.27 or newer |
+| GPU | NVIDIA, CUDA-capable |
+| Driver | **575.51.03 or newer** (checked before the first-run download) |
+| VRAM | Per model class; 12 GB runs most images, while video and larger models want 24 GB+ |
+| Disk | ~2 GB for the app-managed GPU runtime, plus model weights |
+
+SceneWorks downloads its pinned CUDA 12.9/cuDNN 9/ONNX Runtime user-space
+libraries. A system CUDA toolkit is not required; only the NVIDIA driver is.
 
 ### macOS
 
@@ -124,6 +138,23 @@ On first launch a setup screen reports progress. What happens differs by platfor
 > `SCENEWORKS_GPU_RUNTIME_DIR` at it. See
 > [Offline / air-gapped install](docs/offline-install.md). (Model weights are a
 > separate download — that guide covers seeding them too.)
+
+### Linux (first run only)
+
+1. **GPU preflight.** SceneWorks checks `nvidia-smi` for an NVIDIA GPU and a
+   575.51.03-or-newer driver. Failure leaves the GPU lane dormant with an
+   actionable setup message; it does not start a retrying worker.
+2. **GPU runtime download (~1.9 GB, once).** Pinned, SHA-256-verified Linux
+   x86_64 wheels provide CUDA 12.9, cuDNN 9, cuFFT, nvJitLink, NVRTC, and
+   ONNX Runtime GPU under `$XDG_DATA_HOME/SceneWorks/gpu-runtime` (default
+   `~/.local/share/SceneWorks/gpu-runtime`).
+3. **Engine starts.** The runtime marker and full shared-library sentinel set
+   are rechecked on relaunch; complete installs skip the network and start the
+   candle worker.
+
+For an offline Linux machine, copy a provisioned Linux `gpu-runtime` directory
+or point `SCENEWORKS_GPU_RUNTIME_DIR` at one before launching. See
+[Offline / air-gapped install](docs/offline-install.md).
 
 ### macOS (first run)
 
