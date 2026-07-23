@@ -1,8 +1,9 @@
 // ---------------------------------------------------------------------------
-// Krea 2 single-phase "turbo-on-Raw" (macOS, epic 13879 S3, sc-13883): the Raw base
+// Krea 2 single-phase "turbo-on-Raw" (epic 13879 S3, sc-13883): the Raw base
 // DiT run through the DISTILLED TURBO SAMPLING REGIME when the accelerator-role turbo
 // LoRA (sc-13882 `krea2_turbo_accel`) is selected on a `krea_2_raw` t2i job. Routed here
-// from `ImageRoute::KreaTurboOnRaw`.
+// from `ImageRoute::KreaTurboOnRaw` (MLX / macOS) or `CandleImageRoute::KreaTurboOnRaw`
+// (candle / Windows-Linux CUDA, sc-13887).
 //
 // The Krea engine keys its sampling regime on the DESCRIPTOR id, not per-generation params:
 // the Raw generator (`krea_2_raw`) always runs the resolution-DYNAMIC-mu, 52-step, true-CFG
@@ -18,8 +19,15 @@
 // This is the t2i sibling of `krea_edit.rs::krea_edit_engine_id`, which likewise picks the
 // engine id (`krea_2_turbo_edit` vs `krea_2_edit`) by job shape. No inference-monorepo change
 // is required — the fixed-mu / CFG-off behavior is entirely the existing `krea_2_turbo`
-// generator's, reached by routing rather than by a new per-generation flag. (The whole file is
-// `include!`d only on macOS, so — like `krea_edit.rs` — nothing here needs a per-item cfg.)
+// generator's, reached by routing rather than by a new per-generation flag; the candle
+// `candle-gen-krea` generator keys the turbo regime on the same descriptor id (inference PR #204).
+//
+// The whole file is backend-neutral and `include!`d on BOTH the macOS (MLX) build AND the candle
+// build (sc-13887): every helper it uses — `mlx_model` (the shared registry join), `resolve_*`,
+// `load_spec`, `start_cached_gen_stream`, `consume_gen_events` — resolves against whichever backend
+// is compiled, so there is no MLX-specific engine call to gate. The `include!` in `image_jobs.rs`
+// carries the `any(macos, all(not-macos, backend-candle))` cfg; the "neither" build pulls in nothing.
+// Nothing here needs a per-item cfg.
 // ---------------------------------------------------------------------------
 
 /// The SceneWorks model id whose LoRA-training/Raw base this accelerator lane runs on. The

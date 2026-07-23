@@ -5830,6 +5830,246 @@ fn candle_image_route_sends_krea_img2img_to_txt2img() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// sc-13887 (epic 13879 S6): the S3 turbo-on-Raw + S4 multi-phase Krea lanes on the CANDLE backend —
+// the parity twins of the macOS `resolve_image_route` `KreaTurboOnRaw`/`KreaMultiPhase` tests above.
+// The shape-detection + `advanced.phases` parse/validate + engine invocation are SHARED (backend-
+// neutral) — see `krea_turbo_raw.rs`/`krea_multiphase.rs`; these lock the candle ROUTING decisions
+// (`resolve_candle_image_route`), which are the only backend-specific part. Candle-cfg only; they
+// first RUN on the `candle-worker` CI lane (this host cannot link libcuda).
+// ---------------------------------------------------------------------------
+
+// A `krea_2_raw` t2i job carrying an explicit `advanced.phases` list routes to the candle multi-phase
+// lane — AND takes precedence over the S3 turbo-on-Raw regime (an explicit phase list is the finer-
+// grained control), exactly like the macOS router. The over-routing guards: accelerator LoRA + no
+// phases → `KreaTurboOnRaw`; plain Raw t2i (no phases/accel) → `CandleTxt2Img` (the generic candle
+// lane, UNCHANGED). The exclusions: an img2img reference EXCLUDES turbo-on-Raw (→ `CandleTxt2Img`, the
+// reference honored via `render_base_img2img` + the LoRA still additive), and an `edit_image` job → the
+// bespoke `KreaEdit` lane, never turbo/multiphase.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_krea_multiphase_and_turbo_route_with_over_routing_guards() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+    // `resolve_weights_dir` honors an explicit `modelPath` first, so the tempdir resolves the Raw
+    // weight-gate both lanes require (parity with the macOS S4 routing test).
+    let model_path = dir.path().to_string_lossy().to_string();
+    let accel = json!({ "id": "krea2_turbo_accel", "family": "krea_2", "role": "accelerator" });
+
+    // Raw t2i + an explicit `advanced.phases` list → the candle multi-phase lane.
+    let with_phases = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1,
+        "advanced": {
+            "modelPath": model_path.clone(),
+            "phases": [{ "steps": 20, "guidance": 3.5 }, { "steps": 8, "guidance": 0.0 }]
+        }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&with_phases, &settings),
+        Some(CandleImageRoute::KreaMultiPhase),
+        "krea_2_raw t2i + advanced.phases must route to the candle multi-phase lane",
+    );
+
+    // Precedence over S3: the SAME job also carrying the accelerator LoRA still routes to multi-phase —
+    // an explicit phase list wins over the whole-job turbo-on-Raw regime.
+    let phases_and_accel = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1,
+        "loras": [accel.clone()],
+        "advanced": {
+            "modelPath": model_path.clone(),
+            "phases": [
+                { "steps": 20, "guidance": 3.5 },
+                { "steps": 8, "guidance": 0.0, "loras": [{ "index": 0, "weight": 1.0 }] }
+            ]
+        }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&phases_and_accel, &settings),
+        Some(CandleImageRoute::KreaMultiPhase),
+        "an explicit advanced.phases list must take precedence over the S3 turbo-on-Raw lane on candle",
+    );
+
+    // Over-routing guard 1: accelerator LoRA but NO phases → the S3 candle turbo-on-Raw lane.
+    let accel_no_phases = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1,
+        "loras": [accel.clone()],
+        "advanced": { "modelPath": model_path.clone() }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&accel_no_phases, &settings),
+        Some(CandleImageRoute::KreaTurboOnRaw),
+        "an accelerator LoRA without advanced.phases must route to the candle turbo-on-Raw lane",
+    );
+
+    // Over-routing guard 2: plain Raw t2i, no phases/accel → the generic candle txt2img lane, UNCHANGED.
+    let plain = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1,
+        "advanced": { "modelPath": model_path.clone() }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&plain, &settings),
+        Some(CandleImageRoute::CandleTxt2Img),
+        "a plain Raw t2i without advanced.phases/accelerator must stay on the generic candle lane",
+    );
+
+    // Exclusion 1: an img2img reference EXCLUDES turbo-on-Raw — the reference-bearing job falls through
+    // to the generic candle lane (which resolves the img2img init + still folds the accelerator LoRA),
+    // never the plain turbo-t2i render that would drop the reference (sc-13883 exclusion).
+    let accel_img2img = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1,
+        "loras": [accel.clone()],
+        "modelManifestEntry": { "ui": { "img2img": true } },
+        "referenceAssetId": "asset-1",
+        "advanced": { "modelPath": model_path.clone(), "strength": 0.5 }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&accel_img2img, &settings),
+        Some(CandleImageRoute::CandleTxt2Img),
+        "a krea_2_raw + accelerator + img2img reference must fall through to the generic img2img lane, \
+         not the turbo-t2i lane that drops the reference",
+    );
+
+    // Exclusion 2: an `edit_image` job (a source) → the bespoke candle KreaEdit lane, never turbo/
+    // multiphase — even carrying the accelerator LoRA (turbo excludes edit_image; multiphase has no
+    // phases here).
+    let edit = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1, "mode": "edit_image",
+        "sourceAssetId": "src-1",
+        "loras": [accel],
+        "advanced": { "modelPath": model_path }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&edit, &settings),
+        Some(CandleImageRoute::KreaEdit),
+        "a krea_2_raw edit_image job must route to the bespoke candle KreaEdit lane, not turbo/multiphase",
+    );
+}
+
+// The candle multi-phase gate claims a `krea_2_raw` + `advanced.phases` job even when the shape is a
+// conflicting one (edit / pose / img2img / PiD) — so the lane can reject it LOUDLY (multi-phase renders
+// from pure noise) rather than silently diverting it. Locks that a present phases list wins the route on
+// candle regardless of a conflicting-but-non-edit shape (a strict-pose here), matching the macOS lane's
+// "claim then reject" contract (`ensure_multiphase_job_shape`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_krea_multiphase_claims_conflicting_shapes_to_reject_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+    let model_path = dir.path().to_string_lossy().to_string();
+
+    // krea_2_raw + advanced.phases + a strict pose → multi-phase CLAIMS it (present phases wins), so the
+    // lane surfaces the pose-unsupported error rather than the job being silently rendered pose-dropped.
+    let phases_and_pose = request(json!({
+        "projectId": "p", "model": "krea_2_raw", "count": 1,
+        "advanced": {
+            "modelPath": model_path,
+            "phases": [{ "steps": 8 }],
+            "poses": [{ "id": "a" }]
+        }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&phases_and_pose, &settings),
+        Some(CandleImageRoute::KreaMultiPhase),
+        "a present advanced.phases must be CLAIMED by multi-phase (to reject the conflict loudly), not \
+         diverted to a pose lane",
+    );
+    // The shared shape guard then rejects it loudly before the load (backend-neutral, exercised on both).
+    assert!(ensure_multiphase_job_shape(&phases_and_pose)
+        .unwrap_err()
+        .to_string()
+        .contains("strict-pose"));
+}
+
+// sc-13887 — the candle parity twin of the macOS `krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime`
+// discriminating test. The turbo-on-Raw lane resolves its sampling regime against the `krea_2_turbo`
+// descriptor (while loading Raw weights), so the whole regime falls out for free on candle too: the fixed-
+// mu Turbo engine id, ~8 steps, guidance off, no negative forwarded. `resolve_steps`/`resolve_guidance`/
+// `resolve_negative_prompt`/`model_repo`/`mlx_model` are all SHARED (the candle lane uses the same
+// registry join), so pinning the NON-default turbo values makes this FAIL if the candle lane ever reverts
+// to the Raw regime (52 steps / guidance 3.5 / negative forwarded) or loads the wrong repo/engine.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
+    let raw = mlx_model("krea_2_raw").expect("krea_2_raw candle engine registered");
+    let turbo = mlx_model("krea_2_turbo").expect("krea_2_turbo candle engine registered");
+
+    // The lane samples with the `krea_2_turbo` engine (fixed mu 1.15 / CFG-free), NOT `krea_2_raw`
+    // (dynamic mu / true CFG). This engine swap IS the mu-1.15 mechanism (the pinned candle engine keys
+    // the schedule on the descriptor id, inference PR #204).
+    assert_eq!(turbo.engine_id(), "krea_2_turbo");
+    assert_ne!(
+        turbo.engine_id(),
+        raw.engine_id(),
+        "candle turbo-on-Raw must sample with the turbo engine (fixed mu), not the raw engine",
+    );
+    // The lane's own constants pin the split: load Raw weights, sample with the Turbo engine.
+    assert_eq!(
+        KREA_RAW_MODEL_ID, "krea_2_raw",
+        "the lane's base model is Raw"
+    );
+    assert_eq!(
+        KREA_TURBO_ENGINE_ID, "krea_2_turbo",
+        "the lane samples with the Turbo engine",
+    );
+
+    // A Raw-shaped request (negative prompt set, NO explicit step override) resolved against the turbo
+    // descriptor yields the full turbo regime; the SAME request against raw yields the Raw defaults.
+    let req = request(json!({
+        "projectId": "p", "model": "krea_2_raw",
+        "negativePrompt": "blurry, low quality",
+        "loras": [{ "id": "krea2_turbo_accel", "family": "krea_2", "role": "accelerator" }]
+    }));
+
+    // Steps: the turbo default is the distilled 8 (MODEL_TABLE row, backend-independent), NOT the Raw 52.
+    assert_eq!(
+        resolve_steps(&req, &turbo),
+        8,
+        "candle turbo-on-Raw defaults to the distilled 8 steps, not the Raw 52",
+    );
+    assert_eq!(
+        resolve_steps(&req, &raw),
+        52,
+        "control: the Raw default is 52"
+    );
+
+    // Guidance: CFG off under the turbo (distilled) descriptor → None, NOT the Raw 3.5.
+    assert_eq!(
+        resolve_guidance(&req, &turbo),
+        None,
+        "candle turbo-on-Raw forwards no guidance (CFG off)",
+    );
+    assert_eq!(
+        resolve_guidance(&req, &raw),
+        Some(3.5),
+        "control: the Raw default guidance is 3.5",
+    );
+
+    // Negative prompt: NOT forwarded under turbo (distilled, no negative branch); the Raw path forwards it.
+    assert_eq!(
+        resolve_negative_prompt(&req, &turbo),
+        None,
+        "candle turbo-on-Raw must not forward the negative prompt (CFG off)",
+    );
+    assert_eq!(
+        resolve_negative_prompt(&req, &raw),
+        Some("blurry, low quality".to_owned()),
+        "control: the Raw path forwards the user's negative prompt",
+    );
+
+    // The lane loads the RAW repo (fidelity base stays Raw even though the sampler runs the turbo regime),
+    // NOT the turbo engine's repo — `model_repo` reads the backend-independent MODEL_TABLE row.
+    assert_eq!(model_repo(&req, &raw), "SceneWorks/krea-2-raw-mlx");
+    assert_ne!(
+        model_repo(&req, &raw),
+        model_repo(&req, &turbo),
+        "candle turbo-on-Raw must load the RAW repo, not the turbo engine's repo",
+    );
+}
+
 /// Isolate the HF hub-cache env (`HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` / `HF_HOME`) to an explicit
 /// dir for as long as the returned guard lives, restoring the previous values on drop. The
 /// control-base resolvers (both the candle lanes and the MLX `resolve_krea_control_base`) read the
