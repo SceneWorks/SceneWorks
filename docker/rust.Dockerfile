@@ -79,15 +79,13 @@ CMD ["sceneworks-rust-api"]
 # --- Rust worker runtime ------------------------------------------------------
 FROM debian:bookworm-slim AS rust-worker
 
+# ffmpeg: candle video lanes encode mp4. No Python here: model downloads are the
+# native in-process `ensure_hf_files_cached` path (sc-12227 / sc-12232), so the
+# retired `huggingface_hub[cli]` venv is gone — keeping this image Python-free
+# (epic 3482). Don't re-add the hf CLI; it would bypass the native download watchdog.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg python3 python3-venv \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/*
-
-RUN python3 -m venv /opt/hf-cli \
-    && /opt/hf-cli/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/hf-cli/bin/pip install --no-cache-dir "huggingface_hub[cli]>=0.36,<1"
-
-ENV PATH="/opt/hf-cli/bin:${PATH}"
 
 COPY --from=builder /out/sceneworks-rust-worker /usr/local/bin/sceneworks-rust-worker
 
@@ -184,8 +182,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # no Python) — its older-glibc binary runs fine on 24.04 (glibc is backward-compatible).
 FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04 AS rust-worker-candle
 ENV DEBIAN_FRONTEND=noninteractive
-# ffmpeg: candle video lanes encode mp4. python3/venv: stage onnxruntime-gpu + the hf
-# CLI for model downloads. libgomp1: onnxruntime's OpenMP runtime.
+# ffmpeg: candle video lanes encode mp4. python3/venv: stage onnxruntime-gpu (model
+# downloads are the native in-process path, no hf CLI — sc-12227 / sc-12232).
+# libgomp1: onnxruntime's OpenMP runtime.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl ffmpeg python3 python3-venv libgomp1 \
@@ -195,7 +194,7 @@ RUN apt-get update \
 # base doesn't ship — cuDNN-9 (incl. lazily-loaded sub-engines), cuFFT, nvJitLink,
 # nvRTC. onnxruntime-gpu does NOT declare these as hard deps, so request them
 # explicitly (sc-6209). 1.26.0 matches the `ort` crate rc.12 (ORT API 24); validated
-# on RTX PRO 6000 with cuDNN-cu12 9.23. Also installs the hf CLI for downloads.
+# on RTX PRO 6000 with cuDNN-cu12 9.23.
 ENV ORT_PY_SITE=/opt/ort/lib/python3.12/site-packages
 ARG ONNXRUNTIME_GPU_VERSION=1.26.0
 RUN python3 -m venv /opt/ort \
@@ -203,7 +202,6 @@ RUN python3 -m venv /opt/ort \
     && /opt/ort/bin/pip install --no-cache-dir \
         "onnxruntime-gpu==${ONNXRUNTIME_GPU_VERSION}" \
         nvidia-cudnn-cu12 nvidia-cufft-cu12 nvidia-nvjitlink-cu12 nvidia-cuda-nvrtc-cu12 \
-        "huggingface_hub[cli]>=0.36,<1" \
     && ORT_SO="$(ls ${ORT_PY_SITE}/onnxruntime/capi/libonnxruntime.so* | head -1)" \
     && test -n "${ORT_SO}" \
     && ln -sf "${ORT_SO}" "${ORT_PY_SITE}/onnxruntime/capi/libonnxruntime.so"

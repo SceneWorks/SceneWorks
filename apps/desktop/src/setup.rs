@@ -634,9 +634,9 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         .spawn()
         .map_err(|error| format!("spawn api: {error}"))?;
     record_api_pid(app, child.pid());
-    // sc-11946: confine the API sidecar (and every process it later spawns — notably the `hf`
-    // download CLI and the `python.exe` its shim forks) to a kill-on-close Job Object, so the
-    // whole subtree dies with the desktop and no orphan can pin the API port on the next launch.
+    // sc-11946: confine the API sidecar (and every process it later spawns) to a kill-on-close
+    // Job Object, so the whole subtree dies with the desktop and no orphan can pin the API port
+    // on the next launch.
     #[cfg(windows)]
     sidecar_job::confine(child.pid());
     app.state::<Managed>()
@@ -1309,16 +1309,14 @@ fn record_api_pid(app: &AppHandle, pid: u32) {
 
 /// Windows sidecar-tree containment (sc-11946).
 ///
-/// The API sidecar shells out to the `hf` CLI for whole-repo model downloads, and that
-/// `hf.exe` pip shim in turn forks a `python.exe` (`huggingface_hub`). If the desktop dies
-/// without cleanly reaping that subtree — a clean API self-exit orphans it, and a force-quit
-/// races the `taskkill /T` walk — the orphaned child keeps the API's listening socket handle
-/// it inherited, pinning the port so the next launch fails to bind ("local API stopped
-/// unexpectedly" / AddrInUse).
+/// The API sidecar can spawn child processes. If the desktop dies without cleanly reaping
+/// that subtree — a clean API self-exit orphans it, and a force-quit races the `taskkill /T`
+/// walk — an orphaned child keeps the API's listening socket handle it inherited, pinning the
+/// port so the next launch fails to bind ("local API stopped unexpectedly" / AddrInUse).
 ///
 /// We create ONE process-lifetime Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and
 /// assign the API sidecar to it. Descendants a job member spawns join the job automatically
-/// (nested jobs, Win8+), so the whole `api → hf.exe → python.exe` tree is in it. When the
+/// (nested jobs, Win8+), so the whole API subtree is in it. When the
 /// desktop process ends for ANY reason — graceful exit, panic, or hard kill — the OS closes
 /// our handle and terminates every process still in the job. Nothing can be orphaned. This is
 /// the OS-enforced backstop the pidfile `taskkill /T` reaping ([`kill_pid`]) can't guarantee
