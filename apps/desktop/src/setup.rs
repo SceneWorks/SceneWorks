@@ -2595,6 +2595,20 @@ fn cuda_preflight() -> Result<(), String> {
 const MIN_LINUX_NVIDIA_DRIVER: (u32, u32, u32) = (575, 51, 3);
 
 #[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+const MIN_LINUX_COMPUTE_CAP: (u32, u32) = (8, 0);
+
+#[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+const MAX_LINUX_COMPUTE_CAP: (u32, u32) = (12, 0);
+
+#[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+const LINUX_CUDA_REQUIREMENT: &str =
+    "SceneWorks on Linux requires an NVIDIA (CUDA) GPU with driver 575.51.03 or newer. \
+     NVIDIA Ampere (compute capability 8.0) through Blackwell (compute capability 12.0) is \
+     supported in v1; Turing and older NVIDIA GPUs, AMD/ROCm, and CPU-only generation are not \
+     supported. Install or update the NVIDIA driver, verify `nvidia-smi` lists a supported GPU, \
+     then restart SceneWorks.";
+
+#[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
 fn parse_driver_version(value: &str) -> Option<(u32, u32, u32)> {
     let mut parts = value.split('.');
     Some((
@@ -2604,41 +2618,88 @@ fn parse_driver_version(value: &str) -> Option<(u32, u32, u32)> {
     ))
 }
 
+#[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+fn parse_compute_capability(value: &str) -> Option<(u32, u32)> {
+    let mut parts = value.split('.');
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next().unwrap_or("0").parse().ok()?,
+    ))
+}
+
 /// Linux counterpart of the Windows CUDA preflight. CUDA 12.9 requires the
-/// 575-series Linux driver; missing `nvidia-smi`, no GPU rows, and an old driver
-/// map to actionable setup errors before the multi-GB first-run download.
+/// 575-series Linux driver and the packaged kernels target Ampere through
+/// Blackwell. Missing `nvidia-smi`, no GPU rows, an old driver, or any GPU
+/// outside that architecture range maps to an actionable setup error before
+/// the multi-GB first-run download.
 #[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
 fn evaluate_linux_nvidia_preflight(smi_output: Option<&str>) -> Result<(), String> {
-    let Some(line) =
-        smi_output.and_then(|out| out.lines().map(str::trim).find(|line| !line.is_empty()))
-    else {
-        return Err(
-            "SceneWorks on Linux requires an NVIDIA GPU with driver 575.51.03 or newer. \
-             No NVIDIA GPU was detected (nvidia-smi is missing or returned no devices); \
-             the GPU worker will remain disabled."
-                .to_owned(),
-        );
+    let Some(output) = smi_output.filter(|output| !output.trim().is_empty()) else {
+        return Err(format!(
+            "{LINUX_CUDA_REQUIREMENT}\n\nNo NVIDIA GPU was detected: `nvidia-smi` is missing, \
+             failed, or returned no devices."
+        ));
     };
-    let mut parts = line.split(',').map(str::trim);
-    let name = parts.next().unwrap_or("NVIDIA GPU");
-    let driver = parts.next().unwrap_or("");
-    if let Some(version) = parse_driver_version(driver) {
-        if version < MIN_LINUX_NVIDIA_DRIVER {
+
+    let mut supported_gpu_count = 0;
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let mut parts = line.split(',').map(str::trim);
+        let name = parts.next().unwrap_or("");
+        let driver = parts.next().unwrap_or("");
+        let compute_capability = parts.next().unwrap_or("");
+        if !name.to_ascii_lowercase().contains("nvidia") {
+            let detail = if name.is_empty() {
+                "`nvidia-smi` returned a GPU row without a recognizable vendor.".to_owned()
+            } else {
+                format!("Detected unsupported GPU: {name}.")
+            };
+            return Err(format!("{LINUX_CUDA_REQUIREMENT}\n\n{detail}"));
+        }
+        let Some(driver_version) = parse_driver_version(driver) else {
             return Err(format!(
-                "SceneWorks on Linux requires NVIDIA driver 575.51.03 or newer for CUDA 12.9 \
-                 (found {driver} on {name}). Update the NVIDIA driver; the GPU worker will \
-                 remain disabled."
+                "{LINUX_CUDA_REQUIREMENT}\n\nSceneWorks could not verify the NVIDIA driver \
+                 version reported for {name} (reported value: {driver:?})."
+            ));
+        };
+        if driver_version < MIN_LINUX_NVIDIA_DRIVER {
+            return Err(format!(
+                "{LINUX_CUDA_REQUIREMENT}\n\nThe detected NVIDIA driver is too old for CUDA 12.9 \
+                 (found {driver} on {name})."
             ));
         }
+        let Some(compute_capability_version) = parse_compute_capability(compute_capability) else {
+            return Err(format!(
+                "{LINUX_CUDA_REQUIREMENT}\n\nSceneWorks could not verify the CUDA compute \
+                 capability reported for {name} (reported value: {compute_capability:?})."
+            ));
+        };
+        if !(MIN_LINUX_COMPUTE_CAP..=MAX_LINUX_COMPUTE_CAP).contains(&compute_capability_version) {
+            return Err(format!(
+                "{LINUX_CUDA_REQUIREMENT}\n\n{name} reports compute capability \
+                 {compute_capability}, outside the supported 8.0 through 12.0 range."
+            ));
+        }
+        supported_gpu_count += 1;
     }
-    Ok(())
+
+    if supported_gpu_count == 0 {
+        Err(format!(
+            "{LINUX_CUDA_REQUIREMENT}\n\n`nvidia-smi` returned no recognizable GPU rows."
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn linux_cuda_preflight() -> Result<(), String> {
     let output = std::process::Command::new("nvidia-smi")
         .args([
-            "--query-gpu=name,driver_version",
+            "--query-gpu=name,driver_version,compute_cap",
             "--format=csv,noheader,nounits",
         ])
         .output();
@@ -3237,29 +3298,103 @@ mod linux_preflight_tests {
     use super::evaluate_linux_nvidia_preflight;
 
     #[test]
-    fn absent_linux_nvidia_runtime_maps_to_dormant_message() {
+    fn absent_linux_nvidia_runtime_fails_with_an_actionable_requirement() {
         for output in [None, Some(""), Some(" \n")] {
             let error = evaluate_linux_nvidia_preflight(output).expect_err("missing GPU must fail");
             assert!(error.contains("575.51.03"));
-            assert!(error.contains("remain disabled"));
+            assert!(error.contains("NVIDIA"));
+            assert!(error.contains("CPU-only"));
+            assert!(error.contains("AMD"));
+        }
+    }
+
+    #[test]
+    fn non_nvidia_gpu_is_rejected_instead_of_entering_a_silent_cpu_path() {
+        let error =
+            evaluate_linux_nvidia_preflight(Some("AMD Radeon RX 7900 XTX, 575.51.03, 12.0\n"))
+                .expect_err("the Linux v1 desktop must reject non-NVIDIA GPUs");
+        assert!(error.contains("AMD Radeon RX 7900 XTX"));
+        assert!(error.contains("NVIDIA"));
+        assert!(error.contains("CPU-only"));
+        assert!(error.contains("AMD"));
+    }
+
+    #[test]
+    fn missing_or_unparseable_driver_version_is_rejected_actionably() {
+        for output in [
+            "NVIDIA RTX 4090,, 8.9\n",
+            "NVIDIA RTX 4090, unknown, 8.9\n",
+            "NVIDIA RTX 4090, 575.invalid, 8.9\n",
+        ] {
+            let error = evaluate_linux_nvidia_preflight(Some(output))
+                .expect_err("an unverifiable CUDA driver must fail startup");
+            assert!(error.contains("NVIDIA RTX 4090"));
+            assert!(error.contains("575.51.03"));
+            assert!(error.contains("driver"));
         }
     }
 
     #[test]
     fn linux_driver_floor_is_compared_by_version_components() {
-        assert!(evaluate_linux_nvidia_preflight(Some("NVIDIA RTX 4090, 575.51.03\n")).is_ok());
-        assert!(evaluate_linux_nvidia_preflight(Some("NVIDIA RTX 4090, 580.1.0\n")).is_ok());
-        let error = evaluate_linux_nvidia_preflight(Some("NVIDIA RTX 4090, 575.50.99\n"))
+        assert!(evaluate_linux_nvidia_preflight(Some("NVIDIA RTX 4090, 575.51.03, 8.9\n")).is_ok());
+        assert!(evaluate_linux_nvidia_preflight(Some("NVIDIA RTX 4090, 580.1.0, 8.9\n")).is_ok());
+        let error = evaluate_linux_nvidia_preflight(Some("NVIDIA RTX 4090, 575.50.99, 8.9\n"))
             .expect_err("old driver must fail");
         assert!(error.contains("575.50.99"));
         assert!(error.contains("CUDA 12.9"));
     }
 
     #[test]
-    fn unusual_linux_driver_text_defers_to_runtime_instead_of_false_negative() {
-        assert!(
-            evaluate_linux_nvidia_preflight(Some("NVIDIA Datacenter GPU, vendor-build")).is_ok()
-        );
+    fn multi_gpu_output_accepts_a_supported_nvidia_device() {
+        assert!(evaluate_linux_nvidia_preflight(Some(
+            "NVIDIA RTX 4090, 580.1.0, 8.9\nNVIDIA RTX PRO 6000 Blackwell, 580.1.0, 12.0\n"
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn all_nvidia_devices_below_the_driver_floor_are_rejected() {
+        let error = evaluate_linux_nvidia_preflight(Some(
+            "NVIDIA RTX 3090, 570.10.0, 8.6\nNVIDIA RTX 4090, 575.50.99, 8.9\n",
+        ))
+        .expect_err("one old NVIDIA device must not make another old device acceptable");
+        assert!(error.contains("too old"));
+        assert!(error.contains("CUDA 12.9"));
+        assert!(error.contains("575.51.03"));
+    }
+
+    #[test]
+    fn turing_pascal_and_unvalidated_future_architectures_are_rejected() {
+        for (name, cap) in [
+            ("NVIDIA GeForce RTX 2080 Ti", "7.5"),
+            ("NVIDIA GeForce GTX 1080 Ti", "6.1"),
+            ("NVIDIA Future GPU", "13.0"),
+        ] {
+            let output = format!("{name}, 580.65.06, {cap}\n");
+            let error = evaluate_linux_nvidia_preflight(Some(&output))
+                .expect_err("GPU outside Ampere-through-Blackwell must fail startup");
+            assert!(error.contains(name));
+            assert!(error.contains(cap));
+            assert!(error.contains("8.0 through 12.0"));
+        }
+    }
+
+    #[test]
+    fn mixed_supported_and_unsupported_nvidia_gpus_are_rejected() {
+        let error = evaluate_linux_nvidia_preflight(Some(
+            "NVIDIA RTX 4090, 580.65.06, 8.9\nNVIDIA RTX 2080 Ti, 580.65.06, 7.5\n",
+        ))
+        .expect_err("the auto supervisor would spawn on every GPU, so every GPU must be supported");
+        assert!(error.contains("NVIDIA RTX 2080 Ti"));
+        assert!(error.contains("7.5"));
+    }
+
+    #[test]
+    fn missing_compute_capability_is_rejected_before_runtime_download() {
+        let error = evaluate_linux_nvidia_preflight(Some("NVIDIA RTX 4090, 580.65.06,\n"))
+            .expect_err("an unverifiable architecture must fail startup");
+        assert!(error.contains("compute capability"));
+        assert!(error.contains("NVIDIA RTX 4090"));
     }
 }
 

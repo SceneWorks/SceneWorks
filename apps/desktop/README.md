@@ -33,9 +33,9 @@ engine is linked into the app, so first run starts straight on the native engine
 
 ## Hardware requirements
 
-SceneWorks generation is GPU-only on both platforms. **There is no CPU or AMD
-fallback** — a machine without a supported GPU can run the app shell but cannot
-generate.
+SceneWorks generation is GPU-only on every platform. **There is no CPU
+fallback.** Linux and Windows v1 require NVIDIA/CUDA; AMD/ROCm support is
+tracked separately in Shortcut epic 10386.
 
 ### Windows
 
@@ -54,14 +54,22 @@ older PTX, so recent NVIDIA architectures work with a current driver.
 
 | Requirement | Detail |
 | --- | --- |
-| OS | x86_64 Linux desktop with glibc 2.27 or newer |
-| GPU | NVIDIA, CUDA-capable |
+| Architecture | x86_64 |
+| Supported distro baseline | **Ubuntu 22.04 LTS or Ubuntu 24.04 LTS** |
+| Best-effort distros | Fedora and Arch Linux (not release-gated; package names and WebKitGTK integration may differ) |
+| Webview | **WebKitGTK 4.1** (`libwebkit2gtk-4.1-0` on Ubuntu) with GTK 3 |
+| GPU | **NVIDIA/CUDA only** for v1; Ampere (sm_80) through Blackwell (sm_120) |
+| CUDA build baseline | `CUDA_COMPUTE_CAP=80`; packaged kernels provide the forward-compatible coverage used through Blackwell. Turing (sm_75) is not built or validated |
 | Driver | **575.51.03 or newer** (checked before the first-run download) |
+| Host packages | WebKitGTK 4.1, GTK 3, GStreamer libav, and **FFmpeg** (required for generated-video finalization) |
 | VRAM | Per model class; 12 GB runs most images, while video and larger models want 24 GB+ |
 | Disk | ~2 GB for the app-managed GPU runtime, plus model weights |
 
 SceneWorks downloads its pinned CUDA 12.9/cuDNN 9/ONNX Runtime user-space
 libraries. A system CUDA toolkit is not required; only the NVIDIA driver is.
+Pre-Ampere GPUs, including Turing (sm_75), are outside the v1 package baseline.
+AMD/ROCm and CPU-only generation are not a silent fallback: startup stops with
+a requirement message before downloading the GPU runtime.
 
 ### macOS
 
@@ -120,13 +128,14 @@ Choose either Linux x86_64 package:
 
 - Install the `.deb` on Ubuntu 22.04 or 24.04 with
   `sudo apt install ./SceneWorks_*.deb`. APT installs the declared
-  `libwebkit2gtk-4.1-0`, `libgtk-3-0`, and `gstreamer1.0-libav` runtime
-  dependencies. The GStreamer libav plugin supplies the H.264 decoder used by
-  WebKitGTK for MP4 preview playback.
+  `libwebkit2gtk-4.1-0`, `libgtk-3-0`, `gstreamer1.0-libav`, and `ffmpeg`
+  runtime dependencies. The GStreamer libav plugin supplies the H.264 decoder
+  used by WebKitGTK for MP4 preview playback; FFmpeg finalizes generated video.
 - Make the AppImage executable with `chmod +x SceneWorks_*.AppImage`, then run
-  it directly. The AppImage carries its GTK/WebKitGTK runtime and does not
-  require a package-manager install. Release AppImages participate in the same
-  signed in-app auto-update flow as the macOS and Windows builds.
+  it directly. The AppImage carries its GTK/WebKitGTK playback runtime, but the
+  host must provide the `ffmpeg` executable (`sudo apt install ffmpeg` on
+  Ubuntu). Release AppImages participate in the same signed in-app auto-update
+  flow as the macOS and Windows builds.
 
 The `.deb` does **not** self-update. Until SceneWorks publishes an APT repository,
 install a newer `.deb` from the GitHub release when upgrading; installing it over
@@ -216,8 +225,10 @@ On first launch a setup screen reports progress. What happens differs by platfor
 ### Linux (first run only)
 
 1. **GPU preflight.** SceneWorks checks `nvidia-smi` for an NVIDIA GPU and a
-   575.51.03-or-newer driver. Failure leaves the GPU lane dormant with an
-   actionable setup message; it does not start a retrying worker.
+   575.51.03-or-newer driver. A missing command, non-NVIDIA device, unverifiable
+   driver, or older driver stops startup with an actionable message explaining
+   that Linux v1 has no AMD/ROCm or CPU-only fallback. It does not download the
+   runtime, launch a CPU generation path, or start a retrying worker.
 2. **GPU runtime download (~1.9 GB, once).** Pinned, SHA-256-verified Linux
    x86_64 wheels provide CUDA 12.9, cuDNN 9, cuFFT, nvJitLink, NVRTC, and
    ONNX Runtime GPU under `$XDG_DATA_HOME/SceneWorks/gpu-runtime` (default
@@ -428,6 +439,17 @@ the GNU OpenMP runtime (`sudo apt install libgomp1` on Debian/Ubuntu or
 `sudo dnf install libgomp` on Fedora/RHEL), then relaunch. Offline machines can
 copy a provisioned Linux runtime as described in
 [Offline / air-gapped install](docs/offline-install.md).
+
+**Linux: "requires an NVIDIA (CUDA) GPU."**
+Linux v1 supports NVIDIA GPUs from Ampere through Blackwell with driver
+575.51.03 or newer. If `nvidia-smi` is missing or does not list the GPU, install
+or update the NVIDIA driver and restart SceneWorks. AMD/ROCm (epic 10386),
+CPU-only generation, and Turing (sm_75) are not supported by this v1 package.
+
+**Linux: generated video fails during finalization / `ffmpeg` is missing.**
+Install FFmpeg (`sudo apt install ffmpeg` on Ubuntu, `sudo dnf install ffmpeg`
+on Fedora after enabling the appropriate multimedia repository, or
+`sudo pacman -S ffmpeg` on Arch), then retry the job.
 
 **"The local API did not start in time."**
 The bundled API didn't become healthy within the startup window. Retry from the
