@@ -111,7 +111,24 @@ pub enum QuantFormat {
     /// ComfyUI `comfy_quant` packed fp4/mxfp4: a `.comfy_quant` marker per Linear
     /// plus `.weight_scale`/`weight_scale_N` block scales over `U8`-packed nibbles.
     /// `gemma_3_12B_it_fp4_mixed`, `ideogram4_fp8_scaled` (packed despite the name).
+    /// Distinguished from [`Self::Int8TensorwisePerRow`] by dtype: fp4/mxfp4 packs
+    /// two nibbles per `U8` byte and carries **no** `I8` weight tensor.
     ComfyQuantPacked,
+    /// ComfyUI `comfy_quant` **int8 tensorwise** (per-row). Despite riding the same
+    /// `.comfy_quant` marker as [`Self::ComfyQuantPacked`], this convention stores
+    /// each quantized Linear's weight as a plain `I8` tensor with an `F32`
+    /// `.weight_scale` sibling — its `.comfy_quant` descriptor blob is
+    /// `{"format":"int8_tensorwise","per_row":true}`. Told apart from the fp4 bucket
+    /// **header-only, by dtype**: int8 carries a bulk of `I8` weight tensors, fp4
+    /// carries none (it packs nibbles into `U8`). Both also carry bulk `U8`
+    /// (int8 stores its `.comfy_quant` descriptors as small `U8` blobs), so `U8`
+    /// alone cannot separate them — the `I8` weight dtype is the decisive signal.
+    /// A loadable quant *in principle* (the int8 single-file loader lands in
+    /// sc-14023); split out here (sc-14026) so the int8 Krea variant
+    /// (`~/models/kreamania_variant4.safetensors`) is not mislabelled as the
+    /// unloadable fp4 bucket. Still refused by [`import_supported`] until its loader
+    /// lands — but with a distinct int8 reason, not the fp4 one.
+    Int8TensorwisePerRow,
     /// GGUF container (`Q8_0`, `Q4_K_S`, …) — detected by the `GGUF` magic, not the
     /// extension. Has no safetensors header; family/component are read from GGUF
     /// metadata by the loader slice, not here.
@@ -136,6 +153,7 @@ impl QuantFormat {
             Self::ScaledFp8Companion => "scaled_fp8_companion",
             Self::Fp8InlineScale => "fp8_inline_scale",
             Self::ComfyQuantPacked => "comfy_quant_packed",
+            Self::Int8TensorwisePerRow => "int8_tensorwise_per_row",
             Self::Gguf => "gguf",
             Self::UnrecognizedScaling => "unrecognized_scaling",
         }
@@ -198,7 +216,8 @@ pub const IMPORT_SUPPORTED_FAMILIES: &[&str] = &["krea_2"];
 /// (`krea_2` / [`ComponentRole::Transformer`] / [`QuantFormat::Bf16`]), which reuses the existing
 /// Krea MLX engine via the family-routing path. Everything else — an unrecognized/absent family, a
 /// non-transformer component (VAE / text encoder / all-in-one checkpoint), or a deferred quant
-/// (plain/scaled/inline fp8, `comfy_quant` packed, GGUF) — is refused with a specific reason.
+/// (plain/scaled/inline fp8, `comfy_quant` fp4-packed, int8-tensorwise-per-row, GGUF) — is refused
+/// with a specific reason (int8 carries its own reason distinct from the fp4/dense-bf16 one).
 pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
     match (verdict.family.as_deref(), verdict.component, verdict.quant) {
         // --- Supported loaders: one arm per landed loader (add the next family/quant here) ---
@@ -218,6 +237,16 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
             "Model import for the '{family}' family currently supports only the diffusion \
              transformer, not a {component} file."
         )),
+        // int8-tensorwise-per-row is a distinct, loadable-in-principle quant (not the fp4/mxfp4
+        // reject bucket), but its single-file loader is not landed yet (sc-14023). Refuse with an
+        // int8-specific reason rather than the generic dense-bf16 message below, so the surface is
+        // accurate about *why* the file is deferred. Do NOT mark it loadable.
+        (Some(family), ComponentRole::Transformer, QuantFormat::Int8TensorwisePerRow) => {
+            Err(format!(
+                "Model import for the '{family}' family does not yet support int8 checkpoints \
+                 (the int8 loader is not landed yet). Re-export the checkpoint in bf16."
+            ))
+        }
         (Some(family), _, quant) => Err(format!(
             "Model import for the '{family}' family currently supports only dense bf16 weights, \
              not {quant}. Re-export the checkpoint in bf16."
@@ -340,7 +369,9 @@ fn any_key_contains(keys: &[&str], needle: &str) -> bool {
 /// conventions share the `F8_E4M3` dtype and are separable only by the scale
 /// tensors that ride alongside:
 ///
-/// 1. `.comfy_quant` present → packed fp4/mxfp4 ([`QuantFormat::ComfyQuantPacked`]).
+/// 1. `.comfy_quant` present → split by dtype: bulk `I8` weights ⇒ int8-tensorwise
+///    per-row ([`QuantFormat::Int8TensorwisePerRow`], a loadable-in-principle quant);
+///    otherwise fp4/mxfp4-packed `U8` nibbles ([`QuantFormat::ComfyQuantPacked`]).
 /// 2. a top-level `scaled_fp8` marker or a `.scale_weight` companion →
 ///    [`QuantFormat::ScaledFp8Companion`] (wan / Kijai / umt5).
 /// 3. a `.weight_scale`/`.input_scale` inline triplet →
@@ -350,7 +381,26 @@ fn any_key_contains(keys: &[&str], needle: &str) -> bool {
 /// ignored: `scale_shift_table` is adaLN modulation (a real model weight in every
 /// PixArt/LTX-style DiT), **not** a quant scale.
 fn detect_quant_format(keys: &[&str], dtypes: &BTreeMap<String, usize>) -> QuantFormat {
+    let count = |name: &str| dtypes.get(name).copied().unwrap_or(0);
+    // `U8` holds packed nibbles when it appears in bulk; a stray one or two are
+    // tokenizer bytes (`spiece_model`, `tekken_model`) or `I64` bookkeeping
+    // (`num_batches_tracked`) that carry no numeric weight signal.
+    let packed_u8 = count("U8") > 4;
+    // Bulk `I8` weight tensors are the header-only signal that a `.comfy_quant`
+    // file is int8-tensorwise-per-row rather than fp4/mxfp4-packed (sc-14026). The
+    // int8 export stores each quantized Linear's weight as `I8` (variant4: 264 of
+    // them); a genuine fp4 file packs nibbles into `U8` and carries no `I8` weight.
+    // A `>4` floor (matching `packed_u8`) shrugs off a stray bookkeeping `I8`.
+    let int8_bulk = count("I8") > 4;
+
     if any_key_contains(keys, ".comfy_quant") || keys.contains(&"comfy_quant") {
+        // Both int8-tensorwise and fp4-packed ride the `.comfy_quant` marker (and
+        // both carry bulk `U8` — int8's are its per-Linear descriptor blobs), so
+        // the marker alone can't separate them. The `I8` weight dtype is decisive:
+        // present ⇒ loadable int8-per-row (sc-14023 loader); absent ⇒ fp4 reject.
+        if int8_bulk {
+            return QuantFormat::Int8TensorwisePerRow;
+        }
         return QuantFormat::ComfyQuantPacked;
     }
     let has_companion_scale = any_key_contains(keys, ".scale_weight")
@@ -363,15 +413,10 @@ fn detect_quant_format(keys: &[&str], dtypes: &BTreeMap<String, usize>) -> Quant
         return QuantFormat::Fp8InlineScale;
     }
 
-    let count = |name: &str| dtypes.get(name).copied().unwrap_or(0);
     let fp8 = count("F8_E4M3") + count("F8E4M3") + count("FLOAT8_E4M3FN");
     let bf16 = count("BF16");
     let f16 = count("F16") + count("FLOAT16");
     let f32 = count("F32") + count("FLOAT32");
-    // `U8` holds packed nibbles when it appears in bulk; a stray one or two are
-    // tokenizer bytes (`spiece_model`, `tekken_model`) or `I64` bookkeeping
-    // (`num_batches_tracked`) that carry no numeric weight signal.
-    let packed_u8 = count("U8") > 4;
 
     if fp8 > 0 {
         // Plain, castable fp8 is *only* a file whose weights are entirely fp8 with
@@ -670,23 +715,78 @@ mod tests {
     }
 
     #[test]
-    fn krea2_native_int8_single_file_is_transformer_but_packed_quant() {
+    fn krea2_native_int8_single_file_is_int8_tensorwise_per_row() {
         // ~/models/kreamania_variant4.safetensors (measured: 958 tensors, DiT-only,
-        // int8 per-row `{"format":"int8_tensorwise","per_row":true}` with `.comfy_quant`
-        // descriptors). The family/component classify the same as the bf16 sibling; the
-        // quant lands in the packed bucket we do not yet load — proving detection is a
-        // prerequisite that already separates the loadable (bf16) from the deferred (int8)
-        // case rather than mislabelling one as the other.
-        let verdict = recognized(classify_base_header(&header(&[
-            ("model.diffusion_model.blocks.0.attn.wq.weight", "I8"),
-            ("model.diffusion_model.blocks.0.attn.wq.weight_scale", "F32"),
-            ("model.diffusion_model.blocks.0.attn.wq.comfy_quant", "U8"),
+        // int8 per-row `{"format":"int8_tensorwise","per_row":true}`: 264 `I8` weight
+        // tensors + F32 `.weight_scale` siblings + 264 small `U8` `.comfy_quant`
+        // descriptors). Family/component classify the same as the bf16 sibling; the quant
+        // must resolve to `Int8TensorwisePerRow` (a loadable-in-principle quant, loader in
+        // sc-14023) — NOT the fp4 `ComfyQuantPacked` reject bucket it was mislabelled as
+        // before sc-14026. The header-only discriminator is the bulk of `I8` weights (both
+        // conventions carry `.comfy_quant` and bulk `U8`, so those cannot separate them).
+        let mut entries = vec![
             ("model.diffusion_model.blocks.0.mod.lin", "BF16"),
-            (
-                "model.diffusion_model.txtfusion.refiner_blocks.1.attn.wq.comfy_quant",
-                "U8",
-            ),
-        ])));
+            ("model.diffusion_model.txtfusion.projector.weight", "F32"),
+        ];
+        // Bulk I8 quantized weights, each with an F32 `.weight_scale` and a small U8
+        // `.comfy_quant` descriptor — the variant4 shape at reduced scale.
+        let i8_weights: Vec<String> = (0..6)
+            .map(|i| format!("model.diffusion_model.blocks.{i}.attn.wq.weight"))
+            .collect();
+        let scales: Vec<String> = (0..6)
+            .map(|i| format!("model.diffusion_model.blocks.{i}.attn.wq.weight_scale"))
+            .collect();
+        let descriptors: Vec<String> = (0..6)
+            .map(|i| format!("model.diffusion_model.blocks.{i}.attn.wq.comfy_quant"))
+            .collect();
+        for name in &i8_weights {
+            entries.push((name.as_str(), "I8"));
+        }
+        for name in &scales {
+            entries.push((name.as_str(), "F32"));
+        }
+        for name in &descriptors {
+            entries.push((name.as_str(), "U8"));
+        }
+        let verdict = recognized(classify_base_header(&header(&entries)));
+        assert_eq!(verdict.family.as_deref(), Some("krea_2"));
+        assert_eq!(verdict.component, ComponentRole::Transformer);
+        assert_eq!(verdict.quant, QuantFormat::Int8TensorwisePerRow);
+    }
+
+    #[test]
+    fn krea2_comfy_quant_fp4_packed_u8_stays_packed() {
+        // The fp4/mxfp4 counterpart to variant4, same krea_2 family: a `.comfy_quant`
+        // export whose quantized weights are packed nibbles in bulk `U8` (plus F32
+        // `.weight_scale` block scales) and carry **no** `I8` weight tensor. Must stay
+        // `ComfyQuantPacked` (the unloadable reject bucket) — proving the sc-14026
+        // discriminator flips only on the `I8` weight dtype, not on the shared
+        // `.comfy_quant`/`U8` signals. (Real fp4 files, e.g. `gemma_3_12B_it_fp4_mixed`,
+        // store weights this way; the F8_E4M3-modelled gemma/ideogram tests below cover
+        // the same reject verdict from the other observed dtype.)
+        let mut entries = vec![
+            ("model.diffusion_model.blocks.0.mod.lin", "BF16"),
+            ("model.diffusion_model.txtfusion.projector.weight", "F32"),
+        ];
+        let u8_weights: Vec<String> = (0..6)
+            .map(|i| format!("model.diffusion_model.blocks.{i}.attn.wq.weight"))
+            .collect();
+        let scales: Vec<String> = (0..6)
+            .map(|i| format!("model.diffusion_model.blocks.{i}.attn.wq.weight_scale"))
+            .collect();
+        let descriptors: Vec<String> = (0..6)
+            .map(|i| format!("model.diffusion_model.blocks.{i}.attn.wq.comfy_quant"))
+            .collect();
+        for name in &u8_weights {
+            entries.push((name.as_str(), "U8"));
+        }
+        for name in &scales {
+            entries.push((name.as_str(), "F32"));
+        }
+        for name in &descriptors {
+            entries.push((name.as_str(), "U8"));
+        }
+        let verdict = recognized(classify_base_header(&header(&entries)));
         assert_eq!(verdict.family.as_deref(), Some("krea_2"));
         assert_eq!(verdict.component, ComponentRole::Transformer);
         assert_eq!(verdict.quant, QuantFormat::ComfyQuantPacked);
@@ -1151,6 +1251,27 @@ mod tests {
         assert!(
             reason.contains(QuantFormat::ComfyQuantPacked.as_str()),
             "reason should name the rejected quant: {reason}"
+        );
+    }
+
+    #[test]
+    fn import_supported_refuses_krea2_int8_with_distinct_reason() {
+        // int8-tensorwise-per-row is loadable in principle but its loader (sc-14023) is not
+        // landed — refuse with an int8-specific reason, NOT the fp4/dense-bf16 message.
+        let reason = import_supported(&verdict(
+            Some("krea_2"),
+            ComponentRole::Transformer,
+            QuantFormat::Int8TensorwisePerRow,
+        ))
+        .expect_err("int8 quant must still be refused (no loader yet)");
+        assert!(
+            reason.contains("int8"),
+            "reason should name int8 specifically: {reason}"
+        );
+        // Must NOT reuse the generic fp4/dense-bf16 phrasing that names the on-disk quant string.
+        assert!(
+            !reason.contains(QuantFormat::Int8TensorwisePerRow.as_str()),
+            "int8 refusal should use its own message, not the generic dense-bf16 one: {reason}"
         );
     }
 
