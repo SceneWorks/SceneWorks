@@ -4,7 +4,7 @@
 // single file, e.g. a ComfyUI-exported `kreamania_variant5.safetensors`) — read in place, no copy, no
 // re-download — by pairing it with a resident `krea_2` base tier that supplies the shared Qwen3-VL text
 // encoder, Qwen VAE, tokenizer, and the DiT architecture config the single file omits. The assembly is
-// the selected runtime's `providers::krea::load_from_native_dit_file(dit, base, descriptor)`
+// the selected runtime's `providers::krea::load_from_native_dit_file(dit, base, adapters, descriptor)`
 // — the sc-10670/10671 "read the DiT in place, source shared components from a resident tier" pattern, and
 // following the candle z-image `load_from_comfyui_components` in-place assembly pattern.
 //
@@ -303,6 +303,7 @@ async fn generate_krea_imported_stream(
             let loaded = runtime_macos::providers::krea::load_from_native_dit_file(
                 &dit,
                 &base_dir,
+                &[],
                 runtime_macos::providers::krea::descriptor(),
             );
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
