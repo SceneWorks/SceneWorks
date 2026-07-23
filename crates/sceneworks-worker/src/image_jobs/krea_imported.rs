@@ -1,5 +1,5 @@
-// Shared MLX/Candle in-place imported single-file Krea 2 checkpoint txt2img route
-// (epic 14015 S0c, sc-14018/sc-14023).
+// Shared MLX/Candle in-place imported single-file Krea 2 checkpoint txt2img/img2img route
+// (epic 14015 S0c, sc-14018/sc-14023/sc-14071).
 // Renders a user-imported COMMUNITY checkpoint that is the Krea 2 **transformer only** (a bare DiT
 // single file, e.g. a ComfyUI-exported `kreamania_variant5.safetensors`) — read in place, no copy, no
 // re-download — by pairing it with a resident `krea_2` base tier that supplies the shared Qwen3-VL text
@@ -19,10 +19,14 @@
 // `krea_2_raw`, both in `MODEL_TABLE`) resolves through `mlx_model` and loads from its snapshot turnkey —
 // `resolve_imported_krea_dit` returns `None` for it, so the existing snapshot-dir Krea path is untouched.
 //
-// Scope (S0c + sc-14023): dense bf16 or descriptor-gated plain-int8-per-row single-file DiT, txt2img
-// only (the imported checkpoint is a bare transformer, so pose / reference / edit conditioning is
-// deliberately NOT claimed here). Descriptor contents and per-row scale shapes are validated by the
-// inference loader before dequantization; ConvRot descriptors remain on their separate loader arm.
+// Scope (S0c + sc-14023 + sc-14071): dense bf16 or descriptor-gated plain-int8-per-row single-file DiT,
+// txt2img plus img2img (reference-guided latent-init off a single `referenceAssetId` + strength, resolved
+// through the shared cross-platform `resolve_img2img_init_generic` on the SAME Turbo t2i descriptor — the
+// engine keys img2img off a `Conditioning::Reference` on a non-edit descriptor, so BOTH the MLX and candle
+// imported lanes get img2img). Pose / edit conditioning is still deliberately NOT claimed here (the
+// imported checkpoint is a bare transformer; those need base-tier control/edit components this lane does
+// not stage — imported edit is sc-14119). Descriptor contents and per-row scale shapes are validated by
+// the inference loader before dequantization; ConvRot descriptors remain on their separate loader arm.
 
 /// The adapter/engine id recorded on imported-Krea assets + telemetry (distinct from the registry
 /// `krea_2_turbo` / `krea_2_raw` builtins and their bespoke edit/control/multi-phase lanes).
@@ -208,16 +212,26 @@ fn dir_has_safetensors(dir: &Path) -> bool {
         })
 }
 
-/// True when this is an in-place imported single-file Krea 2 **txt2img** job: an imported `krea_2`-family
-/// model whose `modelPath` resolves to a single `.safetensors` DiT, with no edit / pose / reference
-/// (the imported checkpoint is a bare transformer — those conditioning modes need base-tier components
-/// this lane does not stage). Deliberately does NOT gate on base-tier presence: a missing base surfaces
-/// as the loud [`resolve_krea_imported_base_tier`] error in the handler rather than a silent fall-through
-/// to the stub. Mirrors the shape of the other `…_available` predicates.
+/// True when this is an in-place imported single-file Krea 2 **txt2img or img2img** job: an imported
+/// `krea_2`-family model whose `modelPath` resolves to a single `.safetensors` DiT. Both a plain txt2img
+/// job AND an img2img `referenceAssetId` (mode NOT `edit_image`, sc-14071 — reference-guided latent-init
+/// that the shared [`resolve_img2img_init_generic`] resolves to a single `Conditioning::Reference` on the
+/// SAME Turbo t2i descriptor, exactly like the builtin generic MLX/candle img2img lane) are claimed.
+///
+/// Everything that needs base-tier control/edit components this bare-transformer lane does NOT stage stays
+/// rejected — retaining ALL of main's hardened guards: an `edit_image` mode, a pose set, the two-reference
+/// edit SET (`reference_asset_ids`, scene + person — that is the edit surface, sc-14119, not
+/// reference-guided latent-init), a mask, a character / look, a LoRA stack, and a multi-phase
+/// `advanced.phases` list. **`source_asset_id` also stays rejected**: [`resolve_img2img_init_generic`]
+/// reads only `reference_asset_id`, so admitting a bare `sourceAssetId` job would silently drop its source
+/// and render plain t2i — so a `sourceAssetId`-shaped img2img request is NOT claimed here.
+///
+/// Deliberately does NOT gate on base-tier presence: a missing base surfaces as the loud
+/// [`resolve_krea_imported_base_tier`] error in the handler rather than a silent fall-through to the stub.
+/// Mirrors the shape of the other `…_available` predicates.
 fn krea_imported_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.mode != "edit_image"
         && pose_entries(request).is_empty()
-        && request.reference_asset_id.is_none()
         && request.reference_asset_ids.is_empty()
         && request.source_asset_id.is_none()
         && request.mask_asset_id.is_none()
@@ -230,6 +244,23 @@ fn krea_imported_available(request: &ImageRequest, settings: &Settings) -> bool 
             .and_then(Value::as_array)
             .is_some_and(|phases| !phases.is_empty())
         && matches!(resolve_imported_krea_dit(request, settings), Ok(Some(_)))
+}
+
+/// Build the img2img conditioning for the imported Krea lane (sc-14071): a resolved reference + strength
+/// becomes a single `Conditioning::Reference` — byte-identical to the generic lane's `identity_init`
+/// path, which the engine routes to `generate_turbo_img2img` off a Reference on the (non-edit) Turbo t2i
+/// descriptor. A plain txt2img job (`None`) yields the empty conditioning. Pure (no I/O), so the img2img
+/// wiring is unit-testable without loading a real reference asset or a generator. Cross-platform (NOT
+/// macOS-gated): the cross-platform [`generate_krea_imported_stream`] calls it, so the MLX and candle
+/// imported lanes both thread img2img through this helper.
+fn krea_imported_conditioning(img2img: Option<(Image, f32)>) -> Vec<Conditioning> {
+    match img2img {
+        Some((image, strength)) => vec![Conditioning::Reference {
+            image,
+            strength: Some(strength),
+        }],
+        None => Vec::new(),
+    }
 }
 
 /// Flat telemetry recorded on imported-Krea assets. No guidance — the imported distilled-Turbo merges
@@ -254,10 +285,13 @@ fn krea_imported_raw_settings(request: &ImageRequest, steps: u32) -> JsonObject 
     raw
 }
 
-/// Real in-place imported single-file Krea 2 txt2img generation (epic 14015 S0c, sc-14023): resolve the
-/// imported DiT + resident base tier on the async side, then load the selected runtime's native
-/// entrypoint once and generate each image on the blocking thread. The merge is distilled Turbo
-/// (no CFG / negative prompt). The `Box<dyn Generator>` is bespoke (not registry-cached).
+/// Real in-place imported single-file Krea 2 txt2img / img2img generation (epic 14015 S0c, sc-14023 +
+/// sc-14071): resolve the imported DiT, the resident base tier, and any img2img reference on the async
+/// side, then load the selected runtime's native entrypoint once and generate each image on the blocking
+/// thread. The merge is distilled Turbo (no CFG / negative prompt). An img2img `referenceAssetId` +
+/// strength is threaded to the engine as a single `Conditioning::Reference` on the Turbo t2i descriptor
+/// (the SAME cross-platform generic img2img seam the builtin Krea Turbo lane uses, so both the MLX and
+/// candle imported lanes get img2img). The `Box<dyn Generator>` is bespoke (not registry-cached).
 async fn generate_krea_imported_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -276,6 +310,22 @@ async fn generate_krea_imported_stream(
     })?;
     // Require the resident base tier before any compute — a clear "install the Krea 2 base first" error.
     let base_dir = resolve_krea_imported_base_tier(settings)?;
+
+    // img2img reference-guided latent-init (sc-14071): the SAME generic seam the builtin Krea Turbo
+    // img2img lane uses (`resolve_generic_lane_conditioning`'s generic arm), and it is CROSS-PLATFORM —
+    // `model_supports_img2img` + `resolve_img2img_init_generic` are the shared candle/MLX helpers (both
+    // under the file's `any(macos, backend-candle)` cfg), so BOTH the MLX and candle imported lanes get
+    // img2img. Resolved on the async side (decode → `Send` `Image` moved into the worker thread), gated on
+    // the model's `ui.img2img` manifest flag ([`model_supports_img2img`]) + a non-edit mode;
+    // `resolve_img2img_init_generic` yields `None` for a plain txt2img job (it reads only
+    // `referenceAssetId`). Fed to the engine as a single `Conditioning::Reference` on the SAME Turbo t2i
+    // descriptor below — the engine keys img2img off a Reference on a non-edit descriptor, so no descriptor
+    // change is needed. Edit conditioning is NOT resolved here (sc-14119).
+    let img2img = if model_supports_img2img(request) && request.mode != "edit_image" {
+        resolve_img2img_init_generic(request, settings, project_path)?
+    } else {
+        None
+    };
 
     let (width, height) = (request.width, request.height);
     let steps =
@@ -318,6 +368,9 @@ async fn generate_krea_imported_stream(
             Ok(model)
         },
         move |model, tx, cancel| {
+            // Build the img2img conditioning once (the resolved reference + strength → a single
+            // `Conditioning::Reference`), then clone it per rendered image. Empty for a plain txt2img job.
+            let conditioning = krea_imported_conditioning(img2img);
             drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
@@ -329,6 +382,7 @@ async fn generate_krea_imported_stream(
                     count: 1,
                     seed: Some(seed as u64),
                     steps: Some(steps),
+                    conditioning: conditioning.clone(),
                     cancel: cancel.clone(),
                     ..Default::default()
                 };
