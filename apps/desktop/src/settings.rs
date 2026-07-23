@@ -358,12 +358,13 @@ pub fn resolve_credential_secret(host: &str) -> Option<(String, CredentialScheme
 }
 
 fn credentials_env_json_with(
+    platform: &str,
     settings: &AppSettings,
     read_secret: impl Fn(&str) -> Result<Option<String>, String>,
 ) -> Result<Option<String>, String> {
     let mut map = serde_json::Map::new();
     for meta in &settings.credentials {
-        if let Some(token) = read_secret(&meta.host)? {
+        if let Some(token) = credential_read_for_platform(platform, read_secret(&meta.host))? {
             let scheme = match meta.scheme {
                 CredentialScheme::Bearer => "bearer",
                 CredentialScheme::Query => "query",
@@ -384,7 +385,11 @@ fn credentials_env_json_with(
 }
 
 fn credentials_env_json_result() -> Result<Option<String>, String> {
-    credentials_env_json_with(&load_settings(), read_credential_secret_result)
+    credentials_env_json_with(
+        host_platform(),
+        &load_settings(),
+        read_credential_secret_result,
+    )
 }
 
 /// All stored credentials serialized as the worker's `SCENEWORKS_CREDENTIALS` JSON
@@ -1477,10 +1482,14 @@ mod tests {
             read_hf_token_with(&settings, |_| panic!("must not touch keyring")),
             Ok(None)
         );
-        assert_eq!(
-            credentials_env_json_with(&settings, |_| panic!("must not touch keyring")),
-            Ok(None)
-        );
+        for platform in ["linux", "macos", "windows"] {
+            assert_eq!(
+                credentials_env_json_with(platform, &settings, |_| {
+                    panic!("must not touch keyring")
+                }),
+                Ok(None)
+            );
+        }
     }
 
     #[test]
@@ -1503,18 +1512,68 @@ mod tests {
     #[test]
     fn generic_worker_read_preserves_secret_service_failure() {
         let settings = AppSettings {
-            credentials: vec![CredentialMeta {
-                host: "civitai.com".to_owned(),
-                label: "Civit.ai".to_owned(),
-                scheme: CredentialScheme::Query,
-            }],
+            credentials: vec![
+                CredentialMeta {
+                    host: "broken.example".to_owned(),
+                    label: "Broken".to_owned(),
+                    scheme: CredentialScheme::Bearer,
+                },
+                CredentialMeta {
+                    host: "later.example".to_owned(),
+                    label: "Later".to_owned(),
+                    scheme: CredentialScheme::Query,
+                },
+            ],
             ..AppSettings::default()
         };
         let detail = "Secret Service locked".to_owned();
         assert_eq!(
-            credentials_env_json_with(&settings, |_| Err(detail.clone())),
+            credentials_env_json_with("linux", &settings, |host| {
+                if host == "broken.example" {
+                    Err(detail.clone())
+                } else {
+                    panic!("Linux must fail fast before reading later credentials")
+                }
+            }),
             Err(detail)
         );
+    }
+
+    #[test]
+    fn non_linux_generic_worker_read_skips_only_unreadable_entry() {
+        let settings = AppSettings {
+            credentials: vec![
+                CredentialMeta {
+                    host: "broken.example".to_owned(),
+                    label: "Broken".to_owned(),
+                    scheme: CredentialScheme::Bearer,
+                },
+                CredentialMeta {
+                    host: "readable.example".to_owned(),
+                    label: "Readable".to_owned(),
+                    scheme: CredentialScheme::Query,
+                },
+            ],
+            ..AppSettings::default()
+        };
+
+        for platform in ["macos", "windows"] {
+            let json = credentials_env_json_with(platform, &settings, |host| match host {
+                "broken.example" => Err("native credential read failed".to_owned()),
+                "readable.example" => Ok(Some("later-token".to_owned())),
+                other => panic!("unexpected host: {other}"),
+            })
+            .expect("non-Linux credential assembly")
+            .expect("readable credential remains");
+            let value: serde_json::Value = serde_json::from_str(&json).expect("credential JSON");
+
+            assert!(value.get("broken.example").is_none());
+            assert_eq!(
+                value["readable.example"]["token"].as_str(),
+                Some("later-token")
+            );
+            assert_eq!(value["readable.example"]["scheme"].as_str(), Some("query"));
+        }
     }
 
     #[test]
