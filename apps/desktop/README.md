@@ -173,7 +173,8 @@ anything already downloaded by other tools on the machine (and vice versa). Poin
 
 Service credentials (gated Hugging Face / Civitai tokens) are **not** stored in
 these folders — they go in the per-user OS keychain (Windows Credential Manager,
-macOS Keychain). Add them under **Settings → Service credentials**.
+macOS Keychain, or Linux Secret Service through GNOME Keyring/KWallet). Add them
+under **Settings → Service credentials**.
 
 ---
 
@@ -327,3 +328,20 @@ Check `mlx-worker.log` — if nothing is being claimed, the worker may not be id
 Add the service token under **Settings → Service credentials** (e.g.
 `huggingface.co` for gated Hugging Face repos). Credential changes take effect on
 the next worker restart.
+
+**Linux: "Secret Service is unavailable or locked."**
+SceneWorks stores desktop tokens through the freedesktop Secret Service API. Start
+and unlock GNOME Keyring or KWallet in your graphical login session, and make sure
+the app has a D-Bus user session, then save the token again. Minimal window-manager
+or headless sessions need to launch a compatible Secret Service daemon first; use
+the server deployment's restricted credential file instead when no desktop secret
+store is available.
+
+To validate persistence on a Linux desktop, save a temporary Hugging Face token,
+quit SceneWorks completely, relaunch it, and confirm Settings still shows the
+credential without “token missing.” Maintainers can also exercise the native
+write/new-entry/read/delete flow with:
+
+```sh
+cargo test -p sceneworks-desktop linux_secret_service_round_trip -- --ignored
+```

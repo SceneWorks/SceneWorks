@@ -2774,7 +2774,10 @@ fn kolors_real_weights_ip_adapter_generates_one_image() {
 }
 
 /// A deterministic synthetic RGB [`Image`] from a per-pixel `(x, y) -> [r, g, b]` closure.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn synthetic_rgb(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> Image {
     let mut pixels = vec![0u8; (w * h * 3) as usize];
     for y in 0..h {
@@ -11022,19 +11025,47 @@ fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lan
     assert_eq!(KREA_IMPORTED_ENGINE, "candle_krea_imported");
 }
 
-/// A pose / edit / reference shape on an imported Krea 2 model is NOT claimed by the txt2img import lane
-/// (a bare imported DiT carries no conditioning components) — the availability predicate stays t2i-only.
+/// The imported Krea 2 lane accepts a plain txt2img job AND an img2img `referenceAssetId` (mode NOT
+/// `edit_image`, sc-14071 — reference-guided latent-init), while STILL rejecting every shape that needs
+/// base-tier edit/control components this bare-transformer lane does not stage: an `edit_image` job, a
+/// pose set, the two-reference edit SET (`referenceAssetIds`, scene+person — imported edit is sc-14119),
+/// and main's hardened guards (`sourceAssetId`, mask, character, LoRA stack, multi-phase). `sourceAssetId`
+/// in particular stays rejected because `resolve_img2img_init_generic` reads only `referenceAssetId`, so a
+/// bare `sourceAssetId` job would silently render plain t2i. Runs on the cross-platform path so the candle
+/// imported lane is covered too.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[test]
-fn krea_imported_available_is_txt2img_only() {
+fn krea_imported_available_allows_img2img_but_rejects_edit_and_pose() {
     let dir = tempfile::tempdir().unwrap();
     let (settings, file) = imported_krea_settings_with_file(dir.path());
     let path_str = file.to_str().unwrap().to_owned();
     let base = json!({ "family": "krea_2", "modelPath": path_str });
 
+    // Plain txt2img: accepted.
+    let t2i = request(json!({
+        "projectId": "p", "model": "kreamania_variant5", "prompt": "a cat",
+        "modelManifestEntry": base.clone()
+    }));
+    assert!(
+        krea_imported_available(&t2i, &settings),
+        "plain txt2img is accepted"
+    );
+
+    // img2img: a `referenceAssetId` on a non-edit mode is now ACCEPTED (sc-14071).
+    let img2img = request(json!({
+        "projectId": "p", "model": "kreamania_variant5", "referenceAssetId": "r",
+        "advanced": { "strength": 0.5 },
+        "modelManifestEntry": base.clone()
+    }));
+    assert!(
+        krea_imported_available(&img2img, &settings),
+        "an img2img referenceAssetId (mode t2i) is accepted"
+    );
+
+    // A pose set is still rejected.
     let with_pose = request(json!({
         "projectId": "p", "model": "kreamania_variant5",
         "advanced": { "poses": [{ "id": "a" }] },
@@ -11045,6 +11076,7 @@ fn krea_imported_available_is_txt2img_only() {
         "pose job excluded"
     );
 
+    // An `edit_image` job is still rejected (imported edit is sc-14119).
     let edit = request(json!({
         "projectId": "p", "model": "kreamania_variant5", "mode": "edit_image",
         "sourceAssetId": "s", "modelManifestEntry": base.clone()
@@ -11054,16 +11086,22 @@ fn krea_imported_available_is_txt2img_only() {
         "edit job excluded"
     );
 
-    let reference = request(json!({
-        "projectId": "p", "model": "kreamania_variant5", "referenceAssetId": "r",
+    // The two-reference edit SET (scene + person) is still rejected — that is the edit surface, not
+    // reference-guided latent-init.
+    let two_ref = request(json!({
+        "projectId": "p", "model": "kreamania_variant5",
+        "referenceAssetIds": ["scene", "person"],
         "modelManifestEntry": base.clone()
     }));
     assert!(
-        !krea_imported_available(&reference, &settings),
-        "reference/img2img job excluded (t2i only in S0c)"
+        !krea_imported_available(&two_ref, &settings),
+        "the two-reference edit set is excluded"
     );
 
+    // main's hardened guards stay rejected — including a bare `sourceAssetId` (a non-edit img2img shape
+    // `resolve_img2img_init_generic` would silently drop, since it reads only `referenceAssetId`).
     for (label, extra) in [
+        ("source", json!({ "sourceAssetId": "s" })),
         ("mask", json!({ "maskAssetId": "m" })),
         ("character", json!({ "characterId": "c" })),
         ("adapter", json!({ "loras": [{ "id": "adapter" }] })),
@@ -11086,6 +11124,56 @@ fn krea_imported_available_is_txt2img_only() {
             "{label} job excluded"
         );
     }
+}
+
+/// The imported Krea lane threads a resolved img2img reference into a single `Conditioning::Reference`
+/// (strength carried) on the Turbo t2i descriptor, and a plain txt2img job into the empty conditioning
+/// (sc-14071). Also pins the manifest→worker seam: the `ui.img2img` flag the core stamps on an imported
+/// krea_2 entry (sc-14071 Part B) is exactly what `model_supports_img2img` reads to engage the img2img
+/// resolve. Pure — no reference-asset I/O or generator load. Runs on the cross-platform path so the
+/// candle imported lane's img2img threading is covered too.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn krea_imported_conditioning_threads_the_img2img_reference() {
+    // A resolved reference → one `Conditioning::Reference` carrying the strength.
+    let reference = synthetic_rgb(8, 8, |_, _| [10, 20, 30]);
+    let conditioning = krea_imported_conditioning(Some((reference, 0.4)));
+    match conditioning.as_slice() {
+        [Conditioning::Reference { image, strength }] => {
+            assert_eq!(image.width, 8);
+            assert_eq!(image.height, 8);
+            assert_eq!(*strength, Some(0.4));
+        }
+        other => panic!("expected a single Conditioning::Reference, got {other:?}"),
+    }
+
+    // A plain txt2img job (no resolved reference) → the empty conditioning.
+    assert!(
+        krea_imported_conditioning(None).is_empty(),
+        "plain txt2img carries no conditioning"
+    );
+
+    // Manifest→worker seam: the `ui.img2img` flag `apply_family_studio_surface_defaults` stamps on an
+    // imported krea_2 entry (Part B) is what `model_supports_img2img` reads to engage the img2img arm.
+    let img2img_entry = request(json!({
+        "projectId": "p", "model": "kreamania_variant5",
+        "modelManifestEntry": { "family": "krea_2", "ui": { "img2img": true } }
+    }));
+    assert!(
+        model_supports_img2img(&img2img_entry),
+        "the stamped ui.img2img flag engages the img2img resolve"
+    );
+    let no_flag = request(json!({
+        "projectId": "p", "model": "kreamania_variant5",
+        "modelManifestEntry": { "family": "krea_2" }
+    }));
+    assert!(
+        !model_supports_img2img(&no_flag),
+        "without ui.img2img the lane stays plain txt2img"
+    );
 }
 
 /// Real-weight GPU acceptance for the imported single-file Krea 2 lane (epic 14015 S0f, sc-14021).
