@@ -676,6 +676,7 @@ function inspectResourceSpecs(specs, ncTokens) {
 async function inspectTauriConfigs(ncTokens) {
   const configRelPaths = [
     "apps/desktop/tauri.conf.json",
+    "apps/desktop/tauri.linux.conf.json",
     "apps/desktop/tauri.macos.conf.json",
     "apps/desktop/updater.release.conf.json",
   ];
