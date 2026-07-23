@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/control-overlays.schema.json",
+  "title": "SceneWorks Control-Overlay Manifest",
+  "description": "The built-in (hosted) control-overlay catalog — the third source of the shared control-overlay registry (sc-8466, epic 8459 S6), alongside the user-global and per-project overlay manifests. Each entry reuses the LoRA entry shape so it normalizes through `normalize_lora_entry`: a hosted overlay resolves its install state from the HF cache and the ControlPanel picker (GET /api/v1/control-overlays?baseModel=…) lists it. This schema was added by sc-13606 (F-037) so authoring errors in the control-overlay catalog surface in CI, matching the model/lora/styles catalogs, rather than at runtime as a missing overlay.",
+  "type": "object",
+  "required": ["schemaVersion", "controlOverlays"],
+  "$defs": {
+    "hfRevision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Optional pinned 40-hex git commit SHA the download job forwards so the worker fetches that exact IMMUTABLE commit into snapshots/<sha>/ (defense-in-depth parity with the worker's KREA_CONTROL_OVERLAY_REVISION). A branch/tag/short/uppercase value is rejected by the pattern."
+    },
+    "overlaySource": {
+      "type": "object",
+      "description": "How the runtime resolves an overlay's weights (apps/rust-api/src/control_overlays.rs). A hosted overlay carries provider + repo (+ an optional file/files filter and an optional pinned revision). Closed keys so a typo'd `repo`/`file`/`files` fails CI instead of producing a failed download at runtime.",
+      "additionalProperties": false,
+      "required": ["provider", "repo"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Download provider identifier; hosted overlays use `huggingface`."
+        },
+        "repo": {
+          "type": "string",
+          "description": "Provider repository the overlay checkpoint is fetched from."
+        },
+        "file": {
+          "type": "string",
+          "description": "Single overlay checkpoint file to narrow the snapshot to. The runtime reads the top-level `files` list first, then falls back to `source.file`."
+        },
+        "files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Explicit allow-list of provider file patterns to fetch."
+        },
+        "revision": { "$ref": "#/$defs/hfRevision" },
+        "path": {
+          "type": "string",
+          "description": "Local filesystem path for a non-hosted (studio-trained) overlay. Hosted builtin entries use provider + repo instead."
+        }
+      }
+    }
+  },
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "controlOverlays": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "baseModel", "controlType", "source"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]*$",
+            "description": "Stable overlay id the registry merges scopes by (builtin → user → project) and the ControlPanel keys on."
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Human-facing display name shown in the ControlPanel overlay picker."
+          },
+          "baseModel": {
+            "type": "string",
+            "description": "The frozen INFERENCE base id this overlay applies on (NOT the training base). `list_control_overlays` filters the picker by this."
+          },
+          "controlType": {
+            "type": "string",
+            "description": "Control modality the overlay drives (e.g. 'pose', 'depth', 'canny')."
+          },
+          "controlEngine": {
+            "type": "string",
+            "description": "Worker STRICT_CONTROL_ENGINES key that loads and applies this overlay (backend-neutral; the OS/feature cfg picks the provider lane)."
+          },
+          "backbone": {
+            "type": "string",
+            "description": "Model backbone/family the overlay's control branch was trained against."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Overlay artifact kind (e.g. 'pose_control_branch')."
+          },
+          "experimental": {
+            "type": "boolean",
+            "description": "Marks a not-for-production feasibility-spike overlay (superseded by a full-corpus production overlay later)."
+          },
+          "source": { "$ref": "#/$defs/overlaySource" },
+          "files": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Overlay checkpoint file(s) the worker loads. Read before `source.file` when resolving the weights path."
+          },
+          "provenance": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Provenance metadata for the trained overlay checkpoint.",
+            "properties": {
+              "epic": { "type": "string" },
+              "story": { "type": "string" },
+              "spike": { "type": "string" },
+              "notForProduction": { "type": "boolean" }
+            }
+          },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

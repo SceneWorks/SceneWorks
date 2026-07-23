@@ -20,9 +20,13 @@ const requiredPaths = [
   "packages/schemas/model-manifest.schema.json",
   "packages/schemas/lora-manifest.schema.json",
   "packages/schemas/recipe-preset.schema.json",
+  "packages/schemas/styles.schema.json",
+  "packages/schemas/control-overlays.schema.json",
   "config/manifests/builtin.models.jsonc",
   "config/manifests/builtin.loras.jsonc",
   "config/manifests/builtin.recipe-presets.jsonc",
+  "config/manifests/builtin.styles.jsonc",
+  "config/manifests/builtin.control_overlays.jsonc",
   "data/projects/.gitkeep",
   "data/models/.gitkeep",
   "data/loras/.gitkeep",
@@ -46,12 +50,16 @@ const manifestSchemaPaths = [
   "packages/schemas/model-manifest.schema.json",
   "packages/schemas/lora-manifest.schema.json",
   "packages/schemas/recipe-preset.schema.json",
+  "packages/schemas/styles.schema.json",
+  "packages/schemas/control-overlays.schema.json",
 ];
 
 const manifestPaths = [
   "config/manifests/builtin.models.jsonc",
   "config/manifests/builtin.loras.jsonc",
   "config/manifests/builtin.recipe-presets.jsonc",
+  "config/manifests/builtin.styles.jsonc",
+  "config/manifests/builtin.control_overlays.jsonc",
 ];
 
 const manifestSchemaPairs = [
@@ -66,6 +74,14 @@ const manifestSchemaPairs = [
   {
     manifestPath: "config/manifests/builtin.recipe-presets.jsonc",
     schemaPath: "packages/schemas/recipe-preset.schema.json",
+  },
+  {
+    manifestPath: "config/manifests/builtin.styles.jsonc",
+    schemaPath: "packages/schemas/styles.schema.json",
+  },
+  {
+    manifestPath: "config/manifests/builtin.control_overlays.jsonc",
+    schemaPath: "packages/schemas/control-overlays.schema.json",
   },
 ];
 
