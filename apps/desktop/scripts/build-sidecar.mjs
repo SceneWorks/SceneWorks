@@ -17,6 +17,11 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import os from "node:os";
+import {
+  ffmpegPlaceholder,
+  onnxruntimePlaceholder,
+  shouldBuildCandle,
+} from "./build-sidecar-platform.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopDir = resolve(scriptDir, ".."); // apps/desktop
@@ -192,19 +197,21 @@ function codesignForNotarization(file) {
 // talk to its own origin (the API serves it), so it works on the dynamic port
 // with no CORS.
 //
-// Candle (Windows/CUDA) backend — the DEFAULT for the Windows desktop (sc-5559 /
-// sc-5563): compile the sidecar with `--features embed-web,backend-candle` so the
-// desktop's Rust worker runs candle. Off-Mac is CUDA-only (product decision: no
-// CPU/AMD, and the Python torch worker was retired in Phase 7), so a plain Windows
-// build is a GPU-less shell with no inference backend at all — never what we ship.
-// Building it therefore REQUIRES the CUDA Toolkit 12.9 + VS2022 BuildTools MSVC
-// 14.44 on PATH (run from its vcvars64 — CUDA 12.9 rejects VS2026's 14.51); the
-// candle build aborts with a clear error otherwise. Opt OUT with
+// Candle (Windows/Linux CUDA) backend — the DEFAULT for the Windows desktop
+// (sc-5559 / sc-5563) and required for Linux (sc-10374): compile the sidecar with
+// `--features embed-web,backend-candle` so the desktop's Rust worker runs candle.
+// Off-Mac is CUDA-only (product decision: no CPU/AMD, and the Python torch worker
+// was retired in Phase 7), so a plain Windows/Linux build is a GPU-less shell with
+// no inference backend at all — never what we ship.
+// Building it therefore REQUIRES a compatible CUDA toolkit. Windows additionally
+// requires CUDA Toolkit 12.9 + VS2022 BuildTools MSVC 14.44 on PATH (run from its
+// vcvars64 — CUDA 12.9 rejects VS2026's 14.51). Opt OUT on Windows with
 // SCENEWORKS_DESKTOP_CANDLE=0 only for a deliberately GPU-less compile/packaging
 // check on a box without the CUDA toolkit (e.g. a fast windows-latest CI lane).
-// macOS is unaffected — it bakes MLX into the api binary and never builds candle.
-const candle =
-  process.platform === "win32" && process.env.SCENEWORKS_DESKTOP_CANDLE !== "0";
+// Linux always builds candle through the toolchain proven by
+// .github/workflows/server-candle-linux.yml. macOS is unaffected — it bakes MLX
+// into the api binary and never builds candle.
+const candle = shouldBuildCandle(process.platform);
 if (candle) {
   // CUDA_COMPUTE_CAP=80 builds `compute_80` PTX the driver JITs forward to sm_120
   // (Blackwell) — one binary covers Ampere→Blackwell (per sc-3676). That claim holds
@@ -309,7 +316,7 @@ if (triple.includes("apple-darwin")) {
 } else {
   writeFileSync(
     join(ortDir, "README.txt"),
-    "onnxruntime is bundled on macOS (CoreML) only; the Windows candle build downloads the CUDA onnxruntime on first run into %APPDATA%\\SceneWorks\\gpu-runtime (cuda_provision.rs), not into this resource dir (sc-3487 / sc-5496).\n",
+    onnxruntimePlaceholder(process.platform),
   );
   console.log(`build-sidecar: ${ortDir} placeholder (no bundled onnxruntime)`);
 }
@@ -344,7 +351,7 @@ if (triple.includes("apple-darwin")) {
 } else {
   writeFileSync(
     join(ffmpegDir, "README.txt"),
-    "Static ffmpeg is bundled on macOS only (sc-3767); Windows/Linux use PATH ffmpeg.\n",
+    ffmpegPlaceholder(process.platform),
   );
   console.log(`build-sidecar: ${ffmpegDir} placeholder (non-macOS, PATH ffmpeg)`);
 }
