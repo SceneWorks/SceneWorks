@@ -1241,13 +1241,16 @@ fn supervise_mlx_worker(app: AppHandle) {
                 &resolve_supervisor_action(&app.state::<Managed>()),
             );
             if !matches!(verdict, SpawnVerdict::Keep) {
-                if let Some(child) = app
+                // Take the stale child out of the slot and DROP the guard before the
+                // kill (mirrors `restart_gpu_worker`) so the worker mutex is never
+                // held across the kill and a concurrent handle_api_exit isn't blocked.
+                let stale = app
                     .state::<Managed>()
                     .mlx_worker
                     .lock()
                     .expect("mlx worker lock")
-                    .take()
-                {
+                    .take();
+                if let Some(child) = stale {
                     let _ = child.kill();
                 }
                 record_mlx_worker_pid(&app, None);
@@ -1258,6 +1261,11 @@ fn supervise_mlx_worker(app: AppHandle) {
                     &log_path,
                     "[desktop] mlx worker target port changed before start; respawning\n",
                 );
+                // sc-13605: brief defensive throttle so a pathological rapid
+                // crash-loop can't hot-spin on spawns via this recheck path, which
+                // `continue`s past the bottom-of-loop exponential backoff. Short
+                // fixed delay (the minimum backoff), NOT the exponential.
+                std::thread::sleep(Duration::from_secs(1));
                 continue;
             }
             let started = Instant::now();
@@ -1482,13 +1490,17 @@ fn supervise_candle_worker(app: AppHandle) {
                 &resolve_supervisor_action(&app.state::<Managed>()),
             );
             if !matches!(verdict, SpawnVerdict::Keep) {
-                if let Some(child) = app
+                // Take the stale child out of the slot and DROP the guard before the
+                // (blocking) tree-kill (mirrors `restart_gpu_worker`) so the worker
+                // mutex is never held across `kill_pid` and a concurrent
+                // handle_api_exit isn't blocked on the guard.
+                let stale = app
                     .state::<Managed>()
                     .candle_worker
                     .lock()
                     .expect("candle worker lock")
-                    .take()
-                {
+                    .take();
+                if let Some(child) = stale {
                     kill_pid(child.pid());
                 }
                 record_candle_worker_pid(&app, None);
@@ -1499,6 +1511,11 @@ fn supervise_candle_worker(app: AppHandle) {
                     &log_path,
                     "[desktop] candle worker target port changed before start; respawning\n",
                 );
+                // sc-13605: brief defensive throttle so a pathological rapid
+                // crash-loop can't hot-spin on spawns via this recheck path, which
+                // `continue`s past the bottom-of-loop exponential backoff. Short
+                // fixed delay (the minimum backoff), NOT the exponential.
+                std::thread::sleep(Duration::from_secs(1));
                 continue;
             }
             let started = Instant::now();
