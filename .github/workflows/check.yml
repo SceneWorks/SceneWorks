@@ -81,6 +81,7 @@ jobs:
         run: |
           npm run check
           npm run check:compose
+          npm run check:docker:rust-api:self-test
       - name: Guard against NC model weights in a published artifact (sc-10526, epic 10512)
         # SceneWorks converts weights at install and pulls them at runtime — it never
         # redistributes them. Baking a Non-Commercial family's weights (Anima /
