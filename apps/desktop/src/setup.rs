@@ -334,7 +334,7 @@ impl LinuxDesktopPaths {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     fn from_process_env() -> Result<LinuxDesktopPaths, String> {
-        Self::resolve(std::env::var_os)
+        Self::resolve(|name| std::env::var_os(name))
     }
 
     fn settings_file(&self) -> PathBuf {
@@ -1526,7 +1526,7 @@ fn supervise_worker(
     slot: fn(&Managed) -> &Mutex<Option<CommandChild>>,
     record_pid: fn(&AppHandle, Option<u32>),
     kill_stale: fn(CommandChild),
-    env_builder: impl Fn(Command, WorkerSpawnCtx) -> Command + Send + 'static,
+    env_builder: impl Fn(Command, WorkerSpawnCtx) -> Result<Command, String> + Send + 'static,
 ) {
     std::thread::spawn(move || {
         // sc-13605: exactly one supervisor owns the single worker slot. If one is
@@ -1580,7 +1580,7 @@ fn supervise_worker(
             // The ONLY substantive per-worker difference: build the child's env
             // block. Everything around it (spawn, PID record, recheck, backoff) is
             // identical across workers.
-            let command = env_builder(
+            let command = match env_builder(
                 sidecar,
                 WorkerSpawnCtx {
                     app: &app,
@@ -1588,7 +1588,22 @@ fn supervise_worker(
                     worker_id: &worker_id,
                     hf_home: &hf_home,
                 },
-            );
+            ) {
+                Ok(command) => command,
+                Err(error) => {
+                    // Linux Secret Service reads are deliberately fallible. Never
+                    // launch without recorded credentials: preserve the actionable
+                    // error, then retry so unlocking the service recovers without an
+                    // orphaned credential-less worker.
+                    append_log(
+                        &log_path,
+                        &format!("[desktop] {label} worker environment setup failed: {error}\n"),
+                    );
+                    std::thread::sleep(Duration::from_secs(backoff));
+                    backoff = (backoff * 2).min(30);
+                    continue;
+                }
+            };
             let spawned = command.spawn();
             let (mut events, child) = match spawned {
                 Ok(pair) => pair,
@@ -1800,7 +1815,7 @@ fn supervise_mlx_worker(app: AppHandle) {
             if let Some(token) = lan_access_token() {
                 command = command.env("SCENEWORKS_ACCESS_TOKEN", token);
             }
-            command
+            Ok(command)
         },
     );
 }
@@ -1909,10 +1924,10 @@ fn supervise_candle_worker(app: AppHandle) {
             if let Some(ffmpeg) = resolve_bundled_ffmpeg(ctx.app) {
                 command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
             }
-            if let Some(token) = crate::settings::read_hf_token() {
+            if let Some(token) = crate::settings::read_hf_token()? {
                 command = command.env("HF_TOKEN", token);
             }
-            if let Some(credentials) = crate::settings::credentials_env_json() {
+            if let Some(credentials) = crate::settings::credentials_env_json()? {
                 command = command.env("SCENEWORKS_CREDENTIALS", credentials);
             }
             // LAN mode (epic 4484): the API now requires the password as an access
@@ -1921,7 +1936,7 @@ fn supervise_candle_worker(app: AppHandle) {
             if let Some(token) = lan_access_token() {
                 command = command.env("SCENEWORKS_ACCESS_TOKEN", token);
             }
-            command
+            Ok(command)
         },
     );
 }

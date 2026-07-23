@@ -371,15 +371,17 @@ fn read_hf_token_result() -> Result<Option<String>, String> {
 /// macOS no longer uses this eager push at all — the MLX worker pulls credentials
 /// lazily from the desktop credential socket (`cred_ipc`) — so it's compiled but
 /// uncalled there (the Python/candle spawn sites on other platforms still use it).
-#[cfg(target_os = "linux")]
-pub fn read_hf_token() -> Result<Option<String>, String> {
-    credential_read_for_platform(host_platform(), read_hf_token_result())
-}
-
-#[cfg(not(target_os = "linux"))]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-pub fn read_hf_token() -> Option<String> {
-    credential_read_for_platform(host_platform(), read_hf_token_result()).unwrap_or_default()
+pub fn read_hf_token() -> Result<Option<String>, String> {
+    let result = credential_read_for_platform(host_platform(), read_hf_token_result());
+    if cfg!(target_os = "linux") {
+        result
+    } else {
+        // Preserve macOS/Windows's existing best-effort keychain behavior while
+        // keeping one cross-platform return type so Linux's fallible contract is
+        // type-checked by every desktop CI lane.
+        Ok(result.unwrap_or_default())
+    }
 }
 
 /// The non-secret hosts that have a credential recorded, handed to the MLX worker so
@@ -453,15 +455,16 @@ fn credentials_env_json_result() -> Result<Option<String>, String> {
 ///
 /// macOS uses the lazy credential socket (`cred_ipc`) instead, so this is compiled
 /// but uncalled there (the Python/candle spawn sites on other platforms use it).
-#[cfg(target_os = "linux")]
-pub fn credentials_env_json() -> Result<Option<String>, String> {
-    credential_read_for_platform(host_platform(), credentials_env_json_result())
-}
-
-#[cfg(not(target_os = "linux"))]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-pub fn credentials_env_json() -> Option<String> {
-    credential_read_for_platform(host_platform(), credentials_env_json_result()).unwrap_or_default()
+pub fn credentials_env_json() -> Result<Option<String>, String> {
+    let result = credential_read_for_platform(host_platform(), credentials_env_json_result());
+    if cfg!(target_os = "linux") {
+        result
+    } else {
+        // See `read_hf_token`: non-Linux remains best-effort, but callers share
+        // Linux's explicit `Result` signature and cannot accidentally discard it.
+        Ok(result.unwrap_or_default())
+    }
 }
 
 fn worker_credential_preflight_with(
@@ -481,18 +484,8 @@ fn worker_credential_preflight_with(
 /// environment. The setup screen renders this error and offers Retry after the user
 /// starts/unlocks Secret Service. This is a no-op on macOS/Windows, preserving their
 /// existing lazy/best-effort behavior without touching the native keychain.
-#[cfg(target_os = "linux")]
 pub fn validate_worker_credentials() -> Result<(), String> {
     worker_credential_preflight_with(host_platform(), read_hf_token, credentials_env_json)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn validate_worker_credentials() -> Result<(), String> {
-    worker_credential_preflight_with(
-        host_platform(),
-        || Ok(read_hf_token()),
-        || Ok(credentials_env_json()),
-    )
 }
 
 // ---------------------------------------------------------------------------
