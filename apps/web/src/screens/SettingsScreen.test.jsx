@@ -107,6 +107,33 @@ describe("SettingsScreen service credentials", () => {
     expect(container.textContent).not.toContain("key123");
   });
 
+  it("surfaces an actionable Linux Secret Service save failure", async () => {
+    invoke.mockImplementation(async (command) => {
+      if (command === "get_app_settings") return {};
+      if (command === "get_gpu_info") return { platform: "linux", devices: [] };
+      if (command === "list_credentials") return [];
+      if (command === "set_credential") {
+        throw new Error(
+          "Couldn't save the credential because Linux Secret Service is unavailable or locked. " +
+            "Start and unlock GNOME Keyring or KWallet, make sure a D-Bus user session is running, then try again.",
+        );
+      }
+      return null;
+    });
+    await render();
+    expect(container.textContent).toContain("Secret Service (GNOME Keyring or KWallet)");
+
+    await changeField(container.querySelector('[aria-label="Credential host"]'), "huggingface.co");
+    await changeField(container.querySelector('[aria-label="Credential token"]'), "hf_secret");
+    await click(container.querySelector(".settings-credential-form button"));
+
+    expect(container.querySelector(".settings-status").textContent).toContain(
+      "Start and unlock GNOME Keyring or KWallet",
+    );
+    expect(container.textContent).not.toContain("Credential saved.");
+    expect(container.textContent).not.toContain("hf_secret");
+  });
+
   it("removes a credential via delete_credential", async () => {
     credentials = [{ host: "civitai.com", label: "Civit.ai", scheme: "query", present: true }];
     await render();

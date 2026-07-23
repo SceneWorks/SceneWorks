@@ -121,7 +121,12 @@ export function SettingsScreen() {
     };
   }, [gpu]);
 
-  const secretStore = gpu?.platform === "windows" ? "Credential Manager" : "Keychain";
+  const secretStore =
+    gpu?.platform === "windows"
+      ? "Credential Manager"
+      : gpu?.platform === "linux"
+        ? "Secret Service (GNOME Keyring or KWallet)"
+        : "Keychain";
   const credentialLocation = isDesktop
     ? `the system ${secretStore}`
     : "the server's credential store (a restricted file in the config directory)";
