@@ -124,7 +124,7 @@ async function bumpPhase(bump) {
 
   run("git", ["push", "-u", "origin", relBranch], repoRoot);
   const body =
-    `Version bump to \`${newVersion}\` (root + tauri.conf.json + apps/desktop + apps/web via sync-version.mjs).\n\n` +
+    `Version bump to \`${newVersion}\` (root + tauri.conf.json + apps/desktop + apps/web + Cargo.toml via sync-version.mjs).\n\n` +
     "After this merges, cut the release:\n" +
     "```\ngit switch main && git pull\nnpm run release -- tag\n```\n" +
     "The tag push triggers `.github/workflows/release.yml`, which drafts the GitHub Release.";
