@@ -10,6 +10,8 @@ mod cred_ipc;
 // run into %APPDATA%\SceneWorks\gpu-runtime and resolved from there.
 #[cfg(target_os = "windows")]
 mod cuda_provision;
+#[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+mod linux_cuda_provision;
 // Pure, cross-platform filesystem predicates for `cuda_provision` (marker + sentinel
 // checks). NOT `cfg`-gated so the retry-skip guard (sc-13614) is unit-tested on any
 // host, not only the Windows-only lane where `cuda_provision` compiles.

@@ -1,4 +1,50 @@
-# Offline / air-gapped install (Windows)
+# Offline / air-gapped GPU runtime install
+
+SceneWorks downloads its platform-specific NVIDIA user-space runtime once on
+Windows and Linux. The NVIDIA display driver must already be installed, but a
+system CUDA toolkit is not required.
+
+## Linux
+
+The connected-machine method is recommended:
+
+1. Launch SceneWorks once on a connected x86_64 Linux/NVIDIA machine and let
+   setup complete.
+2. Copy the whole runtime root to the offline user's XDG data location:
+
+   ```text
+   $XDG_DATA_HOME/SceneWorks/gpu-runtime
+   # default: ~/.local/share/SceneWorks/gpu-runtime
+   ```
+
+   The source and target must both be Linux; Windows DLLs are not compatible.
+3. Launch SceneWorks. It validates the pinned marker plus all CUDA, cuDNN,
+   cuFFT, nvJitLink, NVRTC, and ONNX Runtime sentinels and skips the network.
+
+For managed deployment, the copied root may live elsewhere. Set
+`SCENEWORKS_GPU_RUNTIME_DIR=/absolute/path/to/gpu-runtime` before first launch;
+SceneWorks copies and validates it into the target user's XDG data directory.
+The expected layout is:
+
+```text
+gpu-runtime/
+  cuda/lib64/
+  cublas/lib/
+  curand/lib/
+  cuda_nvrtc/lib/
+  cudnn/lib/
+  cufft/lib/
+  nvjitlink/lib/
+  onnxruntime/capi/
+```
+
+The authoritative Linux x86_64 wheel URLs, SHA-256 hashes, extraction rules,
+and version marker are in
+[`linux_cuda_provision.rs`](../src/linux_cuda_provision.rs). Do not substitute
+floating pip versions. An incomplete or corrupt stage is rejected and the GPU
+worker remains dormant rather than entering a crash loop.
+
+## Windows
 
 SceneWorks Desktop on Windows needs ~2.7 GB of NVIDIA CUDA runtime, cuDNN, and the
 ONNX Runtime GPU provider at runtime. These are **not** in the installer (the set
