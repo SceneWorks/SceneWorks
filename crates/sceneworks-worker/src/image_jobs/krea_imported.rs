@@ -353,6 +353,9 @@ async fn generate_krea_imported_stream(
             let loaded = runtime_macos::providers::krea::load_from_native_dit_file(
                 &dit,
                 &base_dir,
+                // inference #211 added an adapters slice; the plain t2i/img2img path passes none
+                // (LoRAs + edit are threaded in the follow-up feature commit, sc-14111 / sc-14119).
+                &[],
                 runtime_macos::providers::krea::descriptor(),
             );
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
