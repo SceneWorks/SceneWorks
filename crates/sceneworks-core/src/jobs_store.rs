@@ -3892,11 +3892,29 @@ mod candle_routing_tests {
             direct_file
         )));
 
+        // img2img (a single non-edit `referenceAssetId`) is candle-eligible — the candle imported
+        // lane serves it (sc-14071, `resolve_img2img_init_generic` → one `Conditioning::Reference`);
+        // no adapter needed. This closes the sc-14071 routing gap (the gate previously rejected
+        // `referenceAssetId`, stranding candle img2img).
+        let mut img2img = plain.clone();
+        img2img
+            .as_object_mut()
+            .expect("payload object")
+            .insert("referenceAssetId".to_owned(), json!("reference_1"));
+        assert!(
+            image_job_is_candle_eligible(&image_generate_job(img2img)),
+            "a non-edit imported-Krea img2img referenceAssetId must be candle-eligible (sc-14071)"
+        );
+
+        // LoRAs (sc-14111) and the Kontext edit surface (sc-14119) stay OFF candle — its native
+        // single-file loader takes no adapters yet (sc-14135) — along with every base-tier-only shape
+        // (mask, character, strict pose, multi-phase) and the plural edit-reference set on a non-edit
+        // job (that is the edit surface).
         let mut unsupported_shapes = Vec::new();
         for extra in [
             json!({ "mode": "edit_image", "sourceAssetId": "source_1" }),
             json!({ "mode": " edit_image ", "sourceAssetId": "source_1" }),
-            json!({ "referenceAssetId": "reference_1" }),
+            json!({ "mode": "edit_image", "referenceAssetIds": ["scene_1", "person_1"] }),
             json!({ "referenceAssetIds": ["reference_1"] }),
             json!({ "maskAssetId": "mask_1" }),
             json!({ "characterId": "character_1" }),
@@ -3914,7 +3932,7 @@ mod candle_routing_tests {
         for payload in unsupported_shapes {
             assert!(
                 !image_job_is_candle_eligible(&image_generate_job(payload.clone())),
-                "unsupported imported-Krea conditioning must fail closed: {payload}"
+                "unsupported imported-Krea conditioning must fail closed on candle: {payload}"
             );
         }
 
@@ -6649,9 +6667,40 @@ mod mlx_routing_tests {
             "an MLX worker must claim the imported family-routed job"
         );
 
+        // On MLX the imported native loader takes adapters (inference #211), so a LoRA t2i job
+        // (sc-14111), an img2img job (sc-14071), and the Kontext edit surface (sc-14119) are all
+        // claim-eligible via the family fallback.
+        let entry = json!({
+            "family": "krea_2",
+            "paths": { "model": "/app/models/imports/kreamania_variant4" }
+        });
+        for (label, extra) in [
+            ("lora t2i", json!({ "loras": [{ "id": "adapter_1" }] })),
+            ("img2img", json!({ "referenceAssetId": "reference_1" })),
+            (
+                "edit",
+                json!({ "mode": "edit_image", "sourceAssetId": "source_1" }),
+            ),
+        ] {
+            let mut payload = json!({ "model": "kreamania_variant4", "prompt": "a red fox" });
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("modelManifestEntry".to_owned(), entry.clone());
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            assert!(
+                image_job_is_mlx_eligible(&image_generate_job(payload)),
+                "{label} imported job must be MLX-eligible via the adapter-capable family fallback"
+            );
+        }
+
+        // A base-tier-only shape (pose) and a manifest entry with no installed path stay ineligible.
         assert!(!image_job_is_mlx_eligible(&image_generate_job(json!({
             "model": "kreamania_variant4",
-            "loras": [{ "id": "adapter_1" }],
+            "advanced": { "poses": [{ "id": "pose_1" }] },
             "modelManifestEntry": {
                 "family": "krea_2",
                 "paths": { "model": "/app/models/imports/kreamania_variant4" }

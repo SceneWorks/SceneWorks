@@ -54,7 +54,9 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         // future) candle-only builtin — a builtin id absent from `MLX_ROUTED_MODELS` — not-eligible
         // here rather than family-routed. Today every builtin is `mlx_routed`, so this branch is only
         // ever reached by imported ids; the guard is defensive parity, not live behavior.
-        return imported_image_request_family_eligible(model, payload, MLX_ROUTED_FAMILIES);
+        // `adapters_supported = true`: the MLX native single-file loader takes an adapter slice
+        // (inference #211), so the imported lane serves LoRAs (sc-14111) + Kontext edit (sc-14119).
+        return imported_image_request_family_eligible(model, payload, MLX_ROUTED_FAMILIES, true);
     }
     match model {
         "z_image_turbo" | "z_image_edit" => z_image_mlx_eligible(payload),
@@ -1003,24 +1005,98 @@ mod tests {
         ));
     }
 
-    /// Import scope is t2i-only (S0c). The shared imported-family gate rejects `edit_image` before
-    /// backend dispatch, so even a well-formed imported edit with a source remains ineligible.
+    /// On MLX the imported single-file loader takes an adapter slice (inference #211), so the
+    /// imported-family lane is claim-eligible for LoRAs (sc-14111), the Kontext edit surface
+    /// (sc-14119, any of the edit-reference fields), AND reference-guided img2img (sc-14071) — while
+    /// still rejecting the base-tier-only shapes (pose, mask, character, multi-phase) and a bare
+    /// non-edit `sourceAssetId`.
     #[test]
-    fn imported_krea_family_edit_is_not_mlx_eligible() {
+    fn imported_krea_family_adapters_and_edit_are_mlx_eligible() {
         let imported_id = "user_kreamania_variant5";
+        let entry = json!({
+            "id": imported_id,
+            "family": "krea_2",
+            "paths": { "model": "/app/models/imports/kreamania_variant4" }
+        });
+
+        // Edit + a source image → eligible (the required identity-edit LoRA is worker-enforced).
         let edit = json!({
             "model": imported_id,
             "mode": "edit_image",
             "sourceAssetId": "asset-1",
-            "modelManifestEntry": {
-                "id": imported_id,
-                "family": "krea_2",
-                "paths": { "model": "/app/models/imports/kreamania_variant4" }
-            },
+            "modelManifestEntry": entry.clone(),
+        });
+        assert!(image_request_mlx_eligible(
+            imported_id,
+            edit.as_object().expect("probe is an object")
+        ));
+
+        // Edit via the two-reference scene+person set → equally eligible.
+        let edit_two_ref = json!({
+            "model": imported_id,
+            "mode": "edit_image",
+            "referenceAssetIds": ["scene", "person"],
+            "modelManifestEntry": entry.clone(),
+        });
+        assert!(image_request_mlx_eligible(
+            imported_id,
+            edit_two_ref.as_object().expect("probe is an object")
+        ));
+
+        // An edit with NO conditioning image is still rejected (defensive shape).
+        let edit_no_ref = json!({
+            "model": imported_id,
+            "mode": "edit_image",
+            "modelManifestEntry": entry.clone(),
         });
         assert!(!image_request_mlx_eligible(
             imported_id,
-            edit.as_object().expect("probe is an object")
+            edit_no_ref.as_object().expect("probe is an object")
+        ));
+
+        // A t2i job carrying a LoRA stack → eligible (adapter path).
+        let t2i_lora = json!({
+            "model": imported_id,
+            "mode": "text_to_image",
+            "loras": [{ "id": "some_adapter" }],
+            "modelManifestEntry": entry.clone(),
+        });
+        assert!(image_request_mlx_eligible(
+            imported_id,
+            t2i_lora.as_object().expect("probe is an object")
+        ));
+
+        // A non-edit img2img job (a single referenceAssetId) → eligible (sc-14071, no adapter needed).
+        let img2img = json!({
+            "model": imported_id,
+            "referenceAssetId": "asset-1",
+            "modelManifestEntry": entry.clone(),
+        });
+        assert!(image_request_mlx_eligible(
+            imported_id,
+            img2img.as_object().expect("probe is an object")
+        ));
+
+        // A base-tier-only shape (a pose set) is still rejected.
+        let pose = json!({
+            "model": imported_id,
+            "advanced": { "poses": [{}] },
+            "modelManifestEntry": entry.clone(),
+        });
+        assert!(!image_request_mlx_eligible(
+            imported_id,
+            pose.as_object().expect("probe is an object")
+        ));
+
+        // A bare non-edit `sourceAssetId` is still rejected (the img2img path reads referenceAssetId).
+        let bare_source = json!({
+            "model": imported_id,
+            "sourceAssetId": "asset-1",
+            "modelManifestEntry": entry.clone(),
+        });
+        assert!(!image_request_mlx_eligible(
+            imported_id,
+            bare_source.as_object().expect("probe is an object")
         ));
     }
 
