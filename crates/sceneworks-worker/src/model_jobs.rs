@@ -1,5 +1,7 @@
 use super::*;
 
+use sceneworks_core::base_weights::{detect_base_weight_file, import_detection_supported};
+
 /// Post the terminal `Completed` update for a Hugging Face cache download, building the shared
 /// `{<id_key>, repo, path, storage:"huggingface_cache", completedAt}` result object (F-116). Both
 /// model download paths (`modelId`) and the LoRA path (`loraId`) funnel through here so the result
@@ -2849,6 +2851,51 @@ pub(crate) async fn run_model_import_job(
                 )
                 .await;
             }
+        }
+    }
+
+    // sc-14019 (epic 14015): compatibility gate behind the now-enabled model-import kill-switch.
+    // Classify the downloaded base weights with the base-weight detector and refuse the import —
+    // with the detector's typed reason — unless the (family, component, quant) triple has a real
+    // loader today (`import_detection_supported`). Runs over the bytes on disk, so it covers HF-repo,
+    // source-URL, and uploaded imports uniformly (the API's synchronous `import_source_supported`
+    // only sees on-disk uploads at queue time). NEVER a silent fallback. `target_dir` is
+    // app-managed (`resolve_model_import_target`) — this gate is purely additive to confinement.
+    match first_safetensors_path(&target_dir) {
+        Some(weight_file) => match detect_base_weight_file(&weight_file) {
+            Ok(detection) => {
+                if let Err(reason) = import_detection_supported(&detection) {
+                    return fail_job(
+                        api,
+                        &job.id,
+                        "Model import is not supported for this file.",
+                        Some(reason),
+                    )
+                    .await;
+                }
+            }
+            Err(error) => {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "Model import failed.",
+                    Some(model_family_detection_error(error)),
+                )
+                .await;
+            }
+        },
+        None => {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import is not supported for this file.",
+                Some(
+                    "No safetensors base-weight file was found in the imported model; single-file \
+                     base-checkpoint import expects a .safetensors transformer."
+                        .to_owned(),
+                ),
+            )
+            .await;
         }
     }
 

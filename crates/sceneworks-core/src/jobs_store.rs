@@ -6798,7 +6798,7 @@ mod mlx_routing_tests {
         // and `features.edit` is now true (drives the Image Studio Edit tab alongside the catalog
         // `edit_image` capability). `reference`/`pose` remain true — inert, since the catalog
         // capabilities (not these flags) drive the UI affordances.
-        let support = model_mac_support("ideogram_4", "image");
+        let support = model_mac_support("ideogram_4", "image", None);
         assert!(support.supported, "ideogram_4 must be Mac-supported");
         assert!(
             support.features.edit,
@@ -6813,7 +6813,7 @@ mod mlx_routing_tests {
             "ideogram_4_turbo",
             &object(json!({ "mode": "edit_image", "sourceAssetId": "asset_1" }))
         ));
-        let turbo = model_mac_support("ideogram_4_turbo", "image");
+        let turbo = model_mac_support("ideogram_4_turbo", "image", None);
         assert!(turbo.supported, "ideogram_4_turbo must be Mac-supported");
         assert!(turbo.features.edit, "ideogram_4_turbo supports edit");
     }
@@ -6859,20 +6859,24 @@ mod mlx_routing_tests {
         // this flag both gate the Edit tab to `boogu_image_edit`).
         for model in ["boogu_image", "boogu_image_turbo", "boogu_image_edit"] {
             assert!(
-                model_mac_support(model, "image").supported,
+                model_mac_support(model, "image", None).supported,
                 "{model} must be Mac-supported"
             );
         }
         assert!(
-            model_mac_support("boogu_image_edit", "image").features.edit,
+            model_mac_support("boogu_image_edit", "image", None)
+                .features
+                .edit,
             "boogu_image_edit supports edit"
         );
         assert!(
-            !model_mac_support("boogu_image", "image").features.edit,
+            !model_mac_support("boogu_image", "image", None)
+                .features
+                .edit,
             "boogu_image (Base) is text-to-image only"
         );
         assert!(
-            !model_mac_support("boogu_image_turbo", "image")
+            !model_mac_support("boogu_image_turbo", "image", None)
                 .features
                 .edit,
             "boogu_image_turbo is text-to-image only"
@@ -6907,7 +6911,7 @@ mod mlx_routing_tests {
             "krea_2_turbo edit_image without a source is rejected"
         );
 
-        let support = model_mac_support("krea_2_turbo", "image");
+        let support = model_mac_support("krea_2_turbo", "image", None);
         assert!(support.supported, "krea_2_turbo must be Mac-supported");
         assert!(
             support.features.edit,
@@ -6943,7 +6947,7 @@ mod mlx_routing_tests {
             "krea_2_raw edit_image without a source is rejected"
         );
 
-        let support = model_mac_support("krea_2_raw", "image");
+        let support = model_mac_support("krea_2_raw", "image", None);
         assert!(support.supported, "krea_2_raw must be Mac-supported");
         assert!(
             support.features.edit,
@@ -6979,7 +6983,7 @@ mod mlx_routing_tests {
             );
 
             // UI gating oracle: Mac-supported (reaches the picker), text-to-image only (no edit tab).
-            let support = model_mac_support(model, "image");
+            let support = model_mac_support(model, "image", None);
             assert!(support.supported, "{model} must be Mac-supported");
             assert!(!support.features.edit, "{model} is text-to-image only");
         }

@@ -1,5 +1,6 @@
 use super::*;
 
+use sceneworks_core::base_weights::{detect_base_weight_file, import_detection_supported};
 use sceneworks_core::credentials::normalize_host;
 use sceneworks_core::lora_family::is_hidden_file;
 
@@ -875,20 +876,45 @@ fn converted_tier_real_bytes(tier_dir: &FsPath) -> u64 {
     total
 }
 
-/// Kill-switch for the model upload/import endpoint (sc-7081, epic 7080). Disabled on
-/// every platform until a real compatibility-check + conversion pipeline exists behind it:
-/// today an imported checkpoint never reaches a runnable engine. macOS dropped the torch
-/// worker (MLX-only, sc-3492) and resolves engines from a compile-time table a novel
-/// imported id is never in; the off-Mac diffusers path only loads full repos via
-/// `from_pretrained`, not the single files this endpoint accepts. Flip to `true` once the
-/// pipeline gates imports on an architecture-compatibility verdict (kept as a fn, not a
-/// `const`, so the guarded handler body stays reachable — no `unreachable_code`).
+/// Kill-switch for the model upload/import endpoint (sc-7081, epic 7080). Enabled as of sc-14019
+/// (epic 14015): a base-checkpoint import is now gated on the architecture-compatibility verdict of
+/// the base-weight detector ([`sceneworks_core::base_weights`]) via [`import_source_supported`] at
+/// queue time and the worker's `run_model_import_job` over the downloaded bytes. The gate accepts
+/// ONLY `(family, component, quant)` triples with a real loader today (`import_supported` — currently
+/// a dense-bf16 Krea 2 DiT, routed to the Krea MLX engine via the S0d family path); every other file
+/// is refused with a typed reason (NEVER a silent fallback). Kept as a fn, not a `const`, so the
+/// guarded handler body stays reachable (no `unreachable_code`) and the switch is trivially
+/// re-flippable if a regression surfaces.
 fn model_import_enabled() -> bool {
-    false
+    true
 }
 
 const MODEL_IMPORT_DISABLED_DETAIL: &str = "Model import is temporarily disabled while native \
      model support and conversion are being built. (LoRA import is unaffected.)";
+
+/// Import-compatibility gate for a base checkpoint (sc-14019, epic 14015): resolve the primary
+/// weight file under `source`, classify it with the base-weight detector, and refuse the import
+/// unless the verdict is one a real loader accepts today
+/// ([`sceneworks_core::base_weights::import_supported`]). The refusal reason is surfaced to the API
+/// client as a `400` so the upload flow gets a synchronous, actionable message rather than a queued
+/// job that fails later. This gate is **additive** to path confinement — `source` has already been
+/// confined by `validate_lora_import_source_path` (LAN-exposed jobs API, epic 4484); this never
+/// widens or bypasses that. The worker re-runs the same predicate over the downloaded bytes so repo/
+/// URL imports (whose file is not on disk at queue time) are covered there.
+fn import_source_supported(source: &FsPath) -> Result<(), ApiError> {
+    let weight_file = if source.is_dir() {
+        first_safetensors_path(source)
+    } else {
+        Some(source.to_path_buf())
+    };
+    let Some(weight_file) = weight_file else {
+        return Err(ApiError::bad_request(
+            "No safetensors base-weight file was found to import; single-file base-checkpoint import expects a .safetensors transformer.",
+        ));
+    };
+    let detection = detect_base_weight_file(&weight_file).map_err(model_family_inspection_error)?;
+    import_detection_supported(&detection).map_err(ApiError::bad_request)
+}
 
 pub(crate) async fn create_model_import_job(
     State(state): State<AppState>,
@@ -1019,6 +1045,11 @@ pub(crate) async fn queue_model_import_job(
             allowed_source_roots
         };
         validate_lora_import_source_path(source_path, &allowed_source_roots)?;
+        // Compatibility gate (sc-14019): refuse — synchronously, with the detector's typed reason —
+        // any staged/local base checkpoint whose (family, component, quant) has no loader today.
+        // Runs AFTER confinement above; it never widens the allowed roots. Repo/URL imports (no file
+        // on disk yet) are gated by the worker over the downloaded bytes instead.
+        import_source_supported(FsPath::new(source_path))?;
         let detected =
             detect_model_family(FsPath::new(source_path)).map_err(model_family_inspection_error)?;
         payload.family = reconcile_model_family(
@@ -1421,6 +1452,124 @@ fn backfill_current_receipt(
         )
         .ok()
     });
+}
+
+#[cfg(test)]
+mod import_gate_tests {
+    //! The queue-time base-checkpoint compatibility gate (sc-14019, epic 14015): `import_source_supported`
+    //! must accept a dense-bf16 Krea 2 DiT and refuse everything else with an actionable reason, so the
+    //! LAN-exposed import endpoint (now that the kill-switch is on) can never queue an un-runnable file.
+    use super::*;
+
+    /// Write a safetensors file whose header declares `(name, dtype)` tensors. The declared tensor
+    /// data must be present or the header is rejected as truncated (sc-6072), so the payload is padded
+    /// to the declared offsets — mirrors `external_base_models::tests::write_safetensors`.
+    fn write_safetensors(path: &FsPath, entries: &[(&str, &str)]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("parent dir");
+        }
+        let mut header = serde_json::Map::new();
+        for (index, (key, dtype)) in entries.iter().enumerate() {
+            let start = index * 4;
+            header.insert(
+                (*key).to_owned(),
+                json!({ "dtype": dtype, "shape": [1], "data_offsets": [start, start + 4] }),
+            );
+        }
+        let header_bytes = serde_json::to_vec(&Value::Object(header)).expect("header json");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&header_bytes);
+        bytes.extend(std::iter::repeat(0_u8).take(entries.len() * 4));
+        std::fs::write(path, bytes).expect("write safetensors");
+    }
+
+    /// A ComfyUI-native dense-bf16 Krea 2 DiT: the unique `txtfusion.` tower + BFL-style `blocks.*`
+    /// keys, all BF16 → detector `(krea_2, Transformer, Bf16)` — the one importable triple today.
+    fn krea2_bf16_dit_keys() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("model.diffusion_model.blocks.0.attn.wq.weight", "BF16"),
+            ("model.diffusion_model.blocks.0.mod.lin", "BF16"),
+            (
+                "model.diffusion_model.txtfusion.refiner_blocks.0.attn.wq.weight",
+                "BF16",
+            ),
+            ("model.diffusion_model.txtfusion.projector.weight", "BF16"),
+        ]
+    }
+
+    #[test]
+    fn krea2_bf16_upload_is_accepted() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("kreamania_variant5.safetensors");
+        write_safetensors(&file, &krea2_bf16_dit_keys());
+        assert!(
+            import_source_supported(&file).is_ok(),
+            "a dense-bf16 Krea 2 DiT upload must pass the import gate"
+        );
+    }
+
+    #[test]
+    fn krea2_packed_quant_upload_is_refused_with_reason() {
+        // Same family/component but `.comfy_quant` packed int8 → no loader yet → 400 with a reason.
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("kreamania_variant4.safetensors");
+        write_safetensors(
+            &file,
+            &[
+                ("model.diffusion_model.blocks.0.attn.wq.weight", "I8"),
+                ("model.diffusion_model.blocks.0.attn.wq.comfy_quant", "U8"),
+                ("model.diffusion_model.blocks.0.mod.lin", "BF16"),
+                (
+                    "model.diffusion_model.txtfusion.refiner_blocks.0.attn.wq.comfy_quant",
+                    "U8",
+                ),
+            ],
+        );
+        let error = import_source_supported(&file).expect_err("packed quant must be refused");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.detail.contains("bf16"), "detail: {}", error.detail);
+    }
+
+    #[test]
+    fn unsupported_family_upload_is_refused() {
+        // A qwen-image plain-fp8 DiT is recognized but has no import loader → refused.
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("qwen_image.safetensors");
+        write_safetensors(
+            &file,
+            &[
+                ("model.diffusion_model.img_in.weight", "F8_E4M3"),
+                (
+                    "model.diffusion_model.transformer_blocks.0.attn.add_q_proj.weight",
+                    "F8_E4M3",
+                ),
+                (
+                    "model.diffusion_model.transformer_blocks.0.img_mlp.net.0.proj.weight",
+                    "F8_E4M3",
+                ),
+            ],
+        );
+        let error = import_source_supported(&file).expect_err("qwen import must be refused");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(
+            error.detail.contains("qwen-image"),
+            "detail should name the unsupported family: {}",
+            error.detail
+        );
+    }
+
+    #[test]
+    fn unrecognized_file_upload_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("mystery.safetensors");
+        write_safetensors(
+            &file,
+            &[("some.mystery.tensor", "BF16"), ("another.mystery", "BF16")],
+        );
+        let error = import_source_supported(&file).expect_err("unrecognized file must be refused");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
 }
 
 #[cfg(test)]
@@ -2613,7 +2762,15 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        model_mac_support(id, model_type)
+        // Forward the catalog-declared family so an imported/user model whose id is in no routing
+        // table still routes to its family's MLX engine (route-by-family, sc-14019) instead of
+        // reporting "not available on Mac". Builtin ids are unaffected (they route by id).
+        let family = object
+            .get("family")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        model_mac_support(id, model_type, family)
     };
     if let Ok(mac_support) = serde_json::to_value(mac_support) {
         object.insert("macSupport".to_owned(), mac_support);
