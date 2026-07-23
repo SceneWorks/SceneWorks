@@ -182,6 +182,13 @@ fn write_marker(root: &Path) -> Result<(), String> {
         .map_err(|error| format!("write marker: {error}"))
 }
 
+fn invalidate_markers(root: &Path) {
+    let _ = fs::remove_file(root.join(".redist-marker"));
+    for component in COMPONENTS {
+        let _ = fs::remove_file(root.join(format!(".component-{}.ok", component.slug)));
+    }
+}
+
 #[cfg(test)]
 fn hash_reader(mut reader: impl Read) -> Result<String, String> {
     let mut hasher = Sha256::new();
@@ -270,6 +277,14 @@ fn install_from_staged(source: &Path, root: &Path) -> Result<(), String> {
             .then_some(())
             .ok_or_else(|| format!("{GPU_RUNTIME_DIR_ENV} points at an incomplete runtime"));
     }
+    // Invalidate every live completion witness before the first mutation. If the
+    // staged copy is interrupted, the next launch cannot trust old markers over a
+    // partially replaced runtime and will re-provision instead of starting a worker.
+    invalidate_markers(root);
+    let stage_root = root.join(".staged-install");
+    let _ = fs::remove_dir_all(&stage_root);
+    fs::create_dir_all(&stage_root)
+        .map_err(|error| format!("create {}: {error}", stage_root.display()))?;
     for component in COMPONENTS {
         let src = source.join(component.dest);
         if !src.is_dir() {
@@ -279,21 +294,30 @@ fn install_from_staged(source: &Path, root: &Path) -> Result<(), String> {
                 component.dest
             ));
         }
-        let dest = root.join(component.dest);
-        if dest.exists() {
-            fs::remove_dir_all(&dest)
-                .map_err(|error| format!("replace {}: {error}", dest.display()))?;
-        }
-        fs::create_dir_all(&dest).map_err(|error| format!("create {}: {error}", dest.display()))?;
+        let stage = stage_root.join(component.slug);
+        fs::create_dir_all(&stage)
+            .map_err(|error| format!("create {}: {error}", stage.display()))?;
         for entry in
             fs::read_dir(&src).map_err(|error| format!("read {}: {error}", src.display()))?
         {
             let entry = entry.map_err(|error| format!("read {}: {error}", src.display()))?;
             if entry.path().is_file() {
-                fs::copy(entry.path(), dest.join(entry.file_name()))
+                fs::copy(entry.path(), stage.join(entry.file_name()))
                     .map_err(|error| format!("copy {}: {error}", entry.path().display()))?;
             }
         }
+        if !component
+            .sentinels
+            .iter()
+            .all(|name| dir_has_shared_object(&stage, name))
+        {
+            return Err(format!(
+                "pre-staged component {} is missing required shared objects",
+                component.label
+            ));
+        }
+        let dest = root.join(component.dest);
+        promote_component(&stage, &dest)?;
     }
     if !runtime_complete(root) {
         return Err(format!(
@@ -305,6 +329,7 @@ fn install_from_staged(source: &Path, root: &Path) -> Result<(), String> {
     for component in COMPONENTS {
         write_component_marker(root, component.slug, REDIST_VERSION)?;
     }
+    let _ = fs::remove_dir_all(stage_root);
     Ok(())
 }
 
@@ -324,20 +349,7 @@ fn evaluate_ldd_report(success: bool, report: &str) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn validate_runtime_dependencies(root: &Path) -> Result<(), String> {
-    let provider_dir = root.join("onnxruntime/capi");
-    let provider = fs::read_dir(&provider_dir)
-        .map_err(|error| format!("read {}: {error}", provider_dir.display()))?
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    name == "libonnxruntime_providers_cuda.so"
-                        || name.starts_with("libonnxruntime_providers_cuda.so.")
-                })
-        })
-        .ok_or_else(|| "onnxruntime CUDA provider is missing after provisioning".to_owned())?;
+    let targets = dependency_probe_targets(root)?;
     let mut loader_dirs = Vec::new();
     for component in COMPONENTS {
         let path = root.join(component.dest);
@@ -350,17 +362,72 @@ fn validate_runtime_dependencies(root: &Path) -> Result<(), String> {
     ));
     let joined = std::env::join_paths(loader_dirs)
         .map_err(|error| format!("compose LD_LIBRARY_PATH: {error}"))?;
-    let output = std::process::Command::new("ldd")
-        .arg(provider)
-        .env("LD_LIBRARY_PATH", joined)
-        .output()
-        .map_err(|error| format!("run Linux GPU runtime dependency check (`ldd`): {error}"))?;
-    let report = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    evaluate_ldd_report(output.status.success(), &report)
+    let mut reports = String::new();
+    let mut success = true;
+    for target in targets {
+        let output = std::process::Command::new("ldd")
+            .arg(&target)
+            .env("LD_LIBRARY_PATH", &joined)
+            .output()
+            .map_err(|error| format!("run Linux GPU runtime dependency check (`ldd`): {error}"))?;
+        success &= output.status.success();
+        reports.push_str(&format!(
+            "\n{}:\n{}{}",
+            target.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    evaluate_ldd_report(success, &reports)
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+fn dependency_probe_targets(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let capi = root.join("onnxruntime/capi");
+    let main = find_shared_object(&capi, "libonnxruntime.so").ok_or_else(|| {
+        "onnxruntime main shared library is missing after provisioning".to_owned()
+    })?;
+    let provider = find_shared_object(&capi, "libonnxruntime_providers_cuda.so")
+        .ok_or_else(|| "onnxruntime CUDA provider is missing after provisioning".to_owned())?;
+    let cudnn = root.join("cudnn/lib");
+    let mut targets = vec![main, provider];
+    let mut cudnn_libraries = fs::read_dir(&cudnn)
+        .map_err(|error| format!("read {}: {error}", cudnn.display()))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains(".so"))
+        })
+        .collect::<Vec<_>>();
+    cudnn_libraries.sort();
+    targets.extend(cudnn_libraries);
+    Ok(targets)
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+fn find_shared_object(dir: &Path, basename: &str) -> Option<PathBuf> {
+    let exact = dir.join(basename);
+    if exact.is_file() {
+        return Some(exact);
+    }
+    let mut candidates = fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&format!("{basename}.")))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.into_iter().next()
 }
 
 async fn fetch_component(
@@ -664,7 +731,7 @@ mod tests {
             .expect("remove fixture sentinel");
         let rejected = scratch("staged-rejected");
         let error = install_from_staged(&partial, &rejected).expect_err("reject partial stage");
-        assert!(error.contains("incomplete"));
+        assert!(error.contains("missing required"));
         for root in [source, target, partial, rejected] {
             fs::remove_dir_all(root).expect("remove fixture");
         }
@@ -701,6 +768,30 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_staged_replacement_invalidates_all_live_markers() {
+        let source = scratch("staged-interrupted-source");
+        touch_runtime(&source);
+        write_marker(&source).expect("mark pinned source");
+        // The first component can promote, then the second component fails.
+        fs::remove_dir_all(source.join(COMPONENTS[1].dest)).expect("remove later staged component");
+
+        let target = scratch("staged-interrupted-target");
+        touch_runtime(&target);
+        mark_components(&target);
+        write_marker(&target).expect("mark prior live runtime");
+        assert!(already_provisioned(&target));
+
+        install_from_staged(&source, &target).expect_err("staged install must fail partway");
+        assert!(!top_marker_current(&target));
+        assert!(!all_component_markers_current(&target));
+        assert!(!already_provisioned(&target));
+
+        for root in [source, target] {
+            fs::remove_dir_all(root).expect("remove fixture");
+        }
+    }
+
+    #[test]
     fn promotion_removes_obsolete_versioned_libraries() {
         let root = scratch("promote");
         let stage = root.join("stage");
@@ -722,6 +813,35 @@ mod tests {
             .expect_err("missing libgomp must fail before worker spawn");
         assert!(error.contains("libgomp1"));
         assert!(error.contains("not found"));
+    }
+
+    #[test]
+    fn dependency_probe_covers_main_ort_provider_and_cudnn_lazy_engines() {
+        let root = scratch("dependency-targets");
+        let capi = root.join("onnxruntime/capi");
+        let cudnn = root.join("cudnn/lib");
+        fs::create_dir_all(&capi).expect("create capi");
+        fs::create_dir_all(&cudnn).expect("create cudnn");
+        for path in [
+            capi.join("libonnxruntime.so.1.26.0"),
+            capi.join("libonnxruntime_providers_cuda.so"),
+            cudnn.join("libcudnn.so.9"),
+            cudnn.join("libcudnn_engines_precompiled.so.9"),
+        ] {
+            fs::write(path, b"fixture").expect("write dependency target");
+        }
+        let targets = dependency_probe_targets(&root).expect("resolve dependency targets");
+        assert_eq!(targets.len(), 4);
+        assert!(targets
+            .iter()
+            .any(|path| path.ends_with("libonnxruntime.so.1.26.0")));
+        assert!(targets
+            .iter()
+            .any(|path| path.ends_with("libonnxruntime_providers_cuda.so")));
+        assert!(targets
+            .iter()
+            .any(|path| path.ends_with("libcudnn_engines_precompiled.so.9")));
+        fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]
