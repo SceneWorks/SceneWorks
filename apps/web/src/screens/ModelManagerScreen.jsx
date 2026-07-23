@@ -113,18 +113,17 @@ const MODEL_TYPE_OPTIONS = [
   { value: "utility", label: "Utility" },
 ];
 
-// sc-7081 (epic 7080, P0): model upload/import is hidden + disabled on every platform until a
-// real compatibility + conversion pipeline exists behind it. Today an imported checkpoint
-// has no runnable engine (macOS is MLX-only with a compile-time engine table; off-Mac only
-// loads full diffusers repos), so the form is kept in source but not rendered. The API
-// refuses the request too. Flip to true once the pipeline gates imports on a compatibility
-// verdict.
-//
-// KEEP, don't delete (sc-8941 / F-139): this is the deliberate P0-disabled scaffold that epic
-// 7080's P5 ("re-enable the UI behind the compat gate") restores — not accidental dead code.
-// The whole form + its state/handler below stay compile-time-gated by this flag so the
-// restoration point is preserved. Removing it would discard tracked, in-progress roadmap work.
-const MODEL_IMPORT_ENABLED = false;
+// sc-7081 (epic 7080, P0) originally hid this form on every platform because an imported
+// checkpoint had no runnable engine and the API refused the request. Epic 14015 (Mac-first
+// community-checkpoint import) restores it behind a real compatibility gate: S0d flipped the
+// backend `model_import_enabled()` on and gates `POST /api/v1/models/import` on the
+// base-weight detector's verdict (supported (family, component, quant) triple → accepted;
+// unsupported → 400 with a typed reason). S0e (sc-14020) flips this web mirror on so the
+// point-at-file import affordance renders. A rejected checkpoint surfaces the detector's
+// typed reason (unsupported family/quant/unrecognized) inline rather than a generic error;
+// an accepted one queues a `model_import` job whose completion refetches the catalog and
+// surfaces the new `catalogScope:"user"` model (a Krea 2 base checkpoint today).
+const MODEL_IMPORT_ENABLED = true;
 
 // Capability descriptors shown as chips on each model card. With models now grouped
 // by `type`, the chips are what tell the user what a card actually does (plain
@@ -695,8 +694,10 @@ export function ModelManagerScreen() {
   const [loraEditError, setLoraEditError] = useState("");
   const [importingModel, setImportingModel] = useState(false);
   const [modelImportMessage, setModelImportMessage] = useState({ tone: "neutral", text: "" });
+  // Point-at-file import (sc-14020) leads with the file picker; URL stays available via the
+  // segmented toggle. `type` defaults to image — the only importable base checkpoint today.
   const [modelImportForm, setModelImportForm] = useState({
-    mode: "url",
+    mode: "file",
     sourceUrl: "",
     file: null,
     name: "",
@@ -2011,15 +2012,19 @@ export function ModelManagerScreen() {
             )}
           </div>
 
-          {/* Model import stays compile-gated (epic 7080 / sc-8941 F-139) and renders nothing while
-              disabled; the section only appears to surface any in-flight model-import progress. */}
+          {/* Import a base checkpoint (epic 14015, sc-14020). Gated on MODEL_IMPORT_ENABLED, which
+              mirrors the backend kill-switch S0d opened; the section also surfaces any in-flight
+              model-import progress. The point-at-a-file picker is the primary affordance. */}
           {MODEL_IMPORT_ENABLED || pendingModelImportJobs.length > 0 ? (
             <section className="model-import-panel-section">
               {MODEL_IMPORT_ENABLED && (
-                <form className="lora-import-panel models-import-panel" aria-label="Import model" onSubmit={importModel}>
-                  <div>
-                    <strong>Import model</strong>
-                    <span>{modelImportForm.family || "auto-detect family"}</span>
+                <form className="models-accent-band models-import-panel" aria-label="Import model" onSubmit={importModel}>
+                  <div className="models-accent-band-head">
+                    <span className="models-accent-dot" aria-hidden="true" />
+                    <p className="eyebrow">Import model</p>
+                    <span className="models-accent-band-caption">
+                      Point at a base checkpoint file — auto-detects family (Krea 2 today)
+                    </span>
                   </div>
                   <div className="segmented-control compact-segment" aria-label="Model import source">
                     <button

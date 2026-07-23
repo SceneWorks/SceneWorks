@@ -1253,10 +1253,11 @@ describe("SceneWorks app shell", () => {
     expect(buttonInside(loraPanel(container), "Queue Import").disabled).toBe(false);
   });
 
-  it("hides the model import form while uploads are disabled pending conversion support (sc-7081)", async () => {
-    // The model upload/import form is gated off on every platform (MODEL_IMPORT_ENABLED)
-    // until the compatibility + conversion pipeline (epic 7080) lands — an imported
-    // checkpoint has no runnable engine today, and the API refuses the request too.
+  it("renders the base-checkpoint point-at-file import affordance when enabled (sc-14020)", async () => {
+    // Epic 14015 (Mac-first community-checkpoint import) re-enables model import behind the
+    // backend compatibility gate S0d opened; S0e flips the web MODEL_IMPORT_ENABLED mirror on.
+    // The point-at-a-file picker is the default (leading) affordance and Type defaults to image
+    // — the only importable base checkpoint (a Krea 2 DiT) today.
     root = createRoot(container);
     await act(async () => {
       root.render(
@@ -1267,19 +1268,166 @@ describe("SceneWorks app shell", () => {
           models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
           onDownloadModel: () => {},
           onImportLora: () => {},
-          onImportModel: () => {},
+          onImportModel: vi.fn(),
           onOpenQueue: () => {},
         }),
       );
     });
 
-    expect(modelImportPanel(container)).toBeNull();
-    expect(container.textContent).not.toContain("Import model");
-    // The image model's card is on the default (Image) tab.
-    expect(container.textContent).toContain("Z-Image Turbo");
-    // LoRA import is unaffected — its form is on the LoRAs tab.
+    // The import form shares the LoRAs tab's import area (the existing scaffold home).
     await selectModelTab("LoRAs");
-    expect(loraPanel(container)).not.toBeNull();
+    const panel = modelImportPanel(container);
+    expect(panel).not.toBeNull();
+    expect(panel.textContent).toContain("Import model");
+    // File mode leads: the "Model File" picker is mounted, not a Source URL input.
+    expect(field(panel, "Model File")).toBeTruthy();
+    expect(field(panel, "Source URL")).toBeFalsy();
+    expect(field(panel, "Type").value).toBe("image");
+  });
+
+  it("POSTs the pointed-at checkpoint as an image import, leaving family to auto-detect (sc-14020)", async () => {
+    const onImportModel = vi.fn(async () => ({
+      payload: { modelId: "my_krea", manifestEntry: { family: "krea_2" } },
+    }));
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withModelManagerContext({
+          activeProject: null,
+          jobs: [],
+          loras: [],
+          models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
+          onDownloadModel: () => {},
+          onImportLora: () => {},
+          onImportModel,
+          onOpenQueue: () => {},
+        }),
+      );
+    });
+
+    await selectModelTab("LoRAs");
+    const panel = modelImportPanel(container);
+    const file = new File([new Uint8Array([1, 2, 3])], "krea2-checkpoint.safetensors");
+    await changeFile(field(panel, "Model File"), file);
+    await act(async () => {
+      buttonInside(panel, "Queue Import").click();
+    });
+    await settle();
+
+    expect(onImportModel).toHaveBeenCalledTimes(1);
+    const payload = onImportModel.mock.calls[0][0];
+    expect(payload.file).toBe(file);
+    expect(payload.modelType).toBe("image");
+    // No family override — the backend detector classifies the file (Krea 2 today).
+    expect(payload.family).toBeUndefined();
+  });
+
+  it("surfaces the detected Krea 2 family on a successful checkpoint import (sc-14020)", async () => {
+    const onImportModel = vi.fn(async () => ({
+      payload: { modelId: "my_krea", manifestEntry: { family: "krea_2" } },
+    }));
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withModelManagerContext({
+          activeProject: null,
+          jobs: [],
+          loras: [],
+          models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
+          onDownloadModel: () => {},
+          onImportLora: () => {},
+          onImportModel,
+          onOpenQueue: () => {},
+        }),
+      );
+    });
+
+    await selectModelTab("LoRAs");
+    const panel = modelImportPanel(container);
+    await changeFile(field(panel, "Model File"), new File([new Uint8Array([1])], "krea2.safetensors"));
+    await act(async () => {
+      buttonInside(panel, "Queue Import").click();
+    });
+    await settle();
+
+    const success = container.querySelector(".inline-success");
+    expect(success).not.toBeNull();
+    expect(success.textContent).toContain("my_krea");
+    expect(success.textContent).toContain("krea-2");
+  });
+
+  it("shows the detector's typed rejection reason (not a generic error) on a 400 (sc-14020)", async () => {
+    // The queue-time compatibility gate (sc-14019) refuses an un-runnable base checkpoint with a
+    // typed reason; apiFetch surfaces it as the thrown Error message, which the form must show
+    // verbatim rather than a generic failure string.
+    const typedReason = "Unsupported base checkpoint: qwen-image fp8 has no import loader today.";
+    const onImportModel = vi.fn(async () => {
+      throw new Error(typedReason);
+    });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withModelManagerContext({
+          activeProject: null,
+          jobs: [],
+          loras: [],
+          models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
+          onDownloadModel: () => {},
+          onImportLora: () => {},
+          onImportModel,
+          onOpenQueue: () => {},
+        }),
+      );
+    });
+
+    await selectModelTab("LoRAs");
+    const panel = modelImportPanel(container);
+    await changeFile(field(panel, "Model File"), new File([new Uint8Array([1])], "qwen.safetensors"));
+    await act(async () => {
+      buttonInside(panel, "Queue Import").click();
+    });
+    await settle();
+
+    const warning = container.querySelector(".inline-warning");
+    expect(warning).not.toBeNull();
+    expect(warning.textContent).toContain(typedReason);
+    expect(container.textContent).not.toContain("Request failed");
+  });
+
+  it("surfaces an imported Krea 2 checkpoint as a user model card in the catalog (sc-14020)", async () => {
+    // Once the model_import job completes the catalog refetch (App.test covers the SSE refetch)
+    // yields a catalogScope:"user" Krea 2 model; the Model Manager renders it as a normal card.
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withModelManagerContext({
+          activeProject: null,
+          jobs: [],
+          loras: [],
+          models: [
+            {
+              id: "my_krea",
+              name: "My Krea Checkpoint",
+              type: "image",
+              family: "krea_2",
+              catalogScope: "user",
+              installState: "installed",
+            },
+          ],
+          onDownloadModel: () => {},
+          onImportLora: () => {},
+          onImportModel: vi.fn(),
+          onOpenQueue: () => {},
+        }),
+      );
+    });
+
+    // Image tab is the default; the imported user model shows with its detected family.
+    const card = [...container.querySelectorAll(".model-card")].find((node) =>
+      node.textContent.includes("My Krea Checkpoint"),
+    );
+    expect(card).toBeTruthy();
+    expect(card.textContent).toContain("krea_2");
   });
 
   it("renders unassociated models with a needs-family badge", async () => {
