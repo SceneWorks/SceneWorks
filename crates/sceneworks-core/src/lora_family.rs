@@ -349,6 +349,86 @@ pub fn apply_model_manifest_defaults(
             .entry("families".to_owned())
             .or_insert_with(|| json!([family]));
     }
+
+    apply_family_studio_surface_defaults(entry, &family);
+}
+
+/// Stamp the resolution / img2img Studio surface an imported model needs to match its builtin sibling
+/// (sc-14071, epic 14015). An imported entry ships empty `limits` / `defaults` / `ui`, so without this
+/// the Studio resolution picker falls back to its bare 4-option list (`selectedModel.limits.resolutions`
+/// is empty) and never offers img2img. Every field is `or_insert_with`, so an author-supplied value
+/// always wins — this only fills the gaps the import path leaves. Family-scoped: only families with a
+/// stamped surface below are touched; every other family is left exactly as before.
+///
+/// **`krea-2`** mirrors the builtin `krea_2_turbo` entry (config/manifests/builtin.models.jsonc): the
+/// 15-bucket ÷16-aligned ≤2048² resolution list, the 1024² default, `mlx.minMemoryGb` 48 (the ≤1536²
+/// visibility floor + the >1536² memory-gate anchor, sc-13959 — an empty `mlx` block would offer 2048²
+/// unconditionally on any Mac), and the `ui.img2img` toggle + `img2imgStrength` slider (reference-guided
+/// latent-init, resolved by the worker's `resolve_img2img_init_generic`). It does NOT stamp
+/// `ui.editReferences` or an `edit_image` capability — imported edit is a separate story (sc-14119).
+fn apply_family_studio_surface_defaults(entry: &mut Map<String, Value>, family: &str) {
+    if family != "krea-2" {
+        return;
+    }
+    if let Some(limits) = entry
+        .entry("limits".to_owned())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    {
+        limits.entry("resolutions".to_owned()).or_insert_with(|| {
+            json!([
+                "1024x1024",
+                "768x1024",
+                "1024x768",
+                "1280x720",
+                "720x1280",
+                "1216x832",
+                "832x1216",
+                "1152x896",
+                "896x1152",
+                "1536x1536",
+                "2048x1152",
+                "1152x2048",
+                "2048x1408",
+                "1408x2048",
+                "2048x2048"
+            ])
+        });
+    }
+    if let Some(defaults) = entry
+        .entry("defaults".to_owned())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    {
+        defaults
+            .entry("resolution".to_owned())
+            .or_insert_with(|| json!("1024x1024"));
+    }
+    if let Some(mlx) = entry
+        .entry("mlx".to_owned())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    {
+        mlx.entry("minMemoryGb".to_owned())
+            .or_insert_with(|| json!(48));
+    }
+    if let Some(ui) = entry
+        .entry("ui".to_owned())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    {
+        ui.entry("img2img".to_owned())
+            .or_insert_with(|| json!(true));
+        ui.entry("img2imgStrength".to_owned()).or_insert_with(|| {
+            json!({
+                "label": "Reference strength",
+                "default": 0.5,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 0.05
+            })
+        });
+    }
 }
 
 pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
@@ -421,13 +501,15 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // surface, so the family default advertises only t2i + style variations (like z-image /
         // qwen-image / lens / flux).
         ("image", "anima") => vec!["text_to_image", "style_variations"],
-        // Krea 2 (epic 14015): imported single-file Krea 2 checkpoints. The KreaImported lane
-        // (sc-14018) is text-to-image ONLY — reference/edit for imports is deferred to sc-14071 — so
-        // the family default advertises just t2i + style variations, NOT `edit_image` /
-        // `character_image` (the builtin Turbo/Raw entries expose those, imports don't yet). The
-        // match keys on the normalized hyphen form `krea-2` (`normalize_model_family("krea_2")`).
-        // This default only affects imported/user krea_2 models; the builtin krea_2 entries declare
-        // their own `capabilities` explicitly, so `apply_model_manifest_defaults` never changes them.
+        // Krea 2 (epic 14015): imported single-file Krea 2 checkpoints. The KreaImported lane serves
+        // text-to-image (sc-14018) plus img2img (sc-14071 — reference-guided latent-init, exposed via the
+        // `ui.img2img` toggle stamped by `apply_family_studio_surface_defaults`, NOT a capabilities value:
+        // z-image owns "image_to_image" for its edit-mode img2img). So the family default advertises just
+        // t2i + style variations, NOT `edit_image` / `character_image` (the builtin Turbo/Raw entries
+        // expose those; imports do not — imported edit is sc-14119). The match keys on the normalized
+        // hyphen form `krea-2` (`normalize_model_family("krea_2")`). This default only affects
+        // imported/user krea_2 models; the builtin krea_2 entries declare their own `capabilities`
+        // explicitly, so `apply_model_manifest_defaults` never changes them.
         ("image", "krea-2") => vec!["text_to_image", "style_variations"],
         // Bernini still-image companion (epic 4699 / sc-5424): the same `Modality::Both`
         // engine the video `bernini` family uses, but the image-typed catalog id
@@ -3014,8 +3096,9 @@ mod tests {
 
         // The imported model is now MLX-Krea-routed and selectable as a text-to-image model.
         assert_eq!(entry["adapter"], "mlx_krea");
-        // Text-to-image only (+ style_variations): the KreaImported lane is txt2img-only, so the
-        // default must NOT claim `edit_image` / `character_image` (deferred to sc-14071).
+        // Text-to-image + img2img (+ style_variations). img2img is a `ui.img2img` toggle (asserted
+        // below), NOT a capabilities value, so `capabilities` stays t2i + style_variations and must
+        // NOT claim `edit_image` / `character_image` (imported edit is deferred to sc-14119).
         assert_eq!(
             entry["capabilities"],
             json!(["text_to_image", "style_variations"])
@@ -3023,6 +3106,95 @@ mod tests {
         // `loraCompatibility.families` carries the normalized token (as every other family does,
         // e.g. wan-video above) — Krea LoRAs resolve to it through `canonical_lora_family`.
         assert_eq!(entry["loraCompatibility"]["families"], json!(["krea-2"]));
+    }
+
+    #[test]
+    fn imported_krea_2_gets_builtin_resolution_and_img2img_surface() {
+        // sc-14071 (epic 14015): an imported krea_2 entry ships empty limits/defaults/ui, so the Studio
+        // resolution picker would fall back to its 4-option list and never offer img2img. The family
+        // default must stamp the SAME resolution / img2img surface the builtin `krea_2_turbo` entry
+        // carries (config/manifests/builtin.models.jsonc): the 15-bucket resolution list, the 1024²
+        // default, `mlx.minMemoryGb` 48 (the >1536² memory-gate anchor, sc-13959), and the `ui.img2img`
+        // toggle + `img2imgStrength` slider. It must NOT stamp `ui.editReferences` or an `edit_image`
+        // capability — imported edit is sc-14119.
+        let mut entry = serde_json::Map::new();
+        apply_model_manifest_defaults(&mut entry, "image", Some("krea_2"));
+
+        // The exact 15-bucket resolution list the builtin Krea 2 Turbo ships (verbatim, same order).
+        let resolutions = entry["limits"]["resolutions"]
+            .as_array()
+            .expect("resolutions is an array");
+        assert_eq!(
+            resolutions.len(),
+            15,
+            "the builtin Krea Turbo resolution list has 15 buckets"
+        );
+        assert_eq!(
+            entry["limits"]["resolutions"],
+            json!([
+                "1024x1024",
+                "768x1024",
+                "1024x768",
+                "1280x720",
+                "720x1280",
+                "1216x832",
+                "832x1216",
+                "1152x896",
+                "896x1152",
+                "1536x1536",
+                "2048x1152",
+                "1152x2048",
+                "2048x1408",
+                "1408x2048",
+                "2048x2048"
+            ])
+        );
+        assert_eq!(entry["defaults"]["resolution"], "1024x1024");
+        // The ≤1536² visibility floor / >1536² memory-gate anchor — without it 2048² is offered
+        // unconditionally on any Mac (sc-13959).
+        assert_eq!(entry["mlx"]["minMemoryGb"], json!(48));
+        // img2img is exposed as the `ui.img2img` toggle + strength slider (worker resolves it via
+        // `resolve_img2img_init_generic`), NOT as a capability.
+        assert_eq!(entry["ui"]["img2img"], json!(true));
+        assert_eq!(entry["ui"]["img2imgStrength"]["default"], json!(0.5));
+        // Edit surface is NOT stamped here (sc-14119).
+        assert!(
+            entry["ui"].get("editReferences").is_none(),
+            "imported krea must not get editReferences (edit is sc-14119)"
+        );
+    }
+
+    #[test]
+    fn non_krea_families_get_no_studio_resolution_surface() {
+        // The krea-2 Studio-surface default (sc-14071) is family-scoped: every other family keeps its
+        // empty `limits` / `defaults` / `ui` blocks and gains no `mlx` block, so nothing else is
+        // perturbed by the new stamping.
+        for (model_type, family) in [("image", "z-image"), ("video", "wan_video")] {
+            let mut entry = serde_json::Map::new();
+            apply_model_manifest_defaults(&mut entry, model_type, Some(family));
+            assert!(
+                entry["limits"]
+                    .as_object()
+                    .expect("limits object")
+                    .is_empty(),
+                "{family} limits must stay empty"
+            );
+            assert!(
+                entry["defaults"]
+                    .as_object()
+                    .expect("defaults object")
+                    .is_empty(),
+                "{family} defaults must stay empty"
+            );
+            assert!(
+                entry["ui"].as_object().expect("ui object").is_empty(),
+                "{family} ui must stay empty"
+            );
+            assert!(
+                entry.get("mlx").is_none(),
+                "{family} must gain no mlx block"
+            );
+        }
     }
 
     #[test]
