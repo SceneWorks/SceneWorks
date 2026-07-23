@@ -5,6 +5,8 @@
 //! then spawns the API sidecar, health-gates it, and navigates the window to the
 //! local API. `start_setup` is also the retry entry point.
 
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -270,9 +272,106 @@ pub(crate) fn emit(app: &AppHandle, phase: &str, message: impl Into<String>, err
     );
 }
 
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+const APP_DIR_NAME: &str = "SceneWorks";
+
+/// Linux desktop paths resolved from the XDG base-directory environment.
+///
+/// Kept as a pure helper (rather than reading the process environment directly)
+/// so all XDG override and fallback behavior is testable on every CI host. A
+/// missing absolute XDG base and missing absolute `HOME` is an error: falling
+/// back to `temp_dir()` would trust `TMPDIR`, permit relative/CWD writes, and use
+/// a predictable cross-user directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+struct LinuxDesktopPaths {
+    data_dir: PathBuf,
+    config_dir: PathBuf,
+    cache_dir: PathBuf,
+    state_dir: PathBuf,
+}
+
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+impl LinuxDesktopPaths {
+    fn absolute_linux_path(value: OsString) -> Option<PathBuf> {
+        let path = PathBuf::from(value);
+        path.as_os_str()
+            .to_string_lossy()
+            .starts_with('/')
+            .then_some(path)
+    }
+
+    fn resolve(get_env: impl Fn(&str) -> Option<OsString>) -> Result<LinuxDesktopPaths, String> {
+        let home = get_env("HOME").and_then(LinuxDesktopPaths::absolute_linux_path);
+        let xdg_dir = |name: &str, fallback: &[&str], temp_leaf: &str| {
+            get_env(name)
+                .and_then(LinuxDesktopPaths::absolute_linux_path)
+                .or_else(|| {
+                    home.as_ref().map(|home| {
+                        fallback
+                            .iter()
+                            .fold(home.clone(), |path, component| path.join(component))
+                    })
+                })
+                .map(|base| base.join(APP_DIR_NAME))
+                .ok_or_else(|| {
+                    format!(
+                        "cannot resolve Linux {temp_leaf} directory: set {name} or HOME to an absolute path"
+                    )
+                })
+        };
+
+        Ok(LinuxDesktopPaths {
+            data_dir: xdg_dir("XDG_DATA_HOME", &[".local", "share"], "data")?,
+            config_dir: xdg_dir("XDG_CONFIG_HOME", &[".config"], "config")?,
+            cache_dir: xdg_dir("XDG_CACHE_HOME", &[".cache"], "cache")?,
+            state_dir: xdg_dir("XDG_STATE_HOME", &[".local", "state"], "state")?,
+        })
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn from_process_env() -> Result<LinuxDesktopPaths, String> {
+        Self::resolve(std::env::var_os)
+    }
+
+    fn settings_file(&self) -> PathBuf {
+        self.config_dir.join("settings.json")
+    }
+
+    fn data_dir(&self) -> PathBuf {
+        self.data_dir.clone()
+    }
+
+    fn config_dir(&self) -> PathBuf {
+        self.config_dir.clone()
+    }
+
+    fn logs_dir(&self) -> PathBuf {
+        self.state_dir.join("logs")
+    }
+
+    fn huggingface_home(&self) -> PathBuf {
+        self.cache_dir.join("huggingface")
+    }
+
+    fn gpu_runtime_dir(&self) -> PathBuf {
+        self.data_dir.join("gpu-runtime")
+    }
+
+    fn sidecar_pidfile(&self) -> PathBuf {
+        self.state_dir.join("desktop-sidecars.json")
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_desktop_paths() -> LinuxDesktopPaths {
+    LinuxDesktopPaths::from_process_env()
+        .unwrap_or_else(|error| panic!("SceneWorks Linux path configuration is invalid: {error}"))
+}
+
 /// Per-OS application support root: `~/Library/Application Support/SceneWorks`
-/// (macOS), `%APPDATA%\SceneWorks` (Windows), `$XDG_DATA_HOME/sceneworks` or
-/// `~/.local/share/sceneworks` (Linux). Mirrors the API's path resolver.
+/// (macOS), `%APPDATA%\SceneWorks` (Windows), `$XDG_DATA_HOME/SceneWorks` or
+/// `~/.local/share/SceneWorks` (Linux).
 pub fn app_support_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     if let Ok(home) = std::env::var("HOME") {
@@ -287,17 +386,12 @@ pub fn app_support_dir() -> PathBuf {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        if let Ok(data) = std::env::var("XDG_DATA_HOME") {
-            return PathBuf::from(data).join("sceneworks");
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("sceneworks");
-        }
+        linux_desktop_paths().data_dir()
     }
-    std::env::temp_dir().join("SceneWorks")
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        std::env::temp_dir().join("SceneWorks")
+    }
 }
 
 /// Platform-appropriate logs directory (also used for the API/worker logs).
@@ -315,42 +409,84 @@ pub fn logs_dir() -> PathBuf {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        if let Ok(state) = std::env::var("XDG_STATE_HOME") {
-            return PathBuf::from(state).join("sceneworks").join("logs");
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home)
-                .join(".local")
-                .join("state")
-                .join("sceneworks")
-                .join("logs");
-        }
+        linux_desktop_paths().logs_dir()
     }
-    std::env::temp_dir().join("SceneWorks").join("logs")
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        std::env::temp_dir().join("SceneWorks").join("logs")
+    }
 }
 
 /// Platform default workspace data directory, used when the user hasn't picked a
 /// custom location in the first-run splash / Settings.
 pub fn default_data_dir() -> PathBuf {
-    app_support_dir().join("data")
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        linux_desktop_paths().data_dir()
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        app_support_dir().join("data")
+    }
 }
 
 pub(crate) fn config_dir() -> PathBuf {
-    app_support_dir().join("config")
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        linux_desktop_paths().config_dir()
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        app_support_dir().join("config")
+    }
 }
 
-/// Shared per-user Hugging Face cache (`~/.cache/huggingface`) — the default
-/// `HF_HOME` when the user hasn't chosen a custom location. Dedups with other
-/// HF-based tools on the machine and reuses anything already downloaded.
-pub fn shared_huggingface_home() -> PathBuf {
-    if let Some(home) = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+pub(crate) fn settings_file() -> PathBuf {
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
-        return PathBuf::from(home).join(".cache").join("huggingface");
+        linux_desktop_paths().settings_file()
     }
-    app_support_dir().join("cache").join("huggingface")
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        app_support_dir().join("settings.json")
+    }
+}
+
+/// Root for the provisioned native GPU runtime. Linux provisioning (sc-10376)
+/// consumes this path so its runtime stays under the XDG data base; the Windows
+/// value remains `%APPDATA%\SceneWorks\gpu-runtime`.
+pub fn gpu_runtime_dir() -> PathBuf {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        linux_desktop_paths().gpu_runtime_dir()
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        app_support_dir().join("gpu-runtime")
+    }
+}
+
+/// Shared per-user Hugging Face cache — the default `HF_HOME` when the user
+/// hasn't chosen a custom location. Linux uses
+/// `$XDG_CACHE_HOME/SceneWorks/huggingface` (or
+/// `~/.cache/SceneWorks/huggingface`); macOS and Windows retain the existing
+/// `~/.cache/huggingface` convention.
+pub fn shared_huggingface_home() -> PathBuf {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        linux_desktop_paths().huggingface_home()
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        if let Some(home) = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            return PathBuf::from(home).join(".cache").join("huggingface");
+        }
+        app_support_dir().join("cache").join("huggingface")
+    }
 }
 
 /// Hugging Face cache home injected into both sidecars so the rust-api model
@@ -362,21 +498,55 @@ pub fn shared_huggingface_home() -> PathBuf {
 /// `tauri dev`), then the user's persisted choice from the first-run splash, then
 /// the shared per-user cache. Because the splash persists this *before* the
 /// sidecars spawn, the chosen location takes effect with no app restart.
+fn select_huggingface_home(
+    ambient: Option<&str>,
+    persisted: Option<&str>,
+    shared: PathBuf,
+    linux_absolute: bool,
+) -> PathBuf {
+    ambient
+        .and_then(|value| crate::settings::storage_override_path(value, linux_absolute))
+        .or_else(|| {
+            persisted
+                .and_then(|value| crate::settings::storage_override_path(value, linux_absolute))
+        })
+        .unwrap_or(shared)
+}
+
+fn huggingface_cache_env(hf_home: &str, linux_absolute: bool) -> Vec<(&'static str, String)> {
+    let home = crate::settings::storage_override_path(hf_home, linux_absolute)
+        .expect("resolved HF_HOME must satisfy the platform path invariant");
+    let home = home.to_string_lossy().into_owned();
+    let mut env = vec![("HF_HOME", home.clone())];
+    if linux_absolute {
+        let hub = if home == "/" {
+            "/hub".to_owned()
+        } else {
+            format!("{}/hub", home.trim_end_matches('/'))
+        };
+        // The core resolver reads these before HF_HOME. Pin both like Docker so
+        // inherited relative values cannot redirect Linux sidecars into CWD.
+        env.push(("HF_HUB_CACHE", hub.clone()));
+        env.push(("HUGGINGFACE_HUB_CACHE", hub));
+    }
+    env
+}
+
+fn inject_huggingface_cache_env(command: Command, hf_home: &str) -> Command {
+    huggingface_cache_env(hf_home, cfg!(all(unix, not(target_os = "macos"))))
+        .into_iter()
+        .fold(command, |command, (name, value)| command.env(name, value))
+}
+
 fn huggingface_home() -> PathBuf {
-    if let Ok(value) = std::env::var("HF_HOME") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-    if let Some(dir) = crate::settings::load_settings()
-        .hf_home
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        return PathBuf::from(dir);
-    }
-    shared_huggingface_home()
+    let ambient = std::env::var("HF_HOME").ok();
+    let persisted = crate::settings::load_settings().hf_home;
+    select_huggingface_home(
+        ambient.as_deref(),
+        persisted.as_deref(),
+        shared_huggingface_home(),
+        cfg!(all(unix, not(target_os = "macos"))),
+    )
 }
 
 /// Seed the builtin model/LoRA/recipe-preset catalogs into the desktop's
@@ -684,6 +854,7 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
             &format!("[desktop] {warning}\n"),
         );
     }
+    let hf_home = huggingface_home().to_string_lossy().into_owned();
     let mut command = app
         .shell()
         .sidecar("sceneworks-api")
@@ -712,10 +883,10 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         .env(
             "SCENEWORKS_CONFIG_DIR",
             config_dir().to_string_lossy().to_string(),
-        )
-        // The catalog's install-state detection resolves the HF cache from this;
-        // it must match the worker's download root or every model reads "missing".
-        .env("HF_HOME", huggingface_home().to_string_lossy().to_string());
+        );
+    // The catalog's install-state detection resolves the HF cache from these;
+    // they must match the worker's download root or every model reads "missing".
+    command = inject_huggingface_cache_env(command, &hf_home);
     // Epic 3482 (Python Eradication) final cutover (sc-3492) — macOS runs MLX-only.
     // `Settings.mlx_required` ← `SCENEWORKS_MLX_REQUIRED` (sc-3483): the MPS/torch worker
     // never claims an MLX-eligible job, and an MLX-eligible job that no live `mlx` worker
@@ -1330,7 +1501,6 @@ fn supervise_mlx_worker(app: AppHandle) {
                 .env("SCENEWORKS_GPU_ID", "mlx")
                 .env("SCENEWORKS_WORKER_ID", ctx.worker_id)
                 .env("SCENEWORKS_API_URL", ctx.api_url)
-                .env("HF_HOME", ctx.hf_home)
                 // Parent-death watchdog (run_worker() honours this): a force-quit
                 // self-terminates the worker so its multi-GB MLX model isn't
                 // orphaned to launchd.
@@ -1343,6 +1513,7 @@ fn supervise_mlx_worker(app: AppHandle) {
                     "SCENEWORKS_CONFIG_DIR",
                     config_dir().to_string_lossy().to_string(),
                 );
+            command = inject_huggingface_cache_env(command, ctx.hf_home);
             // sc-7821 (epic 7819): the user's GPU memory ceiling, as fraction × total unified
             // memory. run_worker_loop applies it to the MLX runtime process-globally (covers
             // generations, upscales, AND LoRA training). Absent ⇒ no env ⇒ MLX default budget.
@@ -1452,7 +1623,6 @@ fn supervise_candle_worker(app: AppHandle) {
                 .env("SCENEWORKS_BACKEND_CANDLE_ENABLED", "true")
                 .env("SCENEWORKS_WORKER_ID", ctx.worker_id)
                 .env("SCENEWORKS_API_URL", ctx.api_url)
-                .env("HF_HOME", ctx.hf_home)
                 // Parent-death watchdog (run_worker() honours this): a force-quit
                 // self-terminates the worker so its multi-GB model + CUDA context
                 // isn't orphaned.
@@ -1465,6 +1635,7 @@ fn supervise_candle_worker(app: AppHandle) {
                     "SCENEWORKS_CONFIG_DIR",
                     config_dir().to_string_lossy().to_string(),
                 );
+            command = inject_huggingface_cache_env(command, ctx.hf_home);
             // cudarc dynamic-linking `LoadLibrary`s the CUDA runtime DLLs by name;
             // prepend the bundled redist dir to this worker's PATH so they resolve
             // without a CUDA Toolkit on the machine (sc-5560).
@@ -1527,9 +1698,17 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 /// File holding this launch's sidecar PIDs, used to reap orphans left by a prior
-/// unclean exit. Lives alongside the app's data so it survives across launches.
+/// unclean exit. Linux treats it as mutable state under `XDG_STATE_HOME`; other
+/// platforms retain the existing application-support location.
 fn sidecar_pidfile() -> PathBuf {
-    app_support_dir().join("desktop-sidecars.json")
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        linux_desktop_paths().sidecar_pidfile()
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        app_support_dir().join("desktop-sidecars.json")
+    }
 }
 
 /// Persist the current sidecar PIDs (best effort, atomic via temp+rename).
@@ -2153,6 +2332,185 @@ pub async fn start_setup(app: AppHandle) {
     app.state::<Managed>()
         .running
         .store(false, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::{huggingface_cache_env, select_huggingface_home, LinuxDesktopPaths};
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    fn resolve(values: &[(&str, &str)]) -> Result<LinuxDesktopPaths, String> {
+        let env = values
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), OsString::from(value)))
+            .collect::<HashMap<_, _>>();
+        LinuxDesktopPaths::resolve(|name| env.get(name).cloned())
+    }
+
+    #[test]
+    fn linux_xdg_overrides_cover_every_desktop_managed_location() {
+        let paths = resolve(&[
+            ("HOME", "relative-home"),
+            ("XDG_DATA_HOME", "/mnt/xdg-data"),
+            ("XDG_CONFIG_HOME", "/mnt/xdg-config"),
+            ("XDG_CACHE_HOME", "/mnt/xdg-cache"),
+            ("XDG_STATE_HOME", "/mnt/xdg-state"),
+        ])
+        .expect("absolute XDG overrides resolve");
+
+        assert_eq!(paths.data_dir(), PathBuf::from("/mnt/xdg-data/SceneWorks"));
+        assert_eq!(
+            paths.config_dir(),
+            PathBuf::from("/mnt/xdg-config/SceneWorks")
+        );
+        assert_eq!(paths.cache_dir, PathBuf::from("/mnt/xdg-cache/SceneWorks"));
+        assert_eq!(paths.state_dir, PathBuf::from("/mnt/xdg-state/SceneWorks"));
+
+        // Exact call surfaces owned by the desktop and its sidecars.
+        assert_eq!(
+            paths.settings_file(),
+            PathBuf::from("/mnt/xdg-config/SceneWorks/settings.json")
+        );
+        assert_eq!(
+            paths.config_dir().join("manifests"),
+            PathBuf::from("/mnt/xdg-config/SceneWorks/manifests")
+        );
+        assert_eq!(
+            paths.data_dir().join("cache").join("jobs.db"),
+            PathBuf::from("/mnt/xdg-data/SceneWorks/cache/jobs.db")
+        );
+        assert_eq!(
+            paths.logs_dir(),
+            PathBuf::from("/mnt/xdg-state/SceneWorks/logs")
+        );
+        assert_eq!(
+            paths.gpu_runtime_dir(),
+            PathBuf::from("/mnt/xdg-data/SceneWorks/gpu-runtime")
+        );
+        assert_eq!(
+            paths.huggingface_home(),
+            PathBuf::from("/mnt/xdg-cache/SceneWorks/huggingface")
+        );
+        assert_eq!(
+            paths.sidecar_pidfile(),
+            PathBuf::from("/mnt/xdg-state/SceneWorks/desktop-sidecars.json")
+        );
+    }
+
+    #[test]
+    fn linux_xdg_fallbacks_are_home_scoped_and_never_relative() {
+        let paths = resolve(&[("HOME", "/home/alice")]).expect("absolute HOME resolves");
+        assert_eq!(
+            paths.data_dir(),
+            PathBuf::from("/home/alice/.local/share/SceneWorks")
+        );
+        assert_eq!(
+            paths.config_dir(),
+            PathBuf::from("/home/alice/.config/SceneWorks")
+        );
+        assert_eq!(
+            paths.cache_dir,
+            PathBuf::from("/home/alice/.cache/SceneWorks")
+        );
+        assert_eq!(
+            paths.state_dir,
+            PathBuf::from("/home/alice/.local/state/SceneWorks")
+        );
+    }
+
+    #[test]
+    fn linux_paths_fail_without_absolute_xdg_or_home_even_with_relative_tmpdir() {
+        // The XDG spec requires absolute override values. `TMPDIR` is
+        // intentionally relative to reproduce the review finding: resolution
+        // must fail before any accessor can turn it into a launch-CWD write.
+        let error = resolve(&[
+            ("HOME", "relative-home"),
+            ("XDG_DATA_HOME", "relative-data"),
+            ("XDG_CONFIG_HOME", ""),
+            ("TMPDIR", "relative-tmp"),
+        ])
+        .expect_err("missing absolute XDG/HOME bases must stop startup");
+        assert!(
+            error.contains("XDG_DATA_HOME") && error.contains("HOME"),
+            "unexpected resolution error: {error}"
+        );
+
+        let absent = resolve(&[("TMPDIR", "relative-tmp")])
+            .expect_err("missing HOME and XDG bases must stop startup");
+        assert!(
+            absent.contains("XDG_DATA_HOME") && absent.contains("HOME"),
+            "unexpected resolution error: {absent}"
+        );
+    }
+
+    #[test]
+    fn linux_hf_home_ignores_relative_ambient_and_legacy_overrides() {
+        let shared = PathBuf::from("/home/alice/.cache/SceneWorks/huggingface");
+        assert_eq!(
+            select_huggingface_home(
+                Some("relative-ambient"),
+                Some("/mnt/models/huggingface"),
+                shared.clone(),
+                true,
+            ),
+            PathBuf::from("/mnt/models/huggingface")
+        );
+        assert_eq!(
+            select_huggingface_home(
+                Some("/mnt/ambient/huggingface"),
+                Some("/mnt/persisted/huggingface"),
+                shared.clone(),
+                true,
+            ),
+            PathBuf::from("/mnt/ambient/huggingface")
+        );
+        assert_eq!(
+            select_huggingface_home(
+                Some("./ambient"),
+                Some("persisted-relative"),
+                shared.clone(),
+                true,
+            ),
+            shared
+        );
+    }
+
+    #[test]
+    fn non_linux_hf_home_preserves_relative_ambient_override() {
+        assert_eq!(
+            select_huggingface_home(
+                Some("relative-ambient"),
+                Some("relative-persisted"),
+                PathBuf::from("shared"),
+                false,
+            ),
+            PathBuf::from("relative-ambient")
+        );
+        assert_eq!(
+            huggingface_cache_env("relative-ambient", false),
+            vec![("HF_HOME", "relative-ambient".to_owned())]
+        );
+    }
+
+    #[test]
+    fn linux_hf_cache_env_pins_every_hub_override_to_absolute_xdg_home() {
+        assert_eq!(
+            huggingface_cache_env("/mnt/cache/SceneWorks/huggingface", true),
+            vec![
+                ("HF_HOME", "/mnt/cache/SceneWorks/huggingface".to_owned()),
+                (
+                    "HF_HUB_CACHE",
+                    "/mnt/cache/SceneWorks/huggingface/hub".to_owned()
+                ),
+                (
+                    "HUGGINGFACE_HUB_CACHE",
+                    "/mnt/cache/SceneWorks/huggingface/hub".to_owned()
+                ),
+            ]
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]

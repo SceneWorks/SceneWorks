@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
-use crate::setup::{app_support_dir, default_data_dir, shared_huggingface_home};
+use crate::setup::{default_data_dir, settings_file, shared_huggingface_home};
 
 const KEYRING_SERVICE: &str = "SceneWorks";
 /// Pre-migration account that held the single Hugging Face token. Retained only so
@@ -213,7 +213,7 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
     /// Hugging Face cache home (`HF_HOME`) for HF-downloaded model weights;
-    /// `None` uses the shared per-user cache (`~/.cache/huggingface`).
+    /// `None` uses the platform shared cache (the XDG cache base on Linux).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hf_home: Option<String>,
     /// Set once the first-run splash storage step (sc-1473 Step 1) has run, so
@@ -256,14 +256,69 @@ pub struct AppSettings {
 }
 
 fn settings_path() -> PathBuf {
-    app_support_dir().join("settings.json")
+    settings_file()
+}
+
+/// Normalize an editable storage override. `linux_absolute` is explicit so the
+/// Linux rule is testable on Windows CI: Linux accepts only `/`-rooted paths,
+/// while macOS/Windows retain their existing relative-path behavior.
+pub(crate) fn storage_override_path(value: &str, linux_absolute: bool) -> Option<PathBuf> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    if linux_absolute && !path.as_os_str().to_string_lossy().starts_with('/') {
+        return None;
+    }
+    Some(path)
+}
+
+fn storage_override_input_for(
+    name: &str,
+    value: &str,
+    linux_absolute: bool,
+) -> Result<Option<String>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    storage_override_path(trimmed, linux_absolute)
+        .map(|_| Some(trimmed.to_owned()))
+        .ok_or_else(|| format!("{name} must be an absolute path on Linux"))
+}
+
+fn storage_override_input(name: &str, value: &str) -> Result<Option<String>, String> {
+    storage_override_input_for(name, value, cfg!(all(unix, not(target_os = "macos"))))
+}
+
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+fn sanitize_storage_overrides(settings: &mut AppSettings, linux_absolute: bool) {
+    let sanitize = |value: Option<String>| {
+        value.and_then(|value| {
+            storage_override_path(&value, linux_absolute)
+                .map(|path| path.to_string_lossy().into_owned())
+        })
+    };
+    settings.data_dir = sanitize(settings.data_dir.take());
+    settings.hf_home = sanitize(settings.hf_home.take());
 }
 
 pub fn load_settings() -> AppSettings {
-    std::fs::read_to_string(settings_path())
+    let settings = std::fs::read_to_string(settings_path())
         .ok()
         .and_then(|body| serde_json::from_str(&body).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut settings = settings;
+        sanitize_storage_overrides(&mut settings, true);
+        settings
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        settings
+    }
 }
 
 /// Write `body` to `path` atomically via temp-file + rename, so a crash / full disk
@@ -811,18 +866,8 @@ pub fn get_storage_setup() -> StorageSetup {
 #[tauri::command]
 pub fn save_storage_setup(data_dir: String, hf_home: String) -> Result<AppSettings, String> {
     let mut settings = load_settings();
-    let data_trimmed = data_dir.trim();
-    settings.data_dir = if data_trimmed.is_empty() {
-        None
-    } else {
-        Some(data_trimmed.to_owned())
-    };
-    let hf_trimmed = hf_home.trim();
-    settings.hf_home = if hf_trimmed.is_empty() {
-        None
-    } else {
-        Some(hf_trimmed.to_owned())
-    };
+    settings.data_dir = storage_override_input("SceneWorks data directory", &data_dir)?;
+    settings.hf_home = storage_override_input("Hugging Face cache directory", &hf_home)?;
     settings.storage_configured = true;
     save_settings(&settings)?;
     Ok(settings)
@@ -862,12 +907,7 @@ pub async fn choose_folder(app: AppHandle) -> Option<String> {
 #[tauri::command]
 pub fn set_data_dir(path: String) -> Result<AppSettings, String> {
     let mut settings = load_settings();
-    let trimmed = path.trim();
-    settings.data_dir = if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    };
+    settings.data_dir = storage_override_input("SceneWorks data directory", &path)?;
     save_settings(&settings)?;
     Ok(settings)
 }
@@ -1210,6 +1250,69 @@ pub fn get_gpu_info() -> GpuInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_storage_inputs_require_absolute_paths() {
+        assert_eq!(
+            storage_override_input_for("data directory", " /srv/sceneworks ", true)
+                .expect("absolute Linux path"),
+            Some("/srv/sceneworks".to_owned())
+        );
+        assert_eq!(
+            storage_override_input_for("data directory", "   ", true)
+                .expect("empty clears override"),
+            None
+        );
+        let data_error = storage_override_input_for("data directory", "relative/data", true)
+            .expect_err("relative Linux data directory must be rejected");
+        assert!(data_error.contains("absolute path on Linux"));
+        let hf_error = storage_override_input_for("HF cache", "./huggingface", true)
+            .expect_err("relative Linux HF cache must be rejected");
+        assert!(hf_error.contains("absolute path on Linux"));
+    }
+
+    #[test]
+    fn non_linux_storage_inputs_preserve_relative_path_behavior() {
+        assert_eq!(
+            storage_override_input_for("data directory", " relative/data ", false)
+                .expect("non-Linux relative path remains supported"),
+            Some("relative/data".to_owned())
+        );
+        assert_eq!(
+            storage_override_path("./huggingface", false),
+            Some(PathBuf::from("./huggingface"))
+        );
+    }
+
+    #[test]
+    fn legacy_linux_settings_drop_relative_storage_overrides() {
+        let mut settings = AppSettings {
+            data_dir: Some("relative/data".to_owned()),
+            hf_home: Some("./huggingface".to_owned()),
+            ..AppSettings::default()
+        };
+        sanitize_storage_overrides(&mut settings, true);
+        assert_eq!(settings.data_dir, None);
+        assert_eq!(settings.hf_home, None);
+
+        let mut mixed = AppSettings {
+            data_dir: Some(" /srv/sceneworks ".to_owned()),
+            hf_home: Some("relative-hf".to_owned()),
+            ..AppSettings::default()
+        };
+        sanitize_storage_overrides(&mut mixed, true);
+        assert_eq!(mixed.data_dir.as_deref(), Some("/srv/sceneworks"));
+        assert_eq!(mixed.hf_home, None);
+
+        let mut non_linux = AppSettings {
+            data_dir: Some(" relative/data ".to_owned()),
+            hf_home: Some(" ./huggingface ".to_owned()),
+            ..AppSettings::default()
+        };
+        sanitize_storage_overrides(&mut non_linux, false);
+        assert_eq!(non_linux.data_dir.as_deref(), Some("relative/data"));
+        assert_eq!(non_linux.hf_home.as_deref(), Some("./huggingface"));
+    }
 
     /// A unique scratch directory under the system temp dir, so the path-resolution
     /// tests below don't need a `tempfile` dependency. Cleaned up by the caller.

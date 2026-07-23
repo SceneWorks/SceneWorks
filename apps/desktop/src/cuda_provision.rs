@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 
 use crate::cuda_provision_check::{component_provisioned, dir_has_dll, write_component_marker};
-use crate::setup::{app_support_dir, emit};
+use crate::setup::{emit, gpu_runtime_dir};
 
 /// Bump this when the pinned manifest changes so an existing install re-provisions.
 /// Written to `<root>\.redist-marker` after a fully successful provision; a run whose
@@ -199,7 +199,7 @@ const COMPONENTS: &[Component] = &[
 
 /// Root of the provisioned GPU runtime: `%APPDATA%\SceneWorks\gpu-runtime`.
 fn root() -> PathBuf {
-    app_support_dir().join("gpu-runtime")
+    gpu_runtime_dir()
 }
 
 /// Provisioned CUDA runtime DLL dir (`<root>\cuda`). The candle worker's PATH is
