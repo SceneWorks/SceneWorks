@@ -69,9 +69,19 @@ pub(crate) fn probe_payload(model: &str, entries: &[(&str, Value)]) -> Map<Strin
 /// Non-image/video types (utility/infra: upscalers, captioners) are reported `supported` — their
 /// Python-only *actions* are gated by [`mac_capabilities`] at the job-type level, not by hiding
 /// the model from a picker. Same source of truth as [`mac_rust_supported`].
-pub fn model_mac_support(model_id: &str, model_type: &str) -> ModelMacSupport {
+///
+/// `family` is the model's catalog-declared architecture family (`None` for a builtin whose routing
+/// is purely id-keyed). It is consulted only for the image route-by-family path (sc-14019): a
+/// non-builtin (imported/user) image model whose family is MLX-routed is Mac-routable even though
+/// its novel id is in no routing table. Builtin routing is unaffected (a builtin short-circuits on
+/// its id).
+pub fn model_mac_support(
+    model_id: &str,
+    model_type: &str,
+    family: Option<&str>,
+) -> ModelMacSupport {
     match model_type {
-        "image" => image_model_mac_support(model_id),
+        "image" => image_model_mac_support(model_id, family),
         "video" => video_model_mac_support(model_id),
         _ => ModelMacSupport {
             supported: true,
@@ -81,8 +91,29 @@ pub fn model_mac_support(model_id: &str, model_type: &str) -> ModelMacSupport {
     }
 }
 
-pub(crate) fn image_model_mac_support(model: &str) -> ModelMacSupport {
+pub(crate) fn image_model_mac_support(model: &str, family: Option<&str>) -> ModelMacSupport {
     if !MLX_ROUTED_MODELS.contains(&model) {
+        // Route-by-family for non-builtin (imported/user) models (sc-14019, epic 14015): a model
+        // whose id is in no routing table but whose declared `family` is an MLX-routed family reuses
+        // that family's existing in-process engine, so it is Mac-routable rather than hidden behind
+        // "Not available on Mac (MLX only)". Guarded on `!is_builtin_image_model` so builtin id-keyed
+        // routing is never altered — a builtin always short-circuits on `MLX_ROUTED_MODELS` above (or,
+        // if some future builtin is candle-only, keeps its id-keyed not-supported verdict here).
+        if !is_builtin_image_model(model) && family.is_some_and(image_family_is_mlx_routed) {
+            return ModelMacSupport {
+                supported: true,
+                reason: None,
+                features: ModelMacFeatures {
+                    // MLX-routed ⇒ third-party LyCORIS applies on the provider (epic 3641). The
+                    // imported single-file checkpoint is a bare diffusion transformer, so the
+                    // conditioning features that need extra components/adapters (pose / reference /
+                    // edit) are deliberately NOT claimed here — S0c wires the actual assembly/load;
+                    // this story decides eligibility only.
+                    lycoris: true,
+                    ..ModelMacFeatures::default()
+                },
+            };
+        }
         return ModelMacSupport {
             supported: false,
             reason: Some(classify_image_gap(&probe_payload(model, &[]))),
@@ -841,6 +872,31 @@ derive_model_list! {
     pub(crate) MLX_ROUTED_MODELS, IMAGE_MODEL_CAPS, mlx_routed
 }
 
+/// Architecture families whose MLX-routed builtins define an in-process image engine that a
+/// **non-builtin (imported/user) same-family model reuses** (sc-14019, epic 14015). A builtin's
+/// routing is decided by its id ([`MLX_ROUTED_MODELS`]); an imported checkpoint carries a novel id
+/// that is in no table, so [`image_model_mac_support`] falls back to its declared *family* — if the
+/// family is one of these, it routes to that family's existing MLX engine. Seeded with `krea_2`
+/// (its builtins `krea_2_turbo` / `krea_2_raw` already route to the Krea MLX engine). This is an
+/// explicit allow-list, not derived from the id table, because the routing catalog is keyed on ids
+/// alone and has no id→family map; keep it aligned with the same-family builtins above and with the
+/// import gate (`sceneworks_core::base_weights::IMPORT_SUPPORTED_FAMILIES`). Pinned by the
+/// `EXPECTED_MLX_ROUTED_FAMILIES` snapshot test.
+pub(crate) const MLX_ROUTED_FAMILIES: &[&str] = &["krea_2"];
+
+/// Whether an image `family` string routes to an in-process MLX engine via the route-by-family path
+/// (sc-14019) — i.e. it is a member of [`MLX_ROUTED_FAMILIES`]. Consulted only for non-builtin ids.
+pub(crate) fn image_family_is_mlx_routed(family: &str) -> bool {
+    MLX_ROUTED_FAMILIES.contains(&family)
+}
+
+/// Whether `id` names a builtin image model (a row in [`IMAGE_MODEL_CAPS`]). The route-by-family
+/// path applies only to non-builtin (imported/user) ids, so a builtin's id-keyed routing is never
+/// overridden by its family (sc-14019).
+pub(crate) fn is_builtin_image_model(id: &str) -> bool {
+    IMAGE_MODEL_CAPS.iter().any(|caps| caps.id == id)
+}
+
 derive_model_list! {
     /// The models the candle (Windows/CUDA) lane can serve for base txt2img (derived from
     /// [`IMAGE_MODEL_CAPS`]`.candle_routed`, sc-9495). Mirrors the worker's `image_jobs::is_candle_engine`.
@@ -989,10 +1045,11 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
+        image_family_is_mlx_routed, image_model_mac_support, is_builtin_image_model,
         CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_MODELS,
         CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS,
-        CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_MODELS,
-        MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS,
+        CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_FAMILIES,
+        MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS,
     };
 
     /// Assert a table-derived list reproduces its pre-collapse snapshot EXACTLY as a set: same
@@ -1355,5 +1412,102 @@ mod tests {
             VIDEO_MODEL_CAPS.len(),
             "VIDEO_MODEL_CAPS has duplicate model ids"
         );
+    }
+
+    // --- route-by-family for imported models (sc-14019, epic 14015) -------------
+
+    /// The MLX-routed *family* allow-list, pinned like the model lists above. Adding a family here is
+    /// a deliberate edit (it makes every imported same-family checkpoint Mac-routable), so it must be
+    /// mirrored here — the guardrail that a family is never silently added to the import surface.
+    const EXPECTED_MLX_ROUTED_FAMILIES: &[&str] = &["krea_2"];
+
+    #[test]
+    fn mlx_routed_families_match_snapshot() {
+        assert_eq!(MLX_ROUTED_FAMILIES, EXPECTED_MLX_ROUTED_FAMILIES);
+    }
+
+    #[test]
+    fn mlx_routed_families_have_a_same_family_builtin_engine() {
+        // Every allow-listed family must actually be one an MLX-routed builtin defines an engine for
+        // (the routing catalog has no id→family map, so this asserts the family token is real: at
+        // least one builtin id begins with the family token, and it is MLX-routed). krea_2 →
+        // krea_2_turbo / krea_2_raw. This catches a typo'd or dead family token in the allow-list.
+        for family in MLX_ROUTED_FAMILIES {
+            let has_routed_builtin = MLX_ROUTED_MODELS
+                .iter()
+                .any(|id| id.starts_with(family) && is_builtin_image_model(id));
+            assert!(
+                has_routed_builtin,
+                "MLX_ROUTED_FAMILIES lists '{family}' but no MLX-routed builtin id shares that family prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn mlx_routed_families_agree_with_import_supported_families() {
+        // sc-14019: `MLX_ROUTED_FAMILIES` (routing, here) and `base_weights::IMPORT_SUPPORTED_FAMILIES`
+        // (the model-import compatibility gate) are two independent `krea_2` allow-lists that must NOT
+        // silently drift. Route-by-family exists ONLY via MLX today, so the two sets must be identical:
+        // a family added to the import gate but not here would let a user import a checkpoint no engine
+        // can run, and a family added here but not to the gate would route one the gate refuses. This
+        // fails the moment either list gains or loses a family the other did not. If a non-MLX
+        // route-by-family lane (e.g. candle) is ever added, evolve this into a subset check over the
+        // union of route-by-family lists.
+        let routed: BTreeSet<&str> = MLX_ROUTED_FAMILIES.iter().copied().collect();
+        let importable: BTreeSet<&str> = crate::base_weights::IMPORT_SUPPORTED_FAMILIES
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(
+            routed, importable,
+            "MLX_ROUTED_FAMILIES and IMPORT_SUPPORTED_FAMILIES disagree; add a family to BOTH the \
+             import gate and the route-by-family allow-list (or remove it from both)"
+        );
+    }
+
+    #[test]
+    fn imported_same_family_model_routes_via_family_path() {
+        // An imported model id that is in NO routing table, declaring family krea_2, resolves as
+        // Mac-routable (supported) via the family path — not hidden behind "not available on Mac".
+        let imported_id = "user_kreamania_variant5"; // a novel id, never a builtin
+        assert!(!is_builtin_image_model(imported_id));
+        assert!(!MLX_ROUTED_MODELS.contains(&imported_id));
+
+        let support = image_model_mac_support(imported_id, Some("krea_2"));
+        assert!(
+            support.supported,
+            "an imported krea_2-family model should route via the family path"
+        );
+        assert!(support.reason.is_none());
+        // MLX-routed ⇒ LyCORIS applies; the bare-DiT conditioning features stay unclaimed (S0c).
+        assert!(support.features.lycoris);
+        assert!(!support.features.edit);
+        assert!(!support.features.pose);
+        assert!(!support.features.reference);
+    }
+
+    #[test]
+    fn imported_non_routed_family_model_stays_unsupported() {
+        // A non-MLX-routed family (or no family) does NOT get the family path — it stays hidden with
+        // the standard "not available on Mac" gap reason, exactly as before sc-14019.
+        assert!(!image_family_is_mlx_routed("z-image")); // detector family for an unsupported import
+        let unsupported = image_model_mac_support("user_zimage_import", Some("z-image"));
+        assert!(!unsupported.supported);
+        assert!(unsupported.reason.is_some());
+
+        let no_family = image_model_mac_support("user_mystery_import", None);
+        assert!(!no_family.supported);
+    }
+
+    #[test]
+    fn builtin_image_routing_is_unaffected_by_family_argument() {
+        // A builtin short-circuits on its id: passing a (possibly wrong) family never changes its
+        // verdict, so builtin id-keyed routing stays byte-identical (sc-14019 constraint).
+        let with_family = image_model_mac_support("krea_2_turbo", Some("krea_2"));
+        let without_family = image_model_mac_support("krea_2_turbo", None);
+        let mismatched_family = image_model_mac_support("krea_2_turbo", Some("z-image"));
+        assert!(with_family.supported);
+        assert_eq!(with_family, without_family);
+        assert_eq!(with_family, mismatched_family);
     }
 }

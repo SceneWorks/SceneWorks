@@ -209,6 +209,31 @@ pub(crate) fn test_safetensors_bytes_with_keys(tensor_keys: &[String]) -> Vec<u8
     bytes
 }
 
+/// Like [`test_safetensors_bytes_with_keys`] but with a per-tensor dtype, so a fixture can drive the
+/// base-weight detector's dtype-sensitive quant classification (sc-14019): a BF16 Krea 2 DiT lands as
+/// `(krea_2, Transformer, Bf16)` (importable) while an F8_E4M3 qwen DiT lands as a refused quant. Same
+/// header + padded-data completeness posture as [`test_safetensors_bytes_with_keys`].
+pub(crate) fn test_safetensors_bytes_with_typed_keys(entries: &[(&str, &str)]) -> Vec<u8> {
+    const TENSOR_DATA_END: u64 = 32768;
+    let mut object = serde_json::Map::new();
+    object.insert("__metadata__".to_owned(), json!({"format": "pt"}));
+    let mut data_end = 0_u64;
+    for (key, dtype) in entries {
+        object.insert(
+            (*key).to_owned(),
+            json!({"dtype": dtype, "shape": [16, 1024], "data_offsets": [0, TENSOR_DATA_END]}),
+        );
+        data_end = data_end.max(TENSOR_DATA_END);
+    }
+    let header = serde_json::to_vec(&Value::Object(object)).expect("header serializes");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(header.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&header);
+    let data_len = usize::try_from(data_end.max(12)).expect("data length fits usize");
+    bytes.resize(bytes.len() + data_len, 0);
+    bytes
+}
+
 pub(crate) fn z_image_tensor_keys() -> Vec<String> {
     mm_dit_tensor_keys(24)
 }

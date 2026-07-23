@@ -10670,3 +10670,279 @@ fn resolve_krea_control_base_descends_turnkey_root_into_tier_with_tokenizer() {
         "resolved base must carry the tokenizer whose absence produced the sc-11853 load failure"
     );
 }
+
+// ---- Imported single-file Krea 2 checkpoint assembly (epic 14015 S0c, sc-14018) -----------------
+
+/// The single-file-vs-snapshot-dir decision at the heart of S0c: a `.safetensors` FILE is a single-file
+/// checkpoint (→ the native entrypoint); a directory (a snapshot tier) is not (→ the registry snapshot
+/// path). A non-safetensors file (e.g. a `.ckpt`) is likewise not one — the S0b/S0a lane is safetensors.
+#[cfg(target_os = "macos")]
+#[test]
+fn is_single_file_checkpoint_distinguishes_file_from_snapshot_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("kreamania.safetensors");
+    std::fs::write(&file, b"x").unwrap();
+    let snapshot = dir.path().join("bf16");
+    std::fs::create_dir_all(&snapshot).unwrap();
+    let other = dir.path().join("model.ckpt");
+    std::fs::write(&other, b"x").unwrap();
+
+    assert!(
+        is_single_file_checkpoint(&file),
+        "a .safetensors file is a single-file checkpoint (takes the native entrypoint)"
+    );
+    assert!(
+        !is_single_file_checkpoint(&snapshot),
+        "a snapshot directory is NOT a single-file checkpoint (takes the registry snapshot path)"
+    );
+    assert!(
+        !is_single_file_checkpoint(&other),
+        "a non-safetensors file is not a single-file checkpoint"
+    );
+    assert!(
+        !is_single_file_checkpoint(&dir.path().join("does-not-exist.safetensors")),
+        "an absent path is not a single-file checkpoint"
+    );
+}
+
+/// Seed an app-managed imported model file under `<data_dir>/models/…` and return a Settings pinned to
+/// that data dir. The confinement (`normalize_app_managed_model_path`) admits `<data_dir>` roots.
+#[cfg(target_os = "macos")]
+fn imported_krea_settings_with_file(dir: &std::path::Path) -> (Settings, PathBuf) {
+    let file = dir
+        .join("models")
+        .join("imported-krea")
+        .join("kreamania_variant5.safetensors");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"dit").unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.to_path_buf();
+    (settings, file)
+}
+
+/// `resolve_imported_krea_dit` returns the imported DiT only for a non-builtin `krea_2`-family model
+/// whose `modelPath` is a single `.safetensors` file — and returns `None` (leaving the existing
+/// snapshot-dir path untouched) for a builtin Krea id, a wrong family, or a directory `modelPath`.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_imported_krea_dit_claims_only_non_builtin_single_file_krea2() {
+    let dir = tempfile::tempdir().unwrap();
+    let (settings, file) = imported_krea_settings_with_file(dir.path());
+    let path_str = file.to_str().unwrap();
+
+    // Imported (non-builtin) krea_2 with a single-file modelPath → Some(file).
+    let imported = request(json!({
+        "projectId": "p", "model": "kreamania_variant5",
+        "modelManifestEntry": { "family": "krea_2", "modelPath": path_str }
+    }));
+    let resolved = resolve_imported_krea_dit(&imported, &settings)
+        .expect("resolve ok")
+        .expect("imported single-file krea2 resolves its DiT");
+    assert_eq!(
+        resolved,
+        std::fs::canonicalize(&file).unwrap_or(file.clone())
+    );
+
+    // A builtin Krea id (in MODEL_TABLE, mlx_model Some) with the SAME single-file modelPath → None:
+    // builtins keep loading from their snapshot turnkey, the S0c "snapshot path untouched" requirement.
+    assert!(
+        mlx_model("krea_2_turbo").is_some(),
+        "precondition: krea_2_turbo is a builtin engine on macOS"
+    );
+    let builtin = request(json!({
+        "projectId": "p", "model": "krea_2_turbo",
+        "modelManifestEntry": { "family": "krea_2", "modelPath": path_str }
+    }));
+    assert_eq!(
+        resolve_imported_krea_dit(&builtin, &settings).expect("resolve ok"),
+        None,
+        "a builtin Krea id must NOT take the single-file path"
+    );
+
+    // Wrong family → None.
+    let wrong_family = request(json!({
+        "projectId": "p", "model": "some_import",
+        "modelManifestEntry": { "family": "z-image", "modelPath": path_str }
+    }));
+    assert_eq!(
+        resolve_imported_krea_dit(&wrong_family, &settings).expect("resolve ok"),
+        None,
+        "a non-krea_2 family is not an imported Krea job"
+    );
+
+    // The REAL production shape: no explicit `modelPath`, only the import job's `paths.model` install
+    // dir (holding the single .safetensors checkpoint) → resolves to that lone weight file.
+    let install_dir = file.parent().unwrap();
+    let via_install_dir = request(json!({
+        "projectId": "p", "model": "kreamania_variant5",
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "paths": { "model": install_dir.to_str().unwrap() }
+        }
+    }));
+    assert_eq!(
+        resolve_imported_krea_dit(&via_install_dir, &settings)
+            .expect("resolve ok")
+            .expect("install-dir single-file import resolves its DiT"),
+        std::fs::canonicalize(&file).unwrap_or(file.clone()),
+        "the lone .safetensors inside the recorded install dir is the imported DiT"
+    );
+
+    // A diffusers snapshot directory (a builtin turnkey tier: model_index.json marker) → None, even
+    // though a bare .safetensors also sits alongside — it takes the registry snapshot path, not this lane.
+    let snap_dir = dir.path().join("models").join("imported-krea").join("snap");
+    std::fs::create_dir_all(&snap_dir).unwrap();
+    std::fs::write(snap_dir.join("model_index.json"), b"{}").unwrap();
+    std::fs::write(snap_dir.join("stray.safetensors"), b"x").unwrap();
+    let dir_job = request(json!({
+        "projectId": "p", "model": "kreamania_variant5",
+        "modelManifestEntry": { "family": "krea_2", "modelPath": snap_dir.to_str().unwrap() }
+    }));
+    assert_eq!(
+        resolve_imported_krea_dit(&dir_job, &settings).expect("resolve ok"),
+        None,
+        "a diffusers snapshot directory is not a single-file import"
+    );
+
+    // A dir with MORE THAN ONE loose weight file is not the single-file shape → None.
+    let multi_dir = dir
+        .path()
+        .join("models")
+        .join("imported-krea")
+        .join("multi");
+    std::fs::create_dir_all(&multi_dir).unwrap();
+    std::fs::write(multi_dir.join("a.safetensors"), b"x").unwrap();
+    std::fs::write(multi_dir.join("b.safetensors"), b"x").unwrap();
+    let multi_job = request(json!({
+        "projectId": "p", "model": "kreamania_variant5",
+        "modelManifestEntry": { "family": "krea_2", "paths": { "model": multi_dir.to_str().unwrap() } }
+    }));
+    assert_eq!(
+        resolve_imported_krea_dit(&multi_job, &settings).expect("resolve ok"),
+        None,
+        "more than one loose weight file is not a single-file import"
+    );
+}
+
+/// `resolve_krea_imported_base_tier` requires the resident Krea 2 base and fails with a clear
+/// "install the Krea 2 base first" message when it is absent; when the `bf16/` tier is installed and
+/// complete (config + TE/VAE/tokenizer) it resolves that dir.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_krea_imported_base_tier_requires_installed_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = dir.path().join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+
+    // Base absent → loud typed error.
+    let err = resolve_krea_imported_base_tier(&settings)
+        .expect_err("no base installed must be an error, not a silent fall-through");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("Krea 2 base model is not installed") && msg.contains("install the Krea 2"),
+        "error must direct the user to install the Krea 2 base first, got: {msg}"
+    );
+
+    // Seed a complete `SceneWorks/krea-2-turbo-mlx` bf16 base tier (arch config + shared components).
+    let snapshot = hub
+        .join("models--SceneWorks--krea-2-turbo-mlx")
+        .join("snapshots")
+        .join("rev0");
+    let bf16 = snapshot.join("bf16");
+    for sub in ["transformer", "text_encoder", "vae", "tokenizer"] {
+        std::fs::create_dir_all(bf16.join(sub)).unwrap();
+    }
+    std::fs::write(bf16.join("transformer").join("config.json"), b"{}").unwrap();
+    let refs = hub
+        .join("models--SceneWorks--krea-2-turbo-mlx")
+        .join("refs");
+    std::fs::create_dir_all(&refs).unwrap();
+    std::fs::write(refs.join("main"), b"rev0").unwrap();
+
+    let base = resolve_krea_imported_base_tier(&settings).expect("installed base resolves");
+    assert_eq!(
+        base, bf16,
+        "the resolved base is the dense bf16 tier of the Turbo turnkey"
+    );
+}
+
+/// End-to-end routing decision: a plain-t2i imported single-file Krea 2 job routes to the bespoke
+/// `KreaImported` in-place lane (the imported id is in no MODEL_TABLE, so the generic `mlx_available`
+/// snapshot arm would never claim it — this arm is what makes it MLX-generatable), while a directory
+/// `modelPath` (a snapshot) does not take that lane.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_image_route_sends_imported_single_file_krea_to_the_bespoke_lane() {
+    let dir = tempfile::tempdir().unwrap();
+    let (settings, file) = imported_krea_settings_with_file(dir.path());
+
+    let imported = request(json!({
+        "projectId": "p", "model": "kreamania_variant5", "prompt": "a cat",
+        "modelManifestEntry": { "family": "krea_2", "modelPath": file.to_str().unwrap() }
+    }));
+    assert_eq!(
+        resolve_image_route(&imported, &settings),
+        Some(ImageRoute::KreaImported),
+        "an imported single-file krea_2 t2i job routes to the bespoke in-place assembly lane"
+    );
+    assert!(krea_imported_available(&imported, &settings));
+
+    // A directory modelPath (a snapshot) is not a single-file import → the imported lane does not claim
+    // it (and with an unknown id + no resolvable snapshot it is not otherwise MLX-routable).
+    let snap_dir = dir.path().join("models").join("imported-krea").join("snap");
+    std::fs::create_dir_all(&snap_dir).unwrap();
+    let dir_job = request(json!({
+        "projectId": "p", "model": "kreamania_variant5", "prompt": "a cat",
+        "modelManifestEntry": { "family": "krea_2", "modelPath": snap_dir.to_str().unwrap() }
+    }));
+    assert!(
+        !krea_imported_available(&dir_job, &settings),
+        "a snapshot-directory modelPath must not take the single-file import lane"
+    );
+    assert_ne!(
+        resolve_image_route(&dir_job, &settings),
+        Some(ImageRoute::KreaImported)
+    );
+}
+
+/// A pose / edit / reference shape on an imported Krea 2 model is NOT claimed by the txt2img import lane
+/// (a bare imported DiT carries no conditioning components) — the availability predicate stays t2i-only.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_imported_available_is_txt2img_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let (settings, file) = imported_krea_settings_with_file(dir.path());
+    let path_str = file.to_str().unwrap().to_owned();
+    let base = json!({ "family": "krea_2", "modelPath": path_str });
+
+    let with_pose = request(json!({
+        "projectId": "p", "model": "kreamania_variant5",
+        "advanced": { "poses": [{ "id": "a" }] },
+        "modelManifestEntry": base.clone()
+    }));
+    assert!(
+        !krea_imported_available(&with_pose, &settings),
+        "pose job excluded"
+    );
+
+    let edit = request(json!({
+        "projectId": "p", "model": "kreamania_variant5", "mode": "edit_image",
+        "sourceAssetId": "s", "modelManifestEntry": base.clone()
+    }));
+    assert!(
+        !krea_imported_available(&edit, &settings),
+        "edit job excluded"
+    );
+
+    let reference = request(json!({
+        "projectId": "p", "model": "kreamania_variant5", "referenceAssetId": "r",
+        "modelManifestEntry": base
+    }));
+    assert!(
+        !krea_imported_available(&reference, &settings),
+        "reference/img2img job excluded (t2i only in S0c)"
+    );
+}

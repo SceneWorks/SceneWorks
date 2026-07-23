@@ -22,6 +22,16 @@ name: Release (desktop)
 #                           is the signing Mac; a cloud runner would instead store
 #                           the .p8 contents as a secret and write it to a temp file)
 #
+# SIGNING-MATERIAL ISOLATION (sc-13612, F-050): the install step now uses
+# `npm ci --ignore-scripts` so a compromised transitive dep can't run install-time
+# code on this signing box. Two residual hardening items are HOST-side (this file
+# does no `security` keychain management and never writes the .p8, so they can't be
+# done purely in-repo) and are tracked as follow-ups:
+#   sc-14064 — move signing off the always-unlocked LOGIN keychain to a dedicated,
+#              per-use-unlocked temp keychain created+deleted within the run.
+#   sc-14065 — provision the .p8 from a secret into a chmod-600 mktemp path removed
+#              on exit, instead of a pre-placed file readable in the runner's HOME.
+#
 # Tag/dispatch only — never push/PR. NOTE: `codesign` needs the login keychain
 # unlocked in the runner's session; verify end-to-end with a throwaway tag (e.g.
 # v0.0.0-rc.1) before relying on this. See sc-5930.
@@ -45,10 +55,21 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, nax]
     env:
       CARGO_NET_OFFLINE: "true"
+    # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
+    # default (sc-10420). Runs on the SOLE self-hosted nax box (shared with
+    # macos-mlx.yml), so a wedge holds that box against queued runs (sc-13603).
+    # Generous for the release path: a cold MLX-from-source rebuild plus Apple
+    # notarization's variable network round-trip sit on top of the healthy
+    # ~7-14 min.
+    timeout-minutes: 60
     # Signing/notarization secrets are scoped to the specific steps that consume
     # them (the bundle build + the DMG staple) — NOT set at job level — so that
-    # `npm ci` (postinstall scripts) and every crate build.rs never see the
-    # updater signing key or the Apple credentials (sc-8864).
+    # `npm ci` and every crate build.rs never see the updater signing key or the
+    # Apple credentials (sc-8864). Layered with `npm ci --ignore-scripts` on the
+    # install step (sc-13612): env-scoping keeps secrets out of an install script's
+    # ENV, and --ignore-scripts stops install scripts from running at all — needed
+    # because this box's login keychain holds the Developer ID cert, so a dep's
+    # postinstall could sign/notarize as us regardless of ENV scoping.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
@@ -69,10 +90,26 @@ jobs:
       # embedded UI, built by the tauri.conf beforeBuildCommand → api:build:embedded
       # → web:build) and apps/desktop (the @tauri-apps/cli that `tauri build` runs).
       # The repo root has no JS deps — it only orchestrates.
+      #
+      # --ignore-scripts (sc-13612, F-050): this box is the self-hosted signing Mac
+      # holding the Developer ID cert (login keychain) + notary .p8. Step-scoping the
+      # APPLE_*/TAURI_* secrets keeps them out of install-time scripts' ENV, but a
+      # compromised transitive dep's postinstall could still ask the unlocked login
+      # keychain to codesign/notarize arbitrary binaries as us. Disabling lifecycle
+      # scripts on the release lane removes that path. Safe here because the build runs
+      # via explicit `run build` steps (vite build / tauri build), not an install hook,
+      # and no needed dep relies on a postinstall: apps/desktop has ZERO install-script
+      # deps (@tauri-apps/cli resolves its platform binary via optionalDependencies);
+      # apps/web's only install-script deps are esbuild (works under --ignore-scripts —
+      # its platform binary is an optionalDependency resolved at runtime; the postinstall
+      # is a startup optimization only) and fsevents (optional, dev-server file-watching
+      # only — unused by `vite build`). Confirm with one real release test build.
+      # Residual host-side hardening tracked as follow-ups: sc-14064 (dedicated per-use
+      # keychain instead of the login keychain) and sc-14065 (.p8 off the readable path).
       - name: Install web + desktop JS deps
         run: |
-          npm ci --prefix apps/web
-          npm ci --prefix apps/desktop
+          npm ci --prefix apps/web --ignore-scripts
+          npm ci --prefix apps/desktop --ignore-scripts
 
       # `tauri build` runs the beforeBuildCommand (sidecar + web/api + the nested
       # binary pre-signing from #715) and, because the APPLE_* env is set, signs +
@@ -192,6 +229,11 @@ jobs:
       # signing key is scoped to the bundle step below, not here (sc-8864).
       CUDA_COMPUTE_CAP: "80"
       CARGO_NET_OFFLINE: "true"
+    # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
+    # default (sc-10420, sc-13603). Hosted runner with no warm cache: a cold CUDA
+    # toolkit install + full candle/CUDA build + NSIS/MSI packaging is the healthy
+    # ~42-49 min, so this sits ~2x above that worst-case release build.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -230,10 +272,15 @@ jobs:
           bash scripts/check-gen-core-skew.sh --self-test
           bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle
           bash scripts/check-gen-core-skew.sh sceneworks-rust-api --features embed-web,backend-candle
+      # --ignore-scripts (sc-13612, F-050): defense-in-depth on the release lane so a
+      # compromised transitive dep can't run install-time code during the release build.
+      # See the macos job's install step for the full lifecycle-script analysis (no
+      # needed dep relies on a postinstall; @tauri-apps/cli + esbuild resolve platform
+      # binaries via optionalDependencies). Confirm with one real release test build.
       - name: Install web dependencies
-        run: npm ci --prefix apps/web
+        run: npm ci --prefix apps/web --ignore-scripts
       - name: Install desktop dependencies
-        run: npm ci --prefix apps/desktop
+        run: npm ci --prefix apps/desktop --ignore-scripts
       # `tauri build` runs build-sidecar.mjs, which on Windows builds the candle
       # sidecar by default (nvcc compiles every provider's CUDA kernels) and stages
       # the ffmpeg resource, then packages both installers. The ~2.7 GB CUDA/cuDNN/

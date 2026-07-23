@@ -1216,13 +1216,14 @@ async fn paired_moe_lora_upload_writes_convention_files_and_records_base_model()
 }
 
 #[tokio::test]
-async fn model_import_route_is_disabled_on_every_platform() {
-    // sc-7081 (epic 7080): model upload/import is intentionally disabled until a real
-    // compatibility + conversion pipeline exists. Both the JSON and multipart entrypoints
-    // must short-circuit with an actionable 403 before any staging/queueing. The deeper
-    // validation/family-detection logic still lives behind `create_model_import_job` (and is
-    // covered by lora_family + worker tests); restore the route-level assertions when the
-    // feature is re-enabled.
+async fn model_import_route_is_enabled_and_detector_gated() {
+    // sc-14019 (epic 14015): the model-import kill-switch is ON, and each entrypoint is gated on the
+    // base-weight detector's compatibility verdict (`import_supported`) rather than unconditionally
+    // refused (the pre-sc-14019 contract this test used to pin). This drives the MOUNTED route through
+    // `create_app` so a regression in the `create_model_import_job` -> `queue_model_import_job` -> gate
+    // wiring is caught, not just the `import_source_supported` helper (unit-tested in
+    // `models::import_gate_tests`). Detection is header-only, so the fixtures are minimal synthetic
+    // safetensors headers built in-test — no real weights needed.
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -1253,9 +1254,67 @@ async fn model_import_route_is_disabled_on_every_platform() {
         std::fs::write(config_dir.join(name), body).expect("manifest writes");
     }
 
-    // JSON path: refused before any validation or queueing.
+    // Supported multipart upload: a dense-bf16 Krea 2 DiT (the unique `txtfusion.` tower + BFL-style
+    // `blocks.*` keys, all BF16) -> detector `(krea_2, Transformer, Bf16)` -> the gate accepts it and
+    // the endpoint queues the import (201). This is the positive endpoint->gate wiring assertion.
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (status, error) = request(
+    let (status, job) = request_multipart_model_upload(
+        app,
+        &[("name", "Krea Import"), ("type", "image")],
+        "kreamania_variant5.safetensors",
+        &test_safetensors_bytes_with_typed_keys(&[
+            ("model.diffusion_model.blocks.0.attn.wq.weight", "BF16"),
+            ("model.diffusion_model.blocks.0.mod.lin", "BF16"),
+            (
+                "model.diffusion_model.txtfusion.refiner_blocks.0.attn.wq.weight",
+                "BF16",
+            ),
+            ("model.diffusion_model.txtfusion.projector.weight", "BF16"),
+        ]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a dense-bf16 Krea 2 DiT upload must pass the gate and queue: {job:?}"
+    );
+    assert_eq!(job["type"], "model_import");
+
+    // Unsupported multipart upload: an F8_E4M3 qwen-image DiT is a recognized family with no import
+    // loader today -> refused AT THE ENDPOINT with 400 and the typed reason naming the family, before
+    // any job is queued. This is the negative endpoint->gate wiring assertion.
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (mp_status, mp_error) = request_multipart_model_upload(
+        app,
+        &[("name", "Qwen Import"), ("type", "image")],
+        "qwen_image.safetensors",
+        &test_safetensors_bytes_with_typed_keys(&[
+            ("model.diffusion_model.img_in.weight", "F8_E4M3"),
+            (
+                "model.diffusion_model.transformer_blocks.0.attn.add_q_proj.weight",
+                "F8_E4M3",
+            ),
+            (
+                "model.diffusion_model.transformer_blocks.0.img_mlp.net.0.proj.weight",
+                "F8_E4M3",
+            ),
+        ]),
+    )
+    .await;
+    assert_eq!(mp_status, StatusCode::BAD_REQUEST);
+    assert!(
+        mp_error["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("qwen-image"),
+        "refusal detail should surface the typed reason naming the family: {mp_error:?}"
+    );
+
+    // Remote `sourceUrl` JSON import: there are no local bytes to inspect at queue time, so the gate
+    // correctly defers to the worker (which re-runs the same detector over the downloaded bytes). The
+    // endpoint queues the job (201) rather than refusing a file it cannot yet see.
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (url_status, url_job) = request(
         app,
         "POST",
         "/api/v1/models/import",
@@ -1265,23 +1324,12 @@ async fn model_import_route_is_disabled_on_every_platform() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(error["detail"].as_str().unwrap_or("").contains("disabled"));
-
-    // Multipart path: refused before the upload is staged.
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (mp_status, mp_error) = request_multipart_model_upload(
-        app,
-        &[("name", "Disabled"), ("type", "image")],
-        "disabled.safetensors",
-        &test_safetensors_bytes_with_keys(&qwen_image_tensor_keys()),
-    )
-    .await;
-    assert_eq!(mp_status, StatusCode::FORBIDDEN);
-    assert!(mp_error["detail"]
-        .as_str()
-        .unwrap_or("")
-        .contains("disabled"));
+    assert_eq!(
+        url_status,
+        StatusCode::CREATED,
+        "a remote sourceUrl import has no local bytes, so it queues for the worker gate: {url_job:?}"
+    );
+    assert_eq!(url_job["type"], "model_import");
 }
 
 #[tokio::test]

@@ -475,6 +475,21 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::KreaImported => {
+                // Imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): pair the
+                // imported DiT with a resident `krea_2` base tier (shared TE/VAE/tokenizer) and load via
+                // the S0b MLX native single-file entrypoint. txt2img, `count` renders each its own seed.
+                generate_krea_imported_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::InstantId => {
                 // InstantID identity-preserving character image (sc-3345): single identity or
                 // grouped angle/pose sets, on RealVisXL + IdentityNet + the native face stack.
@@ -1772,6 +1787,11 @@ include!("image_jobs/krea_multiphase.rs");
 #[cfg(target_os = "macos")]
 // Krea 2 pose-ControlNet (MLX) strict-pose routing (sc-8465, epic 8459 S5).
 include!("image_jobs/krea_control.rs");
+#[cfg(target_os = "macos")]
+// Imported single-file Krea 2 checkpoint routing (epic 14015 S0c, sc-14018): a user-imported `krea_2`-
+// family DiT single file → paired with a resident `krea_2` base tier (shared TE/VAE/tokenizer) and loaded
+// via the S0b MLX native single-file entrypoint, bypassing the registry snapshot-dir path.
+include!("image_jobs/krea_imported.rs");
 #[cfg(target_os = "macos")]
 // SenseNova edit routing.
 include!("image_jobs/sensenova.rs");

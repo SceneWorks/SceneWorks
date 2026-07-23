@@ -171,6 +171,73 @@ pub enum BaseWeightDetection {
     },
 }
 
+// ---------------------------------------------------------------------------
+// Import compatibility (sc-14019, epic 14015)
+// ---------------------------------------------------------------------------
+
+/// Architecture families the single-file **model-import** pipeline can assemble and load today
+/// (sc-14019, epic 14015). An imported checkpoint of one of these families is registered as a
+/// user model and routed to that family's existing in-process engine (the S0d family-routing path
+/// in `jobs_store::routing::catalog`). Seeded with `krea_2` — the community Krea 2 DiT export the
+/// detector recognizes by its `txtfusion.` marker, whose builtins already route to the Krea MLX
+/// engine. Grows one entry per landed loader; keep it aligned with [`import_supported`]'s arms and
+/// with `MLX_ROUTED_FAMILIES` (routing).
+pub const IMPORT_SUPPORTED_FAMILIES: &[&str] = &["krea_2"];
+
+/// Whether an imported community single-file **base checkpoint** described by `verdict` can be
+/// assembled and run by a real engine today (sc-14019, epic 14015) — the compatibility gate behind
+/// the model-import kill-switch (`apps/rust-api::model_import_enabled`). `Ok(())` means the
+/// `(family, component, quant)` triple has a landed single-file import loader; `Err(reason)` is a
+/// client-facing explanation of why the file is refused. There is **no silent fallback**: a triple
+/// with no loader fails closed with a reason (the sc-10509 posture), never a best-effort load that
+/// would decode to noise.
+///
+/// Written as a `match` with **one arm per supported loader** so a follow-on family / component /
+/// quant (the S0c assembly slice and the epic's later families) is a single added arm, not a
+/// rewrite. Today exactly one triple is loadable: a dense-`bf16` Krea 2 DiT
+/// (`krea_2` / [`ComponentRole::Transformer`] / [`QuantFormat::Bf16`]), which reuses the existing
+/// Krea MLX engine via the family-routing path. Everything else — an unrecognized/absent family, a
+/// non-transformer component (VAE / text encoder / all-in-one checkpoint), or a deferred quant
+/// (plain/scaled/inline fp8, `comfy_quant` packed, GGUF) — is refused with a specific reason.
+pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
+    match (verdict.family.as_deref(), verdict.component, verdict.quant) {
+        // --- Supported loaders: one arm per landed loader (add the next family/quant here) ---
+        (Some("krea_2"), ComponentRole::Transformer, QuantFormat::Bf16) => Ok(()),
+
+        // --- Refusals: most specific first, each with an actionable, client-facing reason ---
+        (None, _, _) => Err(
+            "The architecture family could not be identified from the file, so the import is \
+             refused rather than guessing at a loader."
+                .to_owned(),
+        ),
+        (Some(family), _, _) if !IMPORT_SUPPORTED_FAMILIES.contains(&family) => Err(format!(
+            "Model import does not yet support the '{family}' family. Supported today: {}.",
+            IMPORT_SUPPORTED_FAMILIES.join(", ")
+        )),
+        (Some(family), component, _) if component != ComponentRole::Transformer => Err(format!(
+            "Model import for the '{family}' family currently supports only the diffusion \
+             transformer, not a {component} file."
+        )),
+        (Some(family), _, quant) => Err(format!(
+            "Model import for the '{family}' family currently supports only dense bf16 weights, \
+             not {quant}. Re-export the checkpoint in bf16."
+        )),
+    }
+}
+
+/// [`import_supported`] lifted over a whole [`BaseWeightDetection`]: a `Recognized` verdict defers to
+/// `import_supported`, while an `Unrecognized` file is refused carrying the detector's own reason.
+/// The single entry point the API/worker import gates call over a detected file (sc-14019).
+pub fn import_detection_supported(detection: &BaseWeightDetection) -> Result<(), String> {
+    match detection {
+        BaseWeightDetection::Recognized(verdict) => import_supported(verdict),
+        BaseWeightDetection::Unrecognized { reason } => Err(format!(
+            "The file is not a recognized base-weight checkpoint ({reason}), so it cannot be \
+             imported."
+        )),
+    }
+}
+
 /// The GGUF container magic — the first four bytes of every `.gguf` file. Detected
 /// by content, not extension, per the story (a renamed `.bin`/`.sft` GGUF must
 /// still classify).
@@ -1041,5 +1108,129 @@ mod tests {
             ("transformer_blocks.0.attn2.to_k.weight", "BF16"),
         ])));
         assert_eq!(verdict.quant, QuantFormat::Bf16);
+    }
+
+    // --- import compatibility gate (sc-14019, epic 14015) -----------------------
+
+    fn verdict(
+        family: Option<&str>,
+        component: ComponentRole,
+        quant: QuantFormat,
+    ) -> BaseWeightVerdict {
+        BaseWeightVerdict {
+            family: family.map(str::to_owned),
+            component,
+            quant,
+        }
+    }
+
+    #[test]
+    fn import_supported_accepts_only_krea2_transformer_bf16() {
+        // The single loadable triple today: a dense-bf16 Krea 2 DiT, routed to the Krea MLX engine.
+        assert!(import_supported(&verdict(
+            Some("krea_2"),
+            ComponentRole::Transformer,
+            QuantFormat::Bf16
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn import_supported_refuses_krea2_transformer_deferred_quant() {
+        // Same family + component, but a packed quant with no loader → refused with the quant named.
+        let reason = import_supported(&verdict(
+            Some("krea_2"),
+            ComponentRole::Transformer,
+            QuantFormat::ComfyQuantPacked,
+        ))
+        .expect_err("packed quant must be refused");
+        assert!(
+            reason.contains("bf16"),
+            "reason should name the required quant: {reason}"
+        );
+        assert!(
+            reason.contains(QuantFormat::ComfyQuantPacked.as_str()),
+            "reason should name the rejected quant: {reason}"
+        );
+    }
+
+    #[test]
+    fn import_supported_refuses_krea2_wrong_component() {
+        // A Krea-family VAE (or any non-transformer component) is not the transformer we load.
+        for component in [
+            ComponentRole::Vae,
+            ComponentRole::TextEncoder,
+            ComponentRole::Checkpoint,
+        ] {
+            let reason = import_supported(&verdict(Some("krea_2"), component, QuantFormat::Bf16))
+                .expect_err("non-transformer component must be refused");
+            assert!(
+                reason.contains("transformer"),
+                "reason should explain the transformer-only rule: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_supported_refuses_unsupported_and_absent_family() {
+        // A recognized-but-unsupported family (z-image) is refused, naming the supported set.
+        let z_reason = import_supported(&verdict(
+            Some("z-image"),
+            ComponentRole::Transformer,
+            QuantFormat::Bf16,
+        ))
+        .expect_err("unsupported family must be refused");
+        assert!(z_reason.contains("z-image"), "reason: {z_reason}");
+        assert!(
+            z_reason.contains("krea_2"),
+            "reason should name the supported set: {z_reason}"
+        );
+        // A component with no family label (None) is refused rather than guessed at.
+        assert!(import_supported(&verdict(
+            None,
+            ComponentRole::Transformer,
+            QuantFormat::Bf16
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn import_detection_supported_refuses_unrecognized_with_reason() {
+        let detection = BaseWeightDetection::Unrecognized {
+            reason: "no recognized component-role signature".to_owned(),
+        };
+        let reason =
+            import_detection_supported(&detection).expect_err("unrecognized must be refused");
+        assert!(
+            reason.contains("no recognized component-role signature"),
+            "the detector's own reason must be surfaced: {reason}"
+        );
+    }
+
+    #[test]
+    fn import_detection_supported_accepts_recognized_krea2_bf16() {
+        let detection = BaseWeightDetection::Recognized(verdict(
+            Some("krea_2"),
+            ComponentRole::Transformer,
+            QuantFormat::Bf16,
+        ));
+        assert!(import_detection_supported(&detection).is_ok());
+    }
+
+    #[test]
+    fn import_supported_families_are_a_subset_of_the_ok_arms() {
+        // Guardrail: every family the gate advertises must actually have an Ok triple, so the
+        // advertised set and the `match` arms can never drift (add the family here + its arm together).
+        for family in IMPORT_SUPPORTED_FAMILIES {
+            assert!(
+                import_supported(&verdict(
+                    Some(family),
+                    ComponentRole::Transformer,
+                    QuantFormat::Bf16
+                ))
+                .is_ok(),
+                "IMPORT_SUPPORTED_FAMILIES lists {family} but no bf16 transformer arm accepts it"
+            );
+        }
     }
 }
