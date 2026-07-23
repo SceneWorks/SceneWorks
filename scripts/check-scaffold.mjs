@@ -85,6 +85,7 @@ async function assertDesktopLinuxPackagingWorkflow() {
   }
 
   const requiredCommands = [
+    "gstreamer1.0-libav",
     "scripts/check-gen-core-skew.sh --self-test",
     "sceneworks-worker --features backend-candle",
     "sceneworks-rust-api --features embed-web,backend-candle",

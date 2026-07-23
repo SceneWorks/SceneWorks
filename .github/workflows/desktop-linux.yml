@@ -36,16 +36,19 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
 
-      # Tauri v2's Ubuntu/WebKitGTK build prerequisites. Ubuntu 22.04 is
+      # Tauri v2's Ubuntu/WebKitGTK build prerequisites. gstreamer1.0-libav
+      # supplies the H.264 decoder that WebKitGTK lacks on stock Ubuntu and is
+      # available to Tauri's AppImage media-framework bundler. Ubuntu 22.04 is
       # intentional: packages built here retain the project's glibc baseline and
       # run on both the documented Ubuntu 22.04 and 24.04 targets.
-      - name: Install GTK and WebKitGTK build dependencies
+      - name: Install GTK, WebKitGTK, and media dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             build-essential \
             curl \
             file \
+            gstreamer1.0-libav \
             libayatana-appindicator3-dev \
             libfuse2 \
             libgtk-3-dev \
