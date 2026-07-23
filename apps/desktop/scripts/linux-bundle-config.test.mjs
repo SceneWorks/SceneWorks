@@ -38,6 +38,7 @@ const macosOverlay = readJson("tauri.macos.conf.json");
 const packageJson = readJson("package.json");
 const tauriSchema = readJson("node_modules/@tauri-apps/cli/config.schema.json");
 const desktopReadme = readFileSync(join(desktopDir, "README.md"), "utf8");
+const webStyles = readFileSync(join(desktopDir, "..", "web", "src", "styles.css"), "utf8");
 
 test("the Linux overlay is valid against the locked Tauri v2 schema", () => {
   // Tauri's schema intentionally escapes `:` in a character class. Node 24's
@@ -70,10 +71,11 @@ test("the default Linux build produces only AppImage and deb bundles", () => {
   );
 });
 
-test("the deb declares the Tauri v2 GTK and WebKitGTK runtime dependencies", () => {
+test("the deb declares its WebKitGTK, GTK, and H.264 playback dependencies", () => {
   assert.deepEqual(linuxOverlay.bundle.linux.deb.depends, [
     "libwebkit2gtk-4.1-0",
     "libgtk-3-0",
+    "gstreamer1.0-libav",
   ]);
 });
 
@@ -97,13 +99,38 @@ test("Linux bundles carry product metadata, category, and PNG icons", () => {
   }
 });
 
-test("the AppImage WebKitGTK and media-framework decision is explicit", () => {
+test("Linux bundles carry the media framework needed for H.264 playback", () => {
   assert.equal(
     linuxOverlay.bundle.linux.appimage.bundleMediaFramework,
-    false,
+    true,
   );
   assert.match(desktopReadme, /AppImage carries its GTK\/WebKitGTK runtime/);
-  assert.match(desktopReadme, /bundleMediaFramework: false/);
+  assert.match(desktopReadme, /bundleMediaFramework: true/);
+  assert.match(desktopReadme, /gstreamer1\.0-libav/);
+  assert.match(desktopReadme, /sudo apt install gstreamer1\.0-libav/);
+  assert.match(desktopReadme, /H\.264/);
+});
+
+test("the WebKitGTK compatibility contract remains configured", () => {
+  assert.equal(baseConfig.app.windows[0].dragDropEnabled, false);
+  assert.match(desktopReadme, /WEBKIT_DISABLE_DMABUF_RENDERER=1/);
+  assert.match(desktopReadme, /SCENEWORKS_WEBKIT_DMABUF=1/);
+
+  const unprefixedBlur = /(?<!-webkit-)backdrop-filter:\s*([^;]+);/g;
+  for (const match of webStyles.matchAll(unprefixedBlur)) {
+    const declarationStart = match.index;
+    const precedingRule = webStyles.slice(
+      Math.max(0, declarationStart - 100),
+      declarationStart,
+    );
+    assert.match(
+      precedingRule,
+      new RegExp(
+        `-webkit-backdrop-filter:\\s*${match[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*;`,
+      ),
+      `backdrop-filter at byte ${declarationStart} needs a matching WebKit prefix`,
+    );
+  }
 });
 
 test("the Linux overlay does not regress macOS or Windows bundle config", () => {

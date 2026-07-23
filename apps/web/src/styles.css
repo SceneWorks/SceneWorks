@@ -9178,7 +9178,7 @@ details[open] > summary.lora-scope-group-heading::before,
 .ie-hint svg { width: 15px; height: 15px; flex: 0 0 auto; }
 .ie-hint b { color: var(--ie-text); font-weight: 600; }
 
-.ie-busy { position: absolute; inset: 0; display: grid; place-items: center; background: color-mix(in srgb, var(--ie-bg) 55%, transparent); backdrop-filter: blur(2px); z-index: 6; }
+.ie-busy { position: absolute; inset: 0; display: grid; place-items: center; background: color-mix(in srgb, var(--ie-bg) 55%, transparent); -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); z-index: 6; }
 .ie-busy-card { width: 300px; padding: 20px; background: var(--ie-surface); border: 1px solid var(--ie-border); border-radius: 14px; box-shadow: var(--ie-shadow-lg); text-align: center; }
 .ie-busy-title { font-weight: 600; margin: 0 0 4px; }
 .ie-busy-msg { font-size: 12.5px; color: var(--ie-muted); margin: 0 0 14px; }

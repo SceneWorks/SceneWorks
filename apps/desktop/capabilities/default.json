@@ -21,6 +21,7 @@
     "allow-reveal-in-os",
     "allow-resolve-asset-path",
     "allow-save-asset-as",
+    "allow-save-image-export",
     "allow-list-credentials",
     "allow-set-credential",
     "allow-delete-credential",

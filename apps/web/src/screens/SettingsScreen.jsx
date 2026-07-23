@@ -14,6 +14,7 @@ import {
   readDefaultGenerationQuality,
   writeDefaultGenerationQuality,
 } from "../generationQuality.js";
+import { writeClipboardText } from "../clipboard.js";
 
 // The data-dir / GPU / worker / wizard / remote-access controls are desktop-only
 // (backed by Tauri commands in the shell) and are gated behind `isDesktop` so a
@@ -283,10 +284,9 @@ export function SettingsScreen() {
     if (!remote?.url) {
       return;
     }
-    try {
-      await navigator.clipboard.writeText(remote.url);
+    if (await writeClipboardText(remote.url)) {
       setStatus(`Copied ${remote.url}`);
-    } catch {
+    } else {
       setStatus("Couldn't copy to clipboard.");
     }
   }
