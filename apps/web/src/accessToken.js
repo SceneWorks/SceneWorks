@@ -34,15 +34,27 @@ function storage() {
 
 // The persisted access token, or "" when none is stored / storage is unavailable.
 export function readAccessToken() {
-  return storage()?.getItem(ACCESS_TOKEN_KEY) ?? "";
+  try {
+    return storage()?.getItem(ACCESS_TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
 }
 
 // Persist the verified access token so it survives reloads (see threat-model note).
 export function storeAccessToken(token) {
-  storage()?.setItem(ACCESS_TOKEN_KEY, token);
+  try {
+    storage()?.setItem(ACCESS_TOKEN_KEY, token);
+  } catch {
+    // Storage may reject writes in private/restricted WebKit contexts.
+  }
 }
 
 // Forget the stored token (the "lock"/forget affordance re-shows the login gate).
 export function clearAccessToken() {
-  storage()?.removeItem(ACCESS_TOKEN_KEY);
+  try {
+    storage()?.removeItem(ACCESS_TOKEN_KEY);
+  } catch {
+    // Treat an unavailable store as already empty.
+  }
 }

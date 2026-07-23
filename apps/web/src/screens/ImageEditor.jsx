@@ -7,6 +7,7 @@ import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
 import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { appConfirm } from "../appConfirm.jsx";
+import { isDesktop, tauriInvoke } from "../runtime.js";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
@@ -518,6 +519,61 @@ function cropOverlayRects(imgW, imgH, rect) {
 export const BLANK_CANVAS_MIN = 256;
 export const BLANK_CANVAS_MAX = 2048;
 export const BLANK_CANVAS_SIZES = [512, 768, 1024, 1536, 2048];
+// A conservative cross-WebKit ceiling. WebKitGTK builds and GPU drivers vary in
+// their exact canvas allocation limit; keeping both the longest side and total
+// area bounded prevents the silent transparent-canvas failure seen above these
+// values while retaining the largest normal SceneWorks generation size.
+export const EDITOR_CANVAS_MAX_SIDE = 4096;
+export const EDITOR_CANVAS_MAX_AREA =
+  EDITOR_CANVAS_MAX_SIDE * EDITOR_CANVAS_MAX_SIDE;
+
+export function boundedEditorCanvasDimensions(width, height) {
+  const sourceWidth = Math.max(1, Math.round(Number(width) || 0));
+  const sourceHeight = Math.max(1, Math.round(Number(height) || 0));
+  const sideScale = Math.min(
+    1,
+    EDITOR_CANVAS_MAX_SIDE / sourceWidth,
+    EDITOR_CANVAS_MAX_SIDE / sourceHeight,
+  );
+  const areaScale = Math.min(
+    1,
+    Math.sqrt(EDITOR_CANVAS_MAX_AREA / (sourceWidth * sourceHeight)),
+  );
+  const scale = Math.min(sideScale, areaScale);
+  return {
+    width: Math.max(1, Math.floor(sourceWidth * scale)),
+    height: Math.max(1, Math.floor(sourceHeight * scale)),
+    scaled: scale < 1,
+    sourceWidth,
+    sourceHeight,
+  };
+}
+
+export async function exportEditorFile(
+  file,
+  {
+    desktop = isDesktop,
+    invoke = tauriInvoke,
+    documentRef = globalThis.document,
+    urlApi = globalThis.URL,
+  } = {},
+) {
+  if (desktop) {
+    return invoke("save_image_export", {
+      imageBytes: Array.from(new Uint8Array(await file.arrayBuffer())),
+      suggestedFilename: file.name,
+    });
+  }
+  const url = urlApi.createObjectURL(file);
+  const anchor = documentRef.createElement("a");
+  anchor.href = url;
+  anchor.download = file.name;
+  documentRef.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  urlApi.revokeObjectURL(url);
+  return null;
+}
 
 // Snap a pixel dimension to a multiple of 16 within [256, 2048] (Ideogram limits).
 function snapCanvasDim(px) {
@@ -556,6 +612,52 @@ function blobToImage(blob) {
     };
     image.src = objectUrl;
   });
+}
+
+// Decode an editor source and, only when it exceeds the conservative WebKit
+// canvas ceiling, rasterize it directly into a bounded surface before any Konva
+// or export canvas is allocated. The caller owns the returned object URL.
+async function blobToEditorImage(blob) {
+  const decoded = await blobToImage(blob);
+  const dimensions = boundedEditorCanvasDimensions(
+    decoded.image.naturalWidth,
+    decoded.image.naturalHeight,
+  );
+  if (!dimensions.scaled) {
+    return { ...decoded, blob, downscaled: null };
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = dimensions.width;
+  canvas.height = dimensions.height;
+  let resizedBlob;
+  try {
+    const context = canvas.getContext("2d");
+    if (!context) {
+      throw new Error("Could not create a 2D editor canvas.");
+    }
+    context.drawImage(
+      decoded.image,
+      0,
+      0,
+      dimensions.width,
+      dimensions.height,
+    );
+    resizedBlob = await new Promise((resolve) =>
+      canvas.toBlob(resolve, "image/png"),
+    );
+  } finally {
+    URL.revokeObjectURL(decoded.objectUrl);
+  }
+  if (!resizedBlob) {
+    throw new Error("Could not prepare this large image for the editor.");
+  }
+  const resized = await blobToImage(resizedBlob);
+  return {
+    ...resized,
+    blob: resizedBlob,
+    downscaled: dimensions,
+  };
 }
 
 // ── Undo/redo history (sc-6106) ────────────────────────────────────────────
@@ -1419,8 +1521,16 @@ export function ImageEditor() {
     async (blob, source) => {
       setStatus({ loading: true, error: "" });
       try {
-        const { image, objectUrl } = await blobToImage(blob);
-        installWorkingImage(image, objectUrl, blob, source);
+        const prepared = await blobToEditorImage(blob);
+        const preparedSource = prepared.downscaled
+          ? { ...source, editorDownscaled: prepared.downscaled }
+          : source;
+        installWorkingImage(
+          prepared.image,
+          prepared.objectUrl,
+          prepared.blob,
+          preparedSource,
+        );
         // A freshly opened image is a clean session — clear edit/provenance state
         // and start a fresh undo/redo history rooted at this bitmap (sc-6106).
         setEdits([]);
@@ -2271,15 +2381,28 @@ export function ImageEditor() {
         const res = await fetch(assetUrl(resultAsset));
         if (!res.ok) throw new Error(`Failed to load result (${res.status})`);
         const blob = await res.blob();
-        const { image, objectUrl } = await blobToImage(blob);
+        const prepared = await blobToEditorImage(blob);
         checkpoint();
         // Active-layer op (same-size edit / detail) → write the result back into the
         // target layer, preserving the rest of the stack; document op (upscale /
         // outpaint / box edit) → flatten the stack into one new base layer (sc-6119).
         if (writeBack === "activeLayer" && targetLayerId && layerById(workingRef.current, targetLayerId)) {
-          replaceLayerImage(targetLayerId, image, objectUrl, blob);
+          replaceLayerImage(
+            targetLayerId,
+            prepared.image,
+            prepared.objectUrl,
+            prepared.blob,
+          );
         } else {
-          installWorkingImage(image, objectUrl, blob, source);
+          const preparedSource = prepared.downscaled
+            ? { ...source, editorDownscaled: prepared.downscaled }
+            : source;
+          installWorkingImage(
+            prepared.image,
+            prepared.objectUrl,
+            prepared.blob,
+            preparedSource,
+          );
         }
         if (edit) setEdits((prev) => [...prev, edit]);
         setDirty(true);
@@ -2330,14 +2453,7 @@ export function ImageEditor() {
     if (!working) return;
     try {
       const file = await workingImageToFile(editedFilename(working.source));
-      const url = URL.createObjectURL(file);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = file.name;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
+      await exportEditorFile(file);
     } catch (err) {
       setStatus({ loading: false, error: `Could not export: ${err.message || err}` });
     }
@@ -3949,6 +4065,20 @@ export function ImageEditor() {
           <div className="ie-hint">
             {EDITOR_TOOL_ICONS[tool]}
             <span>{toolHint}</span>
+          </div>
+        ) : null}
+        {working?.source?.editorDownscaled ? (
+          <div
+            className="ie-hint"
+            role="status"
+            style={{ top: "58px", borderColor: "color-mix(in srgb, var(--ie-warn) 55%, var(--ie-border))" }}
+          >
+            <span>
+              Large source scaled from{" "}
+              {working.source.editorDownscaled.sourceWidth} x{" "}
+              {working.source.editorDownscaled.sourceHeight} to {working.width} x{" "}
+              {working.height} for reliable WebKit editing and export.
+            </span>
           </div>
         ) : null}
         {working && stageSize.width > 0 && stageSize.height > 0 ? (

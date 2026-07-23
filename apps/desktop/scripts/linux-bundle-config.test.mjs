@@ -38,6 +38,7 @@ const macosOverlay = readJson("tauri.macos.conf.json");
 const packageJson = readJson("package.json");
 const tauriSchema = readJson("node_modules/@tauri-apps/cli/config.schema.json");
 const desktopReadme = readFileSync(join(desktopDir, "README.md"), "utf8");
+const webStyles = readFileSync(join(desktopDir, "..", "web", "src", "styles.css"), "utf8");
 
 test("the Linux overlay is valid against the locked Tauri v2 schema", () => {
   // Tauri's schema intentionally escapes `:` in a character class. Node 24's
@@ -104,6 +105,28 @@ test("the AppImage WebKitGTK and media-framework decision is explicit", () => {
   );
   assert.match(desktopReadme, /AppImage carries its GTK\/WebKitGTK runtime/);
   assert.match(desktopReadme, /bundleMediaFramework: false/);
+});
+
+test("the WebKitGTK compatibility contract remains configured", () => {
+  assert.equal(baseConfig.app.windows[0].dragDropEnabled, false);
+  assert.match(desktopReadme, /WEBKIT_DISABLE_DMABUF_RENDERER=1/);
+  assert.match(desktopReadme, /SCENEWORKS_WEBKIT_DMABUF=1/);
+
+  const unprefixedBlur = /(?<!-webkit-)backdrop-filter:\s*([^;]+);/g;
+  for (const match of webStyles.matchAll(unprefixedBlur)) {
+    const declarationStart = match.index;
+    const precedingRule = webStyles.slice(
+      Math.max(0, declarationStart - 100),
+      declarationStart,
+    );
+    assert.match(
+      precedingRule,
+      new RegExp(
+        `-webkit-backdrop-filter:\\s*${match[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*;`,
+      ),
+      `backdrop-filter at byte ${declarationStart} needs a matching WebKit prefix`,
+    );
+  }
 });
 
 test("the Linux overlay does not regress macOS or Windows bundle config", () => {

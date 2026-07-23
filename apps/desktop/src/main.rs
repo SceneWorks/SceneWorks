@@ -23,10 +23,15 @@ mod setup;
 // In-app cross-platform auto-updater (sc-1355): startup check against the GitHub
 // "latest release" pointer, user-prompted download + install + restart.
 mod update;
+#[cfg(any(target_os = "linux", test))]
+mod webkitgtk;
 
 use tauri::RunEvent;
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    webkitgtk::configure_environment();
+
     // Windows/WebView2: opening a native file dialog (or any window that takes the
     // foreground) makes Chromium's native window-occlusion tracker mark the webview
     // occluded and stop compositing to save power; on the return trip it fails to
@@ -77,6 +82,7 @@ fn main() {
             // Save an asset to a user-chosen destination + resolve an asset's
             // project-relative path to its absolute on-disk path (sc-8726).
             settings::save_asset_as,
+            settings::save_image_export,
             settings::resolve_asset_path,
             settings::list_credentials,
             settings::set_credential,

@@ -151,6 +151,14 @@ An Ubuntu 22.04 WSL2/WSLg distro can run the same commands for iterative
 packaging and GUI checks. It does not replace the final install and launch smoke
 test on a native Ubuntu 22.04/24.04 desktop.
 
+SceneWorks sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` before creating its Linux
+webview. This avoids the blank-canvas and black-video failures that some
+WebKitGTK/compositor/NVIDIA combinations exhibit with DMA-BUF. An explicitly
+pre-set `WEBKIT_DISABLE_DMABUF_RENDERER` value is always preserved. To opt back
+into DMA-BUF without setting WebKit's variable directly, launch with
+`SCENEWORKS_WEBKIT_DMABUF=1`; use that override only after verifying canvas and
+video playback on the target driver and desktop session.
+
 The Debian package intentionally uses the host's WebKitGTK 4.1 and GTK 3 through
 the package dependencies above. The AppImage follows Tauri's portable model:
 WebKitGTK and GTK are bundled from the Ubuntu 22.04 build host. Additional

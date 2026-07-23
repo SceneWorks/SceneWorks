@@ -59,6 +59,10 @@ import {
   boxMetadataGaps,
   blankCanvasDims,
   BLANK_CANVAS_SIZES,
+  boundedEditorCanvasDimensions,
+  EDITOR_CANVAS_MAX_AREA,
+  EDITOR_CANVAS_MAX_SIDE,
+  exportEditorFile,
   paintBoxesOnContext,
   colorName,
   composeColorPrompt,
@@ -422,6 +426,78 @@ describe("Close/Discard + unsaved indicator logic (sc-11968)", () => {
     expect(saveStatusIndicator({ dirty: false, savedAssetId: null })).toBeNull();
     // A dirty edit made after a Save reads as unsaved again, not "saved".
     expect(saveStatusIndicator({ dirty: true, savedAssetId: "asset-9" })).toBe("unsaved");
+  });
+});
+
+describe("WebKit-safe editor canvas and export (sc-10380)", () => {
+  it("keeps ordinary images at their source dimensions", () => {
+    expect(boundedEditorCanvasDimensions(2048, 1536)).toEqual({
+      width: 2048,
+      height: 1536,
+      scaled: false,
+      sourceWidth: 2048,
+      sourceHeight: 1536,
+    });
+  });
+
+  it("preserves the supported 4096-square boundary without resampling", () => {
+    expect(boundedEditorCanvasDimensions(4096, 4096)).toEqual({
+      width: 4096,
+      height: 4096,
+      scaled: false,
+      sourceWidth: 4096,
+      sourceHeight: 4096,
+    });
+    expect(EDITOR_CANVAS_MAX_AREA).toBe(4096 * 4096);
+  });
+
+  it("bounds both the longest side and total area while preserving aspect", () => {
+    const wide = boundedEditorCanvasDimensions(8192, 4096);
+    expect(wide.scaled).toBe(true);
+    expect(wide.width).toBeLessThanOrEqual(EDITOR_CANVAS_MAX_SIDE);
+    expect(wide.height).toBeLessThanOrEqual(EDITOR_CANVAS_MAX_SIDE);
+    expect(wide.width * wide.height).toBeLessThanOrEqual(EDITOR_CANVAS_MAX_AREA);
+    expect(wide.width / wide.height).toBeCloseTo(2, 2);
+
+    const square = boundedEditorCanvasDimensions(5000, 5000);
+    expect(square.width * square.height).toBeLessThanOrEqual(EDITOR_CANVAS_MAX_AREA);
+    expect(square.width).toBe(square.height);
+  });
+
+  it("routes desktop-generated PNG bytes through the native save command", async () => {
+    const file = {
+      name: "shot-edited.png",
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    };
+    const invoke = vi.fn().mockResolvedValue("/tmp/shot-edited.png");
+    await expect(
+      exportEditorFile(file, { desktop: true, invoke }),
+    ).resolves.toBe("/tmp/shot-edited.png");
+    expect(invoke).toHaveBeenCalledWith("save_image_export", {
+      imageBytes: [1, 2, 3],
+      suggestedFilename: "shot-edited.png",
+    });
+  });
+
+  it("retains browser download behavior outside the desktop shell", async () => {
+    const file = new File(["png"], "shot.png", { type: "image/png" });
+    const click = vi
+      .spyOn(window.HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
+    const urlApi = {
+      createObjectURL: vi.fn(() => "blob:test"),
+      revokeObjectURL: vi.fn(),
+    };
+    await expect(
+      exportEditorFile(file, {
+        desktop: false,
+        documentRef: document,
+        urlApi,
+      }),
+    ).resolves.toBeNull();
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith("blob:test");
+    expect(document.querySelector("a[download]")).toBeNull();
   });
 });
 

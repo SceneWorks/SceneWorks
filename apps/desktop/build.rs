@@ -14,6 +14,7 @@ fn main() {
             "reveal_in_os",
             "resolve_asset_path",
             "save_asset_as",
+            "save_image_export",
             "list_credentials",
             "set_credential",
             "delete_credential",
