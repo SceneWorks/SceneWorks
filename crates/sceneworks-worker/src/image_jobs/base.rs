@@ -357,6 +357,11 @@ enum CandleImageRoute {
     /// control. Loads the `krea_2_raw` engine (the driver keys on that descriptor id). Reference / edit /
     /// pose / PiD shapes are rejected loudly by the lane (multi-phase renders from pure noise).
     KreaMultiPhase,
+    /// An imported/user single-file Krea 2 transformer: pair the in-place DiT with the resident
+    /// shared-component base tier and load it through Candle's native single-file entrypoint. This is
+    /// the off-Mac twin of [`ImageRoute::KreaImported`], required because imported IDs are not registry
+    /// engine IDs and would otherwise fall through to the procedural stub.
+    KreaImported,
     /// Z-Image identity-init for Image Studio "With Character" (sc-8409).
     ZimageIdentity,
     /// SDXL IP-Adapter-Plus reference conditioning (sc-5488).
@@ -534,6 +539,10 @@ fn resolve_candle_image_route(
         // for this t2i story (sc-13883). The candle twin of the MLX `resolve_image_route` `KreaTurboOnRaw`
         // arm; placed AFTER the edit lane, BEFORE the generic txt2img arm.
         Some(CandleImageRoute::KreaTurboOnRaw)
+    } else if krea_imported_available(request, settings) {
+        // Imported/user Krea 2 single-file t2i: external IDs are absent from `is_candle_engine`, so
+        // this bespoke route must claim them before the generic/external fall-through.
+        Some(CandleImageRoute::KreaImported)
     } else if zimage_comfyui_available(request, settings) {
         // In-place ComfyUI Z-Image base (sc-10668): an `external_base_*` id, so it matches no
         // `is_candle_engine` arm below — route it here off the forwarded `modelManifestEntry`.

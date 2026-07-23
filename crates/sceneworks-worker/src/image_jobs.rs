@@ -954,6 +954,22 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
+                // Imported/user Krea 2 single-file t2i (sc-14023): pair the imported bare DiT with
+                // the resident Krea base tier and load it through the selected runtime's native-file
+                // entrypoint. The resolver has already proved this is a non-builtin, single-file,
+                // unconditioned request; keep it distinct from the builtin registry path.
+                CandleImageRoute::KreaImported => {
+                    generate_krea_imported_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
                 // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane (e.g.
                 // sdxl) must be REJECTED with a clear error, not silently rendered as plain txt2img (poses
                 // dropped) and not bounced to torch. The candle worker CLAIMS these (jobs_store
@@ -1787,10 +1803,14 @@ include!("image_jobs/krea_multiphase.rs");
 #[cfg(target_os = "macos")]
 // Krea 2 pose-ControlNet (MLX) strict-pose routing (sc-8465, epic 8459 S5).
 include!("image_jobs/krea_control.rs");
-#[cfg(target_os = "macos")]
-// Imported single-file Krea 2 checkpoint routing (epic 14015 S0c, sc-14018): a user-imported `krea_2`-
-// family DiT single file → paired with a resident `krea_2` base tier (shared TE/VAE/tokenizer) and loaded
-// via the S0b MLX native single-file entrypoint, bypassing the registry snapshot-dir path.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+// Imported single-file Krea 2 checkpoint routing (epic 14015 S0c, sc-14018/sc-14023): a user-imported
+// `krea_2`-family DiT single file → paired with a resident base tier (shared TE/VAE/tokenizer) and
+// loaded through the selected runtime's native single-file entrypoint, bypassing the registry
+// snapshot-dir path. Shared by MLX and Candle so global import acceptance always has a real route.
 include!("image_jobs/krea_imported.rs");
 #[cfg(target_os = "macos")]
 // SenseNova edit routing.

@@ -3854,6 +3854,84 @@ mod candle_routing_tests {
     }
 
     #[test]
+    fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
+        let plain = json!({
+            "projectId": "project_1",
+            "model": "kreamania_variant4",
+            "prompt": "a red fox",
+            "modelManifestEntry": {
+                "family": "krea_2",
+                "paths": { "model": "C:\\SceneWorks\\models\\imports\\kreamania_variant4" }
+            }
+        });
+
+        assert!(
+            !image_request_candle_eligible(
+                "kreamania_variant4",
+                plain.as_object().expect("payload object")
+            ),
+            "the builtin id table must not accidentally contain the imported id"
+        );
+        assert!(
+            image_job_is_candle_eligible(&image_generate_job(plain.clone())),
+            "the full scheduler must claim a novel imported id through family routing"
+        );
+        assert!(
+            worker_supports_job(&gpu_worker(CANDLE_CAPS), &image_generate_job(plain.clone())),
+            "a Candle worker must claim the imported family-routed job"
+        );
+
+        let direct_file = json!({
+            "model": "kreamania_variant4_direct",
+            "modelManifestEntry": {
+                "family": "krea_2",
+                "modelPath": "C:\\SceneWorks\\models\\kreamania_variant4.safetensors"
+            }
+        });
+        assert!(image_job_is_candle_eligible(&image_generate_job(
+            direct_file
+        )));
+
+        let mut unsupported_shapes = Vec::new();
+        for extra in [
+            json!({ "mode": "edit_image", "sourceAssetId": "source_1" }),
+            json!({ "mode": " edit_image ", "sourceAssetId": "source_1" }),
+            json!({ "referenceAssetId": "reference_1" }),
+            json!({ "referenceAssetIds": ["reference_1"] }),
+            json!({ "maskAssetId": "mask_1" }),
+            json!({ "characterId": "character_1" }),
+            json!({ "loras": [{ "id": "adapter_1" }] }),
+            json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
+            json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
+        ] {
+            let mut payload = plain.clone();
+            payload
+                .as_object_mut()
+                .expect("payload object")
+                .extend(extra.as_object().expect("extra object").clone());
+            unsupported_shapes.push(payload);
+        }
+        for payload in unsupported_shapes {
+            assert!(
+                !image_job_is_candle_eligible(&image_generate_job(payload.clone())),
+                "unsupported imported-Krea conditioning must fail closed: {payload}"
+            );
+        }
+
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "kreamania_variant4",
+            "modelManifestEntry": { "family": "krea_2" }
+        }))));
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "foreign_import",
+            "modelManifestEntry": {
+                "family": "z-image",
+                "paths": { "model": "C:\\SceneWorks\\models\\imports\\foreign" }
+            }
+        }))));
+    }
+
+    #[test]
     fn base_z_image_txt2img_is_candle_eligible_but_edit_shapes_are_not() {
         // sc-8679: base `z_image` plain txt2img rides the candle lane (the base sibling of z_image_turbo);
         // its edit / reference / mask conditioning shapes still defer to the Python torch worker (no candle
@@ -6494,14 +6572,95 @@ mod candle_routing_tests {
 #[cfg(test)]
 mod mlx_routing_tests {
     use super::{
-        flux2_mlx_eligible, flux_mlx_eligible, image_request_mlx_eligible, instantid_mlx_eligible,
-        model_mac_support, qwen_edit_mlx_eligible, qwen_mlx_eligible, sdxl_mlx_eligible,
-        video_mode_is_mlx_eligible, z_image_mlx_eligible, VIDEO_MLX_ROUTED_MODELS,
+        flux2_mlx_eligible, flux_mlx_eligible, image_job_is_mlx_eligible,
+        image_request_mlx_eligible, instantid_mlx_eligible, model_mac_support,
+        qwen_edit_mlx_eligible, qwen_mlx_eligible, sdxl_mlx_eligible, video_mode_is_mlx_eligible,
+        worker_supports_job, z_image_mlx_eligible, JobSnapshot, WorkerSnapshot, MLX_ROUTED_MODELS,
+        VIDEO_MLX_ROUTED_MODELS,
     };
     use serde_json::{json, Map, Value};
 
     fn object(value: Value) -> Map<String, Value> {
         value.as_object().expect("test value is an object").clone()
+    }
+
+    fn image_generate_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_imported_krea",
+            "type": "image_generate",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-07-23T00:00:00Z",
+            "updatedAt": "2026-07-23T00:00:00Z"
+        }))
+        .expect("valid image job")
+    }
+
+    fn mlx_worker() -> WorkerSnapshot {
+        serde_json::from_value(json!({
+            "id": "worker_mlx",
+            "gpuId": "mlx",
+            "status": "idle",
+            "capabilities": ["gpu", "image_generate"],
+            "loadedModels": [],
+            "registeredAt": "2026-07-23T00:00:00Z",
+            "lastSeenAt": "2026-07-23T00:00:00Z"
+        }))
+        .expect("valid MLX worker")
+    }
+
+    #[test]
+    fn imported_krea_family_plain_single_file_job_is_mlx_eligible() {
+        let plain = json!({
+            "projectId": "project_1",
+            "model": "kreamania_variant4",
+            "prompt": "a red fox",
+            "modelManifestEntry": {
+                "family": "krea_2",
+                "paths": { "model": "/app/models/imports/kreamania_variant4" }
+            }
+        });
+
+        assert!(
+            !MLX_ROUTED_MODELS.contains(&"kreamania_variant4"),
+            "the builtin id table must not accidentally contain the imported id"
+        );
+        assert!(
+            image_request_mlx_eligible(
+                "kreamania_variant4",
+                plain.as_object().expect("payload object")
+            ),
+            "the public MLX predicate must apply the imported-family fallback"
+        );
+        let job = image_generate_job(plain.clone());
+        assert!(
+            image_job_is_mlx_eligible(&job),
+            "the full scheduler must claim a novel imported id through family routing"
+        );
+        assert!(
+            worker_supports_job(&mlx_worker(), &job),
+            "an MLX worker must claim the imported family-routed job"
+        );
+
+        assert!(!image_job_is_mlx_eligible(&image_generate_job(json!({
+            "model": "kreamania_variant4",
+            "loras": [{ "id": "adapter_1" }],
+            "modelManifestEntry": {
+                "family": "krea_2",
+                "paths": { "model": "/app/models/imports/kreamania_variant4" }
+            }
+        }))));
+        assert!(!image_job_is_mlx_eligible(&image_generate_job(json!({
+            "model": "kreamania_variant4",
+            "modelManifestEntry": { "family": "krea_2" }
+        }))));
     }
 
     #[test]

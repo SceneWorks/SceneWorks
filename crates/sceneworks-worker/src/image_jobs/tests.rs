@@ -2774,7 +2774,10 @@ fn kolors_real_weights_ip_adapter_generates_one_image() {
 }
 
 /// A deterministic synthetic RGB [`Image`] from a per-pixel `(x, y) -> [r, g, b]` closure.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn synthetic_rgb(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> Image {
     let mut pixels = vec![0u8; (w * h * 3) as usize];
     for y in 0..h {
@@ -10676,7 +10679,10 @@ fn resolve_krea_control_base_descends_turnkey_root_into_tier_with_tokenizer() {
 /// The single-file-vs-snapshot-dir decision at the heart of S0c: a `.safetensors` FILE is a single-file
 /// checkpoint (→ the native entrypoint); a directory (a snapshot tier) is not (→ the registry snapshot
 /// path). A non-safetensors file (e.g. a `.ckpt`) is likewise not one — the S0b/S0a lane is safetensors.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn is_single_file_checkpoint_distinguishes_file_from_snapshot_dir() {
     let dir = tempfile::tempdir().unwrap();
@@ -10707,12 +10713,15 @@ fn is_single_file_checkpoint_distinguishes_file_from_snapshot_dir() {
 
 /// Seed an app-managed imported model file under `<data_dir>/models/…` and return a Settings pinned to
 /// that data dir. The confinement (`normalize_app_managed_model_path`) admits `<data_dir>` roots.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn imported_krea_settings_with_file(dir: &std::path::Path) -> (Settings, PathBuf) {
     let file = dir
         .join("models")
         .join("imported-krea")
-        .join("kreamania_variant5.safetensors");
+        .join("kreamania_variant4.safetensors");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, b"dit").unwrap();
     let mut settings = Settings::from_env();
@@ -10989,11 +10998,45 @@ fn resolve_image_route_sends_imported_single_file_krea_to_the_bespoke_lane() {
     );
 }
 
+/// Candle twin of the MLX route regression above: the external id is absent from the builtin table,
+/// yet a real app-managed single-file Krea manifest resolves to the bespoke Candle dispatch variant.
+/// The exhaustive match in `run_image_job` maps that variant to `generate_krea_imported_stream`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lane() {
+    let dir = tempfile::tempdir().unwrap();
+    let (settings, file) = imported_krea_settings_with_file(dir.path());
+    let imported = request(json!({
+        "projectId": "p",
+        "model": "kreamania_variant4",
+        "prompt": "a cat",
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "modelPath": file.to_str().unwrap()
+        }
+    }));
+
+    assert_eq!(
+        resolve_candle_image_route(&imported, &settings),
+        Some(CandleImageRoute::KreaImported),
+        "a novel imported Krea id must reach the Candle native-file lane"
+    );
+    assert!(krea_imported_available(&imported, &settings));
+    assert_eq!(KREA_IMPORTED_ENGINE, "candle_krea_imported");
+}
+
 /// The imported Krea 2 lane accepts a plain txt2img job AND an img2img `referenceAssetId` (mode NOT
-/// `edit_image`, sc-14071 — reference-guided latent-init), while STILL rejecting an `edit_image` job, a
-/// pose set, and the two-reference edit SET (`referenceAssetIds`, the scene+person surface) — those need
-/// base-tier edit/control components this bare-transformer lane does not stage (imported edit is sc-14119).
-#[cfg(target_os = "macos")]
+/// `edit_image`, sc-14071 — reference-guided latent-init), while STILL rejecting every shape that needs
+/// base-tier edit/control components this bare-transformer lane does not stage: an `edit_image` job, a
+/// pose set, the two-reference edit SET (`referenceAssetIds`, scene+person — imported edit is sc-14119),
+/// and main's hardened guards (`sourceAssetId`, mask, character, LoRA stack, multi-phase). `sourceAssetId`
+/// in particular stays rejected because `resolve_img2img_init_generic` reads only `referenceAssetId`, so a
+/// bare `sourceAssetId` job would silently render plain t2i. Runs on the cross-platform path so the candle
+/// imported lane is covered too.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn krea_imported_available_allows_img2img_but_rejects_edit_and_pose() {
     let dir = tempfile::tempdir().unwrap();
@@ -11048,25 +11091,56 @@ fn krea_imported_available_allows_img2img_but_rejects_edit_and_pose() {
     let two_ref = request(json!({
         "projectId": "p", "model": "kreamania_variant5",
         "referenceAssetIds": ["scene", "person"],
-        "modelManifestEntry": base
+        "modelManifestEntry": base.clone()
     }));
     assert!(
         !krea_imported_available(&two_ref, &settings),
         "the two-reference edit set is excluded"
     );
+
+    // main's hardened guards stay rejected — including a bare `sourceAssetId` (a non-edit img2img shape
+    // `resolve_img2img_init_generic` would silently drop, since it reads only `referenceAssetId`).
+    for (label, extra) in [
+        ("source", json!({ "sourceAssetId": "s" })),
+        ("mask", json!({ "maskAssetId": "m" })),
+        ("character", json!({ "characterId": "c" })),
+        ("adapter", json!({ "loras": [{ "id": "adapter" }] })),
+        (
+            "multi-phase",
+            json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "p",
+            "model": "kreamania_variant4",
+            "modelManifestEntry": base.clone()
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert!(
+            !krea_imported_available(&request(payload), &settings),
+            "{label} job excluded"
+        );
+    }
 }
 
 /// The imported Krea lane threads a resolved img2img reference into a single `Conditioning::Reference`
 /// (strength carried) on the Turbo t2i descriptor, and a plain txt2img job into the empty conditioning
 /// (sc-14071). Also pins the manifest→worker seam: the `ui.img2img` flag the core stamps on an imported
 /// krea_2 entry (sc-14071 Part B) is exactly what `model_supports_img2img` reads to engage the img2img
-/// resolve. Pure — no reference-asset I/O or generator load.
-#[cfg(target_os = "macos")]
+/// resolve. Pure — no reference-asset I/O or generator load. Runs on the cross-platform path so the
+/// candle imported lane's img2img threading is covered too.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn krea_imported_conditioning_threads_the_img2img_reference() {
     // A resolved reference → one `Conditioning::Reference` carrying the strength.
     let reference = synthetic_rgb(8, 8, |_, _| [10, 20, 30]);
-    let conditioning = krea_imported_conditioning(Some((reference.clone(), 0.4)));
+    let conditioning = krea_imported_conditioning(Some((reference, 0.4)));
     match conditioning.as_slice() {
         [Conditioning::Reference { image, strength }] => {
             assert_eq!(image.width, 8);
