@@ -130,11 +130,25 @@ fn read_credential_secret_result(host: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// Best-effort secret lookup for worker launch paths that historically return an
-/// `Option`. The Settings command uses [`read_credential_secret_result`] directly
-/// and therefore exposes backend failures to the user.
+/// Best-effort lookup retained for the macOS lazy credential socket, whose protocol
+/// represents unavailable secrets as absent. Eager Linux worker reads use the
+/// fallible helpers below instead.
+#[cfg(target_os = "macos")]
 fn read_credential_secret(host: &str) -> Option<String> {
     read_credential_secret_result(host).ok().flatten()
+}
+
+/// Linux must retain secure-storage read failures so startup can surface them.
+/// macOS/Windows keep their historical best-effort `Option` behavior.
+fn credential_read_for_platform<T: Default>(
+    platform: &str,
+    read: Result<T, String>,
+) -> Result<T, String> {
+    match read {
+        Err(error) if platform == "linux" => Err(error),
+        Err(_) => Ok(T::default()),
+        Ok(value) => Ok(value),
+    }
 }
 
 /// Linux command callers must distinguish a missing secret from an unavailable
@@ -144,11 +158,7 @@ fn credential_presence_for_platform(
     platform: &str,
     secret: Result<Option<String>, String>,
 ) -> Result<bool, String> {
-    match secret {
-        Ok(secret) => Ok(secret.is_some()),
-        Err(error) if platform == "linux" => Err(error),
-        Err(_) => Ok(false),
-    }
+    credential_read_for_platform(platform, secret).map(|secret| secret.is_some())
 }
 
 /// Insert a credential's metadata, or update label/scheme in place if its host is
@@ -281,6 +291,20 @@ fn save_settings(settings: &AppSettings) -> Result<(), String> {
     atomic_write(&settings_path(), body.as_bytes())
 }
 
+fn read_hf_token_with(
+    settings: &AppSettings,
+    read_secret: impl FnOnce(&str) -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
+    if !hf_credential_recorded(settings) {
+        return Ok(None);
+    }
+    read_secret(HF_HOST)
+}
+
+fn read_hf_token_result() -> Result<Option<String>, String> {
+    read_hf_token_with(&load_settings(), read_credential_secret_result)
+}
+
 /// Hugging Face token for injecting `HF_TOKEN` into the worker, from the host-keyed
 /// `huggingface.co` credential. Gated on the non-secret `settings.json` metadata
 /// first: if no `huggingface.co` credential is recorded, returns `None` *without
@@ -292,12 +316,15 @@ fn save_settings(settings: &AppSettings) -> Result<(), String> {
 /// macOS no longer uses this eager push at all — the MLX worker pulls credentials
 /// lazily from the desktop credential socket (`cred_ipc`) — so it's compiled but
 /// uncalled there (the Python/candle spawn sites on other platforms still use it).
+#[cfg(target_os = "linux")]
+pub fn read_hf_token() -> Result<Option<String>, String> {
+    credential_read_for_platform(host_platform(), read_hf_token_result())
+}
+
+#[cfg(not(target_os = "linux"))]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn read_hf_token() -> Option<String> {
-    if !hf_credential_recorded(&load_settings()) {
-        return None;
-    }
-    read_credential_secret(HF_HOST)
+    credential_read_for_platform(host_platform(), read_hf_token_result()).unwrap_or_default()
 }
 
 /// The non-secret hosts that have a credential recorded, handed to the MLX worker so
@@ -330,18 +357,13 @@ pub fn resolve_credential_secret(host: &str) -> Option<(String, CredentialScheme
     Some((token, meta.scheme))
 }
 
-/// All stored credentials serialized as the worker's `SCENEWORKS_CREDENTIALS` JSON
-/// map (`{ host: { token, scheme } }`), reading each secret from the keychain.
-/// `None` when no credentials are stored. Injected into the worker at spawn.
-///
-/// macOS uses the lazy credential socket (`cred_ipc`) instead, so this is compiled
-/// but uncalled there (the Python/candle spawn sites on other platforms use it).
-#[cfg_attr(target_os = "macos", allow(dead_code))]
-pub fn credentials_env_json() -> Option<String> {
-    let settings = load_settings();
+fn credentials_env_json_with(
+    settings: &AppSettings,
+    read_secret: impl Fn(&str) -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
     let mut map = serde_json::Map::new();
     for meta in &settings.credentials {
-        if let Some(token) = read_credential_secret(&meta.host) {
+        if let Some(token) = read_secret(&meta.host)? {
             let scheme = match meta.scheme {
                 CredentialScheme::Bearer => "bearer",
                 CredentialScheme::Query => "query",
@@ -353,10 +375,64 @@ pub fn credentials_env_json() -> Option<String> {
         }
     }
     if map.is_empty() {
-        None
+        Ok(None)
     } else {
-        serde_json::to_string(&serde_json::Value::Object(map)).ok()
+        serde_json::to_string(&serde_json::Value::Object(map))
+            .map(Some)
+            .map_err(|error| error.to_string())
     }
+}
+
+fn credentials_env_json_result() -> Result<Option<String>, String> {
+    credentials_env_json_with(&load_settings(), read_credential_secret_result)
+}
+
+/// All stored credentials serialized as the worker's `SCENEWORKS_CREDENTIALS` JSON
+/// map (`{ host: { token, scheme } }`), reading each secret from the keychain.
+/// `None` when no credentials are stored. Injected into the worker at spawn.
+///
+/// macOS uses the lazy credential socket (`cred_ipc`) instead, so this is compiled
+/// but uncalled there (the Python/candle spawn sites on other platforms use it).
+#[cfg(target_os = "linux")]
+pub fn credentials_env_json() -> Result<Option<String>, String> {
+    credential_read_for_platform(host_platform(), credentials_env_json_result())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn credentials_env_json() -> Option<String> {
+    credential_read_for_platform(host_platform(), credentials_env_json_result()).unwrap_or_default()
+}
+
+fn worker_credential_preflight_with(
+    platform: &str,
+    read_hf: impl FnOnce() -> Result<Option<String>, String>,
+    read_all: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<(), String> {
+    if platform != "linux" {
+        return Ok(());
+    }
+    let _ = credential_read_for_platform(platform, read_hf())?;
+    let _ = credential_read_for_platform(platform, read_all())?;
+    Ok(())
+}
+
+/// Fail Linux startup before spawning a worker with silently missing credential
+/// environment. The setup screen renders this error and offers Retry after the user
+/// starts/unlocks Secret Service. This is a no-op on macOS/Windows, preserving their
+/// existing lazy/best-effort behavior without touching the native keychain.
+#[cfg(target_os = "linux")]
+pub fn validate_worker_credentials() -> Result<(), String> {
+    worker_credential_preflight_with(host_platform(), read_hf_token, credentials_env_json)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn validate_worker_credentials() -> Result<(), String> {
+    worker_credential_preflight_with(
+        host_platform(),
+        || Ok(read_hf_token()),
+        || Ok(credentials_env_json()),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1389,14 +1465,93 @@ mod tests {
     /// metadata before any `keyring::Entry`/`get_password()` is constructed, so a
     /// no-credential install never touches the OS keychain. `hf_credential_recorded`
     /// is that gate for `read_hf_token`; an empty `credentials` list is likewise the
-    /// gate for `credentials_env_json` (its loop body — the only `read_credential_secret`
-    /// site — never runs). This headless test asserts the gate predicate without
+    /// gate for `credentials_env_json` (its fallible resolver loop never runs). This
+    /// headless test asserts the gate predicate without
     /// touching the keychain (which `read_hf_token` itself would, once past the gate).
     #[test]
     fn no_recorded_credential_means_no_keychain_gate() {
         let settings = AppSettings::default();
         assert!(!hf_credential_recorded(&settings));
         assert!(settings.credentials.is_empty());
+        assert_eq!(
+            read_hf_token_with(&settings, |_| panic!("must not touch keyring")),
+            Ok(None)
+        );
+        assert_eq!(
+            credentials_env_json_with(&settings, |_| panic!("must not touch keyring")),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn hf_worker_read_preserves_secret_service_failure() {
+        let settings = AppSettings {
+            credentials: vec![CredentialMeta {
+                host: HF_HOST.to_owned(),
+                label: "Hugging Face".to_owned(),
+                scheme: CredentialScheme::Bearer,
+            }],
+            ..AppSettings::default()
+        };
+        let detail = "Secret Service unavailable".to_owned();
+        assert_eq!(
+            read_hf_token_with(&settings, |_| Err(detail.clone())),
+            Err(detail)
+        );
+    }
+
+    #[test]
+    fn generic_worker_read_preserves_secret_service_failure() {
+        let settings = AppSettings {
+            credentials: vec![CredentialMeta {
+                host: "civitai.com".to_owned(),
+                label: "Civit.ai".to_owned(),
+                scheme: CredentialScheme::Query,
+            }],
+            ..AppSettings::default()
+        };
+        let detail = "Secret Service locked".to_owned();
+        assert_eq!(
+            credentials_env_json_with(&settings, |_| Err(detail.clone())),
+            Err(detail)
+        );
+    }
+
+    #[test]
+    fn linux_worker_preflight_surfaces_hf_and_generic_read_failures() {
+        let hf_detail = "HF Secret Service unavailable".to_owned();
+        assert_eq!(
+            worker_credential_preflight_with(
+                "linux",
+                || Err(hf_detail.clone()),
+                || panic!("generic read must stop after HF failure")
+            ),
+            Err(hf_detail)
+        );
+
+        let generic_detail = "generic Secret Service unavailable".to_owned();
+        assert_eq!(
+            worker_credential_preflight_with(
+                "linux",
+                || Ok(Some("hf-token".to_owned())),
+                || Err(generic_detail.clone())
+            ),
+            Err(generic_detail)
+        );
+    }
+
+    #[test]
+    fn non_linux_worker_preflight_preserves_no_touch_behavior() {
+        for platform in ["macos", "windows"] {
+            assert_eq!(
+                worker_credential_preflight_with(
+                    platform,
+                    || panic!("must not eagerly read native keychain"),
+                    || panic!("must not eagerly read native keychain")
+                ),
+                Ok(())
+            );
+        }
     }
 
     #[test]

@@ -2110,6 +2110,14 @@ async fn run_startup(app: AppHandle) {
         emit(&app, "error", error, true);
         return;
     }
+    // Linux credentials are eagerly handed to the native worker. If Secret Service
+    // is unavailable/locked, stop on the visible setup screen with the actionable
+    // keyring error instead of spawning a worker without HF/service tokens and
+    // producing an opaque downstream 401.
+    if let Err(error) = crate::settings::validate_worker_credentials() {
+        emit(&app, "error", error, true);
+        return;
+    }
     // No Python venv on ANY platform: macOS went MLX-only (epic 3482, sc-3492/sc-3493)
     // and off-Mac went candle-only (epic 5483 Phase 7, sc-5563), so first run starts
     // straight on the native engine with no Python provisioning step.
