@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // Builds (or merges into) the Tauri updater manifest `latest.json` (sc-1355).
 //
-// The macOS and Windows release jobs build on separate runners, so neither can
-// produce a complete manifest alone. The macOS job runs this in "init" mode to
-// create latest.json with its `darwin-aarch64` entry; the Windows job (which
-// `needs: macos`) downloads that file and runs this again with `--in` to merge in
-// its `windows-x86_64` entry. The result is uploaded to the GitHub Release and
+// The platform release jobs build on separate runners, so none can produce the
+// complete manifest alone. macOS initializes `darwin-aarch64`, Windows (which
+// `needs: macos`) merges `windows-x86_64`, and Linux (which `needs: windows`)
+// merges `linux-x86_64`. Those dependencies serialize the manifest's
+// read/modify/write sequence. The result is uploaded to the GitHub Release and
 // served at plugins.updater.endpoints (…/releases/latest/download/latest.json).
 //
 // The per-platform `signature` is the CONTENTS of the `.sig` file emitted next to
@@ -54,6 +54,22 @@ if (!signature) {
 let manifest;
 if (args.in && existsSync(args.in)) {
   manifest = JSON.parse(readFileSync(args.in, "utf8"));
+  if (manifest.version !== args.version) {
+    console.error(
+      `build-update-manifest: input version ${manifest.version ?? "(missing)"} ` +
+        `does not match requested version ${args.version}`,
+    );
+    process.exit(1);
+  }
+  if (
+    manifest.platforms !== undefined &&
+    (manifest.platforms === null ||
+      typeof manifest.platforms !== "object" ||
+      Array.isArray(manifest.platforms))
+  ) {
+    console.error("build-update-manifest: input platforms must be an object");
+    process.exit(1);
+  }
   manifest.platforms ??= {};
 } else {
   manifest = {

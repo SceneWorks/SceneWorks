@@ -193,10 +193,12 @@ path is still flagged.
 - **`.github/workflows/check.yml`** (every PR): runs `--self-test` (which now also
   exercises the archive-scan positive/negative/bomb cases) then the default scan over
   the Docker build context / Tauri resource trees.
-- **`.github/workflows/release.yml`** (desktop release, macOS + Windows): scans the
+- **`.github/workflows/release.yml`** (desktop release, macOS + Windows + Linux): scans the
   freshly-built `target/release/bundle` tree before signing/publishing with
   `--scan-archives --skip-uninspectable` — the real-artifact form of the check, which
-  additionally decompresses the `*.app.tar.gz` / `*.nsis.zip` updater payloads.
+  additionally decompresses the `*.app.tar.gz` / `*.nsis.zip` updater payloads. The
+  AppImage is opaque to this pure-JS scanner, so its loose pre-bundle resource tree and
+  the always-on source-resource scan provide the same protection as for MSI/NSIS.
 
 ## Known limitation
 

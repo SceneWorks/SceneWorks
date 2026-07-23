@@ -3,10 +3,11 @@
 //! On launch the release build asks the GitHub "latest release" pointer
 //! (`plugins.updater.endpoints` in `tauri.conf.json`) whether a newer build
 //! exists for this platform. The endpoint serves a `latest.json` manifest with a
-//! per-target `platforms` map; `tauri-plugin-updater` picks `darwin-aarch64` /
-//! `windows-x86_64` for the running build, verifies the minisign signature against
-//! `plugins.updater.pubkey`, and — on user accept — downloads, installs, and
-//! restarts into the new version.
+//! per-target `platforms` map; `tauri-plugin-updater` picks `darwin-aarch64`,
+//! `windows-x86_64`, or `linux-x86_64` for the running build, verifies the minisign
+//! signature against `plugins.updater.pubkey`, and — on user accept — downloads,
+//! installs, and restarts into the new version. Linux self-update is supported by
+//! the AppImage release; `.deb` users upgrade through their package installer.
 //!
 //! Driven entirely from the Rust shell: the UI is the API-served React app at a
 //! loopback `http://127.0.0.1:<port>` origin, so a JS-side updater would need ACL
@@ -22,6 +23,14 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 /// where the running version is the dev build and no signed bundle exists to swap.
 pub fn spawn_startup_check(app: &AppHandle) {
     if cfg!(debug_assertions) {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("APPIMAGE").is_none() {
+        // Tauri's Linux updater replaces the running AppImage in place. A deb
+        // install has no equivalent transaction (that requires an APT repo), so
+        // do not offer an update the package cannot safely install.
+        tracing::info!("auto-update: disabled for non-AppImage Linux package");
         return;
     }
     let app = app.clone();

@@ -101,6 +101,70 @@ async function assertDesktopLinuxPackagingWorkflow() {
   }
 }
 
+async function assertDesktopLinuxReleaseWorkflow() {
+  const workflowPath = ".github/workflows/release.yml";
+  const body = await readFile(path.join(root, workflowPath), "utf8");
+  const packageBody = await readFile(
+    path.join(root, ".github/workflows/desktop-linux.yml"),
+    "utf8",
+  );
+  const linuxJob = body.match(/\n  linux:\n([\s\S]*)$/)?.[1];
+  if (!linuxJob) {
+    throw new Error(`${workflowPath} must define a Linux release job`);
+  }
+
+  for (const field of [
+    "needs: windows",
+    "runs-on: ubuntu-22.04",
+    "gstreamer1.0-libav",
+    "scripts/check-gen-core-skew.sh --self-test",
+    "sceneworks-worker --features backend-candle",
+    "sceneworks-rust-api --features embed-web,backend-candle",
+    "--bundles appimage,deb --config updater.release.conf.json",
+    "target/release/bundle/appimage/*.AppImage",
+    "target/release/bundle/deb/*.deb",
+    "--target linux-x86_64",
+    "gh release upload",
+    "gh release download",
+  ]) {
+    if (!linuxJob.includes(field)) {
+      throw new Error(
+        `${workflowPath} Linux release job is missing required contract: ${field}`,
+      );
+    }
+  }
+
+  const cudaPin = linuxJob.match(/^\s+cuda:\s*"([^"]+)"/m)?.[1];
+  const packageCudaPin = packageBody.match(/^\s+cuda:\s*"([^"]+)"/m)?.[1];
+  const cudaAction = linuxJob.match(/uses:\s*Jimver\/cuda-toolkit@(\S+)/)?.[1];
+  const packageCudaAction = packageBody.match(
+    /uses:\s*Jimver\/cuda-toolkit@(\S+)/,
+  )?.[1];
+  if (cudaPin !== packageCudaPin || cudaAction !== packageCudaAction) {
+    throw new Error(
+      `${workflowPath} Linux release CUDA action/version must match desktop-linux.yml`,
+    );
+  }
+
+  const signingStep = linuxJob.match(
+    /- name: Build Linux candle packages \+ signed AppImage updater([\s\S]*?)(?=\n      - name:)/,
+  )?.[0];
+  if (
+    !signingStep?.includes("TAURI_SIGNING_PRIVATE_KEY:") ||
+    !signingStep.includes("TAURI_SIGNING_PRIVATE_KEY_PASSWORD:")
+  ) {
+    throw new Error(
+      `${workflowPath} Linux updater key must be scoped to the bundle step`,
+    );
+  }
+  const outsideSigningStep = linuxJob.replace(signingStep, "");
+  if (outsideSigningStep.includes("secrets.TAURI_SIGNING_PRIVATE_KEY")) {
+    throw new Error(
+      `${workflowPath} Linux updater key must never be job-wide or visible to other steps`,
+    );
+  }
+}
+
 const manifestSchemaPaths = [
   "packages/schemas/model-manifest.schema.json",
   "packages/schemas/lora-manifest.schema.json",
@@ -484,6 +548,7 @@ await assertManifestSchemaReferences();
 await assertManifestRootsMatchSchemas();
 await assertVersionsAligned();
 await assertDesktopLinuxPackagingWorkflow();
+await assertDesktopLinuxReleaseWorkflow();
 await assertBuiltinPromptGuides();
 await assertCharacterImageTuningSurface();
 await assertEntitlementsPlistsWellFormed();

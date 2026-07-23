@@ -38,6 +38,7 @@ const macosOverlay = readJson("tauri.macos.conf.json");
 const packageJson = readJson("package.json");
 const tauriSchema = readJson("node_modules/@tauri-apps/cli/config.schema.json");
 const desktopReadme = readFileSync(join(desktopDir, "README.md"), "utf8");
+const updaterSource = readFileSync(join(desktopDir, "src", "update.rs"), "utf8");
 const webStyles = readFileSync(join(desktopDir, "..", "web", "src", "styles.css"), "utf8");
 
 test("the Linux overlay is valid against the locked Tauri v2 schema", () => {
@@ -131,6 +132,14 @@ test("the WebKitGTK compatibility contract remains configured", () => {
       `backdrop-filter at byte ${declarationStart} needs a matching WebKit prefix`,
     );
   }
+});
+
+test("Linux release update behavior is explicit for each package format", () => {
+  assert.match(desktopReadme, /Release AppImages.*signed in-app auto-update/s);
+  assert.match(desktopReadme, /The `\.deb` does \*\*not\*\* self-update/);
+  assert.match(desktopReadme, /APT repository/);
+  assert.match(updaterSource, /target_os = "linux"/);
+  assert.match(updaterSource, /var_os\("APPIMAGE"\)\.is_none\(\)/);
 });
 
 test("the Linux overlay does not regress macOS or Windows bundle config", () => {

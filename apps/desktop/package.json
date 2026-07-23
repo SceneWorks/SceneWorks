@@ -7,7 +7,7 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "build:linux": "tauri build --bundles appimage,deb",
-    "test": "node --test scripts/build-sidecar-platform.test.mjs scripts/linux-bundle-config.test.mjs",
+    "test": "node --test scripts/build-sidecar-platform.test.mjs scripts/build-update-manifest.test.mjs scripts/linux-bundle-config.test.mjs",
     "release:mac": "tauri build && node scripts/staple-dmg.mjs"
   },
   "devDependencies": {
