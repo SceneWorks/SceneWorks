@@ -11189,7 +11189,7 @@ fn krea_imported_conditioning_threads_the_img2img_reference() {
 ///      admits it, exactly the install-dir shape the import job records).
 ///   3. `resolve_krea_imported_base_tier` → the resident `SceneWorks/krea-2-turbo-mlx` dense `bf16/`
 ///      tier that supplies the shared Qwen3-VL text encoder, Qwen VAE, tokenizer, and arch config.
-///   4. `runtime_macos::providers::krea::load_from_native_dit_file(dit, base, descriptor())` → the S0b
+///   4. `runtime_macos::providers::krea::load_from_native_dit_file(dit, base, &[], descriptor())` → the S0b
 ///      MLX native single-file entrypoint, then a real Metal txt2img.
 ///
 /// The NEGATIVE CONTROL (the sc-10539 with/without-adapter methodology) proves the imported DiT is
@@ -11309,7 +11309,7 @@ fn krea_imported_mlx_gpu_smoke() {
     let descriptor = runtime_macos::providers::krea::descriptor();
     let t0 = std::time::Instant::now();
     let variant5 =
-        runtime_macos::providers::krea::load_from_native_dit_file(&dit, &base, descriptor)
+        runtime_macos::providers::krea::load_from_native_dit_file(&dit, &base, &[], descriptor)
             .expect("load imported Krea 2 DiT (variant5) paired with the bf16 base");
     let mut last_a = String::new();
     let out_a = variant5
