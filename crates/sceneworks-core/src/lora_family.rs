@@ -363,9 +363,12 @@ pub fn apply_model_manifest_defaults(
 /// **`krea-2`** mirrors the builtin `krea_2_turbo` entry (config/manifests/builtin.models.jsonc): the
 /// 15-bucket ÷16-aligned ≤2048² resolution list, the 1024² default, `mlx.minMemoryGb` 48 (the ≤1536²
 /// visibility floor + the >1536² memory-gate anchor, sc-13959 — an empty `mlx` block would offer 2048²
-/// unconditionally on any Mac), and the `ui.img2img` toggle + `img2imgStrength` slider (reference-guided
-/// latent-init, resolved by the worker's `resolve_img2img_init_generic`). It does NOT stamp
-/// `ui.editReferences` or an `edit_image` capability — imported edit is a separate story (sc-14119).
+/// unconditionally on any Mac), the `ui.img2img` toggle + `img2imgStrength` slider (reference-guided
+/// latent-init, resolved by the worker's `resolve_img2img_init_generic`), and — for the MLX Kontext
+/// edit surface (sc-14119) — the `ui.editReferences` optional-second-image slot the Edit tab renders
+/// (the `edit_image` capability is stamped by `model_capabilities_for_type_and_family`). The
+/// `editReferences` copy mirrors the builtin Turbo entry (image 1 required + image 2 optional, fixed
+/// order).
 fn apply_family_studio_surface_defaults(entry: &mut Map<String, Value>, family: &str) {
     if family != "krea-2" {
         return;
@@ -426,6 +429,17 @@ fn apply_family_studio_surface_defaults(entry: &mut Map<String, Value>, family: 
                 "min": 0.0,
                 "max": 1.0,
                 "step": 0.05
+            })
+        });
+        // Kontext edit second-image slot (sc-14119, mirrors the builtin krea_2_turbo `ui` block): the
+        // `krea2_identity_edit` edit optionally takes a SECOND source (image 1 required + image 2
+        // optional, FIXED order). Presence of this object makes the Studio render the optional second
+        // slot in Edit mode; the worker + engine (`krea_2_turbo_edit` MultiReference) cap at two and
+        // preserve order. Ignored outside `edit_image`.
+        ui.entry("editReferences".to_owned()).or_insert_with(|| {
+            json!({
+                "secondaryLabel": "Image 2 (optional)",
+                "secondaryHint": "Optional — a second image combined with Image 1 in a fixed order (Image 1, then Image 2). In your instruction, refer to each subject by position (\"the person in image 1 / image 2\") or by description (\"the woman in the green jacket\") — either works."
             })
         });
     }
@@ -502,15 +516,17 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // qwen-image / lens / flux).
         ("image", "anima") => vec!["text_to_image", "style_variations"],
         // Krea 2 (epic 14015): imported single-file Krea 2 checkpoints. The KreaImported lane serves
-        // text-to-image (sc-14018) plus img2img (sc-14071 — reference-guided latent-init, exposed via the
-        // `ui.img2img` toggle stamped by `apply_family_studio_surface_defaults`, NOT a capabilities value:
-        // z-image owns "image_to_image" for its edit-mode img2img). So the family default advertises just
-        // t2i + style variations, NOT `edit_image` / `character_image` (the builtin Turbo/Raw entries
-        // expose those; imports do not — imported edit is sc-14119). The match keys on the normalized
-        // hyphen form `krea-2` (`normalize_model_family("krea_2")`). This default only affects
-        // imported/user krea_2 models; the builtin krea_2 entries declare their own `capabilities`
-        // explicitly, so `apply_model_manifest_defaults` never changes them.
-        ("image", "krea-2") => vec!["text_to_image", "style_variations"],
+        // text-to-image (sc-14018), img2img (sc-14071 — reference-guided latent-init, exposed via the
+        // `ui.img2img` toggle stamped by `apply_family_studio_surface_defaults`, NOT a capabilities
+        // value: z-image owns "image_to_image" for its edit-mode img2img), AND the Kontext instruction
+        // `edit_image` surface on the MLX backend (sc-14119 — the source rides as in-context tokens +
+        // grounds the Qwen3-VL vision tower, driven by the `krea2_identity_edit` LoRA). `edit_image`
+        // pairs with the `ui.editReferences` slot `apply_family_studio_surface_defaults` also stamps.
+        // Still NOT `character_image` (no IP-Adapter/identity surface on the bare transformer). The
+        // match keys on the normalized hyphen form `krea-2` (`normalize_model_family("krea_2")`). This
+        // default only affects imported/user krea_2 models; the builtin krea_2 entries declare their
+        // own `capabilities` explicitly, so `apply_model_manifest_defaults` never changes them.
+        ("image", "krea-2") => vec!["text_to_image", "edit_image", "style_variations"],
         // Bernini still-image companion (epic 4699 / sc-5424): the same `Modality::Both`
         // engine the video `bernini` family uses, but the image-typed catalog id
         // (`bernini_image`) exposes only the still tasks — t2i (text→image) and i2i
@@ -3096,12 +3112,12 @@ mod tests {
 
         // The imported model is now MLX-Krea-routed and selectable as a text-to-image model.
         assert_eq!(entry["adapter"], "mlx_krea");
-        // Text-to-image + img2img (+ style_variations). img2img is a `ui.img2img` toggle (asserted
-        // below), NOT a capabilities value, so `capabilities` stays t2i + style_variations and must
-        // NOT claim `edit_image` / `character_image` (imported edit is deferred to sc-14119).
+        // Text-to-image + edit_image (the MLX Kontext edit surface, sc-14119) + style_variations.
+        // img2img is a `ui.img2img` toggle (asserted in the sibling test), NOT a capabilities value.
+        // `character_image` stays unclaimed (no IP-Adapter/identity surface on the bare transformer).
         assert_eq!(
             entry["capabilities"],
-            json!(["text_to_image", "style_variations"])
+            json!(["text_to_image", "edit_image", "style_variations"])
         );
         // `loraCompatibility.families` carries the normalized token (as every other family does,
         // e.g. wan-video above) — Krea LoRAs resolve to it through `canonical_lora_family`.
@@ -3112,11 +3128,11 @@ mod tests {
     fn imported_krea_2_gets_builtin_resolution_and_img2img_surface() {
         // sc-14071 (epic 14015): an imported krea_2 entry ships empty limits/defaults/ui, so the Studio
         // resolution picker would fall back to its 4-option list and never offer img2img. The family
-        // default must stamp the SAME resolution / img2img surface the builtin `krea_2_turbo` entry
-        // carries (config/manifests/builtin.models.jsonc): the 15-bucket resolution list, the 1024²
-        // default, `mlx.minMemoryGb` 48 (the >1536² memory-gate anchor, sc-13959), and the `ui.img2img`
-        // toggle + `img2imgStrength` slider. It must NOT stamp `ui.editReferences` or an `edit_image`
-        // capability — imported edit is sc-14119.
+        // default must stamp the SAME resolution / img2img / edit surface the builtin `krea_2_turbo`
+        // entry carries (config/manifests/builtin.models.jsonc): the 15-bucket resolution list, the
+        // 1024² default, `mlx.minMemoryGb` 48 (the >1536² memory-gate anchor, sc-13959), the
+        // `ui.img2img` toggle + `img2imgStrength` slider, and — for the Kontext edit surface (sc-14119)
+        // — the `ui.editReferences` optional-second-image slot.
         let mut entry = serde_json::Map::new();
         apply_model_manifest_defaults(&mut entry, "image", Some("krea_2"));
 
@@ -3157,10 +3173,10 @@ mod tests {
         // `resolve_img2img_init_generic`), NOT as a capability.
         assert_eq!(entry["ui"]["img2img"], json!(true));
         assert_eq!(entry["ui"]["img2imgStrength"]["default"], json!(0.5));
-        // Edit surface is NOT stamped here (sc-14119).
-        assert!(
-            entry["ui"].get("editReferences").is_none(),
-            "imported krea must not get editReferences (edit is sc-14119)"
+        // The Kontext edit second-image slot (sc-14119) mirrors the builtin krea_2_turbo `ui` block.
+        assert_eq!(
+            entry["ui"]["editReferences"]["secondaryLabel"],
+            json!("Image 2 (optional)")
         );
     }
 

@@ -45,11 +45,14 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
         return false;
     };
-    // Imported Krea 2 single-file txt2img (sc-14023): imported ids are intentionally absent from
-    // `CANDLE_ROUTED_MODELS`, so claim them through the manifest family before the builtin id table.
-    // The worker repeats this gate and validates that the recorded app-managed path resolves to
-    // exactly one safetensors file before dispatching the native-file loader.
-    if imported_image_request_family_eligible(model, &job.payload, CANDLE_ROUTED_FAMILIES) {
+    // Imported Krea 2 single-file txt2img / img2img (sc-14023 / sc-14071): imported ids are
+    // intentionally absent from `CANDLE_ROUTED_MODELS`, so claim them through the manifest family
+    // before the builtin id table. The worker repeats this gate and validates that the recorded
+    // app-managed path resolves to exactly one safetensors file before dispatching the native-file
+    // loader. `adapters_supported = false`: the candle native single-file loader takes no adapters
+    // yet (sc-14135), so the candle imported lane stays t2i / img2img only — LoRAs (sc-14111) and
+    // the Kontext edit surface (sc-14119) are MLX-only until that follow-up lands.
+    if imported_image_request_family_eligible(model, &job.payload, CANDLE_ROUTED_FAMILIES, false) {
         return true;
     }
     // InstantID (sc-5491, epic 5480): the candle `candle-gen-instantid` provider serves the SAME
