@@ -43,13 +43,54 @@ for (const dir of ["apps/desktop", "apps/web"]) {
 // to preserve exact formatting (no JSON reparse/reformat churn).
 const conf = join(repoRoot, "apps", "desktop", "tauri.conf.json");
 const before = readFileSync(conf, "utf8");
-const after = before.replace(/"version":\s*"[^"]*"/, `"version": "${version}"`);
-if (after === before) {
+const tauriVersionKey = /"version":\s*"[^"]*"/;
+if (!tauriVersionKey.test(before)) {
   console.error('sync-version: no "version" field found in tauri.conf.json');
   process.exit(1);
 }
-writeFileSync(conf, after);
+// Distinguish "field missing" (fatal, above) from "already at target" (idempotent
+// no-op): only write when the value actually changes so re-runs don't error or churn.
+const after = before.replace(tauriVersionKey, `"version": "${version}"`);
+if (after !== before) {
+  writeFileSync(conf, after);
+}
+
+// Root Cargo.toml [workspace.package] version — the single source every local
+// crate inherits via `version.workspace = true`. It feeds logs, /health payloads,
+// and the project-file appVersion, so it must track the product version too
+// (sc-13613: it had drifted to 0.2.0 while the product shipped 0.8.0). Rewrite
+// ONLY the [workspace.package] table's `version` key: bound the edit to that
+// section so we never touch a member-crate `version.workspace = true` line, a
+// [workspace.dependencies] pin, or the [patch] rev. Idempotent — an already
+// aligned table is left untouched (no spurious write on re-runs).
+const cargoToml = join(repoRoot, "Cargo.toml");
+const cargoBefore = readFileSync(cargoToml, "utf8");
+const cargoHeader = "[workspace.package]";
+const cargoSectionStart = cargoBefore.indexOf(cargoHeader);
+if (cargoSectionStart === -1) {
+  console.error("sync-version: no [workspace.package] table found in Cargo.toml");
+  process.exit(1);
+}
+const cargoAfterHeader = cargoSectionStart + cargoHeader.length;
+const cargoNextHeaderRel = cargoBefore.slice(cargoAfterHeader).search(/\n\[/);
+const cargoSectionEnd =
+  cargoNextHeaderRel === -1 ? cargoBefore.length : cargoAfterHeader + cargoNextHeaderRel;
+const cargoSection = cargoBefore.slice(cargoSectionStart, cargoSectionEnd);
+const cargoVersionKey = /^version\s*=\s*"[^"]*"/m;
+if (!cargoVersionKey.test(cargoSection)) {
+  console.error("sync-version: no version key in Cargo.toml [workspace.package]");
+  process.exit(1);
+}
+const cargoPatchedSection = cargoSection.replace(cargoVersionKey, `version = "${version}"`);
+if (cargoPatchedSection !== cargoSection) {
+  writeFileSync(
+    cargoToml,
+    cargoBefore.slice(0, cargoSectionStart) +
+      cargoPatchedSection +
+      cargoBefore.slice(cargoSectionEnd),
+  );
+}
 
 console.log(
-  `sync-version: apps/desktop + apps/web + tauri.conf.json synced to ${version}`,
+  `sync-version: apps/desktop + apps/web + tauri.conf.json + Cargo.toml synced to ${version}`,
 );
