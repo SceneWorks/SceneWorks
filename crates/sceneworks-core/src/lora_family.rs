@@ -472,7 +472,7 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
     }
 }
 
-fn normalize_model_family(family: &str) -> String {
+pub(crate) fn normalize_model_family(family: &str) -> String {
     let normalized = family.trim().to_ascii_lowercase().replace('_', "-");
     // Collapse spelling variants the `_`→`-` step alone can't unify. ostris
     // ai-toolkit bakes Krea 2's base id into trained files as the separator-less

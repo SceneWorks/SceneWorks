@@ -5,9 +5,10 @@ use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
 use crate::jobs_store::routing::catalog::{
-    MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS,
-    VIDEO_MLX_ROUTED_MODELS,
+    image_family_is_mlx_routed, is_builtin_image_model, MLX_ONLY_TRAINING_KERNELS,
+    MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
 };
+use crate::lora_family::normalize_model_family;
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
 /// worker? This lifts the per-family `_should_route_*_to_mlx` decision (ported
@@ -45,6 +46,18 @@ pub(crate) fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// synthetic payloads — one dispatch table, no divergence between routing and what the UI hides.
 pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if !MLX_ROUTED_MODELS.contains(&model) {
+        // Route-by-family fallback for a non-builtin (imported/user) image model whose novel id is in
+        // no routing table (sc-14109, epic 14015). S0d (sc-14019) made only the display badge
+        // (`image_model_mac_support`) family-aware, so an imported checkpoint showed as usable yet its
+        // job was never claimed at THIS predicate — it stranded on "Waiting for an available GPU
+        // worker." A builtin always keeps its id-keyed verdict: `!is_builtin_image_model` mirrors the
+        // display badge's guard so the router and the badge agree, and it keeps a (hypothetical
+        // future) candle-only builtin — a builtin id absent from `MLX_ROUTED_MODELS` — not-eligible
+        // here rather than family-routed. Today every builtin is `mlx_routed`, so this branch is only
+        // ever reached by imported ids; the guard is defensive parity, not live behavior.
+        if !is_builtin_image_model(model) {
+            return imported_family_image_mlx_eligible(payload);
+        }
         return false;
     }
     match model {
@@ -84,6 +97,41 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "anima_base" | "anima_aesthetic" | "anima_turbo" => anima_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
+        _ => false,
+    }
+}
+
+/// Route-by-family MLX-eligibility for a non-builtin (imported/user) image model whose novel id is
+/// in no routing table (sc-14109, epic 14015). Reads the catalog `family` off the job payload's
+/// `modelManifestEntry` — the full manifest entry apps/rust-api stamps into every generation job
+/// (`generation.rs`, the same entry the display badge reads its `family` from, so claim-time routing
+/// and the UI verdict share one source of truth). Eligible only when that family is an MLX-routed
+/// family ([`image_family_is_mlx_routed`], the same allow-list the badge uses — checked against the
+/// raw manifest token, which the detector emits in `MLX_ROUTED_FAMILIES` form), then dispatched to
+/// that family's existing per-family predicate. For `krea_2`, [`krea_mlx_eligible`] admits plain t2i
+/// and rejects an `edit_image` job on a non-builtin id (its edit arm gates on the builtin
+/// `krea_2_raw`/`krea_2_turbo` ids), which matches S0c's t2i-only import scope. A missing /
+/// family-less manifest entry, or a non-routed / not-yet-dispatched family, returns false —
+/// unchanged from the pre-sc-14109 blanket `return false`.
+fn imported_family_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let Some(family) = payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .and_then(|entry| entry.get("family"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    if !image_family_is_mlx_routed(family) {
+        return false;
+    }
+    // Dispatch on the normalized family token (`krea_2` → `krea-2`, mirroring lora_family's
+    // adapter/capabilities arms). Future importable families add an arm here alongside their
+    // `MLX_ROUTED_FAMILIES` / `IMPORT_SUPPORTED_FAMILIES` entry.
+    match normalize_model_family(family).as_str() {
+        "krea-2" => krea_mlx_eligible(payload),
         _ => false,
     }
 }
@@ -908,6 +956,132 @@ mod tests {
         assert!(!image_request_mlx_eligible(
             "krea_2_turbo",
             turbo_no_source.as_object().expect("probe is an object")
+        ));
+    }
+
+    /// sc-14109 (epic 14015): an imported/user Krea 2 single-file checkpoint carries a novel id in NO
+    /// routing table, but the full catalog entry the API stamps into the job (`modelManifestEntry`)
+    /// declares `family: "krea_2"` — the MLX-routed family whose builtins already run in-process. A
+    /// plain t2i job MUST be claim-eligible via the route-by-family fallback, or the mlx worker never
+    /// claims it (`worker_supports_job`) and, with no torch/candle Krea lane on Mac, it strands on
+    /// "Waiting for an available GPU worker." forever — exactly the bug this story fixes. S0d
+    /// (sc-14019) had made only the display badge family-aware, leaving this claim-time predicate
+    /// blindly `false` for the same id.
+    #[test]
+    fn imported_krea_family_t2i_is_mlx_eligible() {
+        let imported_id = "user_kreamania_variant5"; // a novel id, never a builtin
+        assert!(!MLX_ROUTED_MODELS.contains(&imported_id));
+
+        let t2i = json!({
+            "model": imported_id,
+            "mode": "text_to_image",
+            "modelManifestEntry": { "id": imported_id, "family": "krea_2" },
+        });
+        assert!(image_request_mlx_eligible(
+            imported_id,
+            t2i.as_object().expect("probe is an object")
+        ));
+
+        // A bare request with no explicit mode is equally a t2i job, equally eligible.
+        let bare = json!({
+            "model": imported_id,
+            "modelManifestEntry": { "id": imported_id, "family": "krea_2" },
+        });
+        assert!(image_request_mlx_eligible(
+            imported_id,
+            bare.as_object().expect("probe is an object")
+        ));
+    }
+
+    /// The route-by-family fallback fires ONLY for an MLX-routed family with a readable manifest
+    /// entry. A non-routed family (the detector's `z-image`, an unsupported import), a missing
+    /// manifest entry, and a manifest entry with no `family` key all stay not-eligible — unchanged
+    /// from the pre-sc-14109 blanket `false`, so nothing new becomes claimable by accident.
+    #[test]
+    fn imported_model_without_routed_family_is_not_mlx_eligible() {
+        let imported_id = "user_zimage_import";
+
+        // z-image is a real detector family but NOT in MLX_ROUTED_FAMILIES → no family fallback.
+        let z_image = json!({
+            "model": imported_id,
+            "mode": "text_to_image",
+            "modelManifestEntry": { "id": imported_id, "family": "z-image" },
+        });
+        assert!(!image_request_mlx_eligible(
+            imported_id,
+            z_image.as_object().expect("probe is an object")
+        ));
+
+        // No manifest entry at all — nothing to read a family from.
+        let no_entry = json!({ "model": imported_id, "mode": "text_to_image" });
+        assert!(!image_request_mlx_eligible(
+            imported_id,
+            no_entry.as_object().expect("probe is an object")
+        ));
+
+        // A manifest entry present but with no `family` key.
+        let no_family = json!({
+            "model": imported_id,
+            "mode": "text_to_image",
+            "modelManifestEntry": { "id": imported_id },
+        });
+        assert!(!image_request_mlx_eligible(
+            imported_id,
+            no_family.as_object().expect("probe is an object")
+        ));
+    }
+
+    /// Import scope is t2i-only (S0c). An `edit_image` job on an imported krea_2 id is NOT eligible:
+    /// `krea_mlx_eligible`'s edit arm gates on the builtin `krea_2_raw`/`krea_2_turbo` ids, and an
+    /// imported novel id is neither, so even a well-formed edit-with-source falls through to false.
+    #[test]
+    fn imported_krea_family_edit_is_not_mlx_eligible() {
+        let imported_id = "user_kreamania_variant5";
+        let edit = json!({
+            "model": imported_id,
+            "mode": "edit_image",
+            "sourceAssetId": "asset-1",
+            "modelManifestEntry": { "id": imported_id, "family": "krea_2" },
+        });
+        assert!(!image_request_mlx_eligible(
+            imported_id,
+            edit.as_object().expect("probe is an object")
+        ));
+    }
+
+    /// Builtin id-keyed routing is untouched by the fallback: a routed builtin still routes on its id
+    /// alone, and a manifest `family` on a builtin payload is ignored (the `MLX_ROUTED_MODELS`
+    /// short-circuit runs before the fallback is ever consulted). Guards the sc-14109 constraint that
+    /// builtin routing stays byte-identical (with `every_mlx_routed_model_has_a_dispatch_arm` above).
+    #[test]
+    fn builtin_image_routing_unaffected_by_family_fallback() {
+        // A routed builtin routes on its id, with or without a manifest family present.
+        let builtin_t2i = json!({ "model": "krea_2_raw", "mode": "text_to_image" });
+        assert!(image_request_mlx_eligible(
+            "krea_2_raw",
+            builtin_t2i.as_object().expect("probe is an object")
+        ));
+        let builtin_with_family = json!({
+            "model": "krea_2_raw",
+            "mode": "text_to_image",
+            "modelManifestEntry": { "id": "krea_2_raw", "family": "krea_2" },
+        });
+        assert!(image_request_mlx_eligible(
+            "krea_2_raw",
+            builtin_with_family.as_object().expect("probe is an object")
+        ));
+
+        // A torch-only builtin id-keyed verdict is unchanged: `flux_dev` edit stays off MLX even if a
+        // (spurious) krea_2 manifest family rides along — the builtin arm decides, never the fallback.
+        let builtin_edit = json!({
+            "model": "flux_dev",
+            "mode": "edit_image",
+            "sourceAssetId": "asset-1",
+            "modelManifestEntry": { "id": "flux_dev", "family": "krea_2" },
+        });
+        assert!(!image_request_mlx_eligible(
+            "flux_dev",
+            builtin_edit.as_object().expect("probe is an object")
         ));
     }
 }
