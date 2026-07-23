@@ -107,6 +107,7 @@ test("Linux bundles carry the media framework needed for H.264 playback", () => 
   assert.match(desktopReadme, /AppImage carries its GTK\/WebKitGTK runtime/);
   assert.match(desktopReadme, /bundleMediaFramework: true/);
   assert.match(desktopReadme, /gstreamer1\.0-libav/);
+  assert.match(desktopReadme, /sudo apt install gstreamer1\.0-libav/);
   assert.match(desktopReadme, /H\.264/);
 });
 

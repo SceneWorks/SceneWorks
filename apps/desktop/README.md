@@ -135,8 +135,16 @@ downloads its pinned CUDA user-space runtime on first launch.
 Linux bundles must be built on Linux. Use Ubuntu 22.04 as the baseline so the
 AppImage remains compatible with both Ubuntu 22.04 and 24.04. Install the
 [Tauri v2 Linux prerequisites](https://v2.tauri.app/start/prerequisites/), the
-repository's normal Node/Rust prerequisites, and dependencies for both apps,
-then run the opt-in package command:
+repository's normal Node/Rust prerequisites, and the GStreamer libav plugin:
+
+```sh
+sudo apt install gstreamer1.0-libav
+```
+
+The plugin must be present on the build host because Tauri copies the available
+GStreamer playback libraries into the AppImage when
+`bundleMediaFramework: true`. Then install dependencies for both apps and run
+the opt-in package command:
 
 ```sh
 npm --prefix apps/web ci
