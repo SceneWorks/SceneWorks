@@ -120,7 +120,9 @@ Choose either Linux x86_64 package:
 
 - Install the `.deb` on Ubuntu 22.04 or 24.04 with
   `sudo apt install ./SceneWorks_*.deb`. APT installs the declared
-  `libwebkit2gtk-4.1-0` and `libgtk-3-0` runtime dependencies.
+  `libwebkit2gtk-4.1-0`, `libgtk-3-0`, and `gstreamer1.0-libav` runtime
+  dependencies. The GStreamer libav plugin supplies the H.264 decoder used by
+  WebKitGTK for MP4 preview playback.
 - Make the AppImage executable with `chmod +x SceneWorks_*.AppImage`, then run
   it directly. The AppImage carries its GTK/WebKitGTK runtime and does not
   require a package-manager install.
@@ -160,10 +162,12 @@ into DMA-BUF without setting WebKit's variable directly, launch with
 video playback on the target driver and desktop session.
 
 The Debian package intentionally uses the host's WebKitGTK 4.1 and GTK 3 through
-the package dependencies above. The AppImage follows Tauri's portable model:
-WebKitGTK and GTK are bundled from the Ubuntu 22.04 build host. Additional
-GStreamer multimedia plugins remain disabled (`bundleMediaFramework: false`);
-they are separate from the WebKitGTK runtime needed to launch and show the UI.
+the package dependencies above, including `gstreamer1.0-libav` for H.264 video
+decoding. The AppImage follows Tauri's portable model: WebKitGTK and GTK are
+bundled from the Ubuntu 22.04 build host, and Tauri's additional GStreamer
+playback libraries are included (`bundleMediaFramework: true`). This keeps MP4
+previews working on a stock supported Ubuntu install rather than relying on
+multimedia plugins that happen to be present on the build or user machine.
 
 Inspect a built Debian package's dependency declaration with:
 

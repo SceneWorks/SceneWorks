@@ -71,10 +71,11 @@ test("the default Linux build produces only AppImage and deb bundles", () => {
   );
 });
 
-test("the deb declares the Tauri v2 GTK and WebKitGTK runtime dependencies", () => {
+test("the deb declares its WebKitGTK, GTK, and H.264 playback dependencies", () => {
   assert.deepEqual(linuxOverlay.bundle.linux.deb.depends, [
     "libwebkit2gtk-4.1-0",
     "libgtk-3-0",
+    "gstreamer1.0-libav",
   ]);
 });
 
@@ -98,13 +99,15 @@ test("Linux bundles carry product metadata, category, and PNG icons", () => {
   }
 });
 
-test("the AppImage WebKitGTK and media-framework decision is explicit", () => {
+test("Linux bundles carry the media framework needed for H.264 playback", () => {
   assert.equal(
     linuxOverlay.bundle.linux.appimage.bundleMediaFramework,
-    false,
+    true,
   );
   assert.match(desktopReadme, /AppImage carries its GTK\/WebKitGTK runtime/);
-  assert.match(desktopReadme, /bundleMediaFramework: false/);
+  assert.match(desktopReadme, /bundleMediaFramework: true/);
+  assert.match(desktopReadme, /gstreamer1\.0-libav/);
+  assert.match(desktopReadme, /H\.264/);
 });
 
 test("the WebKitGTK compatibility contract remains configured", () => {
