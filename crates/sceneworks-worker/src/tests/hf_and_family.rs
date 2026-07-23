@@ -228,6 +228,56 @@ fn download_family_check_proceeds_when_detection_matches_catalog() {
     ));
 }
 
+fn krea2_base_dit_safetensors_keys() -> Vec<String> {
+    // The ComfyUI-native Krea 2 DiT signature the base-weight classifier keys on: the
+    // `txtfusion.` text-fusion tower is unique to Krea 2.
+    vec![
+        "model.diffusion_model.blocks.0.attn.wq.weight".to_owned(),
+        "model.diffusion_model.blocks.0.mlp.gate.weight".to_owned(),
+        "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+    ]
+}
+
+#[test]
+fn imported_base_krea_dit_gets_family_from_the_base_weight_verdict() {
+    // sc-14108 regression: a bare single-file Krea 2 DiT is neither a diffusers directory nor a
+    // LoRA, so the LoRA-oriented `detect_model_family` returns None. `run_model_import_job` therefore
+    // falls back to the base-weight gate's verdict — `detect_model_family(dir).or(base_weight_family)`
+    // — to stamp `krea_2`. Without the fallback the imported model persists family-less, so the
+    // catalog shows "Needs Family" / "Not On Mac" and it cannot be selected in the Image Studio.
+    use sceneworks_core::base_weights::{detect_base_weight_file, BaseWeightDetection};
+    use sceneworks_core::lora_family::{detect_model_family, first_safetensors_path};
+
+    let dir = tempdir().expect("tempdir creates");
+    write_safetensors_with_keys(
+        &dir.path().join("kreamania_v5.safetensors"),
+        &krea2_base_dit_safetensors_keys(),
+    );
+
+    // (1) The LoRA/diffusers detector cannot classify a bare base DiT.
+    assert_eq!(
+        detect_model_family(dir.path()).expect("detect_model_family runs"),
+        None,
+    );
+
+    // (2) The base-weight gate verdict supplies the family the import falls back to.
+    let file = first_safetensors_path(dir.path()).expect("a safetensors file");
+    let base_weight_family = match detect_base_weight_file(&file).expect("classifies") {
+        BaseWeightDetection::Recognized(verdict) => verdict.family,
+        BaseWeightDetection::Unrecognized { .. } => None,
+    };
+    assert_eq!(base_weight_family.as_deref(), Some("krea_2"));
+
+    // (3) The exact composition `run_model_import_job` stamps onto the manifest entry.
+    assert_eq!(
+        detect_model_family(dir.path())
+            .expect("detect_model_family runs")
+            .or(base_weight_family)
+            .as_deref(),
+        Some("krea_2"),
+    );
+}
+
 #[test]
 fn download_family_check_proceeds_for_derived_family_base_architecture() {
     // Regression: a catalog entry declares a model family whose downloaded weights detect

@@ -1,6 +1,8 @@
 use super::*;
 
-use sceneworks_core::base_weights::{detect_base_weight_file, import_detection_supported};
+use sceneworks_core::base_weights::{
+    detect_base_weight_file, import_detection_supported, BaseWeightDetection,
+};
 
 /// Post the terminal `Completed` update for a Hugging Face cache download, building the shared
 /// `{<id_key>, repo, path, storage:"huggingface_cache", completedAt}` result object (F-116). Both
@@ -2861,7 +2863,7 @@ pub(crate) async fn run_model_import_job(
     // source-URL, and uploaded imports uniformly (the API's synchronous `import_source_supported`
     // only sees on-disk uploads at queue time). NEVER a silent fallback. `target_dir` is
     // app-managed (`resolve_model_import_target`) — this gate is purely additive to confinement.
-    match first_safetensors_path(&target_dir) {
+    let base_weight_family = match first_safetensors_path(&target_dir) {
         Some(weight_file) => match detect_base_weight_file(&weight_file) {
             Ok(detection) => {
                 if let Err(reason) = import_detection_supported(&detection) {
@@ -2872,6 +2874,17 @@ pub(crate) async fn run_model_import_job(
                         Some(reason),
                     )
                     .await;
+                }
+                // sc-14108: a single-file base checkpoint is a bare DiT — neither a diffusers
+                // directory nor a LoRA — so the LoRA-oriented `detect_model_family` below returns
+                // None for it. Reuse the family the gate's base-weight verdict already resolved so
+                // the import STAMPS it onto the manifest entry. Without a family the entry persists
+                // "unassociated": the catalog shows "Needs Family" and, because Mac routing keys off
+                // the family (sc-14019 `MLX_ROUTED_FAMILIES`), "Not On Mac" — so the model can't be
+                // selected in the Image Studio.
+                match detection {
+                    BaseWeightDetection::Recognized(verdict) => verdict.family,
+                    BaseWeightDetection::Unrecognized { .. } => None,
                 }
             }
             Err(error) => {
@@ -2897,10 +2910,12 @@ pub(crate) async fn run_model_import_job(
             )
             .await;
         }
-    }
+    };
 
     let detected_family = match detect_model_family(&target_dir) {
-        Ok(detected) => detected,
+        // A diffusers dir / LoRA is classified here; a bare base DiT is not, so fall back to the
+        // base-weight verdict's family (sc-14108).
+        Ok(detected) => detected.or(base_weight_family),
         Err(error) => {
             return fail_job(
                 api,

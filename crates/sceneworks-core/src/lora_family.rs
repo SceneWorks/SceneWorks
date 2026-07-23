@@ -382,6 +382,14 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         // `anima_aesthetic` / `anima_turbo`), never instantiated through a Torch adapter. Lineage
         // label only (mirrors sd3 / bernini / scail2).
         "anima" => Some("anima"),
+        // Krea 2 (epic 14015): imported single-file Krea 2 checkpoints reuse the same MLX Krea
+        // adapter the builtin krea_2 catalog entries declare (`mlx_krea`), routed to the Krea MLX
+        // engine by family (sc-14108). The match scrutinee is the normalized family, so the arm keys
+        // on the hyphen form `krea-2` (`normalize_model_family("krea_2")`). Builtin krea_2 entries
+        // (`krea_2_turbo` / `krea_2_raw`) declare `adapter` explicitly, so
+        // `apply_model_manifest_defaults` (`or_insert_with`) never overrides them — this default only
+        // stamps user/imported krea_2 models that omit it.
+        "krea-2" => Some("mlx_krea"),
         _ => None,
     }
 }
@@ -413,6 +421,14 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // surface, so the family default advertises only t2i + style variations (like z-image /
         // qwen-image / lens / flux).
         ("image", "anima") => vec!["text_to_image", "style_variations"],
+        // Krea 2 (epic 14015): imported single-file Krea 2 checkpoints. The KreaImported lane
+        // (sc-14018) is text-to-image ONLY — reference/edit for imports is deferred to sc-14071 — so
+        // the family default advertises just t2i + style variations, NOT `edit_image` /
+        // `character_image` (the builtin Turbo/Raw entries expose those, imports don't yet). The
+        // match keys on the normalized hyphen form `krea-2` (`normalize_model_family("krea_2")`).
+        // This default only affects imported/user krea_2 models; the builtin krea_2 entries declare
+        // their own `capabilities` explicitly, so `apply_model_manifest_defaults` never changes them.
+        ("image", "krea-2") => vec!["text_to_image", "style_variations"],
         // Bernini still-image companion (epic 4699 / sc-5424): the same `Modality::Both`
         // engine the video `bernini` family uses, but the image-typed catalog id
         // (`bernini_image`) exposes only the still tasks — t2i (text→image) and i2i
@@ -2983,6 +2999,30 @@ mod tests {
         );
         assert_eq!(entry["loraCompatibility"]["families"], json!(["wan-video"]));
         assert_eq!(entry["downloads"], json!([]));
+    }
+
+    #[test]
+    fn imported_krea_2_gets_adapter_and_text_to_image_capability() {
+        // sc-14108 (epic 14015): an imported single-file krea_2 base checkpoint whose family the
+        // base-weight gate stamps must ALSO pick up the krea_2 family defaults, or it stays
+        // adapter-less with an empty `capabilities` array and the Image Studio picker (which filters
+        // on `text_to_image`) still hides it. `apply_model_manifest_defaults` is fed the canonical
+        // catalog token `krea_2` (from `reconcile_detected_family`); it normalizes to `krea-2`
+        // internally, which is the form the family-default arms key on.
+        let mut entry = serde_json::Map::new();
+        apply_model_manifest_defaults(&mut entry, "image", Some("krea_2"));
+
+        // The imported model is now MLX-Krea-routed and selectable as a text-to-image model.
+        assert_eq!(entry["adapter"], "mlx_krea");
+        // Text-to-image only (+ style_variations): the KreaImported lane is txt2img-only, so the
+        // default must NOT claim `edit_image` / `character_image` (deferred to sc-14071).
+        assert_eq!(
+            entry["capabilities"],
+            json!(["text_to_image", "style_variations"])
+        );
+        // `loraCompatibility.families` carries the normalized token (as every other family does,
+        // e.g. wan-video above) — Krea LoRAs resolve to it through `canonical_lora_family`.
+        assert_eq!(entry["loraCompatibility"]["families"], json!(["krea-2"]));
     }
 
     #[test]
