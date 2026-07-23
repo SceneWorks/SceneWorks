@@ -122,6 +122,17 @@ describe("AssetMedia audio rendering (epic 13400 A5)", () => {
     expect(container.querySelector("video")).not.toBeNull();
   });
 
+  it("uses WebKit-safe inline metadata playback for generated MP4 video", async () => {
+    await act(() => root.render(<AssetMedia asset={videoAsset} />));
+    const video = container.querySelector("video");
+    expect(video).not.toBeNull();
+    expect(video.controls).toBe(true);
+    expect(video.muted).toBe(true);
+    expect(video.playsInline).toBe(true);
+    expect(video.preload).toBe("metadata");
+    expect(video.getAttribute("src")).toContain("clip.mp4");
+  });
+
   it("honors controls={false} so a custom transport can drive the element", async () => {
     await act(() => root.render(<AssetMedia asset={audioAsset} controls={false} />));
     const audio = container.querySelector("audio");

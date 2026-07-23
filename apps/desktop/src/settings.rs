@@ -1033,6 +1033,48 @@ fn sanitized_start_dir(start_dir: Option<&str>) -> Option<PathBuf> {
     }
 }
 
+fn sanitized_export_filename(value: &str) -> String {
+    let trimmed = value.trim();
+    std::path::Path::new(trimmed)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .unwrap_or("SceneWorks-export.png")
+        .to_owned()
+}
+
+/// Save a browser-generated image through the native dialog. WebKitGTK and
+/// WKWebView have inconsistent `<a download>` behavior for blob URLs, while this
+/// path gives every desktop platform the intended filename and a real save
+/// destination. The explicit size ceiling prevents an untrusted webview payload
+/// from causing an unbounded allocation in the shell.
+#[tauri::command]
+pub async fn save_image_export(
+    app: AppHandle,
+    image_bytes: Vec<u8>,
+    suggested_filename: String,
+) -> Result<Option<String>, String> {
+    const MAX_EXPORT_BYTES: usize = 256 * 1024 * 1024;
+    if image_bytes.is_empty() {
+        return Err("The exported image was empty.".to_owned());
+    }
+    if image_bytes.len() > MAX_EXPORT_BYTES {
+        return Err("The exported image exceeds the 256 MB desktop limit.".to_owned());
+    }
+
+    let destination = app
+        .dialog()
+        .file()
+        .set_file_name(sanitized_export_filename(&suggested_filename))
+        .blocking_save_file()
+        .and_then(|file| file.into_path().ok());
+    let Some(destination) = destination else {
+        return Ok(None);
+    };
+    std::fs::write(&destination, image_bytes).map_err(|error| error.to_string())?;
+    Ok(Some(destination.to_string_lossy().into_owned()))
+}
+
 /// Save an asset file to a user-chosen destination (sc-8726). Opens the native "save as"
 /// dialog pre-filled with `suggested_filename`, then copies the bytes from `source_path`
 /// to the chosen destination. `source_path` must be an already-resolved absolute path
@@ -1406,7 +1448,11 @@ mod tests {
             .iter()
             .filter_map(|value| value.as_str())
             .collect::<Vec<_>>();
-        for permission in ["allow-resolve-asset-path", "allow-save-asset-as"] {
+        for permission in [
+            "allow-resolve-asset-path",
+            "allow-save-asset-as",
+            "allow-save-image-export",
+        ] {
             assert!(
                 permissions.contains(&permission),
                 "capabilities/default.json is missing `{permission}` — the command would \
@@ -1470,6 +1516,16 @@ mod tests {
         assert_eq!(sanitized_start_dir(Some(&padded)), Some(dir.clone()));
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn export_filename_cannot_escape_the_save_dialog_name() {
+        assert_eq!(sanitized_export_filename("shot.png"), "shot.png");
+        assert_eq!(
+            sanitized_export_filename("../../outside.png"),
+            "outside.png"
+        );
+        assert_eq!(sanitized_export_filename("   "), "SceneWorks-export.png");
     }
 
     /// sc-8929 (F-127): the settings writer is atomic — the final file holds exactly

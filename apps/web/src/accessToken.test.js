@@ -55,4 +55,25 @@ describe("accessToken (sc-8880)", () => {
     expect(readAccessToken()).toBe("");
     expect(() => clearAccessToken()).not.toThrow();
   });
+
+  it("degrades gracefully when individual storage operations throw", () => {
+    originalStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem() {
+          throw new Error("read denied");
+        },
+        setItem() {
+          throw new Error("quota exceeded");
+        },
+        removeItem() {
+          throw new Error("write denied");
+        },
+      },
+    });
+    expect(readAccessToken()).toBe("");
+    expect(() => storeAccessToken("x")).not.toThrow();
+    expect(() => clearAccessToken()).not.toThrow();
+  });
 });
