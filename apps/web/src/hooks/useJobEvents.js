@@ -103,9 +103,11 @@ export function useJobEvents({
       // the pre-job row — still offering "Convert to MLX" for an already-converted model, or
       // omitting the imported one entirely — until the app is restarted.
       //
-      // `model_import` cannot fire today: `create_model_import_job` 403s on every platform behind
-      // the sc-7081 kill-switch, so no such job is ever queued. It is wired here so 7080's P5
-      // re-enable flips the feature on complete, not one refresh short.
+      // `model_import` now fires (epic 14015): S0d (sc-14019) opened the backend kill-switch and
+      // gates `create_model_import_job` on a base-weight compatibility verdict, and S0e (sc-14020)
+      // exposed the point-at-file import affordance. A completed import upserts a
+      // `catalogScope:"user"` model into `user.models.jsonc`, so the refetch below is required for
+      // it to appear on the Models page without an app restart.
       if (
         job.status === "completed" &&
         (job.type === "model_download" || job.type === "model_convert" || job.type === "model_import")
