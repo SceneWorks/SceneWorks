@@ -72,11 +72,12 @@ test("the default Linux build produces only AppImage and deb bundles", () => {
   );
 });
 
-test("the deb declares its WebKitGTK, GTK, and H.264 playback dependencies", () => {
+test("the deb declares its Linux webview, playback, and video-finalization dependencies", () => {
   assert.deepEqual(linuxOverlay.bundle.linux.deb.depends, [
     "libwebkit2gtk-4.1-0",
     "libgtk-3-0",
     "gstreamer1.0-libav",
+    "ffmpeg",
   ]);
 });
 
@@ -105,7 +106,7 @@ test("Linux bundles carry the media framework needed for H.264 playback", () => 
     linuxOverlay.bundle.linux.appimage.bundleMediaFramework,
     true,
   );
-  assert.match(desktopReadme, /AppImage carries its GTK\/WebKitGTK runtime/);
+  assert.match(desktopReadme, /AppImage carries its GTK\/WebKitGTK (?:playback )?runtime/);
   assert.match(desktopReadme, /bundleMediaFramework: true/);
   assert.match(desktopReadme, /gstreamer1\.0-libav/);
   assert.match(desktopReadme, /sudo apt install gstreamer1\.0-libav/);
@@ -132,6 +133,18 @@ test("the WebKitGTK compatibility contract remains configured", () => {
       `backdrop-filter at byte ${declarationStart} needs a matching WebKit prefix`,
     );
   }
+});
+
+test("the documented Linux v1 support matrix stays explicit", () => {
+  assert.match(desktopReadme, /Ubuntu 22\.04 LTS or Ubuntu 24\.04 LTS/);
+  assert.match(desktopReadme, /Fedora and Arch Linux.*not release-gated/);
+  assert.match(desktopReadme, /WebKitGTK 4\.1/);
+  assert.match(desktopReadme, /NVIDIA\/CUDA only.*v1/);
+  assert.match(desktopReadme, /Ampere \(sm_80\) through Blackwell \(sm_120\)/);
+  assert.match(desktopReadme, /Turing \(sm_75\).*not built or validated/);
+  assert.match(desktopReadme, /AMD\/ROCm and CPU-only generation.*not a silent fallback/s);
+  assert.match(desktopReadme, /FFmpeg.*generated-video finalization/);
+  assert.match(desktopReadme, /sudo apt install ffmpeg/);
 });
 
 test("Linux release update behavior is explicit for each package format", () => {
