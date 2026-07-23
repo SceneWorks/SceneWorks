@@ -86,13 +86,69 @@ fn normalize_host(input: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// The token stored for `host`, from the OS keychain. `None` when unset/unreadable.
+/// Render credential-store failures for a Tauri command. Linux's Secret Service
+/// errors are otherwise low-level D-Bus messages that do not tell a user how to
+/// recover from a missing/locked daemon. Other platforms retain keyring's existing
+/// error text so Keychain/Credential Manager behavior is unchanged.
+fn credential_store_error_for_platform(
+    platform: &str,
+    action: &str,
+    error: keyring::Error,
+) -> String {
+    let backend_unavailable = matches!(
+        &error,
+        keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_)
+    );
+    let detail = error.to_string();
+    if platform == "linux" && backend_unavailable {
+        format!(
+            "Couldn't {action} the credential because Linux Secret Service is unavailable or \
+             locked. Start and unlock GNOME Keyring or KWallet, make sure a D-Bus user session \
+             is running, then try again. Details: {detail}"
+        )
+    } else {
+        detail.to_owned()
+    }
+}
+
+fn credential_store_error(action: &str, error: keyring::Error) -> String {
+    credential_store_error_for_platform(host_platform(), action, error)
+}
+
+/// The token stored for `host`, from the OS keychain. `Ok(None)` means it is not
+/// set; backend access failures stay distinct so command callers can surface them.
+fn read_credential_secret_result(host: &str) -> Result<Option<String>, String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, &cred_account(host))
+        .map_err(|error| credential_store_error("read", error))?;
+    match entry.get_password() {
+        Ok(token) => Ok({
+            let token = token.trim().to_owned();
+            (!token.is_empty()).then_some(token)
+        }),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(credential_store_error("read", error)),
+    }
+}
+
+/// Best-effort secret lookup for worker launch paths that historically return an
+/// `Option`. The Settings command uses [`read_credential_secret_result`] directly
+/// and therefore exposes backend failures to the user.
 fn read_credential_secret(host: &str) -> Option<String> {
-    keyring::Entry::new(KEYRING_SERVICE, &cred_account(host))
-        .ok()
-        .and_then(|entry| entry.get_password().ok())
-        .map(|token| token.trim().to_owned())
-        .filter(|token| !token.is_empty())
+    read_credential_secret_result(host).ok().flatten()
+}
+
+/// Linux command callers must distinguish a missing secret from an unavailable
+/// Secret Service daemon. macOS and Windows retain the existing listing behavior,
+/// where an unreadable native entry is reported as not present.
+fn credential_presence_for_platform(
+    platform: &str,
+    secret: Result<Option<String>, String>,
+) -> Result<bool, String> {
+    match secret {
+        Ok(secret) => Ok(secret.is_some()),
+        Err(error) if platform == "linux" => Err(error),
+        Err(_) => Ok(false),
+    }
 }
 
 /// Insert a credential's metadata, or update label/scheme in place if its host is
@@ -906,18 +962,21 @@ pub async fn save_asset_as(
 /// Enumerate stored credentials for the Settings screen: host, label, scheme, and
 /// whether the secret is present in the keychain. Never returns the token itself.
 #[tauri::command]
-pub fn list_credentials() -> Vec<CredentialStatus> {
+pub fn list_credentials() -> Result<Vec<CredentialStatus>, String> {
     load_settings()
         .credentials
         .into_iter()
         .map(|meta| {
-            let present = read_credential_secret(&meta.host).is_some();
-            CredentialStatus {
+            let present = credential_presence_for_platform(
+                host_platform(),
+                read_credential_secret_result(&meta.host),
+            )?;
+            Ok(CredentialStatus {
                 host: meta.host,
                 label: meta.label,
                 scheme: meta.scheme,
                 present,
-            }
+            })
         })
         .collect()
 }
@@ -941,9 +1000,9 @@ pub fn set_credential(
         return Err("A token is required; use Remove to clear a credential.".to_owned());
     }
     keyring::Entry::new(KEYRING_SERVICE, &cred_account(&host))
-        .map_err(|error| error.to_string())?
+        .map_err(|error| credential_store_error("save", error))?
         .set_password(token)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| credential_store_error("save", error))?;
     let label = {
         let trimmed = label.trim();
         if trimmed.is_empty() {
@@ -965,7 +1024,7 @@ pub fn set_credential(
     // Drop any cached secret for this host so the worker pulls the new token on its
     // next download without an app restart (sc-5891).
     crate::setup::invalidate_credential_cache(&app, &host);
-    Ok(list_credentials())
+    list_credentials()
 }
 
 /// Remove a host's credential from the keychain and drop its metadata.
@@ -975,7 +1034,7 @@ pub fn delete_credential(app: AppHandle, host: String) -> Result<Vec<CredentialS
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &cred_account(&host)) {
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => {}
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(credential_store_error("remove", error)),
         }
     }
     // Also clear the pre-migration HF account so removing HF can't be undone by a
@@ -991,7 +1050,7 @@ pub fn delete_credential(app: AppHandle, host: String) -> Result<Vec<CredentialS
     // Drop the cached secret so a revoked credential stops being served by the
     // credential socket without an app restart (sc-5891).
     crate::setup::invalidate_credential_cache(&app, &host);
-    Ok(list_credentials())
+    list_credentials()
 }
 
 #[tauri::command]
@@ -1338,6 +1397,102 @@ mod tests {
         let settings = AppSettings::default();
         assert!(!hf_credential_recorded(&settings));
         assert!(settings.credentials.is_empty());
+    }
+
+    #[test]
+    fn linux_credential_store_errors_are_actionable() {
+        let message = credential_store_error_for_platform(
+            "linux",
+            "save",
+            keyring::Error::PlatformFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "D-Bus is not available",
+            ))),
+        );
+        assert!(message.contains("Linux Secret Service is unavailable or locked"));
+        assert!(message.contains("Start and unlock GNOME Keyring or KWallet"));
+        assert!(message.contains("make sure a D-Bus user session is running"));
+        assert!(message.contains("D-Bus is not available"));
+    }
+
+    #[test]
+    fn non_linux_credential_store_errors_keep_existing_text() {
+        let error =
+            keyring::Error::PlatformFailure(Box::new(std::io::Error::other("native error")));
+        let detail = error.to_string();
+        assert_eq!(
+            credential_store_error_for_platform("macos", "save", error),
+            detail
+        );
+        let error =
+            keyring::Error::PlatformFailure(Box::new(std::io::Error::other("native error")));
+        assert_eq!(
+            credential_store_error_for_platform("windows", "save", error),
+            detail
+        );
+    }
+
+    #[test]
+    fn linux_validation_errors_keep_keyring_text() {
+        let error = keyring::Error::Invalid("username".to_owned(), "cannot be empty".to_owned());
+        let detail = error.to_string();
+        assert_eq!(
+            credential_store_error_for_platform("linux", "save", error),
+            detail
+        );
+    }
+
+    #[test]
+    fn linux_credential_listing_propagates_backend_failure() {
+        let detail = "Secret Service unavailable".to_owned();
+        assert_eq!(
+            credential_presence_for_platform("linux", Err(detail.clone())),
+            Err(detail)
+        );
+    }
+
+    #[test]
+    fn non_linux_credential_listing_keeps_missing_status_on_backend_failure() {
+        assert_eq!(
+            credential_presence_for_platform("macos", Err("native error".to_owned())),
+            Ok(false)
+        );
+        assert_eq!(
+            credential_presence_for_platform("windows", Err("native error".to_owned())),
+            Ok(false)
+        );
+    }
+
+    /// Opt-in native integration check for sc-10378. Run this on a Linux desktop
+    /// with an unlocked GNOME Keyring/KWallet session:
+    ///
+    /// `cargo test -p sceneworks-desktop linux_secret_service_round_trip -- --ignored`
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a running, unlocked Linux Secret Service daemon"]
+    fn linux_secret_service_round_trip() {
+        let account = format!(
+            "sc-10378-test:{}:{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        );
+        let token = "sc-10378-secret-service-round-trip";
+        let entry = keyring::Entry::new(KEYRING_SERVICE, &account).expect("create entry");
+        entry.set_password(token).expect("save to Secret Service");
+
+        // A newly constructed Entry mirrors a later app process resolving the same
+        // service/account pair instead of reading an in-memory value.
+        let reopened = keyring::Entry::new(KEYRING_SERVICE, &account).expect("reopen entry");
+        assert_eq!(
+            reopened.get_password().expect("read from Secret Service"),
+            token
+        );
+        reopened
+            .delete_credential()
+            .expect("remove integration-test entry");
     }
 
     /// epic 4484 story 1: LAN remote access is OFF by default with no port and no
