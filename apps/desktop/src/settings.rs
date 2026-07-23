@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
-use crate::setup::{app_support_dir, default_data_dir, shared_huggingface_home};
+use crate::setup::{default_data_dir, settings_file, shared_huggingface_home};
 
 const KEYRING_SERVICE: &str = "SceneWorks";
 /// Pre-migration account that held the single Hugging Face token. Retained only so
@@ -86,13 +86,79 @@ fn normalize_host(input: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// The token stored for `host`, from the OS keychain. `None` when unset/unreadable.
+/// Render credential-store failures for a Tauri command. Linux's Secret Service
+/// errors are otherwise low-level D-Bus messages that do not tell a user how to
+/// recover from a missing/locked daemon. Other platforms retain keyring's existing
+/// error text so Keychain/Credential Manager behavior is unchanged.
+fn credential_store_error_for_platform(
+    platform: &str,
+    action: &str,
+    error: keyring::Error,
+) -> String {
+    let backend_unavailable = matches!(
+        &error,
+        keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_)
+    );
+    let detail = error.to_string();
+    if platform == "linux" && backend_unavailable {
+        format!(
+            "Couldn't {action} the credential because Linux Secret Service is unavailable or \
+             locked. Start and unlock GNOME Keyring or KWallet, make sure a D-Bus user session \
+             is running, then try again. Details: {detail}"
+        )
+    } else {
+        detail.to_owned()
+    }
+}
+
+fn credential_store_error(action: &str, error: keyring::Error) -> String {
+    credential_store_error_for_platform(host_platform(), action, error)
+}
+
+/// The token stored for `host`, from the OS keychain. `Ok(None)` means it is not
+/// set; backend access failures stay distinct so command callers can surface them.
+fn read_credential_secret_result(host: &str) -> Result<Option<String>, String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, &cred_account(host))
+        .map_err(|error| credential_store_error("read", error))?;
+    match entry.get_password() {
+        Ok(token) => Ok({
+            let token = token.trim().to_owned();
+            (!token.is_empty()).then_some(token)
+        }),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(credential_store_error("read", error)),
+    }
+}
+
+/// Best-effort lookup retained for the macOS lazy credential socket, whose protocol
+/// represents unavailable secrets as absent. Eager Linux worker reads use the
+/// fallible helpers below instead.
+#[cfg(target_os = "macos")]
 fn read_credential_secret(host: &str) -> Option<String> {
-    keyring::Entry::new(KEYRING_SERVICE, &cred_account(host))
-        .ok()
-        .and_then(|entry| entry.get_password().ok())
-        .map(|token| token.trim().to_owned())
-        .filter(|token| !token.is_empty())
+    read_credential_secret_result(host).ok().flatten()
+}
+
+/// Linux must retain secure-storage read failures so startup can surface them.
+/// macOS/Windows keep their historical best-effort `Option` behavior.
+fn credential_read_for_platform<T: Default>(
+    platform: &str,
+    read: Result<T, String>,
+) -> Result<T, String> {
+    match read {
+        Err(error) if platform == "linux" => Err(error),
+        Err(_) => Ok(T::default()),
+        Ok(value) => Ok(value),
+    }
+}
+
+/// Linux command callers must distinguish a missing secret from an unavailable
+/// Secret Service daemon. macOS and Windows retain the existing listing behavior,
+/// where an unreadable native entry is reported as not present.
+fn credential_presence_for_platform(
+    platform: &str,
+    secret: Result<Option<String>, String>,
+) -> Result<bool, String> {
+    credential_read_for_platform(platform, secret).map(|secret| secret.is_some())
 }
 
 /// Insert a credential's metadata, or update label/scheme in place if its host is
@@ -147,7 +213,7 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
     /// Hugging Face cache home (`HF_HOME`) for HF-downloaded model weights;
-    /// `None` uses the shared per-user cache (`~/.cache/huggingface`).
+    /// `None` uses the platform shared cache (the XDG cache base on Linux).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hf_home: Option<String>,
     /// Set once the first-run splash storage step (sc-1473 Step 1) has run, so
@@ -190,14 +256,69 @@ pub struct AppSettings {
 }
 
 fn settings_path() -> PathBuf {
-    app_support_dir().join("settings.json")
+    settings_file()
+}
+
+/// Normalize an editable storage override. `linux_absolute` is explicit so the
+/// Linux rule is testable on Windows CI: Linux accepts only `/`-rooted paths,
+/// while macOS/Windows retain their existing relative-path behavior.
+pub(crate) fn storage_override_path(value: &str, linux_absolute: bool) -> Option<PathBuf> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    if linux_absolute && !path.as_os_str().to_string_lossy().starts_with('/') {
+        return None;
+    }
+    Some(path)
+}
+
+fn storage_override_input_for(
+    name: &str,
+    value: &str,
+    linux_absolute: bool,
+) -> Result<Option<String>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    storage_override_path(trimmed, linux_absolute)
+        .map(|_| Some(trimmed.to_owned()))
+        .ok_or_else(|| format!("{name} must be an absolute path on Linux"))
+}
+
+fn storage_override_input(name: &str, value: &str) -> Result<Option<String>, String> {
+    storage_override_input_for(name, value, cfg!(all(unix, not(target_os = "macos"))))
+}
+
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+fn sanitize_storage_overrides(settings: &mut AppSettings, linux_absolute: bool) {
+    let sanitize = |value: Option<String>| {
+        value.and_then(|value| {
+            storage_override_path(&value, linux_absolute)
+                .map(|path| path.to_string_lossy().into_owned())
+        })
+    };
+    settings.data_dir = sanitize(settings.data_dir.take());
+    settings.hf_home = sanitize(settings.hf_home.take());
 }
 
 pub fn load_settings() -> AppSettings {
-    std::fs::read_to_string(settings_path())
+    let settings = std::fs::read_to_string(settings_path())
         .ok()
         .and_then(|body| serde_json::from_str(&body).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut settings = settings;
+        sanitize_storage_overrides(&mut settings, true);
+        settings
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        settings
+    }
 }
 
 /// Write `body` to `path` atomically via temp-file + rename, so a crash / full disk
@@ -225,6 +346,20 @@ fn save_settings(settings: &AppSettings) -> Result<(), String> {
     atomic_write(&settings_path(), body.as_bytes())
 }
 
+fn read_hf_token_with(
+    settings: &AppSettings,
+    read_secret: impl FnOnce(&str) -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
+    if !hf_credential_recorded(settings) {
+        return Ok(None);
+    }
+    read_secret(HF_HOST)
+}
+
+fn read_hf_token_result() -> Result<Option<String>, String> {
+    read_hf_token_with(&load_settings(), read_credential_secret_result)
+}
+
 /// Hugging Face token for injecting `HF_TOKEN` into the worker, from the host-keyed
 /// `huggingface.co` credential. Gated on the non-secret `settings.json` metadata
 /// first: if no `huggingface.co` credential is recorded, returns `None` *without
@@ -236,12 +371,15 @@ fn save_settings(settings: &AppSettings) -> Result<(), String> {
 /// macOS no longer uses this eager push at all — the MLX worker pulls credentials
 /// lazily from the desktop credential socket (`cred_ipc`) — so it's compiled but
 /// uncalled there (the Python/candle spawn sites on other platforms still use it).
+#[cfg(target_os = "linux")]
+pub fn read_hf_token() -> Result<Option<String>, String> {
+    credential_read_for_platform(host_platform(), read_hf_token_result())
+}
+
+#[cfg(not(target_os = "linux"))]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn read_hf_token() -> Option<String> {
-    if !hf_credential_recorded(&load_settings()) {
-        return None;
-    }
-    read_credential_secret(HF_HOST)
+    credential_read_for_platform(host_platform(), read_hf_token_result()).unwrap_or_default()
 }
 
 /// The non-secret hosts that have a credential recorded, handed to the MLX worker so
@@ -274,18 +412,14 @@ pub fn resolve_credential_secret(host: &str) -> Option<(String, CredentialScheme
     Some((token, meta.scheme))
 }
 
-/// All stored credentials serialized as the worker's `SCENEWORKS_CREDENTIALS` JSON
-/// map (`{ host: { token, scheme } }`), reading each secret from the keychain.
-/// `None` when no credentials are stored. Injected into the worker at spawn.
-///
-/// macOS uses the lazy credential socket (`cred_ipc`) instead, so this is compiled
-/// but uncalled there (the Python/candle spawn sites on other platforms use it).
-#[cfg_attr(target_os = "macos", allow(dead_code))]
-pub fn credentials_env_json() -> Option<String> {
-    let settings = load_settings();
+fn credentials_env_json_with(
+    platform: &str,
+    settings: &AppSettings,
+    read_secret: impl Fn(&str) -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
     let mut map = serde_json::Map::new();
     for meta in &settings.credentials {
-        if let Some(token) = read_credential_secret(&meta.host) {
+        if let Some(token) = credential_read_for_platform(platform, read_secret(&meta.host))? {
             let scheme = match meta.scheme {
                 CredentialScheme::Bearer => "bearer",
                 CredentialScheme::Query => "query",
@@ -297,10 +431,68 @@ pub fn credentials_env_json() -> Option<String> {
         }
     }
     if map.is_empty() {
-        None
+        Ok(None)
     } else {
-        serde_json::to_string(&serde_json::Value::Object(map)).ok()
+        serde_json::to_string(&serde_json::Value::Object(map))
+            .map(Some)
+            .map_err(|error| error.to_string())
     }
+}
+
+fn credentials_env_json_result() -> Result<Option<String>, String> {
+    credentials_env_json_with(
+        host_platform(),
+        &load_settings(),
+        read_credential_secret_result,
+    )
+}
+
+/// All stored credentials serialized as the worker's `SCENEWORKS_CREDENTIALS` JSON
+/// map (`{ host: { token, scheme } }`), reading each secret from the keychain.
+/// `None` when no credentials are stored. Injected into the worker at spawn.
+///
+/// macOS uses the lazy credential socket (`cred_ipc`) instead, so this is compiled
+/// but uncalled there (the Python/candle spawn sites on other platforms use it).
+#[cfg(target_os = "linux")]
+pub fn credentials_env_json() -> Result<Option<String>, String> {
+    credential_read_for_platform(host_platform(), credentials_env_json_result())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn credentials_env_json() -> Option<String> {
+    credential_read_for_platform(host_platform(), credentials_env_json_result()).unwrap_or_default()
+}
+
+fn worker_credential_preflight_with(
+    platform: &str,
+    read_hf: impl FnOnce() -> Result<Option<String>, String>,
+    read_all: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<(), String> {
+    if platform != "linux" {
+        return Ok(());
+    }
+    let _ = credential_read_for_platform(platform, read_hf())?;
+    let _ = credential_read_for_platform(platform, read_all())?;
+    Ok(())
+}
+
+/// Fail Linux startup before spawning a worker with silently missing credential
+/// environment. The setup screen renders this error and offers Retry after the user
+/// starts/unlocks Secret Service. This is a no-op on macOS/Windows, preserving their
+/// existing lazy/best-effort behavior without touching the native keychain.
+#[cfg(target_os = "linux")]
+pub fn validate_worker_credentials() -> Result<(), String> {
+    worker_credential_preflight_with(host_platform(), read_hf_token, credentials_env_json)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn validate_worker_credentials() -> Result<(), String> {
+    worker_credential_preflight_with(
+        host_platform(),
+        || Ok(read_hf_token()),
+        || Ok(credentials_env_json()),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -674,18 +866,8 @@ pub fn get_storage_setup() -> StorageSetup {
 #[tauri::command]
 pub fn save_storage_setup(data_dir: String, hf_home: String) -> Result<AppSettings, String> {
     let mut settings = load_settings();
-    let data_trimmed = data_dir.trim();
-    settings.data_dir = if data_trimmed.is_empty() {
-        None
-    } else {
-        Some(data_trimmed.to_owned())
-    };
-    let hf_trimmed = hf_home.trim();
-    settings.hf_home = if hf_trimmed.is_empty() {
-        None
-    } else {
-        Some(hf_trimmed.to_owned())
-    };
+    settings.data_dir = storage_override_input("SceneWorks data directory", &data_dir)?;
+    settings.hf_home = storage_override_input("Hugging Face cache directory", &hf_home)?;
     settings.storage_configured = true;
     save_settings(&settings)?;
     Ok(settings)
@@ -725,12 +907,7 @@ pub async fn choose_folder(app: AppHandle) -> Option<String> {
 #[tauri::command]
 pub fn set_data_dir(path: String) -> Result<AppSettings, String> {
     let mut settings = load_settings();
-    let trimmed = path.trim();
-    settings.data_dir = if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    };
+    settings.data_dir = storage_override_input("SceneWorks data directory", &path)?;
     save_settings(&settings)?;
     Ok(settings)
 }
@@ -906,18 +1083,21 @@ pub async fn save_asset_as(
 /// Enumerate stored credentials for the Settings screen: host, label, scheme, and
 /// whether the secret is present in the keychain. Never returns the token itself.
 #[tauri::command]
-pub fn list_credentials() -> Vec<CredentialStatus> {
+pub fn list_credentials() -> Result<Vec<CredentialStatus>, String> {
     load_settings()
         .credentials
         .into_iter()
         .map(|meta| {
-            let present = read_credential_secret(&meta.host).is_some();
-            CredentialStatus {
+            let present = credential_presence_for_platform(
+                host_platform(),
+                read_credential_secret_result(&meta.host),
+            )?;
+            Ok(CredentialStatus {
                 host: meta.host,
                 label: meta.label,
                 scheme: meta.scheme,
                 present,
-            }
+            })
         })
         .collect()
 }
@@ -941,9 +1121,9 @@ pub fn set_credential(
         return Err("A token is required; use Remove to clear a credential.".to_owned());
     }
     keyring::Entry::new(KEYRING_SERVICE, &cred_account(&host))
-        .map_err(|error| error.to_string())?
+        .map_err(|error| credential_store_error("save", error))?
         .set_password(token)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| credential_store_error("save", error))?;
     let label = {
         let trimmed = label.trim();
         if trimmed.is_empty() {
@@ -965,7 +1145,7 @@ pub fn set_credential(
     // Drop any cached secret for this host so the worker pulls the new token on its
     // next download without an app restart (sc-5891).
     crate::setup::invalidate_credential_cache(&app, &host);
-    Ok(list_credentials())
+    list_credentials()
 }
 
 /// Remove a host's credential from the keychain and drop its metadata.
@@ -975,7 +1155,7 @@ pub fn delete_credential(app: AppHandle, host: String) -> Result<Vec<CredentialS
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &cred_account(&host)) {
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => {}
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(credential_store_error("remove", error)),
         }
     }
     // Also clear the pre-migration HF account so removing HF can't be undone by a
@@ -991,7 +1171,7 @@ pub fn delete_credential(app: AppHandle, host: String) -> Result<Vec<CredentialS
     // Drop the cached secret so a revoked credential stops being served by the
     // credential socket without an app restart (sc-5891).
     crate::setup::invalidate_credential_cache(&app, &host);
-    Ok(list_credentials())
+    list_credentials()
 }
 
 #[tauri::command]
@@ -1070,6 +1250,69 @@ pub fn get_gpu_info() -> GpuInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_storage_inputs_require_absolute_paths() {
+        assert_eq!(
+            storage_override_input_for("data directory", " /srv/sceneworks ", true)
+                .expect("absolute Linux path"),
+            Some("/srv/sceneworks".to_owned())
+        );
+        assert_eq!(
+            storage_override_input_for("data directory", "   ", true)
+                .expect("empty clears override"),
+            None
+        );
+        let data_error = storage_override_input_for("data directory", "relative/data", true)
+            .expect_err("relative Linux data directory must be rejected");
+        assert!(data_error.contains("absolute path on Linux"));
+        let hf_error = storage_override_input_for("HF cache", "./huggingface", true)
+            .expect_err("relative Linux HF cache must be rejected");
+        assert!(hf_error.contains("absolute path on Linux"));
+    }
+
+    #[test]
+    fn non_linux_storage_inputs_preserve_relative_path_behavior() {
+        assert_eq!(
+            storage_override_input_for("data directory", " relative/data ", false)
+                .expect("non-Linux relative path remains supported"),
+            Some("relative/data".to_owned())
+        );
+        assert_eq!(
+            storage_override_path("./huggingface", false),
+            Some(PathBuf::from("./huggingface"))
+        );
+    }
+
+    #[test]
+    fn legacy_linux_settings_drop_relative_storage_overrides() {
+        let mut settings = AppSettings {
+            data_dir: Some("relative/data".to_owned()),
+            hf_home: Some("./huggingface".to_owned()),
+            ..AppSettings::default()
+        };
+        sanitize_storage_overrides(&mut settings, true);
+        assert_eq!(settings.data_dir, None);
+        assert_eq!(settings.hf_home, None);
+
+        let mut mixed = AppSettings {
+            data_dir: Some(" /srv/sceneworks ".to_owned()),
+            hf_home: Some("relative-hf".to_owned()),
+            ..AppSettings::default()
+        };
+        sanitize_storage_overrides(&mut mixed, true);
+        assert_eq!(mixed.data_dir.as_deref(), Some("/srv/sceneworks"));
+        assert_eq!(mixed.hf_home, None);
+
+        let mut non_linux = AppSettings {
+            data_dir: Some(" relative/data ".to_owned()),
+            hf_home: Some(" ./huggingface ".to_owned()),
+            ..AppSettings::default()
+        };
+        sanitize_storage_overrides(&mut non_linux, false);
+        assert_eq!(non_linux.data_dir.as_deref(), Some("relative/data"));
+        assert_eq!(non_linux.hf_home.as_deref(), Some("./huggingface"));
+    }
 
     /// A unique scratch directory under the system temp dir, so the path-resolution
     /// tests below don't need a `tempfile` dependency. Cleaned up by the caller.
@@ -1330,14 +1573,243 @@ mod tests {
     /// metadata before any `keyring::Entry`/`get_password()` is constructed, so a
     /// no-credential install never touches the OS keychain. `hf_credential_recorded`
     /// is that gate for `read_hf_token`; an empty `credentials` list is likewise the
-    /// gate for `credentials_env_json` (its loop body — the only `read_credential_secret`
-    /// site — never runs). This headless test asserts the gate predicate without
+    /// gate for `credentials_env_json` (its fallible resolver loop never runs). This
+    /// headless test asserts the gate predicate without
     /// touching the keychain (which `read_hf_token` itself would, once past the gate).
     #[test]
     fn no_recorded_credential_means_no_keychain_gate() {
         let settings = AppSettings::default();
         assert!(!hf_credential_recorded(&settings));
         assert!(settings.credentials.is_empty());
+        assert_eq!(
+            read_hf_token_with(&settings, |_| panic!("must not touch keyring")),
+            Ok(None)
+        );
+        for platform in ["linux", "macos", "windows"] {
+            assert_eq!(
+                credentials_env_json_with(platform, &settings, |_| {
+                    panic!("must not touch keyring")
+                }),
+                Ok(None)
+            );
+        }
+    }
+
+    #[test]
+    fn hf_worker_read_preserves_secret_service_failure() {
+        let settings = AppSettings {
+            credentials: vec![CredentialMeta {
+                host: HF_HOST.to_owned(),
+                label: "Hugging Face".to_owned(),
+                scheme: CredentialScheme::Bearer,
+            }],
+            ..AppSettings::default()
+        };
+        let detail = "Secret Service unavailable".to_owned();
+        assert_eq!(
+            read_hf_token_with(&settings, |_| Err(detail.clone())),
+            Err(detail)
+        );
+    }
+
+    #[test]
+    fn generic_worker_read_preserves_secret_service_failure() {
+        let settings = AppSettings {
+            credentials: vec![
+                CredentialMeta {
+                    host: "broken.example".to_owned(),
+                    label: "Broken".to_owned(),
+                    scheme: CredentialScheme::Bearer,
+                },
+                CredentialMeta {
+                    host: "later.example".to_owned(),
+                    label: "Later".to_owned(),
+                    scheme: CredentialScheme::Query,
+                },
+            ],
+            ..AppSettings::default()
+        };
+        let detail = "Secret Service locked".to_owned();
+        assert_eq!(
+            credentials_env_json_with("linux", &settings, |host| {
+                if host == "broken.example" {
+                    Err(detail.clone())
+                } else {
+                    panic!("Linux must fail fast before reading later credentials")
+                }
+            }),
+            Err(detail)
+        );
+    }
+
+    #[test]
+    fn non_linux_generic_worker_read_skips_only_unreadable_entry() {
+        let settings = AppSettings {
+            credentials: vec![
+                CredentialMeta {
+                    host: "broken.example".to_owned(),
+                    label: "Broken".to_owned(),
+                    scheme: CredentialScheme::Bearer,
+                },
+                CredentialMeta {
+                    host: "readable.example".to_owned(),
+                    label: "Readable".to_owned(),
+                    scheme: CredentialScheme::Query,
+                },
+            ],
+            ..AppSettings::default()
+        };
+
+        for platform in ["macos", "windows"] {
+            let json = credentials_env_json_with(platform, &settings, |host| match host {
+                "broken.example" => Err("native credential read failed".to_owned()),
+                "readable.example" => Ok(Some("later-token".to_owned())),
+                other => panic!("unexpected host: {other}"),
+            })
+            .expect("non-Linux credential assembly")
+            .expect("readable credential remains");
+            let value: serde_json::Value = serde_json::from_str(&json).expect("credential JSON");
+
+            assert!(value.get("broken.example").is_none());
+            assert_eq!(
+                value["readable.example"]["token"].as_str(),
+                Some("later-token")
+            );
+            assert_eq!(value["readable.example"]["scheme"].as_str(), Some("query"));
+        }
+    }
+
+    #[test]
+    fn linux_worker_preflight_surfaces_hf_and_generic_read_failures() {
+        let hf_detail = "HF Secret Service unavailable".to_owned();
+        assert_eq!(
+            worker_credential_preflight_with(
+                "linux",
+                || Err(hf_detail.clone()),
+                || panic!("generic read must stop after HF failure")
+            ),
+            Err(hf_detail)
+        );
+
+        let generic_detail = "generic Secret Service unavailable".to_owned();
+        assert_eq!(
+            worker_credential_preflight_with(
+                "linux",
+                || Ok(Some("hf-token".to_owned())),
+                || Err(generic_detail.clone())
+            ),
+            Err(generic_detail)
+        );
+    }
+
+    #[test]
+    fn non_linux_worker_preflight_preserves_no_touch_behavior() {
+        for platform in ["macos", "windows"] {
+            assert_eq!(
+                worker_credential_preflight_with(
+                    platform,
+                    || panic!("must not eagerly read native keychain"),
+                    || panic!("must not eagerly read native keychain")
+                ),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn linux_credential_store_errors_are_actionable() {
+        let message = credential_store_error_for_platform(
+            "linux",
+            "save",
+            keyring::Error::PlatformFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "D-Bus is not available",
+            ))),
+        );
+        assert!(message.contains("Linux Secret Service is unavailable or locked"));
+        assert!(message.contains("Start and unlock GNOME Keyring or KWallet"));
+        assert!(message.contains("make sure a D-Bus user session is running"));
+        assert!(message.contains("D-Bus is not available"));
+    }
+
+    #[test]
+    fn non_linux_credential_store_errors_keep_existing_text() {
+        let error =
+            keyring::Error::PlatformFailure(Box::new(std::io::Error::other("native error")));
+        let detail = error.to_string();
+        assert_eq!(
+            credential_store_error_for_platform("macos", "save", error),
+            detail
+        );
+        let error =
+            keyring::Error::PlatformFailure(Box::new(std::io::Error::other("native error")));
+        assert_eq!(
+            credential_store_error_for_platform("windows", "save", error),
+            detail
+        );
+    }
+
+    #[test]
+    fn linux_validation_errors_keep_keyring_text() {
+        let error = keyring::Error::Invalid("username".to_owned(), "cannot be empty".to_owned());
+        let detail = error.to_string();
+        assert_eq!(
+            credential_store_error_for_platform("linux", "save", error),
+            detail
+        );
+    }
+
+    #[test]
+    fn linux_credential_listing_propagates_backend_failure() {
+        let detail = "Secret Service unavailable".to_owned();
+        assert_eq!(
+            credential_presence_for_platform("linux", Err(detail.clone())),
+            Err(detail)
+        );
+    }
+
+    #[test]
+    fn non_linux_credential_listing_keeps_missing_status_on_backend_failure() {
+        assert_eq!(
+            credential_presence_for_platform("macos", Err("native error".to_owned())),
+            Ok(false)
+        );
+        assert_eq!(
+            credential_presence_for_platform("windows", Err("native error".to_owned())),
+            Ok(false)
+        );
+    }
+
+    /// Opt-in native integration check for sc-10378. Run this on a Linux desktop
+    /// with an unlocked GNOME Keyring/KWallet session:
+    ///
+    /// `cargo test -p sceneworks-desktop linux_secret_service_round_trip -- --ignored`
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a running, unlocked Linux Secret Service daemon"]
+    fn linux_secret_service_round_trip() {
+        let account = format!(
+            "sc-10378-test:{}:{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        );
+        let token = "sc-10378-secret-service-round-trip";
+        let entry = keyring::Entry::new(KEYRING_SERVICE, &account).expect("create entry");
+        entry.set_password(token).expect("save to Secret Service");
+
+        // A newly constructed Entry mirrors a later app process resolving the same
+        // service/account pair instead of reading an in-memory value.
+        let reopened = keyring::Entry::new(KEYRING_SERVICE, &account).expect("reopen entry");
+        assert_eq!(
+            reopened.get_password().expect("read from Secret Service"),
+            token
+        );
+        reopened
+            .delete_credential()
+            .expect("remove integration-test entry");
     }
 
     /// epic 4484 story 1: LAN remote access is OFF by default with no port and no
