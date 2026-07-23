@@ -159,32 +159,82 @@ impl Drop for SupervisorLease {
 /// The worker-facing URL for the API's currently-discovered port, re-read from
 /// shared `Managed` state (never a value captured at supervisor spawn), or
 /// `None` if no port has been discovered yet (sc-13605). The supervisor loops
-/// call this every iteration so that after an API-crash → Retry the respawned
-/// worker targets the NEW port instead of a stale captured URL.
+/// derive their per-attempt target from this every iteration so that after an
+/// API-crash → Retry the respawned worker targets the NEW port, not a stale one.
 fn current_api_url(managed: &Managed) -> Option<String> {
     let port = *managed.api_port.lock().expect("api port lock");
     port.map(|port| format!("http://127.0.0.1:{port}"))
 }
 
-/// Block until the API's current port is known, returning its worker URL, or
-/// `None` if a shutdown latches while waiting (so the supervisor exits). Called
-/// at the top of each supervisor respawn iteration: on first start the port is
-/// already set, and after an API crash it parks here until the Retry's fresh
-/// `spawn_api` publishes the new port — at which point the worker is respawned
-/// against it (sc-13605).
+/// What a supervisor iteration does next, resolved *purely* from the live
+/// shutdown flag + currently-discovered API url — both re-read every iteration,
+/// never captured at spawn (sc-13605). Factored out (with
+/// [`plan_supervisor_action`] / [`resolve_supervisor_action`]) so the
+/// per-attempt port re-read is unit-testable and identical across the two
+/// `supervise_*` loops.
+#[derive(Debug, PartialEq, Eq)]
+enum SupervisorAction {
+    /// A shutdown has latched — exit the loop (the lease `Drop` clears liveness).
+    Exit,
+    /// No API port is currently published (post-crash, pre-Retry) — park briefly
+    /// and re-decide, so the worker is (re)spawned only against a live port.
+    WaitForPort,
+    /// (Re)spawn the worker against this url.
+    Spawn(String),
+}
+
+/// Pure core of the per-iteration decision: given the freshly-read shutdown flag
+/// and current API url, what should the supervisor do? (sc-13605)
+fn plan_supervisor_action(
+    shutting_down: bool,
+    current_api_url: Option<String>,
+) -> SupervisorAction {
+    match (shutting_down, current_api_url) {
+        (true, _) => SupervisorAction::Exit,
+        (false, None) => SupervisorAction::WaitForPort,
+        (false, Some(url)) => SupervisorAction::Spawn(url),
+    }
+}
+
+/// Re-read the live supervisor inputs from `Managed` and resolve the next action.
+/// The single seam both `supervise_*` loops go through every iteration (top of
+/// loop AND the post-spawn recheck), so the port is never captured — a
+/// regression that memoized it here would flip the `supervisor_tests`
+/// re-read assertions (sc-13605).
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn wait_for_api_url(app: &AppHandle) -> Option<String> {
-    loop {
-        {
-            let managed = app.state::<Managed>();
-            if managed.shutting_down.load(Ordering::SeqCst) {
-                return None;
-            }
-            if let Some(url) = current_api_url(&managed) {
-                return Some(url);
-            }
-        }
-        std::thread::sleep(Duration::from_millis(300));
+fn resolve_supervisor_action(managed: &Managed) -> SupervisorAction {
+    plan_supervisor_action(
+        managed.shutting_down.load(Ordering::SeqCst),
+        current_api_url(managed),
+    )
+}
+
+/// Verdict for the child a supervisor just spawned + stored, from re-reading the
+/// current action AFTER the store (sc-13605 correlated-death guard). Closes the
+/// window where an API crash clears the port and `handle_api_exit`'s
+/// `restart_gpu_worker` kill fires *before* the child was stored (so it misses
+/// it): if the current target no longer matches what we launched against, the
+/// child is stale and must be killed — then the loop exits (shutdown) or retries
+/// (re-reads the fresh port), so the sole supervisor never blocks on a zombie
+/// pointed at the dead port.
+#[derive(Debug, PartialEq, Eq)]
+enum SpawnVerdict {
+    /// Target still current — keep the child and block on its event stream.
+    Keep,
+    /// Shutdown latched meanwhile — kill the child and exit the loop.
+    KillAndExit,
+    /// Port changed/cleared meanwhile — kill the child and retry the loop.
+    KillAndRetry,
+}
+
+/// Decide a just-stored child's fate from the target it was launched against and
+/// the action re-read after storing it (sc-13605).
+fn verify_spawned_target(spawned_url: &str, recheck: &SupervisorAction) -> SpawnVerdict {
+    match recheck {
+        SupervisorAction::Spawn(url) if url.as_str() == spawned_url => SpawnVerdict::Keep,
+        SupervisorAction::Exit => SpawnVerdict::KillAndExit,
+        // WaitForPort (port cleared) or Spawn(other) (port changed) — stale.
+        _ => SpawnVerdict::KillAndRetry,
     }
 }
 
@@ -838,10 +888,12 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
 /// dead port forever (`run_worker_loop`'s generic-error arm). Left alone, the single
 /// supervisor stays blocked on that zombie's event stream and never respawns it, so after
 /// a Retry the worker would still point at the dead original port. Killing the child here
-/// (after clearing the port) breaks the supervisor's inner loop; it then parks in
-/// `wait_for_api_url` until the Retry's fresh `spawn_api` publishes the NEW port and
-/// respawns the worker against it. Ordering matters: clear `api_port` FIRST so the
-/// supervisor can never re-read the stale port between the kill and the respawn.
+/// (after clearing the port) breaks the supervisor's inner loop; its next
+/// `resolve_supervisor_action` reads `WaitForPort` and parks until the Retry's fresh
+/// `spawn_api` publishes the NEW port, then respawns the worker against it. Ordering
+/// matters: clear `api_port` FIRST so the supervisor can never re-read the stale port
+/// between the kill and the respawn. (The supervisor's own post-store recheck closes the
+/// residual window where this kill races ahead of the child being stored.)
 fn handle_api_exit(app: &AppHandle) {
     if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
         return;
@@ -1064,15 +1116,18 @@ fn supervise_mlx_worker(app: AppHandle) {
         );
         let mut backoff = 1u64;
         loop {
-            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
-                return;
-            }
-            // sc-13605: re-read the CURRENT API url every iteration (never a URL
-            // captured at spawn) so after an API-crash → Retry the worker points
-            // at the NEW port. Parks here until the fresh spawn publishes a port;
-            // returns only if a shutdown latches while waiting.
-            let Some(api_url) = wait_for_api_url(&app) else {
-                return;
+            // sc-13605: re-read shutdown + the CURRENT API url every iteration
+            // (never a URL captured at spawn) through the shared
+            // `resolve_supervisor_action` seam, so after an API-crash → Retry the
+            // worker points at the NEW port. Park (not exit) while no port is
+            // published; exit only on shutdown.
+            let api_url = match resolve_supervisor_action(&app.state::<Managed>()) {
+                SupervisorAction::Exit => return,
+                SupervisorAction::WaitForPort => {
+                    std::thread::sleep(Duration::from_millis(300));
+                    continue;
+                }
+                SupervisorAction::Spawn(url) => url,
             };
             let sidecar = match app.shell().sidecar("sceneworks-api") {
                 Ok(command) => command,
@@ -1175,6 +1230,36 @@ fn supervise_mlx_worker(app: AppHandle) {
                 .lock()
                 .expect("mlx worker lock")
                 .replace(child);
+            // sc-13605 correlated-death guard: re-read the target AFTER storing the
+            // child. If the API port changed/cleared in the window between the read
+            // above and this store, `handle_api_exit`'s `restart_gpu_worker` kill may
+            // have run while the slot was still empty and missed this child — so the
+            // worker would sit pointed at a dead port and the supervisor would block
+            // on its (never-terminating) event stream. Kill+retry (or exit) instead.
+            let verdict = verify_spawned_target(
+                &api_url,
+                &resolve_supervisor_action(&app.state::<Managed>()),
+            );
+            if !matches!(verdict, SpawnVerdict::Keep) {
+                if let Some(child) = app
+                    .state::<Managed>()
+                    .mlx_worker
+                    .lock()
+                    .expect("mlx worker lock")
+                    .take()
+                {
+                    let _ = child.kill();
+                }
+                record_mlx_worker_pid(&app, None);
+                if matches!(verdict, SpawnVerdict::KillAndExit) {
+                    return;
+                }
+                append_log(
+                    &log_path,
+                    "[desktop] mlx worker target port changed before start; respawning\n",
+                );
+                continue;
+            }
             let started = Instant::now();
             loop {
                 match tauri::async_runtime::block_on(events.recv()) {
@@ -1266,15 +1351,18 @@ fn supervise_candle_worker(app: AppHandle) {
         );
         let mut backoff = 1u64;
         loop {
-            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
-                return;
-            }
-            // sc-13605: re-read the CURRENT API url every iteration (never a URL
-            // captured at spawn) so after an API-crash → Retry the worker points
-            // at the NEW port. Parks here until the fresh spawn publishes a port;
-            // returns only if a shutdown latches while waiting.
-            let Some(api_url) = wait_for_api_url(&app) else {
-                return;
+            // sc-13605: re-read shutdown + the CURRENT API url every iteration
+            // (never a URL captured at spawn) through the shared
+            // `resolve_supervisor_action` seam, so after an API-crash → Retry the
+            // worker points at the NEW port. Park (not exit) while no port is
+            // published; exit only on shutdown.
+            let api_url = match resolve_supervisor_action(&app.state::<Managed>()) {
+                SupervisorAction::Exit => return,
+                SupervisorAction::WaitForPort => {
+                    std::thread::sleep(Duration::from_millis(300));
+                    continue;
+                }
+                SupervisorAction::Spawn(url) => url,
             };
             let sidecar = match app.shell().sidecar("sceneworks-api") {
                 Ok(command) => command,
@@ -1381,6 +1469,38 @@ fn supervise_candle_worker(app: AppHandle) {
                 .lock()
                 .expect("candle worker lock")
                 .replace(child);
+            // sc-13605 correlated-death guard: re-read the target AFTER storing the
+            // child. If the API port changed/cleared in the window between the read
+            // above and this store, `handle_api_exit`'s `restart_gpu_worker` kill may
+            // have run while the slot was still empty and missed this child — so the
+            // worker would sit pointed at a dead port and the supervisor would block
+            // on its (never-terminating) event stream. Kill+retry (or exit) instead.
+            // Tree-kill by PID (as `restart_gpu_worker` does): this is the candle
+            // `auto` supervisor, whose per-GPU children would otherwise be orphaned.
+            let verdict = verify_spawned_target(
+                &api_url,
+                &resolve_supervisor_action(&app.state::<Managed>()),
+            );
+            if !matches!(verdict, SpawnVerdict::Keep) {
+                if let Some(child) = app
+                    .state::<Managed>()
+                    .candle_worker
+                    .lock()
+                    .expect("candle worker lock")
+                    .take()
+                {
+                    kill_pid(child.pid());
+                }
+                record_candle_worker_pid(&app, None);
+                if matches!(verdict, SpawnVerdict::KillAndExit) {
+                    return;
+                }
+                append_log(
+                    &log_path,
+                    "[desktop] candle worker target port changed before start; respawning\n",
+                );
+                continue;
+            }
             let started = Instant::now();
             loop {
                 match tauri::async_runtime::block_on(events.recv()) {
@@ -2268,12 +2388,17 @@ mod bind_tests {
 /// `gate_window`. The old `gate_window` spawned a worker supervisor thread
 /// unconditionally, so every crash → Retry cycle stacked another supervisor on
 /// the single worker slot; the stale ones kept respawning a worker pointed at
-/// the dead port captured at their spawn. These tests pin the two halves of the
-/// fix — the sole-supervisor guard and the per-iteration port re-read — as pure
-/// decision logic, without spawning real threads.
+/// the dead port captured at their spawn. These tests pin the halves of the fix
+/// — the sole-supervisor guard, the per-iteration port re-read, and the
+/// post-spawn correlated-death recheck — as pure decision logic, without
+/// spawning real threads.
 #[cfg(test)]
 mod supervisor_tests {
-    use super::{current_api_url, Managed, SupervisorSlot};
+    use super::{
+        current_api_url, resolve_supervisor_action, verify_spawned_target, Managed, SpawnVerdict,
+        SupervisorAction, SupervisorSlot,
+    };
+    use std::sync::atomic::Ordering;
 
     /// Discriminating test: simulate the API-crash → Retry cycle N times and
     /// assert only ONE supervisor ever starts. Each `gate_window` attempts to
@@ -2332,7 +2457,7 @@ mod supervisor_tests {
     #[test]
     fn worker_url_follows_the_current_api_port_after_a_retry() {
         let managed = Managed::default();
-        // No port discovered yet → no URL (the supervisor parks in wait_for_api_url).
+        // No port discovered yet → no URL (the supervisor parks).
         assert_eq!(current_api_url(&managed), None);
         // Initial API bind publishes a port.
         *managed.api_port.lock().expect("api port lock") = Some(50111);
@@ -2349,6 +2474,100 @@ mod supervisor_tests {
         assert_eq!(
             current_api_url(&managed).as_deref(),
             Some("http://127.0.0.1:50222")
+        );
+    }
+
+    /// Loop-level port re-read (F-036 issue 2): the supervisor's per-attempt
+    /// target comes from `resolve_supervisor_action` — the *same* seam the loop
+    /// body calls every iteration (top of loop AND the post-spawn recheck) — which
+    /// re-reads the live `Managed.api_port`. Drive successive attempts across a
+    /// port change and assert the resolved `Spawn` target follows the port. A loop
+    /// that captured the port (or a `resolve_supervisor_action` that memoized it)
+    /// would resolve the OLD port on the second attempt and fail here — the
+    /// captured-vs-reread regression this discriminates.
+    #[test]
+    fn supervisor_resolves_the_live_port_on_each_attempt() {
+        let managed = Managed::default();
+        // Attempt with no port yet → park, never spawn (post-crash, pre-Retry).
+        assert_eq!(
+            resolve_supervisor_action(&managed),
+            SupervisorAction::WaitForPort
+        );
+        // Attempt 1: API bound at port A.
+        *managed.api_port.lock().expect("api port lock") = Some(50111);
+        assert_eq!(
+            resolve_supervisor_action(&managed),
+            SupervisorAction::Spawn("http://127.0.0.1:50111".to_owned())
+        );
+        // API crash + Retry rebinds a NEW port B; the very next attempt follows it.
+        *managed.api_port.lock().expect("api port lock") = Some(50222);
+        assert_eq!(
+            resolve_supervisor_action(&managed),
+            SupervisorAction::Spawn("http://127.0.0.1:50222".to_owned())
+        );
+        // A latched shutdown wins over any port → Exit.
+        managed.shutting_down.store(true, Ordering::SeqCst);
+        assert_eq!(resolve_supervisor_action(&managed), SupervisorAction::Exit);
+    }
+
+    /// Correlated-death verdict (F-036 issue 1): a worker just stored against
+    /// port A must be kept only while A is still current; if the target moved to
+    /// B or cleared in the pre-store window (where `handle_api_exit`'s
+    /// `restart_gpu_worker` kill can miss the not-yet-stored child) it is killed
+    /// and the loop retries, and if a shutdown latched it is killed and the loop
+    /// exits.
+    #[test]
+    fn post_store_recheck_classifies_the_spawned_target() {
+        let a = "http://127.0.0.1:50111";
+        let b = "http://127.0.0.1:50222";
+        // Target unchanged → keep and block on the worker's events.
+        assert_eq!(
+            verify_spawned_target(a, &SupervisorAction::Spawn(a.to_owned())),
+            SpawnVerdict::Keep
+        );
+        // Port changed under us → kill + retry (the residual race this closes).
+        assert_eq!(
+            verify_spawned_target(a, &SupervisorAction::Spawn(b.to_owned())),
+            SpawnVerdict::KillAndRetry
+        );
+        // Port cleared (crash, Retry not yet) → kill + retry, then the loop parks.
+        assert_eq!(
+            verify_spawned_target(a, &SupervisorAction::WaitForPort),
+            SpawnVerdict::KillAndRetry
+        );
+        // Shutdown latched meanwhile → kill + exit.
+        assert_eq!(
+            verify_spawned_target(a, &SupervisorAction::Exit),
+            SpawnVerdict::KillAndExit
+        );
+    }
+
+    /// End-to-end (pure) of the correlated-death window through the *live*
+    /// `Managed` seam: the loop resolves the target for this attempt (port A) and
+    /// spawns against it, then a crash+Retry moves the port to B before the store
+    /// completes, so the post-store recheck — reading the SAME live state the loop
+    /// reads — returns `KillAndRetry`, and the retry then resolves B. Fails if the
+    /// recheck used a captured target instead of re-reading.
+    #[test]
+    fn post_store_recheck_repoints_a_worker_left_on_a_dead_port() {
+        let managed = Managed::default();
+        *managed.api_port.lock().expect("api port lock") = Some(50111);
+        let SupervisorAction::Spawn(spawned) = resolve_supervisor_action(&managed) else {
+            panic!("expected a spawn target at port A");
+        };
+        assert_eq!(spawned, "http://127.0.0.1:50111");
+        // Correlated death: the API crashed (port cleared) and a Retry rebound B,
+        // all in the window before the child was stored — so restart_gpu_worker's
+        // kill missed it. The post-store recheck re-reads and finds it stale.
+        *managed.api_port.lock().expect("api port lock") = Some(50222);
+        assert_eq!(
+            verify_spawned_target(&spawned, &resolve_supervisor_action(&managed)),
+            SpawnVerdict::KillAndRetry
+        );
+        // The retry resolves the NEW port, so the respawn targets B, not A.
+        assert_eq!(
+            resolve_supervisor_action(&managed),
+            SupervisorAction::Spawn("http://127.0.0.1:50222".to_owned())
         );
     }
 }
