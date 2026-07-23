@@ -3592,7 +3592,7 @@ fn model_mac_support_hides_torch_only_models_keeps_mlx_models() {
     // lacking a dedicated port epic, reports "needs an epic" (suggested_epic None). No real image
     // model is torch-only anymore: Lens — formerly this example — is MLX-routed after epic 3164 /
     // sc-5105 (asserted below), as is pulid_flux_dev after sc-3344.
-    let torch_only = model_mac_support("unported_image_model", "image");
+    let torch_only = model_mac_support("unported_image_model", "image", None);
     assert!(!torch_only.supported);
     assert!(torch_only.reason.is_some());
     assert_eq!(
@@ -3606,89 +3606,93 @@ fn model_mac_support_hides_torch_only_models_keeps_mlx_models() {
     // and in the picker with no gap reason. The edit-mode gating (Lens has no edit path) is asserted
     // in `model_mac_support_feature_flags_mirror_routing_without_over_gating`.
     for id in ["lens", "lens_turbo"] {
-        let lens = model_mac_support(id, "image");
+        let lens = model_mac_support(id, "image", None);
         assert!(lens.supported, "{id} should be MLX-supported");
         assert!(lens.reason.is_none(), "{id} should carry no gap reason");
     }
     // PuLID-FLUX (sc-3344) is MLX-routed now — it stays in the picker as a supported face-ID
     // backbone (character_image reference), no longer a torch-only port-epic gap.
-    let pulid = model_mac_support("pulid_flux_dev", "image");
+    let pulid = model_mac_support("pulid_flux_dev", "image", None);
     assert!(pulid.supported);
     assert!(pulid.features.reference);
     // Kolors runs its full surface on MLX (epic 3090): T2I (sc-3875), img2img (sc-4765), the
     // IP-Adapter-Plus reference (sc-4767) and the strict-pose tier (sc-4766 / engine sc-5012), so all
     // three advanced features are enabled.
-    let kolors = model_mac_support("kolors", "image");
+    let kolors = model_mac_support("kolors", "image", None);
     assert!(kolors.supported);
     assert!(kolors.features.edit);
     assert!(kolors.features.pose);
     assert!(kolors.features.reference);
     // An MLX-routed base family stays in the picker.
-    let z_image = model_mac_support("z_image_turbo", "image");
+    let z_image = model_mac_support("z_image_turbo", "image", None);
     assert!(z_image.supported);
     assert!(z_image.reason.is_none());
     // Base (undistilled, full-CFG) Z-Image is MLX-routed on macOS too (real `z_image` MODEL_TABLE
     // engine + `ZImageBaseControl`), so it must NOT be hidden behind "Not available on Mac" — the
     // sc-8320/sc-8251 wiring gap this fix closes.
-    let z_image_base = model_mac_support("z_image", "image");
+    let z_image_base = model_mac_support("z_image", "image", None);
     assert!(z_image_base.supported);
     assert!(z_image_base.reason.is_none());
     // Chroma (epic 3531 / sc-3843) is now MLX-routed — all three variants stay in the picker
     // and no longer report an `mlx_unsupported` port-epic gap.
     for id in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
-        let chroma = model_mac_support(id, "image");
+        let chroma = model_mac_support(id, "image", None);
         assert!(chroma.supported, "{id} should be MLX-supported");
         assert!(chroma.reason.is_none(), "{id} should carry no gap reason");
     }
     // SVD is now MLX-routed (sc-3523, image→video only) so it stays in the picker, like Wan/LTX;
     // a genuinely engine-less video model id is still hidden.
-    assert!(model_mac_support("svd", "video").supported);
-    assert!(model_mac_support("wan_2_2", "video").supported);
-    assert!(!model_mac_support("some_torch_only_video", "video").supported);
+    assert!(model_mac_support("svd", "video", None).supported);
+    assert!(model_mac_support("wan_2_2", "video", None).supported);
+    assert!(!model_mac_support("some_torch_only_video", "video", None).supported);
     // Utility/infra models are never hidden by model-level gating (their actions are
     // gated by mac_capabilities at the job-type level instead).
-    assert!(model_mac_support("real_esrgan", "utility").supported);
+    assert!(model_mac_support("real_esrgan", "utility", None).supported);
 }
 
 #[test]
 fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     // Base Qwen strict-pose ControlNet, Z-Image, and SDXL pose are MLX → enabled.
-    assert!(model_mac_support("qwen_image", "image").features.pose);
-    assert!(model_mac_support("z_image_turbo", "image").features.pose);
-    assert!(model_mac_support("sdxl", "image").features.pose);
+    assert!(model_mac_support("qwen_image", "image", None).features.pose);
+    assert!(
+        model_mac_support("z_image_turbo", "image", None)
+            .features
+            .pose
+    );
+    assert!(model_mac_support("sdxl", "image", None).features.pose);
     // Z-Image reference-identity (no pose) is ported to MLX (sc-3619) → reference enabled;
     // img2img-edit is now ported too (epic 3529 / sc-3923) → edit enabled.
-    let z_image = model_mac_support("z_image_turbo", "image");
+    let z_image = model_mac_support("z_image_turbo", "image", None);
     assert!(z_image.features.reference);
     assert!(z_image.features.edit);
     // The dedicated z_image_edit model is supported on Mac with edit enabled (no dead-end).
-    let z_image_edit = model_mac_support("z_image_edit", "image");
+    let z_image_edit = model_mac_support("z_image_edit", "image", None);
     assert!(z_image_edit.supported);
     assert!(z_image_edit.features.edit);
     // Base Z-Image: pose (base Fun-Controlnet-Union) + reference (generic img2img-init) are MLX, so both
     // are enabled — but the base has NO `edit_image` checkpoint (that's Turbo-weights-only), so `edit`
     // must stay FALSE. This discriminates the base arm from Turbo's (which enables edit).
-    let z_image_base = model_mac_support("z_image", "image");
+    let z_image_base = model_mac_support("z_image", "image", None);
     assert!(z_image_base.features.pose);
     assert!(z_image_base.features.reference);
     assert!(!z_image_base.features.edit);
     // FLUX.1 reference (XLabs IP-Adapter) is ported to MLX (epic 3621) → reference enabled on
     // both variants; edit_image stays off (no FLUX.1 edit on any platform — future Kontext).
-    let flux = model_mac_support("flux_dev", "image");
+    let flux = model_mac_support("flux_dev", "image", None);
     assert!(flux.features.reference);
     assert!(!flux.features.edit);
-    let flux_schnell = model_mac_support("flux_schnell", "image");
+    let flux_schnell = model_mac_support("flux_schnell", "image", None);
     assert!(flux_schnell.features.reference);
     assert!(!flux_schnell.features.edit);
     // SDXL + FLUX.2 do reference/edit on MLX (epic 3041 / MLX-only family) → enabled.
-    let sdxl = model_mac_support("sdxl", "image");
+    let sdxl = model_mac_support("sdxl", "image", None);
     assert!(sdxl.features.reference);
     assert!(sdxl.features.edit);
-    let flux2 = model_mac_support("flux2_klein_9b", "image");
+    let flux2 = model_mac_support("flux2_klein_9b", "image", None);
     assert!(flux2.features.reference);
     assert!(flux2.features.edit);
     // Qwen-Image-Edit conditions reference/edit on its modes → both enabled (no over-gate).
-    let qwen_edit = model_mac_support("qwen_image_edit_2511", "image");
+    let qwen_edit = model_mac_support("qwen_image_edit_2511", "image", None);
     assert!(qwen_edit.features.reference);
     assert!(qwen_edit.features.edit);
     // Lens / Lens-Turbo (epic 3164 / sc-5105) are pure T2I — no edit path on any platform, so
@@ -3696,7 +3700,7 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     // T2I against a dropped source image.
     for id in ["lens", "lens_turbo"] {
         assert!(
-            !model_mac_support(id, "image").features.edit,
+            !model_mac_support(id, "image", None).features.edit,
             "{id} has no edit path → edit must be gated off"
         );
     }
@@ -3705,7 +3709,7 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     // gates only `edit_image`, so the "available in some MLX config" `reference`/`pose` probes come
     // out permissively true — harmless: the manifest `capabilities` are the real UI gate and the
     // engine ignores a stray reference on a t2i job. The meaningful flag here is `edit`.)
-    let bernini_image = model_mac_support("bernini_image", "image");
+    let bernini_image = model_mac_support("bernini_image", "image", None);
     assert!(
         bernini_image.supported,
         "bernini_image should be MLX-supported"
@@ -3713,9 +3717,11 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     assert!(bernini_image.reason.is_none());
     assert!(bernini_image.features.edit, "bernini_image i2i is MLX");
     // Third-party LyCORIS now applies on every MLX provider (epic 3641) → supported.
-    assert!(model_mac_support("sdxl", "image").features.lycoris);
+    assert!(model_mac_support("sdxl", "image", None).features.lycoris);
     // Video models expose per-mode eligibility.
-    let wan = model_mac_support("wan_2_2", "video").features.video_modes;
+    let wan = model_mac_support("wan_2_2", "video", None)
+        .features
+        .video_modes;
     assert_eq!(wan.get("text_to_video"), Some(&true));
     assert_eq!(wan.get("image_to_video"), Some(&true));
     assert_eq!(wan.get("first_last_frame"), Some(&true)); // Wan TI2V-5B FLF is MLX
@@ -3724,12 +3730,14 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     assert_eq!(wan.get("extend_clip"), Some(&true));
     assert_eq!(wan.get("video_bridge"), Some(&true));
     // LTX serves the IC-LoRA clip-conditioning modes on MLX → extend/bridge enabled (sc-3522/3773).
-    let ltx = model_mac_support("ltx_2_3", "video").features.video_modes;
+    let ltx = model_mac_support("ltx_2_3", "video", None)
+        .features
+        .video_modes;
     assert_eq!(ltx.get("extend_clip"), Some(&true));
     assert_eq!(ltx.get("video_bridge"), Some(&true));
     // The 14B Wan MoE engines have no FLF Keyframe path → torch.
     assert_eq!(
-        model_mac_support("wan_2_2_t2v_14b", "video")
+        model_mac_support("wan_2_2_t2v_14b", "video", None)
             .features
             .video_modes
             .get("first_last_frame"),
@@ -3738,7 +3746,7 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     // Bernini (epic 4699) is MLX-routed text-to-video only. Its renderer is
     // Wan2.2-T2V, so still-image-to-video is off; the editing/reference video
     // modes are net-new vocabulary (sc-4703), off until then.
-    let bernini = model_mac_support("bernini", "video");
+    let bernini = model_mac_support("bernini", "video", None);
     assert!(bernini.supported, "bernini should be MLX-supported");
     assert!(bernini.reason.is_none());
     assert_eq!(
@@ -3761,7 +3769,7 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     // cross-identity replace_person (sc-5452 — the same engine, replace_flag=true, as the integrated
     // backend behind the person-track pipeline); the worker paints its masks from native SAM3. No
     // text/image-to-video.
-    let scail2 = model_mac_support("scail2_14b", "video");
+    let scail2 = model_mac_support("scail2_14b", "video", None);
     assert!(scail2.supported, "scail2 should be MLX-supported");
     assert!(scail2.reason.is_none());
     assert_eq!(
