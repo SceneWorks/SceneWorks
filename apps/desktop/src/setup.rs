@@ -60,12 +60,13 @@ pub struct Managed {
     /// binary re-launched in worker mode (`SCENEWORKS_WORKER_ONLY=1`,
     /// `SCENEWORKS_GPU_ID=mlx`). Only populated on macOS.
     pub mlx_worker: Mutex<Option<CommandChild>>,
-    /// The Windows candle (CUDA) GPU worker supervisor (sc-5561): the same
+    /// The Windows/Linux candle (CUDA) GPU worker supervisor (sc-5561/sc-10375):
+    /// the same
     /// `sceneworks-api` binary re-launched in worker mode (`SCENEWORKS_WORKER_ONLY=1`,
     /// `SCENEWORKS_GPU_ID=auto`, `SCENEWORKS_BACKEND_CANDLE_ENABLED=true`). `auto`
     /// makes it the multi-GPU supervisor — it spawns one candle child per NVIDIA GPU
     /// (those children are owned by the supervisor, not tracked here). Only populated
-    /// on the Windows candle build.
+    /// on the Windows or Linux candle build.
     pub candle_worker: Mutex<Option<CommandChild>>,
     /// On-demand keychain credential socket served to the MLX worker (sc-5891).
     /// Started once before the worker spawns; the worker pulls a host's secret from
@@ -203,7 +204,7 @@ fn plan_supervisor_action(
 /// loop AND the post-spawn recheck), so the port is never captured — a
 /// regression that memoized it here would flip the `supervisor_tests`
 /// re-read assertions (sc-13605).
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn resolve_supervisor_action(managed: &Managed) -> SupervisorAction {
     plan_supervisor_action(
         managed.shutting_down.load(Ordering::SeqCst),
@@ -240,7 +241,8 @@ fn verify_spawned_target(spawned_url: &str, recheck: &SupervisorAction) -> Spawn
     }
 }
 
-/// PIDs of the API + GPU worker (MLX on macOS, candle on Windows) sidecars owned by this launch.
+/// PIDs of the API + GPU worker (MLX on macOS, candle on Windows/Linux) sidecars
+/// owned by this launch.
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct SidecarPids {
     api: Option<u32>,
@@ -248,7 +250,8 @@ struct SidecarPids {
     /// an older build (no such field) still deserializes for reaping.
     #[serde(default)]
     mlx_worker: Option<u32>,
-    /// The Windows candle GPU worker (sc-5561). `#[serde(default)]` so an older
+    /// The Windows/Linux candle GPU worker (sc-5561/sc-10375). `#[serde(default)]`
+    /// so an older
     /// pidfile (no such field) still deserializes for reaping.
     #[serde(default)]
     candle_worker: Option<u32>,
@@ -757,6 +760,220 @@ fn resolve_bundled_cuda_dir(_app: &AppHandle) -> Option<std::path::PathBuf> {
     crate::cuda_provision::cuda_dir_if_present()
 }
 
+/// The provisioned Linux candle runtime resolved from the XDG-managed
+/// `gpu-runtime` root. Provisioning is intentionally owned by sc-10376; this
+/// story only consumes a completed runtime and keeps the lane dormant while the
+/// required sentinels are absent.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinuxCandleRuntime {
+    ort_dylib: PathBuf,
+    cuda_dir: PathBuf,
+    cudnn_dir: PathBuf,
+    loader_dirs: Vec<PathBuf>,
+}
+
+/// Find an ELF shared object by its unversioned name or a versioned sibling
+/// (`libfoo.so.1`, `libfoo.so.1.2`, ...).
+#[cfg(any(target_os = "linux", test))]
+fn find_linux_shared_object(dir: &Path, basename: &str) -> Option<PathBuf> {
+    let exact = dir.join(basename);
+    if exact.is_file() {
+        return Some(exact);
+    }
+    let versioned_prefix = format!("{basename}.");
+    let mut candidates = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            (name.starts_with(&versioned_prefix) && entry.path().is_file()).then(|| entry.path())
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.into_iter().next()
+}
+
+/// Known library locations supported by the Linux provisioner contract. The
+/// flat `<root>/cuda` layout mirrors Windows; the component-specific paths
+/// mirror the PyPI-wheel and Docker layouts sc-10376 will stage.
+#[cfg(any(target_os = "linux", test))]
+fn linux_runtime_library_dirs(root: &Path) -> Vec<PathBuf> {
+    [
+        "onnxruntime/capi",
+        "onnxruntime",
+        "cudnn/lib",
+        "nvidia/cudnn/lib",
+        "cufft/lib",
+        "nvidia/cufft/lib",
+        "nvjitlink/lib",
+        "nvidia/nvjitlink/lib",
+        "cuda_nvrtc/lib",
+        "nvidia/cuda_nvrtc/lib",
+        "cublas/lib",
+        "nvidia/cublas/lib",
+        "curand/lib",
+        "nvidia/curand/lib",
+        "cuda/lib64",
+        "cuda",
+        "nvidia/cuda_runtime/lib",
+    ]
+    .into_iter()
+    .map(|path| root.join(path))
+    .filter(|path| {
+        std::fs::read_dir(path)
+            .ok()
+            .is_some_and(|entries| entries.flatten().any(|entry| entry.path().is_file()))
+    })
+    .collect()
+}
+
+/// Detect a complete-enough Linux runtime for starting the candle supervisor.
+/// Requiring onnxruntime + CUDA runtime + cuDNN sentinels is the pre-provision
+/// crash-loop gate. Full component completeness remains sc-10376's concern.
+#[cfg(any(target_os = "linux", test))]
+fn resolve_linux_candle_runtime(root: &Path) -> Option<LinuxCandleRuntime> {
+    let loader_dirs = linux_runtime_library_dirs(root);
+    let ort_dylib = loader_dirs
+        .iter()
+        .find_map(|dir| find_linux_shared_object(dir, "libonnxruntime.so"))?;
+    // Candle itself dynamically loads the CUDA generation set; onnxruntime's
+    // CUDA EP adds cuDNN/cuFFT/nvJitLink. A partial subset would pass a one-file
+    // probe only to crash after the supervisor starts, so require one sentinel
+    // from every provisioned component before enabling the lane.
+    for required in [
+        "libcudart.so",
+        "libcublas.so",
+        "libcublasLt.so",
+        "libcurand.so",
+        "libnvrtc.so",
+        "libcudnn.so",
+        "libcufft.so",
+        "libnvJitLink.so",
+    ] {
+        loader_dirs
+            .iter()
+            .find_map(|dir| find_linux_shared_object(dir, required))?;
+    }
+    let cuda_dir = loader_dirs
+        .iter()
+        .find(|dir| find_linux_shared_object(dir, "libcudart.so").is_some())?
+        .clone();
+    let cudnn_dir = loader_dirs
+        .iter()
+        .find(|dir| find_linux_shared_object(dir, "libcudnn.so").is_some())?
+        .clone();
+    Some(LinuxCandleRuntime {
+        ort_dylib,
+        cuda_dir,
+        cudnn_dir,
+        loader_dirs,
+    })
+}
+
+/// Prepend runtime loader directories to inherited ones, preserving order and
+/// removing duplicates. Kept path-based so tests can validate Linux loader-env
+/// composition on non-Linux hosts.
+#[cfg(any(target_os = "linux", test))]
+fn prepend_loader_paths(
+    runtime_dirs: &[PathBuf],
+    inherited_dirs: impl IntoIterator<Item = PathBuf>,
+) -> Vec<PathBuf> {
+    let mut combined = Vec::new();
+    for path in runtime_dirs.iter().cloned().chain(inherited_dirs) {
+        if !combined.contains(&path) {
+            combined.push(path);
+        }
+    }
+    combined
+}
+
+#[cfg(target_os = "linux")]
+fn linux_candle_runtime() -> Option<LinuxCandleRuntime> {
+    resolve_linux_candle_runtime(&gpu_runtime_dir())
+}
+
+/// Apply the Linux analogue of the Windows candle PATH/ORT block. Both the API
+/// sidecar and GPU-worker supervisor use this seam.
+#[cfg(target_os = "linux")]
+fn inject_linux_candle_runtime_env(mut command: Command, runtime: &LinuxCandleRuntime) -> Command {
+    let inherited = std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default();
+    let paths = prepend_loader_paths(&runtime.loader_dirs, std::env::split_paths(&inherited));
+    if let Ok(joined) = std::env::join_paths(paths) {
+        command = command.env("LD_LIBRARY_PATH", joined);
+    }
+    command
+        .env(
+            "ORT_DYLIB_PATH",
+            runtime.ort_dylib.to_string_lossy().to_string(),
+        )
+        .env(
+            "SCENEWORKS_ORT_CUDA_DIR",
+            runtime.cuda_dir.to_string_lossy().to_string(),
+        )
+        .env(
+            "SCENEWORKS_ORT_CUDNN_DIR",
+            runtime.cudnn_dir.to_string_lossy().to_string(),
+        )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopPlatform {
+    Macos,
+    Windows,
+    Linux,
+    Other,
+}
+
+const fn current_desktop_platform() -> DesktopPlatform {
+    if cfg!(target_os = "macos") {
+        DesktopPlatform::Macos
+    } else if cfg!(target_os = "windows") {
+        DesktopPlatform::Windows
+    } else if cfg!(target_os = "linux") {
+        DesktopPlatform::Linux
+    } else {
+        DesktopPlatform::Other
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerSupervisor {
+    Mlx,
+    Candle,
+    Dormant,
+}
+
+/// Pure platform/runtime selection used by `gate_window`. Linux selects candle
+/// exactly like Windows once its runtime is present; pre-provision Linux stays
+/// dormant instead of starting a crash-looping supervisor.
+fn select_worker_supervisor(
+    platform: DesktopPlatform,
+    candle_runtime_present: bool,
+) -> WorkerSupervisor {
+    match platform {
+        DesktopPlatform::Macos => WorkerSupervisor::Mlx,
+        DesktopPlatform::Windows | DesktopPlatform::Linux if candle_runtime_present => {
+            WorkerSupervisor::Candle
+        }
+        _ => WorkerSupervisor::Dormant,
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn candle_runtime_present(app: &AppHandle) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        resolve_bundled_cuda_dir(app).is_some()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        linux_candle_runtime().is_some()
+    }
+}
+
 /// The resolved bind/auth environment for the API sidecar for one launch (epic 4484
 /// stories 2/3). Pure output of [`decide_api_bind_env`] so the loopback-vs-LAN choice
 /// is unit-tested without spawning anything.
@@ -946,6 +1163,10 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
             command = command.env("PATH", joined);
         }
     }
+    #[cfg(target_os = "linux")]
+    if let Some(runtime) = linux_candle_runtime() {
+        command = inject_linux_candle_runtime_env(command, &runtime);
+    }
     // LAN mode (epic 4484): hand the API the user's password as the access token so it
     // requires auth on the now-network-reachable bind. The server ALSO refuses any
     // non-loopback bind without a token (API-001 gate), so this is what unlocks the
@@ -1114,6 +1335,10 @@ fn gate_window(app: AppHandle) {
                     }
                     #[cfg(target_os = "macos")]
                     {
+                        debug_assert_eq!(
+                            select_worker_supervisor(current_desktop_platform(), false),
+                            WorkerSupervisor::Mlx
+                        );
                         // Epic 3482 final cutover (sc-3492): macOS is MLX-only — the
                         // Python torch/MPS worker is no longer spawned. Only the
                         // Apple-Silicon MLX GPU worker (sc-3289) runs, executing
@@ -1132,23 +1357,31 @@ fn gate_window(app: AppHandle) {
                         // the current port, so it repoints at the fresh API.
                         supervise_mlx_worker(app);
                     }
-                    #[cfg(not(target_os = "macos"))]
+                    #[cfg(any(target_os = "windows", target_os = "linux"))]
                     {
                         // Epic 5483 Phase 7 (sc-5563): off-Mac is candle-only — the Python
                         // torch worker is no longer spawned (its venv + bundle were dropped),
-                        // exactly as macOS went MLX-only in sc-3492. The Windows candle (CUDA)
+                        // exactly as macOS went MLX-only in sc-3492. The Windows/Linux candle
+                        // (CUDA)
                         // GPU worker runs the candle-eligible surface; anything candle can't
                         // serve fails loudly (candle_unsupported / candle_unavailable) per
                         // Settings.candle_required (set in spawn_api), never a silent torch
-                        // fallback. Spawned only when the candle backend is actually bundled
-                        // (a plain build has no CUDA DLLs); without it there is no GPU worker
-                        // and GPU jobs fail loudly rather than silently degrading. (Linux
-                        // desktop is not a shipped target — the Linux server runs via Docker.)
-                        #[cfg(target_os = "windows")]
-                        if resolve_bundled_cuda_dir(&app).is_some() {
+                        // fallback. Spawned only when the native runtime is present; before
+                        // provisioning completes there is no GPU supervisor to crash-loop.
+                        let runtime_present = candle_runtime_present(&app);
+                        if matches!(
+                            select_worker_supervisor(current_desktop_platform(), runtime_present),
+                            WorkerSupervisor::Candle
+                        ) {
                             // sc-13605: self-guarded, same as the macOS branch —
                             // one supervisor per worker slot, re-reads the port.
                             supervise_candle_worker(app);
+                        } else {
+                            append_log(
+                                &logs_dir().join("candle-worker.log"),
+                                "[desktop] candle worker dormant: native CUDA/cuDNN/onnxruntime \
+                                 runtime is not provisioned\n",
+                            );
                         }
                     }
                     return;
@@ -1212,8 +1445,7 @@ pub fn invalidate_credential_cache(app: &AppHandle, host: &str) {
 /// Kill the current GPU worker child so its supervisor respawns it — the shared core of
 /// the local "Restart worker" Tauri command and the remote REST restart (epic 4484
 /// story 12, triggered when the API prints `WORKER_RESTART_SENTINEL` to stdout). macOS
-/// runs the MLX worker; Windows runs the candle worker; elsewhere there is no GPU
-/// worker to restart.
+/// runs the MLX worker; Windows/Linux run the candle worker.
 pub fn restart_gpu_worker(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     let child = app
@@ -1222,30 +1454,32 @@ pub fn restart_gpu_worker(app: &AppHandle) {
         .lock()
         .expect("mlx worker lock")
         .take();
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     let child = app
         .state::<Managed>()
         .candle_worker
         .lock()
         .expect("candle worker lock")
         .take();
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     if let Some(child) = child {
         // macOS runs a single MLX worker process — CommandChild::kill() (TerminateProcess
-        // on Windows / a plain kill here) reaps it fully. Windows runs the candle `auto`
+        // on Windows / a plain kill here) reaps it fully. Off-Mac runs the candle `auto`
         // supervisor, which spawns one child per GPU plus a CPU child, each inheriting
         // SCENEWORKS_PARENT_PID = this desktop PID. Unlike a quit, a restart leaves the
         // desktop alive, so plain-killing only the supervisor orphans those children:
         // their parent-death watchdog still sees the live desktop and never fires, and the
         // respawned supervisor spawns a duplicate set contending for the same GPUs and
-        // worker IDs. Tree-kill the whole group by PID instead (taskkill /T /F), mirroring
-        // `begin_shutdown` and `stop_sidecars_for_update`.
+        // worker IDs. Use the platform PID teardown: taskkill /T /F on Windows; SIGTERM
+        // on Linux, where the supervisor handles it by stopping and reaping its children.
         #[cfg(target_os = "windows")]
         kill_pid(child.pid());
+        #[cfg(target_os = "linux")]
+        terminate_linux_candle_tree(child.pid());
         #[cfg(target_os = "macos")]
         let _ = child.kill();
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     let _ = app;
 }
 
@@ -1255,7 +1489,7 @@ pub fn restart_gpu_worker(app: &AppHandle) {
 /// (re-read every attempt, never captured — sc-13605), the per-launch worker id,
 /// and the shared HF cache root. Passed by value (all borrows) so the closure
 /// bound stays a simple `for<'a> Fn(Command, WorkerSpawnCtx<'a>)`.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 struct WorkerSpawnCtx<'a> {
     app: &'a AppHandle,
     api_url: &'a str,
@@ -1280,12 +1514,11 @@ struct WorkerSpawnCtx<'a> {
 /// * `slot` — the `Managed` mutex that holds this worker's child.
 /// * `record_pid` — persists the child PID to the pidfile.
 /// * `kill_stale` — how the post-store recheck kills a stale child: MLX kills the
-///   single child directly (`CommandChild::kill`); candle TREE-kills by PID
-///   (`kill_pid` → `taskkill /T /F`) because it is the `auto` multi-GPU
-///   supervisor whose per-GPU children would otherwise be orphaned. Collapsing
-///   these two would regress the orphan-process class this file guards.
+///   single child directly (`CommandChild::kill`); candle uses platform PID
+///   teardown so the `auto` supervisor also stops its per-GPU children (Windows
+///   tree-kill; Linux supervisor-handled SIGTERM).
 /// * `env_builder` — builds the child's env block from the located sidecar.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn supervise_worker(
     app: AppHandle,
     label: &'static str,
@@ -1572,7 +1805,8 @@ fn supervise_mlx_worker(app: AppHandle) {
     );
 }
 
-/// Spawn and supervise the Windows candle (CUDA) GPU worker(s) (sc-5561): the same
+/// Spawn and supervise the Windows/Linux candle (CUDA) GPU worker(s)
+/// (sc-5561/sc-10375): the same
 /// `sceneworks-api` sidecar re-launched in worker mode (`SCENEWORKS_WORKER_ONLY=1`)
 /// with `SCENEWORKS_GPU_ID=auto` and the candle backend enabled
 /// (`SCENEWORKS_BACKEND_CANDLE_ENABLED=true`), so candle-eligible image/video/caption
@@ -1582,13 +1816,21 @@ fn supervise_mlx_worker(app: AppHandle) {
 /// ALL its GPUs rather than just index 0. A crash-isolated sibling of the API process;
 /// output goes to candle-worker.log.
 ///
-/// The Windows analogue of `supervise_mlx_worker`, and the desktop twin of the
+/// The off-Mac analogue of `supervise_mlx_worker`, and the desktop twin of the
 /// server/Docker candle worker (which also runs `SCENEWORKS_GPU_ID=auto`). Off-Mac is
 /// candle-only post-Phase-7 (sc-5563): anything candle can't serve fails loudly
 /// (`candle_unsupported`/`candle_unavailable`) rather than a silent torch fallback.
-/// Only spawned when the candle redist DLLs are actually bundled
-/// (`resolve_bundled_cuda_dir`), so a plain desktop build never starts it.
-#[cfg(target_os = "windows")]
+/// Only spawned when the platform-native candle runtime is present.
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
+fn candle_worker_mode_env() -> [(&'static str, &'static str); 3] {
+    [
+        ("SCENEWORKS_WORKER_ONLY", "1"),
+        ("SCENEWORKS_GPU_ID", "auto"),
+        ("SCENEWORKS_BACKEND_CANDLE_ENABLED", "true"),
+    ]
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn supervise_candle_worker(app: AppHandle) {
     supervise_worker(
         app,
@@ -1596,31 +1838,23 @@ fn supervise_candle_worker(app: AppHandle) {
         "candle-worker-local",
         candle_worker_slot,
         record_candle_worker_pid,
-        // Tree-kill by PID (as `restart_gpu_worker` does): this is the candle
-        // `auto` multi-GPU supervisor, whose per-GPU children would otherwise be
-        // orphaned by a plain kill of only the supervisor. `kill_pid` runs
-        // `taskkill /T /F` to reap the whole process group. Preserving this vs the
-        // MLX direct kill is the behavioral difference this refactor must NOT
-        // collapse.
-        |child| kill_pid(child.pid()),
+        // Platform PID teardown (as `restart_gpu_worker` does): this is the candle
+        // `auto` multi-GPU supervisor, whose per-GPU children must stop with it.
+        // Windows tree-kills; Linux SIGTERMs the supervisor, whose signal handler
+        // stops and reaps every child. Preserve this vs the MLX direct kill.
+        |child| {
+            #[cfg(target_os = "windows")]
+            kill_pid(child.pid());
+            #[cfg(target_os = "linux")]
+            terminate_linux_candle_tree(child.pid());
+        },
         |sidecar, ctx| {
-            let mut command = sidecar
-                // Dispatches `main` to `run_worker()` (HTTP API never starts).
-                .env("SCENEWORKS_WORKER_ONLY", "1")
-                // `auto` runs the multi-GPU supervisor (`supervise_auto_workers`): it
-                // enumerates every NVIDIA GPU via nvidia-smi and spawns one crash-
-                // isolated candle child per GPU (each pinned with CUDA_VISIBLE_DEVICES)
-                // plus a cpu utility child — so a 2-GPU box uses BOTH GPUs, not just
-                // index 0. A bare index (e.g. "0") would run the single-GPU loop and
-                // strand the other GPU. Mirrors the server/Docker candle worker
-                // (`docker-compose` `SCENEWORKS_CANDLE_GPU_ID:-auto`). The children
-                // inherit this process's candle env (PATH+CUDA DLLs, ORT, ffmpeg,
-                // HF/creds, SCENEWORKS_PARENT_PID death-watchdog), so each GPU child is
-                // wired exactly as the single worker was.
-                .env("SCENEWORKS_GPU_ID", "auto")
-                // Light up the candle lane on each discovered NVIDIA GPU
-                // (gpu::with_candle_capabilities + engines::registry_capabilities).
-                .env("SCENEWORKS_BACKEND_CANDLE_ENABLED", "true")
+            // Dispatches `main` to `run_worker()` with `auto`, which runs the
+            // multi-GPU supervisor (`supervise_auto_workers`) and advertises the
+            // candle image/video capabilities on every discovered GPU.
+            let mut command = candle_worker_mode_env()
+                .into_iter()
+                .fold(sidecar, |command, (name, value)| command.env(name, value))
                 .env("SCENEWORKS_WORKER_ID", ctx.worker_id)
                 .env("SCENEWORKS_API_URL", ctx.api_url)
                 // Parent-death watchdog (run_worker() honours this): a force-quit
@@ -1639,6 +1873,7 @@ fn supervise_candle_worker(app: AppHandle) {
             // cudarc dynamic-linking `LoadLibrary`s the CUDA runtime DLLs by name;
             // prepend the bundled redist dir to this worker's PATH so they resolve
             // without a CUDA Toolkit on the machine (sc-5560).
+            #[cfg(target_os = "windows")]
             if let Some(cuda_dir) = resolve_bundled_cuda_dir(ctx.app) {
                 let existing = std::env::var_os("PATH").unwrap_or_default();
                 let mut paths = vec![cuda_dir.clone()];
@@ -1662,6 +1897,12 @@ fn supervise_candle_worker(app: AppHandle) {
                         .env("SCENEWORKS_ORT_CUDA_DIR", &cuda)
                         .env("SCENEWORKS_ORT_CUDNN_DIR", &cuda);
                 }
+            }
+            // Linux uses the same candle/ORT contract, with the dynamic linker's
+            // LD_LIBRARY_PATH in place of the Windows DLL-search PATH.
+            #[cfg(target_os = "linux")]
+            if let Some(runtime) = linux_candle_runtime() {
+                command = inject_linux_candle_runtime_env(command, &runtime);
             }
             // The worker muxes generated video with ffmpeg; point it at the bundled
             // binary when staged (else it falls back to PATH ffmpeg), as spawn_api does.
@@ -1687,7 +1928,7 @@ fn supervise_candle_worker(app: AppHandle) {
 
 /// The `Managed` slot holding the candle worker child (sc-13615). Named fn for
 /// the same higher-ranked-lifetime coercion reason as `mlx_worker_slot`.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn candle_worker_slot(managed: &Managed) -> &Mutex<Option<CommandChild>> {
     &managed.candle_worker
 }
@@ -1859,7 +2100,7 @@ fn record_mlx_worker_pid(app: &AppHandle, pid: Option<u32>) {
     write_sidecar_pidfile(&pids);
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn record_candle_worker_pid(app: &AppHandle, pid: Option<u32>) {
     let state = app.state::<Managed>();
     let mut pids = state.pids.lock().expect("pids lock");
@@ -1900,6 +2141,123 @@ fn is_our_sidecar(pid: u32) -> bool {
     String::from_utf8_lossy(&output.stdout).contains("sceneworks-api")
 }
 
+#[cfg(unix)]
+fn worker_shutdown_grace_seconds() -> u64 {
+    std::env::var("SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(10)
+        .clamp(1, 30)
+}
+
+/// Direct children of every thread in a Linux process. A Tokio worker thread can
+/// call `Command::spawn`, and Linux records that child in the spawning thread's
+/// `/proc/<pid>/task/<tid>/children` file rather than necessarily in the thread
+/// group leader's file, so every task must be inspected.
+#[cfg(any(target_os = "linux", test))]
+fn linux_direct_children(proc_root: &Path, parent: u32) -> Vec<u32> {
+    let task_dir = proc_root.join(parent.to_string()).join("task");
+    let Ok(tasks) = std::fs::read_dir(task_dir) else {
+        return Vec::new();
+    };
+    let mut task_ids = tasks
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .collect::<Vec<_>>();
+    task_ids.sort_unstable();
+
+    let mut children = Vec::new();
+    for task_id in task_ids {
+        let path = proc_root
+            .join(parent.to_string())
+            .join("task")
+            .join(task_id.to_string())
+            .join("children");
+        if let Ok(value) = std::fs::read_to_string(path) {
+            children.extend(
+                value
+                    .split_whitespace()
+                    .filter_map(|value| value.parse::<u32>().ok()),
+            );
+        }
+    }
+    children.sort_unstable();
+    children.dedup();
+    children
+}
+
+/// Linux `/proc` descendant snapshot in post-order (deepest children first).
+/// Candle children watch the desktop PID, not the supervisor PID, so killing
+/// only the supervisor while the desktop stays alive would orphan them.
+#[cfg(any(target_os = "linux", test))]
+fn linux_process_descendants_from(proc_root: &Path, root: u32) -> Vec<u32> {
+    fn visit(
+        proc_root: &Path,
+        parent: u32,
+        seen: &mut std::collections::HashSet<u32>,
+        out: &mut Vec<u32>,
+    ) {
+        for child in linux_direct_children(proc_root, parent) {
+            if seen.insert(child) {
+                visit(proc_root, child, seen, out);
+                out.push(child);
+            }
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut descendants = Vec::new();
+    visit(proc_root, root, &mut seen, &mut descendants);
+    descendants
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_descendants(root: u32) -> Vec<u32> {
+    linux_process_descendants_from(Path::new("/proc"), root)
+}
+
+/// Gracefully stop a Linux candle supervisor and every descendant, then
+/// SIGKILL any survivor after the configured worker grace period.
+#[cfg(target_os = "linux")]
+fn terminate_linux_candle_tree(root: u32) {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    let root_pid = Pid::from_raw(root as i32);
+    let mut descendants = linux_process_descendants(root);
+    let _ = kill(root_pid, Signal::SIGTERM);
+    for &pid in &descendants {
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+    }
+
+    let deadline =
+        Instant::now() + Duration::from_secs(worker_shutdown_grace_seconds().saturating_add(1));
+    while Instant::now() < deadline {
+        // Capture children spawned in the narrow signal-delivery race and retain
+        // them even if the supervisor exits and Linux reparents them meanwhile.
+        for pid in linux_process_descendants(root) {
+            if !descendants.contains(&pid) {
+                descendants.push(pid);
+                let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+            }
+        }
+        if !pid_alive(root) && !descendants.iter().copied().any(pid_alive) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Descendants are post-ordered, so force-kill leaves before parents.
+    for pid in descendants {
+        if pid_alive(pid) {
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+        }
+    }
+    if pid_alive(root) {
+        let _ = kill(root_pid, Signal::SIGKILL);
+    }
+}
+
 /// SIGTERM then SIGKILL a confirmed-stale sidecar.
 #[cfg(unix)]
 fn kill_pid(pid: u32) {
@@ -1931,19 +2289,45 @@ pub fn reap_stale_sidecars() {
         return;
     };
     let pids: SidecarPids = serde_json::from_slice(&bytes).unwrap_or_default();
-    for pid in [pids.api, pids.mlx_worker, pids.candle_worker]
-        .into_iter()
-        .flatten()
+    for (pid, candle_tree) in [
+        (pids.api, false),
+        (pids.mlx_worker, false),
+        (pids.candle_worker, true),
+    ]
+    .into_iter()
+    .filter_map(|(pid, candle_tree)| pid.map(|pid| (pid, candle_tree)))
     {
         if is_our_sidecar(pid) {
+            #[cfg(target_os = "linux")]
+            if candle_tree {
+                terminate_linux_candle_tree(pid);
+                continue;
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = candle_tree;
             kill_pid(pid);
         }
     }
     let _ = std::fs::remove_file(&path);
 }
 
-/// Begin graceful shutdown: stop the GPU worker (MLX on macOS, candle on Windows)
-/// then the API sidecar.
+/// Ordered PIDs for Unix graceful shutdown: every native GPU supervisor first,
+/// then the API. Kept pure so Linux candle PID participation cannot regress
+/// unnoticed on non-Linux test hosts.
+#[cfg(any(unix, test))]
+fn unix_shutdown_pids(
+    mlx_worker: Option<u32>,
+    candle_worker: Option<u32>,
+    api: Option<u32>,
+) -> Vec<u32> {
+    [mlx_worker, candle_worker, api]
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// Begin graceful shutdown: stop the GPU worker (MLX on macOS, candle on
+/// Windows/Linux) then the API sidecar.
 /// On Unix this sends SIGTERM and waits up to the grace period before
 /// force-killing; on Windows it force-kills (CTRL_BREAK handling is a
 /// Windows-session refinement). Returns true if shutdown was initiated (caller
@@ -1966,17 +2350,21 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
     let cred_ipc = managed.cred_ipc.lock().expect("cred_ipc lock").take();
     let handle = app.clone();
     std::thread::spawn(move || {
+        #[cfg(target_os = "linux")]
+        if let Some(child) = candle_worker.as_ref() {
+            // Stop/reap the auto supervisor's full descendant tree while the
+            // desktop is still alive, before the API is signalled.
+            terminate_linux_candle_tree(child.pid());
+        }
         #[cfg(unix)]
         {
-            let grace = std::env::var("SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(10)
-                .clamp(1, 30);
+            let grace = worker_shutdown_grace_seconds();
             let mlx_worker_pid = mlx_worker.as_ref().map(CommandChild::pid);
+            let candle_worker_pid = candle_worker.as_ref().map(CommandChild::pid);
             let api_pid = api_child.as_ref().map(CommandChild::pid);
+            let shutdown_pids = unix_shutdown_pids(mlx_worker_pid, candle_worker_pid, api_pid);
             // SIGTERM the workers first, then the API.
-            for pid in [mlx_worker_pid, api_pid].into_iter().flatten() {
+            for &pid in &shutdown_pids {
                 let _ = nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(pid as i32),
                     nix::sys::signal::Signal::SIGTERM,
@@ -1984,11 +2372,7 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
             }
             let deadline = Instant::now() + Duration::from_secs(grace);
             while Instant::now() < deadline {
-                if ![mlx_worker_pid, api_pid]
-                    .into_iter()
-                    .flatten()
-                    .any(pid_alive)
-                {
+                if !shutdown_pids.iter().copied().any(pid_alive) {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -1998,7 +2382,7 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
         if let Some(child) = mlx_worker {
             let _ = child.kill();
         }
-        // Windows-only (candle is Windows); None elsewhere. The candle `auto` worker
+        // The candle `auto` worker
         // is a supervisor that spawns one child per GPU plus a CPU child;
         // CommandChild::kill() (TerminateProcess) reaps ONLY the supervisor and
         // orphans those children — the exact leak that left N worker processes
@@ -2009,7 +2393,9 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
         if let Some(child) = candle_worker {
             #[cfg(windows)]
             kill_pid(child.pid());
-            #[cfg(not(windows))]
+            #[cfg(target_os = "linux")]
+            terminate_linux_candle_tree(child.pid());
+            #[cfg(not(any(windows, target_os = "linux")))]
             let _ = child.kill();
         }
         if let Some(child) = api_child {
@@ -2094,14 +2480,15 @@ pub fn stop_sidecars_for_update(app: &AppHandle) {
         .take();
     let api_child = managed.api.lock().expect("api lock").take();
 
-    // Tree-kill the candle `auto` supervisor so its per-GPU + CPU grandchildren die
-    // with it (each is a `sceneworks-api.exe` holding the binary open);
-    // CommandChild::kill() reaps only the supervisor and orphans them — the same reason
-    // `begin_shutdown` tree-kills it.
+    // Tear down the candle `auto` supervisor's complete per-GPU + CPU
+    // descendant tree. A root-only kill can orphan those workers because they
+    // watch the still-running desktop PID.
     if let Some(child) = candle_worker {
         #[cfg(windows)]
         kill_pid(child.pid());
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        terminate_linux_candle_tree(child.pid());
+        #[cfg(not(any(windows, target_os = "linux")))]
         let _ = child.kill();
     }
     if let Some(child) = mlx_worker {
@@ -2510,6 +2897,211 @@ mod path_tests {
                 ),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod linux_candle_tests {
+    use super::{
+        candle_worker_mode_env, linux_process_descendants_from, prepend_loader_paths,
+        resolve_linux_candle_runtime, select_worker_supervisor, unix_shutdown_pids,
+        DesktopPlatform, SidecarPids, WorkerSupervisor,
+    };
+    use std::path::{Path, PathBuf};
+
+    fn runtime_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "sceneworks-sc-10375-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ))
+    }
+
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().expect("library parent"))
+            .expect("create library dir");
+        std::fs::write(path, b"sentinel").expect("write library sentinel");
+    }
+
+    fn write_proc_children(proc_root: &Path, pid: u32, tid: u32, children: &str) {
+        let path = proc_root
+            .join(pid.to_string())
+            .join("task")
+            .join(tid.to_string())
+            .join("children");
+        std::fs::create_dir_all(path.parent().expect("proc task parent"))
+            .expect("create fake proc task");
+        std::fs::write(path, children).expect("write fake proc children");
+    }
+
+    #[test]
+    fn linux_runtime_gate_requires_ort_cuda_and_cudnn() {
+        let root = runtime_root("presence");
+        assert!(
+            resolve_linux_candle_runtime(&root).is_none(),
+            "pre-provision state must stay dormant"
+        );
+
+        touch(&root.join("onnxruntime/capi/libonnxruntime.so.1.26.0"));
+        touch(&root.join("cuda/lib64/libcudart.so.12"));
+        assert!(
+            resolve_linux_candle_runtime(&root).is_none(),
+            "a partial runtime must not start a crash-looping worker"
+        );
+
+        touch(&root.join("cublas/lib/libcublas.so.12"));
+        touch(&root.join("cublas/lib/libcublasLt.so.12"));
+        touch(&root.join("curand/lib/libcurand.so.10"));
+        touch(&root.join("cuda_nvrtc/lib/libnvrtc.so.12"));
+        touch(&root.join("cudnn/lib/libcudnn.so.9"));
+        touch(&root.join("cufft/lib/libcufft.so.11"));
+        touch(&root.join("nvjitlink/lib/libnvJitLink.so.12"));
+        let runtime =
+            resolve_linux_candle_runtime(&root).expect("all required sentinels are present");
+        assert_eq!(
+            runtime.ort_dylib,
+            root.join("onnxruntime/capi/libonnxruntime.so.1.26.0")
+        );
+        assert_eq!(runtime.cuda_dir, root.join("cuda/lib64"));
+        assert_eq!(runtime.cudnn_dir, root.join("cudnn/lib"));
+        assert_eq!(
+            runtime.loader_dirs,
+            vec![
+                root.join("onnxruntime/capi"),
+                root.join("cudnn/lib"),
+                root.join("cufft/lib"),
+                root.join("nvjitlink/lib"),
+                root.join("cuda_nvrtc/lib"),
+                root.join("cublas/lib"),
+                root.join("curand/lib"),
+                root.join("cuda/lib64"),
+            ]
+        );
+
+        std::fs::remove_dir_all(root).expect("remove isolated test runtime");
+    }
+
+    #[test]
+    fn linux_loader_path_prepends_runtime_and_deduplicates_inherited_entries() {
+        let ort = PathBuf::from("/runtime/onnxruntime/capi");
+        let cuda = PathBuf::from("/runtime/cuda/lib64");
+        let system = PathBuf::from("/usr/local/cuda/lib64");
+        assert_eq!(
+            prepend_loader_paths(&[ort.clone(), cuda.clone()], [system.clone(), cuda.clone()]),
+            vec![ort, cuda, system]
+        );
+    }
+
+    #[test]
+    fn supervisor_selection_ungates_linux_only_after_runtime_presence() {
+        assert_eq!(
+            select_worker_supervisor(DesktopPlatform::Macos, false),
+            WorkerSupervisor::Mlx
+        );
+        assert_eq!(
+            select_worker_supervisor(DesktopPlatform::Windows, true),
+            WorkerSupervisor::Candle
+        );
+        assert_eq!(
+            select_worker_supervisor(DesktopPlatform::Linux, true),
+            WorkerSupervisor::Candle
+        );
+        assert_eq!(
+            select_worker_supervisor(DesktopPlatform::Linux, false),
+            WorkerSupervisor::Dormant
+        );
+        assert_eq!(
+            select_worker_supervisor(DesktopPlatform::Other, true),
+            WorkerSupervisor::Dormant
+        );
+    }
+
+    #[test]
+    fn candle_supervisor_uses_worker_only_auto_backend_contract() {
+        assert_eq!(
+            candle_worker_mode_env(),
+            [
+                ("SCENEWORKS_WORKER_ONLY", "1"),
+                ("SCENEWORKS_GPU_ID", "auto"),
+                ("SCENEWORKS_BACKEND_CANDLE_ENABLED", "true"),
+            ]
+        );
+    }
+
+    #[test]
+    fn linux_shutdown_orders_candle_supervisor_before_api() {
+        assert_eq!(
+            unix_shutdown_pids(None, Some(202), Some(303)),
+            vec![202, 303]
+        );
+        assert_eq!(
+            unix_shutdown_pids(Some(101), Some(202), Some(303)),
+            vec![101, 202, 303]
+        );
+    }
+
+    #[test]
+    fn candle_pid_survives_pidfile_round_trip() {
+        let pids = SidecarPids {
+            api: Some(101),
+            mlx_worker: None,
+            candle_worker: Some(202),
+        };
+        let encoded = serde_json::to_vec(&pids).expect("serialize pids");
+        let decoded: SidecarPids = serde_json::from_slice(&encoded).expect("deserialize pids");
+        assert_eq!(decoded.api, Some(101));
+        assert_eq!(decoded.mlx_worker, None);
+        assert_eq!(decoded.candle_worker, Some(202));
+    }
+
+    #[test]
+    fn linux_candle_tree_teardown_is_wired_to_every_lifecycle_path() {
+        let source = include_str!("setup.rs");
+        // Assemble the call so this test's own source does not count itself.
+        let call = ["terminate_linux_", "candle_tree(child.pid());"].concat();
+        assert!(
+            source.matches(&call).count() >= 4,
+            "restart, stale-spawn cleanup, shutdown and update teardown must all \
+             use descendant-aware Linux candle cleanup"
+        );
+        let stale_call = ["terminate_linux_", "candle_tree(pid);"].concat();
+        assert!(
+            source.contains(&stale_call),
+            "pidfile reaping must use descendant-aware cleanup for candle"
+        );
+        let linux_cfg = [
+            r#"#[cfg(any(target_os = "windows", "#,
+            r#"target_os = "linux"))]"#,
+        ]
+        .concat();
+        assert!(
+            source.contains(&linux_cfg),
+            "the candle supervisor/PID slots must compile on Linux as well as Windows"
+        );
+    }
+
+    #[test]
+    fn linux_descendants_include_children_spawned_by_non_leader_threads() {
+        let proc_root = runtime_root("proc");
+        // PID 100's leader spawned 200, while Tokio-style worker TID 101
+        // spawned 300. PID 200 in turn spawned 400 from its own worker thread.
+        write_proc_children(&proc_root, 100, 100, "200\n");
+        write_proc_children(&proc_root, 100, 101, "300\n");
+        write_proc_children(&proc_root, 200, 200, "");
+        write_proc_children(&proc_root, 200, 201, "400\n");
+        write_proc_children(&proc_root, 300, 300, "");
+        write_proc_children(&proc_root, 400, 400, "");
+
+        assert_eq!(
+            linux_process_descendants_from(&proc_root, 100),
+            vec![400, 200, 300],
+            "post-order discovery must include every task's recursively spawned children"
+        );
+
+        std::fs::remove_dir_all(proc_root).expect("remove isolated fake proc tree");
     }
 }
 
