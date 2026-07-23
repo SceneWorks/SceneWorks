@@ -423,6 +423,16 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
     {
         return Some("z-image");
     }
+    // Krea 2 (epic 8588): the ComfyUI-native MMDiT export carries a unique
+    // `txtfusion.` text-fusion tower (`txtfusion.{layerwise,refiner}_blocks`,
+    // `txtfusion.projector`) alongside BFL-style `blocks.N.attn.{wq,wk,wv,wo}`,
+    // `qknorm`, and `mod.lin`. `txtfusion.` appears in no other family we ship, so
+    // one hit is decisive. This classifies the community single-file DiT export
+    // (`model.diffusion_model.*`, native keys) — the diffusers-key snapshot layout
+    // (`transformer_blocks.*`) is loaded by the Krea snapshot path, not here.
+    if any_key_contains(keys, "txtfusion.") {
+        return Some("krea_2");
+    }
     // Ideogram 4 (epic 6561): single-stream `layers.N.attention.qkv` +
     // `adaln_modulation` (lowercase) + `feed_forward.w`, with the unique
     // `embed_image_indicator` / `llm_cond_proj` / `adaln_proj` head keys.
@@ -563,6 +573,56 @@ mod tests {
         assert_eq!(verdict.family.as_deref(), Some("z-image"));
         assert_eq!(verdict.component, ComponentRole::Transformer);
         assert_eq!(verdict.quant, QuantFormat::Bf16);
+    }
+
+    #[test]
+    fn krea2_native_bf16_single_file_is_transformer() {
+        // ~/models/kreamania_variant5.safetensors (measured: 430 tensors, DiT-only,
+        // 415 BF16 + 15 F32, ComfyUI-native keys, no quant markers) — the dense-bf16
+        // community Krea 2 checkpoint that anchors the single-file import skeleton.
+        let verdict = recognized(classify_base_header(&header(&[
+            ("model.diffusion_model.blocks.0.attn.wq.weight", "BF16"),
+            ("model.diffusion_model.blocks.0.attn.wk.weight", "BF16"),
+            (
+                "model.diffusion_model.blocks.0.attn.qknorm.qnorm.scale",
+                "BF16",
+            ),
+            ("model.diffusion_model.blocks.0.mlp.gate.weight", "BF16"),
+            ("model.diffusion_model.blocks.0.mod.lin", "BF16"),
+            (
+                "model.diffusion_model.txtfusion.refiner_blocks.0.attn.wq.weight",
+                "BF16",
+            ),
+            ("model.diffusion_model.txtfusion.projector.weight", "F32"),
+            ("model.diffusion_model.first.weight", "F32"),
+            ("model.diffusion_model.last.linear.weight", "F32"),
+        ])));
+        assert_eq!(verdict.family.as_deref(), Some("krea_2"));
+        assert_eq!(verdict.component, ComponentRole::Transformer);
+        assert_eq!(verdict.quant, QuantFormat::Bf16);
+    }
+
+    #[test]
+    fn krea2_native_int8_single_file_is_transformer_but_packed_quant() {
+        // ~/models/kreamania_variant4.safetensors (measured: 958 tensors, DiT-only,
+        // int8 per-row `{"format":"int8_tensorwise","per_row":true}` with `.comfy_quant`
+        // descriptors). The family/component classify the same as the bf16 sibling; the
+        // quant lands in the packed bucket we do not yet load — proving detection is a
+        // prerequisite that already separates the loadable (bf16) from the deferred (int8)
+        // case rather than mislabelling one as the other.
+        let verdict = recognized(classify_base_header(&header(&[
+            ("model.diffusion_model.blocks.0.attn.wq.weight", "I8"),
+            ("model.diffusion_model.blocks.0.attn.wq.weight_scale", "F32"),
+            ("model.diffusion_model.blocks.0.attn.wq.comfy_quant", "U8"),
+            ("model.diffusion_model.blocks.0.mod.lin", "BF16"),
+            (
+                "model.diffusion_model.txtfusion.refiner_blocks.1.attn.wq.comfy_quant",
+                "U8",
+            ),
+        ])));
+        assert_eq!(verdict.family.as_deref(), Some("krea_2"));
+        assert_eq!(verdict.component, ComponentRole::Transformer);
+        assert_eq!(verdict.quant, QuantFormat::ComfyQuantPacked);
     }
 
     #[test]
