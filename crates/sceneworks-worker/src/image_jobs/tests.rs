@@ -10676,7 +10676,10 @@ fn resolve_krea_control_base_descends_turnkey_root_into_tier_with_tokenizer() {
 /// The single-file-vs-snapshot-dir decision at the heart of S0c: a `.safetensors` FILE is a single-file
 /// checkpoint (→ the native entrypoint); a directory (a snapshot tier) is not (→ the registry snapshot
 /// path). A non-safetensors file (e.g. a `.ckpt`) is likewise not one — the S0b/S0a lane is safetensors.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn is_single_file_checkpoint_distinguishes_file_from_snapshot_dir() {
     let dir = tempfile::tempdir().unwrap();
@@ -10707,12 +10710,15 @@ fn is_single_file_checkpoint_distinguishes_file_from_snapshot_dir() {
 
 /// Seed an app-managed imported model file under `<data_dir>/models/…` and return a Settings pinned to
 /// that data dir. The confinement (`normalize_app_managed_model_path`) admits `<data_dir>` roots.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn imported_krea_settings_with_file(dir: &std::path::Path) -> (Settings, PathBuf) {
     let file = dir
         .join("models")
         .join("imported-krea")
-        .join("kreamania_variant5.safetensors");
+        .join("kreamania_variant4.safetensors");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, b"dit").unwrap();
     let mut settings = Settings::from_env();
@@ -10989,9 +10995,39 @@ fn resolve_image_route_sends_imported_single_file_krea_to_the_bespoke_lane() {
     );
 }
 
+/// Candle twin of the MLX route regression above: the external id is absent from the builtin table,
+/// yet a real app-managed single-file Krea manifest resolves to the bespoke Candle dispatch variant.
+/// The exhaustive match in `run_image_job` maps that variant to `generate_krea_imported_stream`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lane() {
+    let dir = tempfile::tempdir().unwrap();
+    let (settings, file) = imported_krea_settings_with_file(dir.path());
+    let imported = request(json!({
+        "projectId": "p",
+        "model": "kreamania_variant4",
+        "prompt": "a cat",
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "modelPath": file.to_str().unwrap()
+        }
+    }));
+
+    assert_eq!(
+        resolve_candle_image_route(&imported, &settings),
+        Some(CandleImageRoute::KreaImported),
+        "a novel imported Krea id must reach the Candle native-file lane"
+    );
+    assert!(krea_imported_available(&imported, &settings));
+    assert_eq!(KREA_IMPORTED_ENGINE, "candle_krea_imported");
+}
+
 /// A pose / edit / reference shape on an imported Krea 2 model is NOT claimed by the txt2img import lane
 /// (a bare imported DiT carries no conditioning components) — the availability predicate stays t2i-only.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn krea_imported_available_is_txt2img_only() {
     let dir = tempfile::tempdir().unwrap();
@@ -11020,12 +11056,36 @@ fn krea_imported_available_is_txt2img_only() {
 
     let reference = request(json!({
         "projectId": "p", "model": "kreamania_variant5", "referenceAssetId": "r",
-        "modelManifestEntry": base
+        "modelManifestEntry": base.clone()
     }));
     assert!(
         !krea_imported_available(&reference, &settings),
         "reference/img2img job excluded (t2i only in S0c)"
     );
+
+    for (label, extra) in [
+        ("mask", json!({ "maskAssetId": "m" })),
+        ("character", json!({ "characterId": "c" })),
+        ("adapter", json!({ "loras": [{ "id": "adapter" }] })),
+        (
+            "multi-phase",
+            json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "p",
+            "model": "kreamania_variant4",
+            "modelManifestEntry": base.clone()
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert!(
+            !krea_imported_available(&request(payload), &settings),
+            "{label} job excluded"
+        );
+    }
 }
 
 /// Real-weight GPU acceptance for the imported single-file Krea 2 lane (epic 14015 S0f, sc-14021).
