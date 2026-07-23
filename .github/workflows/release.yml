@@ -1,13 +1,16 @@
 name: Release (desktop)
 
 # Builds, signs, notarizes, staples, and publishes a DRAFT GitHub Release of the
-# desktop app when a `v*` tag is pushed (or via manual dispatch). Two jobs attach to
+# desktop app when a `v*` tag is pushed (or via manual dispatch). Three jobs attach to
 # the SAME draft release:
 #   macos   — signs + notarizes the .app via the APPLE_* env (from repo secrets),
 #             then staple-dmg.mjs staples the DMG; CREATES the draft release.
 #   windows — builds the candle/CUDA NSIS + MSI installers and UPLOADS them to the
 #             release the macos job created (needs: macos). Mirrors the build steps in
 #             desktop-windows.yml; keep the two in sync when either changes.
+#   linux   — builds the candle/CUDA AppImage + deb and UPLOADS them to that draft
+#             (needs: windows, which also serializes latest.json platform merges).
+#             Mirrors desktop-linux.yml; keep the two in sync when either changes.
 # Mirrors the local mac flow (`npm run release:mac`): `tauri build` signs + notarizes
 # the .app, then staple-dmg.mjs staples the DMG.
 #
@@ -194,7 +197,10 @@ jobs:
             'Signed & notarized build. Open the DMG and drag SceneWorks to Applications.' \
             '' \
             '## Windows (CUDA GPU)' \
-            'Run the .msi installer. Requires an NVIDIA GPU; the CUDA/cuDNN runtime is downloaded on first launch.')
+            'Run the .msi installer. Requires an NVIDIA GPU; the CUDA/cuDNN runtime is downloaded on first launch.' \
+            '' \
+            '## Linux x86_64 (CUDA GPU)' \
+            'Run the AppImage or install the .deb on Ubuntu 22.04/24.04. Requires an NVIDIA GPU; the CUDA/cuDNN runtime is downloaded on first launch.')
           args=(--draft --generate-notes --title "SceneWorks $TAG" --notes "$notes")
           case "$TAG" in *-*) args+=(--prerelease) ;; esac
           # Attach the DMG (fresh install) + the updater tarball (in-app update payload).
@@ -356,6 +362,140 @@ jobs:
           gh release download "$TAG" -p latest.json --clobber
           node apps/desktop/scripts/build-update-manifest.mjs \
             --target windows-x86_64 \
+            --version "${TAG#v}" \
+            --url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${payload_name}" \
+            --sig "$sig" \
+            --in latest.json \
+            --out latest.json
+          gh release upload "$TAG" --clobber latest.json
+
+  linux:
+    # Attach the Linux packages after Windows has merged its updater entry.
+    # Serializing the latest.json read/modify/write prevents platform entries
+    # from clobbering one another. Build steps mirror desktop-linux.yml.
+    needs: windows
+    if: ${{ github.repository == 'SceneWorks/SceneWorks' }}
+    runs-on: ubuntu-22.04
+    env:
+      # Build-side constant, not a secret. Keep this and the CUDA pin aligned
+      # with desktop-linux.yml, server-candle-linux.yml, and Windows.
+      CUDA_COMPUTE_CAP: "80"
+      CARGO_NET_OFFLINE: "true"
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            apps/web/package-lock.json
+            apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+
+      # Match the manual Linux packaging lane. gstreamer1.0-libav supplies H.264
+      # decoding for WebKitGTK media playback on stock Ubuntu.
+      - name: Install GTK, WebKitGTK, and media dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            curl \
+            file \
+            gstreamer1.0-libav \
+            libayatana-appindicator3-dev \
+            libfuse2 \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
+      - name: Fetch the private inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
+          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
+        run: cargo fetch --locked
+
+      - name: Install CUDA Toolkit 12.9
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        with:
+          cuda: "12.9.1"
+          method: "network"
+          linux-local-args: '["--toolkit"]'
+
+      - name: Guard against gen-core version skew (candle)
+        run: |
+          bash scripts/check-gen-core-skew.sh --self-test
+          bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle
+          bash scripts/check-gen-core-skew.sh sceneworks-rust-api --features embed-web,backend-candle
+
+      # Keep install-time lifecycle scripts disabled on the signing lane. The
+      # updater private key is absent here and scoped only to the bundle step.
+      - name: Install web and desktop dependencies
+        run: |
+          npm ci --prefix apps/web --ignore-scripts
+          npm ci --prefix apps/desktop --ignore-scripts
+
+      - name: Validate desktop bundle configuration
+        run: npm --prefix apps/desktop test
+
+      # createUpdaterArtifacts emits the signed AppImage update payload beside
+      # the normal AppImage and deb. Only this step receives the minisign key.
+      - name: Build Linux candle packages + signed AppImage updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm --prefix apps/desktop run build -- --bundles appimage,deb --config updater.release.conf.json
+
+      - name: Guard against NC model weights in the desktop bundle (sc-10526, sc-10551)
+        run: node scripts/check-no-nc-weights.mjs --dir target/release/bundle --scan-archives --skip-uninspectable
+
+      - name: Attach Linux packages + merge updater manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          shopt -s nullglob
+          appimages=(target/release/bundle/appimage/*.AppImage)
+          debs=(target/release/bundle/deb/*.deb)
+          if [ ${#appimages[@]} -eq 0 ] || [ ${#debs[@]} -eq 0 ]; then
+            echo "Expected an AppImage and deb under target/release/bundle/{appimage,deb}/" >&2
+            exit 1
+          fi
+          packages=("${appimages[@]}" "${debs[@]}")
+          sigs=(target/release/bundle/appimage/*.sig)
+          if [ ${#sigs[@]} -eq 0 ]; then
+            echo "No AppImage updater signature under target/release/bundle/appimage/*.sig" >&2
+            exit 1
+          fi
+          sig="${sigs[0]}"
+          payload="${sig%.sig}"
+          if [ ! -f "$payload" ]; then
+            echo "Signed AppImage updater payload is missing: $payload" >&2
+            exit 1
+          fi
+          payload_name="$(basename "$payload")"
+
+          gh release upload "$TAG" --clobber "${packages[@]}"
+          case " ${packages[*]} " in
+            *" $payload "*) : ;;  # the signed updater payload is the AppImage itself
+            *) gh release upload "$TAG" --clobber "$payload" ;;
+          esac
+
+          # Windows already merged its entry; add Linux last so the published
+          # manifest contains all three supported desktop targets.
+          gh release download "$TAG" -p latest.json --clobber
+          node apps/desktop/scripts/build-update-manifest.mjs \
+            --target linux-x86_64 \
             --version "${TAG#v}" \
             --url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${payload_name}" \
             --sig "$sig" \

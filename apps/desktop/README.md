@@ -123,7 +123,12 @@ Choose either Linux x86_64 package:
   `libwebkit2gtk-4.1-0` and `libgtk-3-0` runtime dependencies.
 - Make the AppImage executable with `chmod +x SceneWorks_*.AppImage`, then run
   it directly. The AppImage carries its GTK/WebKitGTK runtime and does not
-  require a package-manager install.
+  require a package-manager install. Release AppImages participate in the same
+  signed in-app auto-update flow as the macOS and Windows builds.
+
+The `.deb` does **not** self-update. Until SceneWorks publishes an APT repository,
+install a newer `.deb` from the GitHub release when upgrading; installing it over
+an existing package preserves the per-user SceneWorks data directories.
 
 Both packages require an NVIDIA driver, but not a system CUDA toolkit. SceneWorks
 downloads its pinned CUDA user-space runtime on first launch.
