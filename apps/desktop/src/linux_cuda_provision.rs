@@ -162,10 +162,19 @@ fn component_complete(root: &Path, component: &Component) -> bool {
 }
 
 fn already_provisioned(root: &Path) -> bool {
+    top_marker_current(root) && runtime_complete(root)
+}
+
+fn top_marker_current(root: &Path) -> bool {
     fs::read_to_string(root.join(".redist-marker"))
         .map(|value| value.trim() == REDIST_VERSION)
         .unwrap_or(false)
-        && runtime_complete(root)
+}
+
+fn all_component_markers_current(root: &Path) -> bool {
+    COMPONENTS
+        .iter()
+        .all(|component| component_complete(root, component))
 }
 
 fn write_marker(root: &Path) -> Result<(), String> {
@@ -227,20 +236,18 @@ fn extract_shared_objects(
 }
 
 fn promote_component(stage: &Path, dest: &Path) -> Result<(), String> {
-    fs::create_dir_all(dest).map_err(|error| format!("create {}: {error}", dest.display()))?;
-    for entry in
-        fs::read_dir(stage).map_err(|error| format!("read {}: {error}", stage.display()))?
-    {
-        let entry = entry.map_err(|error| format!("read {}: {error}", stage.display()))?;
-        let target = dest.join(entry.file_name());
-        if target.exists() {
-            fs::remove_file(&target)
-                .map_err(|error| format!("replace {}: {error}", target.display()))?;
-        }
-        fs::rename(entry.path(), &target)
-            .map_err(|error| format!("promote {}: {error}", target.display()))?;
+    let parent = dest
+        .parent()
+        .ok_or_else(|| format!("{} has no parent", dest.display()))?;
+    fs::create_dir_all(parent).map_err(|error| format!("create {}: {error}", parent.display()))?;
+    // A version bump must not leave older versioned SONAME files alongside the new
+    // wheel: setup's resolver sorts candidates and could otherwise select the stale
+    // one. The component marker is written only after this replacement succeeds, so
+    // a crash here remains safely incomplete/dormant.
+    if dest.exists() {
+        fs::remove_dir_all(dest).map_err(|error| format!("replace {}: {error}", dest.display()))?;
     }
-    Ok(())
+    fs::rename(stage, dest).map_err(|error| format!("promote {}: {error}", dest.display()))
 }
 
 fn install_from_staged(source: &Path, root: &Path) -> Result<(), String> {
@@ -250,8 +257,16 @@ fn install_from_staged(source: &Path, root: &Path) -> Result<(), String> {
             source.display()
         ));
     }
+    let pinned_source = top_marker_current(source) || all_component_markers_current(source);
+    if !pinned_source {
+        return Err(format!(
+            "{GPU_RUNTIME_DIR_ENV} ({}) has no current `{REDIST_VERSION}` marker evidence; \
+             copy a complete runtime provisioned by this SceneWorks version",
+            source.display()
+        ));
+    }
     if source == root {
-        return runtime_complete(root)
+        return (runtime_complete(root) && pinned_source)
             .then_some(())
             .ok_or_else(|| format!("{GPU_RUNTIME_DIR_ENV} points at an incomplete runtime"));
     }
@@ -265,6 +280,10 @@ fn install_from_staged(source: &Path, root: &Path) -> Result<(), String> {
             ));
         }
         let dest = root.join(component.dest);
+        if dest.exists() {
+            fs::remove_dir_all(&dest)
+                .map_err(|error| format!("replace {}: {error}", dest.display()))?;
+        }
         fs::create_dir_all(&dest).map_err(|error| format!("create {}: {error}", dest.display()))?;
         for entry in
             fs::read_dir(&src).map_err(|error| format!("read {}: {error}", src.display()))?
@@ -276,13 +295,72 @@ fn install_from_staged(source: &Path, root: &Path) -> Result<(), String> {
             }
         }
     }
-    runtime_complete(root).then_some(()).ok_or_else(|| {
-        format!(
+    if !runtime_complete(root) {
+        return Err(format!(
             "pre-staged GPU runtime from {} is incomplete; required CUDA/cuDNN/onnxruntime \
              shared objects are missing",
             source.display()
-        )
-    })
+        ));
+    }
+    for component in COMPONENTS {
+        write_component_marker(root, component.slug, REDIST_VERSION)?;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+fn evaluate_ldd_report(success: bool, report: &str) -> Result<(), String> {
+    if success && !report.contains("not found") {
+        return Ok(());
+    }
+    Err(format!(
+        "the Linux GPU runtime has unresolved shared-library dependencies. Install the \
+         GNU OpenMP runtime if it is missing (Debian/Ubuntu: `sudo apt install libgomp1`; \
+         Fedora/RHEL: `sudo dnf install libgomp`) and relaunch SceneWorks. ldd reported: \
+         {}",
+        report.trim()
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn validate_runtime_dependencies(root: &Path) -> Result<(), String> {
+    let provider_dir = root.join("onnxruntime/capi");
+    let provider = fs::read_dir(&provider_dir)
+        .map_err(|error| format!("read {}: {error}", provider_dir.display()))?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name == "libonnxruntime_providers_cuda.so"
+                        || name.starts_with("libonnxruntime_providers_cuda.so.")
+                })
+        })
+        .ok_or_else(|| "onnxruntime CUDA provider is missing after provisioning".to_owned())?;
+    let mut loader_dirs = Vec::new();
+    for component in COMPONENTS {
+        let path = root.join(component.dest);
+        if !loader_dirs.contains(&path) {
+            loader_dirs.push(path);
+        }
+    }
+    loader_dirs.extend(std::env::split_paths(
+        &std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
+    ));
+    let joined = std::env::join_paths(loader_dirs)
+        .map_err(|error| format!("compose LD_LIBRARY_PATH: {error}"))?;
+    let output = std::process::Command::new("ldd")
+        .arg(provider)
+        .env("LD_LIBRARY_PATH", joined)
+        .output()
+        .map_err(|error| format!("run Linux GPU runtime dependency check (`ldd`): {error}"))?;
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    evaluate_ldd_report(output.status.success(), &report)
 }
 
 async fn fetch_component(
@@ -362,6 +440,7 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
     let root = gpu_runtime_dir();
     fs::create_dir_all(&root).map_err(|error| format!("create {}: {error}", root.display()))?;
     if already_provisioned(&root) {
+        validate_runtime_dependencies(&root)?;
         emit(app, "provision", "GPU runtime ready (cached).", false);
         return Ok(());
     }
@@ -379,17 +458,19 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
                 false,
             );
             install_from_staged(&source, &root)?;
+            validate_runtime_dependencies(&root)?;
             write_marker(&root)?;
             emit(app, "provision", "GPU runtime ready (pre-staged).", false);
             return Ok(());
         }
     }
-    if runtime_complete(&root) {
+    if all_component_markers_current(&root) {
+        validate_runtime_dependencies(&root)?;
         write_marker(&root)?;
         emit(
             app,
             "provision",
-            "Found a complete Linux GPU runtime; skipping download.",
+            "Recovered a verified Linux GPU runtime; skipping download.",
             false,
         );
         return Ok(());
@@ -438,6 +519,7 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
     if !runtime_complete(&root) {
         return Err("Linux GPU runtime is incomplete after extraction".to_owned());
     }
+    validate_runtime_dependencies(&root)?;
     write_marker(&root)?;
     emit(app, "provision", "Linux GPU runtime ready.", false);
     Ok(())
@@ -467,6 +549,13 @@ mod tests {
                 fs::write(dir.join(format!("{sentinel}.fixture")), b"fixture")
                     .expect("write sentinel");
             }
+        }
+    }
+
+    fn mark_components(root: &Path) {
+        for component in COMPONENTS {
+            write_component_marker(root, component.slug, REDIST_VERSION)
+                .expect("write component marker");
         }
     }
 
@@ -562,12 +651,15 @@ mod tests {
     fn staged_override_copies_complete_layout_and_rejects_partial() {
         let source = scratch("staged-source");
         touch_runtime(&source);
+        write_marker(&source).expect("mark pinned source");
         let target = scratch("staged-target");
         install_from_staged(&source, &target).expect("install complete stage");
         assert!(runtime_complete(&target));
+        assert!(all_component_markers_current(&target));
 
         let partial = scratch("staged-partial");
         touch_runtime(&partial);
+        write_marker(&partial).expect("mark pinned partial source");
         fs::remove_file(partial.join("cufft/lib/libcufft.so.fixture"))
             .expect("remove fixture sentinel");
         let rejected = scratch("staged-rejected");
@@ -576,6 +668,60 @@ mod tests {
         for root in [source, target, partial, rejected] {
             fs::remove_dir_all(root).expect("remove fixture");
         }
+    }
+
+    #[test]
+    fn staged_override_rejects_markerless_stale_and_mixed_runtimes() {
+        let markerless = scratch("staged-markerless");
+        touch_runtime(&markerless);
+        let target = scratch("staged-markerless-target");
+        let error =
+            install_from_staged(&markerless, &target).expect_err("markerless stage is unpinned");
+        assert!(error.contains("marker evidence"));
+
+        fs::write(markerless.join(".redist-marker"), "old-runtime-version")
+            .expect("write stale marker");
+        let error = install_from_staged(&markerless, &target).expect_err("stale stage is unpinned");
+        assert!(error.contains(REDIST_VERSION));
+
+        // Per-component evidence is an allowed recovery path only when every marker
+        // and sentinel belongs to the current manifest.
+        mark_components(&markerless);
+        fs::write(
+            markerless.join(".component-cudnn.ok"),
+            "old-runtime-version",
+        )
+        .expect("make one component stale");
+        let error = install_from_staged(&markerless, &target).expect_err("mixed stage is unpinned");
+        assert!(error.contains("marker evidence"));
+
+        for root in [markerless, target] {
+            fs::remove_dir_all(root).expect("remove fixture");
+        }
+    }
+
+    #[test]
+    fn promotion_removes_obsolete_versioned_libraries() {
+        let root = scratch("promote");
+        let stage = root.join("stage");
+        let dest = root.join("runtime/cudnn/lib");
+        fs::create_dir_all(&stage).expect("create stage");
+        fs::create_dir_all(&dest).expect("create old destination");
+        fs::write(stage.join("libcudnn.so.9"), b"new").expect("write new library");
+        fs::write(dest.join("libcudnn.so.8"), b"old").expect("write stale library");
+        promote_component(&stage, &dest).expect("replace component directory");
+        assert!(dest.join("libcudnn.so.9").is_file());
+        assert!(!dest.join("libcudnn.so.8").exists());
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn ldd_failure_maps_libgomp_and_other_missing_dependencies_actionably() {
+        assert!(evaluate_ldd_report(true, "libgomp.so.1 => /usr/lib/libgomp.so.1").is_ok());
+        let error = evaluate_ldd_report(false, "libgomp.so.1 => not found")
+            .expect_err("missing libgomp must fail before worker spawn");
+        assert!(error.contains("libgomp1"));
+        assert!(error.contains("not found"));
     }
 
     #[test]
