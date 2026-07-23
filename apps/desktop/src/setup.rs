@@ -278,7 +278,10 @@ const APP_DIR_NAME: &str = "SceneWorks";
 /// Linux desktop paths resolved from the XDG base-directory environment.
 ///
 /// Kept as a pure helper (rather than reading the process environment directly)
-/// so all XDG override and fallback behavior is testable on every CI host.
+/// so all XDG override and fallback behavior is testable on every CI host. A
+/// missing absolute XDG base and missing absolute `HOME` is an error: falling
+/// back to `temp_dir()` would trust `TMPDIR`, permit relative/CWD writes, and use
+/// a predictable cross-user directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg(any(all(unix, not(target_os = "macos")), test))]
 struct LinuxDesktopPaths {
@@ -298,9 +301,8 @@ impl LinuxDesktopPaths {
             .then_some(path)
     }
 
-    fn resolve(get_env: impl Fn(&str) -> Option<OsString>, temp_dir: &Path) -> LinuxDesktopPaths {
+    fn resolve(get_env: impl Fn(&str) -> Option<OsString>) -> Result<LinuxDesktopPaths, String> {
         let home = get_env("HOME").and_then(LinuxDesktopPaths::absolute_linux_path);
-        let temp_root = temp_dir.join(APP_DIR_NAME);
         let xdg_dir = |name: &str, fallback: &[&str], temp_leaf: &str| {
             get_env(name)
                 .and_then(LinuxDesktopPaths::absolute_linux_path)
@@ -312,21 +314,59 @@ impl LinuxDesktopPaths {
                     })
                 })
                 .map(|base| base.join(APP_DIR_NAME))
-                .unwrap_or_else(|| temp_root.join(temp_leaf))
+                .ok_or_else(|| {
+                    format!(
+                        "cannot resolve Linux {temp_leaf} directory: set {name} or HOME to an absolute path"
+                    )
+                })
         };
 
-        LinuxDesktopPaths {
-            data_dir: xdg_dir("XDG_DATA_HOME", &[".local", "share"], "data"),
-            config_dir: xdg_dir("XDG_CONFIG_HOME", &[".config"], "config"),
-            cache_dir: xdg_dir("XDG_CACHE_HOME", &[".cache"], "cache"),
-            state_dir: xdg_dir("XDG_STATE_HOME", &[".local", "state"], "state"),
-        }
+        Ok(LinuxDesktopPaths {
+            data_dir: xdg_dir("XDG_DATA_HOME", &[".local", "share"], "data")?,
+            config_dir: xdg_dir("XDG_CONFIG_HOME", &[".config"], "config")?,
+            cache_dir: xdg_dir("XDG_CACHE_HOME", &[".cache"], "cache")?,
+            state_dir: xdg_dir("XDG_STATE_HOME", &[".local", "state"], "state")?,
+        })
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
-    fn from_process_env() -> LinuxDesktopPaths {
-        Self::resolve(std::env::var_os, &std::env::temp_dir())
+    fn from_process_env() -> Result<LinuxDesktopPaths, String> {
+        Self::resolve(std::env::var_os)
     }
+
+    fn settings_file(&self) -> PathBuf {
+        self.config_dir.join("settings.json")
+    }
+
+    fn data_dir(&self) -> PathBuf {
+        self.data_dir.clone()
+    }
+
+    fn config_dir(&self) -> PathBuf {
+        self.config_dir.clone()
+    }
+
+    fn logs_dir(&self) -> PathBuf {
+        self.state_dir.join("logs")
+    }
+
+    fn huggingface_home(&self) -> PathBuf {
+        self.cache_dir.join("huggingface")
+    }
+
+    fn gpu_runtime_dir(&self) -> PathBuf {
+        self.data_dir.join("gpu-runtime")
+    }
+
+    fn sidecar_pidfile(&self) -> PathBuf {
+        self.state_dir.join("desktop-sidecars.json")
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_desktop_paths() -> LinuxDesktopPaths {
+    LinuxDesktopPaths::from_process_env()
+        .unwrap_or_else(|error| panic!("SceneWorks Linux path configuration is invalid: {error}"))
 }
 
 /// Per-OS application support root: `~/Library/Application Support/SceneWorks`
@@ -346,7 +386,7 @@ pub fn app_support_dir() -> PathBuf {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        LinuxDesktopPaths::from_process_env().data_dir
+        linux_desktop_paths().data_dir()
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
@@ -369,7 +409,7 @@ pub fn logs_dir() -> PathBuf {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        LinuxDesktopPaths::from_process_env().state_dir.join("logs")
+        linux_desktop_paths().logs_dir()
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
@@ -382,7 +422,7 @@ pub fn logs_dir() -> PathBuf {
 pub fn default_data_dir() -> PathBuf {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        LinuxDesktopPaths::from_process_env().data_dir
+        linux_desktop_paths().data_dir()
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
@@ -393,7 +433,7 @@ pub fn default_data_dir() -> PathBuf {
 pub(crate) fn config_dir() -> PathBuf {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        LinuxDesktopPaths::from_process_env().config_dir
+        linux_desktop_paths().config_dir()
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
@@ -404,7 +444,7 @@ pub(crate) fn config_dir() -> PathBuf {
 pub(crate) fn settings_file() -> PathBuf {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        config_dir().join("settings.json")
+        linux_desktop_paths().settings_file()
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
@@ -416,7 +456,14 @@ pub(crate) fn settings_file() -> PathBuf {
 /// consumes this path so its runtime stays under the XDG data base; the Windows
 /// value remains `%APPDATA%\SceneWorks\gpu-runtime`.
 pub fn gpu_runtime_dir() -> PathBuf {
-    app_support_dir().join("gpu-runtime")
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        linux_desktop_paths().gpu_runtime_dir()
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        app_support_dir().join("gpu-runtime")
+    }
 }
 
 /// Shared per-user Hugging Face cache — the default `HF_HOME` when the user
@@ -427,9 +474,7 @@ pub fn gpu_runtime_dir() -> PathBuf {
 pub fn shared_huggingface_home() -> PathBuf {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        LinuxDesktopPaths::from_process_env()
-            .cache_dir
-            .join("huggingface")
+        linux_desktop_paths().huggingface_home()
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
@@ -1623,9 +1668,7 @@ fn pid_alive(pid: u32) -> bool {
 fn sidecar_pidfile() -> PathBuf {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        LinuxDesktopPaths::from_process_env()
-            .state_dir
-            .join("desktop-sidecars.json")
+        linux_desktop_paths().sidecar_pidfile()
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
@@ -2253,32 +2296,30 @@ mod path_tests {
     use super::LinuxDesktopPaths;
     use std::collections::HashMap;
     use std::ffi::OsString;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
-    fn resolve(values: &[(&str, &str)], temp_dir: &Path) -> LinuxDesktopPaths {
+    fn resolve(values: &[(&str, &str)]) -> Result<LinuxDesktopPaths, String> {
         let env = values
             .iter()
             .map(|(name, value)| ((*name).to_owned(), OsString::from(value)))
             .collect::<HashMap<_, _>>();
-        LinuxDesktopPaths::resolve(|name| env.get(name).cloned(), temp_dir)
+        LinuxDesktopPaths::resolve(|name| env.get(name).cloned())
     }
 
     #[test]
     fn linux_xdg_overrides_cover_every_desktop_managed_location() {
-        let paths = resolve(
-            &[
-                ("HOME", "/home/alice"),
-                ("XDG_DATA_HOME", "/mnt/xdg-data"),
-                ("XDG_CONFIG_HOME", "/mnt/xdg-config"),
-                ("XDG_CACHE_HOME", "/mnt/xdg-cache"),
-                ("XDG_STATE_HOME", "/mnt/xdg-state"),
-            ],
-            Path::new("/tmp"),
-        );
+        let paths = resolve(&[
+            ("HOME", "relative-home"),
+            ("XDG_DATA_HOME", "/mnt/xdg-data"),
+            ("XDG_CONFIG_HOME", "/mnt/xdg-config"),
+            ("XDG_CACHE_HOME", "/mnt/xdg-cache"),
+            ("XDG_STATE_HOME", "/mnt/xdg-state"),
+        ])
+        .expect("absolute XDG overrides resolve");
 
-        assert_eq!(paths.data_dir, PathBuf::from("/mnt/xdg-data/SceneWorks"));
+        assert_eq!(paths.data_dir(), PathBuf::from("/mnt/xdg-data/SceneWorks"));
         assert_eq!(
-            paths.config_dir,
+            paths.config_dir(),
             PathBuf::from("/mnt/xdg-config/SceneWorks")
         );
         assert_eq!(paths.cache_dir, PathBuf::from("/mnt/xdg-cache/SceneWorks"));
@@ -2286,44 +2327,44 @@ mod path_tests {
 
         // Exact call surfaces owned by the desktop and its sidecars.
         assert_eq!(
-            paths.config_dir.join("settings.json"),
+            paths.settings_file(),
             PathBuf::from("/mnt/xdg-config/SceneWorks/settings.json")
         );
         assert_eq!(
-            paths.config_dir.join("manifests"),
+            paths.config_dir().join("manifests"),
             PathBuf::from("/mnt/xdg-config/SceneWorks/manifests")
         );
         assert_eq!(
-            paths.data_dir.join("cache").join("jobs.db"),
+            paths.data_dir().join("cache").join("jobs.db"),
             PathBuf::from("/mnt/xdg-data/SceneWorks/cache/jobs.db")
         );
         assert_eq!(
-            paths.state_dir.join("logs"),
+            paths.logs_dir(),
             PathBuf::from("/mnt/xdg-state/SceneWorks/logs")
         );
         assert_eq!(
-            paths.data_dir.join("gpu-runtime"),
+            paths.gpu_runtime_dir(),
             PathBuf::from("/mnt/xdg-data/SceneWorks/gpu-runtime")
         );
         assert_eq!(
-            paths.cache_dir.join("huggingface"),
+            paths.huggingface_home(),
             PathBuf::from("/mnt/xdg-cache/SceneWorks/huggingface")
         );
         assert_eq!(
-            paths.state_dir.join("desktop-sidecars.json"),
+            paths.sidecar_pidfile(),
             PathBuf::from("/mnt/xdg-state/SceneWorks/desktop-sidecars.json")
         );
     }
 
     #[test]
     fn linux_xdg_fallbacks_are_home_scoped_and_never_relative() {
-        let paths = resolve(&[("HOME", "/home/alice")], Path::new("/tmp"));
+        let paths = resolve(&[("HOME", "/home/alice")]).expect("absolute HOME resolves");
         assert_eq!(
-            paths.data_dir,
+            paths.data_dir(),
             PathBuf::from("/home/alice/.local/share/SceneWorks")
         );
         assert_eq!(
-            paths.config_dir,
+            paths.config_dir(),
             PathBuf::from("/home/alice/.config/SceneWorks")
         );
         assert_eq!(
@@ -2334,29 +2375,30 @@ mod path_tests {
             paths.state_dir,
             PathBuf::from("/home/alice/.local/state/SceneWorks")
         );
+    }
 
-        // The XDG spec requires absolute override values. Ignoring relative/empty
-        // values prevents an accidental write into the launch CWD.
-        let invalid = resolve(
-            &[
-                ("HOME", "relative-home"),
-                ("XDG_DATA_HOME", "relative-data"),
-                ("XDG_CONFIG_HOME", ""),
-            ],
-            Path::new("/var/tmp"),
+    #[test]
+    fn linux_paths_fail_without_absolute_xdg_or_home_even_with_relative_tmpdir() {
+        // The XDG spec requires absolute override values. `TMPDIR` is
+        // intentionally relative to reproduce the review finding: resolution
+        // must fail before any accessor can turn it into a launch-CWD write.
+        let error = resolve(&[
+            ("HOME", "relative-home"),
+            ("XDG_DATA_HOME", "relative-data"),
+            ("XDG_CONFIG_HOME", ""),
+            ("TMPDIR", "relative-tmp"),
+        ])
+        .expect_err("missing absolute XDG/HOME bases must stop startup");
+        assert!(
+            error.contains("XDG_DATA_HOME") && error.contains("HOME"),
+            "unexpected resolution error: {error}"
         );
-        assert_eq!(invalid.data_dir, PathBuf::from("/var/tmp/SceneWorks/data"));
-        assert_eq!(
-            invalid.config_dir,
-            PathBuf::from("/var/tmp/SceneWorks/config")
-        );
-        assert_eq!(
-            invalid.cache_dir,
-            PathBuf::from("/var/tmp/SceneWorks/cache")
-        );
-        assert_eq!(
-            invalid.state_dir,
-            PathBuf::from("/var/tmp/SceneWorks/state")
+
+        let absent = resolve(&[("TMPDIR", "relative-tmp")])
+            .expect_err("missing HOME and XDG bases must stop startup");
+        assert!(
+            absent.contains("XDG_DATA_HOME") && absent.contains("HOME"),
+            "unexpected resolution error: {absent}"
         );
     }
 }
