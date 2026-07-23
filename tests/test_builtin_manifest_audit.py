@@ -986,3 +986,361 @@ def test_hide_reference_strength_models_declare_a_variation_knob():
         f"with NO identity tuning control. Add `variationStrength` or drop "
         f"`hideReferenceStrength`."
     )
+
+
+# ---------------------------------------------------------------------------
+# sc-13606 (F-037): even out schema enforcement across the SIBLING builtin
+# catalogs (loras / styles / control_overlays / recipe-presets).
+#
+# Before this, only builtin.models.jsonc got full JSON-Schema CI validation
+# (sc-12338, the audits above). The lora schema required nothing per entry and
+# left `source` wide open (additionalProperties:true), so a typo'd
+# `source.repo`/`source.file` — the sc-12288 field class behind a silent failed
+# download — passed; builtin.styles.jsonc declared a `$schema` NO check
+# validated; builtin.control_overlays.jsonc had no schema at all. Authoring
+# errors therefore surfaced at runtime (failed downloads, missing overlays /
+# styles) instead of in CI. These tests mirror the model audit above: load each
+# JSONC catalog, validate it against its schema, and prove each new constraint
+# catches a deliberately-broken entry with a schema-keyword-DISCRIMINATING
+# mutation check — NOT a test that merely asserts the current catalog passes.
+#
+# The check-scaffold registry (scripts/check-scaffold.mjs) is kept in lockstep:
+# it now lists all five schema/manifest pairs so the scaffold/parity lane knows
+# the styles + control-overlays pairs exist and reference a real schema; the
+# DEEP jsonschema validation is this pytest lane's job (the scaffold has no
+# jsonschema dependency), the same division of labour the model catalog uses.
+# ---------------------------------------------------------------------------
+
+LORA_MANIFEST_PATH = ROOT / "config" / "manifests" / "builtin.loras.jsonc"
+LORA_SCHEMA_PATH = ROOT / "packages" / "schemas" / "lora-manifest.schema.json"
+STYLES_MANIFEST_PATH = ROOT / "config" / "manifests" / "builtin.styles.jsonc"
+STYLES_SCHEMA_PATH = ROOT / "packages" / "schemas" / "styles.schema.json"
+CONTROL_OVERLAYS_MANIFEST_PATH = ROOT / "config" / "manifests" / "builtin.control_overlays.jsonc"
+CONTROL_OVERLAYS_SCHEMA_PATH = ROOT / "packages" / "schemas" / "control-overlays.schema.json"
+RECIPE_PRESETS_MANIFEST_PATH = ROOT / "config" / "manifests" / "builtin.recipe-presets.jsonc"
+RECIPE_PRESET_SCHEMA_PATH = ROOT / "packages" / "schemas" / "recipe-preset.schema.json"
+
+
+def _load_jsonc(path: Path) -> dict:
+    """Generalization of `_load_builtin_models_manifest` for the sibling catalogs."""
+    return json.loads(_strip_jsonc_comments(path.read_text(encoding="utf-8")))
+
+
+def _schema_errors(manifest: dict, schema_path: Path) -> list:
+    """Validate `manifest` against the schema at `schema_path`, returning the
+    (path-sorted) validation errors. Also asserts the schema itself is a legal
+    Draft 2020-12 document (a broken schema is a silent all-pass otherwise)."""
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator.check_schema(schema)
+    return sorted(
+        jsonschema.Draft202012Validator(schema).iter_errors(manifest),
+        key=lambda error: list(error.absolute_path),
+    )
+
+
+def _format_errors(errors) -> str:
+    return "\n".join(
+        f"- {'.'.join(map(str, error.absolute_path)) or '<root>'}: {error.message}"
+        for error in errors
+    )
+
+
+# --- LoRA catalog (builtin.loras.jsonc) ------------------------------------
+
+
+def _sample_lora_entry() -> dict:
+    """A minimal schema-valid LoRA entry for exercising the entry/source schema in
+    isolation (never shipped — real entries live in builtin.loras.jsonc)."""
+    return {
+        "id": "sample_lora",
+        "name": "Sample LoRA",
+        "family": "krea_2",
+        "compatibility": {"families": ["krea_2"]},
+        "defaultWeight": 1.0,
+        "source": {
+            "provider": "huggingface",
+            "repo": "namespace/sample-lora",
+            "file": "sample.safetensors",
+        },
+    }
+
+
+def test_builtin_loras_manifest_satisfies_authoring_schema():
+    """sc-13606: builtin.loras.jsonc is now a full-jsonschema CI contract, not just
+    a shallow root-key check (parity with the model catalog)."""
+    errors = _schema_errors(_load_jsonc(LORA_MANIFEST_PATH), LORA_SCHEMA_PATH)
+    assert not errors, "builtin.loras.jsonc violates lora-manifest.schema.json:\n" + _format_errors(errors)
+
+
+def test_lora_schema_requires_entry_id():
+    """A LoRA entry must carry `id` (the picker / job payloads / compatibility
+    checks all key on it). Discriminate on the `required` keyword + its value so a
+    schema revert dropping `required:[id]` goes red rather than passing on an
+    unrelated error."""
+    entry = _sample_lora_entry()
+    del entry["id"]
+    errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
+    assert any(
+        error.validator == "required"
+        and error.validator_value == ["id"]
+        and list(error.absolute_path) == ["loras", 0]
+        for error in errors
+    ), "a LoRA entry without `id` must be rejected by the entry's required:['id']"
+
+
+def test_lora_schema_rejects_a_typod_source_key():
+    """The sc-12288 field class: a typo'd `source.file` (or `repo`) key silently
+    produced a failed download. The typed loraSource is additionalProperties:false,
+    so the typo now fails at authoring time. Pin the keyword + path so a revert to
+    an open source object goes red."""
+    entry = _sample_lora_entry()
+    entry["source"]["filez"] = entry["source"].pop("file")
+    errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
+    assert any(
+        error.validator == "additionalProperties"
+        and list(error.absolute_path) == ["loras", 0, "source"]
+        and "'filez'" in error.message
+        for error in errors
+    ), "a typo'd key under `source` must be rejected by additionalProperties:false"
+
+
+def test_lora_schema_requires_repo_on_source():
+    """The typed source requires `provider`+`repo` (all builtin entries are HF
+    hosted; the runtime errors without a repo). A `source` missing `repo` fails."""
+    entry = _sample_lora_entry()
+    del entry["source"]["repo"]
+    errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
+    assert any(
+        error.validator == "required"
+        and "repo" in error.validator_value
+        and list(error.absolute_path) == ["loras", 0, "source"]
+        for error in errors
+    ), "a `source` without `repo` must be rejected by the typed source's required list"
+
+
+def test_lora_schema_rejects_an_unknown_entry_key():
+    """The entry object is additionalProperties:false, so a decorative/typo'd
+    entry-level key (the model-catalog `recommendded` mutation, ported) fails."""
+    entry = _sample_lora_entry()
+    entry["recommendded"] = True
+    errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
+    assert any(
+        error.validator == "additionalProperties"
+        and list(error.absolute_path) == ["loras", 0]
+        and "'recommendded'" in error.message
+        for error in errors
+    )
+
+
+def test_lora_schema_rejects_a_non_40hex_source_revision():
+    """`source.revision` reuses the model schema's 40-hex pin pattern, so a
+    branch/tag value is rejected by the `pattern` keyword."""
+    entry = _sample_lora_entry()
+    entry["source"]["revision"] = "main"
+    errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
+    assert any(
+        error.validator == "pattern"
+        and list(error.absolute_path) == ["loras", 0, "source", "revision"]
+        for error in errors
+    ), "a non-40-hex source.revision must be rejected by the pattern"
+
+
+def test_lora_source_guard_is_live_against_the_real_catalog():
+    """Mutation guard: the typed-source rule is LIVE on the SHIPPED catalog, not
+    decoration on a synthetic fixture. Typo the first real entry's `source.repo`
+    and validation must fail (proving the guard exercises the real file)."""
+    manifest = _load_jsonc(LORA_MANIFEST_PATH)
+    manifest["loras"][0]["source"]["reppo"] = manifest["loras"][0]["source"].pop("repo")
+    errors = _schema_errors(manifest, LORA_SCHEMA_PATH)
+    assert any(
+        error.validator == "additionalProperties"
+        and list(error.absolute_path) == ["loras", 0, "source"]
+        and "'reppo'" in error.message
+        for error in errors
+    )
+
+
+# --- Control-overlay catalog (builtin.control_overlays.jsonc) ---------------
+
+
+def _sample_control_overlay_entry() -> dict:
+    """A minimal schema-valid control-overlay entry (never shipped)."""
+    return {
+        "id": "sample_overlay",
+        "name": "Sample Overlay",
+        "baseModel": "krea_2_turbo",
+        "controlType": "pose",
+        "source": {
+            "provider": "huggingface",
+            "repo": "namespace/sample-overlay",
+            "file": "control.safetensors",
+        },
+        "files": ["control.safetensors"],
+    }
+
+
+def test_builtin_control_overlays_manifest_satisfies_authoring_schema():
+    """sc-13606: builtin.control_overlays.jsonc previously had NO schema at all; it
+    now validates against control-overlays.schema.json in CI."""
+    errors = _schema_errors(
+        _load_jsonc(CONTROL_OVERLAYS_MANIFEST_PATH), CONTROL_OVERLAYS_SCHEMA_PATH
+    )
+    assert not errors, (
+        "builtin.control_overlays.jsonc violates control-overlays.schema.json:\n"
+        + _format_errors(errors)
+    )
+
+
+def test_control_overlay_schema_requires_its_core_fields():
+    """Each of id/name/baseModel/controlType/source is load-bearing (the picker
+    filters by baseModel + controlType; the registry keys on id; the runtime reads
+    source). Dropping any one must produce a `required` error at the entry."""
+    for field in ("id", "name", "baseModel", "controlType", "source"):
+        entry = _sample_control_overlay_entry()
+        del entry[field]
+        errors = _schema_errors(
+            {"schemaVersion": 1, "controlOverlays": [entry]}, CONTROL_OVERLAYS_SCHEMA_PATH
+        )
+        assert any(
+            error.validator == "required"
+            and field in error.validator_value
+            and list(error.absolute_path) == ["controlOverlays", 0]
+            for error in errors
+        ), f"a control overlay without `{field}` must be rejected by the entry required list"
+
+
+def test_control_overlay_schema_rejects_a_typod_source_key():
+    """The sc-12288 field class on the overlay source (additionalProperties:false)."""
+    entry = _sample_control_overlay_entry()
+    entry["source"]["repoo"] = entry["source"].pop("repo")
+    errors = _schema_errors(
+        {"schemaVersion": 1, "controlOverlays": [entry]}, CONTROL_OVERLAYS_SCHEMA_PATH
+    )
+    assert any(
+        error.validator == "additionalProperties"
+        and list(error.absolute_path) == ["controlOverlays", 0, "source"]
+        and "'repoo'" in error.message
+        for error in errors
+    )
+
+
+def test_control_overlay_schema_rejects_an_unknown_entry_key():
+    """The overlay entry is additionalProperties:false — a typo'd field name fails."""
+    entry = _sample_control_overlay_entry()
+    entry["controlTyp"] = "pose"
+    errors = _schema_errors(
+        {"schemaVersion": 1, "controlOverlays": [entry]}, CONTROL_OVERLAYS_SCHEMA_PATH
+    )
+    assert any(
+        error.validator == "additionalProperties"
+        and list(error.absolute_path) == ["controlOverlays", 0]
+        and "'controlTyp'" in error.message
+        for error in errors
+    )
+
+
+def test_control_overlay_guard_is_live_against_the_real_catalog():
+    """Mutation guard: the overlay schema is LIVE on the shipped catalog. Typo the
+    real entry's `source.file` and validation must fail."""
+    manifest = _load_jsonc(CONTROL_OVERLAYS_MANIFEST_PATH)
+    source = manifest["controlOverlays"][0]["source"]
+    source["fil"] = source.pop("file")
+    errors = _schema_errors(manifest, CONTROL_OVERLAYS_SCHEMA_PATH)
+    assert any(
+        error.validator == "additionalProperties"
+        and list(error.absolute_path) == ["controlOverlays", 0, "source"]
+        and "'fil'" in error.message
+        for error in errors
+    )
+
+
+# --- Style catalog (builtin.styles.jsonc) ----------------------------------
+
+
+def test_builtin_styles_manifest_satisfies_authoring_schema():
+    """sc-13606: builtin.styles.jsonc declared a `$schema` that NO check validated
+    (F-037). It is now an enforced CI contract like the model catalog. (The catalog
+    is machine-generated from documents/style.txt and drift-guarded by
+    styleCatalog.test.js; this only validates its shape, it does not hand-edit it.)"""
+    errors = _schema_errors(_load_jsonc(STYLES_MANIFEST_PATH), STYLES_SCHEMA_PATH)
+    assert not errors, "builtin.styles.jsonc violates styles.schema.json:\n" + _format_errors(errors)
+
+
+def test_styles_schema_rejects_an_unknown_style_key_on_the_real_catalog():
+    """Mutation guard: the styles schema pins additionalProperties:false on each
+    style object. Injecting a decorative/typo'd key into the first real style must
+    fail — proving the now-enforced schema is live, not merely declared."""
+    manifest = _load_jsonc(STYLES_MANIFEST_PATH)
+    manifest["groups"][0]["styles"][0]["prromt"] = "typo"
+    errors = _schema_errors(manifest, STYLES_SCHEMA_PATH)
+    assert any(
+        error.validator == "additionalProperties"
+        and list(error.absolute_path) == ["groups", 0, "styles", 0]
+        and "'prromt'" in error.message
+        for error in errors
+    )
+
+
+def test_styles_schema_requires_a_style_prompt():
+    """A style object requires id/name/prompt; dropping `prompt` from the first
+    real style must be rejected by the style object's required list."""
+    manifest = _load_jsonc(STYLES_MANIFEST_PATH)
+    del manifest["groups"][0]["styles"][0]["prompt"]
+    errors = _schema_errors(manifest, STYLES_SCHEMA_PATH)
+    assert any(
+        error.validator == "required"
+        and "prompt" in error.validator_value
+        and list(error.absolute_path) == ["groups", 0, "styles", 0]
+        for error in errors
+    )
+
+
+# --- Recipe-preset catalog (builtin.recipe-presets.jsonc) -------------------
+
+
+def test_builtin_recipe_presets_manifest_satisfies_authoring_schema():
+    """sc-13606: the recipe-preset catalog now gets full jsonschema validation in
+    the pytest lane (previously only the shallow check-scaffold root-key check).
+    The shipped catalog is currently empty, so the discriminating guards below run
+    against synthetic presets — the schema, not the catalog, carries the rules."""
+    errors = _schema_errors(_load_jsonc(RECIPE_PRESETS_MANIFEST_PATH), RECIPE_PRESET_SCHEMA_PATH)
+    assert not errors, (
+        "builtin.recipe-presets.jsonc violates recipe-preset.schema.json:\n" + _format_errors(errors)
+    )
+
+
+def test_recipe_preset_schema_requires_id_and_name():
+    """Every preset requires id + name. Dropping `name` from an otherwise-valid
+    general preset must be rejected by the entry's required list."""
+    preset = {"id": "sample_preset", "name": "Sample Preset", "kind": "general"}
+    del preset["name"]
+    errors = _schema_errors({"schemaVersion": 1, "presets": [preset]}, RECIPE_PRESET_SCHEMA_PATH)
+    assert any(
+        error.validator == "required"
+        and "name" in error.validator_value
+        and list(error.absolute_path) == ["presets", 0]
+        for error in errors
+    )
+
+
+def test_recipe_preset_schema_requires_model_and_workflow_for_model_presets():
+    """A preset with no `kind` is a MODEL preset; the schema's allOf conditional
+    then requires model + workflow. A bare {id,name} model preset must fail — this
+    only holds while that conditional exists (discriminates a revert)."""
+    preset = {"id": "sample_model_preset", "name": "Sample"}
+    errors = _schema_errors({"schemaVersion": 1, "presets": [preset]}, RECIPE_PRESET_SCHEMA_PATH)
+    assert any(
+        error.validator == "required" and set(error.validator_value) == {"model", "workflow"}
+        for error in errors
+    ), "a model (non-general) preset must require model + workflow via the allOf conditional"
+
+
+def test_recipe_preset_schema_rejects_a_bad_id_pattern():
+    """The preset `id` is pattern-constrained (lowercase slug); an id with spaces /
+    capitals / punctuation is rejected by the `pattern` keyword."""
+    preset = {"id": "Bad Id!", "name": "Sample", "kind": "general"}
+    errors = _schema_errors({"schemaVersion": 1, "presets": [preset]}, RECIPE_PRESET_SCHEMA_PATH)
+    assert any(
+        error.validator == "pattern" and list(error.absolute_path) == ["presets", 0, "id"]
+        for error in errors
+    )

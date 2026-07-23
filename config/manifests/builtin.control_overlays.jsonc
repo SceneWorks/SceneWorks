@@ -11,6 +11,7 @@
   // worker lane (`ensure_krea_control_weights`) already defaults to the same repo and lazy-downloads it, so
   // pose control works out-of-box even before the overlay is explicitly picked; a studio-trained overlay
   // always overrides the built-in.
+  "$schema": "../../packages/schemas/control-overlays.schema.json",
   "schemaVersion": 1,
   "controlOverlays": [
     {
