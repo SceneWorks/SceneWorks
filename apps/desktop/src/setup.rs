@@ -498,21 +498,55 @@ pub fn shared_huggingface_home() -> PathBuf {
 /// `tauri dev`), then the user's persisted choice from the first-run splash, then
 /// the shared per-user cache. Because the splash persists this *before* the
 /// sidecars spawn, the chosen location takes effect with no app restart.
+fn select_huggingface_home(
+    ambient: Option<&str>,
+    persisted: Option<&str>,
+    shared: PathBuf,
+    linux_absolute: bool,
+) -> PathBuf {
+    ambient
+        .and_then(|value| crate::settings::storage_override_path(value, linux_absolute))
+        .or_else(|| {
+            persisted
+                .and_then(|value| crate::settings::storage_override_path(value, linux_absolute))
+        })
+        .unwrap_or(shared)
+}
+
+fn huggingface_cache_env(hf_home: &str, linux_absolute: bool) -> Vec<(&'static str, String)> {
+    let home = crate::settings::storage_override_path(hf_home, linux_absolute)
+        .expect("resolved HF_HOME must satisfy the platform path invariant");
+    let home = home.to_string_lossy().into_owned();
+    let mut env = vec![("HF_HOME", home.clone())];
+    if linux_absolute {
+        let hub = if home == "/" {
+            "/hub".to_owned()
+        } else {
+            format!("{}/hub", home.trim_end_matches('/'))
+        };
+        // The core resolver reads these before HF_HOME. Pin both like Docker so
+        // inherited relative values cannot redirect Linux sidecars into CWD.
+        env.push(("HF_HUB_CACHE", hub.clone()));
+        env.push(("HUGGINGFACE_HUB_CACHE", hub));
+    }
+    env
+}
+
+fn inject_huggingface_cache_env(command: Command, hf_home: &str) -> Command {
+    huggingface_cache_env(hf_home, cfg!(all(unix, not(target_os = "macos"))))
+        .into_iter()
+        .fold(command, |command, (name, value)| command.env(name, value))
+}
+
 fn huggingface_home() -> PathBuf {
-    if let Ok(value) = std::env::var("HF_HOME") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-    if let Some(dir) = crate::settings::load_settings()
-        .hf_home
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        return PathBuf::from(dir);
-    }
-    shared_huggingface_home()
+    let ambient = std::env::var("HF_HOME").ok();
+    let persisted = crate::settings::load_settings().hf_home;
+    select_huggingface_home(
+        ambient.as_deref(),
+        persisted.as_deref(),
+        shared_huggingface_home(),
+        cfg!(all(unix, not(target_os = "macos"))),
+    )
 }
 
 /// Seed the builtin model/LoRA/recipe-preset catalogs into the desktop's
@@ -820,6 +854,7 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
             &format!("[desktop] {warning}\n"),
         );
     }
+    let hf_home = huggingface_home().to_string_lossy().into_owned();
     let mut command = app
         .shell()
         .sidecar("sceneworks-api")
@@ -848,10 +883,10 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         .env(
             "SCENEWORKS_CONFIG_DIR",
             config_dir().to_string_lossy().to_string(),
-        )
-        // The catalog's install-state detection resolves the HF cache from this;
-        // it must match the worker's download root or every model reads "missing".
-        .env("HF_HOME", huggingface_home().to_string_lossy().to_string());
+        );
+    // The catalog's install-state detection resolves the HF cache from these;
+    // they must match the worker's download root or every model reads "missing".
+    command = inject_huggingface_cache_env(command, &hf_home);
     // Epic 3482 (Python Eradication) final cutover (sc-3492) — macOS runs MLX-only.
     // `Settings.mlx_required` ← `SCENEWORKS_MLX_REQUIRED` (sc-3483): the MPS/torch worker
     // never claims an MLX-eligible job, and an MLX-eligible job that no live `mlx` worker
@@ -1466,7 +1501,6 @@ fn supervise_mlx_worker(app: AppHandle) {
                 .env("SCENEWORKS_GPU_ID", "mlx")
                 .env("SCENEWORKS_WORKER_ID", ctx.worker_id)
                 .env("SCENEWORKS_API_URL", ctx.api_url)
-                .env("HF_HOME", ctx.hf_home)
                 // Parent-death watchdog (run_worker() honours this): a force-quit
                 // self-terminates the worker so its multi-GB MLX model isn't
                 // orphaned to launchd.
@@ -1479,6 +1513,7 @@ fn supervise_mlx_worker(app: AppHandle) {
                     "SCENEWORKS_CONFIG_DIR",
                     config_dir().to_string_lossy().to_string(),
                 );
+            command = inject_huggingface_cache_env(command, ctx.hf_home);
             // sc-7821 (epic 7819): the user's GPU memory ceiling, as fraction × total unified
             // memory. run_worker_loop applies it to the MLX runtime process-globally (covers
             // generations, upscales, AND LoRA training). Absent ⇒ no env ⇒ MLX default budget.
@@ -1588,7 +1623,6 @@ fn supervise_candle_worker(app: AppHandle) {
                 .env("SCENEWORKS_BACKEND_CANDLE_ENABLED", "true")
                 .env("SCENEWORKS_WORKER_ID", ctx.worker_id)
                 .env("SCENEWORKS_API_URL", ctx.api_url)
-                .env("HF_HOME", ctx.hf_home)
                 // Parent-death watchdog (run_worker() honours this): a force-quit
                 // self-terminates the worker so its multi-GB model + CUDA context
                 // isn't orphaned.
@@ -1601,6 +1635,7 @@ fn supervise_candle_worker(app: AppHandle) {
                     "SCENEWORKS_CONFIG_DIR",
                     config_dir().to_string_lossy().to_string(),
                 );
+            command = inject_huggingface_cache_env(command, ctx.hf_home);
             // cudarc dynamic-linking `LoadLibrary`s the CUDA runtime DLLs by name;
             // prepend the bundled redist dir to this worker's PATH so they resolve
             // without a CUDA Toolkit on the machine (sc-5560).
@@ -2293,7 +2328,7 @@ pub async fn start_setup(app: AppHandle) {
 
 #[cfg(test)]
 mod path_tests {
-    use super::LinuxDesktopPaths;
+    use super::{huggingface_cache_env, select_huggingface_home, LinuxDesktopPaths};
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::path::PathBuf;
@@ -2399,6 +2434,73 @@ mod path_tests {
         assert!(
             absent.contains("XDG_DATA_HOME") && absent.contains("HOME"),
             "unexpected resolution error: {absent}"
+        );
+    }
+
+    #[test]
+    fn linux_hf_home_ignores_relative_ambient_and_legacy_overrides() {
+        let shared = PathBuf::from("/home/alice/.cache/SceneWorks/huggingface");
+        assert_eq!(
+            select_huggingface_home(
+                Some("relative-ambient"),
+                Some("/mnt/models/huggingface"),
+                shared.clone(),
+                true,
+            ),
+            PathBuf::from("/mnt/models/huggingface")
+        );
+        assert_eq!(
+            select_huggingface_home(
+                Some("/mnt/ambient/huggingface"),
+                Some("/mnt/persisted/huggingface"),
+                shared.clone(),
+                true,
+            ),
+            PathBuf::from("/mnt/ambient/huggingface")
+        );
+        assert_eq!(
+            select_huggingface_home(
+                Some("./ambient"),
+                Some("persisted-relative"),
+                shared.clone(),
+                true,
+            ),
+            shared
+        );
+    }
+
+    #[test]
+    fn non_linux_hf_home_preserves_relative_ambient_override() {
+        assert_eq!(
+            select_huggingface_home(
+                Some("relative-ambient"),
+                Some("relative-persisted"),
+                PathBuf::from("shared"),
+                false,
+            ),
+            PathBuf::from("relative-ambient")
+        );
+        assert_eq!(
+            huggingface_cache_env("relative-ambient", false),
+            vec![("HF_HOME", "relative-ambient".to_owned())]
+        );
+    }
+
+    #[test]
+    fn linux_hf_cache_env_pins_every_hub_override_to_absolute_xdg_home() {
+        assert_eq!(
+            huggingface_cache_env("/mnt/cache/SceneWorks/huggingface", true),
+            vec![
+                ("HF_HOME", "/mnt/cache/SceneWorks/huggingface".to_owned()),
+                (
+                    "HF_HUB_CACHE",
+                    "/mnt/cache/SceneWorks/huggingface/hub".to_owned()
+                ),
+                (
+                    "HUGGINGFACE_HUB_CACHE",
+                    "/mnt/cache/SceneWorks/huggingface/hub".to_owned()
+                ),
+            ]
         );
     }
 }
