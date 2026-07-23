@@ -10946,3 +10946,237 @@ fn krea_imported_available_is_txt2img_only() {
         "reference/img2img job excluded (t2i only in S0c)"
     );
 }
+
+/// Real-weight GPU acceptance for the imported single-file Krea 2 lane (epic 14015 S0f, sc-14021).
+/// `#[ignore]`d — run by hand on an Apple-Silicon Mac with the ~26 GB imported DiT and the resident
+/// Krea 2 Turbo `bf16/` base cached. It reproduces the **exact** `KreaImported` worker lane end-to-end,
+/// minus the async job/SSE plumbing, by calling the same four seams `generate_krea_imported_stream`
+/// calls, in the same order:
+///   1. `resolve_image_route` → must be `ImageRoute::KreaImported` (the S0d route-by-family decision +
+///      the S0c `krea_imported_available` gate) — the deterministic ROUTE EVIDENCE that the job takes
+///      the bespoke in-place lane rather than the generic snapshot arm.
+///   2. `resolve_imported_krea_dit` → the in-place single-file DiT (no 26 GB copy; the checkpoint is
+///      symlinked into the app-managed data dir so the `normalize_app_managed_model_path` confinement
+///      admits it, exactly the install-dir shape the import job records).
+///   3. `resolve_krea_imported_base_tier` → the resident `SceneWorks/krea-2-turbo-mlx` dense `bf16/`
+///      tier that supplies the shared Qwen3-VL text encoder, Qwen VAE, tokenizer, and arch config.
+///   4. `runtime_macos::providers::krea::load_from_native_dit_file(dit, base, descriptor())` → the S0b
+///      MLX native single-file entrypoint, then a real Metal txt2img.
+///
+/// The NEGATIVE CONTROL (the sc-10539 with/without-adapter methodology) proves the imported DiT is
+/// actually in the graph and not a silent fallback to the base: it renders the SAME prompt + SAME seed
+/// on the stock builtin `krea_2_turbo` loaded from the SAME dense `bf16/` dir, so the ONLY difference
+/// between the two renders is the transformer weights (variant5's imported DiT vs the base tier's own
+/// DiT). Everything else — TE, VAE, tokenizer, arch config, scheduler, quant (dense bf16), seed, steps,
+/// resolution — is byte-for-byte identical, so a non-trivial per-pixel delta isolates the imported
+/// weights as the cause (Metal matmul is ~1e-3 reduced precision, so identical weights would collapse
+/// the delta toward zero).
+///
+/// The two heavy loads run SEQUENTIALLY with an `mlx_rs::memory::clear_cache()` between them (the first
+/// generator is dropped first) to stay under the MLX wired ceiling and avoid the default OOM hard-exit.
+/// ```text
+/// # optional: KREA_IMPORTED_DIT=$HOME/models/kreamania_variant5.safetensors
+/// # optional: KREA_STEPS=8 KREA_W=1024 KREA_H=1024 KREA_SEED=42 KREA_PROMPT="..." KREA_OUT_DIR=/tmp/krea_imported_smoke
+/// cargo test -p sceneworks-worker --release krea_imported_mlx_gpu_smoke -- --ignored --nocapture
+/// ```
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight MLX smoke; needs the ~26 GB imported Krea 2 DiT + the SceneWorks/krea-2-turbo-mlx bf16 base cached + an Apple-Silicon Mac"]
+fn krea_imported_mlx_gpu_smoke() {
+    use crate::smoke_support::{
+        env_or, image_std, mean_abs_frame_delta, save_png, DEGENERATE_STD_FLOOR_DEFAULT,
+    };
+
+    let home = std::env::var("HOME").expect("HOME");
+    // The imported single-file community DiT: a dense bf16 Krea 2 transformer with ComfyUI-native keys.
+    let dit_src = PathBuf::from(env_or(
+        "KREA_IMPORTED_DIT",
+        &format!("{home}/models/kreamania_variant5.safetensors"),
+    ));
+    assert!(
+        dit_src.is_file(),
+        "imported DiT not found at {} — download it or set KREA_IMPORTED_DIT",
+        dit_src.display()
+    );
+
+    // Register variant5 the S0c way: an app-managed install dir holding ONLY the checkpoint. Symlink the
+    // 26 GB file in (no copy); `paths.model` points at the dir — exactly the shape the import job records.
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let install_dir = data_dir
+        .path()
+        .join("models")
+        .join("imports")
+        .join("kreamania_v5");
+    std::fs::create_dir_all(&install_dir).expect("install dir");
+    let dit_link = install_dir.join("kreamania_variant5.safetensors");
+    std::os::unix::fs::symlink(&dit_src, &dit_link).expect("symlink DiT into app-managed dir");
+
+    // Point the base-tier resolver at the REAL HF hub cache (settings.data_dir is the temp dir), so
+    // `resolve_krea_imported_base_tier` finds the resident Krea 2 Turbo turnkey. The guard restores env.
+    let real_hub = PathBuf::from(format!("{home}/.cache/huggingface/hub"));
+    let _hf = isolate_hf_hub_cache_to(&real_hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.path().to_path_buf();
+
+    let steps: u32 = env_or("KREA_STEPS", "8").parse().expect("KREA_STEPS");
+    let w: u32 = env_or("KREA_W", "1024").parse().expect("KREA_W");
+    let h: u32 = env_or("KREA_H", "1024").parse().expect("KREA_H");
+    let seed: u64 = env_or("KREA_SEED", "42").parse().expect("KREA_SEED");
+    let prompt = env_or(
+        "KREA_PROMPT",
+        "a photorealistic portrait of a red fox sitting in a sunlit autumn forest, sharp focus, \
+         shallow depth of field",
+    );
+    let out_dir = PathBuf::from(env_or("KREA_OUT_DIR", "/tmp/krea_imported_smoke"));
+    std::fs::create_dir_all(&out_dir).expect("out dir");
+
+    // ---- 1. ROUTE EVIDENCE: the job takes the bespoke KreaImported lane (S0d route + S0c gate) ----
+    let req = request(json!({
+        "projectId": "p",
+        "model": "imported_kreamania_v5",
+        "prompt": prompt,
+        "width": w, "height": h,
+        "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "paths": { "model": install_dir.to_str().unwrap() }
+        }
+    }));
+    let route = resolve_image_route(&req, &settings);
+    assert_eq!(
+        route,
+        Some(ImageRoute::KreaImported),
+        "ROUTE EVIDENCE: an imported single-file krea_2 t2i job must take the bespoke in-place lane"
+    );
+    eprintln!(
+        "[route] resolve_image_route(imported_kreamania_v5) = {route:?}  -> KreaImported lane"
+    );
+
+    // ---- 2 + 3. The same two resolves the KreaImported arm makes before any compute ----
+    let dit = resolve_imported_krea_dit(&req, &settings)
+        .expect("resolve ok")
+        .expect("imported single-file Krea 2 DiT resolves");
+    let base =
+        resolve_krea_imported_base_tier(&settings).expect("resident Krea 2 Turbo bf16 base tier");
+    eprintln!(
+        "[route] load_from_native_dit_file(dit={}, base={})",
+        dit.display(),
+        base.display()
+    );
+
+    // A shared request recipe — Turbo few-step, CFG-free (the descriptor advertises no guidance).
+    let make_req = || GenerationRequest {
+        prompt: prompt.clone(),
+        width: w,
+        height: h,
+        count: 1,
+        seed: Some(seed),
+        steps: Some(steps),
+        guidance: None,
+        ..Default::default()
+    };
+
+    // ---- 4. RENDER A: the imported variant5 DiT via the S0b native single-file entrypoint ----
+    let descriptor = runtime_macos::providers::krea::descriptor();
+    let t0 = std::time::Instant::now();
+    let variant5 =
+        runtime_macos::providers::krea::load_from_native_dit_file(&dit, &base, descriptor)
+            .expect("load imported Krea 2 DiT (variant5) paired with the bf16 base");
+    let mut last_a = String::new();
+    let out_a = variant5
+        .generate(&make_req(), &mut |p| {
+            let s = format!("{p:?}");
+            if s != last_a {
+                eprintln!("[variant5] {s}");
+                last_a = s;
+            }
+        })
+        .expect("variant5 generate");
+    let image_a = match out_a {
+        GenerationOutput::Images(mut images) => images.pop().expect("variant5 image"),
+        other => panic!("expected Images, got {other:?}"),
+    };
+    let secs_a = t0.elapsed().as_secs_f64();
+    let std_a = image_std(&image_a);
+    let png_a = out_dir.join("variant5.png");
+    save_png(&image_a, &png_a);
+    eprintln!(
+        "[variant5] {}x{} std {:.2} in {:.1}s @ {} steps -> {}",
+        image_a.width,
+        image_a.height,
+        std_a,
+        secs_a,
+        steps,
+        png_a.display()
+    );
+    assert_eq!(
+        (image_a.width, image_a.height),
+        (w, h),
+        "variant5 returned the wrong dimensions"
+    );
+    assert!(
+        std_a > DEGENERATE_STD_FLOOR_DEFAULT,
+        "variant5 render looks degenerate (std {std_a:.2}) — NaN / all-black / flat decode"
+    );
+
+    // Evict variant5 before loading the control — bound peak memory under the MLX wired ceiling.
+    drop(variant5);
+    mlx_rs::memory::clear_cache();
+
+    // ---- NEGATIVE CONTROL: stock builtin krea_2_turbo from the SAME bf16 dir (only the DiT differs) --
+    let t1 = std::time::Instant::now();
+    let spec = LoadSpec::new(WeightsSource::Dir(base.clone()));
+    let stock = crate::inference_runtime::load("krea_2_turbo", &spec)
+        .expect("load stock krea_2_turbo from the bf16 base tier");
+    let mut last_b = String::new();
+    let out_b = stock
+        .generate(&make_req(), &mut |p| {
+            let s = format!("{p:?}");
+            if s != last_b {
+                eprintln!("[stock] {s}");
+                last_b = s;
+            }
+        })
+        .expect("stock krea_2_turbo generate");
+    let image_b = match out_b {
+        GenerationOutput::Images(mut images) => images.pop().expect("stock image"),
+        other => panic!("expected Images, got {other:?}"),
+    };
+    let secs_b = t1.elapsed().as_secs_f64();
+    let std_b = image_std(&image_b);
+    let png_b = out_dir.join("stock_krea_2_turbo_bf16.png");
+    save_png(&image_b, &png_b);
+    eprintln!(
+        "[stock] {}x{} std {:.2} in {:.1}s -> {}",
+        image_b.width,
+        image_b.height,
+        std_b,
+        secs_b,
+        png_b.display()
+    );
+    assert!(
+        std_b > DEGENERATE_STD_FLOOR_DEFAULT,
+        "stock krea_2_turbo control render looks degenerate (std {std_b:.2})"
+    );
+
+    drop(stock);
+    mlx_rs::memory::clear_cache();
+
+    // ---- DIFFER: the imported DiT is in the graph, not a silent fallback to the base transformer ----
+    let delta = mean_abs_frame_delta(&image_a, &image_b);
+    eprintln!(
+        "[differ] mean_abs_pixel_delta(variant5, stock_bf16) = {delta:.3}  \
+         (same prompt+seed+base TE/VAE/config; only the DiT differs)"
+    );
+    assert!(
+        delta > 2.0,
+        "variant5 and stock krea_2_turbo (same bf16 base, same seed) must differ — a near-zero delta \
+         ({delta:.3}) means the imported DiT was NOT loaded (silent fallback to the base transformer)"
+    );
+    eprintln!(
+        "[DONE] KreaImported lane validated: coherent variant5 render + negative control differs.  \
+         shasum -a 256 {} {}",
+        png_a.display(),
+        png_b.display()
+    );
+}
