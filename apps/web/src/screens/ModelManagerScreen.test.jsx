@@ -675,7 +675,10 @@ describe("ModelManagerScreen type-grouped layout", () => {
 
   it("shows a single '{Type} models' section (no Recommended band) when nothing is recommended", async () => {
     await render({ models: [MODELS[0]] }); // fixture has no recommended flag
-    expect(container.querySelector(".models-accent-band")).toBeNull();
+    // The Recommended band is its own container (.models-recommended, per the sibling test);
+    // assert on that rather than .models-accent-band, since the Image tab now also carries the
+    // base-checkpoint "Import model" accent-band (sc-14069) which is unrelated to recommendations.
+    expect(container.querySelector(".models-recommended")).toBeNull();
     const section = container.querySelector(".models-section");
     expect(section.textContent).toContain("Image models");
     expect(section.querySelectorAll(".model-card").length).toBe(1);

@@ -1676,12 +1676,150 @@ export function ModelManagerScreen() {
     );
   }
 
+  // Base-checkpoint import affordance (epic 14015, sc-14020). Surfaced on the Image Models
+  // tab (sc-14069) rather than the LoRAs tab where the sc-7080 scaffold first placed it — a
+  // base checkpoint IS an image model (a Krea 2 DiT today), so this is where a user looks for
+  // it. Gated on MODEL_IMPORT_ENABLED (mirrors the backend kill-switch S0d opened); the
+  // section also surfaces any in-flight model-import progress. Factored out of the tab body so
+  // it can mount under any relevant model-type tab once more base-checkpoint types become
+  // importable — image is the only relevant tab today (the Type selector is image-locked).
+  function renderModelImportPanel() {
+    if (!MODEL_IMPORT_ENABLED && pendingModelImportJobs.length === 0) {
+      return null;
+    }
+    return (
+      <section className="model-import-panel-section">
+        {MODEL_IMPORT_ENABLED && (
+          <form className="models-accent-band models-import-panel" aria-label="Import model" onSubmit={importModel}>
+            <div className="models-accent-band-head">
+              <span className="models-accent-dot" aria-hidden="true" />
+              <p className="eyebrow">Import model</p>
+              <span className="models-accent-band-caption">
+                Point at a base checkpoint file — auto-detects family (Krea 2 today)
+              </span>
+            </div>
+            <div className="segmented-control compact-segment" aria-label="Model import source">
+              <button
+                className={modelImportForm.mode === "url" ? "active" : ""}
+                disabled={importingModel}
+                onClick={() => setModelImportForm((current) => ({ ...current, mode: "url" }))}
+                type="button"
+              >
+                URL
+              </button>
+              <button
+                className={modelImportForm.mode === "file" ? "active" : ""}
+                disabled={importingModel}
+                onClick={() => setModelImportForm((current) => ({ ...current, mode: "file" }))}
+                type="button"
+              >
+                Upload
+              </button>
+            </div>
+            <div className="models-import-grid">
+              <label>
+                Type
+                {/* Base-checkpoint import only produces image models today (a Krea 2 DiT).
+                    `queue_model_import_job` (models.rs) writes this type verbatim into the
+                    user manifest and never reconciles it against the detected family, so
+                    offering video/audio/utility here would let an image checkpoint be
+                    mis-typed. Constrain to Image (disabled) until more base-checkpoint types
+                    are importable, then drop the image-only filter to restore the full
+                    MODEL_TYPE_OPTIONS selector (sc-14020). */}
+                <select disabled value={modelImportForm.type} aria-readonly="true">
+                  {MODEL_TYPE_OPTIONS.filter((option) => option.value === "image").map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Family
+                <select
+                  disabled={importingModel || !families.length}
+                  onChange={(event) => setModelImportForm((current) => ({ ...current, family: event.target.value }))}
+                  value={modelImportForm.family}
+                >
+                  {families.length ? (
+                    <>
+                      <option value="">Auto-detect</option>
+                      {families.map((family) => (
+                        <option key={family} value={family}>
+                          {family}
+                        </option>
+                      ))}
+                    </>
+                  ) : (
+                    <option value="">No known families</option>
+                  )}
+                </select>
+              </label>
+              {isModelFileImport ? (
+                <label>
+                  Model File
+                  <span className="file-picker-row">
+                    <span className="file-upload-button">
+                      Choose
+                      <input
+                        accept=".safetensors,.ckpt,.pt,.bin"
+                        disabled={importingModel}
+                        key={modelFileInputKey}
+                        onChange={(event) => setModelImportForm((current) => ({ ...current, file: event.target.files?.[0] ?? null }))}
+                        type="file"
+                      />
+                    </span>
+                    <span className="selected-file-name">{modelImportForm.file?.name ?? "No file selected"}</span>
+                  </span>
+                </label>
+              ) : (
+                <label>
+                  Source URL
+                  <input
+                    disabled={importingModel}
+                    onChange={(event) => setModelImportForm((current) => ({ ...current, sourceUrl: event.target.value }))}
+                    placeholder="https://..."
+                    value={modelImportForm.sourceUrl}
+                  />
+                </label>
+              )}
+              <label>
+                Name
+                <input
+                  disabled={importingModel}
+                  onChange={(event) => setModelImportForm((current) => ({ ...current, name: event.target.value }))}
+                  placeholder="Optional"
+                  value={modelImportForm.name}
+                />
+              </label>
+              <button disabled={modelImportDisabled} type="submit">
+                {importingModel ? (isModelFileImport ? "Uploading" : "Queueing...") : "Queue Import"}
+              </button>
+            </div>
+            {modelImportMessage.text ? <p className={modelImportMessage.tone === "success" ? "inline-success" : "inline-warning"}>{modelImportMessage.text}</p> : null}
+          </form>
+        )}
+        {pendingModelImportJobs.length ? (
+          <div className="lora-import-progress">
+            <strong>Model imports in progress</strong>
+            <div className="local-job-stack">
+              {pendingModelImportJobs.map((job) => (
+                <WorkerProgressCard job={job} key={job.id} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
   // The catalog grid on the canvas: "All {type} models" (the non-recommended
   // rest). Recommended picks render separately in the work-panel above.
   function renderModelTabPanel(type) {
     const { recommended, others, othersHeading } = modelTabGroups(type);
     return (
       <div className="models-tab-panel">
+        {type === "image" ? renderModelImportPanel() : null}
         {others.length ? (
           <div className="models-section">
             <div className="models-section-heading">
@@ -2016,134 +2154,6 @@ export function ModelManagerScreen() {
               <div className="models-empty">No user LoRAs yet — import one above.</div>
             )}
           </div>
-
-          {/* Import a base checkpoint (epic 14015, sc-14020). Gated on MODEL_IMPORT_ENABLED, which
-              mirrors the backend kill-switch S0d opened; the section also surfaces any in-flight
-              model-import progress. The point-at-a-file picker is the primary affordance. */}
-          {MODEL_IMPORT_ENABLED || pendingModelImportJobs.length > 0 ? (
-            <section className="model-import-panel-section">
-              {MODEL_IMPORT_ENABLED && (
-                <form className="models-accent-band models-import-panel" aria-label="Import model" onSubmit={importModel}>
-                  <div className="models-accent-band-head">
-                    <span className="models-accent-dot" aria-hidden="true" />
-                    <p className="eyebrow">Import model</p>
-                    <span className="models-accent-band-caption">
-                      Point at a base checkpoint file — auto-detects family (Krea 2 today)
-                    </span>
-                  </div>
-                  <div className="segmented-control compact-segment" aria-label="Model import source">
-                    <button
-                      className={modelImportForm.mode === "url" ? "active" : ""}
-                      disabled={importingModel}
-                      onClick={() => setModelImportForm((current) => ({ ...current, mode: "url" }))}
-                      type="button"
-                    >
-                      URL
-                    </button>
-                    <button
-                      className={modelImportForm.mode === "file" ? "active" : ""}
-                      disabled={importingModel}
-                      onClick={() => setModelImportForm((current) => ({ ...current, mode: "file" }))}
-                      type="button"
-                    >
-                      Upload
-                    </button>
-                  </div>
-                  <div className="models-import-grid">
-                    <label>
-                      Type
-                      {/* Base-checkpoint import only produces image models today (a Krea 2 DiT).
-                          `queue_model_import_job` (models.rs) writes this type verbatim into the
-                          user manifest and never reconciles it against the detected family, so
-                          offering video/audio/utility here would let an image checkpoint be
-                          mis-typed. Constrain to Image (disabled) until more base-checkpoint types
-                          are importable, then drop the image-only filter to restore the full
-                          MODEL_TYPE_OPTIONS selector (sc-14020). */}
-                      <select disabled value={modelImportForm.type} aria-readonly="true">
-                        {MODEL_TYPE_OPTIONS.filter((option) => option.value === "image").map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      Family
-                      <select
-                        disabled={importingModel || !families.length}
-                        onChange={(event) => setModelImportForm((current) => ({ ...current, family: event.target.value }))}
-                        value={modelImportForm.family}
-                      >
-                        {families.length ? (
-                          <>
-                            <option value="">Auto-detect</option>
-                            {families.map((family) => (
-                              <option key={family} value={family}>
-                                {family}
-                              </option>
-                            ))}
-                          </>
-                        ) : (
-                          <option value="">No known families</option>
-                        )}
-                      </select>
-                    </label>
-                    {isModelFileImport ? (
-                      <label>
-                        Model File
-                        <span className="file-picker-row">
-                          <span className="file-upload-button">
-                            Choose
-                            <input
-                              accept=".safetensors,.ckpt,.pt,.bin"
-                              disabled={importingModel}
-                              key={modelFileInputKey}
-                              onChange={(event) => setModelImportForm((current) => ({ ...current, file: event.target.files?.[0] ?? null }))}
-                              type="file"
-                            />
-                          </span>
-                          <span className="selected-file-name">{modelImportForm.file?.name ?? "No file selected"}</span>
-                        </span>
-                      </label>
-                    ) : (
-                      <label>
-                        Source URL
-                        <input
-                          disabled={importingModel}
-                          onChange={(event) => setModelImportForm((current) => ({ ...current, sourceUrl: event.target.value }))}
-                          placeholder="https://..."
-                          value={modelImportForm.sourceUrl}
-                        />
-                      </label>
-                    )}
-                    <label>
-                      Name
-                      <input
-                        disabled={importingModel}
-                        onChange={(event) => setModelImportForm((current) => ({ ...current, name: event.target.value }))}
-                        placeholder="Optional"
-                        value={modelImportForm.name}
-                      />
-                    </label>
-                    <button disabled={modelImportDisabled} type="submit">
-                      {importingModel ? (isModelFileImport ? "Uploading" : "Queueing...") : "Queue Import"}
-                    </button>
-                  </div>
-                  {modelImportMessage.text ? <p className={modelImportMessage.tone === "success" ? "inline-success" : "inline-warning"}>{modelImportMessage.text}</p> : null}
-                </form>
-              )}
-              {pendingModelImportJobs.length ? (
-                <div className="lora-import-progress">
-                  <strong>Model imports in progress</strong>
-                  <div className="local-job-stack">
-                    {pendingModelImportJobs.map((job) => (
-                      <WorkerProgressCard job={job} key={job.id} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-            </section>
-          ) : null}
         </div>
       ) : null}
     </section>
