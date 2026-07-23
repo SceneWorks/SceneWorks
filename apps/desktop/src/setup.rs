@@ -5,6 +5,8 @@
 //! then spawns the API sidecar, health-gates it, and navigates the window to the
 //! local API. `start_setup` is also the retry entry point.
 
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -270,9 +272,66 @@ pub(crate) fn emit(app: &AppHandle, phase: &str, message: impl Into<String>, err
     );
 }
 
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+const APP_DIR_NAME: &str = "SceneWorks";
+
+/// Linux desktop paths resolved from the XDG base-directory environment.
+///
+/// Kept as a pure helper (rather than reading the process environment directly)
+/// so all XDG override and fallback behavior is testable on every CI host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+struct LinuxDesktopPaths {
+    data_dir: PathBuf,
+    config_dir: PathBuf,
+    cache_dir: PathBuf,
+    state_dir: PathBuf,
+}
+
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+impl LinuxDesktopPaths {
+    fn absolute_linux_path(value: OsString) -> Option<PathBuf> {
+        let path = PathBuf::from(value);
+        path.as_os_str()
+            .to_string_lossy()
+            .starts_with('/')
+            .then_some(path)
+    }
+
+    fn resolve(get_env: impl Fn(&str) -> Option<OsString>, temp_dir: &Path) -> LinuxDesktopPaths {
+        let home = get_env("HOME").and_then(LinuxDesktopPaths::absolute_linux_path);
+        let temp_root = temp_dir.join(APP_DIR_NAME);
+        let xdg_dir = |name: &str, fallback: &[&str], temp_leaf: &str| {
+            get_env(name)
+                .and_then(LinuxDesktopPaths::absolute_linux_path)
+                .or_else(|| {
+                    home.as_ref().map(|home| {
+                        fallback
+                            .iter()
+                            .fold(home.clone(), |path, component| path.join(component))
+                    })
+                })
+                .map(|base| base.join(APP_DIR_NAME))
+                .unwrap_or_else(|| temp_root.join(temp_leaf))
+        };
+
+        LinuxDesktopPaths {
+            data_dir: xdg_dir("XDG_DATA_HOME", &[".local", "share"], "data"),
+            config_dir: xdg_dir("XDG_CONFIG_HOME", &[".config"], "config"),
+            cache_dir: xdg_dir("XDG_CACHE_HOME", &[".cache"], "cache"),
+            state_dir: xdg_dir("XDG_STATE_HOME", &[".local", "state"], "state"),
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn from_process_env() -> LinuxDesktopPaths {
+        Self::resolve(std::env::var_os, &std::env::temp_dir())
+    }
+}
+
 /// Per-OS application support root: `~/Library/Application Support/SceneWorks`
-/// (macOS), `%APPDATA%\SceneWorks` (Windows), `$XDG_DATA_HOME/sceneworks` or
-/// `~/.local/share/sceneworks` (Linux). Mirrors the API's path resolver.
+/// (macOS), `%APPDATA%\SceneWorks` (Windows), `$XDG_DATA_HOME/SceneWorks` or
+/// `~/.local/share/SceneWorks` (Linux).
 pub fn app_support_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     if let Ok(home) = std::env::var("HOME") {
@@ -287,17 +346,12 @@ pub fn app_support_dir() -> PathBuf {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        if let Ok(data) = std::env::var("XDG_DATA_HOME") {
-            return PathBuf::from(data).join("sceneworks");
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("sceneworks");
-        }
+        LinuxDesktopPaths::from_process_env().data_dir
     }
-    std::env::temp_dir().join("SceneWorks")
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        std::env::temp_dir().join("SceneWorks")
+    }
 }
 
 /// Platform-appropriate logs directory (also used for the API/worker logs).
@@ -315,42 +369,79 @@ pub fn logs_dir() -> PathBuf {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        if let Ok(state) = std::env::var("XDG_STATE_HOME") {
-            return PathBuf::from(state).join("sceneworks").join("logs");
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home)
-                .join(".local")
-                .join("state")
-                .join("sceneworks")
-                .join("logs");
-        }
+        LinuxDesktopPaths::from_process_env().state_dir.join("logs")
     }
-    std::env::temp_dir().join("SceneWorks").join("logs")
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        std::env::temp_dir().join("SceneWorks").join("logs")
+    }
 }
 
 /// Platform default workspace data directory, used when the user hasn't picked a
 /// custom location in the first-run splash / Settings.
 pub fn default_data_dir() -> PathBuf {
-    app_support_dir().join("data")
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        LinuxDesktopPaths::from_process_env().data_dir
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        app_support_dir().join("data")
+    }
 }
 
 pub(crate) fn config_dir() -> PathBuf {
-    app_support_dir().join("config")
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        LinuxDesktopPaths::from_process_env().config_dir
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        app_support_dir().join("config")
+    }
 }
 
-/// Shared per-user Hugging Face cache (`~/.cache/huggingface`) — the default
-/// `HF_HOME` when the user hasn't chosen a custom location. Dedups with other
-/// HF-based tools on the machine and reuses anything already downloaded.
-pub fn shared_huggingface_home() -> PathBuf {
-    if let Some(home) = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+pub(crate) fn settings_file() -> PathBuf {
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
-        return PathBuf::from(home).join(".cache").join("huggingface");
+        config_dir().join("settings.json")
     }
-    app_support_dir().join("cache").join("huggingface")
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        app_support_dir().join("settings.json")
+    }
+}
+
+/// Root for the provisioned native GPU runtime. Linux provisioning (sc-10376)
+/// consumes this path so its runtime stays under the XDG data base; the Windows
+/// value remains `%APPDATA%\SceneWorks\gpu-runtime`.
+pub fn gpu_runtime_dir() -> PathBuf {
+    app_support_dir().join("gpu-runtime")
+}
+
+/// Shared per-user Hugging Face cache — the default `HF_HOME` when the user
+/// hasn't chosen a custom location. Linux uses
+/// `$XDG_CACHE_HOME/SceneWorks/huggingface` (or
+/// `~/.cache/SceneWorks/huggingface`); macOS and Windows retain the existing
+/// `~/.cache/huggingface` convention.
+pub fn shared_huggingface_home() -> PathBuf {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        LinuxDesktopPaths::from_process_env()
+            .cache_dir
+            .join("huggingface")
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        if let Some(home) = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            return PathBuf::from(home).join(".cache").join("huggingface");
+        }
+        app_support_dir().join("cache").join("huggingface")
+    }
 }
 
 /// Hugging Face cache home injected into both sidecars so the rust-api model
@@ -1527,9 +1618,19 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 /// File holding this launch's sidecar PIDs, used to reap orphans left by a prior
-/// unclean exit. Lives alongside the app's data so it survives across launches.
+/// unclean exit. Linux treats it as mutable state under `XDG_STATE_HOME`; other
+/// platforms retain the existing application-support location.
 fn sidecar_pidfile() -> PathBuf {
-    app_support_dir().join("desktop-sidecars.json")
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        LinuxDesktopPaths::from_process_env()
+            .state_dir
+            .join("desktop-sidecars.json")
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        app_support_dir().join("desktop-sidecars.json")
+    }
 }
 
 /// Persist the current sidecar PIDs (best effort, atomic via temp+rename).
@@ -2145,6 +2246,119 @@ pub async fn start_setup(app: AppHandle) {
     app.state::<Managed>()
         .running
         .store(false, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::LinuxDesktopPaths;
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    fn resolve(values: &[(&str, &str)], temp_dir: &Path) -> LinuxDesktopPaths {
+        let env = values
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), OsString::from(value)))
+            .collect::<HashMap<_, _>>();
+        LinuxDesktopPaths::resolve(|name| env.get(name).cloned(), temp_dir)
+    }
+
+    #[test]
+    fn linux_xdg_overrides_cover_every_desktop_managed_location() {
+        let paths = resolve(
+            &[
+                ("HOME", "/home/alice"),
+                ("XDG_DATA_HOME", "/mnt/xdg-data"),
+                ("XDG_CONFIG_HOME", "/mnt/xdg-config"),
+                ("XDG_CACHE_HOME", "/mnt/xdg-cache"),
+                ("XDG_STATE_HOME", "/mnt/xdg-state"),
+            ],
+            Path::new("/tmp"),
+        );
+
+        assert_eq!(paths.data_dir, PathBuf::from("/mnt/xdg-data/SceneWorks"));
+        assert_eq!(
+            paths.config_dir,
+            PathBuf::from("/mnt/xdg-config/SceneWorks")
+        );
+        assert_eq!(paths.cache_dir, PathBuf::from("/mnt/xdg-cache/SceneWorks"));
+        assert_eq!(paths.state_dir, PathBuf::from("/mnt/xdg-state/SceneWorks"));
+
+        // Exact call surfaces owned by the desktop and its sidecars.
+        assert_eq!(
+            paths.config_dir.join("settings.json"),
+            PathBuf::from("/mnt/xdg-config/SceneWorks/settings.json")
+        );
+        assert_eq!(
+            paths.config_dir.join("manifests"),
+            PathBuf::from("/mnt/xdg-config/SceneWorks/manifests")
+        );
+        assert_eq!(
+            paths.data_dir.join("cache").join("jobs.db"),
+            PathBuf::from("/mnt/xdg-data/SceneWorks/cache/jobs.db")
+        );
+        assert_eq!(
+            paths.state_dir.join("logs"),
+            PathBuf::from("/mnt/xdg-state/SceneWorks/logs")
+        );
+        assert_eq!(
+            paths.data_dir.join("gpu-runtime"),
+            PathBuf::from("/mnt/xdg-data/SceneWorks/gpu-runtime")
+        );
+        assert_eq!(
+            paths.cache_dir.join("huggingface"),
+            PathBuf::from("/mnt/xdg-cache/SceneWorks/huggingface")
+        );
+        assert_eq!(
+            paths.state_dir.join("desktop-sidecars.json"),
+            PathBuf::from("/mnt/xdg-state/SceneWorks/desktop-sidecars.json")
+        );
+    }
+
+    #[test]
+    fn linux_xdg_fallbacks_are_home_scoped_and_never_relative() {
+        let paths = resolve(&[("HOME", "/home/alice")], Path::new("/tmp"));
+        assert_eq!(
+            paths.data_dir,
+            PathBuf::from("/home/alice/.local/share/SceneWorks")
+        );
+        assert_eq!(
+            paths.config_dir,
+            PathBuf::from("/home/alice/.config/SceneWorks")
+        );
+        assert_eq!(
+            paths.cache_dir,
+            PathBuf::from("/home/alice/.cache/SceneWorks")
+        );
+        assert_eq!(
+            paths.state_dir,
+            PathBuf::from("/home/alice/.local/state/SceneWorks")
+        );
+
+        // The XDG spec requires absolute override values. Ignoring relative/empty
+        // values prevents an accidental write into the launch CWD.
+        let invalid = resolve(
+            &[
+                ("HOME", "relative-home"),
+                ("XDG_DATA_HOME", "relative-data"),
+                ("XDG_CONFIG_HOME", ""),
+            ],
+            Path::new("/var/tmp"),
+        );
+        assert_eq!(invalid.data_dir, PathBuf::from("/var/tmp/SceneWorks/data"));
+        assert_eq!(
+            invalid.config_dir,
+            PathBuf::from("/var/tmp/SceneWorks/config")
+        );
+        assert_eq!(
+            invalid.cache_dir,
+            PathBuf::from("/var/tmp/SceneWorks/cache")
+        );
+        assert_eq!(
+            invalid.state_dir,
+            PathBuf::from("/var/tmp/SceneWorks/state")
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]

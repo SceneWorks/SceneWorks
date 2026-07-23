@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
-use crate::setup::{app_support_dir, default_data_dir, shared_huggingface_home};
+use crate::setup::{default_data_dir, settings_file, shared_huggingface_home};
 
 const KEYRING_SERVICE: &str = "SceneWorks";
 /// Pre-migration account that held the single Hugging Face token. Retained only so
@@ -147,7 +147,7 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
     /// Hugging Face cache home (`HF_HOME`) for HF-downloaded model weights;
-    /// `None` uses the shared per-user cache (`~/.cache/huggingface`).
+    /// `None` uses the platform shared cache (the XDG cache base on Linux).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hf_home: Option<String>,
     /// Set once the first-run splash storage step (sc-1473 Step 1) has run, so
@@ -190,7 +190,7 @@ pub struct AppSettings {
 }
 
 fn settings_path() -> PathBuf {
-    app_support_dir().join("settings.json")
+    settings_file()
 }
 
 pub fn load_settings() -> AppSettings {
