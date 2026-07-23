@@ -10825,8 +10825,11 @@ fn resolve_imported_krea_dit_claims_only_non_builtin_single_file_krea2() {
 }
 
 /// `resolve_krea_imported_base_tier` requires the resident Krea 2 base and fails with a clear
-/// "install the Krea 2 base first" message when it is absent; when the `bf16/` tier is installed and
-/// complete (config + TE/VAE/tokenizer) it resolves that dir.
+/// "install the Krea 2 base first" message when it is absent OR TORN (component dirs present but empty —
+/// a half-finished download); only when the `bf16/` tier is installed and complete (arch config + a
+/// weight file in each of TE/VAE plus the tokenizer's `tokenizer.json`) does it resolve that dir. The
+/// torn-base case is what keeps the friendly typed error firing instead of a generic mid-load Engine
+/// "load failed" (sc-14074).
 #[cfg(target_os = "macos")]
 #[test]
 fn resolve_krea_imported_base_tier_requires_installed_base() {
@@ -10837,36 +10840,110 @@ fn resolve_krea_imported_base_tier_requires_installed_base() {
     let mut settings = Settings::from_env();
     settings.data_dir = dir.path().to_path_buf();
 
-    // Base absent → loud typed error.
-    let err = resolve_krea_imported_base_tier(&settings)
-        .expect_err("no base installed must be an error, not a silent fall-through");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("Krea 2 base model is not installed") && msg.contains("install the Krea 2"),
-        "error must direct the user to install the Krea 2 base first, got: {msg}"
-    );
+    let assert_install_base_error = |label: &str| {
+        let err = resolve_krea_imported_base_tier(&settings).expect_err(&format!(
+            "{label}: expected the friendly install-base typed error, not an Ok resolve"
+        ));
+        let msg = format!("{err}");
+        assert!(
+            matches!(err, WorkerError::InvalidPayload(_)),
+            "{label}: must be the friendly typed InvalidPayload error, not a generic Engine load \
+             failure, got: {err:?}"
+        );
+        assert!(
+            msg.contains("Krea 2 base model is not installed")
+                && msg.contains("install the Krea 2"),
+            "{label}: error must direct the user to install the Krea 2 base first, got: {msg}"
+        );
+    };
 
-    // Seed a complete `SceneWorks/krea-2-turbo-mlx` bf16 base tier (arch config + shared components).
+    // Base absent → loud typed error.
+    assert_install_base_error("absent base");
+
     let snapshot = hub
         .join("models--SceneWorks--krea-2-turbo-mlx")
         .join("snapshots")
         .join("rev0");
     let bf16 = snapshot.join("bf16");
-    for sub in ["transformer", "text_encoder", "vae", "tokenizer"] {
-        std::fs::create_dir_all(bf16.join(sub)).unwrap();
-    }
-    std::fs::write(bf16.join("transformer").join("config.json"), b"{}").unwrap();
     let refs = hub
         .join("models--SceneWorks--krea-2-turbo-mlx")
         .join("refs");
     std::fs::create_dir_all(&refs).unwrap();
     std::fs::write(refs.join("main"), b"rev0").unwrap();
 
+    // TORN base: the arch config lands but the component dirs exist EMPTY (an interrupted download). The
+    // old existence-only gate passed this and then failed deep in the load; the tightened gate rejects
+    // it up front with the same friendly typed error.
+    for sub in ["transformer", "text_encoder", "vae", "tokenizer"] {
+        std::fs::create_dir_all(bf16.join(sub)).unwrap();
+    }
+    std::fs::write(bf16.join("transformer").join("config.json"), b"{}").unwrap();
+    assert_install_base_error("torn base (empty component dirs)");
+
+    // Now POPULATE each component dir with its expected payload → complete → resolves.
+    std::fs::write(bf16.join("text_encoder").join("model.safetensors"), b"te").unwrap();
+    std::fs::write(
+        bf16.join("vae").join("diffusion_pytorch_model.safetensors"),
+        b"vae",
+    )
+    .unwrap();
+    std::fs::write(bf16.join("tokenizer").join("tokenizer.json"), b"{}").unwrap();
+
     let base = resolve_krea_imported_base_tier(&settings).expect("installed base resolves");
     assert_eq!(
         base, bf16,
         "the resolved base is the dense bf16 tier of the Turbo turnkey"
     );
+}
+
+/// `krea_imported_base_tier_complete` probes each shared component for an actual payload file, not just
+/// the directory's existence (sc-14074): a fully populated tier is complete, but dropping the arch
+/// config, either TE/VAE `.safetensors`, or the tokenizer's `tokenizer.json` makes it incomplete — each
+/// dropped file discriminates a distinct torn-download shape.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_imported_base_tier_complete_requires_populated_components() {
+    let dir = tempfile::tempdir().unwrap();
+    let bf16 = dir.path().join("bf16");
+    for sub in ["transformer", "text_encoder", "vae", "tokenizer"] {
+        std::fs::create_dir_all(bf16.join(sub)).unwrap();
+    }
+
+    // Empty component dirs (only the dirs exist) → NOT complete, even with the arch config present.
+    std::fs::write(bf16.join("transformer").join("config.json"), b"{}").unwrap();
+    assert!(
+        !krea_imported_base_tier_complete(&bf16),
+        "empty component dirs (a torn download) must not count as a complete base tier"
+    );
+
+    // Fully populated → complete.
+    let config = bf16.join("transformer").join("config.json");
+    let te = bf16.join("text_encoder").join("model.safetensors");
+    let vae = bf16.join("vae").join("diffusion_pytorch_model.safetensors");
+    let tok = bf16.join("tokenizer").join("tokenizer.json");
+    std::fs::write(&te, b"te").unwrap();
+    std::fs::write(&vae, b"vae").unwrap();
+    std::fs::write(&tok, b"{}").unwrap();
+    assert!(
+        krea_imported_base_tier_complete(&bf16),
+        "arch config + a weight file in TE/VAE + tokenizer.json is a complete base tier"
+    );
+
+    // Dropping any single required payload makes it incomplete (mutation-discriminating).
+    for (label, victim) in [
+        ("transformer/config.json", &config),
+        ("text_encoder/*.safetensors", &te),
+        ("vae/*.safetensors", &vae),
+        ("tokenizer/tokenizer.json", &tok),
+    ] {
+        std::fs::remove_file(victim).unwrap();
+        assert!(
+            !krea_imported_base_tier_complete(&bf16),
+            "a base tier missing {label} must be incomplete"
+        );
+        // Restore for the next iteration.
+        std::fs::write(victim, b"x").unwrap();
+    }
 }
 
 /// End-to-end routing decision: a plain-t2i imported single-file Krea 2 job routes to the bespoke
@@ -10890,10 +10967,14 @@ fn resolve_image_route_sends_imported_single_file_krea_to_the_bespoke_lane() {
     );
     assert!(krea_imported_available(&imported, &settings));
 
-    // A directory modelPath (a snapshot) is not a single-file import → the imported lane does not claim
-    // it (and with an unknown id + no resolvable snapshot it is not otherwise MLX-routable).
+    // A diffusers snapshot-directory modelPath (a `model_index.json` pipeline marker, even alongside a
+    // loose `.safetensors`) is not a single-file import → the imported lane does not claim it. Seeding
+    // the marker makes this genuinely exercise the snapshot-dir exclusion (`is_diffusers_snapshot_dir`),
+    // not merely an empty dir that happens to hold no weight file.
     let snap_dir = dir.path().join("models").join("imported-krea").join("snap");
     std::fs::create_dir_all(&snap_dir).unwrap();
+    std::fs::write(snap_dir.join("model_index.json"), b"{}").unwrap();
+    std::fs::write(snap_dir.join("stray.safetensors"), b"x").unwrap();
     let dir_job = request(json!({
         "projectId": "p", "model": "kreamania_variant5", "prompt": "a cat",
         "modelManifestEntry": { "family": "krea_2", "modelPath": snap_dir.to_str().unwrap() }
