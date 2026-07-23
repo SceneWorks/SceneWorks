@@ -94,6 +94,56 @@ default apply weight (1.5) than other families:
 - If a LoRA over-dominates, lower it. The weight slider is the main lever; the default is just a
   starting point.
 
+## Turbo Speed On Raw: the accelerator LoRA & multi-phase denoise
+
+Raw's full-fidelity regime is ~52 steps with true CFG. Two features let you keep that Raw base while
+paying far less of the step cost — both run **on the Raw base** (not on distilled Turbo), so you keep
+Raw's fidelity and control where it matters.
+
+### The accelerator (turbo) LoRA — one-click ~8-step Raw
+
+Select an **accelerator-role LoRA** — the builtin **Krea 2 Turbo (accelerator)**, or any LoRA of type
+`acceleration` — on a plain Raw **text-to-image** job. The render switches to the distilled **Turbo
+sampling regime**: a fixed few-step schedule (**~8 steps**, **CFG-off**), while still loading the **Raw
+base weights** with the LoRA folded in additively. Net effect: *Raw base + LoRA, sampled as Turbo* —
+roughly Turbo speed (~8 steps instead of 52) at close to Raw fidelity (the community `raw+lora` recipe).
+
+- The accelerated pass is **CFG-off**, so the **guidance slider and negative prompt are inert** for it
+  (exactly like Turbo). State everything you want in the positive prompt.
+- **Text-to-image only.** A Raw job that also carries an **img2img reference** keeps the normal full-CFG
+  Raw regime — the reference is honored and the accelerator LoRA still applies additively — it does not
+  switch to the few-step turbo pass.
+- Stack a **style/subject LoRA alongside** the accelerator to accelerate a LoRA render.
+
+### Multi-phase denoise — Raw structure, Turbo finish
+
+The Image Studio's **multi-phase editor** splits **one** Raw denoise trajectory (one global schedule)
+into ordered **phases**. Each phase has its own step count, its own guidance (**CFG on or off, per
+phase**), and its own active subset of the loaded LoRAs (**toggled per phase**). This lets you spend the
+expensive true-CFG Raw steps only where they matter — early, on structure and prompt adherence — then
+finish fast.
+
+The **canonical workflow** (the Studio's "Turbo finish (4+4)" preset) is two phases:
+
+1. **4 steps — Raw, true-CFG on (guidance ~3.5), no accelerator LoRA.** Builds composition, structure,
+   and prompt adherence with the full-fidelity base.
+2. **4 steps — Raw + the turbo (accelerator) LoRA, CFG off (guidance 0).** Fast distilled finishing on
+   the trajectory the first phase set up.
+
+Tune from there:
+
+- Want stronger adherence or cleaner structure? Add steps to **phase 1** (e.g. `6 + 4`, `8 + 4`).
+- Keep the **turbo/accelerator LoRA in the CFG-off phase**, and leave the CFG-on phase base-only (or with
+  just your style LoRA) so its guidance is honored.
+- Give the CFG-on phase a real guidance (**~3.5**, the Raw default); set each CFG-off phase's guidance to
+  **0**.
+- A style/subject LoRA can be toggled into either phase; the accelerator belongs only in a CFG-off phase.
+- Keep the total step budget modest — a 2–3 phase split well under the 52-step single-phase Raw cost is
+  the whole point.
+
+Multi-phase renders from **pure noise**, so it is text-to-image only: edit, strict-pose, img2img-
+reference, and PiD-decode jobs are not supported (remove the phase plan to run those).
+
 ## Example Prompts
 
 `A weathered lighthouse on a rocky cliff at golden hour, waves breaking below, gulls in the distance.

@@ -84,6 +84,22 @@ weight (1.5)** than other families — they stay coherent well above that, so:
 - If a LoRA over-dominates, lower it. The weight slider is the main lever; the default is just a
   starting point tuned for the distilled Turbo.
 
+## Turbo-Fidelity Workflows Live On Krea 2 Raw
+
+Plain **Krea 2 Turbo** here is already the fully-distilled few-step model — fast by default and needing
+no extra setup. If you want **Turbo-like speed with more of Raw's fidelity and control**, two workflows
+run on the **Krea 2 Raw** model instead:
+
+- **The accelerator (turbo) LoRA on Raw** — selecting an accelerator-role LoRA (the builtin **Krea 2
+  Turbo (accelerator)**) on a Krea 2 Raw text-to-image job renders the Raw base in a distilled **~8-step,
+  CFG-off** pass: roughly Turbo speed at close to Raw fidelity.
+- **Multi-phase denoise** — the Image Studio's multi-phase editor runs one Raw trajectory as ordered
+  phases, e.g. the canonical **4 steps Raw (CFG on, guidance ~3.5) + 4 steps Raw + the turbo LoRA (CFG
+  off)**: Raw structure, Turbo finish.
+
+Switch the model to **Krea 2 Raw** to use either — see the **Krea 2 Raw prompt guide** for the
+recommended splits and weights.
+
 ## Example Prompts
 
 `A weathered lighthouse on a rocky cliff at golden hour, waves breaking below, gulls in the distance.

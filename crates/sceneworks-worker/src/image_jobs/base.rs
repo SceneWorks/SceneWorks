@@ -337,6 +337,26 @@ enum CandleImageRoute {
     /// Krea 2 Kontext-style dual-conditioned image-edit — `krea_2_raw` + `edit_image` + a source, with
     /// the required `krea2_identity_edit` LoRA (epic 10871).
     KreaEdit,
+    /// A Krea 2 **Raw** t2i job carrying the accelerator (turbo) LoRA (`role: accelerator`, sc-13882)
+    /// → the single-phase turbo-on-Raw lane (epic 13879 S3, sc-13883, brought to candle by sc-13887):
+    /// the Raw base + LoRA additive, sampled through the distilled Turbo regime (fixed mu 1.15 / ~8 steps
+    /// / CFG-off) by routing to the `krea_2_turbo` candle engine id (which keys that regime, inference PR
+    /// #204). The candle twin of the MLX `ImageRoute::KreaTurboOnRaw`; both dispatch to the SHARED,
+    /// backend-neutral `generate_krea_turbo_on_raw_stream` (`krea_turbo_raw.rs`). Wins over the generic
+    /// `CandleTxt2Img` arm for PLAIN t2i — `krea_2_raw` is a candle txt2img id, so it would otherwise run
+    /// the 52-step true-CFG Raw regime and never accelerate.
+    KreaTurboOnRaw,
+    /// A Krea 2 **Raw** t2i job carrying an explicit `advanced.phases` list (epic 13879 S4, sc-13884,
+    /// brought to candle by sc-13887) → the multi-phase denoise driver: ONE Raw trajectory over ONE
+    /// global sigma schedule, each phase a contiguous step slice with its own guidance (per-phase CFG
+    /// on/off) and its own active subset of the job's load-time LoRA stack (per-phase toggling). The
+    /// candle twin of the MLX `ImageRoute::KreaMultiPhase`; both dispatch to the SHARED, backend-neutral
+    /// `generate_krea_multiphase_stream` (`krea_multiphase.rs`), which passes the backend-agnostic
+    /// `GenerationRequest::phases` the candle Krea engine honors (inference PR #204). Wins over
+    /// `KreaTurboOnRaw` and the generic `CandleTxt2Img` arm — an explicit phase list is the finer-grained
+    /// control. Loads the `krea_2_raw` engine (the driver keys on that descriptor id). Reference / edit /
+    /// pose / PiD shapes are rejected loudly by the lane (multi-phase renders from pure noise).
+    KreaMultiPhase,
     /// Z-Image identity-init for Image Studio "With Character" (sc-8409).
     ZimageIdentity,
     /// SDXL IP-Adapter-Plus reference conditioning (sc-5488).
@@ -484,6 +504,17 @@ fn resolve_candle_image_route(
         // `Krea2Control` lane, diverted before the registry txt2img arm (which would render it as plain
         // txt2img and drop the poses). Mirrors `jobs_store::krea_control_candle_eligible`.
         Some(CandleImageRoute::KreaControl)
+    } else if krea_multiphase_available(request, settings) {
+        // Krea 2 Raw t2i + an explicit `advanced.phases` list (epic 13879 S4, sc-13884; candle sc-13887)
+        // → the multi-phase denoise lane (`generate_krea_multiphase_stream`, SHARED with MLX). Placed
+        // FIRST among the `krea_2_raw` t2i lanes so an explicit phase list takes precedence over the S3
+        // whole-job turbo-on-Raw regime (`krea_turbo_on_raw_available` below) AND the generic Raw t2i
+        // (`CandleTxt2Img`): multi-phase is the finer-grained control. Only claims `krea_2_raw` + a present
+        // `advanced.phases`, so every non-phases job is unaffected; the lane itself rejects
+        // edit/pose/reference/PiD shapes loudly (multi-phase renders from pure noise), so claiming a
+        // conflicting shape here surfaces a clear error rather than diverting it silently. The candle twin
+        // of the MLX `resolve_image_route` `KreaMultiPhase` arm.
+        Some(CandleImageRoute::KreaMultiPhase)
     } else if krea_edit_candle_available(request, settings) {
         // Krea 2 Kontext-style edit (epic 10871): `krea_2_raw` + `edit_image` + a source is the bespoke
         // candle `KreaEdit` lane (`generate_candle_krea_edit_stream`), NOT the generic t2i stream. Diverted
@@ -491,6 +522,18 @@ fn resolve_candle_image_route(
         // 9992) so an edit job runs the dual-conditioning Kontext render instead of being flattened to plain
         // txt2img. Mirrors `jobs_store::krea_edit_candle_eligible`.
         Some(CandleImageRoute::KreaEdit)
+    } else if krea_turbo_on_raw_available(request, settings) {
+        // Krea 2 Raw t2i + the accelerator (turbo) LoRA (sc-13882) → the single-phase turbo-on-Raw lane
+        // (epic 13879 S3, sc-13883; candle sc-13887): the Raw base + LoRA additive, sampled as Turbo
+        // (fixed mu 1.15 / ~8 steps / CFG-off) by routing to the `krea_2_turbo` candle engine
+        // (`generate_krea_turbo_on_raw_stream`, SHARED with MLX). Wins over the generic `CandleTxt2Img`
+        // arm for PLAIN t2i — a plain Raw t2i would otherwise run the 52-step true-CFG regime and ignore
+        // the accelerator's intent. A `krea_2_raw` job that ALSO carries an img2img reference is EXCLUDED
+        // by the gate and falls through to the generic `CandleTxt2Img` img2img path (reference honored via
+        // `render_base_img2img`, accelerator LoRA still additive) — turbo-on-Raw img2img is out of scope
+        // for this t2i story (sc-13883). The candle twin of the MLX `resolve_image_route` `KreaTurboOnRaw`
+        // arm; placed AFTER the edit lane, BEFORE the generic txt2img arm.
+        Some(CandleImageRoute::KreaTurboOnRaw)
     } else if zimage_comfyui_available(request, settings) {
         // In-place ComfyUI Z-Image base (sc-10668): an `external_base_*` id, so it matches no
         // `is_candle_engine` arm below — route it here off the forwarded `modelManifestEntry`.

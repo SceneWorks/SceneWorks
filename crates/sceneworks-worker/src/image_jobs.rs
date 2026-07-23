@@ -917,6 +917,43 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
+                // Krea 2 Raw t2i + an explicit `advanced.phases` list (epic 13879 S4, sc-13884; candle
+                // sc-13887) → the multi-phase denoise driver: ONE Raw trajectory / global sigma schedule,
+                // per-phase guidance (CFG on/off) + per-phase toggling of the job's load-time LoRA stack (by
+                // index). Reference/edit/pose/PiD shapes are rejected loudly before the load (renders from
+                // pure noise). Takes precedence over the S3 turbo-on-Raw regime. The candle engine honors
+                // the backend-agnostic `GenerationRequest::phases` (inference PR #204); the handler is the
+                // SAME backend-neutral `generate_krea_multiphase_stream` the macOS `KreaMultiPhase` arm runs.
+                CandleImageRoute::KreaMultiPhase => {
+                    generate_krea_multiphase_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // Krea 2 Raw t2i + the accelerator (turbo) LoRA (sc-13882) → the distilled Turbo sampling
+                // regime (fixed mu 1.15 / ~8 steps / CFG-off) on the Raw base + LoRA additive (epic 13879
+                // S3, sc-13883; candle sc-13887). Routes to the `krea_2_turbo` candle engine while loading
+                // the Raw weights — the engine keys the regime on that descriptor id (inference PR #204).
+                // The handler is the SAME backend-neutral `generate_krea_turbo_on_raw_stream` the macOS
+                // `KreaTurboOnRaw` arm runs.
+                CandleImageRoute::KreaTurboOnRaw => {
+                    generate_krea_turbo_on_raw_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
                 // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane (e.g.
                 // sdxl) must be REJECTED with a clear error, not silently rendered as plain txt2img (poses
                 // dropped) and not bounced to torch. The candle worker CLAIMS these (jobs_store
@@ -1724,14 +1761,28 @@ include!("image_jobs/qwen.rs");
 #[cfg(target_os = "macos")]
 // Krea 2 Kontext-style image-edit routing (epic 10871).
 include!("image_jobs/krea_edit.rs");
-#[cfg(target_os = "macos")]
 // Krea 2 single-phase turbo-on-Raw routing (epic 13879 S3, sc-13883): the accelerator LoRA on a
 // `krea_2_raw` t2i job → the distilled Turbo sampling regime (fixed mu 1.15 / ~8 steps / CFG-off).
+// Shared by the MLX path (macOS) AND the candle lane (Windows/Linux CUDA, sc-13887): the whole file
+// is backend-neutral — it resolves + samples through the same registry harness (`mlx_model` +
+// `start_cached_gen_stream`) both backends use, so no `_candle.rs` sibling is needed. The candle
+// engine (inference PR #204) keys the turbo regime on the `krea_2_turbo` descriptor id exactly like
+// MLX.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 include!("image_jobs/krea_turbo_raw.rs");
-#[cfg(target_os = "macos")]
 // Krea 2 multi-phase denoise routing (epic 13879 S4, sc-13884): a `krea_2_raw` t2i job carrying an
 // explicit `advanced.phases` list → the multi-phase driver (one Raw trajectory / global schedule,
-// per-phase guidance + per-phase toggling of the job's load-time LoRA stack by index).
+// per-phase guidance + per-phase toggling of the job's load-time LoRA stack by index). Shared by the
+// MLX path AND the candle lane (sc-13887): the multi-phase primitive consumes the backend-agnostic
+// `GenerationRequest::phases` contract, which the candle Krea engine also honors (inference PR #204),
+// so the shape-detection + `advanced.phases` parse/validate + engine invocation are all backend-neutral.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 include!("image_jobs/krea_multiphase.rs");
 #[cfg(target_os = "macos")]
 // Krea 2 pose-ControlNet (MLX) strict-pose routing (sc-8465, epic 8459 S5).

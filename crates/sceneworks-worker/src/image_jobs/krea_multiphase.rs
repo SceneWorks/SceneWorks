@@ -1,7 +1,8 @@
 // ---------------------------------------------------------------------------
-// Krea 2 multi-phase denoise (macOS, epic 13879 S4, sc-13884): a `krea_2_raw` t2i job
+// Krea 2 multi-phase denoise (epic 13879 S4, sc-13884): a `krea_2_raw` t2i job
 // carrying an explicit `advanced.phases` list rendered through the new multi-phase engine
-// primitive (inference PR #199). ONE Raw denoise trajectory over ONE global sigma schedule,
+// primitive (inference PR #199 on MLX; PR #204 brought the candle sibling, sc-13887). ONE Raw
+// denoise trajectory over ONE global sigma schedule,
 // where each PHASE owns a contiguous step slice with its own guidance (per-phase true-CFG
 // on/off) AND its own active subset of the job's load-time LoRA stack (per-phase toggling).
 // The canonical workflow is "N steps Raw with true-CFG on, then M steps Raw + turbo-LoRA with
@@ -39,8 +40,14 @@
 // engine): multi-phase is a Raw-trajectory decomposition, and the engine keys the driver on the
 // `krea_2_raw` descriptor id. This composes with — and takes PRECEDENCE over — the S3 whole-job
 // turbo-on-Raw regime: an explicit `advanced.phases` is the finer-grained control, so the router
-// checks this lane first (see `resolve_image_route`). The whole file is `include!`d only on macOS
-// (like `krea_turbo_raw.rs`), so nothing here needs a per-item cfg.
+// checks this lane first (see `resolve_image_route` / `resolve_candle_image_route`).
+//
+// The whole file is backend-neutral and `include!`d on BOTH the macOS (MLX) build AND the candle
+// build (sc-13887, like `krea_turbo_raw.rs`): the shape-detection, the `advanced.phases`
+// parse/validate → `GenerationRequest::phases`, and the engine invocation all go through the shared
+// registry harness + the backend-agnostic gen-core `phases` contract, so nothing here is
+// MLX-specific and nothing needs a per-item cfg. The candle Krea engine honors `phases` too
+// (inference PR #204).
 // ---------------------------------------------------------------------------
 
 /// Sanity cap on the number of phases in one multi-phase render. The engine imposes none, but a
