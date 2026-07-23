@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 
 const runtime = "rust";
 const port = process.env.SCENEWORKS_API_PORT || "18000";
@@ -24,13 +25,27 @@ function runDocker(args, env) {
   });
 }
 
-async function waitForHealth() {
-  const url = `http://127.0.0.1:${port}/api/v1/health`;
-  const deadline = Date.now() + 120_000;
+export async function waitForHealth({
+  url = `http://127.0.0.1:${port}/api/v1/health`,
+  readinessTimeoutMs = 120_000,
+  requestTimeoutMs = 5_000,
+  retryDelayMs = 2_000,
+} = {}) {
+  const deadline = Date.now() + readinessTimeoutMs;
   let lastError;
+  let attempts = 0;
   while (Date.now() < deadline) {
+    attempts += 1;
     try {
-      const response = await fetch(url);
+      // Publishing the Docker port can accept a connection before the API has
+      // finished create_app(). Bound every individual probe so a connection
+      // that accepts but never responds cannot make the overall deadline
+      // toothless and consume the parity job's 30-minute timeout (sc-14076).
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(
+          Math.max(1, Math.min(requestTimeoutMs, deadline - Date.now())),
+        ),
+      });
       if (response.ok) {
         const health = await response.json();
         if (health.runtime !== runtime) {
@@ -43,9 +58,15 @@ async function waitForHealth() {
     } catch (error) {
       lastError = error.message;
     }
-    await sleep(2_000);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs > 0) {
+      await sleep(Math.min(retryDelayMs, remainingMs));
+    }
   }
-  throw new Error(`SceneWorks ${runtime} API did not become healthy: ${lastError}`);
+  throw new Error(
+    `SceneWorks ${runtime} API did not become healthy within ${readinessTimeoutMs}ms ` +
+      `after ${attempts} attempt(s): ${lastError}`,
+  );
 }
 
 async function main() {
@@ -95,7 +116,15 @@ async function main() {
     // in the run output. (This is no longer load-bearing for exit-13 avoidance — the
     // keepAlive handle and main() wrapper cover that — it's purely diagnostic now.)
     await runDocker([...compose, "logs", "--no-color", "api"], env).catch(() => {});
-    await waitForHealth();
+    try {
+      await waitForHealth();
+    } catch (error) {
+      // The initial log snapshot often happens before create_app reaches the
+      // stalled operation. Capture final health and boot logs at the deadline.
+      await runDocker([...compose, "ps", "--all"], env).catch(() => {});
+      await runDocker([...compose, "logs", "--no-color", "api"], env).catch(() => {});
+      throw error;
+    }
   } finally {
     // The api service runs as root in the container, so anything it seeds into the
     // bind-mounted data dir is root-owned — notably data/projects/global-poses.sceneworks,
@@ -117,10 +146,12 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  // A genuine failure (unhealthy container hitting the 120s waitForHealth deadline,
-  // an unexpected throw, etc.) surfaces as a normal rejection here and exits non-zero —
-  // not via Node's top-level-await exit-13 path.
-  console.error(error);
-  process.exitCode = 1;
-});
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    // A genuine failure (unhealthy container hitting the 120s waitForHealth deadline,
+    // an unexpected throw, etc.) surfaces as a normal rejection here and exits non-zero —
+    // not via Node's top-level-await exit-13 path.
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
