@@ -158,9 +158,10 @@ fn resolve_imported_krea_dit(
 /// tokenizer, and DiT architecture config the imported single-file transformer omits — the `base_snapshot_dir`
 /// argument of the S0b entrypoint. The default base is the Turbo turnkey's dense `bf16/` tier
 /// ([`KREA_IMPORTED_BASE_REPO`] / [`KREA_IMPORTED_BASE_TIER`]), resolved from the HF cache via the shared
-/// repo→cache-path helper. REQUIRES it installed and complete (`transformer/config.json` for the arch
-/// config, plus `text_encoder/ vae/ tokenizer/`); a clear typed error otherwise so the user knows to
-/// install the Krea 2 base first, rather than a raw mid-load "No such file or directory".
+/// repo→cache-path helper. REQUIRES it installed and complete — `transformer/config.json` for the arch
+/// config, plus POPULATED `text_encoder/ vae/ tokenizer/` component trees (weight files present, not
+/// just the directories, so a torn base is caught here); a clear typed error otherwise so the user knows
+/// to install the Krea 2 base first, rather than a raw mid-load "No such file or directory".
 #[cfg(target_os = "macos")]
 fn resolve_krea_imported_base_tier(settings: &Settings) -> WorkerResult<PathBuf> {
     let base_missing = || {
@@ -180,13 +181,36 @@ fn resolve_krea_imported_base_tier(settings: &Settings) -> WorkerResult<PathBuf>
 
 /// The base tier is loadable when it carries the shared components the single-file DiT pairs with: the
 /// transformer's `config.json` (the arch config `Krea2Config::from_snapshot` reads — the WEIGHTS are the
-/// imported file, not this tier's), plus the `text_encoder/ vae/ tokenizer/` component trees.
+/// imported file, not this tier's), plus POPULATED `text_encoder/`, `vae/`, and `tokenizer/` component
+/// trees. Each component dir is probed for an actual payload file — a `.safetensors` weight for the
+/// dense TE/VAE, the `tokenizer.json` the tokenizer loads — not merely for the directory's existence:
+/// a half-downloaded / torn base whose component dirs were created but never filled would otherwise pass
+/// this gate and fail deep inside the S0b load with a generic Engine "load failed" instead of the
+/// friendly [`resolve_krea_imported_base_tier`] "install the Krea 2 base first" typed error.
 #[cfg(target_os = "macos")]
 fn krea_imported_base_tier_complete(dir: &Path) -> bool {
     dir.join("transformer").join("config.json").is_file()
-        && dir.join("text_encoder").is_dir()
-        && dir.join("vae").is_dir()
-        && dir.join("tokenizer").is_dir()
+        && dir_has_safetensors(&dir.join("text_encoder"))
+        && dir_has_safetensors(&dir.join("vae"))
+        && dir.join("tokenizer").join("tokenizer.json").is_file()
+}
+
+/// True when `dir` holds at least one top-level `*.safetensors` weight file — the "is this component
+/// dir actually populated, not just an empty shell left by a torn download" probe
+/// [`krea_imported_base_tier_complete`] uses for the dense text encoder / VAE trees.
+#[cfg(target_os = "macos")]
+fn dir_has_safetensors(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            entry
+                .path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("safetensors"))
+        })
 }
 
 /// True when this is an in-place imported single-file Krea 2 **txt2img** job: an imported `krea_2`-family
