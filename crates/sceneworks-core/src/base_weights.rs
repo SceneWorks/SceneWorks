@@ -123,11 +123,10 @@ pub enum QuantFormat {
     /// carries none (it packs nibbles into `U8`). Both also carry bulk `U8`
     /// (int8 stores its `.comfy_quant` descriptors as small `U8` blobs), so `U8`
     /// alone cannot separate them — the `I8` weight dtype is the decisive signal.
-    /// A loadable quant *in principle* (the int8 single-file loader lands in
-    /// sc-14023); split out here (sc-14026) so the int8 Krea variant
+    /// Loaded by Krea's descriptor-gated single-file loader (sc-14023); split out
+    /// here (sc-14026) so the int8 Krea variant
     /// (`~/models/kreamania_variant4.safetensors`) is not mislabelled as the
-    /// unloadable fp4 bucket. Still refused by [`import_supported`] until its loader
-    /// lands — but with a distinct int8 reason, not the fp4 one.
+    /// unloadable fp4 bucket.
     Int8TensorwisePerRow,
     /// GGUF container (`Q8_0`, `Q4_K_S`, …) — detected by the `GGUF` magic, not the
     /// extension. Has no safetensors header; family/component are read from GGUF
@@ -212,16 +211,19 @@ pub const IMPORT_SUPPORTED_FAMILIES: &[&str] = &["krea_2"];
 ///
 /// Written as a `match` with **one arm per supported loader** so a follow-on family / component /
 /// quant (the S0c assembly slice and the epic's later families) is a single added arm, not a
-/// rewrite. Today exactly one triple is loadable: a dense-`bf16` Krea 2 DiT
-/// (`krea_2` / [`ComponentRole::Transformer`] / [`QuantFormat::Bf16`]), which reuses the existing
-/// Krea MLX engine via the family-routing path. Everything else — an unrecognized/absent family, a
+/// rewrite. Today two triples are loadable: a Krea 2 transformer in either dense `bf16` or
+/// descriptor-gated [`QuantFormat::Int8TensorwisePerRow`], both of which reuse the existing Krea
+/// engine via the family-routing path. Everything else — an unrecognized/absent family, a
 /// non-transformer component (VAE / text encoder / all-in-one checkpoint), or a deferred quant
-/// (plain/scaled/inline fp8, `comfy_quant` fp4-packed, int8-tensorwise-per-row, GGUF) — is refused
-/// with a specific reason (int8 carries its own reason distinct from the fp4/dense-bf16 one).
+/// (plain/scaled/inline fp8, `comfy_quant` fp4-packed, GGUF) — is refused with a specific reason.
 pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
     match (verdict.family.as_deref(), verdict.component, verdict.quant) {
         // --- Supported loaders: one arm per landed loader (add the next family/quant here) ---
-        (Some("krea_2"), ComponentRole::Transformer, QuantFormat::Bf16) => Ok(()),
+        (
+            Some("krea_2"),
+            ComponentRole::Transformer,
+            QuantFormat::Bf16 | QuantFormat::Int8TensorwisePerRow,
+        ) => Ok(()),
 
         // --- Refusals: most specific first, each with an actionable, client-facing reason ---
         (None, _, _) => Err(
@@ -237,19 +239,9 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
             "Model import for the '{family}' family currently supports only the diffusion \
              transformer, not a {component} file."
         )),
-        // int8-tensorwise-per-row is a distinct, loadable-in-principle quant (not the fp4/mxfp4
-        // reject bucket), but its single-file loader is not landed yet (sc-14023). Refuse with an
-        // int8-specific reason rather than the generic dense-bf16 message below, so the surface is
-        // accurate about *why* the file is deferred. Do NOT mark it loadable.
-        (Some(family), ComponentRole::Transformer, QuantFormat::Int8TensorwisePerRow) => {
-            Err(format!(
-                "Model import for the '{family}' family does not yet support int8 checkpoints \
-                 (the int8 loader is not landed yet). Re-export the checkpoint in bf16."
-            ))
-        }
         (Some(family), _, quant) => Err(format!(
-            "Model import for the '{family}' family currently supports only dense bf16 weights, \
-             not {quant}. Re-export the checkpoint in bf16."
+            "Model import for the '{family}' family currently supports only dense bf16 or \
+             descriptor-gated int8-per-row weights, not {quant}. Re-export the checkpoint in bf16."
         )),
     }
 }
@@ -1225,14 +1217,14 @@ mod tests {
     }
 
     #[test]
-    fn import_supported_accepts_only_krea2_transformer_bf16() {
-        // The single loadable triple today: a dense-bf16 Krea 2 DiT, routed to the Krea MLX engine.
-        assert!(import_supported(&verdict(
-            Some("krea_2"),
-            ComponentRole::Transformer,
-            QuantFormat::Bf16
-        ))
-        .is_ok());
+    fn import_supported_accepts_krea2_transformer_bf16_and_int8_per_row() {
+        for quant in [QuantFormat::Bf16, QuantFormat::Int8TensorwisePerRow] {
+            assert!(
+                import_supported(&verdict(Some("krea_2"), ComponentRole::Transformer, quant))
+                    .is_ok(),
+                "Krea 2 transformer {quant} has a landed single-file loader"
+            );
+        }
     }
 
     #[test]
@@ -1245,33 +1237,12 @@ mod tests {
         ))
         .expect_err("packed quant must be refused");
         assert!(
-            reason.contains("bf16"),
+            reason.contains("bf16") && reason.contains("int8"),
             "reason should name the required quant: {reason}"
         );
         assert!(
             reason.contains(QuantFormat::ComfyQuantPacked.as_str()),
             "reason should name the rejected quant: {reason}"
-        );
-    }
-
-    #[test]
-    fn import_supported_refuses_krea2_int8_with_distinct_reason() {
-        // int8-tensorwise-per-row is loadable in principle but its loader (sc-14023) is not
-        // landed — refuse with an int8-specific reason, NOT the fp4/dense-bf16 message.
-        let reason = import_supported(&verdict(
-            Some("krea_2"),
-            ComponentRole::Transformer,
-            QuantFormat::Int8TensorwisePerRow,
-        ))
-        .expect_err("int8 quant must still be refused (no loader yet)");
-        assert!(
-            reason.contains("int8"),
-            "reason should name int8 specifically: {reason}"
-        );
-        // Must NOT reuse the generic fp4/dense-bf16 phrasing that names the on-disk quant string.
-        assert!(
-            !reason.contains(QuantFormat::Int8TensorwisePerRow.as_str()),
-            "int8 refusal should use its own message, not the generic dense-bf16 one: {reason}"
         );
     }
 
