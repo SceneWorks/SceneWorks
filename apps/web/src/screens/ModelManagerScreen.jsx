@@ -998,7 +998,12 @@ export function ModelManagerScreen() {
       const job = await onImportModel({
         ...(isFileImport ? { file: modelImportForm.file } : { sourceUrl: modelImportForm.sourceUrl.trim() }),
         name: modelImportForm.name.trim() || undefined,
-        modelType: modelImportForm.type,
+        // Send the model type under `type` — the literal field name the backend's multipart parser
+        // reads (models.rs `model_import_request_from_multipart`) and that JSON deserialization
+        // accepts via `#[serde(alias = "type")]` on `ModelImportRequest`. Keying this `modelType`
+        // was silently dropped on file uploads (multipart has no serde aliasing), defaulting every
+        // imported checkpoint to `image` regardless of selection (sc-14020).
+        type: modelImportForm.type,
         ...familyOverride,
       });
       const modelId = job?.payload?.modelId;
@@ -2047,12 +2052,15 @@ export function ModelManagerScreen() {
                   <div className="models-import-grid">
                     <label>
                       Type
-                      <select
-                        disabled={importingModel}
-                        onChange={(event) => setModelImportForm((current) => ({ ...current, type: event.target.value }))}
-                        value={modelImportForm.type}
-                      >
-                        {MODEL_TYPE_OPTIONS.map((option) => (
+                      {/* Base-checkpoint import only produces image models today (a Krea 2 DiT).
+                          `queue_model_import_job` (models.rs) writes this type verbatim into the
+                          user manifest and never reconciles it against the detected family, so
+                          offering video/audio/utility here would let an image checkpoint be
+                          mis-typed. Constrain to Image (disabled) until more base-checkpoint types
+                          are importable, then drop the image-only filter to restore the full
+                          MODEL_TYPE_OPTIONS selector (sc-14020). */}
+                      <select disabled value={modelImportForm.type} aria-readonly="true">
+                        {MODEL_TYPE_OPTIONS.filter((option) => option.value === "image").map((option) => (
                           <option key={option.value} value={option.value}>
                             {option.label}
                           </option>

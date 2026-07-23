@@ -208,6 +208,11 @@ export function useModelsAndLoras({
     let body;
     if (file) {
       body = new FormData();
+      // Multipart fields are appended verbatim — the backend reads them by literal field name
+      // (models.rs `model_import_request_from_multipart`) with none of the `#[serde(alias)]`
+      // tolerance the JSON branch below gets. Callers must key metadata by the backend's own
+      // multipart field names (e.g. `type`, not `modelType`) or the value is silently dropped
+      // and the import defaults to `image` (sc-14020).
       Object.entries(metadata).forEach(([key, value]) => {
         if (value != null && value !== "") {
           body.append(key, value);

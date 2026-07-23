@@ -1317,7 +1317,10 @@ describe("SceneWorks app shell", () => {
     expect(onImportModel).toHaveBeenCalledTimes(1);
     const payload = onImportModel.mock.calls[0][0];
     expect(payload.file).toBe(file);
-    expect(payload.modelType).toBe("image");
+    // Keyed `type`, not `modelType`: the backend multipart parser reads the literal `type` field
+    // (JSON accepts it via a serde alias). `modelType` would be silently dropped on upload (sc-14020).
+    expect(payload.type).toBe("image");
+    expect(payload.modelType).toBeUndefined();
     // No family override — the backend detector classifies the file (Krea 2 today).
     expect(payload.family).toBeUndefined();
   });
