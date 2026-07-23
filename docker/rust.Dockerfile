@@ -192,16 +192,32 @@ RUN apt-get update \
 
 # onnxruntime-gpu + the CUDA-12 deps its providers_cuda needs that the CUDA-runtime
 # base doesn't ship — cuDNN-9 (incl. lazily-loaded sub-engines), cuFFT, nvJitLink,
-# nvRTC. onnxruntime-gpu does NOT declare these as hard deps, so request them
-# explicitly (sc-6209). 1.26.0 matches the `ort` crate rc.12 (ORT API 24); validated
-# on RTX PRO 6000 with cuDNN-cu12 9.23.
+# nvRTC. onnxruntime-gpu does NOT declare these as hard deps (they sit behind its
+# `cuda`/`cudnn` extras), so request them explicitly (sc-6209). 1.26.0 matches the
+# `ort` crate rc.12 (ORT API 24); validated on RTX PRO 6000 with cuDNN-cu12 9.23.
+#
+# The four nvidia-*-cu12 versions below are PINNED to exactly match the desktop CUDA
+# provisioner (apps/desktop/src/cuda_provision.rs COMPONENTS table, REDIST_VERSION
+# `cuda12.9-ort1.26.0-cudnn9.23-1`) so both surfaces stage the identical CUDA set that
+# onnxruntime-gpu 1.26.0 was validated against — reproducible server builds, no silent
+# cuDNN 10.x / floating-range drift (sc-13611). Each also satisfies onnxruntime-gpu
+# 1.26.0's own declared ranges (cudnn~=9.0, cufft~=11.0, cuda-nvrtc~=12.0) and the
+# CUDA 12.9 runtime base. Pip --require-hashes hardening is tracked in sc-14078.
 ENV ORT_PY_SITE=/opt/ort/lib/python3.12/site-packages
 ARG ONNXRUNTIME_GPU_VERSION=1.26.0
+# Mirror apps/desktop/src/cuda_provision.rs — keep in lockstep if that manifest bumps.
+ARG NVIDIA_CUDNN_CU12_VERSION=9.23.0.39
+ARG NVIDIA_CUFFT_CU12_VERSION=11.4.1.4
+ARG NVIDIA_NVJITLINK_CU12_VERSION=12.9.86
+ARG NVIDIA_CUDA_NVRTC_CU12_VERSION=12.9.86
 RUN python3 -m venv /opt/ort \
     && /opt/ort/bin/pip install --no-cache-dir --upgrade pip \
     && /opt/ort/bin/pip install --no-cache-dir \
         "onnxruntime-gpu==${ONNXRUNTIME_GPU_VERSION}" \
-        nvidia-cudnn-cu12 nvidia-cufft-cu12 nvidia-nvjitlink-cu12 nvidia-cuda-nvrtc-cu12 \
+        "nvidia-cudnn-cu12==${NVIDIA_CUDNN_CU12_VERSION}" \
+        "nvidia-cufft-cu12==${NVIDIA_CUFFT_CU12_VERSION}" \
+        "nvidia-nvjitlink-cu12==${NVIDIA_NVJITLINK_CU12_VERSION}" \
+        "nvidia-cuda-nvrtc-cu12==${NVIDIA_CUDA_NVRTC_CU12_VERSION}" \
     && ORT_SO="$(ls ${ORT_PY_SITE}/onnxruntime/capi/libonnxruntime.so* | head -1)" \
     && test -n "${ORT_SO}" \
     && ln -sf "${ORT_SO}" "${ORT_PY_SITE}/onnxruntime/capi/libonnxruntime.so"
