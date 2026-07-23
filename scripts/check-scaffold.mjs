@@ -40,12 +40,66 @@ const requiredPaths = [
 
 const inferenceCargoWorkflows = [
   ".github/workflows/check.yml",
+  ".github/workflows/desktop-linux.yml",
   ".github/workflows/desktop-windows.yml",
   ".github/workflows/macos-mlx.yml",
   ".github/workflows/release.yml",
   ".github/workflows/server-candle-linux.yml",
   ".github/workflows/windows-candle.yml",
 ];
+
+async function assertDesktopLinuxPackagingWorkflow() {
+  const workflowPath = ".github/workflows/desktop-linux.yml";
+  const body = await readFile(path.join(root, workflowPath), "utf8");
+  const serverCandleBody = await readFile(
+    path.join(root, ".github/workflows/server-candle-linux.yml"),
+    "utf8",
+  );
+
+  // Keep the heavy lane opt-in. An accidental pull_request/push trigger would
+  // turn every desktop edit into a full nvcc release build.
+  if (!/on:\s*\n\s+workflow_dispatch:\s*(?:\n|$)/m.test(body)) {
+    throw new Error(`${workflowPath} must remain workflow_dispatch-only`);
+  }
+  if (/^\s{2}(?:pull_request|push):/m.test(body)) {
+    throw new Error(`${workflowPath} must not run automatically on pull requests or pushes`);
+  }
+
+  const cudaPin = body.match(/^\s+cuda:\s*"([^"]+)"/m)?.[1];
+  const serverCudaPin = serverCandleBody.match(/^\s+cuda:\s*"([^"]+)"/m)?.[1];
+  if (!cudaPin || cudaPin !== serverCudaPin) {
+    throw new Error(
+      `${workflowPath} CUDA pin (${cudaPin ?? "missing"}) must match ` +
+        `.github/workflows/server-candle-linux.yml (${serverCudaPin ?? "missing"})`,
+    );
+  }
+  const cudaAction = body.match(/uses:\s*Jimver\/cuda-toolkit@(\S+)/)?.[1];
+  const serverCudaAction = serverCandleBody.match(
+    /uses:\s*Jimver\/cuda-toolkit@(\S+)/,
+  )?.[1];
+  if (!cudaAction || cudaAction !== serverCudaAction) {
+    throw new Error(
+      `${workflowPath} CUDA installer action (${cudaAction ?? "missing"}) must match ` +
+        `.github/workflows/server-candle-linux.yml (${serverCudaAction ?? "missing"})`,
+    );
+  }
+
+  const requiredCommands = [
+    "gstreamer1.0-libav",
+    "scripts/check-gen-core-skew.sh --self-test",
+    "sceneworks-worker --features backend-candle",
+    "sceneworks-rust-api --features embed-web,backend-candle",
+    "npm --prefix apps/desktop run build:linux",
+    "target/release/bundle/appimage/*.AppImage",
+    "target/release/bundle/deb/*.deb",
+    "if-no-files-found: error",
+  ];
+  for (const command of requiredCommands) {
+    if (!body.includes(command)) {
+      throw new Error(`${workflowPath} is missing required packaging contract: ${command}`);
+    }
+  }
+}
 
 const manifestSchemaPaths = [
   "packages/schemas/model-manifest.schema.json",
@@ -429,6 +483,7 @@ await assertManifestSchemasParse();
 await assertManifestSchemaReferences();
 await assertManifestRootsMatchSchemas();
 await assertVersionsAligned();
+await assertDesktopLinuxPackagingWorkflow();
 await assertBuiltinPromptGuides();
 await assertCharacterImageTuningSurface();
 await assertEntitlementsPlistsWellFormed();
