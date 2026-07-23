@@ -1444,6 +1444,28 @@ mod tests {
     }
 
     #[test]
+    fn mlx_routed_families_agree_with_import_supported_families() {
+        // sc-14019: `MLX_ROUTED_FAMILIES` (routing, here) and `base_weights::IMPORT_SUPPORTED_FAMILIES`
+        // (the model-import compatibility gate) are two independent `krea_2` allow-lists that must NOT
+        // silently drift. Route-by-family exists ONLY via MLX today, so the two sets must be identical:
+        // a family added to the import gate but not here would let a user import a checkpoint no engine
+        // can run, and a family added here but not to the gate would route one the gate refuses. This
+        // fails the moment either list gains or loses a family the other did not. If a non-MLX
+        // route-by-family lane (e.g. candle) is ever added, evolve this into a subset check over the
+        // union of route-by-family lists.
+        let routed: BTreeSet<&str> = MLX_ROUTED_FAMILIES.iter().copied().collect();
+        let importable: BTreeSet<&str> = crate::base_weights::IMPORT_SUPPORTED_FAMILIES
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(
+            routed, importable,
+            "MLX_ROUTED_FAMILIES and IMPORT_SUPPORTED_FAMILIES disagree; add a family to BOTH the \
+             import gate and the route-by-family allow-list (or remove it from both)"
+        );
+    }
+
+    #[test]
     fn imported_same_family_model_routes_via_family_path() {
         // An imported model id that is in NO routing table, declaring family krea_2, resolves as
         // Mac-routable (supported) via the family path — not hidden behind "not available on Mac".
