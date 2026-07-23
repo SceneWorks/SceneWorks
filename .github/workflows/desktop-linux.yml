@@ -1,0 +1,105 @@
+name: Desktop (Linux packages)
+
+# Build the complete Linux/NVIDIA desktop packages on the Ubuntu 22.04
+# compatibility baseline. Manual-only, like server-candle-linux.yml: compiling
+# the candle sidecar runs nvcc for every provider and is too heavy for the
+# standing PR lanes. A GPU is not required to compile or package it.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-linux:
+    runs-on: ubuntu-22.04
+    env:
+      # compute_80 PTX the driver JITs forward to sm_120. Keep this and the CUDA
+      # Toolkit pin below aligned with server-candle-linux.yml and the Windows
+      # desktop package lanes.
+      CUDA_COMPUTE_CAP: "80"
+      CARGO_NET_OFFLINE: "true"
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            apps/web/package-lock.json
+            apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+
+      # Tauri v2's Ubuntu/WebKitGTK build prerequisites. Ubuntu 22.04 is
+      # intentional: packages built here retain the project's glibc baseline and
+      # run on both the documented Ubuntu 22.04 and 24.04 targets.
+      - name: Install GTK and WebKitGTK build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libfuse2 \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
+      - name: Fetch the private inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
+          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
+        run: cargo fetch --locked
+
+      # Pin exactly matches server-candle-linux.yml / release.yml. The Windows
+      # desktop package lane also targets the pre-installed CUDA 12.9 Toolkit.
+      - name: Install CUDA Toolkit 12.9
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        with:
+          cuda: "12.9.1"
+          method: "network"
+          linux-local-args: '["--toolkit"]'
+
+      # The default skew gate cannot see optional candle-gen providers. Exercise
+      # both candle feature graphs before spending time on the release build.
+      - name: Guard against gen-core version skew (candle)
+        run: |
+          bash scripts/check-gen-core-skew.sh --self-test
+          bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle
+          bash scripts/check-gen-core-skew.sh sceneworks-rust-api --features embed-web,backend-candle
+
+      - name: Install web and desktop dependencies
+        run: |
+          npm ci --prefix apps/web
+          npm ci --prefix apps/desktop
+
+      - name: Validate desktop bundle configuration
+        run: npm --prefix apps/desktop test
+
+      # Tauri's beforeBuildCommand runs build-sidecar.mjs, which builds the web
+      # production bundle and the Linux candle sidecar with embed-web, verifies
+      # its multi-architecture CUDA fatbin, and stages it before packaging.
+      - name: Build Linux candle packages (AppImage + deb)
+        run: npm --prefix apps/desktop run build:linux
+
+      - name: Upload Linux desktop packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sceneworks-desktop-linux
+          path: |
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/deb/*.deb
+          if-no-files-found: error
