@@ -213,26 +213,102 @@ async function assertBuiltinPromptGuides() {
   }
 }
 
+function parseCargoWorkspaceVersion(relativePath, body) {
+  // The root Cargo.toml carries MANY `version = "…"` lines (workspace deps, the
+  // [patch] rev, member crates inherit via `version.workspace = true`). Only the
+  // one under [workspace.package] is the product version, so parse section-scoped
+  // rather than grabbing the first `version =` in the file.
+  const header = "[workspace.package]";
+  const start = body.indexOf(header);
+  if (start === -1) {
+    throw new Error(`${relativePath} has no [workspace.package] table`);
+  }
+  const afterHeader = start + header.length;
+  const rest = body.slice(afterHeader);
+  const nextHeaderRel = rest.search(/\n\[/);
+  const section = nextHeaderRel === -1 ? rest : rest.slice(0, nextHeaderRel);
+  const match = section.match(/^version\s*=\s*"([^"]*)"/m);
+  if (!match) {
+    throw new Error(`${relativePath} [workspace.package] has no version key`);
+  }
+  return match[1];
+}
+
+async function readWorkspaceMemberCrateNames(cargoTomlBody) {
+  // The [workspace] members array holds directory paths; each member's own
+  // Cargo.toml declares the crate `name` that Cargo.lock records. Derive the set
+  // dynamically (rather than hardcoding) so a new/renamed member is covered
+  // automatically. Only the top-level `members = [...]` array — NOT
+  // `default-members` (line starts with `default-`, so the ^members anchor skips
+  // it) and NOT [workspace.dependencies].
+  const membersMatch = cargoTomlBody.match(/^\s*members\s*=\s*\[([\s\S]*?)\]/m);
+  if (!membersMatch) {
+    throw new Error("Cargo.toml has no [workspace] members array");
+  }
+  const memberDirs = [...membersMatch[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  const names = [];
+  for (const dir of memberDirs) {
+    const memberToml = await readFile(path.join(root, dir, "Cargo.toml"), "utf8");
+    const nameMatch = memberToml.match(/^\s*name\s*=\s*"([^"]+)"/m);
+    if (!nameMatch) {
+      throw new Error(`${dir}/Cargo.toml has no package name`);
+    }
+    names.push(nameMatch[1]);
+  }
+  return names;
+}
+
+function parseCargoLockVersions(body) {
+  // Build a name -> version map from Cargo.lock's [[package]] blocks. Splitting on
+  // the block delimiter keeps each package's own `name`/`version` together (so we
+  // don't cross-read a dependency edge). Workspace members appear here with their
+  // inherited version; a stale lock is exactly what makes `cargo fetch --locked`
+  // fail in CI, so we assert these against the product version.
+  const map = new Map();
+  for (const block of body.split(/\n\[\[package\]\]\n/).slice(1)) {
+    const name = block.match(/^name = "([^"]+)"/m)?.[1];
+    const packageVersion = block.match(/^version = "([^"]+)"/m)?.[1];
+    if (name && packageVersion) {
+      map.set(name, packageVersion);
+    }
+  }
+  return map;
+}
+
 async function assertVersionsAligned() {
   // sync-version.mjs's contract is that one root `npm version` bumps every
-  // product-version field atomically (root + web + desktop package.json and
-  // tauri.conf.json), so the git tag can never drift from the shipped version.
-  // Assert the invariant here: if these four diverge, a root `npm version patch`
-  // can emit a tag BELOW the version users already run — the Tauri auto-updater
-  // (sc-1355) compares against latest.json and would then serve no update.
+  // product-version field atomically (root + web + desktop package.json,
+  // tauri.conf.json, and the root Cargo.toml [workspace.package] version), so
+  // the git tag can never drift from the shipped version. Assert the invariant
+  // here: if these diverge, a root `npm version patch` can emit a tag BELOW the
+  // version users already run — the Tauri auto-updater (sc-1355) compares against
+  // latest.json and would then serve no update. Cargo.toml is in the set because
+  // its workspace version feeds logs, /health payloads, and the project-file
+  // appVersion; it had silently drifted (0.2.0 vs a 0.8.0 product — sc-13613)
+  // because sync-version.mjs did not touch it and this gate did not cover it.
+  // Cargo.lock's workspace-member versions are asserted too: bumping the
+  // workspace version without refreshing the lock leaves it stale, and CI's
+  // `cargo fetch --locked` (parity/release/candle/windows) hard-fails on that
+  // skew — so this gate catches lock drift before it ships, not in a red lane.
+  const cargoTomlBody = await readFile(path.join(root, "Cargo.toml"), "utf8");
   const versionSources = [
     { path: "package.json", version: JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version },
     { path: "apps/web/package.json", version: JSON.parse(await readFile(path.join(root, "apps/web/package.json"), "utf8")).version },
     { path: "apps/desktop/package.json", version: JSON.parse(await readFile(path.join(root, "apps/desktop/package.json"), "utf8")).version },
     { path: "apps/desktop/tauri.conf.json", version: JSON.parse(await readFile(path.join(root, "apps/desktop/tauri.conf.json"), "utf8")).version },
+    { path: "Cargo.toml", version: parseCargoWorkspaceVersion("Cargo.toml", cargoTomlBody) },
   ];
-  // Scope of this assert: four-way ALIGNMENT only. Using versionSources[0]
+  const lockVersions = parseCargoLockVersions(await readFile(path.join(root, "Cargo.lock"), "utf8"));
+  for (const crateName of await readWorkspaceMemberCrateNames(cargoTomlBody)) {
+    versionSources.push({ path: `Cargo.lock:${crateName}`, version: lockVersions.get(crateName) });
+  }
+  // Scope of this assert: cross-file ALIGNMENT only. Using versionSources[0]
   // (root package.json) purely as the equality reference means we verify all
-  // four fields are equal, NOT that the version moved upward. A hypothetical
-  // synchronized all-four-down edit would pass this check. That's deliberate:
+  // fields are equal, NOT that the version moved upward. A hypothetical
+  // synchronized all-down edit would pass this check. That's deliberate:
   // upward-DIRECTION is owned by scripts/sync-version.mjs, whose only mutation
   // path is `npm version`, and `npm version` never moves a version down. There
-  // is no committed floor to compare against here — these four files ARE the
+  // is no committed floor to compare against here — these files ARE the
   // version sources — so a hardcoded baseline would be a rot-prone footgun
   // rather than a real guard. Alignment is the invariant this file owns.
   const reference = versionSources[0].version;
@@ -241,7 +317,7 @@ async function assertVersionsAligned() {
     const detail = versionSources.map((source) => `${source.path}=${source.version}`).join(", ");
     throw new Error(
       `Product version fields are not aligned: ${detail}. Run one root ` +
-        `\`npm version <x.y.z>\` (which invokes scripts/sync-version.mjs) so all four move together.`,
+        `\`npm version <x.y.z>\` (which invokes scripts/sync-version.mjs) so they all move together.`,
     );
   }
 }
