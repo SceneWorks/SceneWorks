@@ -11027,24 +11027,24 @@ fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lan
 
 /// The imported Krea 2 lane accepts a plain txt2img job AND an img2img `referenceAssetId` (mode NOT
 /// `edit_image`, sc-14071 — reference-guided latent-init), while STILL rejecting every shape that needs
-/// base-tier edit/control components this bare-transformer lane does not stage: an `edit_image` job, a
-/// pose set, the two-reference edit SET (`referenceAssetIds`, scene+person — imported edit is sc-14119),
-/// and main's hardened guards (`sourceAssetId`, mask, character, LoRA stack, multi-phase). `sourceAssetId`
-/// in particular stays rejected because `resolve_img2img_init_generic` reads only `referenceAssetId`, so a
-/// bare `sourceAssetId` job would silently render plain t2i. Runs on the cross-platform path so the candle
-/// imported lane is covered too.
+/// t2i + img2img are accepted on EVERY backend; LoRAs (sc-14111) and the Kontext edit surface
+/// (sc-14119) are accepted only on an adapter-capable backend ([`KREA_IMPORTED_SUPPORTS_ADAPTERS`]:
+/// MLX yes / candle not yet, sc-14135); the bare-transformer guards (pose, mask, character, multi-phase,
+/// a non-edit two-reference SET, a bare non-edit `sourceAssetId`) stay rejected on every backend. Runs on
+/// the cross-platform path so both the MLX and candle imported lanes are covered, asserting the
+/// per-backend split via the compile-time capability const.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[test]
-fn krea_imported_available_allows_img2img_but_rejects_edit_and_pose() {
+fn krea_imported_available_backend_gates_loras_and_edit() {
     let dir = tempfile::tempdir().unwrap();
     let (settings, file) = imported_krea_settings_with_file(dir.path());
     let path_str = file.to_str().unwrap().to_owned();
     let base = json!({ "family": "krea_2", "modelPath": path_str });
 
-    // Plain txt2img: accepted.
+    // Plain txt2img: accepted on every backend.
     let t2i = request(json!({
         "projectId": "p", "model": "kreamania_variant5", "prompt": "a cat",
         "modelManifestEntry": base.clone()
@@ -11054,7 +11054,7 @@ fn krea_imported_available_allows_img2img_but_rejects_edit_and_pose() {
         "plain txt2img is accepted"
     );
 
-    // img2img: a `referenceAssetId` on a non-edit mode is now ACCEPTED (sc-14071).
+    // img2img: a `referenceAssetId` on a non-edit mode is accepted on every backend (sc-14071).
     let img2img = request(json!({
         "projectId": "p", "model": "kreamania_variant5", "referenceAssetId": "r",
         "advanced": { "strength": 0.5 },
@@ -11065,50 +11065,75 @@ fn krea_imported_available_allows_img2img_but_rejects_edit_and_pose() {
         "an img2img referenceAssetId (mode t2i) is accepted"
     );
 
-    // A pose set is still rejected.
-    let with_pose = request(json!({
+    // A LoRA stack (sc-14111) and the edit surface (sc-14119) are backend-gated: MLX yes, candle no.
+    let t2i_lora = request(json!({
         "projectId": "p", "model": "kreamania_variant5",
-        "advanced": { "poses": [{ "id": "a" }] },
+        "loras": [{ "id": "adapter" }],
         "modelManifestEntry": base.clone()
     }));
-    assert!(
-        !krea_imported_available(&with_pose, &settings),
-        "pose job excluded"
-    );
-
-    // An `edit_image` job is still rejected (imported edit is sc-14119).
-    let edit = request(json!({
+    let edit_source = request(json!({
         "projectId": "p", "model": "kreamania_variant5", "mode": "edit_image",
         "sourceAssetId": "s", "modelManifestEntry": base.clone()
     }));
-    assert!(
-        !krea_imported_available(&edit, &settings),
-        "edit job excluded"
-    );
-
-    // The two-reference edit SET (scene + person) is still rejected — that is the edit surface, not
-    // reference-guided latent-init.
-    let two_ref = request(json!({
-        "projectId": "p", "model": "kreamania_variant5",
+    let edit_two_ref = request(json!({
+        "projectId": "p", "model": "kreamania_variant5", "mode": "edit_image",
         "referenceAssetIds": ["scene", "person"],
         "modelManifestEntry": base.clone()
     }));
+    if KREA_IMPORTED_SUPPORTS_ADAPTERS {
+        assert!(
+            krea_imported_available(&t2i_lora, &settings),
+            "a LoRA t2i job is accepted on the adapter-capable backend"
+        );
+        assert!(
+            krea_imported_available(&edit_source, &settings),
+            "an edit_image + source is accepted on the adapter-capable backend"
+        );
+        assert!(
+            krea_imported_available(&edit_two_ref, &settings),
+            "an edit_image + the scene+person set is accepted on the adapter-capable backend"
+        );
+    } else {
+        assert!(
+            !krea_imported_available(&t2i_lora, &settings),
+            "a LoRA job is rejected on a backend without adapter support (sc-14135)"
+        );
+        assert!(
+            !krea_imported_available(&edit_source, &settings),
+            "edit is rejected on a backend without adapter support (sc-14135)"
+        );
+        assert!(
+            !krea_imported_available(&edit_two_ref, &settings),
+            "edit (two-ref) is rejected on a backend without adapter support (sc-14135)"
+        );
+    }
+
+    // An `edit_image` job with NO conditioning image is rejected on every backend (defensive shape).
+    let edit_no_ref = request(json!({
+        "projectId": "p", "model": "kreamania_variant5", "mode": "edit_image",
+        "modelManifestEntry": base.clone()
+    }));
     assert!(
-        !krea_imported_available(&two_ref, &settings),
-        "the two-reference edit set is excluded"
+        !krea_imported_available(&edit_no_ref, &settings),
+        "an edit with no conditioning image is rejected"
     );
 
-    // main's hardened guards stay rejected — including a bare `sourceAssetId` (a non-edit img2img shape
-    // `resolve_img2img_init_generic` would silently drop, since it reads only `referenceAssetId`).
+    // Bare-transformer guards stay rejected on EVERY backend: pose, mask, character, multi-phase, a
+    // NON-edit two-reference SET (the edit surface, only valid in edit mode), and a bare non-edit
+    // `sourceAssetId` (the img2img resolve reads only `referenceAssetId`, so it would silently drop it).
     for (label, extra) in [
-        ("source", json!({ "sourceAssetId": "s" })),
+        ("pose", json!({ "advanced": { "poses": [{ "id": "a" }] } })),
         ("mask", json!({ "maskAssetId": "m" })),
         ("character", json!({ "characterId": "c" })),
-        ("adapter", json!({ "loras": [{ "id": "adapter" }] })),
         (
             "multi-phase",
             json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
         ),
+        (
+            "non-edit two-ref set",
+            json!({ "referenceAssetIds": ["a", "b"] }),
+        ),
+        ("bare non-edit source", json!({ "sourceAssetId": "s" })),
     ] {
         let mut payload = json!({
             "projectId": "p",
@@ -11121,9 +11146,46 @@ fn krea_imported_available_allows_img2img_but_rejects_edit_and_pose() {
             .extend(extra.as_object().unwrap().clone());
         assert!(
             !krea_imported_available(&request(payload), &settings),
-            "{label} job excluded"
+            "{label} job excluded on every backend"
         );
     }
+}
+
+/// On the MLX imported lane, `resolve_krea_imported_adapters_and_edit` resolves the job LoRA stack
+/// (sc-14111) and, for an `edit_image` job, enforces the R5 identity-edit-LoRA requirement (sc-14119,
+/// epic 10871) BEFORE any reference I/O — the bare transformer cannot edit without the
+/// `krea2_identity_edit` LoRA (the source conditioning is inert without it), mirroring the builtin
+/// `generate_krea_edit_stream`. A plain t2i job (no loras) resolves to an empty adapter stack + no edit
+/// conditioning. macOS-only (the adapter/edit path is MLX-only, sc-14135).
+#[cfg(target_os = "macos")]
+#[test]
+fn imported_edit_requires_the_identity_edit_lora() {
+    let dir = tempfile::tempdir().unwrap();
+    let (settings, file) = imported_krea_settings_with_file(dir.path());
+    let path_str = file.to_str().unwrap().to_owned();
+    let base = json!({ "family": "krea_2", "modelPath": path_str });
+
+    // A plain t2i job (no loras) → empty adapter stack, no edit conditioning.
+    let t2i = request(json!({
+        "projectId": "p", "model": "kreamania_variant5", "prompt": "a cat",
+        "modelManifestEntry": base.clone()
+    }));
+    let (adapters, edit) =
+        resolve_krea_imported_adapters_and_edit(&t2i, &settings, dir.path()).expect("t2i resolves");
+    assert!(adapters.is_empty(), "a t2i job has no adapters");
+    assert!(edit.is_none(), "a t2i job has no edit conditioning");
+
+    // An `edit_image` job with NO image-edit LoRA is rejected before any reference I/O (R5).
+    let edit_no_lora = request(json!({
+        "projectId": "p", "model": "kreamania_variant5", "mode": "edit_image",
+        "sourceAssetId": "s", "modelManifestEntry": base.clone()
+    }));
+    let err = resolve_krea_imported_adapters_and_edit(&edit_no_lora, &settings, dir.path())
+        .expect_err("edit without the identity-edit LoRA is rejected");
+    assert!(
+        matches!(err, WorkerError::InvalidPayload(msg) if msg.contains("Identity Edit LoRA")),
+        "expected the R5 identity-edit-LoRA requirement error"
+    );
 }
 
 /// The imported Krea lane threads a resolved img2img reference into a single `Conditioning::Reference`
@@ -11189,8 +11251,9 @@ fn krea_imported_conditioning_threads_the_img2img_reference() {
 ///      admits it, exactly the install-dir shape the import job records).
 ///   3. `resolve_krea_imported_base_tier` → the resident `SceneWorks/krea-2-turbo-mlx` dense `bf16/`
 ///      tier that supplies the shared Qwen3-VL text encoder, Qwen VAE, tokenizer, and arch config.
-///   4. `runtime_macos::providers::krea::load_from_native_dit_file(dit, base, descriptor())` → the S0b
-///      MLX native single-file entrypoint, then a real Metal txt2img.
+///   4. `runtime_macos::providers::krea::load_from_native_dit_file(dit, base, &[], descriptor())` → the
+///      S0b MLX native single-file entrypoint (empty adapter slice for plain t2i), then a real Metal
+///      txt2img.
 ///
 /// The NEGATIVE CONTROL (the sc-10539 with/without-adapter methodology) proves the imported DiT is
 /// actually in the graph and not a silent fallback to the base: it renders the SAME prompt + SAME seed
@@ -11306,10 +11369,12 @@ fn krea_imported_mlx_gpu_smoke() {
     };
 
     // ---- 4. RENDER A: the imported variant5 DiT via the S0b native single-file entrypoint ----
+    // Plain t2i → no adapters (the t2i/img2img path passes `&[]`; the LoRA/edit path threads a real
+    // stack, sc-14111 / sc-14119).
     let descriptor = runtime_macos::providers::krea::descriptor();
     let t0 = std::time::Instant::now();
     let variant5 =
-        runtime_macos::providers::krea::load_from_native_dit_file(&dit, &base, descriptor)
+        runtime_macos::providers::krea::load_from_native_dit_file(&dit, &base, &[], descriptor)
             .expect("load imported Krea 2 DiT (variant5) paired with the bf16 base");
     let mut last_a = String::new();
     let out_a = variant5

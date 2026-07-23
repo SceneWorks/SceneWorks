@@ -103,10 +103,17 @@ pub(crate) fn image_model_mac_support(model: &str, family: Option<&str>) -> Mode
             return ModelMacSupport {
                 supported: true,
                 reason: None,
-                // The imported single-file checkpoint is a bare diffusion transformer. Adapters,
-                // pose, reference, and edit are deliberately rejected by both the scheduler and
-                // worker so the UI must not advertise those builtin-only capabilities.
-                features: ModelMacFeatures::default(),
+                // The imported single-file checkpoint is a bare diffusion transformer paired with a
+                // resident base tier. On MLX its native loader takes adapters (inference #211), so the
+                // lane serves job LoRAs (`lycoris`, sc-14111) AND the Kontext edit surface (`edit`,
+                // sc-14119). `pose`/`reference` (IP-Adapter / character identity) stay false — those
+                // need base-tier control/identity components this lane does not stage; img2img is
+                // surfaced separately via the `ui.img2img` manifest flag, not `reference`.
+                features: ModelMacFeatures {
+                    edit: true,
+                    lycoris: true,
+                    ..ModelMacFeatures::default()
+                },
             };
         }
         return ModelMacSupport {
@@ -902,12 +909,20 @@ pub(crate) fn is_builtin_image_model(id: &str) -> bool {
 /// Shared fail-closed request-shape gate for a non-builtin imported image id that reuses a native
 /// engine by family. The worker owns filesystem confinement and verifies that the recorded path
 /// resolves to exactly one safetensors file; the scheduler only admits the matching family, a
-/// non-empty installed path hint, and the bare-transformer txt2img surface implemented by both the
-/// MLX and Candle imported-Krea handlers.
+/// non-empty installed path hint, and a request shape the imported-family handlers implement.
+///
+/// `adapters_supported` is the selected backend's native single-file loader capability: the MLX
+/// entrypoint (`mlx_gen_krea::load_from_native_dit_file`) takes an `adapters` slice (inference #211),
+/// so it serves LoRAs (sc-14111) AND the Kontext edit surface (sc-14119, whose required
+/// `krea2_identity_edit` LoRA IS an adapter); the candle entrypoint takes no adapters yet
+/// (sc-14135), so `false` keeps the candle imported lane **t2i / img2img only**. img2img (a single
+/// `referenceAssetId` on a non-edit mode, resolved by the worker's `resolve_img2img_init_generic`)
+/// needs no adapter, so it is admitted on **both** backends (mlx.rs `true` / candle.rs `false`).
 pub(crate) fn imported_image_request_family_eligible(
     model: &str,
     payload: &Map<String, Value>,
     routed_families: &[&str],
+    adapters_supported: bool,
 ) -> bool {
     if is_builtin_image_model(model) {
         return false;
@@ -937,9 +952,6 @@ pub(crate) fn imported_image_request_family_eligible(
     if !has_nonempty_path {
         return false;
     }
-    if payload.get("mode").and_then(Value::as_str).map(str::trim) == Some("edit_image") {
-        return false;
-    }
     let has_nonempty_id = |key: &str| {
         payload
             .get(key)
@@ -947,29 +959,18 @@ pub(crate) fn imported_image_request_family_eligible(
             .map(str::trim)
             .is_some_and(|value| !value.is_empty())
     };
-    if [
-        "sourceAssetId",
-        "referenceAssetId",
-        "maskAssetId",
-        "characterId",
-        "characterLookId",
-    ]
-    .iter()
-    .any(|key| has_nonempty_id(key))
-    {
-        return false;
-    }
-    if payload
+    let has_reference_list = payload
         .get("referenceAssetIds")
         .and_then(Value::as_array)
-        .is_some_and(|ids| !ids.is_empty())
-        || payload
-            .get("loras")
-            .and_then(Value::as_array)
-            .is_some_and(|loras| !loras.is_empty())
-    {
-        return false;
-    }
+        .is_some_and(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .any(|id| !id.trim().is_empty())
+        });
+    let has_loras = payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .is_some_and(|loras| !loras.is_empty());
     let advanced = payload.get("advanced").and_then(Value::as_object);
     let has_poses = advanced
         .and_then(|advanced| advanced.get("poses"))
@@ -979,7 +980,42 @@ pub(crate) fn imported_image_request_family_eligible(
         .and_then(|advanced| advanced.get("phases"))
         .and_then(Value::as_array)
         .is_some_and(|phases| !phases.is_empty());
-    !has_poses && !has_phases
+
+    // Never on this bare-transformer lane, on any backend: strict pose, multi-phase, inpaint mask,
+    // and character / look identity conditioning (all need base-tier components it does not stage).
+    if has_poses
+        || has_phases
+        || has_nonempty_id("maskAssetId")
+        || has_nonempty_id("characterId")
+        || has_nonempty_id("characterLookId")
+    {
+        return false;
+    }
+    // LoRAs ride the native single-file loader's adapter path — MLX only today (sc-14135 is the
+    // candle follow-up), so reject them on a backend without adapter support.
+    if has_loras && !adapters_supported {
+        return false;
+    }
+
+    if payload.get("mode").and_then(Value::as_str).map(str::trim) == Some("edit_image") {
+        // Kontext-style edit (sc-14119): the adapter-capable backend + a conditioning image, which
+        // can arrive as the singular `referenceAssetId`, the plural scene+person set, or a
+        // `sourceAssetId` — the same priority the worker's `edit_reference_ids` resolves. The
+        // required `krea2_identity_edit` LoRA is enforced worker-side.
+        return adapters_supported
+            && (has_reference_list
+                || has_nonempty_id("referenceAssetId")
+                || has_nonempty_id("sourceAssetId"));
+    }
+
+    // Non-edit t2i / img2img: img2img rides a single `referenceAssetId` (the worker's
+    // `resolve_img2img_init_generic`, sc-14071). The plural set is the edit surface, and a bare
+    // `sourceAssetId` is not read on the img2img path (it would silently render plain t2i), so both
+    // are rejected outside edit mode — mirroring the worker's `krea_imported_available`.
+    if has_reference_list || has_nonempty_id("sourceAssetId") {
+        return false;
+    }
+    true
 }
 
 derive_model_list! {
@@ -1130,8 +1166,9 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        image_family_is_mlx_routed, image_model_mac_support, is_builtin_image_model,
-        CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES,
+        image_family_is_mlx_routed, image_model_mac_support,
+        imported_image_request_family_eligible, is_builtin_image_model, CANDLE_LORA_MODELS,
+        CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES,
         CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS,
         CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS,
         MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS,
@@ -1587,9 +1624,12 @@ mod tests {
             "an imported krea_2-family model should route via the family path"
         );
         assert!(support.reason.is_none());
-        // The bare-DiT lane is plain txt2img only; adapters and conditioning stay unclaimed.
-        assert!(!support.features.lycoris);
-        assert!(!support.features.edit);
+        // The MLX imported lane now serves job LoRAs (sc-14111) and the Kontext edit surface
+        // (sc-14119) via the native single-file loader's adapter path, so `lycoris` + `edit` are
+        // advertised. Pose + IP-Adapter/character `reference` stay unclaimed (base-tier-only shapes;
+        // img2img is a separate `ui.img2img` flag, not `reference`).
+        assert!(support.features.lycoris);
+        assert!(support.features.edit);
         assert!(!support.features.pose);
         assert!(!support.features.reference);
     }
@@ -1617,5 +1657,60 @@ mod tests {
         assert!(with_family.supported);
         assert_eq!(with_family, without_family);
         assert_eq!(with_family, mismatched_family);
+    }
+
+    /// The shared imported-family gate is backend-capability-aware (sc-14111 / sc-14119): LoRAs and
+    /// the Kontext edit surface are admitted ONLY when the backend's native single-file loader takes
+    /// adapters (`adapters_supported = true`, MLX / #211); with `false` (candle, until sc-14135) they
+    /// are rejected so the candle imported lane stays t2i / img2img only. img2img (a non-edit single
+    /// `referenceAssetId`) and plain t2i need no adapter, so they are admitted on BOTH.
+    #[test]
+    fn imported_family_gate_is_adapter_capability_aware() {
+        let imported_id = "user_kreamania_variant5";
+        let payload = |extra: serde_json::Value| -> serde_json::Map<String, serde_json::Value> {
+            let mut base = serde_json::json!({
+                "model": imported_id,
+                "modelManifestEntry": {
+                    "id": imported_id,
+                    "family": "krea_2",
+                    "paths": { "model": "/app/models/imports/kreamania_variant5" }
+                },
+            });
+            base.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            base.as_object().unwrap().clone()
+        };
+        let mlx = |p: &serde_json::Map<String, serde_json::Value>| {
+            imported_image_request_family_eligible(imported_id, p, MLX_ROUTED_FAMILIES, true)
+        };
+        let candle = |p: &serde_json::Map<String, serde_json::Value>| {
+            imported_image_request_family_eligible(imported_id, p, CANDLE_ROUTED_FAMILIES, false)
+        };
+
+        // Plain t2i + non-edit img2img: eligible on BOTH backends (no adapter needed).
+        for p in [
+            payload(serde_json::json!({ "mode": "text_to_image" })),
+            payload(serde_json::json!({ "referenceAssetId": "asset-1" })),
+        ] {
+            assert!(mlx(&p), "t2i/img2img eligible on MLX");
+            assert!(candle(&p), "t2i/img2img eligible on candle");
+        }
+
+        // LoRAs + edit: MLX only (the adapter path), rejected on candle.
+        let t2i_lora = payload(serde_json::json!({ "loras": [{ "id": "adapter" }] }));
+        assert!(mlx(&t2i_lora), "LoRA t2i eligible on MLX");
+        assert!(
+            !candle(&t2i_lora),
+            "LoRA t2i NOT eligible on candle (sc-14135)"
+        );
+
+        let edit = payload(serde_json::json!({ "mode": "edit_image", "sourceAssetId": "s" }));
+        assert!(mlx(&edit), "edit eligible on MLX");
+        assert!(!candle(&edit), "edit NOT eligible on candle (sc-14135)");
+
+        // Base-tier-only shapes stay rejected on both regardless of adapter support.
+        let pose = payload(serde_json::json!({ "advanced": { "poses": [{}] } }));
+        assert!(!mlx(&pose) && !candle(&pose), "pose rejected on both");
     }
 }

@@ -34,6 +34,19 @@
 const KREA_IMPORTED_ENGINE: &str = "mlx_krea_imported";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const KREA_IMPORTED_ENGINE: &str = "candle_krea_imported";
+/// Whether the selected backend's native single-file entrypoint accepts adapters — i.e. it serves job
+/// LoRAs (sc-14111) and the Kontext edit surface (sc-14119, whose required `krea2_identity_edit` LoRA
+/// IS an adapter). The MLX `load_from_native_dit_file` takes an `&[AdapterSpec]` (inference #211); the
+/// candle one does NOT yet (it threads no load-time adapters — sc-14135, the candle follow-up), so the
+/// candle imported lane stays **t2i / img2img only**. img2img (a `Conditioning::Reference` init) needs
+/// no adapter, so it is served on both backends regardless of this flag. Read by
+/// [`krea_imported_available`] (the claim gate mirrors the scheduler's
+/// `imported_image_request_family_eligible(adapters_supported)`), so a candle host never routes a
+/// LoRA/edit imported job into this lane.
+#[cfg(target_os = "macos")]
+const KREA_IMPORTED_SUPPORTS_ADAPTERS: bool = true;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const KREA_IMPORTED_SUPPORTS_ADAPTERS: bool = false;
 /// The base tier whose shared Qwen3-VL text encoder + Qwen VAE + tokenizer + DiT architecture config the
 /// imported single-file transformer is paired with. The Turbo turnkey (`SceneWorks/krea-2-turbo-mlx`,
 /// sc-7573) is the default base — its published Krea 2 architecture matches the community merges, and its
@@ -212,38 +225,67 @@ fn dir_has_safetensors(dir: &Path) -> bool {
         })
 }
 
-/// True when this is an in-place imported single-file Krea 2 **txt2img or img2img** job: an imported
-/// `krea_2`-family model whose `modelPath` resolves to a single `.safetensors` DiT. Both a plain txt2img
-/// job AND an img2img `referenceAssetId` (mode NOT `edit_image`, sc-14071 — reference-guided latent-init
-/// that the shared [`resolve_img2img_init_generic`] resolves to a single `Conditioning::Reference` on the
-/// SAME Turbo t2i descriptor, exactly like the builtin generic MLX/candle img2img lane) are claimed.
+/// True when this is an in-place imported single-file Krea 2 job the selected backend can serve: an
+/// imported `krea_2`-family model whose `modelPath` resolves to a single `.safetensors` DiT, in one of
+/// these shapes:
+///   - **txt2img** (plain), on every backend;
+///   - **img2img** (mode NOT `edit_image` + a single `referenceAssetId`, sc-14071 — reference-guided
+///     latent-init the shared [`resolve_img2img_init_generic`] resolves to one `Conditioning::Reference`
+///     on the Turbo t2i descriptor), on every backend (no adapter needed);
+///   - **LoRAs** on t2i / img2img (sc-14111) and the **Kontext edit** surface (mode `edit_image` + a
+///     conditioning image, sc-14119) — ONLY on a backend whose native loader accepts adapters
+///     ([`KREA_IMPORTED_SUPPORTS_ADAPTERS`]: MLX yes / candle not yet, sc-14135). This mirrors the
+///     scheduler's `imported_image_request_family_eligible(adapters_supported)`, so the claim gate and
+///     the router agree per backend and a candle host never routes a LoRA/edit imported job here.
 ///
-/// Everything that needs base-tier control/edit components this bare-transformer lane does NOT stage stays
-/// rejected — retaining ALL of main's hardened guards: an `edit_image` mode, a pose set, the two-reference
-/// edit SET (`reference_asset_ids`, scene + person — that is the edit surface, sc-14119, not
-/// reference-guided latent-init), a mask, a character / look, a LoRA stack, and a multi-phase
-/// `advanced.phases` list. **`source_asset_id` also stays rejected**: [`resolve_img2img_init_generic`]
-/// reads only `reference_asset_id`, so admitting a bare `sourceAssetId` job would silently drop its source
-/// and render plain t2i — so a `sourceAssetId`-shaped img2img request is NOT claimed here.
+/// Everything needing base-tier control/identity components this bare-transformer lane does NOT stage
+/// stays rejected on EVERY backend: a pose set, a mask, a character / look, and a multi-phase
+/// `advanced.phases` list. Outside edit mode a bare `sourceAssetId` and the plural
+/// `reference_asset_ids` edit set also stay rejected — [`resolve_img2img_init_generic`] reads only
+/// `reference_asset_id`, so admitting either would silently drop the source and render plain t2i.
 ///
 /// Deliberately does NOT gate on base-tier presence: a missing base surfaces as the loud
 /// [`resolve_krea_imported_base_tier`] error in the handler rather than a silent fall-through to the stub.
 /// Mirrors the shape of the other `…_available` predicates.
 fn krea_imported_available(request: &ImageRequest, settings: &Settings) -> bool {
-    request.mode != "edit_image"
-        && pose_entries(request).is_empty()
-        && request.reference_asset_ids.is_empty()
-        && request.source_asset_id.is_none()
-        && request.mask_asset_id.is_none()
-        && request.character_id.is_none()
-        && request.character_look_id.is_none()
-        && request.loras.is_empty()
-        && !request
+    // Rejected on EVERY backend (bare-transformer lane): strict pose, inpaint mask, character / look,
+    // multi-phase.
+    if !pose_entries(request).is_empty()
+        || request.mask_asset_id.is_some()
+        || request.character_id.is_some()
+        || request.character_look_id.is_some()
+        || request
             .advanced
             .get("phases")
             .and_then(Value::as_array)
             .is_some_and(|phases| !phases.is_empty())
-        && matches!(resolve_imported_krea_dit(request, settings), Ok(Some(_)))
+    {
+        return false;
+    }
+
+    if request.mode == "edit_image" {
+        // Kontext edit (sc-14119): an adapter-capable backend + a conditioning image (any of the
+        // edit-reference fields, in `edit_reference_ids` priority). The required `krea2_identity_edit`
+        // LoRA is enforced in the handler (R5). Inline the field probe (rather than the macOS-only
+        // `edit_reference_ids`) so this shared predicate compiles on the candle lane too.
+        let has_edit_reference = !request.reference_asset_ids.is_empty()
+            || non_empty(&request.reference_asset_id)
+            || non_empty(&request.source_asset_id);
+        return KREA_IMPORTED_SUPPORTS_ADAPTERS
+            && has_edit_reference
+            && matches!(resolve_imported_krea_dit(request, settings), Ok(Some(_)));
+    }
+
+    // Non-edit t2i / img2img. img2img rides a single `referenceAssetId`; the plural edit set and a bare
+    // `sourceAssetId` stay rejected here (the img2img resolve reads only `reference_asset_id`).
+    if !request.reference_asset_ids.is_empty() || request.source_asset_id.is_some() {
+        return false;
+    }
+    // LoRAs (sc-14111) ride the adapter path — adapter-capable backend only.
+    if !request.loras.is_empty() && !KREA_IMPORTED_SUPPORTS_ADAPTERS {
+        return false;
+    }
+    matches!(resolve_imported_krea_dit(request, settings), Ok(Some(_)))
 }
 
 /// Build the img2img conditioning for the imported Krea lane (sc-14071): a resolved reference + strength
@@ -264,12 +306,30 @@ fn krea_imported_conditioning(img2img: Option<(Image, f32)>) -> Vec<Conditioning
 }
 
 /// Flat telemetry recorded on imported-Krea assets. No guidance — the imported distilled-Turbo merges
-/// are CFG-free (the Turbo descriptor advertises `supports_guidance=false`).
-fn krea_imported_raw_settings(request: &ImageRequest, steps: u32) -> JsonObject {
+/// are CFG-free (the Turbo descriptor advertises `supports_guidance=false`). `is_edit` records the
+/// Kontext edit lane (sc-14119) vs plain t2i/img2img, and `adapter_count` the number of applied
+/// LoRA/LoKr adapters (sc-14111 — the edit identity LoRA included).
+fn krea_imported_raw_settings(
+    request: &ImageRequest,
+    steps: u32,
+    is_edit: bool,
+    adapter_count: usize,
+) -> JsonObject {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
-    raw.insert("mode".to_owned(), Value::String("text_to_image".to_owned()));
+    raw.insert(
+        "mode".to_owned(),
+        Value::String(
+            if is_edit {
+                "edit_image"
+            } else {
+                "text_to_image"
+            }
+            .to_owned(),
+        ),
+    );
+    raw.insert("adapterCount".to_owned(), json!(adapter_count));
     raw.insert(
         "engine".to_owned(),
         Value::String(KREA_IMPORTED_ENGINE.to_owned()),
@@ -285,13 +345,75 @@ fn krea_imported_raw_settings(request: &ImageRequest, steps: u32) -> JsonObject 
     raw
 }
 
-/// Real in-place imported single-file Krea 2 txt2img / img2img generation (epic 14015 S0c, sc-14023 +
-/// sc-14071): resolve the imported DiT, the resident base tier, and any img2img reference on the async
-/// side, then load the selected runtime's native entrypoint once and generate each image on the blocking
-/// thread. The merge is distilled Turbo (no CFG / negative prompt). An img2img `referenceAssetId` +
-/// strength is threaded to the engine as a single `Conditioning::Reference` on the Turbo t2i descriptor
-/// (the SAME cross-platform generic img2img seam the builtin Krea Turbo lane uses, so both the MLX and
-/// candle imported lanes get img2img). The `Box<dyn Generator>` is bespoke (not registry-cached).
+/// Resolve the adapter stack + edit conditioning for the imported lane on the adapter-capable (MLX)
+/// backend (sc-14111 LoRAs + sc-14119 Kontext edit). Returns `(adapters, edit_conditioning)`:
+///   - `adapters` — the job's LoRA/LoKr stack resolved into engine `AdapterSpec`s via the SHARED
+///     builtin [`resolve_adapters`] (path confinement + `classify_adapter` LoKr detection + per-LoRA
+///     weight); for an edit job this includes the required `krea2_identity_edit` LoRA the user selected.
+///   - `edit_conditioning` — `Some(vec)` for an `edit_image` job: the fitted source reference(s) as a
+///     single `Reference` or a scene+person `MultiReference`, built exactly like [`generate_krea_edit_stream`]
+///     (`edit_reference_ids` → `load_reference_image` → `fit_edit_references` → `build_edit_conditioning`);
+///     `None` for t2i / img2img (the caller uses [`krea_imported_conditioning`] instead).
+///
+/// macOS-only: the edit helpers (`edit_reference_ids` / `fit_edit_references` / `build_edit_conditioning`)
+/// and the MLX native loader's adapter parameter live only on the MLX build, so the candle imported lane
+/// (t2i / img2img only, sc-14135) never calls this.
+#[cfg(target_os = "macos")]
+fn resolve_krea_imported_adapters_and_edit(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<(Vec<AdapterSpec>, Option<Vec<Conditioning>>)> {
+    let adapters = resolve_adapters(request, settings)?;
+    if request.mode != "edit_image" {
+        return Ok((adapters, None));
+    }
+    // R5 (epic 10871): the bare transformer cannot edit without the `krea2_identity_edit` LoRA — the
+    // in-context / grounded source conditioning is inert without the trained weights. Require it before
+    // any compute, mirroring the builtin `generate_krea_edit_stream`.
+    if !request_has_image_edit_lora(request) {
+        return Err(WorkerError::InvalidPayload(
+            "Krea 2 edit requires the Krea 2 Identity Edit LoRA (or another image-edit LoRA): without \
+             it the source-image conditioning is inert. Select it in the LoRA picker."
+                .to_owned(),
+        ));
+    }
+    let reference_ids = edit_reference_ids(request);
+    if reference_ids.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Krea 2 edit requires a source image.".to_owned(),
+        ));
+    }
+    if reference_ids.len() > KREA_MAX_EDIT_REFERENCES {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Krea 2 edit takes at most {KREA_MAX_EDIT_REFERENCES} images (image 1, then image 2)."
+        )));
+    }
+    let mut sources = Vec::with_capacity(reference_ids.len());
+    for id in &reference_ids {
+        sources.push(load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            id,
+            project_path,
+        )?);
+    }
+    // Pre-fit each source to the target W×H (crop / pad / outpaint→pad), fixed order preserved — the same
+    // shared edit-conditioning path the builtin lanes use.
+    let sources = fit_edit_references(sources, request, request.width, request.height)?;
+    Ok((adapters, Some(build_edit_conditioning(&sources))))
+}
+
+/// Real in-place imported single-file Krea 2 generation (epic 14015 S0c, sc-14023 + sc-14071 +
+/// sc-14111 + sc-14119): resolve the imported DiT, the resident base tier, any img2img reference, and —
+/// on the adapter-capable MLX backend — the job LoRA stack + Kontext edit conditioning, then load the
+/// selected runtime's native entrypoint once and generate each image on the blocking thread.
+///
+/// Three shapes ride one lane: plain **t2i**, reference-guided **img2img** (one `Conditioning::Reference`
+/// on the Turbo t2i descriptor, both backends), and — MLX only — **LoRA-adapted** t2i/img2img (sc-14111)
+/// and the **Kontext edit** surface (sc-14119: the `turbo_edit_descriptor` + the fitted source
+/// reference(s) as `Reference`/`MultiReference` + the `krea2_identity_edit` adapter). The merge is
+/// distilled Turbo (no CFG / negative prompt). The `Box<dyn Generator>` is bespoke (not registry-cached).
 async fn generate_krea_imported_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -311,26 +433,34 @@ async fn generate_krea_imported_stream(
     // Require the resident base tier before any compute — a clear "install the Krea 2 base first" error.
     let base_dir = resolve_krea_imported_base_tier(settings)?;
 
+    let is_edit = request.mode == "edit_image";
+
     // img2img reference-guided latent-init (sc-14071): the SAME generic seam the builtin Krea Turbo
     // img2img lane uses (`resolve_generic_lane_conditioning`'s generic arm), and it is CROSS-PLATFORM —
-    // `model_supports_img2img` + `resolve_img2img_init_generic` are the shared candle/MLX helpers (both
-    // under the file's `any(macos, backend-candle)` cfg), so BOTH the MLX and candle imported lanes get
-    // img2img. Resolved on the async side (decode → `Send` `Image` moved into the worker thread), gated on
-    // the model's `ui.img2img` manifest flag ([`model_supports_img2img`]) + a non-edit mode;
-    // `resolve_img2img_init_generic` yields `None` for a plain txt2img job (it reads only
-    // `referenceAssetId`). Fed to the engine as a single `Conditioning::Reference` on the SAME Turbo t2i
-    // descriptor below — the engine keys img2img off a Reference on a non-edit descriptor, so no descriptor
-    // change is needed. Edit conditioning is NOT resolved here (sc-14119).
-    let img2img = if model_supports_img2img(request) && request.mode != "edit_image" {
+    // `model_supports_img2img` + `resolve_img2img_init_generic` are the shared candle/MLX helpers, so BOTH
+    // the MLX and candle imported lanes get img2img. Resolved on the async side (decode → `Send` `Image`
+    // moved into the worker thread). Only for a NON-edit job; an edit resolves its own conditioning below.
+    let img2img = if model_supports_img2img(request) && !is_edit {
         resolve_img2img_init_generic(request, settings, project_path)?
     } else {
         None
     };
 
+    // Adapter-capable backend (MLX, inference #211): resolve the job LoRA stack into engine `AdapterSpec`s
+    // (sc-14111) and, for an `edit_image` job, the fitted source reference(s) + the required identity-edit
+    // adapter (sc-14119). Candle takes no adapters (sc-14135), so it stays t2i/img2img with an empty stack.
+    #[cfg(target_os = "macos")]
+    let (adapters, edit_conditioning) =
+        resolve_krea_imported_adapters_and_edit(request, settings, project_path)?;
+    #[cfg(target_os = "macos")]
+    let adapter_count = adapters.len();
+    #[cfg(not(target_os = "macos"))]
+    let adapter_count = 0usize;
+
     let (width, height) = (request.width, request.height);
     let steps =
         resolve_advanced_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100);
-    let raw_settings = krea_imported_raw_settings(request, steps);
+    let raw_settings = krea_imported_raw_settings(request, steps, is_edit, adapter_count);
 
     // Per-image work items: (seed, prompt) — `request.count` renders, each its own seed.
     let work: Vec<(i64, String)> = (0..request.count as usize)
@@ -341,23 +471,25 @@ async fn generate_krea_imported_stream(
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         KREA_IMPORTED_ENGINE,
-        0,
+        adapter_count,
         move || {
-            // Turbo descriptor (`variant5` dense and `variant4` plain-int8 are distilled-Turbo merges).
-            // The S0b
-            // entrypoint reads the DiT from the single file, key-remaps native→diffusers, coverage/
-            // shape-validates it against the base tier's Krea 2 geometry (fail-closed — the
-            // architecture-compatibility check happens here, before pairing), and sources the shared
-            // TE/VAE/tokenizer from `base_dir`.
+            // The S0b entrypoint reads the DiT from the single file, key-remaps native→diffusers,
+            // coverage/shape-validates it against the base tier's Krea 2 geometry (fail-closed — the
+            // architecture-compatibility check happens here, before pairing), installs any adapters onto
+            // the DiT (MLX), and sources the shared TE/VAE/tokenizer from `base_dir`. Descriptor: the
+            // distilled-Turbo t2i surface (`variant5` dense / `variant4` plain-int8 are Turbo merges), or
+            // the CFG-free Turbo **edit** surface (`turbo_edit_descriptor`) for an `edit_image` job.
             #[cfg(target_os = "macos")]
-            let loaded = runtime_macos::providers::krea::load_from_native_dit_file(
-                &dit,
-                &base_dir,
-                // inference #211 added an adapters slice; the plain t2i/img2img path passes none
-                // (LoRAs + edit are threaded in the follow-up feature commit, sc-14111 / sc-14119).
-                &[],
-                runtime_macos::providers::krea::descriptor(),
-            );
+            let loaded = {
+                let descriptor = if is_edit {
+                    runtime_macos::providers::krea::turbo_edit_descriptor()
+                } else {
+                    runtime_macos::providers::krea::descriptor()
+                };
+                runtime_macos::providers::krea::load_from_native_dit_file(
+                    &dit, &base_dir, &adapters, descriptor,
+                )
+            };
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let loaded = runtime_cuda::providers::krea::load_from_native_dit_file(
                 &dit,
@@ -371,8 +503,13 @@ async fn generate_krea_imported_stream(
             Ok(model)
         },
         move |model, tx, cancel| {
-            // Build the img2img conditioning once (the resolved reference + strength → a single
-            // `Conditioning::Reference`), then clone it per rendered image. Empty for a plain txt2img job.
+            // Build the conditioning once, then clone it per rendered image: the Kontext edit
+            // `Reference`/`MultiReference` for an edit job (MLX), else the img2img `Reference` (or empty
+            // for plain t2i).
+            #[cfg(target_os = "macos")]
+            let conditioning =
+                edit_conditioning.unwrap_or_else(|| krea_imported_conditioning(img2img));
+            #[cfg(not(target_os = "macos"))]
             let conditioning = krea_imported_conditioning(img2img);
             drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
                 if cancel.is_cancelled() {
