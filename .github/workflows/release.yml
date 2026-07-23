@@ -45,6 +45,13 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, nax]
     env:
       CARGO_NET_OFFLINE: "true"
+    # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
+    # default (sc-10420). Runs on the SOLE self-hosted nax box (shared with
+    # macos-mlx.yml), so a wedge holds that box against queued runs (sc-13603).
+    # Generous for the release path: a cold MLX-from-source rebuild plus Apple
+    # notarization's variable network round-trip sit on top of the healthy
+    # ~7-14 min.
+    timeout-minutes: 60
     # Signing/notarization secrets are scoped to the specific steps that consume
     # them (the bundle build + the DMG staple) — NOT set at job level — so that
     # `npm ci` (postinstall scripts) and every crate build.rs never see the
@@ -192,6 +199,11 @@ jobs:
       # signing key is scoped to the bundle step below, not here (sc-8864).
       CUDA_COMPUTE_CAP: "80"
       CARGO_NET_OFFLINE: "true"
+    # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
+    # default (sc-10420, sc-13603). Hosted runner with no warm cache: a cold CUDA
+    # toolkit install + full candle/CUDA build + NSIS/MSI packaging is the healthy
+    # ~42-49 min, so this sits ~2x above that worst-case release build.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

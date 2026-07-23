@@ -82,6 +82,11 @@ jobs:
     runs-on: windows-2022
     env:
       CARGO_NET_OFFLINE: "true"
+    # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
+    # default (sc-10420, sc-13603). Hosted runner; well above the healthy
+    # ~4-8 min desktop-crate test+clippy, with headroom for a cold rust-cache
+    # miss that recompiles the desktop dependency graph.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -137,6 +142,13 @@ jobs:
       # candle-kernels artifacts never collide or thrash each other.
       CUDA_COMPUTE_CAP: "80"
       CARGO_NET_OFFLINE: "true"
+    # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
+    # default (sc-10420). This is the full candle/CUDA sidecar build + NSIS/MSI
+    # packaging on the SOLE self-hosted cuda box (shared with windows-candle.yml),
+    # so a wedge here holds that box and starves every queued PR/main run on it
+    # (sc-13603). Well above the healthy ~13-17 min warm package — a cold candle
+    # rebuild fits.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # sc-13166: same self-hosted cuda box as windows-candle.yml — point this lane at

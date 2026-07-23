@@ -34,6 +34,12 @@ jobs:
       # Ampere->Blackwell (mirrors the Windows lane / build-sidecar.mjs default).
       CUDA_COMPUTE_CAP: "80"
       CARGO_NET_OFFLINE: "true"
+    # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
+    # default (sc-10420, sc-13603). workflow_dispatch-only full candle/CUDA
+    # release build (CUDA toolkit install + nvcc + web build); sized generously
+    # off the ~25 min observed run since it runs rarely and its rust-cache is
+    # usually cold.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

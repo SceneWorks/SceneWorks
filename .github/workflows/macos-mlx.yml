@@ -68,6 +68,13 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, nax]
     env:
       CARGO_NET_OFFLINE: "true"
+    # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
+    # default (sc-10420). This lane is the SOLE self-hosted nax box and
+    # serializes main-push runs (github.sha concurrency), so a wedge here holds
+    # that box and starves every queued PR/main run on it (sc-13603). Well above
+    # the healthy ~6-14 min warm build+test+clippy — a cold MLX-from-source
+    # rebuild still fits.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
