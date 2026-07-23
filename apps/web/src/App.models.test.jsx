@@ -1274,8 +1274,9 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    // The import form shares the LoRAs tab's import area (the existing scaffold home).
-    await selectModelTab("LoRAs");
+    // sc-14069: a base checkpoint is an image model, so the import affordance lives on the
+    // Image Models tab where a user looks for it — no longer the LoRAs tab scaffold home.
+    await selectModelTab("Image");
     const panel = modelImportPanel(container);
     expect(panel).not.toBeNull();
     expect(panel.textContent).toContain("Import model");
@@ -1283,6 +1284,35 @@ describe("SceneWorks app shell", () => {
     expect(field(panel, "Model File")).toBeTruthy();
     expect(field(panel, "Source URL")).toBeFalsy();
     expect(field(panel, "Type").value).toBe("image");
+  });
+
+  it("surfaces the base-checkpoint import affordance on the Image tab, not the LoRAs tab (sc-14069)", async () => {
+    // Discoverability relocation: S0e (sc-14020) first rendered the panel in the LoRAs tab
+    // import area (the pre-existing sc-7080 scaffold). A base checkpoint is an image model
+    // (Krea 2 today), so sc-14069 moves the affordance to the Image Models tab. It must be
+    // reachable from Image and absent from LoRAs.
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withModelManagerContext({
+          activeProject: null,
+          jobs: [],
+          loras: [],
+          models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
+          onDownloadModel: () => {},
+          onImportLora: () => {},
+          onImportModel: vi.fn(),
+          onOpenQueue: () => {},
+        }),
+      );
+    });
+
+    await selectModelTab("Image");
+    expect(modelImportPanel(container)).not.toBeNull();
+    // The LoRAs tab keeps its own "Import LoRA" panel but no longer hosts the model importer.
+    await selectModelTab("LoRAs");
+    expect(loraPanel(container)).not.toBeNull();
+    expect(modelImportPanel(container)).toBeNull();
   });
 
   it("POSTs the pointed-at checkpoint as an image import, leaving family to auto-detect (sc-14020)", async () => {
@@ -1305,7 +1335,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    await selectModelTab("LoRAs");
+    await selectModelTab("Image");
     const panel = modelImportPanel(container);
     const file = new File([new Uint8Array([1, 2, 3])], "krea2-checkpoint.safetensors");
     await changeFile(field(panel, "Model File"), file);
@@ -1345,7 +1375,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    await selectModelTab("LoRAs");
+    await selectModelTab("Image");
     const panel = modelImportPanel(container);
     await changeFile(field(panel, "Model File"), new File([new Uint8Array([1])], "krea2.safetensors"));
     await act(async () => {
@@ -1383,7 +1413,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    await selectModelTab("LoRAs");
+    await selectModelTab("Image");
     const panel = modelImportPanel(container);
     await changeFile(field(panel, "Model File"), new File([new Uint8Array([1])], "qwen.safetensors"));
     await act(async () => {
@@ -1480,7 +1510,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    await selectModelTab("LoRAs");
+    await selectModelTab("Image");
     expect(container.textContent).toContain("Model imports in progress");
     expect(container.textContent).toContain("Model Import");
     expect(container.textContent).toContain("Downloading");
