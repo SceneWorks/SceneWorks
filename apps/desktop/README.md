@@ -198,6 +198,17 @@ environment variables in parentheses override them for advanced setups.
 | Logs | `~/Library/Logs/SceneWorks` |
 | Model weights | `~/.cache/huggingface` (`HF_HOME`) |
 
+### Linux
+
+| What | Location |
+| --- | --- |
+| Projects & app data | `$XDG_DATA_HOME/SceneWorks` (default `~/.local/share/SceneWorks`) |
+| Config & manifests | `$XDG_CONFIG_HOME/SceneWorks` (default `~/.config/SceneWorks`) |
+| Cache | `$XDG_CACHE_HOME/SceneWorks` (default `~/.cache/SceneWorks`) |
+| Logs | `$XDG_STATE_HOME/SceneWorks/logs` (default `~/.local/state/SceneWorks/logs`) |
+| GPU runtime | `$XDG_DATA_HOME/SceneWorks/gpu-runtime` |
+| Model weights | `$XDG_CACHE_HOME/SceneWorks/huggingface` (`HF_HOME`) |
+
 Model weights default to the shared Hugging Face cache so SceneWorks reuses
 anything already downloaded by other tools on the machine (and vice versa). Point
 `HF_HOME` (or the splash field) at a larger drive if your boot volume is tight.
@@ -292,13 +303,13 @@ SceneWorks ships in two forms from the same codebase:
 | | **Desktop** (this app) | **Server** (Docker) |
 | --- | --- | --- |
 | Install | One installer, no Docker | `docker compose` stack |
-| Engine | MLX (Mac) / candle CUDA (Windows), in-app | candle CUDA worker container (NVIDIA + container toolkit) |
+| Engine | MLX (Mac) / candle CUDA (Windows and Linux), in-app | candle CUDA worker container (NVIDIA + container toolkit) |
 | Access | Local app window, loopback only | Web UI over the network (opt-in, token-gated) |
 | Credentials | OS keychain | `0600 credentials.json` / env vars |
 | Paths | Per-user OS app-data dirs | Fixed `/sceneworks/*` volumes |
 | Best for | A single creator on one workstation | Shared/remote GPUs, multiple users, headless hosts |
 
-**Use the desktop app** when you want a turnkey studio on your own Windows or Mac
+**Use the desktop app** when you want a turnkey studio on your own Windows, Linux, or Mac
 workstation. **Use the server stack** when the GPU lives on another machine, when
 several people share it, or when you want a headless/LAN deployment. The Docker
 stack lives at the repo root (`docker-compose.yml`); see the root
@@ -314,9 +325,10 @@ stack lives at the repo root (`docker-compose.yml`); see the root
 | --- | --- |
 | macOS | `~/Library/Logs/SceneWorks/` |
 | Windows | `%LOCALAPPDATA%\SceneWorks\logs\` |
+| Linux | `$XDG_STATE_HOME/SceneWorks/logs/` (default `~/.local/state/SceneWorks/logs/`) |
 
 Key files: `api.log` (the API), and the engine worker log — `mlx-worker.log` on
-macOS, `candle-worker.log` on Windows. The current session's logs are also visible
+macOS, `candle-worker.log` on Windows/Linux. The current session's logs are also visible
 in-app on the **Logs** screen.
 
 ### Common issues
@@ -334,6 +346,14 @@ The first-run CUDA runtime download did not complete (network/disk). Check your
 connection and free space, then retry from the setup screen. The download resumes
 into `%APPDATA%\SceneWorks\gpu-runtime`. On a machine with no internet access, pre-stage
 the runtime instead — see [Offline / air-gapped install](docs/offline-install.md).
+
+**Linux: "GPU runtime setup failed" / "unresolved shared-library dependencies."**
+The first-run runtime download or ELF dependency check did not complete. Retry
+after checking network and disk space. If the message names `libgomp`, install
+the GNU OpenMP runtime (`sudo apt install libgomp1` on Debian/Ubuntu or
+`sudo dnf install libgomp` on Fedora/RHEL), then relaunch. Offline machines can
+copy a provisioned Linux runtime as described in
+[Offline / air-gapped install](docs/offline-install.md).
 
 **"The local API did not start in time."**
 The bundled API didn't become healthy within the startup window. Retry from the
