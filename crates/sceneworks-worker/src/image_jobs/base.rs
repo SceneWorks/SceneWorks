@@ -105,6 +105,14 @@ enum ImageRoute {
     /// keys on that descriptor id), unlike S3 which swaps to `krea_2_turbo`. Reference/edit/pose/PiD
     /// shapes are rejected loudly by the lane (multi-phase renders from pure noise).
     KreaMultiPhase,
+    /// An imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): a non-builtin
+    /// `krea_2`-family model whose `modelPath` is a single `.safetensors` DiT → the bespoke in-place
+    /// assembly lane, which pairs the imported transformer with a resident `krea_2` base tier (shared
+    /// Qwen3-VL TE / Qwen VAE / tokenizer) and loads via the S0b MLX native single-file entrypoint. A
+    /// builtin Krea id (`krea_2_turbo` / `krea_2_raw`, in `MODEL_TABLE`) never reaches here —
+    /// `resolve_imported_krea_dit` returns `None` for it, so the snapshot-dir Krea path is untouched.
+    /// txt2img only (a bare imported DiT carries no conditioning components).
+    KreaImported,
     InstantId,
     PulidFlux,
     SdxlAdvanced,
@@ -209,6 +217,14 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         // additive) — turbo-on-Raw img2img is out of scope for this t2i story (sc-13883). The t2i
         // sibling of the `krea_edit_available` arm above.
         Some(ImageRoute::KreaTurboOnRaw)
+    } else if krea_imported_available(request, settings) {
+        // An imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): a non-builtin
+        // `krea_2`-family model whose `modelPath` is a single `.safetensors` DiT → the bespoke in-place
+        // assembly lane. A builtin Krea id never claims this (`resolve_imported_krea_dit` returns `None`
+        // for a `MODEL_TABLE` id), so the generic `mlx_available` snapshot-dir arm below is unchanged for
+        // builtin Krea. The imported id is in no `MODEL_TABLE`, so `mlx_available` is `false` for it — this
+        // arm is what routes it to real MLX generation at all (S0d marked it Mac-routable; this loads it).
+        Some(ImageRoute::KreaImported)
     } else if instantid_available(request, settings) {
         Some(ImageRoute::InstantId)
     } else if pulid_flux_available(request, settings) {
@@ -288,6 +304,9 @@ impl ImageRoute {
             // Multi-phase (S4) is likewise plain per-image: `count` renders, each its own seed, driven
             // through the phase plan. No angle/pose grouping.
             | ImageRoute::KreaMultiPhase
+            // Imported single-file Krea 2 (S0c) is plain per-image txt2img: `count` renders, each its own
+            // seed. No angle/pose grouping (a bare imported DiT carries no conditioning).
+            | ImageRoute::KreaImported
             | ImageRoute::PoseControlBaseMissing
             | ImageRoute::PoseReject
             | ImageRoute::Mlx => request.count,
