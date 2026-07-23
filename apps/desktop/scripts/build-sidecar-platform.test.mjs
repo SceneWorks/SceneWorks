@@ -1,56 +1,96 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
+import os from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  ffmpegPlaceholder,
-  onnxruntimePlaceholder,
-  shouldBuildCandle,
+  sidecarBuildPlan,
+  stageNonMacResourcePlaceholders,
 } from "./build-sidecar-platform.mjs";
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 
-test("Linux always selects the embedded candle API build", () => {
-  assert.equal(shouldBuildCandle("linux"), true);
-  assert.equal(shouldBuildCandle("linux", "0"), true);
+test("Linux plans the embedded candle API build with compute capability 80", () => {
+  assert.deepEqual(sidecarBuildPlan("linux"), {
+    candle: true,
+    npmScript: "api:build:embedded:candle",
+    computeCap: "80",
+    env: { VITE_API_BASE_URL: "", CUDA_COMPUTE_CAP: "80" },
+  });
+  assert.deepEqual(sidecarBuildPlan("linux", { SCENEWORKS_DESKTOP_CANDLE: "0" }), {
+    candle: true,
+    npmScript: "api:build:embedded:candle",
+    computeCap: "80",
+    env: { VITE_API_BASE_URL: "", CUDA_COMPUTE_CAP: "80" },
+  });
+  assert.equal(
+    sidecarBuildPlan("linux", { CUDA_COMPUTE_CAP: "90" }).computeCap,
+    "90",
+  );
 });
 
 test("Windows preserves its candle opt-out", () => {
-  assert.equal(shouldBuildCandle("win32"), true);
-  assert.equal(shouldBuildCandle("win32", "1"), true);
-  assert.equal(shouldBuildCandle("win32", "0"), false);
+  assert.equal(sidecarBuildPlan("win32").candle, true);
+  assert.equal(
+    sidecarBuildPlan("win32", { SCENEWORKS_DESKTOP_CANDLE: "1" }).candle,
+    true,
+  );
+  assert.deepEqual(
+    sidecarBuildPlan("win32", { SCENEWORKS_DESKTOP_CANDLE: "0" }),
+    {
+      candle: false,
+      npmScript: "api:build:embedded",
+      env: { VITE_API_BASE_URL: "" },
+    },
+  );
 });
 
 test("macOS preserves its non-candle MLX build", () => {
-  assert.equal(shouldBuildCandle("darwin"), false);
+  assert.deepEqual(sidecarBuildPlan("darwin"), {
+    candle: false,
+    npmScript: "api:build:embedded",
+    env: { VITE_API_BASE_URL: "" },
+  });
 });
 
-test("Linux resource placeholders satisfy both Tauri globs", () => {
-  const ort = onnxruntimePlaceholder("linux");
-  const ffmpeg = ffmpegPlaceholder("linux");
-
-  assert.match(ort, /not bundled on Linux yet/);
-  assert.match(ort, /sc-10376/);
-  assert.match(ffmpeg, /not bundled on Linux yet/);
-  assert.match(ffmpeg, /PATH/);
-  assert.match(ffmpeg, /sc-10376/);
-});
-
-test("build-sidecar stages files for every configured resource glob", () => {
+test("Linux stages real files for every configured resource glob", (t) => {
+  const tempDir = mkdtempSync(join(os.tmpdir(), "sceneworks-sidecar-test-"));
+  t.after(() => rmSync(tempDir, { recursive: true }));
+  const onnxruntimeDir = join(tempDir, "onnxruntime");
+  const ffmpegDir = join(tempDir, "ffmpeg");
+  const staged = stageNonMacResourcePlaceholders("linux", {
+    onnxruntimeDir,
+    ffmpegDir,
+  });
   const config = JSON.parse(
     readFileSync(join(scriptsDir, "..", "tauri.conf.json"), "utf8"),
   );
-  assert.ok(config.bundle.resources.includes("onnxruntime/**/*"));
-  assert.ok(config.bundle.resources.includes("ffmpeg/**/*"));
-
-  const source = readFileSync(join(scriptsDir, "build-sidecar.mjs"), "utf8");
-  assert.match(source, /onnxruntimePlaceholder\(process\.platform\)/);
-  assert.match(source, /ffmpegPlaceholder\(process\.platform\)/);
+  for (const glob of ["onnxruntime/**/*", "ffmpeg/**/*"]) {
+    assert.ok(config.bundle.resources.includes(glob));
+    const resourceDir = join(tempDir, glob.split("/")[0]);
+    assert.ok(readdirSync(resourceDir).length > 0, `${glob} must match a file`);
+  }
+  assert.match(readFileSync(staged.onnxruntimeReadme, "utf8"), /sc-10376/);
+  assert.match(readFileSync(staged.ffmpegReadme, "utf8"), /PATH.*sc-10376/);
 });
 
-test("Windows placeholder guidance remains Windows-specific", () => {
-  assert.match(onnxruntimePlaceholder("win32"), /%APPDATA%/);
-  assert.match(ffmpegPlaceholder("win32"), /Windows uses PATH ffmpeg/);
+test("Windows stages its existing platform-specific placeholder guidance", (t) => {
+  const tempDir = mkdtempSync(join(os.tmpdir(), "sceneworks-sidecar-test-"));
+  t.after(() => rmSync(tempDir, { recursive: true }));
+  const staged = stageNonMacResourcePlaceholders("win32", {
+    onnxruntimeDir: join(tempDir, "onnxruntime"),
+    ffmpegDir: join(tempDir, "ffmpeg"),
+  });
+  assert.match(readFileSync(staged.onnxruntimeReadme, "utf8"), /%APPDATA%/);
+  assert.match(
+    readFileSync(staged.ffmpegReadme, "utf8"),
+    /Windows uses PATH ffmpeg/,
+  );
 });

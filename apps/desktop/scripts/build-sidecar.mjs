@@ -18,9 +18,8 @@ import { fileURLToPath } from "node:url";
 import process from "node:process";
 import os from "node:os";
 import {
-  ffmpegPlaceholder,
-  onnxruntimePlaceholder,
-  shouldBuildCandle,
+  sidecarBuildPlan,
+  stageNonMacResourcePlaceholders,
 } from "./build-sidecar-platform.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -211,8 +210,8 @@ function codesignForNotarization(file) {
 // Linux always builds candle through the toolchain proven by
 // .github/workflows/server-candle-linux.yml. macOS is unaffected — it bakes MLX
 // into the api binary and never builds candle.
-const candle = shouldBuildCandle(process.platform);
-if (candle) {
+const buildPlan = sidecarBuildPlan(process.platform, process.env);
+if (buildPlan.candle) {
   // CUDA_COMPUTE_CAP=80 builds `compute_80` PTX the driver JITs forward to sm_120
   // (Blackwell) — one binary covers Ampere→Blackwell (per sc-3676). That claim holds
   // for candle-kernels' dense build_ptx() kernels only: the GGUF quant/moe kernels are
@@ -223,12 +222,8 @@ if (candle) {
   // below after the build (sc-13510 — the patch already dropped out silently once).
   // Honor an explicit override (e.g. a native-cap dev build; the vendored extra gencodes
   // are unconditional, so the quant fatbin stays multi-arch at any cap) if the env set it.
-  const candleEnv = { VITE_API_BASE_URL: "" };
-  if (!process.env.CUDA_COMPUTE_CAP) {
-    candleEnv.CUDA_COMPUTE_CAP = "80";
-  }
   console.log(
-    `build-sidecar: candle backend ON (CUDA_COMPUTE_CAP=${process.env.CUDA_COMPUTE_CAP ?? "80"})`,
+    `build-sidecar: candle backend ON (CUDA_COMPUTE_CAP=${buildPlan.computeCap})`,
   );
   // candle-kernels compiles its CUDA kernels with `cudaforge`, which fans out one
   // nvcc per .cu over a rayon pool sized to ~half the CPU count. On a high-core
@@ -249,8 +244,8 @@ if (candle) {
   //      rerun-if-env-changed set, so toggling it never forces a needless rebuild.
   const nvccCap = String(Math.min(8, Math.max(1, os.cpus().length)));
   try {
-    run(npmCmd, ["run", "api:build:embedded:candle"], {
-      ...candleEnv,
+    run(npmCmd, ["run", buildPlan.npmScript], {
+      ...buildPlan.env,
       CUDAFORGE_THREADS: nvccCap,
     });
   } catch (err) {
@@ -259,14 +254,14 @@ if (candle) {
         `with serial CUDA kernel compilation (CUDAFORGE_THREADS=1) to clear nvcc ` +
         `spawn contention / surface the real nvcc error`,
     );
-    run(npmCmd, ["run", "api:build:embedded:candle"], {
-      ...candleEnv,
+    run(npmCmd, ["run", buildPlan.npmScript], {
+      ...buildPlan.env,
       CUDAFORGE_THREADS: "1",
     });
   }
-  verifyCandleQuantFatbin(process.env.CUDA_COMPUTE_CAP || candleEnv.CUDA_COMPUTE_CAP);
+  verifyCandleQuantFatbin(buildPlan.computeCap);
 } else {
-  run(npmCmd, ["run", "api:build:embedded"], { VITE_API_BASE_URL: "" });
+  run(npmCmd, ["run", buildPlan.npmScript], buildPlan.env);
 }
 
 const src = join(repoRoot, "target", "release", `sceneworks-rust-api${exe}`);
@@ -294,6 +289,7 @@ console.log(`build-sidecar: staged ${dest}`);
 // cuda_provision.rs), pointed at by setup.rs. Windows therefore ships only the
 // placeholder below — the glob still matches and the install stays small.
 const ortDir = join(desktopDir, "onnxruntime");
+const ffmpegDir = join(desktopDir, "ffmpeg");
 mkdirSync(ortDir, { recursive: true });
 if (triple.includes("apple-darwin")) {
   const dylibDest = join(ortDir, "libonnxruntime.dylib");
@@ -314,10 +310,10 @@ if (triple.includes("apple-darwin")) {
   }
   console.log(`build-sidecar: staged onnxruntime MIT license + notice`);
 } else {
-  writeFileSync(
-    join(ortDir, "README.txt"),
-    onnxruntimePlaceholder(process.platform),
-  );
+  stageNonMacResourcePlaceholders(process.platform, {
+    onnxruntimeDir: ortDir,
+    ffmpegDir,
+  });
   console.log(`build-sidecar: ${ortDir} placeholder (no bundled onnxruntime)`);
 }
 
@@ -330,7 +326,6 @@ if (triple.includes("apple-darwin")) {
 // only macOS stages the real binary (Windows/Linux desktop + server/Docker use
 // PATH ffmpeg), other platforms ship a placeholder. GPLv3 — see
 // docs/sc-3767/ffmpeg-bundling.md.
-const ffmpegDir = join(desktopDir, "ffmpeg");
 mkdirSync(ffmpegDir, { recursive: true });
 if (triple.includes("apple-darwin")) {
   const ffmpegDest = join(ffmpegDir, "ffmpeg");
@@ -349,10 +344,6 @@ if (triple.includes("apple-darwin")) {
   }
   console.log(`build-sidecar: staged ffmpeg GPLv3 license + written offer`);
 } else {
-  writeFileSync(
-    join(ffmpegDir, "README.txt"),
-    ffmpegPlaceholder(process.platform),
-  );
   console.log(`build-sidecar: ${ffmpegDir} placeholder (non-macOS, PATH ffmpeg)`);
 }
 
