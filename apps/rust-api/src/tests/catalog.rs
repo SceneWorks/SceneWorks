@@ -1280,6 +1280,48 @@ async fn model_import_route_is_enabled_and_detector_gated() {
     );
     assert_eq!(job["type"], "model_import");
 
+    // Supported multipart upload: the descriptor-gated Krea int8-per-row convention. The detector is
+    // intentionally header-only (bulk I8 + `.comfy_quant`); inference validates descriptor bytes and
+    // F32 per-row scale shapes before dequantization.
+    let mut int8_names = Vec::new();
+    for index in 0..6 {
+        int8_names.push((
+            format!("model.diffusion_model.blocks.{index}.attn.wq.weight"),
+            "I8",
+        ));
+        int8_names.push((
+            format!("model.diffusion_model.blocks.{index}.attn.wq.weight_scale"),
+            "F32",
+        ));
+        int8_names.push((
+            format!("model.diffusion_model.blocks.{index}.attn.wq.comfy_quant"),
+            "U8",
+        ));
+    }
+    int8_names.push(("model.diffusion_model.blocks.0.mod.lin".to_owned(), "BF16"));
+    int8_names.push((
+        "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+        "F32",
+    ));
+    let int8_entries: Vec<(&str, &str)> = int8_names
+        .iter()
+        .map(|(name, dtype)| (name.as_str(), *dtype))
+        .collect();
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (int8_status, int8_job) = request_multipart_model_upload(
+        app,
+        &[("name", "Krea Int8 Import"), ("type", "image")],
+        "kreamania_variant4.safetensors",
+        &test_safetensors_bytes_with_typed_keys(&int8_entries),
+    )
+    .await;
+    assert_eq!(
+        int8_status,
+        StatusCode::CREATED,
+        "a Krea int8-per-row DiT upload must pass the gate and queue: {int8_job:?}"
+    );
+    assert_eq!(int8_job["type"], "model_import");
+
     // Unsupported multipart upload: an F8_E4M3 qwen-image DiT is a recognized family with no import
     // loader today -> refused AT THE ENDPOINT with 400 and the typed reason naming the family, before
     // any job is queued. This is the negative endpoint->gate wiring assertion.

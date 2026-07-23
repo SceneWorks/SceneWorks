@@ -1,55 +1,56 @@
-// macOS (MLX) in-place imported single-file Krea 2 checkpoint txt2img route (epic 14015 S0c, sc-14018).
+// Shared MLX/Candle in-place imported single-file Krea 2 checkpoint txt2img route
+// (epic 14015 S0c, sc-14018/sc-14023).
 // Renders a user-imported COMMUNITY checkpoint that is the Krea 2 **transformer only** (a bare DiT
 // single file, e.g. a ComfyUI-exported `kreamania_variant5.safetensors`) — read in place, no copy, no
 // re-download — by pairing it with a resident `krea_2` base tier that supplies the shared Qwen3-VL text
 // encoder, Qwen VAE, tokenizer, and the DiT architecture config the single file omits. The assembly is
-// the S0b MLX entrypoint `runtime_macos::providers::krea::load_from_native_dit_file(dit, base, descriptor)`
+// the selected runtime's `providers::krea::load_from_native_dit_file(dit, base, descriptor)`
 // — the sc-10670/10671 "read the DiT in place, source shared components from a resident tier" pattern, and
-// the MLX twin of the candle z-image `load_from_comfyui_components` lane (`zimage_comfyui_candle.rs`).
+// following the candle z-image `load_from_comfyui_components` in-place assembly pattern.
 //
-// **macOS-only**, and a **bespoke provider**: the loaded generator is not registry-resolvable (its
+// This is a **bespoke provider** on both backends: the loaded generator is not registry-resolvable (its
 // transformer is a single in-place file, not a diffusers snapshot dir), so it bypasses the registry
 // snapshot-dir descriptor path and is loaded fresh per job through `start_gen_stream` rather than the
 // cached registry path — like the z-image comfyui / Wan comfyui in-place lanes. This file is `include!`d
 // into the `image_jobs` module, sharing its imports.
 //
 // Routing (S0d, sc-14019) already marks an imported/user image model whose declared `family` is `krea_2`
-// as MLX-routable; this lane is what actually loads it. A builtin Krea model (`krea_2_turbo` /
+// as same-family routable; this lane is what actually loads it. A builtin Krea model (`krea_2_turbo` /
 // `krea_2_raw`, both in `MODEL_TABLE`) resolves through `mlx_model` and loads from its snapshot turnkey —
 // `resolve_imported_krea_dit` returns `None` for it, so the existing snapshot-dir Krea path is untouched.
 //
-// Scope (S0c): dense bf16 single-file DiT, txt2img only (the imported checkpoint is a bare transformer,
-// so pose / reference / edit conditioning is deliberately NOT claimed here — S0d did not claim those
-// features for imported models either). The 26 GB load + render is validated on GPU in S0f.
+// Scope (S0c + sc-14023): dense bf16 or descriptor-gated plain-int8-per-row single-file DiT, txt2img
+// only (the imported checkpoint is a bare transformer, so pose / reference / edit conditioning is
+// deliberately NOT claimed here). Descriptor contents and per-row scale shapes are validated by the
+// inference loader before dequantization; ConvRot descriptors remain on their separate loader arm.
 
 /// The adapter/engine id recorded on imported-Krea assets + telemetry (distinct from the registry
 /// `krea_2_turbo` / `krea_2_raw` builtins and their bespoke edit/control/multi-phase lanes).
 #[cfg(target_os = "macos")]
 const KREA_IMPORTED_ENGINE: &str = "mlx_krea_imported";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const KREA_IMPORTED_ENGINE: &str = "candle_krea_imported";
 /// The base tier whose shared Qwen3-VL text encoder + Qwen VAE + tokenizer + DiT architecture config the
 /// imported single-file transformer is paired with. The Turbo turnkey (`SceneWorks/krea-2-turbo-mlx`,
 /// sc-7573) is the default base — its published Krea 2 architecture matches the community merges, and its
-/// `bf16/` tier ships DENSE TE/VAE that pair correctly with the imported dense bf16 DiT. NOT configurable:
+/// `bf16/` tier ships DENSE TE/VAE that pair correctly with either supported imported DiT encoding. NOT
+/// configurable:
 /// the single fixed default keeps the assembly deterministic (a per-request base override is a follow-up
 /// if a Raw-base community checkpoint ever needs a different shared surface).
-#[cfg(target_os = "macos")]
 const KREA_IMPORTED_BASE_REPO: &str = "SceneWorks/krea-2-turbo-mlx";
 /// The dense `bf16/` subdir of [`KREA_IMPORTED_BASE_REPO`] — the DENSE TE/VAE tier (the `q4/`/`q8/` tiers
 /// ship a packed transformer, but their TE/VAE would not pair with a dense imported DiT). Same `bf16/`
 /// surface the candle INT8-ConvRot base uses (`resolve_krea_convrot`).
-#[cfg(target_os = "macos")]
 const KREA_IMPORTED_BASE_TIER: &str = "bf16";
 /// Denoise-steps fallback — the Krea 2 Turbo distilled default (the imported community merges are
 /// distilled-Turbo dense merges, like variant5). The UI normally supplies `advanced.steps`; this only
 /// applies when it does not.
-#[cfg(target_os = "macos")]
 const KREA_IMPORTED_DEFAULT_STEPS: u32 = 8;
 
 /// A single-file checkpoint is one on-disk `.safetensors` FILE (the imported transformer), as opposed to
 /// a diffusers snapshot DIRECTORY (a builtin turnkey tier). This is the single-file-vs-snapshot-dir
 /// decision at the heart of S0c: a `true` here routes to the native single-file entrypoint; a directory
 /// (`false`) keeps the registry snapshot-dir path. Pure (no settings / confinement), unit-testable alone.
-#[cfg(target_os = "macos")]
 fn is_single_file_checkpoint(path: &Path) -> bool {
     path.is_file()
         && path
@@ -62,7 +63,6 @@ fn is_single_file_checkpoint(path: &Path) -> bool {
 /// or a `transformer/` component subtree. Such a dir is a SNAPSHOT (the registry path), never a
 /// single-file import, so it is excluded from the native entrypoint even when it also holds loose
 /// `.safetensors` shards.
-#[cfg(target_os = "macos")]
 fn is_diffusers_snapshot_dir(dir: &Path) -> bool {
     dir.join("model_index.json").is_file()
         || dir.join("config.json").is_file()
@@ -75,7 +75,6 @@ fn is_diffusers_snapshot_dir(dir: &Path) -> bool {
 /// `<data>/models/imports/<name>/`, so the checkpoint is the one weight file there). `None` for a
 /// diffusers snapshot dir (a builtin turnkey tier — [`is_diffusers_snapshot_dir`]), a dir with zero or
 /// more than one top-level `.safetensors`, or a non-safetensors file — those are not a single-file import.
-#[cfg(target_os = "macos")]
 fn imported_dit_file(path: &Path) -> Option<PathBuf> {
     if is_single_file_checkpoint(path) {
         return Some(path.to_path_buf());
@@ -109,7 +108,6 @@ fn imported_dit_file(path: &Path) -> Option<PathBuf> {
 ///
 /// Each path is confined by `normalize_app_managed_model_path` (a payload can never point the checkpoint
 /// outside a declared root; LAN jobs API, epic 4484) — the same confinement `resolve_weights_dir` uses.
-#[cfg(target_os = "macos")]
 fn resolve_imported_krea_dit(
     request: &ImageRequest,
     settings: &Settings,
@@ -162,7 +160,6 @@ fn resolve_imported_krea_dit(
 /// config, plus POPULATED `text_encoder/ vae/ tokenizer/` component trees (weight files present, not
 /// just the directories, so a torn base is caught here); a clear typed error otherwise so the user knows
 /// to install the Krea 2 base first, rather than a raw mid-load "No such file or directory".
-#[cfg(target_os = "macos")]
 fn resolve_krea_imported_base_tier(settings: &Settings) -> WorkerResult<PathBuf> {
     let base_missing = || {
         WorkerError::InvalidPayload(
@@ -187,7 +184,6 @@ fn resolve_krea_imported_base_tier(settings: &Settings) -> WorkerResult<PathBuf>
 /// a half-downloaded / torn base whose component dirs were created but never filled would otherwise pass
 /// this gate and fail deep inside the S0b load with a generic Engine "load failed" instead of the
 /// friendly [`resolve_krea_imported_base_tier`] "install the Krea 2 base first" typed error.
-#[cfg(target_os = "macos")]
 fn krea_imported_base_tier_complete(dir: &Path) -> bool {
     dir.join("transformer").join("config.json").is_file()
         && dir_has_safetensors(&dir.join("text_encoder"))
@@ -198,7 +194,6 @@ fn krea_imported_base_tier_complete(dir: &Path) -> bool {
 /// True when `dir` holds at least one top-level `*.safetensors` weight file — the "is this component
 /// dir actually populated, not just an empty shell left by a torn download" probe
 /// [`krea_imported_base_tier_complete`] uses for the dense text encoder / VAE trees.
-#[cfg(target_os = "macos")]
 fn dir_has_safetensors(dir: &Path) -> bool {
     std::fs::read_dir(dir)
         .into_iter()
@@ -219,19 +214,26 @@ fn dir_has_safetensors(dir: &Path) -> bool {
 /// this lane does not stage). Deliberately does NOT gate on base-tier presence: a missing base surfaces
 /// as the loud [`resolve_krea_imported_base_tier`] error in the handler rather than a silent fall-through
 /// to the stub. Mirrors the shape of the other `…_available` predicates.
-#[cfg(target_os = "macos")]
 fn krea_imported_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.mode != "edit_image"
         && pose_entries(request).is_empty()
         && request.reference_asset_id.is_none()
         && request.reference_asset_ids.is_empty()
         && request.source_asset_id.is_none()
+        && request.mask_asset_id.is_none()
+        && request.character_id.is_none()
+        && request.character_look_id.is_none()
+        && request.loras.is_empty()
+        && !request
+            .advanced
+            .get("phases")
+            .and_then(Value::as_array)
+            .is_some_and(|phases| !phases.is_empty())
         && matches!(resolve_imported_krea_dit(request, settings), Ok(Some(_)))
 }
 
 /// Flat telemetry recorded on imported-Krea assets. No guidance — the imported distilled-Turbo merges
 /// are CFG-free (the Turbo descriptor advertises `supports_guidance=false`).
-#[cfg(target_os = "macos")]
 fn krea_imported_raw_settings(request: &ImageRequest, steps: u32) -> JsonObject {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
@@ -252,12 +254,10 @@ fn krea_imported_raw_settings(request: &ImageRequest, steps: u32) -> JsonObject 
     raw
 }
 
-/// Real MLX in-place imported single-file Krea 2 txt2img generation (epic 14015 S0c): resolve the
-/// imported DiT + the resident base tier on the async side, then load the S0b native entrypoint once +
-/// generate each image on the blocking thread. `request.count` images, each its own seed. The imported
-/// merge is distilled Turbo (no CFG / negative prompt). The loaded `Box<dyn Generator>` is bespoke (not
-/// registry-cached), driven like the z-image comfyui lane.
-#[cfg(target_os = "macos")]
+/// Real in-place imported single-file Krea 2 txt2img generation (epic 14015 S0c, sc-14023): resolve the
+/// imported DiT + resident base tier on the async side, then load the selected runtime's native
+/// entrypoint once and generate each image on the blocking thread. The merge is distilled Turbo
+/// (no CFG / negative prompt). The `Box<dyn Generator>` is bespoke (not registry-cached).
 async fn generate_krea_imported_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -293,15 +293,25 @@ async fn generate_krea_imported_stream(
         KREA_IMPORTED_ENGINE,
         0,
         move || {
-            // Turbo descriptor (`variant5` and its siblings are distilled-Turbo dense merges). The S0b
+            // Turbo descriptor (`variant5` dense and `variant4` plain-int8 are distilled-Turbo merges).
+            // The S0b
             // entrypoint reads the DiT from the single file, key-remaps native→diffusers, coverage/
             // shape-validates it against the base tier's Krea 2 geometry (fail-closed — the
             // architecture-compatibility check happens here, before pairing), and sources the shared
             // TE/VAE/tokenizer from `base_dir`.
-            let descriptor = runtime_macos::providers::krea::descriptor();
-            let model = runtime_macos::providers::krea::load_from_native_dit_file(
-                &dit, &base_dir, descriptor,
-            )
+            #[cfg(target_os = "macos")]
+            let loaded = runtime_macos::providers::krea::load_from_native_dit_file(
+                &dit,
+                &base_dir,
+                runtime_macos::providers::krea::descriptor(),
+            );
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            let loaded = runtime_cuda::providers::krea::load_from_native_dit_file(
+                &dit,
+                &base_dir,
+                runtime_cuda::providers::krea::descriptor(),
+            );
+            let model = loaded
             .map_err(|error| {
                 WorkerError::Engine(format!("Krea 2 imported checkpoint load failed: {error}"))
             })?;

@@ -103,15 +103,10 @@ pub(crate) fn image_model_mac_support(model: &str, family: Option<&str>) -> Mode
             return ModelMacSupport {
                 supported: true,
                 reason: None,
-                features: ModelMacFeatures {
-                    // MLX-routed ⇒ third-party LyCORIS applies on the provider (epic 3641). The
-                    // imported single-file checkpoint is a bare diffusion transformer, so the
-                    // conditioning features that need extra components/adapters (pose / reference /
-                    // edit) are deliberately NOT claimed here — S0c wires the actual assembly/load;
-                    // this story decides eligibility only.
-                    lycoris: true,
-                    ..ModelMacFeatures::default()
-                },
+                // The imported single-file checkpoint is a bare diffusion transformer. Adapters,
+                // pose, reference, and edit are deliberately rejected by both the scheduler and
+                // worker so the UI must not advertise those builtin-only capabilities.
+                features: ModelMacFeatures::default(),
             };
         }
         return ModelMacSupport {
@@ -890,11 +885,101 @@ pub(crate) fn image_family_is_mlx_routed(family: &str) -> bool {
     MLX_ROUTED_FAMILIES.contains(&family)
 }
 
+/// Architecture families whose existing Candle engine can serve a non-builtin imported/user
+/// same-family model. This is deliberately separate from [`CANDLE_ROUTED_MODELS`]: imported
+/// checkpoints have novel ids and are claimed only after the scheduler validates their manifest
+/// family and supported request shape. Seeded by the descriptor-gated Krea single-file lane
+/// (sc-14023).
+pub(crate) const CANDLE_ROUTED_FAMILIES: &[&str] = &["krea_2"];
+
 /// Whether `id` names a builtin image model (a row in [`IMAGE_MODEL_CAPS`]). The route-by-family
 /// path applies only to non-builtin (imported/user) ids, so a builtin's id-keyed routing is never
 /// overridden by its family (sc-14019).
 pub(crate) fn is_builtin_image_model(id: &str) -> bool {
     IMAGE_MODEL_CAPS.iter().any(|caps| caps.id == id)
+}
+
+/// Shared fail-closed request-shape gate for a non-builtin imported image id that reuses a native
+/// engine by family. The worker owns filesystem confinement and verifies that the recorded path
+/// resolves to exactly one safetensors file; the scheduler only admits the matching family, a
+/// non-empty installed path hint, and the bare-transformer txt2img surface implemented by both the
+/// MLX and Candle imported-Krea handlers.
+pub(crate) fn imported_image_request_family_eligible(
+    model: &str,
+    payload: &Map<String, Value>,
+    routed_families: &[&str],
+) -> bool {
+    if is_builtin_image_model(model) {
+        return false;
+    }
+    let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
+        return false;
+    };
+    let family_is_routed = entry
+        .get("family")
+        .and_then(Value::as_str)
+        .is_some_and(|family| routed_families.contains(&family));
+    if !family_is_routed {
+        return false;
+    }
+    let has_nonempty_path = entry
+        .get("modelPath")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            entry
+                .get("paths")
+                .and_then(Value::as_object)
+                .and_then(|paths| paths.get("model"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .is_some_and(|path| !path.is_empty());
+    if !has_nonempty_path {
+        return false;
+    }
+    if payload.get("mode").and_then(Value::as_str).map(str::trim) == Some("edit_image") {
+        return false;
+    }
+    let has_nonempty_id = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+    };
+    if [
+        "sourceAssetId",
+        "referenceAssetId",
+        "maskAssetId",
+        "characterId",
+        "characterLookId",
+    ]
+    .iter()
+    .any(|key| has_nonempty_id(key))
+    {
+        return false;
+    }
+    if payload
+        .get("referenceAssetIds")
+        .and_then(Value::as_array)
+        .is_some_and(|ids| !ids.is_empty())
+        || payload
+            .get("loras")
+            .and_then(Value::as_array)
+            .is_some_and(|loras| !loras.is_empty())
+    {
+        return false;
+    }
+    let advanced = payload.get("advanced").and_then(Value::as_object);
+    let has_poses = advanced
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty());
+    let has_phases = advanced
+        .and_then(|advanced| advanced.get("phases"))
+        .and_then(Value::as_array)
+        .is_some_and(|phases| !phases.is_empty());
+    !has_poses && !has_phases
 }
 
 derive_model_list! {
@@ -1046,10 +1131,11 @@ mod tests {
 
     use super::{
         image_family_is_mlx_routed, image_model_mac_support, is_builtin_image_model,
-        CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_MODELS,
-        CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS,
-        CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_FAMILIES,
-        MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS,
+        CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES,
+        CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS,
+        CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS,
+        MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS,
+        MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS,
     };
 
     /// Assert a table-derived list reproduces its pre-collapse snapshot EXACTLY as a set: same
@@ -1420,10 +1506,18 @@ mod tests {
     /// a deliberate edit (it makes every imported same-family checkpoint Mac-routable), so it must be
     /// mirrored here — the guardrail that a family is never silently added to the import surface.
     const EXPECTED_MLX_ROUTED_FAMILIES: &[&str] = &["krea_2"];
+    const EXPECTED_CANDLE_ROUTED_FAMILIES: &[&str] = &["krea_2"];
 
     #[test]
     fn mlx_routed_families_match_snapshot() {
         assert_eq!(MLX_ROUTED_FAMILIES, EXPECTED_MLX_ROUTED_FAMILIES);
+    }
+
+    #[test]
+    fn candle_routed_families_match_snapshot() {
+        assert_eq!(CANDLE_ROUTED_FAMILIES, EXPECTED_CANDLE_ROUTED_FAMILIES);
+        assert!(CANDLE_ROUTED_FAMILIES.contains(&"krea_2"));
+        assert!(!CANDLE_ROUTED_FAMILIES.contains(&"z-image"));
     }
 
     #[test]
@@ -1444,24 +1538,38 @@ mod tests {
     }
 
     #[test]
+    fn candle_routed_families_have_a_same_family_builtin_engine() {
+        for family in CANDLE_ROUTED_FAMILIES {
+            let has_routed_builtin = CANDLE_ROUTED_MODELS
+                .iter()
+                .any(|id| id.starts_with(family) && is_builtin_image_model(id));
+            assert!(
+                has_routed_builtin,
+                "CANDLE_ROUTED_FAMILIES lists '{family}' but no Candle-routed builtin id shares that family prefix"
+            );
+        }
+    }
+
+    #[test]
     fn mlx_routed_families_agree_with_import_supported_families() {
         // sc-14019: `MLX_ROUTED_FAMILIES` (routing, here) and `base_weights::IMPORT_SUPPORTED_FAMILIES`
         // (the model-import compatibility gate) are two independent `krea_2` allow-lists that must NOT
-        // silently drift. Route-by-family exists ONLY via MLX today, so the two sets must be identical:
-        // a family added to the import gate but not here would let a user import a checkpoint no engine
-        // can run, and a family added here but not to the gate would route one the gate refuses. This
-        // fails the moment either list gains or loses a family the other did not. If a non-MLX
-        // route-by-family lane (e.g. candle) is ever added, evolve this into a subset check over the
-        // union of route-by-family lists.
-        let routed: BTreeSet<&str> = MLX_ROUTED_FAMILIES.iter().copied().collect();
+        // silently drift. The route surface is the union of the MLX and Candle family lists: a family
+        // accepted by the import gate must have at least one native route, and a routed family must be
+        // admitted by the import gate.
+        let routed: BTreeSet<&str> = MLX_ROUTED_FAMILIES
+            .iter()
+            .chain(CANDLE_ROUTED_FAMILIES.iter())
+            .copied()
+            .collect();
         let importable: BTreeSet<&str> = crate::base_weights::IMPORT_SUPPORTED_FAMILIES
             .iter()
             .copied()
             .collect();
         assert_eq!(
             routed, importable,
-            "MLX_ROUTED_FAMILIES and IMPORT_SUPPORTED_FAMILIES disagree; add a family to BOTH the \
-             import gate and the route-by-family allow-list (or remove it from both)"
+            "the native route-by-family union and IMPORT_SUPPORTED_FAMILIES disagree; add a family \
+             to the import gate and at least one native route list (or remove it from both)"
         );
     }
 
@@ -1479,8 +1587,8 @@ mod tests {
             "an imported krea_2-family model should route via the family path"
         );
         assert!(support.reason.is_none());
-        // MLX-routed ⇒ LyCORIS applies; the bare-DiT conditioning features stay unclaimed (S0c).
-        assert!(support.features.lycoris);
+        // The bare-DiT lane is plain txt2img only; adapters and conditioning stay unclaimed.
+        assert!(!support.features.lycoris);
         assert!(!support.features.edit);
         assert!(!support.features.pose);
         assert!(!support.features.reference);

@@ -5,7 +5,8 @@ use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType, WorkerSnapshot};
 use crate::jobs_store::routing::catalog::{
-    CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_MODELS,
+    imported_image_request_family_eligible, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS,
+    CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES, CANDLE_ROUTED_MODELS,
     CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS,
     CANDLE_VIDEO_VACE_MODELS,
 };
@@ -44,6 +45,13 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
         return false;
     };
+    // Imported Krea 2 single-file txt2img (sc-14023): imported ids are intentionally absent from
+    // `CANDLE_ROUTED_MODELS`, so claim them through the manifest family before the builtin id table.
+    // The worker repeats this gate and validates that the recorded app-managed path resolves to
+    // exactly one safetensors file before dispatching the native-file loader.
+    if imported_image_request_family_eligible(model, &job.payload, CANDLE_ROUTED_FAMILIES) {
+        return true;
+    }
     // InstantID (sc-5491, epic 5480): the candle `candle-gen-instantid` provider serves the SAME
     // identity-preserving surface as the MLX path (single-identity character_image, the angle set,
     // pose-library mode, face-restore) — a bespoke `generate_instantid_stream` lane, NOT the

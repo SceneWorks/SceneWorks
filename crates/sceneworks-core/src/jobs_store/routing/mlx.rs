@@ -5,10 +5,9 @@ use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
 use crate::jobs_store::routing::catalog::{
-    image_family_is_mlx_routed, is_builtin_image_model, MLX_ONLY_TRAINING_KERNELS,
+    imported_image_request_family_eligible, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_FAMILIES,
     MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
 };
-use crate::lora_family::normalize_model_family;
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
 /// worker? This lifts the per-family `_should_route_*_to_mlx` decision (ported
@@ -55,10 +54,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         // future) candle-only builtin — a builtin id absent from `MLX_ROUTED_MODELS` — not-eligible
         // here rather than family-routed. Today every builtin is `mlx_routed`, so this branch is only
         // ever reached by imported ids; the guard is defensive parity, not live behavior.
-        if !is_builtin_image_model(model) {
-            return imported_family_image_mlx_eligible(payload);
-        }
-        return false;
+        return imported_image_request_family_eligible(model, payload, MLX_ROUTED_FAMILIES);
     }
     match model {
         "z_image_turbo" | "z_image_edit" => z_image_mlx_eligible(payload),
@@ -97,41 +93,6 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "anima_base" | "anima_aesthetic" | "anima_turbo" => anima_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
-        _ => false,
-    }
-}
-
-/// Route-by-family MLX-eligibility for a non-builtin (imported/user) image model whose novel id is
-/// in no routing table (sc-14109, epic 14015). Reads the catalog `family` off the job payload's
-/// `modelManifestEntry` — the full manifest entry apps/rust-api stamps into every generation job
-/// (`generation.rs`, the same entry the display badge reads its `family` from, so claim-time routing
-/// and the UI verdict share one source of truth). Eligible only when that family is an MLX-routed
-/// family ([`image_family_is_mlx_routed`], the same allow-list the badge uses — checked against the
-/// raw manifest token, which the detector emits in `MLX_ROUTED_FAMILIES` form), then dispatched to
-/// that family's existing per-family predicate. For `krea_2`, [`krea_mlx_eligible`] admits plain t2i
-/// and rejects an `edit_image` job on a non-builtin id (its edit arm gates on the builtin
-/// `krea_2_raw`/`krea_2_turbo` ids), which matches S0c's t2i-only import scope. A missing /
-/// family-less manifest entry, or a non-routed / not-yet-dispatched family, returns false —
-/// unchanged from the pre-sc-14109 blanket `return false`.
-fn imported_family_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    let Some(family) = payload
-        .get("modelManifestEntry")
-        .and_then(Value::as_object)
-        .and_then(|entry| entry.get("family"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return false;
-    };
-    if !image_family_is_mlx_routed(family) {
-        return false;
-    }
-    // Dispatch on the normalized family token (`krea_2` → `krea-2`, mirroring lora_family's
-    // adapter/capabilities arms). Future importable families add an arm here alongside their
-    // `MLX_ROUTED_FAMILIES` / `IMPORT_SUPPORTED_FAMILIES` entry.
-    match normalize_model_family(family).as_str() {
-        "krea-2" => krea_mlx_eligible(payload),
         _ => false,
     }
 }
@@ -975,7 +936,11 @@ mod tests {
         let t2i = json!({
             "model": imported_id,
             "mode": "text_to_image",
-            "modelManifestEntry": { "id": imported_id, "family": "krea_2" },
+            "modelManifestEntry": {
+                "id": imported_id,
+                "family": "krea_2",
+                "paths": { "model": "/app/models/imports/kreamania_variant4" }
+            },
         });
         assert!(image_request_mlx_eligible(
             imported_id,
@@ -985,7 +950,11 @@ mod tests {
         // A bare request with no explicit mode is equally a t2i job, equally eligible.
         let bare = json!({
             "model": imported_id,
-            "modelManifestEntry": { "id": imported_id, "family": "krea_2" },
+            "modelManifestEntry": {
+                "id": imported_id,
+                "family": "krea_2",
+                "modelPath": "/app/models/imports/kreamania_variant4.safetensors"
+            },
         });
         assert!(image_request_mlx_eligible(
             imported_id,
@@ -1023,7 +992,10 @@ mod tests {
         let no_family = json!({
             "model": imported_id,
             "mode": "text_to_image",
-            "modelManifestEntry": { "id": imported_id },
+            "modelManifestEntry": {
+                "id": imported_id,
+                "paths": { "model": "/app/models/imports/user_zimage_import" }
+            },
         });
         assert!(!image_request_mlx_eligible(
             imported_id,
@@ -1031,9 +1003,8 @@ mod tests {
         ));
     }
 
-    /// Import scope is t2i-only (S0c). An `edit_image` job on an imported krea_2 id is NOT eligible:
-    /// `krea_mlx_eligible`'s edit arm gates on the builtin `krea_2_raw`/`krea_2_turbo` ids, and an
-    /// imported novel id is neither, so even a well-formed edit-with-source falls through to false.
+    /// Import scope is t2i-only (S0c). The shared imported-family gate rejects `edit_image` before
+    /// backend dispatch, so even a well-formed imported edit with a source remains ineligible.
     #[test]
     fn imported_krea_family_edit_is_not_mlx_eligible() {
         let imported_id = "user_kreamania_variant5";
@@ -1041,7 +1012,11 @@ mod tests {
             "model": imported_id,
             "mode": "edit_image",
             "sourceAssetId": "asset-1",
-            "modelManifestEntry": { "id": imported_id, "family": "krea_2" },
+            "modelManifestEntry": {
+                "id": imported_id,
+                "family": "krea_2",
+                "paths": { "model": "/app/models/imports/kreamania_variant4" }
+            },
         });
         assert!(!image_request_mlx_eligible(
             imported_id,

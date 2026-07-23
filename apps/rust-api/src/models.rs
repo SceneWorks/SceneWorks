@@ -881,7 +881,8 @@ fn converted_tier_real_bytes(tier_dir: &FsPath) -> u64 {
 /// the base-weight detector ([`sceneworks_core::base_weights`]) via [`import_source_supported`] at
 /// queue time and the worker's `run_model_import_job` over the downloaded bytes. The gate accepts
 /// ONLY `(family, component, quant)` triples with a real loader today (`import_supported` — currently
-/// a dense-bf16 Krea 2 DiT, routed to the Krea MLX engine via the S0d family path); every other file
+/// a dense-bf16 or descriptor-gated int8-per-row Krea 2 DiT, routed to the Krea engine via the S0d
+/// family path); every other file
 /// is refused with a typed reason (NEVER a silent fallback). Kept as a fn, not a `const`, so the
 /// guarded handler body stays reachable (no `unreachable_code`) and the switch is trivially
 /// re-flippable if a regression surfaces.
@@ -1457,8 +1458,8 @@ fn backfill_current_receipt(
 #[cfg(test)]
 mod import_gate_tests {
     //! The queue-time base-checkpoint compatibility gate (sc-14019, epic 14015): `import_source_supported`
-    //! must accept a dense-bf16 Krea 2 DiT and refuse everything else with an actionable reason, so the
-    //! LAN-exposed import endpoint (now that the kill-switch is on) can never queue an un-runnable file.
+    //! must accept a dense-bf16 or int8-per-row Krea 2 DiT and refuse unsupported triples with an
+    //! actionable reason, so the LAN-exposed import endpoint can never queue an un-runnable file.
     use super::*;
 
     /// Write a safetensors file whose header declares `(name, dtype)` tensors. The declared tensor
@@ -1485,7 +1486,7 @@ mod import_gate_tests {
     }
 
     /// A ComfyUI-native dense-bf16 Krea 2 DiT: the unique `txtfusion.` tower + BFL-style `blocks.*`
-    /// keys, all BF16 → detector `(krea_2, Transformer, Bf16)` — the one importable triple today.
+    /// keys, all BF16 → detector `(krea_2, Transformer, Bf16)` — one supported import triple.
     fn krea2_bf16_dit_keys() -> Vec<(&'static str, &'static str)> {
         vec![
             ("model.diffusion_model.blocks.0.attn.wq.weight", "BF16"),
@@ -1506,6 +1507,45 @@ mod import_gate_tests {
         assert!(
             import_source_supported(&file).is_ok(),
             "a dense-bf16 Krea 2 DiT upload must pass the import gate"
+        );
+    }
+
+    #[test]
+    fn krea2_int8_per_row_upload_is_accepted() {
+        // Header detection deliberately identifies the convention from bulk I8 weights plus
+        // `.comfy_quant`; the inference loader validates the actual descriptor JSON and scale shapes
+        // before dequantization. This reduced fixture pins the queue-time classification/gate seam.
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("kreamania_variant4.safetensors");
+        let mut names = Vec::new();
+        for index in 0..6 {
+            names.push((
+                format!("model.diffusion_model.blocks.{index}.attn.wq.weight"),
+                "I8",
+            ));
+            names.push((
+                format!("model.diffusion_model.blocks.{index}.attn.wq.weight_scale"),
+                "F32",
+            ));
+            names.push((
+                format!("model.diffusion_model.blocks.{index}.attn.wq.comfy_quant"),
+                "U8",
+            ));
+        }
+        names.push(("model.diffusion_model.blocks.0.mod.lin".to_owned(), "BF16"));
+        names.push((
+            "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+            "F32",
+        ));
+        let entries: Vec<(&str, &str)> = names
+            .iter()
+            .map(|(name, dtype)| (name.as_str(), *dtype))
+            .collect();
+        write_safetensors(&file, &entries);
+
+        assert!(
+            import_source_supported(&file).is_ok(),
+            "a Krea 2 int8-per-row DiT upload must pass the import gate"
         );
     }
 
