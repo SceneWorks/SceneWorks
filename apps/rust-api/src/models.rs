@@ -2239,18 +2239,24 @@ fn install_state_for(
             if model_has_variant_matrix(model) {
                 let variants = model_variant_states(model, data_dir);
                 let any_installed = variants.iter().any(|variant| variant.installed);
-                // Only a torn tier (some-but-not-all files present) with no complete sibling is a real
-                // repair candidate; a validly absent tier is "missing", not "incomplete".
+                // A TORN tier — some of its files present but not all — is a genuine repair candidate:
+                // it will fail to load, and re-downloading that tier fixes it. A never-fetched tier is
+                // `missing` (`cache_incomplete == false` — nothing on disk to be torn), NOT torn, so it
+                // never enters this find. That distinction is what makes it safe to surface repair even
+                // when a complete sibling exists: sc-9907 (a clean single-tier install must not read
+                // "incomplete + Fix" just because its OTHER tiers were never downloaded) is preserved by
+                // `torn` excluding missing tiers, WITHOUT also suppressing a genuinely half-downloaded
+                // sibling (sc-14431 — the old `!any_installed &&` guard hid a torn q8 behind a complete
+                // q4, so chroma/sdxl/qwen/wan/lens all reported `repairAvailable: false` over a torn tier).
                 let torn = variants
                     .iter()
                     .find(|variant| variant.cache_incomplete && !variant.installed);
-                let incomplete = !any_installed && torn.is_some();
-                let missing = if any_installed {
-                    Vec::new()
-                } else {
-                    torn.map(|variant| variant.missing_required_files.clone())
-                        .unwrap_or_default()
-                };
+                let incomplete = torn.is_some();
+                // Report the torn tier's missing files so the model-level repair knows what to re-fetch,
+                // even though a sibling tier is complete (`any_installed`).
+                let missing = torn
+                    .map(|variant| variant.missing_required_files.clone())
+                    .unwrap_or_default();
                 (any_installed, incomplete, missing)
             } else {
                 let cache_health = cache_path
@@ -4351,10 +4357,72 @@ mod variant_install_tests {
             "a never-fetched tier stays a clean missing (no spurious repair prompt — sc-9907)"
         );
 
-        // Model-level state aggregates: q4 is complete, so the model is installed overall — the torn
-        // q8 must not drag the whole model to incomplete (sc-9907), but it also must not itself count.
+        // Model-level state aggregates: q4 is complete, so the model is INSTALLED (usable) overall —
+        // and because q8 is genuinely TORN, it is also repairable (sc-14431). The complete q4 keeps
+        // `installed` true (the model still works via q4); the torn q8 raises `cache_incomplete` so the
+        // model-level Fix button appears and knows what to re-fetch. This is the fix to the old
+        // suppression that hid a torn sibling behind a complete one — distinct from sc-9907, where the
+        // OTHER tiers were merely never downloaded (missing), not torn.
         let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
         assert!(state.installed, "model installed via the complete q4 tier");
+        assert!(
+            state.cache_incomplete,
+            "a genuinely torn q8 makes the model repairable even though q4 is complete (sc-14431)"
+        );
+        assert!(
+            state
+                .missing_required_files
+                .iter()
+                .any(|file| file.starts_with("q8/")),
+            "the model-level repair must name the torn q8 tier's missing files, got {:?}",
+            state.missing_required_files
+        );
+    }
+
+    /// sc-14431: the model-level repair signal keys on a genuinely TORN tier alone, not on
+    /// `!any_installed`. A complete sibling must NOT suppress repair for a half-downloaded tier — but a
+    /// never-fetched (missing) sibling must still NOT raise a spurious repair (sc-9907 preserved).
+    #[test]
+    fn torn_tier_stays_repairable_behind_a_complete_sibling_but_missing_does_not() {
+        let _env = isolate_hf_cache();
+        let repo = "SceneWorks/matrix";
+        let model = quant_matrix_model(repo);
+
+        // Case A — complete q4 + TORN q8 (metadata only) + missing bf16 → repairable, naming q8.
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let data_dir = tmp.path();
+            seed_diffusers_tier(data_dir, repo, "q4", true);
+            seed_diffusers_tier(data_dir, repo, "q8", false);
+            let state =
+                install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+            assert!(state.installed, "usable via the complete q4 tier");
+            assert!(
+                state.cache_incomplete,
+                "a torn q8 behind a complete q4 must be repairable (sc-14431)"
+            );
+            assert!(state
+                .missing_required_files
+                .iter()
+                .any(|file| file.starts_with("q8/")));
+        }
+
+        // Case B — complete q4 + q8/bf16 NEVER fetched (missing, not torn) → installed, NOT repairable.
+        // This is the sc-9907 scenario the fix must not regress.
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let data_dir = tmp.path();
+            seed_diffusers_tier(data_dir, repo, "q4", true);
+            let state =
+                install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+            assert!(state.installed, "usable via the complete q4 tier");
+            assert!(
+                !state.cache_incomplete,
+                "a clean single-tier install with the others merely un-downloaded must NOT read \
+                 repairable (sc-9907)"
+            );
+            assert!(state.missing_required_files.is_empty());
+        }
     }
 
     /// A SANA quant-matrix turnkey (family `sana`). Ships NO `model_index.json`, so the diffusers
