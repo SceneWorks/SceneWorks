@@ -151,6 +151,30 @@ pub(crate) fn mask_box_coverage(pixels: &[u8], box_norm: BoxNorm, width: u32, he
     }
 }
 
+/// Return detected frames that need a box re-prompt after pass 1.
+///
+/// An empty predictor result is weak by definition and must not be passed to
+/// [`mask_box_coverage`], which expects frame-sized mask data. Frames without a
+/// detector anchor are propagation-only frames and are never re-seeded.
+fn weak_reseed_anchors(
+    pass1: &[Vec<u8>],
+    anchors: &[Option<BoxNorm>],
+    width: u32,
+    height: u32,
+) -> Vec<(usize, BoxNorm)> {
+    anchors
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter_map(|(i, anchor)| anchor.map(|b| (i, b)))
+        .filter(|&(i, b)| {
+            pass1.get(i).is_some_and(|m| {
+                m.is_empty() || mask_box_coverage(m, b, width, height) < COVERAGE_MIN
+            })
+        })
+        .collect()
+}
+
 /// Propagate the selected person's mask across a clip with the native-MLX SAM2 **video
 /// predictor** (sc-3714). `clip_frame_paths` is the contiguous span the track spans (clip-local
 /// frame `0` = the first detected frame); `anchors[i]` is the frame's ByteTrack box in
@@ -293,16 +317,7 @@ pub(crate) fn propagate_track_blocking(
     let pass1 = run(&[(0, prompt)])?;
 
     // Find detected frames whose propagated mask drifted off (or missed) the person.
-    let weak: Vec<(usize, BoxNorm)> = anchors
-        .iter()
-        .enumerate()
-        .skip(1)
-        .filter_map(|(i, anchor)| anchor.map(|b| (i, b)))
-        .filter(|&(i, b)| {
-            pass1.get(i).map(|m| !m.is_empty()).unwrap_or(false)
-                && mask_box_coverage(&pass1[i], b, width, height) < COVERAGE_MIN
-        })
-        .collect();
+    let weak = weak_reseed_anchors(&pass1, &anchors, width, height);
     if weak.is_empty() {
         return Ok(pass1);
     }
@@ -469,6 +484,22 @@ mod tests {
         // A box over the left half of the block → ~half the foreground inside.
         let half = mask_box_coverage(&pixels, (0.0, 0.0, 0.4, 1.0), w, h);
         assert!((half - 0.5).abs() < 1e-9, "half coverage was {half}");
+    }
+
+    /// sc-13618: a detected frame with no returned mask must be re-prompted in pass 2.
+    /// A propagation-only frame with the same empty result has no ByteTrack box to prompt
+    /// and must remain excluded.
+    #[test]
+    fn empty_detected_mask_is_selected_for_reseed_but_unanchored_frame_is_not() {
+        let prompt = (0.1, 0.1, 0.5, 0.5);
+        let recovered = (0.2, 0.2, 0.4, 0.4);
+        let pass1 = vec![vec![255; 16], Vec::new(), Vec::new()];
+        let anchors = vec![Some(prompt), Some(recovered), None];
+
+        assert_eq!(
+            weak_reseed_anchors(&pass1, &anchors, 4, 4),
+            vec![(1, recovered)]
+        );
     }
 
     fn f011_test_settings(data_dir: PathBuf) -> Settings {
