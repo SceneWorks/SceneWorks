@@ -1595,63 +1595,30 @@ export function TrainingStudio({ mode = "training" } = {}) {
           <>
             {datasetLibraryMode ? (
               <DatasetEditorPanel
-                loadingDatasets={loadingDatasets}
-                onRefreshDatasets={onRefreshDatasets}
-                busyDatasetId={busyDatasetId}
-                datasetThumbAsset={datasetThumbAsset}
-                datasets={datasets}
-                startNewDataset={startNewDataset}
-                openDataset={openDataset}
-                activeDataset={activeDataset}
-                selectedDatasetId={selectedDatasetId}
-                datasetsError={datasetsError}
-                datasetError={datasetError}
-                datasetMessage={datasetMessage}
-                draftName={draftName}
-                setDraftName={setDraftName}
-                dirty={dirty}
-                discardDraft={discardDraft}
-                setAddDialogOpen={setAddDialogOpen}
-                renamePrefix={renamePrefix}
-                setRenamePrefix={setRenamePrefix}
-                renaming={renaming}
-                memberAssets={memberAssets}
-                applyOrderedNames={applyOrderedNames}
-                setCaptionDialog={setCaptionDialog}
-                health={health}
-                datasetDoctor={datasetDoctor}
-                readinessByKey={readinessByKey}
-                onToggleItemAck={toggleItemQualityAck}
-                canSave={canSave}
-                saveValidity={saveValidity}
-                saveDataset={saveDataset}
-                savingDataset={savingDataset}
-                unavailableAssetIds={unavailableAssetIds}
-                removeUnavailableAsset={removeUnavailableAsset}
-                captionDraftById={captionDraftById}
-                onPreview={onPreview}
-                updateCaption={updateCaption}
-                captioning={captioning}
-                addDialogOpen={addDialogOpen}
-                imageAssets={imageAssets}
-                characters={characters}
-                associatedCharacterId={associatedCharacterId}
-                setActiveView={setActiveView}
-                importingAssets={importingAssets}
-                selectedAssetIds={selectedAssetIds}
-                addAssets={addAssets}
-                handleImport={handleImport}
-                captionDialog={captionDialog}
-                gpuOptions={gpuOptions}
-                updateCaptionSetting={updateCaptionSetting}
-                runCaptionJob={runCaptionJob}
-                toggleCaptionExtraOption={toggleCaptionExtraOption}
-                displayedCaptionPrompt={displayedCaptionPrompt}
-                captionSettings={captionSettings}
-                captionModelMissing={captionModelMissing}
-                onDownloadCaptionModel={onDownloadCaptionModel}
-                captionModelSizeLabel={captionModelSizeLabel}
-                captionModelName={captionModel?.name ?? "JoyCaption"}
+                datasetSession={{
+                  loadingDatasets, onRefreshDatasets, busyDatasetId, datasetThumbAsset,
+                  datasets, startNewDataset, openDataset, activeDataset, selectedDatasetId,
+                  datasetsError, datasetError, datasetMessage, draftName, setDraftName,
+                  dirty, discardDraft, setAddDialogOpen, renamePrefix, setRenamePrefix,
+                  renaming, memberAssets, applyOrderedNames, setCaptionDialog, health,
+                  canSave, saveValidity, saveDataset, savingDataset, unavailableAssetIds,
+                  removeUnavailableAsset,
+                }}
+                captionSession={{
+                  captionDraftById, onPreview, updateCaption, captioning, addDialogOpen,
+                  selectedAssetIds, addAssets, handleImport, captionDialog,
+                  updateCaptionSetting, runCaptionJob, toggleCaptionExtraOption,
+                  displayedCaptionPrompt, captionSettings, captionModelMissing,
+                  onDownloadCaptionModel, captionModelSizeLabel,
+                  captionModelName: captionModel?.name ?? "JoyCaption",
+                }}
+                doctorSession={{
+                  datasetDoctor, readinessByKey, onToggleItemAck: toggleItemQualityAck,
+                }}
+                config={{
+                  imageAssets, characters, associatedCharacterId, setActiveView,
+                  importingAssets, gpuOptions,
+                }}
               />
             ) : (
               <>

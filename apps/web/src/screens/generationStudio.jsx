@@ -784,6 +784,7 @@ export function LoraPickerSection({
   setLoraWeight,
   loraEmptyMessage,
   onUpdateLora,
+  showIncompatibleControl = true,
 }) {
   // Add-on-demand picker (UI-refinement 3b): only the LoRAs you've added render as
   // slots; everything else lives behind the "Add LoRA" dropdown. This replaces the
@@ -811,14 +812,16 @@ export function LoraPickerSection({
               : "Choose a model"}
         </span>
       </div>
-      <label className="checkline">
-        <input
-          checked={showIncompatibleLoras}
-          onChange={(event) => setShowIncompatibleLoras(event.target.checked)}
-          type="checkbox"
-        />
-        Show incompatible
-      </label>
+      {showIncompatibleControl ? (
+        <label className="checkline">
+          <input
+            checked={showIncompatibleLoras}
+            onChange={(event) => setShowIncompatibleLoras(event.target.checked)}
+            type="checkbox"
+          />
+          Show incompatible
+        </label>
+      ) : null}
 
       {!selectedLoras.length && !availableLoras.length ? (
         <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
