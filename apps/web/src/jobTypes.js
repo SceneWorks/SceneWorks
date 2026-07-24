@@ -19,7 +19,12 @@ export const GPU_REQUIRED_JOB_TYPES = new Set([
   "video_upscale",
   "person_replace",
   "lora_train",
+  "control_training",
   "training_caption",
+  "dataset_analysis",
+  "dataset_upscale",
+  "dataset_face_analysis",
+  "face_likeness_compare",
 ]);
 
 // Utility job types that run on any worker (no GPU required).
@@ -28,7 +33,7 @@ export const NON_GPU_JOB_TYPES = new Set([
   "model_import",
   "model_convert",
   "lora_import",
-  "prompt_refine",
+  "lora_download",
 ]);
 
 // Terminal job statuses (no further progress expected).

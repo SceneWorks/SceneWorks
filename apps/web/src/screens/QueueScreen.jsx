@@ -96,7 +96,12 @@ function jobWaitingMessage(job, workers, jobs) {
   if (job.requestedGpu && job.requestedGpu !== "auto") {
     return `Waiting for GPU ${job.requestedGpu} to claim the job.`;
   }
-  return NON_GPU_JOB_TYPES.has(job.type) ? "Waiting for a utility worker." : "Waiting for an available GPU worker.";
+  if (NON_GPU_JOB_TYPES.has(job.type)) {
+    return "Waiting for a utility worker.";
+  }
+  return GPU_REQUIRED_JOB_TYPES.has(job.type)
+    ? "Waiting for an available GPU worker."
+    : "Waiting for an available worker with the required capability.";
 }
 
 function workerStatusLine(worker) {
