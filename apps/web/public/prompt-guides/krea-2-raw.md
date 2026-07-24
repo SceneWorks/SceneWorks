@@ -36,11 +36,12 @@ The goal is a clear prompt, not a long one:
 - **Specify the light.** "soft overcast light", "golden-hour backlight", "hard noon sun", "warm
   tungsten interior" — Krea is highly lighting-responsive, and its own showcase prompts all name the
   lighting. This is the single highest-value detail you can add.
-- **Use the negative prompt.** Because Raw runs true CFG, a concise **quality negative** measurably
-  sharpens the result. The Studio seeds a mild default (`blurry, soft focus, low detail, low quality`)
-  into the negative box; you can edit or clear it. Keep it *mild* — an aggressive skin/texture negative
-  (e.g. `plastic skin, waxy skin`) over-corrects into an artificial plastic look. State what you want in
-  the prompt; use the negative only to push away genuine quality faults.
+- **The negative prompt is optional — no default is used.** Because Raw runs true CFG it *supports* a
+  negative prompt, but the negative box starts **empty** and you rarely need it. Say what you want in the
+  positive prompt; reach for the negative only to push away a **specific** artifact you actually see
+  (e.g. an unwanted object, a color cast). Keep any negative *mild* and targeted — a broad quality
+  negative (`blurry, low quality`) or an aggressive skin/texture one (`plastic skin, waxy skin`) tends to
+  over-correct and flatten the image rather than help.
 
 ## Build The Prompt
 
@@ -74,10 +75,12 @@ realistic subjects you don't need to say "photorealistic"; that's already the de
 - **Resolution:** use a native bucket (1024² / 768×1024 / 1024×768 / 1280×720 / 720×1280 / 1536²); width
   and height must be multiples of 16. 1024² is the default.
 - **Steps:** ~52 (Raw is undistilled — it needs the full step budget, unlike few-step Turbo).
-- **Guidance:** a real classifier-free-guidance scale; **~3.5** is the reference default. Raise it a
-  little for stronger prompt adherence, lower it for a softer, more natural look.
-- **Negative prompt:** supported and recommended (see above). A concise quality negative is the biggest
-  lever on sharpness.
+- **Guidance:** a real classifier-free-guidance scale; **~1.0** is the default and renders the most
+  natural look. Note Krea's nominal 3.5 is defined differently from standard CFG — it is effectively
+  standard-CFG **4.5**, which oversaturates on this pipeline (over-warm, crunchy). Start at ~1.0; raise it
+  only a little for stronger prompt adherence, and expect saturation/contrast to climb quickly.
+- **Negative prompt:** supported but **off by default** — the box starts empty. Add a short, targeted
+  negative only to push away a specific artifact you see; you don't need one for normal renders (see above).
 - **Sampler / scheduler:** `default` is the native rectified-flow loop and the best starting point; the
   curated samplers/schedulers are exposed for experimentation.
 - **Quantization:** Q8 is the default (near-lossless, ~20.5 GB download — needs a 48 GB-class Mac or a
@@ -125,8 +128,10 @@ finish fast.
 
 The **canonical workflow** (the Studio's "Turbo finish (4+4)" preset) is two phases:
 
-1. **4 steps — Raw, true-CFG on (guidance ~3.5), no accelerator LoRA.** Builds composition, structure,
-   and prompt adherence with the full-fidelity base.
+1. **4 steps — Raw, true-CFG on (the preset uses guidance ~3.5 for this structure phase), no accelerator
+   LoRA.** Builds composition, structure, and prompt adherence with the full-fidelity base. (This phase
+   deliberately runs a higher guidance than the plain single-pass t2i default of ~1.0, because it is only
+   a few structure steps; lower it toward ~1.0 if the finish comes out oversaturated.)
 2. **4 steps — Raw + the turbo (accelerator) LoRA, CFG off (guidance 0).** Fast distilled finishing on
    the trajectory the first phase set up.
 
@@ -135,8 +140,8 @@ Tune from there:
 - Want stronger adherence or cleaner structure? Add steps to **phase 1** (e.g. `6 + 4`, `8 + 4`).
 - Keep the **turbo/accelerator LoRA in the CFG-off phase**, and leave the CFG-on phase base-only (or with
   just your style LoRA) so its guidance is honored.
-- Give the CFG-on phase a real guidance (**~3.5**, the Raw default); set each CFG-off phase's guidance to
-  **0**.
+- Give the CFG-on phase a real guidance (the Turbo-finish preset uses **~3.5** for its short structure
+  phase; the plain single-pass Raw default is **~1.0**); set each CFG-off phase's guidance to **0**.
 - A style/subject LoRA can be toggled into either phase; the accelerator belongs only in a CFG-off phase.
 - Keep the total step budget modest — a 2–3 phase split well under the 52-step single-phase Raw cost is
   the whole point.

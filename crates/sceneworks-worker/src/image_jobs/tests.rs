@@ -1759,6 +1759,47 @@ fn resolve_guidance_none_for_distilled_set_for_dev() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn fresh_krea_2_raw_job_resolves_default_guidance_1_and_empty_negative() {
+    // sc-14203: a fresh Krea 2 Raw job (no advanced.guidanceScale, no negativePrompt) must resolve to the
+    // TRUE-CFG guidance default 1.0 and an EMPTY negative. Raw advertises supports_guidance +
+    // supports_negative_prompt, so this exercises the real product path: `resolve_guidance` falls back to
+    // the ModelRow `default_guidance` (1.0, down from 3.5) and `resolve_negative_prompt` returns None
+    // because nothing is seeded server-side (the sc-13881 default-negative seeding was dropped).
+    let raw = mlx_model("krea_2_raw").unwrap();
+    // Pins the non-default 1.0 so it discriminates a revert to 3.5.
+    assert_eq!(
+        resolve_guidance(&request(json!({ "projectId": "p" })), &raw),
+        Some(1.0),
+        "fresh krea_2_raw resolves the sc-14203 default guidance 1.0"
+    );
+    // An explicit advanced.guidanceScale still overrides the default.
+    assert_eq!(
+        resolve_guidance(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 3.5 } })),
+            &raw
+        ),
+        Some(3.5),
+        "krea_2_raw honors an explicit guidance override"
+    );
+    // No negative is provided → empty (the worker never seeds one; the default seeding was removed).
+    assert_eq!(
+        resolve_negative_prompt(&request(json!({ "projectId": "p" })), &raw),
+        None,
+        "fresh krea_2_raw carries no default negative (sc-14203)"
+    );
+    // A user-typed negative is still honored — the capability is unchanged.
+    assert_eq!(
+        resolve_negative_prompt(
+            &request(json!({ "projectId": "p", "negativePrompt": "blurry" })),
+            &raw
+        ),
+        Some("blurry".to_owned()),
+        "krea_2_raw still forwards a user-typed negative"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn adapter_id_reports_per_family_mlx_label() {
     assert_eq!(
         adapter_id(&request(json!({ "model": "z_image_turbo" }))),
@@ -5639,7 +5680,7 @@ fn lora_declares_accelerator_role_matches_only_the_accelerator_marker() {
 // its sampling regime against the `krea_2_turbo` descriptor (while loading Raw weights), so the whole
 // regime falls out for free: fixed-mu engine, ~8 steps, guidance off, no negative forwarded. Pinning
 // the NON-default turbo values here makes the test FAIL if the lane ever reverts to the Raw defaults
-// (52 steps / guidance 3.5 / dynamic-mu / negative forwarded). mu itself is engine-internal
+// (52 steps / guidance 1.0 / dynamic-mu / negative forwarded). mu itself is engine-internal
 // (`TURBO_MU = 1.15` in the pinned Krea engine's `turbo_sigmas`), reached by selecting the
 // `krea_2_turbo` engine id — so asserting that engine id IS the worker-observable proof of fixed mu.
 #[cfg(target_os = "macos")]
@@ -5679,7 +5720,7 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         "control: the Raw default is 52"
     );
 
-    // Guidance: CFG off (the turbo descriptor advertises no guidance → None), NOT the Raw 3.5.
+    // Guidance: CFG off (the turbo descriptor advertises no guidance → None), NOT the Raw 1.0.
     assert_eq!(
         resolve_guidance(&req, &turbo),
         None,
@@ -5687,8 +5728,8 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
     );
     assert_eq!(
         resolve_guidance(&req, &raw),
-        Some(3.5),
-        "control: the Raw default guidance is 3.5",
+        Some(1.0),
+        "control: the Raw default guidance is 1.0",
     );
 
     // Negative prompt: NOT forwarded under turbo (the descriptor advertises no negative), even though
@@ -5993,7 +6034,7 @@ fn candle_krea_multiphase_claims_conflicting_shapes_to_reject_them() {
 // mu Turbo engine id, ~8 steps, guidance off, no negative forwarded. `resolve_steps`/`resolve_guidance`/
 // `resolve_negative_prompt`/`model_repo`/`mlx_model` are all SHARED (the candle lane uses the same
 // registry join), so pinning the NON-default turbo values makes this FAIL if the candle lane ever reverts
-// to the Raw regime (52 steps / guidance 3.5 / negative forwarded) or loads the wrong repo/engine.
+// to the Raw regime (52 steps / guidance 1.0 / negative forwarded) or loads the wrong repo/engine.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
@@ -6039,7 +6080,7 @@ fn candle_krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         "control: the Raw default is 52"
     );
 
-    // Guidance: CFG off under the turbo (distilled) descriptor → None, NOT the Raw 3.5.
+    // Guidance: CFG off under the turbo (distilled) descriptor → None, NOT the Raw 1.0.
     assert_eq!(
         resolve_guidance(&req, &turbo),
         None,
@@ -6047,8 +6088,8 @@ fn candle_krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
     );
     assert_eq!(
         resolve_guidance(&req, &raw),
-        Some(3.5),
-        "control: the Raw default guidance is 3.5",
+        Some(1.0),
+        "control: the Raw default guidance is 1.0",
     );
 
     // Negative prompt: NOT forwarded under turbo (distilled, no negative branch); the Raw path forwards it.
