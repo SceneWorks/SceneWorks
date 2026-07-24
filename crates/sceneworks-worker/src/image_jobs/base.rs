@@ -1013,37 +1013,15 @@ pub(crate) fn resolve_weights_dir(
             SANA_SPRINT_CANDLE_DIFFUSERS_REPO,
         ));
     }
-    // SenseNova-U1 off-Mac (candle, sc-13817): `candle-gen-sensenova` dense-loads a FLAT
-    // `*.safetensors` backbone (`f32_vb`) and HARD-REJECTS `spec.quantize` — it can consume ONLY the
-    // dense `bf16/` tier of the SceneWorks turnkey. But every sensenova entry flags
-    // `mlx.standardTierLayout: true`, so `standard_tier_subdir` below picks `preferred_tier`, which
-    // with no explicit `mlxQuantize` and no `mlx.minQualityTier` is the app-wide **q8** default — an
-    // MLX-PACKED tier the candle loader cannot read. Net: the candle sensenova lane handed the loader
-    // packed weights and could never render. Force the dense tier here (the Anima `(None, None)`
-    // dense-force precedent above, in tier-subdir form).
-    //
-    // Applies to the WHOLE family, not just the `_fast` ids sc-13817 was filed against: base and
-    // infographic share the same loader constraint and the same manifest flags, so they had the
-    // identical defect. The descriptor advertises `supported_quants: &[]`, so `resolve_quant` already
-    // yields `(None, None)` and no quant reaches the load — the DIRECTORY was the whole bug.
-    //
-    // Forcing the tier here cannot silently override a user's tier pick: every sensenova
-    // `ModelCaps` sets `candle_quant = false` (routing/catalog.rs), so a deliberate
-    // `advanced.mlxQuantize > 0` DEFERS off this lane rather than arriving here to be quietly
-    // rewritten to bf16 — the same contract the Anima dense-force relies on. This arm only handles
-    // the default-quant case the router does not strip.
-    //
-    // When no dense tier is installed this REJECTS with an actionable message rather than falling
-    // back to a packed tier: a fallback would only reach the loader's opaque "no .safetensors found"
-    // / packed-detect failure, and silently substituting a tier the engine cannot load is the
-    // stub-render class of bug (sc-13831). macOS never compiles this branch — mlx-gen-sensenova
-    // packed-loads every tier, so the MLX lane keeps the full q4/q8/bf16 matrix.
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    if is_sensenova_model(&request.model) {
-        return snapshot
-            .map(|root| sensenova_candle_dense_tier(&root, &request.model))
-            .transpose();
-    }
+    // SenseNova-U1 needs NO bespoke branch (sc-14249). It had one from sc-13817 to sc-14249:
+    // `candle-gen-sensenova` mmapped its backbone at a hardcoded F32 and hard-rejected
+    // `spec.quantize`, so it could read ONLY the dense `bf16/` tier — and `standard_tier_subdir`'s
+    // app-wide q8 default handed it packed weights it could not load. That is fixed IN THE ENGINE:
+    // every backbone projection now packed-detects its MLX triple, so all three tiers load and the
+    // family goes through the ordinary `standard_tier_subdir` descent below like every other
+    // quant-matrix model. The old `sensenova_candle_dense_tier` force is deliberately gone rather
+    // than left as a harmless-looking guard: leaving it would pin every candle sensenova job to the
+    // heaviest tier forever, which is the whole thing sc-14249 exists to undo.
     // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
     // turnkeys with self-contained `q4/` (default) + `q8/` + `bf16/` subdirs (replacing any
     // install-time convert); point the engine at the chosen tier's subdir rather than the repo root.
@@ -1053,44 +1031,6 @@ pub(crate) fn resolve_weights_dir(
         return Ok(snapshot.map(|root| standard_tier_subdir(&root, request)));
     }
     Ok(snapshot)
-}
-
-/// The DENSE SenseNova-U1 tier the candle lane can actually load (sc-13817).
-///
-/// `candle-gen-sensenova`'s `f32_vb` mmaps the flat `*.safetensors` shards directly under the
-/// resolved dir, so a loadable tier is one holding real weight files — the MLX-packed `q4/`/`q8/`
-/// tiers are unreadable to it regardless of how complete they are. Prefers `bf16/`; accepts a flat
-/// snapshot root (a non-tiered dense install) as the fallback shape.
-///
-/// A tier dir that exists but holds only configs/tokenizer — the *torn* shape a partial download
-/// leaves, and exactly what this repo's `q8/` looks like on a half-provisioned host — does NOT count
-/// as present, so a torn dense tier is reported as missing rather than handed to the loader.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn sensenova_candle_dense_tier(root: &Path, model: &str) -> WorkerResult<PathBuf> {
-    let has_flat_weights = |dir: &Path| -> bool {
-        std::fs::read_dir(dir).is_ok_and(|entries| {
-            entries.flatten().any(|entry| {
-                let path = entry.path();
-                !sceneworks_core::lora_family::is_hidden_file(&path)
-                    && path
-                        .extension()
-                        .is_some_and(|ext| ext == "safetensors" || ext == "gguf")
-            })
-        })
-    };
-    let bf16 = root.join("bf16");
-    if has_flat_weights(&bf16) {
-        return Ok(bf16);
-    }
-    if has_flat_weights(root) {
-        return Ok(root.to_path_buf());
-    }
-    Err(WorkerError::InvalidPayload(format!(
-        "{model}: the candle SenseNova-U1 engine loads DENSE weights only, and no dense tier is \
-         installed at {}. Install the model's bf16 tier (the q4/q8 tiers are MLX-packed and cannot \
-         be loaded by this backend).",
-        root.display()
-    )))
 }
 
 /// Models that ship the standard SceneWorks quant-matrix turnkey layout: self-contained `q4/`
@@ -3221,9 +3161,10 @@ fn is_flux_model(model: &str) -> bool {
 /// The SenseNova-U1 SceneWorks ids (base + 8-step distill), both served by the unified
 /// `mlx-gen-sensenova` engine (sc-3900).
 ///
-/// sc-13817 widened the gate from macOS-only: the off-Mac candle lane needs the same id set to force
-/// its dense-tier resolution (`sensenova_candle_dense_tier`), because `candle-gen-sensenova` can read
-/// only the dense `bf16/` tier.
+/// sc-13817 widened the gate from macOS-only so the off-Mac candle lane could force a dense tier;
+/// sc-14249 retired that force (`candle-gen-sensenova` packed-detects all three tiers now), but the
+/// widened gate stays — the off-Mac VQA / interleave handlers (`image_jobs/sensenova.rs`) key on the
+/// same id set.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn is_sensenova_model(model: &str) -> bool {
     matches!(
@@ -7746,31 +7687,38 @@ mod standard_tier_tests {
         );
     }
 
-    /// sc-13817: the candle SenseNova-U1 lane must land on the DENSE `bf16/` tier.
+    /// sc-14249 — the candle SenseNova lane resolves the tier the REQUEST asks for.
     ///
-    /// This is the whole defect the story was filed for, stated as an assertion. Every sensenova
-    /// entry flags `mlx.standardTierLayout: true` and declares no `mlx.minQualityTier`, so
-    /// `standard_tier_subdir` resolves `preferred_tier(None, None, false)` = the app-wide **q8**
-    /// default — an MLX-packed tier. `candle-gen-sensenova` dense-loads a flat `*.safetensors`
-    /// backbone and hard-rejects `spec.quantize`, so it can read ONLY `bf16/`. Before the fix the
-    /// candle lane handed the loader packed weights and could never render.
+    /// This replaces the two sc-13817 tests that pinned it to `bf16/`. That force existed only
+    /// because `candle-gen-sensenova` mmapped at a hardcoded F32 and rejected `spec.quantize`, so
+    /// packed weights were unreadable; the engine now packed-detects every backbone projection, so
+    /// the family takes the ordinary `standard_tier_subdir` descent and the cheap tiers are reachable
+    /// at last. Asserting the descent HERE is what would catch a re-introduced dense force — the
+    /// symptom of which is silent: every job still renders, just on the 70.5 GB tier.
     ///
-    /// The fixture installs a COMPLETE q8 tier alongside bf16 precisely so a passing result cannot
-    /// be an accident of q8 being absent — the tier-completeness fallback would reach bf16 on its
-    /// own if q8 were torn, which is what masks this bug on a half-provisioned host.
+    /// All three tiers are seeded COMPLETE so a result cannot be an accident of a tier being absent
+    /// (the completeness fallback would reach a sibling on its own — the shape that masked sc-13817
+    /// on a half-provisioned host).
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
-    fn sensenova_candle_resolves_the_dense_bf16_tier_over_a_complete_packed_q8() {
+    fn sensenova_candle_tier_follows_the_request_not_a_forced_dense_tier() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        // A COMPLETE packed q8 tier (weights present) — the tier the default would otherwise pick.
-        std::fs::create_dir_all(root.join("q8")).unwrap();
-        std::fs::write(root.join("q8").join("model.safetensors"), "packed").unwrap();
-        std::fs::write(root.join("q8").join("config.json"), "{}").unwrap();
-        // The dense tier the candle loader can actually read.
-        std::fs::create_dir_all(root.join("bf16")).unwrap();
-        std::fs::write(root.join("bf16").join("model.safetensors"), "dense").unwrap();
-
+        for tier in ["q4", "q8", "bf16"] {
+            std::fs::create_dir_all(root.join(tier)).unwrap();
+            std::fs::write(root.join(tier).join("model.safetensors"), "weights").unwrap();
+        }
+        let req = |model: &str, advanced: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({
+                    "model": model,
+                    "advanced": advanced,
+                    "modelManifestEntry": { "mlx": { "standardTierLayout": true } }
+                })
+                .as_object()
+                .unwrap(),
+            )
+        };
         for model in [
             "sensenova_u1_8b",
             "sensenova_u1_8b_fast",
@@ -7779,51 +7727,21 @@ mod standard_tier_tests {
             "sensenova_u1_8b_infographic_v2_fast",
             "sensenova_u1_8b_infographic_v3_fast",
         ] {
+            // An explicit pick is honored — the packed tiers are the point of the story.
+            for (bits, tier) in [(4, "q4"), (8, "q8"), (0, "bf16")] {
+                assert_eq!(
+                    standard_tier_subdir(root, &req(model, json!({ "mlxQuantize": bits }))),
+                    root.join(tier),
+                    "{model} with mlxQuantize {bits} must resolve {tier}"
+                );
+            }
+            // ...and with no pick, the app-wide q8 default — NOT a forced bf16.
             assert_eq!(
-                sensenova_candle_dense_tier(root, model).unwrap(),
-                root.join("bf16"),
-                "{model} must resolve the dense bf16 tier, never the packed q8 the default prefers"
+                standard_tier_subdir(root, &req(model, json!({}))),
+                root.join("q8"),
+                "{model} default must be the shared q8, not a dense force"
             );
         }
-    }
-
-    /// sc-13817: a flat (non-tiered) dense snapshot resolves as-is, and a snapshot with NO dense
-    /// weights REJECTS with an actionable message instead of falling back to a packed tier.
-    ///
-    /// Falling back would only reach the loader's opaque "no .safetensors found" / packed-detect
-    /// failure — and silently substituting a tier the engine cannot load is the stub-render class of
-    /// bug (sc-13831). A TORN dense tier (configs present, weights absent — exactly what a partial
-    /// download leaves) must count as missing, not as present.
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    #[test]
-    fn sensenova_candle_rejects_when_no_dense_tier_is_installed() {
-        // Flat dense snapshot (no tier subdirs) → resolve the root itself.
-        let flat = tempfile::tempdir().unwrap();
-        std::fs::write(flat.path().join("model.safetensors"), "dense").unwrap();
-        assert_eq!(
-            sensenova_candle_dense_tier(flat.path(), "sensenova_u1_8b_fast").unwrap(),
-            flat.path().to_path_buf(),
-            "a flat dense install resolves as-is"
-        );
-
-        // Packed q4/q8 only, plus a TORN bf16 (configs but no weights) — nothing dense is loadable.
-        let packed = tempfile::tempdir().unwrap();
-        let root = packed.path();
-        for tier in ["q4", "q8"] {
-            std::fs::create_dir_all(root.join(tier)).unwrap();
-            std::fs::write(root.join(tier).join("model.safetensors"), "packed").unwrap();
-        }
-        std::fs::create_dir_all(root.join("bf16")).unwrap();
-        std::fs::write(root.join("bf16").join("config.json"), "{}").unwrap();
-        std::fs::write(root.join("bf16").join("tokenizer.json"), "{}").unwrap();
-
-        let error = sensenova_candle_dense_tier(root, "sensenova_u1_8b_fast")
-            .expect_err("a torn/absent dense tier must reject, not fall back to a packed tier");
-        let message = error.to_string();
-        assert!(
-            message.contains("bf16") && message.contains("DENSE"),
-            "the error must name the dense tier to install, got {message:?}"
-        );
     }
 
     /// sc-8746 on-device verify (MLX): drive the ACTUAL worker seam against a downloaded SceneWorks

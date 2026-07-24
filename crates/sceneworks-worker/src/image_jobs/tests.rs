@@ -6145,21 +6145,20 @@ fn isolate_hf_hub_cache_to(hub: &std::path::Path) -> EnvVars {
     ])
 }
 
-/// sc-13817 — **the wiring half** of the candle SenseNova dense-force.
+/// sc-14249 — **the wiring half**: `resolve_weights_dir` routes the candle SenseNova lane through the
+/// ordinary `standard_tier_subdir` descent, so the request's tier is what loads.
 ///
-/// The unit tests next to `sensenova_candle_dense_tier` prove the resolver picks bf16; this proves
-/// `resolve_weights_dir` actually ROUTES sensenova through it. Without that branch the request falls
-/// to `standard_tier_subdir` (every sensenova entry flags `mlx.standardTierLayout: true`), which with
-/// no explicit `mlxQuantize` and no `minQualityTier` resolves the app-wide **q8** default — an
-/// MLX-packed tier `candle-gen-sensenova` cannot read, since it dense-mmaps a flat `*.safetensors`
-/// backbone and hard-rejects `spec.quantize`.
+/// This replaces the sc-13817 assertion that it force-resolved `bf16/`. That force was a workaround
+/// for `candle-gen-sensenova` being dense-f32-only; the engine now packed-detects every backbone
+/// projection, so the packed tiers are loadable and pinning the lane to the heaviest one would just
+/// be a silent 70.5 GB tax (every job would still render — which is exactly why it needs a test).
 ///
-/// Both tiers are seeded COMPLETE so the result cannot be an accident of the packed tier being
-/// absent — a torn q8 would fall through to bf16 on its own, which is exactly what masks this bug on
-/// a half-provisioned host (the dev box that filed the story had a weightless q8).
+/// Both tiers are seeded COMPLETE so the result cannot be an accident of one being absent: a torn
+/// tier falls through to a sibling on its own, and that is what masked sc-13817 on a
+/// half-provisioned host.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn sensenova_weights_resolution_routes_the_candle_lane_to_the_dense_tier() {
+fn sensenova_weights_resolution_takes_the_standard_tier_descent() {
     let root = tempfile::tempdir().unwrap();
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).unwrap();
@@ -6168,8 +6167,11 @@ fn sensenova_weights_resolution_routes_the_candle_lane_to_the_dense_tier() {
         .join("models--SceneWorks--sensenova-u1-8b-fast-mlx")
         .join("snapshots")
         .join("installed-revision");
-    // A COMPLETE packed q8 (what the default would pick) AND the dense bf16 tier.
-    for file in ["q8/model.safetensors", "bf16/model.safetensors"] {
+    for file in [
+        "q4/model.safetensors",
+        "q8/model.safetensors",
+        "bf16/model.safetensors",
+    ] {
         let path = snapshot.join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b"weights").unwrap();
@@ -6177,19 +6179,35 @@ fn sensenova_weights_resolution_routes_the_candle_lane_to_the_dense_tier() {
     let mut settings = Settings::from_env();
     settings.data_dir = root.path().to_path_buf();
 
-    let req = request(json!({
-        "projectId": "p",
-        "model": "sensenova_u1_8b_fast",
-        "modelManifestEntry": {
-            "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
-            "mlx": { "standardTierLayout": true, "quantize": 4 }
-        }
-    }));
+    let req = |bits: Option<i64>| {
+        let advanced = match bits {
+            Some(b) => json!({ "mlxQuantize": b }),
+            None => json!({}),
+        };
+        request(json!({
+            "projectId": "p",
+            "model": "sensenova_u1_8b_fast",
+            "advanced": advanced,
+            "modelManifestEntry": {
+                "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
+                "mlx": { "standardTierLayout": true, "quantize": 4 }
+            }
+        }))
+    };
 
+    // The packed tiers the story exists to unlock now resolve...
+    for (bits, tier) in [(Some(4), "q4"), (Some(8), "q8"), (Some(0), "bf16")] {
+        assert_eq!(
+            resolve_weights_dir(&req(bits), &settings).unwrap(),
+            Some(snapshot.join(tier)),
+            "mlxQuantize {bits:?} must resolve the {tier} tier"
+        );
+    }
+    // ...and the default is the shared q8, not the forced dense tier sc-13817 pinned.
     assert_eq!(
-        resolve_weights_dir(&req, &settings).unwrap(),
-        Some(snapshot.join("bf16")),
-        "the candle sensenova lane must resolve the DENSE bf16 tier, not the packed q8 default"
+        resolve_weights_dir(&req(None), &settings).unwrap(),
+        Some(snapshot.join("q8")),
+        "the candle sensenova default must be the app-wide q8, not a forced bf16"
     );
 }
 

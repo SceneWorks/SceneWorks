@@ -1200,6 +1200,27 @@
         "families": ["sensenova-u1"],
         "types": []
       },
+      // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
+      // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
+      // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
+      // read no other tier: a measured 70.5 GB peak, i.e. 96 GB-card-only. It now packed-detects
+      // every backbone projection, so all three tiers load and the numbers are:
+      //
+      //   bf16 36.7 | q8 22.5 | q4 14.8   (load-peak == steady == overall-peak; the backbone is
+      //   resident for the whole run and the AR denoise adds no separate transient)
+      //
+      // QUALITY NOTE: q8 is visually faithful to bf16 (high-pass energy in a flat region matches:
+      // std 5.00 vs 5.20). **q4 is visibly degraded** — a structured ~4 px cross-hatch, 3x the
+      // high-frequency energy (std 15.73). That is the TIER's own 4-bit fidelity, not a load bug:
+      // the repack guard (`real_tier_repack_reproduces_the_on_disk_affine_grid`) measures this
+      // loader bit-exact against the tier's own affine grid (max|D| 0.0, rel-RMS 0.0000%). Tier
+      // default resolution is unaffected (`standard_tier_subdir` defaults to q8; q4 is an explicit
+      // opt-in), but do not make q4 this family's default without re-checking the artifact.
+      "candle": {
+        "minMemoryGb": 16,
+        "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
+        "measured": true
+      },
       "mlx": {
         // q4/ is the shipped default tier (sc-8771); q8/ + bf16/ are hosted and selectable via
         // advanced.mlxQuantize (standard_tier_subdir resolves the subdir).
@@ -1301,6 +1322,27 @@
         "families": ["sensenova-u1"],
         "types": []
       },
+      // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
+      // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
+      // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
+      // read no other tier: a measured 70.5 GB peak, i.e. 96 GB-card-only. It now packed-detects
+      // every backbone projection, so all three tiers load and the numbers are:
+      //
+      //   bf16 36.7 | q8 22.5 | q4 14.8   (load-peak == steady == overall-peak; the backbone is
+      //   resident for the whole run and the AR denoise adds no separate transient)
+      //
+      // QUALITY NOTE: q8 is visually faithful to bf16 (high-pass energy in a flat region matches:
+      // std 5.00 vs 5.20). **q4 is visibly degraded** — a structured ~4 px cross-hatch, 3x the
+      // high-frequency energy (std 15.73). That is the TIER's own 4-bit fidelity, not a load bug:
+      // the repack guard (`real_tier_repack_reproduces_the_on_disk_affine_grid`) measures this
+      // loader bit-exact against the tier's own affine grid (max|D| 0.0, rel-RMS 0.0000%). Tier
+      // default resolution is unaffected (`standard_tier_subdir` defaults to q8; q4 is an explicit
+      // opt-in), but do not make q4 this family's default without re-checking the artifact.
+      "candle": {
+        "minMemoryGb": 16,
+        "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
+        "measured": true
+      },
       "mlx": {
         "quantize": 4,
         "standardTierLayout": true
@@ -1388,6 +1430,27 @@
       "loraCompatibility": {
         "families": ["sensenova-u1"],
         "types": []
+      },
+      // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
+      // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
+      // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
+      // read no other tier: a measured 70.5 GB peak, i.e. 96 GB-card-only. It now packed-detects
+      // every backbone projection, so all three tiers load and the numbers are:
+      //
+      //   bf16 36.7 | q8 22.5 | q4 14.8   (load-peak == steady == overall-peak; the backbone is
+      //   resident for the whole run and the AR denoise adds no separate transient)
+      //
+      // QUALITY NOTE: q8 is visually faithful to bf16 (high-pass energy in a flat region matches:
+      // std 5.00 vs 5.20). **q4 is visibly degraded** — a structured ~4 px cross-hatch, 3x the
+      // high-frequency energy (std 15.73). That is the TIER's own 4-bit fidelity, not a load bug:
+      // the repack guard (`real_tier_repack_reproduces_the_on_disk_affine_grid`) measures this
+      // loader bit-exact against the tier's own affine grid (max|D| 0.0, rel-RMS 0.0000%). Tier
+      // default resolution is unaffected (`standard_tier_subdir` defaults to q8; q4 is an explicit
+      // opt-in), but do not make q4 this family's default without re-checking the artifact.
+      "candle": {
+        "minMemoryGb": 16,
+        "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
+        "measured": true
       },
       "mlx": {
         "quantize": 4,
@@ -1484,6 +1547,27 @@
         // offered.
         "families": ["sensenova-u1"],
         "types": []
+      },
+      // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
+      // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
+      // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
+      // read no other tier: a measured 70.5 GB peak, i.e. 96 GB-card-only. It now packed-detects
+      // every backbone projection, so all three tiers load and the numbers are:
+      //
+      //   bf16 36.7 | q8 22.5 | q4 14.8   (load-peak == steady == overall-peak; the backbone is
+      //   resident for the whole run and the AR denoise adds no separate transient)
+      //
+      // QUALITY NOTE: q8 is visually faithful to bf16 (high-pass energy in a flat region matches:
+      // std 5.00 vs 5.20). **q4 is visibly degraded** — a structured ~4 px cross-hatch, 3x the
+      // high-frequency energy (std 15.73). That is the TIER's own 4-bit fidelity, not a load bug:
+      // the repack guard (`real_tier_repack_reproduces_the_on_disk_affine_grid`) measures this
+      // loader bit-exact against the tier's own affine grid (max|D| 0.0, rel-RMS 0.0000%). Tier
+      // default resolution is unaffected (`standard_tier_subdir` defaults to q8; q4 is an explicit
+      // opt-in), but do not make q4 this family's default without re-checking the artifact.
+      "candle": {
+        "minMemoryGb": 16,
+        "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
+        "measured": true
       },
       "mlx": {
         // q4/ is the shipped default tier (sc-8775); q8/ + bf16/ are hosted and selectable via
@@ -1590,6 +1674,27 @@
         "families": ["sensenova-u1"],
         "types": []
       },
+      // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
+      // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
+      // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
+      // read no other tier: a measured 70.5 GB peak, i.e. 96 GB-card-only. It now packed-detects
+      // every backbone projection, so all three tiers load and the numbers are:
+      //
+      //   bf16 36.7 | q8 22.5 | q4 14.8   (load-peak == steady == overall-peak; the backbone is
+      //   resident for the whole run and the AR denoise adds no separate transient)
+      //
+      // QUALITY NOTE: q8 is visually faithful to bf16 (high-pass energy in a flat region matches:
+      // std 5.00 vs 5.20). **q4 is visibly degraded** — a structured ~4 px cross-hatch, 3x the
+      // high-frequency energy (std 15.73). That is the TIER's own 4-bit fidelity, not a load bug:
+      // the repack guard (`real_tier_repack_reproduces_the_on_disk_affine_grid`) measures this
+      // loader bit-exact against the tier's own affine grid (max|D| 0.0, rel-RMS 0.0000%). Tier
+      // default resolution is unaffected (`standard_tier_subdir` defaults to q8; q4 is an explicit
+      // opt-in), but do not make q4 this family's default without re-checking the artifact.
+      "candle": {
+        "minMemoryGb": 16,
+        "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
+        "measured": true
+      },
       "mlx": {
         "quantize": 4,
         "standardTierLayout": true
@@ -1686,6 +1791,27 @@
       "loraCompatibility": {
         "families": ["sensenova-u1"],
         "types": []
+      },
+      // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
+      // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
+      // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
+      // read no other tier: a measured 70.5 GB peak, i.e. 96 GB-card-only. It now packed-detects
+      // every backbone projection, so all three tiers load and the numbers are:
+      //
+      //   bf16 36.7 | q8 22.5 | q4 14.8   (load-peak == steady == overall-peak; the backbone is
+      //   resident for the whole run and the AR denoise adds no separate transient)
+      //
+      // QUALITY NOTE: q8 is visually faithful to bf16 (high-pass energy in a flat region matches:
+      // std 5.00 vs 5.20). **q4 is visibly degraded** — a structured ~4 px cross-hatch, 3x the
+      // high-frequency energy (std 15.73). That is the TIER's own 4-bit fidelity, not a load bug:
+      // the repack guard (`real_tier_repack_reproduces_the_on_disk_affine_grid`) measures this
+      // loader bit-exact against the tier's own affine grid (max|D| 0.0, rel-RMS 0.0000%). Tier
+      // default resolution is unaffected (`standard_tier_subdir` defaults to q8; q4 is an explicit
+      // opt-in), but do not make q4 this family's default without re-checking the artifact.
+      "candle": {
+        "minMemoryGb": 16,
+        "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
+        "measured": true
       },
       "mlx": {
         "quantize": 4,
