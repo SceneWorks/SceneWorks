@@ -50,6 +50,104 @@ async fn image_edit_job_dispatches_to_image_generate_handler() {
 }
 
 #[tokio::test]
+async fn auto_supervisor_retries_timeout_and_empty_before_selecting_gpu_child() {
+    let gpu = fallback_gpu("0");
+    let mut attempts = VecDeque::from([
+        GpuDiscoveryAttempt::retryable_failure(GpuDiscoveryFailure::Timeout),
+        GpuDiscoveryAttempt::retryable_failure(GpuDiscoveryFailure::NoGpusReported),
+        GpuDiscoveryAttempt::success(vec![gpu]),
+    ]);
+    let waits = std::cell::RefCell::new(Vec::new());
+
+    let specs = choose_auto_worker_specs_with(
+        "worker-gpu-auto-0",
+        4,
+        &[Duration::from_secs(1), Duration::from_secs(2)],
+        || {
+            std::future::ready(
+                attempts
+                    .pop_front()
+                    .expect("test provides one result per discovery attempt"),
+            )
+        },
+        |delay| {
+            waits.borrow_mut().push(delay);
+            std::future::ready(false)
+        },
+    )
+    .await
+    .expect("retry startup is not canceled");
+
+    assert_eq!(
+        waits.into_inner(),
+        vec![Duration::from_secs(1), Duration::from_secs(2)]
+    );
+    assert!(
+        specs
+            .iter()
+            .any(|spec| spec.gpu_id == "0" && spec.worker_id == "worker-gpu-auto-0"),
+        "eventual discovery selects the real GPU child instead of settling for CPU-only"
+    );
+    assert_eq!(
+        specs.iter().filter(|spec| spec.gpu_id == "cpu").count(),
+        1,
+        "GPU supervision retains one utility child"
+    );
+}
+
+#[tokio::test]
+async fn auto_supervisor_exhausts_bounded_retries_then_uses_utility_pool() {
+    let attempts = std::cell::Cell::new(0_usize);
+    let specs = choose_auto_worker_specs_with(
+        "worker-gpu-auto-0",
+        3,
+        &[Duration::from_millis(1), Duration::from_millis(2)],
+        || {
+            attempts.set(attempts.get() + 1);
+            std::future::ready(GpuDiscoveryAttempt::retryable_failure(
+                GpuDiscoveryFailure::Timeout,
+            ))
+        },
+        |_| std::future::ready(false),
+    )
+    .await
+    .expect("retry startup is not canceled");
+
+    assert_eq!(
+        attempts.get(),
+        3,
+        "two configured delays permit exactly three bounded attempts"
+    );
+    assert_eq!(specs, utility_worker_specs("worker-gpu-auto-0", 3));
+}
+
+#[tokio::test]
+async fn auto_supervisor_shutdown_cancels_during_retry_without_spawning_specs() {
+    let attempts = std::cell::Cell::new(0_usize);
+    let waits = std::cell::Cell::new(0_usize);
+    let specs = choose_auto_worker_specs_with(
+        "worker-gpu-auto-0",
+        4,
+        &[Duration::from_secs(1), Duration::from_secs(2)],
+        || {
+            attempts.set(attempts.get() + 1);
+            std::future::ready(GpuDiscoveryAttempt::retryable_failure(
+                GpuDiscoveryFailure::NoGpusReported,
+            ))
+        },
+        |_| {
+            waits.set(waits.get() + 1);
+            std::future::ready(true)
+        },
+    )
+    .await;
+
+    assert!(specs.is_none(), "shutdown returns before any child specs spawn");
+    assert_eq!(attempts.get(), 1);
+    assert_eq!(waits.get(), 1);
+}
+
+#[tokio::test]
 async fn supervisor_restarts_exited_children_with_backoff_state() {
     let settings = test_settings("http://127.0.0.1".to_owned(), None);
     let spec = WorkerSpec {

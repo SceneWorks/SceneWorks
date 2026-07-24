@@ -29,6 +29,23 @@ pub(crate) struct SupervisedChild {
 /// saturating upward across rare, widely-spaced crashes (sc-4282 / F-MLXW-20).
 const HEALTHY_UPTIME_RESET: Duration = Duration::from_secs(300);
 
+/// Retry windows for NVIDIA discovery during automatic supervision startup.
+///
+/// A probe is bounded to three seconds in `gpu.rs`; these seven waits permit
+/// eight total probes over at most about 63 seconds (39 seconds sleeping plus
+/// 24 seconds of worst-case probe time). That covers a fresh container whose
+/// NVIDIA driver devices appear shortly after the process starts without
+/// turning a genuinely GPU-less host into an unbounded startup hang.
+const AUTO_GPU_DISCOVERY_RETRY_DELAYS: [Duration; 7] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(8),
+    Duration::from_secs(8),
+    Duration::from_secs(8),
+];
+
 /// Whether a child's `uptime` (time since its last spawn) was long enough to
 /// count as a healthy run and reset the restart backoff.
 fn backoff_resets_after_healthy_uptime(uptime: Duration) -> bool {
@@ -46,14 +63,112 @@ pub(crate) fn child_died_abnormally(signal: Option<i32>, exit_code: Option<i32>)
 }
 
 pub(crate) async fn supervise_auto_workers(settings: Settings) -> WorkerResult<()> {
-    let gpus = discover_gpus().await;
-    if gpus.is_empty() {
-        let specs = utility_worker_specs(&settings.worker_id, settings.utility_workers);
-        return supervise_children(settings, specs).await;
+    let Some(specs) = choose_auto_worker_specs_with(
+        &settings.worker_id,
+        settings.utility_workers,
+        &AUTO_GPU_DISCOVERY_RETRY_DELAYS,
+        discover_gpus_attempt,
+        |delay| async move {
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => false,
+                _ = shutdown_signal() => true,
+            }
+        },
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    supervise_children(settings, specs).await
+}
+
+/// Select automatic-supervisor child specs after bounded, cancellation-aware
+/// GPU discovery. `wait_for_retry` resolves `true` when startup was canceled.
+///
+/// The injected discovery/wait seams keep the cold-start regression tests
+/// deterministic: no process-global environment mutation, real subprocess, or
+/// wall-clock sleep is required to reproduce timeout -> empty -> success.
+pub(crate) async fn choose_auto_worker_specs_with<D, DFut, W, WFut>(
+    base_worker_id: &str,
+    utility_workers: usize,
+    retry_delays: &[Duration],
+    mut discover: D,
+    mut wait_for_retry: W,
+) -> Option<Vec<WorkerSpec>>
+where
+    D: FnMut() -> DFut,
+    DFut: std::future::Future<Output = GpuDiscoveryAttempt>,
+    W: FnMut(Duration) -> WFut,
+    WFut: std::future::Future<Output = bool>,
+{
+    let max_attempts = retry_delays.len().saturating_add(1);
+    for attempt_index in 0..max_attempts {
+        let attempt_number = attempt_index.saturating_add(1);
+        let result = discover().await;
+        if !result.gpus.is_empty() {
+            if attempt_number > 1 {
+                emit_event_value(
+                    Level::INFO,
+                    json!({
+                        "event": "gpu_discovery_succeeded_after_retry",
+                        "attempt": attempt_number,
+                        "gpuCount": result.gpus.len(),
+                    }),
+                );
+            }
+            return Some(auto_worker_specs(base_worker_id, &result.gpus));
+        }
+
+        let failure = result
+            .failure
+            .unwrap_or(GpuDiscoveryFailure::NoGpusReported);
+        let retry_delay = retry_delays.get(attempt_index).copied();
+        let will_retry = result.retryable && retry_delay.is_some();
+        if will_retry {
+            emit_event_value(
+                Level::WARN,
+                json!({
+                    "event": if failure == GpuDiscoveryFailure::Timeout {
+                        "gpu_discovery_timeout"
+                    } else {
+                        "gpu_discovery_unavailable"
+                    },
+                    "attempt": attempt_number,
+                    "maxAttempts": max_attempts,
+                    "reason": failure.event_reason(),
+                    "retryInSeconds": retry_delay.map(|delay| delay.as_secs()),
+                }),
+            );
+        } else {
+            emit_event_value(
+                Level::INFO,
+                json!({
+                    "event": "gpu_discovery_cpu_fallback",
+                    "attempts": attempt_number,
+                    "reason": failure.event_reason(),
+                    "retriesExhausted": result.retryable,
+                    "utilityWorkers": utility_workers.max(1),
+                }),
+            );
+            return Some(utility_worker_specs(base_worker_id, utility_workers));
+        }
+
+        if wait_for_retry(retry_delay.expect("will_retry requires a delay")).await {
+            emit_event_value(
+                Level::INFO,
+                json!({
+                    "event": "gpu_discovery_shutdown",
+                    "attempts": attempt_number,
+                }),
+            );
+            return None;
+        }
     }
 
-    let specs = auto_worker_specs(&settings.worker_id, &gpus);
-    supervise_children(settings, specs).await
+    // `max_attempts` is always at least one and every loop branch returns on its
+    // final iteration. Keep a defensive CPU fallback so future refactors cannot
+    // accidentally turn startup into a no-worker state.
+    Some(utility_worker_specs(base_worker_id, utility_workers))
 }
 
 /// Spawn the given child workers and keep them running, restarting any that exit
