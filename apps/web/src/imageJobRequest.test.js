@@ -100,6 +100,26 @@ describe("buildImageJobRequest", () => {
     expect(request.advanced.strength).toBe(0.42);
   });
 
+  // sc-10733's explicit-tier marker crosses THIS layer on its way to buildImageJobAdvanced.
+  // It was computed by ImageStudio and consumed by buildImageJobAdvanced, but never
+  // destructured or forwarded here — so `advanced.mlxQuantizeExplicit` never reached a
+  // payload and a deliberate sticky tier stayed silently downtierable by the worker.
+  it("forwards tierExplicit so a deliberate tier pick reaches advanced.mlxQuantizeExplicit", () => {
+    const explicit = buildImageJobRequest(
+      img2imgPidState({ quantTier: "q4", tierExplicit: true }),
+    );
+    expect(explicit.advanced.mlxQuantize).toBe(4);
+    expect(explicit.advanced.mlxQuantizeExplicit).toBe(true);
+  });
+
+  it("omits mlxQuantizeExplicit for a DERIVED tier, so the worker may still downtier it", () => {
+    const derived = buildImageJobRequest(
+      img2imgPidState({ quantTier: "q4", tierExplicit: false }),
+    );
+    expect(derived.advanced.mlxQuantize).toBe(4);
+    expect(derived.advanced.mlxQuantizeExplicit).toBeUndefined();
+  });
+
   it("emits advanced.pidTarget:'2k' when the PiD 2K tier is selected (dropped by the batch copy)", () => {
     const request = buildImageJobRequest(img2imgPidState());
     expect(request.advanced.usePid).toBe(true);

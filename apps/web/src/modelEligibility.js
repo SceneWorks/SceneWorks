@@ -37,7 +37,15 @@ const VOICE_CLONE_CONDITIONING = new Set(["referenceaudio", "voiceembedding"]);
 // when it declares the capability and, under active Mac gating, that feature is MLX-routed
 // for it (the macModelFeatureBlock calls are no-ops off Mac).
 export function imageModelServesMode(model, mode, caps) {
-  const capabilities = model?.capabilities ?? [];
+  // sc-13634 (#1780) taught ImageStudio's local copy that an ABSENT capability array is a
+  // legacy installed-model record which historically meant "Text". This mirror kept the old
+  // `?? []` reading, so the two authorities disagreed for exactly those records: the studio
+  // offered them in Text while anything reading this predicate (the screen gate, download
+  // offers, and the Simple Image Studio) treated them as serving nothing. An EXPLICIT list —
+  // including `[]` — stays authoritative in both, so an edit-only or reference-only model
+  // still can never leak into Text.
+  const capabilitiesDeclared = Array.isArray(model?.capabilities);
+  const capabilities = capabilitiesDeclared ? model.capabilities : [];
   if (mode === "edit_image") {
     return (
       (capabilities.includes("edit_image") || capabilities.includes("image_edit")) &&
@@ -50,7 +58,7 @@ export function imageModelServesMode(model, mode, caps) {
   if (mode === "style_variations") {
     return capabilities.includes("style_variations") && !macModelFeatureBlock(model, caps, "reference");
   }
-  return capabilities.includes("text_to_image");
+  return !capabilitiesDeclared || capabilities.includes("text_to_image");
 }
 
 // Usable on Image Studio: an image-type model that isn't Mac-blocked and serves ≥1 mode.

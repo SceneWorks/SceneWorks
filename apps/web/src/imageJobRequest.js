@@ -80,6 +80,14 @@ export function buildImageJobRequest(state) {
     bf16Precision,
     showTierPicker,
     quantTier,
+    // sc-10733's "this tier is a DELIBERATE pick" marker. ImageStudio computes it (its
+    // sticky == the outgoing tier) and buildImageJobAdvanced turns it into
+    // `advanced.mlxQuantizeExplicit` — but this layer, extracted in sc-11219, never
+    // destructured or forwarded it, so the flag was computed and then silently dropped and
+    // `mlxQuantizeExplicit` never reached a payload. A deliberate sticky tier was therefore
+    // still capability-downtierable by the worker, which is exactly what the flag exists to
+    // prevent. Threaded through here so the marker survives to `advanced`.
+    tierExplicit,
     showPidToggle,
     usePid,
     pidTarget,
@@ -233,6 +241,7 @@ export function buildImageJobRequest(state) {
       bf16Precision,
       showTierPicker,
       quantTier,
+      tierExplicit,
       showPidToggle,
       usePid,
       pidTarget,

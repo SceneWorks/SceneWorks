@@ -91,5 +91,12 @@ export const Icon = {
   Trash: (p) => <I {...p} d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6" />,
   Save: (p) => <I {...p} d="M5 3h11l5 5v13H5zM8 21v-8h8v8M9 3v5h6" />,
   Close: (p) => <I {...p} d="M18 6L6 18M6 6l12 12" />,
+  // Added for the Simple UI shell (design handoff): the phone drawer trigger, the
+  // result-tile download affordance, the selected-option tick in a picker sheet, and
+  // the preview/warning banner. Additive — no existing render site changes.
+  Menu: (p) => <I {...p} d="M4 6h16M4 12h16M4 18h16" />,
+  Download: (p) => <I {...p} d="M12 3v11M8 10.5l4 4 4-4M4 19h16" />,
+  Check: (p) => <I {...p} d="M4 12.5L9 17.5 20 6.5" />,
+  Warning: (p) => <I {...p} d="M12 3l9.5 17H2.5zM12 9v5M12 17.5h.01" />,
 };
 
