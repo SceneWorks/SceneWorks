@@ -26,6 +26,47 @@ trim_whitespace() {
   printf '%s' "${value}"
 }
 
+require_absolute_path() {
+  local label="$1"
+  local path="$2"
+  local non_slashes
+  case "${path}" in
+    /*) ;;
+    *)
+      log "${label} must be an absolute container path (got '${path}')"
+      return 1
+      ;;
+  esac
+  non_slashes="${path//\//}"
+  if [[ -z "${non_slashes}" ]]; then
+    log "${label} must name a managed subdirectory, not the filesystem root"
+    return 1
+  fi
+  case "${path}" in
+    */./* | */. | */../* | */..)
+      log "${label} must not contain '.' or '..' path segments (got '${path}')"
+      return 1
+      ;;
+  esac
+}
+
+ensure_writable_dir() {
+  local label="$1"
+  local dir="$2"
+  local probe
+
+  require_absolute_path "${label}" "${dir}" || return 1
+  if ! mkdir -p -- "${dir}"; then
+    log "cannot create ${label} at '${dir}'. The RunPod volume must be writable by the container root user."
+    return 1
+  fi
+  if ! probe="$(mktemp "${dir}/.sceneworks-write-test.XXXXXX")"; then
+    log "${label} at '${dir}' is not writable. This image runs as root and does not recursively chown network volumes; fix the mount's export/ACL permissions or choose a writable per-path override."
+    return 1
+  fi
+  rm -f -- "${probe}"
+}
+
 effective_api_host() {
   local host
   if [[ -v SCENEWORKS_API_HOST ]]; then
@@ -136,10 +177,54 @@ if ! is_loopback_host "${api_host}" && [[ -z "${access_token_trimmed}" ]]; then
 fi
 unset access_token_trimmed
 
-mkdir -p \
-  "${SCENEWORKS_DATA_DIR:-/sceneworks/data}/cache" \
-  "${SCENEWORKS_CONFIG_DIR:-/sceneworks/config}" \
-  "${HF_HOME:-/sceneworks/data/cache/huggingface}"
+# RunPod mounts a pod network volume at /workspace by default. Resolve every
+# durable default from that one base at runtime so changing SCENEWORKS_VOLUME is
+# enough; explicit per-path settings always win. Keep SQLite off NFS-style
+# storage unless the operator deliberately overrides SCENEWORKS_JOBS_DB_PATH.
+SCENEWORKS_VOLUME="${SCENEWORKS_VOLUME:-/workspace}"
+SCENEWORKS_DATA_DIR="${SCENEWORKS_DATA_DIR:-${SCENEWORKS_VOLUME}/data}"
+SCENEWORKS_CONFIG_DIR="${SCENEWORKS_CONFIG_DIR:-${SCENEWORKS_VOLUME}/config}"
+SCENEWORKS_JOBS_DB_PATH="${SCENEWORKS_JOBS_DB_PATH:-/tmp/sceneworks/cache/jobs.db}"
+HF_HOME="${HF_HOME:-${SCENEWORKS_VOLUME}/cache/huggingface}"
+
+# Preserve the resolver's documented cache-variable precedence. In particular,
+# an explicit legacy HUGGINGFACE_HUB_CACHE must not be shadowed by a generated
+# HF_HUB_CACHE value.
+if [[ -n "${HF_HUB_CACHE:-}" ]]; then
+  effective_hf_hub_cache="${HF_HUB_CACHE}"
+elif [[ -n "${HUGGINGFACE_HUB_CACHE:-}" ]]; then
+  effective_hf_hub_cache="${HUGGINGFACE_HUB_CACHE}"
+else
+  HF_HUB_CACHE="${HF_HOME}/hub"
+  HUGGINGFACE_HUB_CACHE="${HF_HUB_CACHE}"
+  effective_hf_hub_cache="${HF_HUB_CACHE}"
+fi
+
+export SCENEWORKS_VOLUME SCENEWORKS_DATA_DIR SCENEWORKS_CONFIG_DIR
+export SCENEWORKS_JOBS_DB_PATH HF_HOME HF_HUB_CACHE HUGGINGFACE_HUB_CACHE
+
+jobs_db_parent="${SCENEWORKS_JOBS_DB_PATH%/*}"
+if [[ -z "${jobs_db_parent}" && "${SCENEWORKS_JOBS_DB_PATH}" == /* ]]; then
+  jobs_db_parent="/"
+fi
+[[ "${jobs_db_parent}" != "${SCENEWORKS_JOBS_DB_PATH}" ]] || jobs_db_parent="."
+
+# The runtime is intentionally root so a newly attached root-owned volume and a
+# directory owned by a different numeric UID both work without a recursive
+# ownership walk over multi-gigabyte model caches. Restrict startup work to the
+# exact managed directories and verify writes before launching either child.
+require_absolute_path "SCENEWORKS_VOLUME" "${SCENEWORKS_VOLUME}" || exit 1
+require_absolute_path "SceneWorks data directory" "${SCENEWORKS_DATA_DIR}" || exit 1
+require_absolute_path "SceneWorks config directory" "${SCENEWORKS_CONFIG_DIR}" || exit 1
+require_absolute_path "Hugging Face home" "${HF_HOME}" || exit 1
+require_absolute_path "Hugging Face hub cache" "${effective_hf_hub_cache}" || exit 1
+require_absolute_path "jobs.db parent directory" "${jobs_db_parent}" || exit 1
+ensure_writable_dir "SceneWorks data directory" "${SCENEWORKS_DATA_DIR}" || exit 1
+ensure_writable_dir "SceneWorks config directory" "${SCENEWORKS_CONFIG_DIR}" || exit 1
+ensure_writable_dir "Hugging Face home" "${HF_HOME}" || exit 1
+ensure_writable_dir "Hugging Face hub cache" "${effective_hf_hub_cache}" || exit 1
+ensure_writable_dir "jobs.db parent directory" "${jobs_db_parent}" || exit 1
+unset effective_hf_hub_cache jobs_db_parent
 
 log "starting embedded-web API on ${api_host}:${api_port}"
 "${api_bin}" &

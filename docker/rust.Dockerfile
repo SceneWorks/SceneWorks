@@ -294,19 +294,15 @@ RUN chmod 0755 /usr/local/bin/sceneworks-runpod-entrypoint
 ENV SCENEWORKS_API_HOST=0.0.0.0 \
     SCENEWORKS_API_PORT=8010 \
     SCENEWORKS_API_URL=http://127.0.0.1:8010 \
-    SCENEWORKS_DATA_DIR=/sceneworks/data \
-    SCENEWORKS_CONFIG_DIR=/sceneworks/config \
-    SCENEWORKS_JOBS_DB_PATH=/sceneworks/data/cache/jobs.db \
+    SCENEWORKS_VOLUME=/workspace \
+    SCENEWORKS_JOBS_DB_PATH=/tmp/sceneworks/cache/jobs.db \
     SCENEWORKS_CANDLE_REQUIRED=1 \
     SCENEWORKS_CANDLE_UNSUPPORTED_MODE=enforce \
     SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE=1 \
-    SCENEWORKS_WORKER_ID=runpod-worker-0 \
-    HF_HOME=/sceneworks/data/cache/huggingface \
-    HF_HUB_CACHE=/sceneworks/data/cache/huggingface/hub \
-    HUGGINGFACE_HUB_CACHE=/sceneworks/data/cache/huggingface/hub
+    SCENEWORKS_WORKER_ID=runpod-worker-0
 
 EXPOSE 8010
-VOLUME ["/sceneworks"]
+VOLUME ["/workspace"]
 HEALTHCHECK --interval=20s --timeout=5s --retries=3 --start-period=10s \
     CMD curl -fsS "http://127.0.0.1:${SCENEWORKS_API_PORT:-8010}/api/v1/health" >/dev/null || exit 1
 

@@ -255,7 +255,7 @@ docker build --secret id=inference_token,env=SCENEWORKS_INFERENCE_READ_TOKEN `
 
 docker run --gpus all --publish 8010:8010 `
   --env SCENEWORKS_ACCESS_TOKEN=choose-a-private-token `
-  --volume sceneworks-data:/sceneworks `
+  --volume sceneworks-data:/workspace `
   sceneworks-runpod:local
 ```
 
@@ -267,9 +267,33 @@ override. The same token is passed to every candle GPU and CPU utility worker.
 Loopback-only binds remain available without a token for local development.
 Tokens are operator-provided and are never generated or written to logs.
 
-On RunPod, attach the pod's persistent volume at `/sceneworks` in place of the
-example named volume. Provider-specific volume layout and ownership hardening
-are handled separately; this image only defines the shared mount contract.
+On a RunPod pod, attach the network volume at its normal `/workspace` mount. The
+single `SCENEWORKS_VOLUME` base defaults there and gives the following layout:
+
+- `/workspace/data` stores generated assets, projects, imported models, and
+  other application data.
+- `/workspace/config` stores configuration and user manifests.
+- `/workspace/cache/huggingface` stores downloaded Hugging Face models.
+- `/tmp/sceneworks/cache/jobs.db` remains on the pod's local ephemeral disk.
+  Queue state is transient, and SQLite locking is unreliable on NFS-style
+  network volumes. Set `SCENEWORKS_JOBS_DB_PATH` explicitly to persist it only
+  when the mounted filesystem has SQLite-safe locking; concurrent access or
+  lock failures are then the operator's responsibility.
+
+Set `SCENEWORKS_VOLUME=/runpod-volume` for a serverless network-volume mount, or
+another absolute container path for a custom mount. Explicit
+`SCENEWORKS_DATA_DIR`, `SCENEWORKS_CONFIG_DIR`, `SCENEWORKS_JOBS_DB_PATH`,
+`HF_HOME`, `HF_HUB_CACHE`, and `HUGGINGFACE_HUB_CACHE` values take precedence
+over derived defaults.
+
+The image intentionally runs as root, matching RunPod's default volume owner.
+At startup it creates and write-probes only the exact managed directories; it
+does not recursively `chown` a potentially large model volume. This also handles
+directories carrying a different numeric UID on ordinary pod mounts. If an NFS
+export uses root-squash or ACLs that deny even a bounded write probe, startup
+fails before the API launches with the exact path and an actionable permissions
+error; fix the export/ACL or use writable per-path overrides. No existing data
+is removed.
 
 Key knobs:
 
