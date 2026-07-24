@@ -3,6 +3,7 @@ import { Icon } from "../components/Icons.jsx";
 import { AssetThumbnail, assetUrl } from "../components/assetMedia.jsx";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
 import { terminalStatuses } from "../constants.js";
+import { errorStatuses } from "../jobTypes.js";
 import { STYLE_GROUPS } from "../data/styleCatalog.js";
 import { useAppStatic } from "../context/AppContext.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
@@ -212,6 +213,36 @@ export function jobIsRunning(job) {
   return Boolean(job) && !terminalStatuses.has(job.status);
 }
 
+// A run that ended badly, and the reason. The worker's message is the useful part — it is
+// frequently ACTIONABLE ("Select it in the LoRA picker", "needs N GB") — so it is surfaced
+// verbatim rather than replaced with a generic failure string.
+export function jobFailure(job) {
+  if (!job || !errorStatuses.has(job.status)) {
+    return null;
+  }
+  const detail = job.error ?? job.message ?? "";
+  const label = job.status === "canceled" ? "Canceled" : job.status === "interrupted" ? "Interrupted" : "Failed";
+  return { label, detail: String(detail).trim() };
+}
+
+// The shared failure notice. Rendered in the studios' results zone so a job that dies in the
+// worker is visible where the user is looking — before this, a failed Simple run showed
+// NOTHING at all and the reason was only in the Logs screen.
+export function JobFailureNotice({ failure }) {
+  if (!failure) {
+    return null;
+  }
+  return (
+    <div className="su-notice su-notice--error" role="alert">
+      <Icon.Warning size={16} />
+      <span>
+        <strong>{failure.label}.</strong>
+        {failure.detail ? ` ${failure.detail}` : " The worker gave no reason — check Logs in the Advanced workspace."}
+      </span>
+    </div>
+  );
+}
+
 // Results block. Renders the newest run's outputs; while that run is still in flight it
 // renders one placeholder tile per expected output so the grid doesn't pop in.
 export function StudioResults({ job, assets, type, columns, meta, pendingCount = 1, wide = false }) {
@@ -219,6 +250,12 @@ export function StudioResults({ job, assets, type, columns, meta, pendingCount =
   const { updateAssetStatus } = useAppStatic();
   const results = job ? resolveJobResultAssets(job, assets, { type }) : [];
   const running = jobIsRunning(job);
+  const failure = jobFailure(job);
+  // A failed run produces no assets, so the old "no results ⇒ render nothing" guard swallowed
+  // the failure entirely. Show the reason instead.
+  if (failure && results.length === 0) {
+    return <JobFailureNotice failure={failure} />;
+  }
   if (!job || (!running && results.length === 0)) {
     return null;
   }

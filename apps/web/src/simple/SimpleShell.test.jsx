@@ -257,6 +257,113 @@ describe("SimpleShell", () => {
     expect(tile.textContent).toContain("SDXL can’t use a reference image");
   });
 
+  // A Krea 2 edit run failed in the worker because Simple sent `loras: []`, and then the
+  // failure was invisible: the studio rendered nothing and the reason was only in Logs.
+  const KREA = {
+    ...IMAGE_MODEL,
+    id: "krea_2_turbo",
+    name: "Krea 2 Turbo",
+    family: "krea_2",
+  };
+  const KREA_LORA = {
+    id: "krea2_identity_edit",
+    name: "Krea 2 Identity Edit",
+    conditioningRole: "image_edit",
+    installState: "installed",
+    compatibility: { families: ["krea_2"] },
+    families: ["krea_2"],
+  };
+
+  it("auto-applies the managed edit LoRA on a Krea 2 edit run", async () => {
+    const context = baseContext({
+      imageModels: [KREA],
+      models: [KREA],
+      loras: [KREA_LORA],
+      assets: [REFERENCE_ASSET],
+      recentImageAssets: [REFERENCE_ASSET],
+    });
+    await renderShell(root, context);
+
+    await click(buttonWithText(container, "Edit"));
+    await typePrompt(container, "make it dusk");
+    await click([...container.querySelectorAll(".su-tile")].find((n) => n.textContent.includes("Source image")));
+    await click(
+      [...container.querySelectorAll(".su-option-row")].find((n) => n.textContent.includes("cliff_ref.png")),
+    );
+    await click(container.querySelector(".su-generate"));
+
+    const payload = context.createImageJob.mock.calls[0][0];
+    expect(payload.mode).toBe("edit_image");
+    expect(payload.sourceAssetId).toBe("asset-9");
+    expect(payload.loras.map((l) => l.id)).toEqual(["krea2_identity_edit"]);
+    expect(payload.loras[0].conditioningRole).toBe("image_edit");
+  });
+
+  it("blocks the run and offers the download when the edit LoRA isn't installed", async () => {
+    const context = baseContext({
+      imageModels: [KREA],
+      models: [KREA],
+      loras: [{ ...KREA_LORA, installState: "missing" }],
+      assets: [REFERENCE_ASSET],
+      recentImageAssets: [REFERENCE_ASSET],
+    });
+    await renderShell(root, context);
+    await click(buttonWithText(container, "Edit"));
+    await typePrompt(container, "make it dusk");
+
+    expect(container.textContent).toContain("needs the Krea 2 Identity Edit LoRA");
+    expect(container.querySelector(".su-generate").disabled).toBe(true);
+
+    await click(buttonWithText(container, "Download it"));
+    expect(context.createLoraDownloadJob).toHaveBeenCalledTimes(1);
+    expect(context.createLoraDownloadJob.mock.calls[0][0].id).toBe("krea2_identity_edit");
+  });
+
+  it("surfaces a failed run's reason in the studio instead of rendering nothing", async () => {
+    const failed = {
+      id: "job-x",
+      type: "image_generate",
+      status: "failed",
+      error: "Krea 2 edit requires the Krea 2 Identity Edit LoRA.",
+      payload: {},
+    };
+    const context = baseContext({ jobs: [failed], imageLocalJobs: [failed] });
+    await renderShell(root, context);
+
+    expect(container.textContent).toContain("Failed.");
+    expect(container.textContent).toContain("Krea 2 edit requires the Krea 2 Identity Edit LoRA.");
+  });
+
+  it("shows the failure reason on the Queue row too", async () => {
+    const failed = {
+      id: "job-x",
+      type: "image_generate",
+      status: "failed",
+      error: "no worker supports image_generate",
+      payload: { model: "z_image" },
+    };
+    await renderShell(root, baseContext({ jobs: [failed] }));
+    await click(buttonWithText(container, "Queue"));
+
+    expect(container.querySelector(".su-job-error").textContent).toBe(
+      "no worker supports image_generate",
+    );
+    expect(container.querySelector(".su-job-badge").textContent).toBe("Failed");
+  });
+
+  it("badges a canceled job as Canceled, not Failed", async () => {
+    const canceled = {
+      id: "job-c",
+      type: "image_generate",
+      status: "canceled",
+      error: "Canceled before a worker started.",
+      payload: { model: "z_image" },
+    };
+    await renderShell(root, baseContext({ jobs: [canceled] }));
+    await click(buttonWithText(container, "Queue"));
+    expect(container.querySelector(".su-job-badge").textContent).toBe("Canceled");
+  });
+
   it("refuses to submit with an empty prompt", async () => {
     const context = baseContext();
     await renderShell(root, context);

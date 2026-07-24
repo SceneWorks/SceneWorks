@@ -6,7 +6,15 @@ import { audioModelServesMode } from "../modelEligibility.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
 import { buildSimpleAudioRequest } from "./simpleJobs.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
-import { Chips, DownloadButton, SheetSelect, jobIsRunning, newestLocalJob } from "./studioParts.jsx";
+import {
+  Chips,
+  DownloadButton,
+  JobFailureNotice,
+  SheetSelect,
+  jobFailure,
+  jobIsRunning,
+  newestLocalJob,
+} from "./studioParts.jsx";
 
 // Simple Audio Studio (design handoff). The design flags this studio as a PREVIEW —
 // "the models and controls will change as it lands" — and asks for the warning banner
@@ -202,7 +210,9 @@ export function SimpleAudioStudio() {
         {busy ? "Generating…" : "Generate audio"}
       </button>
 
-      {resultAssets.length ? (
+      {jobFailure(latestJob) && !resultAssets.length ? (
+        <JobFailureNotice failure={jobFailure(latestJob)} />
+      ) : resultAssets.length ? (
         <div className="su-audio-result">
           <AssetMedia asset={resultAssets[0]} />
           <DownloadButton asset={resultAssets[0]} className="su-icon-btn" />

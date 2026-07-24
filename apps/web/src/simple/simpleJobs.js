@@ -1,5 +1,6 @@
 import { buildImageJobRequest } from "../imageJobRequest.js";
 import { composeStyledPrompt } from "../styleComposer.js";
+import { serializeLora } from "../presetUtils.js";
 import { styleTextForId } from "../data/styleCatalog.js";
 import { defaultTierSelection, installedTiers } from "../quantTier.js";
 import { suggestTier } from "../tierSuggestion.js";
@@ -168,6 +169,8 @@ export function referenceStrengthFor(model) {
  * @param {string|null} input.referenceAssetId - the armed reference, whichever mode is active.
  * @param {boolean} [input.supportsImg2img] - the selected model's `ui.img2img` flag.
  * @param {number} [input.img2imgStrength] - from referenceStrengthFor(selectedModel).
+ * @param {object|null} [input.editLora] - the model's managed `image_edit`-role LoRA catalog entry
+ *   (findModelEditLora), auto-applied in edit mode. Null for models needing none.
  * @param {string} [input.quantTier] / @param {boolean} [input.tierExplicit] - from resolveSimpleTier.
  * @returns {object|null} the payload for createImageJob, or null when the resolution is invalid.
  */
@@ -181,6 +184,7 @@ export function buildSimpleImageRequest({
   referenceAssetId,
   supportsImg2img = false,
   img2imgStrength = DEFAULT_IMG2IMG_STRENGTH,
+  editLora = null,
   quantTier = "",
   tierExplicit = false,
 }) {
@@ -193,8 +197,16 @@ export function buildSimpleImageRequest({
   // what makes buildImageJobAdvanced emit `advanced.strength`, so claiming it for a model
   // without the capability would send a knob the engine has no use for.
   const img2imgActive = !editing && supportsImg2img && Boolean(referenceAssetId);
+  // Krea-style managed image-edit LoRA (epic 10871, sc-11069). Krea 2's edit lane REJECTS a run
+  // without an `image_edit`-role LoRA — "without it the source-image conditioning is inert" — so
+  // an edit payload that omits it fails in the worker, not the UI. The advanced studio already
+  // manages this for the user rather than exposing it in the LoRA picker, which is exactly the
+  // Simple behavior; it just has to actually be applied. `serializeLora` round-trips
+  // `conditioningRole`, which is what the worker's role check reads.
+  const loras = editing && editLora ? [serializeLora(editLora)] : [];
   return buildImageJobRequest({
     ...IMAGE_DEFAULTS,
+    loras,
     sourceAssetId: editing ? referenceAssetId || null : null,
     supportsImg2img: img2imgActive,
     img2imgReferenceAssetId: img2imgActive ? referenceAssetId : null,

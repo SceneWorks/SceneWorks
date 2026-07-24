@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { imageModelServesMode } from "../modelEligibility.js";
+import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
 import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
 import { resultGridColumns } from "./breakpoint.js";
@@ -39,6 +40,8 @@ export function SimpleImageStudio() {
     assets = [],
     recentImageAssets = [],
     visibleWorkers = [],
+    loras = [],
+    createLoraDownloadJob,
     activeProject,
   } = useAppContext();
   const { breakpoint, openGuide, toast, referenceRequest, clearReferenceRequest } = useSimpleUi();
@@ -116,11 +119,36 @@ export function SimpleImageStudio() {
   const supportsImg2img = Boolean(selectedModel?.ui?.img2img);
   const referenceUsable = mode === "edit_image" || supportsImg2img;
 
+  // Krea-style managed image-edit LoRA (epic 10871, sc-11069): Krea 2's edit lane requires an
+  // `image_edit`-role LoRA and fails the job without one. Like the advanced studio we MANAGE it
+  // rather than exposing a picker — auto-applied when installed, surfaced as a one-click download
+  // when not. Null for edit models that need none (Qwen-Image-Edit, FLUX.2), so this is inert
+  // for them.
+  const editLora = useMemo(
+    () => (mode === "edit_image" ? findModelEditLora(loras, selectedModel) : null),
+    [mode, loras, selectedModel],
+  );
+  const editLoraInstalled = loraIsInstalled(editLora);
+  const editLoraMissing = Boolean(editLora) && !editLoraInstalled;
+  const [editLoraRequested, setEditLoraRequested] = useState(false);
+  useEffect(() => {
+    if (!editLoraMissing) {
+      setEditLoraRequested(false);
+    }
+  }, [editLoraMissing]);
+
   const latestJob = newestLocalJob(imageLocalJobs);
   const busy = submitting || jobIsRunning(latestJob);
   const needsSource = mode === "edit_image" && !referenceAssetId;
   const canGenerate =
-    Boolean(prompt.trim()) && Boolean(model) && Boolean(resolution) && !busy && !needsSource;
+    Boolean(prompt.trim()) &&
+    Boolean(model) &&
+    Boolean(resolution) &&
+    !busy &&
+    !needsSource &&
+    // A required edit LoRA that isn't downloaded blocks the run HERE rather than letting the
+    // worker reject it — the job would fail with an error the studio never surfaces.
+    !editLoraMissing;
 
   async function generate() {
     if (!canGenerate) {
@@ -149,6 +177,8 @@ export function SimpleImageStudio() {
         referenceAssetId,
         supportsImg2img,
         img2imgStrength: referenceStrengthFor(selectedModel),
+        // Auto-applied in edit mode; the worker's edit lane rejects the run without it.
+        editLora: editLoraInstalled ? editLora : null,
         ...tier,
       });
       if (!request) {
@@ -303,6 +333,32 @@ export function SimpleImageStudio() {
       </button>
       {needsSource ? (
         <p className="su-empty">Pick the image you want to edit to start a run.</p>
+      ) : null}
+      {/* The managed edit LoRA isn't downloaded yet. The worker would reject the run outright
+          ("the source-image conditioning is inert"), so offer the one-click fetch instead of
+          letting the user discover it as a failed job. */}
+      {editLoraMissing ? (
+        <div className="su-notice" role="status">
+          <Icon.Warning size={16} />
+          <span>
+            {selectedModel?.name ?? "This model"} needs the {editLora.name ?? "image-edit"} LoRA to
+            edit.{" "}
+            {editLoraRequested ? (
+              "Downloading — track it in the Queue, then generate again."
+            ) : (
+              <button
+                className="su-link"
+                onClick={() => {
+                  setEditLoraRequested(true);
+                  createLoraDownloadJob?.(editLora);
+                }}
+                type="button"
+              >
+                Download it
+              </button>
+            )}
+          </span>
+        </div>
       ) : null}
 
       <StudioResults

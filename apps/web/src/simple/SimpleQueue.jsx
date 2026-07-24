@@ -26,6 +26,17 @@ const BADGE_LABEL = {
   failed: "Failed",
 };
 
+// The three error statuses share one bucket (colour + placement) but NOT one label — a job the
+// user canceled must not read as "Failed".
+const STATUS_LABEL = {
+  canceled: "Canceled",
+  interrupted: "Interrupted",
+};
+
+export function badgeLabelFor(bucket, status) {
+  return STATUS_LABEL[status] ?? BADGE_LABEL[bucket];
+}
+
 export function SimpleQueue() {
   const { jobs = [] } = useAppContext();
 
@@ -38,6 +49,9 @@ export function SimpleQueue() {
         sub: jobSub(job),
         progress: Number(job.progress),
         status: job.status,
+        // The worker's reason, shown on the row. Without it a failed run read as a bare
+        // "Failed" badge and the actual message — often actionable — was only in the Logs.
+        error: errorStatuses.has(job.status) ? String(job.error ?? job.message ?? "").trim() : "",
       })),
     [jobs],
   );
@@ -83,10 +97,11 @@ export function SimpleQueue() {
                 <span className={`su-job-badge su-job-badge--${row.bucket}`}>
                   {row.bucket === "running" && Number.isFinite(row.progress) && row.progress > 0
                     ? percent(row.progress)
-                    : BADGE_LABEL[row.bucket]}
+                    : badgeLabelFor(row.bucket, row.status)}
                 </span>
               </div>
-              {showBar ? (
+              {row.error ? <p className="su-job-error">{row.error}</p> : null}
+              {showBar && !row.error ? (
                 <div className={row.bucket === "done" ? "su-bar su-bar--done" : "su-bar"}>
                   <span style={{ width }} />
                 </div>

@@ -1004,6 +1004,18 @@
   color: var(--text-muted);
 }
 
+/* An inline action inside a notice — reads as a link, not a second button. */
+.su-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-strong);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .su-notice--error {
   border-color: color-mix(in oklch, var(--danger) 45%, var(--border));
   background: var(--danger-soft);
@@ -1297,6 +1309,14 @@
 .su-job-badge--failed {
   background: var(--danger-soft);
   color: color-mix(in oklch, var(--danger) 72%, var(--text));
+}
+
+.su-job-error {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: color-mix(in oklch, var(--danger) 72%, var(--text));
+  overflow-wrap: anywhere;
 }
 
 .su-bar {

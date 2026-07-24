@@ -204,6 +204,45 @@ describe("buildSimpleImageRequest", () => {
     expect(request.advanced.strength).toBeUndefined();
   });
 
+  // Krea 2's edit lane REJECTS a run whose payload carries no `image_edit`-role LoRA
+  // ("without it the source-image conditioning is inert"). Simple sent `loras: []`
+  // unconditionally, so every Krea 2 edit failed in the worker.
+  const KREA_EDIT_LORA = {
+    id: "krea2_identity_edit",
+    name: "Krea 2 Identity Edit",
+    conditioningRole: "image_edit",
+    installState: "installed",
+  };
+
+  it("auto-applies the model's managed edit LoRA on an edit run", () => {
+    const request = buildSimpleImageRequest({
+      ...base,
+      mode: "edit_image",
+      referenceAssetId: "asset-7",
+      editLora: KREA_EDIT_LORA,
+    });
+    expect(request.loras).toHaveLength(1);
+    expect(request.loras[0].id).toBe("krea2_identity_edit");
+    // The ROLE is what the worker's edit-lane check reads — a serialized entry that lost it
+    // fails exactly as an absent LoRA would.
+    expect(request.loras[0].conditioningRole).toBe("image_edit");
+  });
+
+  it("does not attach the edit LoRA to a TEXT run", () => {
+    const request = buildSimpleImageRequest({ ...base, editLora: KREA_EDIT_LORA });
+    expect(request.loras).toEqual([]);
+  });
+
+  it("sends no LoRAs for an edit model that needs none", () => {
+    const request = buildSimpleImageRequest({
+      ...base,
+      mode: "edit_image",
+      referenceAssetId: "asset-7",
+      editLora: null,
+    });
+    expect(request.loras).toEqual([]);
+  });
+
   it("emits no img2img fields at all when nothing is armed", () => {
     const request = buildSimpleImageRequest({ ...base, supportsImg2img: true });
     expect(request.referenceAssetId).toBeNull();
