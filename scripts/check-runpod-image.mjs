@@ -42,8 +42,10 @@ for (const contract of [
   "COPY --from=embed-builder /out/sceneworks-rust-api",
   "COPY docker/runpod-entrypoint.sh",
   "SCENEWORKS_API_URL=http://127.0.0.1:8010",
+  "SCENEWORKS_VOLUME=/workspace",
+  "SCENEWORKS_JOBS_DB_PATH=/tmp/sceneworks/cache/jobs.db",
   "SCENEWORKS_CANDLE_REQUIRED=1",
-  'VOLUME ["/sceneworks"]',
+  'VOLUME ["/workspace"]',
   "/api/v1/health",
   'ENTRYPOINT ["/usr/local/bin/sceneworks-runpod-entrypoint"]',
 ]) {
@@ -111,7 +113,9 @@ for (const contract of [
   "--target runpod",
   "--gpus all",
   "--env SCENEWORKS_ACCESS_TOKEN=",
-  "--volume sceneworks-data:/sceneworks",
+  "--volume sceneworks-data:/workspace",
+  "SCENEWORKS_VOLUME=/runpod-volume",
+  "/tmp/sceneworks/cache/jobs.db",
 ]) {
   assert.ok(readme.includes(contract), `RunPod deployment docs are missing ${contract}`);
 }
