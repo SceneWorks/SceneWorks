@@ -478,9 +478,10 @@ async fn embedded_ui_root_is_reachable_with_access_token_set() {
     // With a token configured and no header, the embedded UI root and assets
     // must not be blocked by auth (404 here under default features since the
     // bundle isn't embedded; the point is it is NOT 401).
-    let (status, _) = request(app.clone(), "GET", "/", Value::Null).await;
+    let (status, _, _) = request_raw(app.clone(), "GET", "/", Body::empty(), &[]).await;
     assert_ne!(status, StatusCode::UNAUTHORIZED);
-    let (status, _) = request(app.clone(), "GET", "/assets/app.js", Value::Null).await;
+    let (status, _, _) =
+        request_raw(app.clone(), "GET", "/assets/app.js", Body::empty(), &[]).await;
     assert_ne!(status, StatusCode::UNAUTHORIZED);
     // API routes stay protected.
     let (status, _) = request(app, "GET", "/api/v1/jobs", Value::Null).await;

@@ -216,6 +216,59 @@ async function assertContains(relativePath, expected) {
   }
 }
 
+async function assertEmbeddedApiDockerTarget() {
+  const dockerfilePath = "docker/rust.Dockerfile";
+  const body = await readFile(path.join(root, dockerfilePath), "utf8");
+  const stage = (name) => {
+    const match = new RegExp(`^FROM [^\\r\\n]+ AS ${name}\\r?$`, "m").exec(body);
+    if (!match) return undefined;
+    const start = match.index + match[0].length;
+    const next = body.indexOf("\nFROM ", start);
+    return body.slice(start, next === -1 ? undefined : next);
+  };
+
+  const plainBuilder = stage("builder");
+  const webBuilder = stage("web-builder");
+  const embedBuilder = stage("embed-builder");
+  const embedRuntime = stage("rust-api-embed");
+  if (!plainBuilder || !webBuilder || !embedBuilder || !embedRuntime) {
+    throw new Error(
+      `${dockerfilePath} must define builder, web-builder, embed-builder, and rust-api-embed stages`,
+    );
+  }
+  if (plainBuilder.includes("embed-web")) {
+    throw new Error(`${dockerfilePath} plain builder must remain free of the embed-web feature`);
+  }
+  for (const command of [
+    "npm ci --prefix apps/web",
+    'ENV VITE_API_BASE_URL=""',
+    "npm run build --prefix apps/web",
+    "! grep -R -q \"http://localhost:8000\" apps/web/dist",
+    "COPY apps/desktop/licenses ./apps/desktop/licenses",
+  ]) {
+    if (!webBuilder.includes(command)) {
+      throw new Error(
+        `${dockerfilePath} web-builder is missing required build contract: ${command}`,
+      );
+    }
+  }
+  if (!embedBuilder.includes("COPY --from=web-builder /app/apps/web/dist ./apps/web/dist")) {
+    throw new Error(
+      `${dockerfilePath} embed-builder must copy the production SPA into the Rust build tree`,
+    );
+  }
+  if (!embedBuilder.includes("--features embed-web")) {
+    throw new Error(
+      `${dockerfilePath} embed-builder must compile sceneworks-rust-api with embed-web`,
+    );
+  }
+  if (!/^FROM rust-api AS rust-api-embed$/m.test(body)) {
+    throw new Error(
+      `${dockerfilePath} rust-api-embed must inherit the unchanged rust-api runtime`,
+    );
+  }
+}
+
 function stripJsoncComments(body) {
   let result = "";
   let inString = false;
@@ -536,6 +589,7 @@ await assertContains(".env.example", "SCENEWORKS_INFERENCE_READ_TOKEN=");
 await assertContains("docker/rust.Dockerfile", "sceneworks-rust-api");
 await assertContains("docker/rust.Dockerfile", "type=secret,id=inference_token,required=true");
 await assertContains("docker/rust.Dockerfile", "cargo build --offline");
+await assertEmbeddedApiDockerTarget();
 await assertContains(".cargo/config.toml", "git-fetch-with-cli = true");
 for (const workflowPath of inferenceCargoWorkflows) {
   await assertContains(workflowPath, "SCENEWORKS_INFERENCE_READ_TOKEN");
