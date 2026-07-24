@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   hasVisibleLocalFailureForView,
-  isCurrentAssetRefresh,
+  isCurrentProjectRequest,
   reconcileSelectedAssetId,
 } from "./appStateHelpers.js";
 
@@ -56,13 +56,13 @@ describe("reconcileSelectedAssetId", () => {
   });
 });
 
-describe("isCurrentAssetRefresh", () => {
+describe("isCurrentProjectRequest", () => {
   it("rejects a project response after the active project is cleared", () => {
-    expect(isCurrentAssetRefresh(null, "project-a")).toBe(false);
+    expect(isCurrentProjectRequest(null, "project-a")).toBe(false);
   });
 
   it("accepts only the exact currently active project", () => {
-    expect(isCurrentAssetRefresh("project-a", "project-a")).toBe(true);
-    expect(isCurrentAssetRefresh("project-b", "project-a")).toBe(false);
+    expect(isCurrentProjectRequest("project-a", "project-a")).toBe(true);
+    expect(isCurrentProjectRequest("project-b", "project-a")).toBe(false);
   });
 });
