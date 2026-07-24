@@ -813,6 +813,18 @@ describe("ImageStudio model picker capability gating", () => {
   };
   const EDIT_ONLY = { ...Z_IMAGE, id: "edit_only", name: "Edit Only", capabilities: ["edit_image", "image_to_image"] };
   const CHARACTER_ONLY = { ...Z_IMAGE, id: "character_only", name: "Character Only", capabilities: ["character_image"] };
+  const LEGACY_NO_CAPABILITIES = {
+    ...Z_IMAGE,
+    id: "legacy_model",
+    name: "Legacy Model",
+    capabilities: undefined,
+  };
+  const EXPLICITLY_UNSUPPORTED = {
+    ...Z_IMAGE,
+    id: "unsupported_model",
+    name: "Unsupported Model",
+    capabilities: [],
+  };
   const MAC_CAPS = {
     macGatingActive: true,
     platform: "darwin",
@@ -854,6 +866,94 @@ describe("ImageStudio model picker capability gating", () => {
     expect(options).toContain("variations_model"); // declares text_to_image
     expect(options).not.toContain("edit_only");
     expect(options).not.toContain("character_only");
+  });
+
+  it("keeps Text empty and actionable when only edit/reference models are installed", async () => {
+    const context = baseContext({ imageModels: [EDIT_ONLY, CHARACTER_ONLY] });
+    await render(context);
+
+    expect(modelOptionValues()).toEqual([]);
+    expect(container.textContent).toContain("No installed model supports Text generation.");
+    expect(
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").disabled,
+    ).toBe(true);
+
+    await click(
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Browse models"),
+    );
+    expect(context.setActiveView).toHaveBeenCalledWith("Models");
+
+    // The empty Text picker must not strand the other valid modes.
+    await click(modeButton("Edit"));
+    await act(async () => {});
+    expect(modelOptionValues()).toEqual(["edit_only"]);
+    expect(field(container, "Model").value).toBe("edit_only");
+  });
+
+  it("accepts absent legacy capability metadata but rejects an explicit empty list", async () => {
+    await render(baseContext({
+      imageModels: [EXPLICITLY_UNSUPPORTED, LEGACY_NO_CAPABILITIES],
+    }));
+
+    expect(modelOptionValues()).toEqual(["legacy_model"]);
+    expect(modelOptionValues()).not.toContain("unsupported_model");
+  });
+
+  it("rejects a programmatic Generate submit with a stale mode-incompatible restored model", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({ mode: "text_to_image", model: "edit_only" }),
+    );
+    const context = baseContext({
+      createImageJob: vi.fn(),
+      imageModels: [EDIT_ONLY, CHARACTER_ONLY],
+    });
+    await render(context);
+
+    await act(async () => {
+      container.querySelector("form").dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(context.createImageJob).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      "supports Text generation",
+    );
+  });
+
+  it("rejects a programmatic batch run with a stale mode-incompatible restored model", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        mode: "text_to_image",
+        model: "edit_only",
+        batchMode: true,
+        batchPromptsText: "first prompt\nsecond prompt",
+      }),
+    );
+    const context = baseContext({
+      createImageJob: vi.fn(),
+      imageModels: [EDIT_ONLY, CHARACTER_ONLY],
+    });
+    await render(context);
+
+    const runBatch = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("Run batch"),
+    );
+    expect(runBatch.disabled).toBe(true);
+
+    // Exercise the React handler itself, bypassing the browser's disabled-button
+    // suppression. runBatch must independently enforce eligibility.
+    const reactPropsKey = Object.keys(runBatch).find((key) => key.startsWith("__reactProps"));
+    await act(async () => {
+      await runBatch[reactPropsKey].onClick();
+    });
+
+    expect(context.createImageJob).not.toHaveBeenCalled();
+    expect(container.querySelector(".batch-warning[role='alert']")?.textContent).toContain(
+      "supports Text generation",
+    );
   });
 
   it("enables the Mac Edit tab when any available model supports edit mode (sc-5589)", async () => {
