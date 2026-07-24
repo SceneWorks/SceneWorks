@@ -445,6 +445,14 @@ describe("SimpleShell", () => {
       }
     });
 
+    it(`offers ${stays ? "a Dismiss" : "no Dismiss"} on the studio card for a ${status} run`, async () => {
+      const job = { ...RUNNING_JOB, status, progress: 1, error: "out of memory" };
+      await renderShell(root, baseContext({ jobs: [job], imageLocalJobs: [job] }));
+      // Cancel and Dismiss are mutually exclusive — a terminal run can only be dismissed.
+      expect(buttonWithText(container, "Cancel")).toBeUndefined();
+      expect(Boolean(buttonWithText(container, "Dismiss"))).toBe(stays);
+    });
+
     it(`always keeps the Queue row for a ${status} run`, async () => {
       const job = { ...RUNNING_JOB, status, progress: 1, error: "out of memory" };
       await renderShell(root, baseContext({ jobs: [job] }));
@@ -453,6 +461,34 @@ describe("SimpleShell", () => {
       expect(container.querySelector(".su-job")).toBeTruthy();
     });
   }
+
+  it("dismisses a failed run's card from the studio without touching the Queue", async () => {
+    const failed = { ...RUNNING_JOB, status: "failed", error: "out of memory" };
+    await renderShell(root, baseContext({ jobs: [failed], imageLocalJobs: [failed] }));
+
+    expect(container.querySelector(".su-job")).toBeTruthy();
+    await click(buttonWithText(container, "Dismiss"));
+    expect(container.querySelector(".su-job")).toBeNull();
+
+    // The Queue is the history — dismissing in a studio must not remove it there.
+    await click(navButton(container, "Queue"));
+    expect(container.querySelector(".su-job")).toBeTruthy();
+    expect(container.querySelector(".su-job-error").textContent).toBe("out of memory");
+  });
+
+  // The studios unmount on navigation, so a studio-local dismissal flag would resurrect the
+  // card on the way back. This is why the dismissed set lives on the shell.
+  it("keeps a dismissal after navigating away and back", async () => {
+    const failed = { ...RUNNING_JOB, status: "failed", error: "out of memory" };
+    await renderShell(root, baseContext({ jobs: [failed], imageLocalJobs: [failed] }));
+
+    await click(buttonWithText(container, "Dismiss"));
+    await click(navButton(container, "Queue"));
+    await click(navButton(container, "Image"));
+
+    expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Image Studio");
+    expect(container.querySelector(".su-job")).toBeNull();
+  });
 
   it("sweeps an indeterminate bar for a claimed run with no percentage yet", async () => {
     const noProgress = { ...RUNNING_JOB, progress: 0 };

@@ -221,11 +221,12 @@ export function jobIsRunning(job) {
 //
 // Unlike the Queue (which keeps every row), a studio clears the card once the run resolves
 // cleanly — see `jobClearsFromStudio`. A FAILED run keeps its card, because that card is the
-// only place a studio shows the worker's reason.
+// only place a studio shows the worker's reason — but the user can Dismiss it once read,
+// rather than being left staring at it. Dismissal is studio-local: the Queue row survives.
 export function StudioRunStatus({ job }) {
-  const { toast } = useSimpleUi();
+  const { toast, dismissedJobIds, dismissJob } = useSimpleUi();
   const { jobAction } = useAppStatic();
-  if (!job || jobClearsFromStudio(job)) {
+  if (!job || jobClearsFromStudio(job) || dismissedJobIds?.has(job.id)) {
     return null;
   }
   return (
@@ -235,6 +236,7 @@ export function StudioRunStatus({ job }) {
         await jobAction?.(target, "cancel");
         toast("Run canceled");
       }}
+      onDismiss={(target) => dismissJob(target.id)}
     />
   );
 }

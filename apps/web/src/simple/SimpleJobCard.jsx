@@ -90,9 +90,12 @@ function formatType(type) {
 /**
  * @param {object} props
  * @param {object} props.job
- * @param {(job: object) => any} [props.onCancel] - omitted ⇒ no Cancel button.
+ * @param {(job: object) => any} [props.onCancel] - omitted ⇒ no Cancel button. Only ever
+ *   offered while the job is non-terminal.
+ * @param {(job: object) => any} [props.onDismiss] - omitted ⇒ no Dismiss button. Only ever
+ *   offered once the job IS terminal, so the two actions never both appear.
  */
-export function SimpleJobCard({ job, onCancel }) {
+export function SimpleJobCard({ job, onCancel, onDismiss }) {
   // Local, so the button reports immediately: the job's status only flips once the
   // server responds and the SSE tick lands, which is long enough to look unresponsive.
   const [canceling, setCanceling] = useState(false);
@@ -135,6 +138,17 @@ export function SimpleJobCard({ job, onCancel }) {
           >
             <Icon.Close size={14} />
             {canceling ? "Canceling…" : "Cancel"}
+          </button>
+        ) : null}
+        {!cancelable && onDismiss ? (
+          <button
+            className="su-job-cancel"
+            onClick={() => onDismiss(job)}
+            title="Dismiss this message"
+            type="button"
+          >
+            <Icon.Close size={14} />
+            Dismiss
           </button>
         ) : null}
       </div>
