@@ -6193,6 +6193,105 @@ fn sensenova_weights_resolution_routes_the_candle_lane_to_the_dense_tier() {
     );
 }
 
+/// sc-10222 (epic 9083 gap #3) — the candle FLUX.2 **edit** lane resolves the re-hosted packed turnkey.
+///
+/// The lane used to key its own `black-forest-labs/FLUX.2-{klein-9B,dev}` dense-BFL constants, missed by
+/// the sc-9092 sweep that retired the other ad-hoc candle repo resolvers. The catalog's `downloads[]`
+/// pull ONLY the `SceneWorks/flux2-*-mlx` q4/q8/bf16 turnkeys (sc-8711 / sc-8513) — there is no
+/// dense-BFL download on any platform — so the probe found nothing, `resolve_flux2_edit_candle_base`
+/// returned `None`, and `flux2_edit_candle_available` reported the job not candle-runnable. Off-Mac that
+/// is fatal for klein, which has no torch path at all.
+///
+/// The hub is seeded with ONLY what the catalog actually downloads (no BFL snapshot anywhere), so a
+/// regression to any bespoke constant makes this fail rather than silently pass off a stale cache. The
+/// per-tier assertions additionally prove the lane goes through `standard_tier_subdir` — the whole point
+/// of the fix, since `Flux2Edit`'s `QLinear::linear_detect` picks its precision from the DIRECTORY.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn flux2_edit_candle_base_resolves_the_packed_turnkey_tier() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+
+    // (model id, the engines.rs `default_repo` turnkey the catalog downloads).
+    for (model, cache_dir) in [
+        ("flux2_klein_9b", "models--SceneWorks--flux2-klein-9b-mlx"),
+        ("flux2_dev", "models--SceneWorks--flux2-dev-mlx"),
+    ] {
+        let snapshot = hub.join(cache_dir).join("snapshots").join("installed");
+        for tier in ["q4", "q8", "bf16"] {
+            let path = snapshot
+                .join(tier)
+                .join("transformer")
+                .join("diffusion_pytorch_model.safetensors");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"weights").unwrap();
+        }
+        // An edit payload with NO manifest `repo`, so the resolution runs through the shared
+        // `mlx_model` → engines.rs `default_repo` — the exact seam the bespoke constants shadowed.
+        let edit = |advanced: serde_json::Value| {
+            request(json!({
+                "projectId": "p", "model": model, "prompt": "make it snow",
+                "mode": "edit_image", "sourceAssetId": "asset_1", "count": 1,
+                "advanced": advanced
+            }))
+        };
+
+        // No explicit tier → the app-wide q8 default, clamped to what is installed.
+        assert_eq!(
+            resolve_flux2_edit_candle_base(&edit(json!({})), &settings).unwrap(),
+            Some(snapshot.join("q8")),
+            "{model} edit must resolve the packed turnkey's q8 tier (sc-10222)"
+        );
+        // An explicit tier pick is honored — the edit lane A/Bs tiers like the txt2img lane.
+        for (bits, tier) in [(4, "q4"), (8, "q8"), (0, "bf16")] {
+            assert_eq!(
+                resolve_flux2_edit_candle_base(&edit(json!({ "mlxQuantize": bits })), &settings)
+                    .unwrap(),
+                Some(snapshot.join(tier)),
+                "{model} edit with mlxQuantize {bits} must resolve the {tier} tier"
+            );
+        }
+        // The whole point: the job is now candle-runnable off-Mac.
+        assert!(
+            flux2_edit_candle_available(&edit(json!({})), &settings),
+            "{model} edit must be candle-available once the turnkey is installed (sc-10222)"
+        );
+        // The recipe names the turnkey the load actually read, not a dense-BFL constant.
+        assert!(
+            flux2_edit_candle_repo(&edit(json!({}))).starts_with("SceneWorks/flux2-"),
+            "{model} edit telemetry must record the re-hosted turnkey repo"
+        );
+    }
+}
+
+/// sc-10222 — with NO FLUX.2 snapshot installed the edit lane still reports "not runnable" rather than
+/// handing the engine a path that does not exist. Guards the `None` half of the delegation: the shared
+/// `resolve_weights_dir` must not manufacture a directory for an unfetched repo.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn flux2_edit_candle_base_is_absent_without_the_turnkey() {
+    let dir = tempfile::tempdir().unwrap();
+    let _hf = isolate_hf_hub_cache_to(dir.path());
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+
+    let edit = request(json!({
+        "projectId": "p", "model": "flux2_klein_9b", "prompt": "make it snow",
+        "mode": "edit_image", "sourceAssetId": "asset_1", "count": 1
+    }));
+    assert_eq!(
+        resolve_flux2_edit_candle_base(&edit, &settings).unwrap(),
+        None
+    );
+    assert!(!flux2_edit_candle_available(&edit, &settings));
+}
+
 // sc-11171 (F-008): a strict-pose job on a WIRED candle pose family (e.g. `z_image_turbo`) whose control
 // base snapshot is NOT installed must route to the loud `PoseControlBaseMissing` reject, NOT fall through
 // to the plain candle txt2img lane (which would silently render an unconditioned image and drop the

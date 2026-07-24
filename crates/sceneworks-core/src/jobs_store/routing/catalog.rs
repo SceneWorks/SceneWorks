@@ -601,13 +601,39 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
         false,
     ),
     // FLUX.2-klein-9B + the `_kv` / `_true_v2` weight variants share the candle `flux2_klein_9b` loader
-    // (sc-7459, a weights swap). **txt2img only** on candle: edit / KV-cache shapes defer to torch.
-    ModelCaps::new("flux2_klein_9b", true, true, false, false, false),
-    ModelCaps::new("flux2_klein_9b_kv", true, true, false, false, false),
+    // (sc-7459, a weights swap). The klein/dev `edit_image` shapes do NOT reach this gate — they are
+    // branched out to the bespoke candle `Flux2Edit` lane above (`flux2_edit_candle_eligible`), so these
+    // caps describe the txt2img surface only.
+    //
+    // sc-10222 (epic 9083): `candle_quant = true` for the two ids that actually ship the standard
+    // q4/q8/bf16 turnkey. Both are worker `STANDARD_TIER_MODELS` members whose manifests carry a
+    // MEASURED `candle.vramGbByTier` (klein 46.2/50.6/75.5, dev 44.0/70.7/128.0) — the worker has served
+    // those tiers on the candle txt2img lane since sc-9092, but this row still said `false`, so
+    // `image_request_candle_eligible`'s `!supports_quant && candle_request_wants_quant` arm bounced every
+    // explicit `advanced.mlxQuantize > 0` tier-select off the candle lane into the retired torch
+    // fallback — and FLUX.2-klein has NO torch path at all. Cruelly, dev's own fit-gate tells a 48 GB
+    // user to pick q4 (44.0) instead of the q8 default (70.7): the only tier that fits was the one tier
+    // that could not be routed. This is the identical "engine wired, router half missed" skew sc-9983
+    // (krea/ideogram/boogu) and sc-11020 (qwen_image) each closed; the diagnostic tell is exactly the one
+    // recorded there — a family in `STANDARD_TIER_MODELS` with a `candle.vramGbByTier` block that is not
+    // in `CANDLE_QUANT_MODELS`. NOT `candle_quant_lora`: neither advertises candle inference LoRA.
+    //
+    // The load `Quant` stays `None` on klein regardless (`DENSE_TE_TIER_MODELS` keeps its bf16 Qwen3 text
+    // encoder full-precision); `mlxQuantize` here is a turnkey tier-SELECT — which pre-quantized subdir
+    // `standard_tier_subdir` descends into — not an on-the-fly quantize.
+    ModelCaps::new("flux2_klein_9b", true, true, true, false, false),
+    ModelCaps::new("flux2_klein_9b_kv", true, true, true, false, false),
+    // `_true_v2` stays `candle_quant = false`: it is the wikeeyang community fine-tune, installed by
+    // convert-at-install from a single bf16 file into a FLAT `modelPath` dir. It ships no q4/q8/bf16
+    // tier matrix (one `downloads[]` entry, `mlx.quantize: 8` on-the-fly), so there is no tier for a
+    // pick to select — admitting one would only hand the dense converted tree to the legacy CPU-stage →
+    // quantize-onto-GPU path on a shape nothing has validated.
     ModelCaps::new("flux2_klein_9b_true_v2", true, true, false, false, false),
     // FLUX.2-dev (epic 5914 MLX / epic 6564 sc-7458 candle) — the guidance-distilled 32B flagship.
-    // A SEPARATE candle engine from klein (Mistral3 TE + 48/48/15360 DiT); Q4-quantized at load off-Mac.
-    ModelCaps::new("flux2_dev", true, true, false, false, false),
+    // A SEPARATE candle engine from klein (Mistral3 TE + 48/48/15360 DiT). Same sc-10222 tier-select
+    // flip as klein above; its `SceneWorks/flux2-dev-mlx` turnkey is where the epic's headline
+    // "packed Q4 load kills the ~105 GB dense CPU-staging peak" claim actually lands.
+    ModelCaps::new("flux2_dev", true, true, true, false, false),
     // SDXL family (sc-10767, epic 9083 full-catalog parity): the candle lane serves the packed q4/q8
     // MLX tiers end-to-end — packed UNet (sc-9416), packed dual-CLIP (sc-9527), and LoRA/LoKr fold on a
     // packed tier (sc-9528) — and `candle-gen-sdxl` now advertises `supported_quants: [Q4, Q8]`. So
@@ -1351,6 +1377,12 @@ mod tests {
         // the candle txt2img lane, so a tier-select stays on candle; no candle inference LoRA on base
         // qwen. (sc-9983 flipped this for krea/ideogram/boogu but missed qwen.)
         "qwen_image",
+        // sc-10222: FLUX.2-klein 9B/`_kv` + FLUX.2-dev — the same missed router half, for the last
+        // `STANDARD_TIER_MODELS` families still carrying it. `_true_v2` is deliberately absent (a flat
+        // convert-at-install dir with no tier matrix); see the caps rows for the full reasoning.
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_dev",
     ];
 
     // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle
