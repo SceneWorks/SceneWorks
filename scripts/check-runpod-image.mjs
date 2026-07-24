@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [dockerfile, entrypoint, gpuSource, engineSource, readme] = await Promise.all([
+const [dockerfile, entrypoint, supervisor, gpuSource, engineSource, readme] = await Promise.all([
   readFile("docker/rust.Dockerfile", "utf8"),
   readFile("docker/runpod-entrypoint.sh", "utf8"),
+  readFile("crates/sceneworks-worker/src/supervisor.rs", "utf8"),
   readFile("crates/sceneworks-worker/src/gpu.rs", "utf8"),
   readFile("crates/sceneworks-worker/src/engines.rs", "utf8"),
   readFile("README.md", "utf8"),
@@ -58,8 +59,29 @@ assert.ok(
   "worker must connect to the API over loopback",
 );
 assert.ok(
+  entrypoint.includes('SCENEWORKS_ACCESS_TOKEN="${SCENEWORKS_ACCESS_TOKEN:-}"'),
+  "entrypoint must explicitly propagate the access token to the worker supervisor",
+);
+assert.ok(
+  entrypoint.includes("unset SCENEWORKS_ALLOW_OPEN_BIND"),
+  "entrypoint must remove the legacy unauthenticated-bind override",
+);
+assert.ok(
+  entrypoint.includes("is_loopback_host") && entrypoint.includes("access_token_trimmed"),
+  "entrypoint must reject a network bind before startup when the token is blank",
+);
+assert.ok(
   entrypoint.includes("shutdown_children"),
   "entrypoint must own coordinated child shutdown",
+);
+assert.ok(
+  supervisor.includes('command.env_remove("SCENEWORKS_ACCESS_TOKEN")') &&
+    supervisor.includes('"SCENEWORKS_ACCESS_TOKEN".to_owned()'),
+  "worker supervisor must explicitly propagate the parsed token to GPU and utility children",
+);
+assert.ok(
+  !dockerfile.includes("SCENEWORKS_ALLOW_OPEN_BIND"),
+  "combined image Dockerfile must never configure the unauthenticated-bind override",
 );
 
 for (const capability of [
