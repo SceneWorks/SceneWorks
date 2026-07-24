@@ -84,21 +84,8 @@ fn download_stall_timeout() -> Option<Duration> {
     (seconds > 0).then(|| Duration::from_secs(seconds))
 }
 
-// The cross-process download lock (F-098 / sc-8900) is only reachable from
-// `ensure_cached_file_verified`, which is gated to the macOS MLX runtime and the
-// off-Mac candle InstantID lane; gate the whole apparatus the same way so the bare
-// (non-macOS, non-candle) lib build — which still compiles `download_source_url` —
-// doesn't drag in an unused `fs2` import or dead lock helpers.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
 use download_lock::DownloadLock;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
 mod download_lock {
     use super::{task_join_error, WorkerError, WorkerResult};
     use fs2::FileExt as _;
@@ -586,6 +573,55 @@ pub(crate) struct DownloadContext<'a> {
 
 const AUTO_RESUME_ATTEMPTS: usize = 1;
 
+struct DownloadResumeState {
+    network_attempts_remaining: usize,
+    stall_timeout: Option<Duration>,
+    stall_resumes_without_progress: u32,
+    last_stall_bytes: u64,
+}
+
+impl DownloadResumeState {
+    fn new(allow_network_resume: bool) -> Self {
+        Self {
+            network_attempts_remaining: usize::from(allow_network_resume) * AUTO_RESUME_ATTEMPTS,
+            stall_timeout: download_stall_timeout(),
+            stall_resumes_without_progress: 0,
+            last_stall_bytes: 0,
+        }
+    }
+
+    fn take_network_resume(&mut self) -> bool {
+        if self.network_attempts_remaining == 0 {
+            false
+        } else {
+            self.network_attempts_remaining -= 1;
+            true
+        }
+    }
+
+    fn record_stall(&mut self, label: &str, on_disk: u64) -> WorkerResult<()> {
+        if on_disk > self.last_stall_bytes {
+            self.stall_resumes_without_progress = 0;
+        } else {
+            self.stall_resumes_without_progress += 1;
+        }
+        self.last_stall_bytes = on_disk;
+        if self.stall_resumes_without_progress >= MAX_STALL_RESUMES_WITHOUT_PROGRESS {
+            let timeout_secs = self.stall_timeout.map_or(0, |timeout| timeout.as_secs());
+            return Err(WorkerError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "{label} download stalled: no forward progress for \
+                     {MAX_STALL_RESUMES_WITHOUT_PROGRESS} consecutive {timeout_secs}s windows \
+                     (stuck at {}). The source appears hung; try again.",
+                    format_bytes_with_exact(on_disk),
+                ),
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Download a single file to `dest` (resumable via HTTP Range), rejecting a truncated
 /// response (size mismatch) and, when `expected_sha256` is provided, a corrupt one
 /// (content-digest mismatch). On a digest mismatch the file is removed so a corrupt
@@ -698,19 +734,12 @@ async fn download_file_inner(
             progress.discard_started_bytes(removed_bytes);
         }
     }
-    let mut resume_attempts_remaining = if context.fresh_download {
-        0
-    } else {
-        AUTO_RESUME_ATTEMPTS
-    };
+    let mut resume = DownloadResumeState::new(!context.fresh_download);
     // Forward-progress watchdog (independent of the network-error resume budget above):
     // a hung-but-alive stream is abort-and-resumed as often as it keeps advancing, and
     // only a source wedged at the same offset for MAX_STALL_RESUMES_WITHOUT_PROGRESS
     // consecutive windows gives up. `last_stall_bytes` starts at 0 so the FIRST stall
     // never counts as no-progress (any partial file already beats it).
-    let stall_timeout = download_stall_timeout();
-    let mut stall_resumes_without_progress = 0_u32;
-    let mut last_stall_bytes = 0_u64;
     loop {
         let existing_bytes = existing_download_bytes(dest, expected_size).await?;
         if expected_size.is_some_and(|size| existing_bytes == size) {
@@ -736,7 +765,7 @@ async fn download_file_inner(
         }
         let appending = existing_bytes > 0 && status == StatusCode::PARTIAL_CONTENT;
         if existing_bytes > 0 && !appending {
-            progress.discard_started_bytes(existing_bytes);
+            progress.reset_to_on_disk(0);
         }
         let mut response = response;
         let mut output = if appending {
@@ -777,7 +806,7 @@ async fn download_file_inner(
                     report_download_progress(context, progress).await?;
                     // A live-but-hung stream (bytes trickling in under HTTP_READ_TIMEOUT
                     // yet never advancing) is caught here and abort-and-resumed below.
-                    if stall_timeout
+                    if resume.stall_timeout
                         .is_some_and(|timeout| progress.is_stalled(timeout, DOWNLOAD_STALL_MIN_PROGRESS))
                     {
                         stalled = true;
@@ -792,24 +821,7 @@ async fn download_file_inner(
             // advances the on-disk count, keep going; only a source stuck at the same
             // offset for consecutive windows is fatal.
             let on_disk = existing_download_bytes(dest, expected_size).await?;
-            if on_disk > last_stall_bytes {
-                stall_resumes_without_progress = 0;
-            } else {
-                stall_resumes_without_progress += 1;
-            }
-            last_stall_bytes = on_disk;
-            if stall_resumes_without_progress >= MAX_STALL_RESUMES_WITHOUT_PROGRESS {
-                let timeout_secs = stall_timeout.map_or(0, |timeout| timeout.as_secs());
-                return Err(WorkerError::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!(
-                        "{label} download stalled: no forward progress for \
-                         {MAX_STALL_RESUMES_WITHOUT_PROGRESS} consecutive {timeout_secs}s windows \
-                         (stuck at {}). The source appears hung; try again.",
-                        format_bytes_with_exact(on_disk),
-                    ),
-                )));
-            }
+            resume.record_stall(label, on_disk)?;
             continue;
         }
         if let Some(error) = transfer_error {
@@ -818,8 +830,7 @@ async fn download_file_inner(
                 if written == expected {
                     return Ok(());
                 }
-                if written < expected && resume_attempts_remaining > 0 {
-                    resume_attempts_remaining -= 1;
+                if written < expected && resume.take_network_resume() {
                     continue;
                 }
             }
@@ -835,8 +846,7 @@ async fn download_file_inner(
             if written == expected {
                 return Ok(());
             }
-            if written < expected && resume_attempts_remaining > 0 {
-                resume_attempts_remaining -= 1;
+            if written < expected && resume.take_network_resume() {
                 continue;
             }
             if written > expected {
@@ -900,6 +910,7 @@ pub(crate) async fn download_snapshot(
         if let Some(parent) = target_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        let _lock = DownloadLock::acquire_async(&target_path).await?;
         download_file(
             context,
             &file.download_url,
@@ -955,10 +966,12 @@ pub(crate) async fn download_snapshot_into_cache(
             .map(|value| normalize_etag(&value))
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| blob_fallback_name(&file.path));
+        let blob_path = blobs_dir.join(&etag);
+        let _lock = DownloadLock::acquire_async(&blob_path).await?;
         download_file(
             context,
             &file.download_url,
-            &blobs_dir.join(&etag),
+            &blob_path,
             file.size,
             // The blob is named by its etag (= the LFS sha256), and the tree API
             // reports the same digest as `lfs.oid`; verify the content against it.
@@ -1159,108 +1172,169 @@ pub(crate) async fn download_source_url(
     };
 
     let client = source_url_client_for_request(context.settings, &request_url).await?;
-    let total_bytes = lora_source_content_length(&client, &request_url, bearer).await?;
+    let total_bytes = lora_source_content_length(&client, &request_url, bearer)
+        .await
+        .map_err(|error| redact_source_url_error("sourceUrl HEAD failed", error))?;
     if total_bytes.is_some_and(|total| total > max_bytes) {
         return Err(WorkerError::InvalidPayload(format!(
             "{source_label} sourceUrl exceeds the {} limit",
             format_bytes(max_bytes)
         )));
     }
-    let existing_bytes = existing_download_bytes(&target_path, total_bytes).await?;
-    if total_bytes.is_some_and(|total| total > 0 && existing_bytes == total) {
+    let started_bytes = existing_download_bytes(&target_path, total_bytes).await?;
+    if total_bytes.is_some_and(|total| total > 0 && started_bytes == total) {
         return Ok(());
-    }
-    let range_header = (existing_bytes > 0).then(|| format!("bytes={existing_bytes}-"));
-    let mut response = send_source_url_with_redirects(
-        context.settings,
-        &request_url,
-        &client,
-        bearer,
-        range_header.as_deref(),
-    )
-    .await?;
-    if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
-        let range_total = response
-            .headers()
-            .get(header::CONTENT_RANGE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(content_range_total);
-        if total_bytes
-            .or(range_total)
-            .is_some_and(|total| total > 0 && existing_bytes == total)
-        {
-            return Ok(());
-        }
-    }
-    response = response.error_for_status()?;
-    let appending = existing_bytes > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
-    let expected_bytes = total_bytes.or_else(|| {
-        response.content_length().map(|remaining| {
-            if appending {
-                existing_bytes + remaining
-            } else {
-                remaining
-            }
-        })
-    });
-    if expected_bytes.is_some_and(|total| total > max_bytes) {
-        return Err(WorkerError::InvalidPayload(format!(
-            "{source_label} sourceUrl exceeds the {} limit",
-            format_bytes(max_bytes)
-        )));
     }
     let mut progress = DownloadProgress::new(
         source_url,
-        if appending { existing_bytes } else { 0 },
-        expected_bytes,
+        started_bytes,
+        total_bytes,
         progress_report_interval(context.settings),
     );
-    let mut output = if appending {
-        tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&target_path)
-            .await?
-    } else {
-        tokio::fs::File::create(&target_path).await?
-    };
-    let mut interval = tokio::time::interval(progress.report_interval());
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    interval.tick().await;
+    let mut resume = DownloadResumeState::new(!context.fresh_download);
     loop {
-        tokio::select! {
-            chunk = response.chunk() => {
-                let Some(chunk) = chunk? else {
-                    break;
-                };
-                // No per-chunk cancel poll here (sc-8806): a GET per received HTTP
-                // chunk turned a multi-GB download into tens of thousands of API
-                // round-trips and serialized the transfer on them. The interval arm
-                // below heartbeats + cancel-checks every report tick, exactly like
-                // `download_file_inner`, so cancel latency is the tick interval.
-                output.write_all(&chunk).await?;
-                progress.record_transferred(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-                if progress.downloaded_bytes() > max_bytes {
-                    return Err(WorkerError::InvalidPayload(format!(
-                        "{source_label} sourceUrl exceeds the {} limit",
-                        format_bytes(max_bytes)
-                    )));
-                }
-            }
-            _ = interval.tick() => {
-                report_download_progress(context, &progress).await?;
+        let existing_bytes = existing_download_bytes(&target_path, total_bytes).await?;
+        let range_header = (existing_bytes > 0).then(|| format!("bytes={existing_bytes}-"));
+        let response = send_source_url_with_redirects(
+            context.settings,
+            &request_url,
+            &client,
+            bearer,
+            range_header.as_deref(),
+        )
+        .await;
+        let mut response = match response {
+            Ok(response) => response,
+            Err(_error) if resume.take_network_resume() => continue,
+            Err(error) => return Err(redact_source_url_error("sourceUrl GET failed", error)),
+        };
+        if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+            let range_total = response
+                .headers()
+                .get(header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(content_range_total);
+            if total_bytes
+                .or(range_total)
+                .is_some_and(|total| total > 0 && existing_bytes == total)
+            {
+                return Ok(());
             }
         }
+        response = response
+            .error_for_status()
+            .map_err(|error| redact_reqwest_source_url_error("sourceUrl GET failed", error))?;
+        let appending = existing_bytes > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
+        if existing_bytes > 0 && !appending {
+            progress.reset_to_on_disk(0);
+        }
+        let expected_bytes = total_bytes.or_else(|| {
+            response.content_length().map(|remaining| {
+                if appending {
+                    existing_bytes + remaining
+                } else {
+                    remaining
+                }
+            })
+        });
+        if expected_bytes.is_some_and(|total| total > max_bytes) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{source_label} sourceUrl exceeds the {} limit",
+                format_bytes(max_bytes)
+            )));
+        }
+        let mut output = if appending {
+            tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&target_path)
+                .await?
+        } else {
+            tokio::fs::File::create(&target_path).await?
+        };
+        let mut interval = tokio::time::interval(progress.report_interval());
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        interval.tick().await;
+        progress.reset_stall_clock();
+        let mut transfer_error = None;
+        let mut stalled = false;
+        loop {
+            tokio::select! {
+                chunk = response.chunk() => {
+                    match chunk {
+                        Ok(Some(chunk)) => {
+                            output.write_all(&chunk).await?;
+                            progress.record_transferred(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                            if progress.downloaded_bytes() > max_bytes {
+                                return Err(WorkerError::InvalidPayload(format!(
+                                    "{source_label} sourceUrl exceeds the {} limit",
+                                    format_bytes(max_bytes)
+                                )));
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            transfer_error = Some(error);
+                            break;
+                        }
+                    }
+                }
+                _ = interval.tick() => {
+                    report_download_progress(context, &progress).await?;
+                    if resume.stall_timeout.is_some_and(|timeout| {
+                        progress.is_stalled(timeout, DOWNLOAD_STALL_MIN_PROGRESS)
+                    }) {
+                        stalled = true;
+                        break;
+                    }
+                }
+            }
+        }
+        output.flush().await?;
+        if stalled {
+            let on_disk = existing_download_bytes(&target_path, total_bytes).await?;
+            resume.record_stall(&format!("{source_label} sourceUrl"), on_disk)?;
+            continue;
+        }
+        if let Some(error) = transfer_error {
+            if resume.take_network_resume() {
+                continue;
+            }
+            return Err(redact_reqwest_source_url_error(
+                "sourceUrl body failed",
+                error,
+            ));
+        }
+        if let Some(expected) = expected_bytes {
+            let written = tokio::fs::metadata(&target_path).await?.len();
+            if written == expected {
+                return Ok(());
+            }
+            if written < expected && resume.take_network_resume() {
+                continue;
+            }
+            if written > expected {
+                let _ = tokio::fs::remove_file(&target_path).await;
+            }
+            return Err(WorkerError::InvalidPayload(download_size_mismatch_message(
+                &format!("{source_label} sourceUrl"),
+                written,
+                expected,
+            )));
+        }
+        return Ok(());
     }
-    output.flush().await?;
-    if expected_bytes.is_some_and(|expected| progress.downloaded_bytes() != expected) {
-        return Err(WorkerError::InvalidPayload(download_size_mismatch_message(
-            &format!("{source_label} sourceUrl"),
-            progress.downloaded_bytes(),
-            expected_bytes.unwrap_or_default(),
-        )));
+}
+
+fn redact_reqwest_source_url_error(context: &str, error: reqwest::Error) -> WorkerError {
+    WorkerError::InvalidPayload(format!("{context}: {}", error.without_url()))
+}
+
+fn redact_source_url_error(context: &str, error: WorkerError) -> WorkerError {
+    match error {
+        WorkerError::Http(error) => redact_reqwest_source_url_error(context, error),
+        other => other,
     }
-    Ok(())
 }
 
 /// Maximum redirect hops to follow on an authenticated source-URL download.
@@ -1547,6 +1621,17 @@ impl<'a> DownloadProgress<'a> {
 
     fn discard_started_bytes(&mut self, bytes: u64) {
         self.started_bytes = self.started_bytes.saturating_sub(bytes);
+    }
+
+    /// Reconcile progress with the bytes that still exist after an HTTP server ignores
+    /// a Range request and the destination is restarted with a full `200` response.
+    /// Bytes transferred on an abandoned attempt must not count toward limits,
+    /// progress, or the next stall window.
+    fn reset_to_on_disk(&mut self, bytes: u64) {
+        self.started_bytes = bytes;
+        self.transferred_bytes = 0;
+        self.stall_checkpoint_bytes = bytes;
+        self.stall_checkpoint_at = Instant::now();
     }
 
     fn report_interval(&self) -> Duration {
