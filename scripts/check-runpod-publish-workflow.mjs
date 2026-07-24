@@ -61,18 +61,19 @@ for (const contract of [
   requireText(workflow, contract);
 }
 
-for (const [action, major] of [
-  ["actions/checkout", "v7"],
-  ["actions/setup-node", "v7"],
-  ["docker/login-action", "v3"],
-  ["docker/setup-buildx-action", "v3"],
-  ["docker/metadata-action", "v5"],
-  ["docker/build-push-action", "v6"],
+for (const [action, version, sha] of [
+  ["actions/checkout", "v7.0.1", "3d3c42e5aac5ba805825da76410c181273ba90b1"],
+  ["actions/setup-node", "v7.0.0", "820762786026740c76f36085b0efc47a31fe5020"],
+  ["docker/login-action", "v4.5.1", "abd2ef45e78c5afb21d64d4ca52ee8550d9572c7"],
+  ["docker/setup-buildx-action", "v4.2.0", "bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"],
+  ["docker/metadata-action", "v6.2.0", "dc802804100637a589fabce1cb79ff13a1411302"],
+  ["docker/build-push-action", "v7.3.0", "53b7df96c91f9c12dcc8a07bcb9ccacbed38856a"],
 ]) {
-  const use = new RegExp(`uses: ${action}@([0-9a-f]{40}) # (${major}(?:\\.[0-9.]+)?)`).exec(
+  requireText(
     workflow,
+    `uses: ${action}@${sha} # ${version}`,
+    `${action} must use the reviewed immutable ${version} commit`,
   );
-  assert.ok(use, `${action} must use an immutable SHA annotated with ${major}`);
 }
 
 assert.match(workflow, /\^refs\/tags\/v\(\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\)\$/);
