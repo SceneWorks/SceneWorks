@@ -38,320 +38,221 @@ pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &["wan_2_2_t2v_14b", "wan_2
 /// of reaching its candle edit lane (the sc-5487 lanes were validated only via `image_generate` jobs, so
 /// the gap was invisible). The conditioning signals mirror the worker's `sdxl_sub_mode` / `pose_entries`
 /// exactly, so the router and worker agree on the lane boundary.
-pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CandleImageLane {
+    ImportedFamily,
+    InstantId,
+    SdxlEdit,
+    Flux2Edit,
+    QwenEdit,
+    ZImageEdit,
+    ZImageIdentity,
+    IdeogramEdit,
+    IdeogramImg2Img,
+    BooguEdit,
+    BooguImg2Img,
+    KreaEdit,
+    BerniniEdit,
+    SdxlIpAdapter,
+    KolorsIpAdapter,
+    FluxIpAdapter,
+    QwenControl,
+    KolorsControl,
+    ZImageControl,
+    ZImageImg2Img,
+    Sd3Img2Img,
+    Flux1Control,
+    Flux2Control,
+    KreaControl,
+    KreaImg2Img,
+    Pulid,
+    TextToImage,
+}
+
+struct CandleImageRoute {
+    lane: CandleImageLane,
+    models: ModelMatch,
+    shape: fn(&Map<String, Value>) -> bool,
+}
+
+enum ModelMatch {
+    Any(&'static [&'static str]),
+    Family(fn(&str) -> bool),
+}
+
+impl CandleImageRoute {
+    fn matches(&self, model: &str, payload: &Map<String, Value>) -> bool {
+        let model_matches = match self.models {
+            ModelMatch::Any(models) => models.contains(&model),
+            ModelMatch::Family(predicate) => predicate(model),
+        };
+        model_matches && (self.shape)(payload)
+    }
+}
+
+const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
+    CandleImageRoute {
+        lane: CandleImageLane::InstantId,
+        models: ModelMatch::Any(&["instantid_realvisxl"]),
+        shape: instantid_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::SdxlEdit,
+        models: ModelMatch::Family(is_sdxl_family_candle_model),
+        shape: sdxl_edit_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::Flux2Edit,
+        models: ModelMatch::Any(&["flux2_klein_9b", "flux2_klein_9b_true_v2", "flux2_dev"]),
+        shape: flux2_edit_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::QwenEdit,
+        models: ModelMatch::Any(&[
+            "qwen_image_edit",
+            "qwen_image_edit_2509",
+            "qwen_image_edit_2511",
+            "qwen_image_edit_2511_lightning",
+        ]),
+        shape: qwen_edit_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::ZImageEdit,
+        models: ModelMatch::Any(&["z_image_turbo", "z_image_edit"]),
+        shape: zimage_edit_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::ZImageIdentity,
+        models: ModelMatch::Any(&["z_image_turbo"]),
+        shape: zimage_identity_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::IdeogramEdit,
+        models: ModelMatch::Any(&["ideogram_4", "ideogram_4_turbo"]),
+        shape: ideogram_edit_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::IdeogramImg2Img,
+        models: ModelMatch::Any(&["ideogram_4", "ideogram_4_turbo"]),
+        shape: ideogram_img2img_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::BooguEdit,
+        models: ModelMatch::Any(&["boogu_image_edit"]),
+        shape: boogu_edit_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::BooguImg2Img,
+        models: ModelMatch::Any(&["boogu_image", "boogu_image_turbo"]),
+        shape: boogu_img2img_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::KreaEdit,
+        models: ModelMatch::Any(&["krea_2_raw", "krea_2_turbo"]),
+        shape: krea_edit_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::BerniniEdit,
+        models: ModelMatch::Any(&["bernini_image"]),
+        shape: bernini_image_edit_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::SdxlIpAdapter,
+        models: ModelMatch::Family(is_sdxl_family_candle_model),
+        shape: sdxl_ipadapter_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::KolorsIpAdapter,
+        models: ModelMatch::Any(&["kolors"]),
+        shape: kolors_ipadapter_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::FluxIpAdapter,
+        models: ModelMatch::Any(&["flux_dev", "flux_schnell"]),
+        shape: flux_ipadapter_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::QwenControl,
+        models: ModelMatch::Any(&["qwen_image"]),
+        shape: qwen_control_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::KolorsControl,
+        models: ModelMatch::Any(&["kolors"]),
+        shape: kolors_control_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::ZImageControl,
+        models: ModelMatch::Any(&["z_image_turbo", "z_image"]),
+        shape: zimage_control_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::ZImageImg2Img,
+        models: ModelMatch::Any(&["z_image", "z_image_turbo"]),
+        shape: zimage_img2img_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::Sd3Img2Img,
+        models: ModelMatch::Family(is_sd3_family_candle_model),
+        shape: sd3_img2img_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::Flux1Control,
+        models: ModelMatch::Any(&["flux_dev"]),
+        shape: flux1_control_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::Flux2Control,
+        models: ModelMatch::Any(&["flux2_dev"]),
+        shape: flux2_dev_control_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::KreaControl,
+        models: ModelMatch::Any(&["krea_2_turbo"]),
+        shape: krea_control_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::KreaImg2Img,
+        models: ModelMatch::Any(&["krea_2_turbo", "krea_2_raw"]),
+        shape: krea_img2img_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::Pulid,
+        models: ModelMatch::Any(&["pulid_flux_dev"]),
+        shape: pulid_flux_candle_eligible,
+    },
+];
+
+#[cfg(test)]
+pub(crate) fn candle_image_route_lanes() -> Vec<CandleImageLane> {
+    CANDLE_IMAGE_ROUTES.iter().map(|route| route.lane).collect()
+}
+
+/// Resolve the first matching Candle image lane. The order is part of the scheduler contract:
+/// specialized conditioned lanes precede the generic registry text-to-image lane.
+pub(crate) fn image_job_candle_lane(job: &JobSnapshot) -> Option<CandleImageLane> {
     if !matches!(job.job_type, JobType::ImageGenerate | JobType::ImageEdit) {
-        return false;
+        return None;
     }
-    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
-        return false;
-    };
-    // Imported Krea 2 single-file txt2img / img2img (sc-14023 / sc-14071): imported ids are
-    // intentionally absent from `CANDLE_ROUTED_MODELS`, so claim them through the manifest family
-    // before the builtin id table. The worker repeats this gate and validates that the recorded
-    // app-managed path resolves to exactly one safetensors file before dispatching the native-file
-    // loader. `adapters_supported = false`: the candle native single-file loader takes no adapters
-    // yet (sc-14135), so the candle imported lane stays t2i / img2img only — LoRAs (sc-14111) and
-    // the Kontext edit surface (sc-14119) are MLX-only until that follow-up lands.
+    let model = job.payload.get("model").and_then(Value::as_str)?;
+
     if imported_image_request_family_eligible(model, &job.payload, CANDLE_ROUTED_FAMILIES, false) {
-        return true;
+        return Some(CandleImageLane::ImportedFamily);
     }
-    // InstantID (sc-5491, epic 5480): the candle `candle-gen-instantid` provider serves the SAME
-    // identity-preserving surface as the MLX path (single-identity character_image, the angle set,
-    // pose-library mode, face-restore) — a bespoke `generate_instantid_stream` lane, NOT the
-    // txt2img-only `image_request_candle_eligible` gate (which rejects `referenceAssetId`, which
-    // InstantID requires). Branch it out before that gate. Retires the Python `_vendor/instantid`
-    // off-Mac; the candle worker only advertises the `candle` marker when the backend is enabled, so a
-    // candle-disabled box still falls these jobs back to the Python torch worker unchanged.
-    if model == "instantid_realvisxl" {
-        return instantid_candle_eligible(&job.payload);
-    }
-    // SDXL img2img / inpaint / outpaint edit (sc-5487, epic 5480): an sdxl-family `edit_image` job with
-    // a source image is the bespoke candle `SdxlEdit` lane (`generate_candle_sdxl_edit_stream`), NOT
-    // txt2img — the `image_request_candle_eligible` gate below rejects the whole `edit_image` family.
-    // Branch it out first (disjoint from the IP-Adapter lane below, which is reference-only and not
-    // `edit_image`). Mirrors the worker's `sdxl_edit_candle_available` gate.
-    if is_sdxl_family_candle_model(model) && sdxl_edit_candle_eligible(&job.payload) {
-        return true;
-    }
-    // FLUX.2-klein reference / img2img edit (sc-5487, epic 5480): a klein-family `edit_image` job with a
-    // source image is the bespoke candle `Flux2Edit` lane (`generate_candle_flux2_edit_stream`), NOT
-    // txt2img — the `image_request_candle_eligible` gate below rejects the whole `edit_image` family.
-    // FLUX.2-klein has no torch path, so this is the only off-Mac edit lane for it. Mirrors the worker's
-    // `flux2_edit_candle_available` gate.
-    if matches!(model, "flux2_klein_9b" | "flux2_klein_9b_true_v2")
-        && flux2_edit_candle_eligible(&job.payload)
-    {
-        return true;
-    }
-    // FLUX.2-dev edit (sc-7736, epic 6564): the 32B flagship `edit_image` job with a source is the SAME
-    // bespoke candle `Flux2Edit` lane (`generate_candle_flux2_edit_stream` via `load_dev`, Q4 CPU-stage →
-    // quantize-onto-GPU), NOT txt2img — the `image_request_candle_eligible` gate below rejects the whole
-    // `edit_image` family. Branch it out first (the klein-edit reasoning, for the dev family). Same payload
-    // predicate as klein. Mirrors the worker's `flux2_edit_candle_available` gate.
-    if model == "flux2_dev" && flux2_edit_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Qwen-Image-Edit reference / dual-latent edit (sc-5487, epic 5480): a non-lightning Qwen-Image-Edit
-    // `edit_image` job with a source image is the bespoke candle `QwenEdit` lane
-    // (`generate_candle_qwen_edit_stream`), NOT txt2img — and `qwen_image_edit*` are not candle txt2img
-    // ids (the gate below only knows `qwen_image`), so they would fall through to torch. Branch it out
-    // first. Off-Mac this was a torch fallback. The `-2511_lightning` distill is the same `-2511` base
-    // with the lightx2v 4-step LoRA folded into the MMDiT at load (sc-6220), so it routes to candle too.
-    // Mirrors the worker's `qwen_edit_candle_available`.
-    if matches!(
-        model,
-        "qwen_image_edit"
-            | "qwen_image_edit_2509"
-            | "qwen_image_edit_2511"
-            | "qwen_image_edit_2511_lightning"
-    ) && qwen_edit_candle_eligible(&job.payload)
-    {
-        return true;
-    }
-    // Z-Image img2img / edit (sc-6595, epic 5480): a z-image-family `edit_image` job with a source image
-    // is the bespoke candle `ZImageEdit` lane (`generate_candle_zimage_edit_stream`), NOT txt2img — the
-    // gate below rejects the whole `edit_image` family, and the dedicated `z_image_edit` id isn't even a
-    // candle txt2img id (so a `z_image_edit` job would otherwise hit the "model not routed" gap and
-    // misattribute to epic 3692). Branch it out first; disjoint from the Z-Image strict-pose control lane
-    // below (that one is `advanced.poses`, not `edit_image`). Mirrors the worker's
-    // `zimage_edit_candle_available`.
-    if matches!(model, "z_image_turbo" | "z_image_edit")
-        && zimage_edit_candle_eligible(&job.payload)
-    {
-        return true;
-    }
-    // Z-Image identity-init for Image Studio "With Character" (sc-8409, epic 4406): a `z_image_turbo`
-    // `character_image` job with a `referenceAssetId` + `advanced.referenceStrength > 0` is the bespoke
-    // candle `ZImageEdit` identity-init lane (`generate_candle_zimage_identity_stream`), NOT txt2img — the
-    // `image_request_candle_eligible` gate below rejects any `referenceAssetId`, so without this the job
-    // falls back to torch/MLX (off-Mac: plain txt2img, dropping the reference — the pre-existing gap this
-    // story closes). Branch it out first; disjoint from the Z-Image edit lane above (`edit_image` +
-    // `sourceAssetId`) and the strict-pose control lane below (`advanced.poses`, which this gate excludes).
-    // Mirrors the worker's `zimage_identity_candle_available`.
-    if model == "z_image_turbo" && zimage_identity_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Ideogram 4 img2img / Remix + mask inpaint / outpaint edit (sc-6598, epic 6561): an ideogram-family
-    // `edit_image` job with a source image runs the candle `candle-gen-ideogram` edit path. Unlike the
-    // other families above, Ideogram has no bespoke edit stream — it's the SAME engine for T2I and edit,
-    // so the generic `generate_candle_stream` resolves the source `Reference` (+ optional `Mask`), exactly
-    // as the MLX `generate_stream` handles Ideogram edit in-lane. The `image_request_candle_eligible` gate
-    // below rejects the whole `edit_image` family, so branch it out here. Mirrors the worker's dispatch.
-    if matches!(model, "ideogram_4" | "ideogram_4_turbo")
-        && ideogram_edit_candle_eligible(&job.payload)
-    {
-        return true;
-    }
-    // Ideogram 4 / Turbo img2img (reference-guided latent-init, sc-10261, epic 8588): an ideogram-family
-    // job in a **non-edit** mode with a `referenceAssetId` is the "Image reference" `ui.img2img` tile —
-    // a single `Conditioning::Reference` with NO `Mask`, which the candle `candle-gen-ideogram` pipeline's
-    // `resolve_edit` denoises as plain img2img (VAE-encode the source → start from the strength-derived
-    // step, no keep-region mask), exactly as the MLX edit path does (sc-10192, worker #1266). DISJOINT
-    // from the Ideogram `edit_image` Remix/inpaint branch above (that arm is `edit_image` + `sourceAssetId`;
-    // this arm is `text_to_image` + `referenceAssetId`), and the txt2img gate below rejects any
-    // `referenceAssetId`, so branch it out here. The worker `generate_candle_stream` already resolves the
-    // init generically (`model_supports_img2img`, sc-10134) — no worker or candle-gen change, just this
-    // router branch. Mirrors the Z-Image / SD3.5 / Boogu img2img routing.
-    if matches!(model, "ideogram_4" | "ideogram_4_turbo")
-        && ideogram_img2img_candle_eligible(&job.payload)
-    {
-        return true;
-    }
-    // Boogu instruction edit (sc-7524, epic 6831): a `boogu_image_edit` `edit_image` job with a source
-    // image runs the candle `candle-gen-boogu` edit path. Like Ideogram (and unlike the SDXL/FLUX.2/Qwen/
-    // Z-Image bespoke streams above), Boogu has no separate edit stream — the SAME registered
-    // `boogu_image_edit` engine resolves the source `Reference` in the worker's `generate_candle_stream`
-    // (the Qwen3-VL vision tower reads it + it VAE-encodes into the DiT reference latent), exactly as the
-    // MLX `generate_stream` handles Boogu edit in-lane. The `image_request_candle_eligible` gate below
-    // rejects the whole `edit_image` family, so branch it out here. Base/Turbo are pure T2I (the generic
-    // gate). Mirrors the worker's dispatch + the MLX `boogu_mlx_eligible`.
-    if model == "boogu_image_edit" && boogu_edit_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Boogu Base/Turbo img2img (reference-guided latent-init, sc-11786, epic 8588): a `boogu_image` /
-    // `boogu_image_turbo` job in a **non-edit** mode with a `referenceAssetId` is the REGISTRY img2img
-    // path — the candle Base/Turbo generators now advertise `Reference` and their `generate` VAE-encodes
-    // a single reference into the clean init latent + denoises the reduced schedule tail (`pipeline`
-    // `resolve_reference` + `init_time_step` + `render_base`/`render_turbo`, candle-gen sc-11786), and the
-    // worker `generate_candle_stream` resolves the init generically (`model_supports_img2img`, sc-10134).
-    // DISJOINT from the `boogu_image_edit` multi-reference instruction-edit lane above (a different engine
-    // id + the Qwen3-VL vision tower). The txt2img gate below rejects any `referenceAssetId`, so branch it
-    // out here. Mirrors the mlx-gen-boogu img2img (sc-10191) + the Z-Image img2img routing.
-    if matches!(model, "boogu_image" | "boogu_image_turbo")
-        && boogu_img2img_candle_eligible(&job.payload)
-    {
-        return true;
-    }
-    // Krea 2 Kontext-style dual-conditioned image-edit (epic 10871 Raw + sc-11640 Turbo): a `krea_2_raw` /
-    // `krea_2_turbo` `edit_image` job with a source image is the bespoke candle `KreaEdit` lane
-    // (`generate_candle_krea_edit_stream`), NOT txt2img — Raw runs the full-CFG loop, Turbo the CFG-free
-    // distilled few-step loop (`render_edit(distilled)`). Branch it out here (disjoint from the Krea control
-    // lane below, which is `krea_2_turbo` + `advanced.poses`). Mirrors the worker's
-    // `krea_edit_candle_available`.
-    if matches!(model, "krea_2_raw" | "krea_2_turbo") && krea_edit_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Bernini still-image i2i (sc-10996, epic 6562): a `bernini_image` `edit_image` job with a source
-    // image runs the candle `candle-gen-bernini` still lane (`generate_candle_bernini_image_stream`,
-    // engine id `bernini`, `frames:1`) — NOT the generic txt2img gate, which rejects the whole
-    // `edit_image` family. The source is fed to the engine as `Conditioning::Reference` (the planner
-    // ViT/VAE-encodes it, a structural re-render). Plain t2i (any non-edit mode) is the generic gate
-    // below (`bernini_image` is now in CANDLE_ROUTED_MODELS). Branch it out here, gated to the id.
-    // Mirrors the worker's dedicated `CandleImageRoute::Bernini` dispatch + the MLX `bernini_image_mlx_eligible`.
-    if model == "bernini_image" && bernini_image_edit_candle_eligible(&job.payload) {
-        return true;
-    }
-    // SDXL IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): an sdxl-family model with a
-    // reference image is a bespoke candle lane (`generate_candle_sdxl_ipadapter_stream`), NOT txt2img —
-    // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
-    // (pure IP only; img2img/inpaint/edit shapes are the SDXL edit lane above). Mirrors the worker's
-    // `sdxl_ipadapter_available` gate.
-    if is_sdxl_family_candle_model(model) && sdxl_ipadapter_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Kolors IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): the `kolors` family with a
-    // reference image is the same bespoke candle lane (`generate_candle_kolors_ipadapter_stream`), NOT
-    // txt2img — branch it out before the gate (which rejects `referenceAssetId`). Pure IP only;
-    // img2img/edit shapes stay on torch (sc-5487). Mirrors the worker's `kolors_ipadapter_available`.
-    if model == "kolors" && kolors_ipadapter_candle_eligible(&job.payload) {
-        return true;
-    }
-    // FLUX XLabs IP-Adapter reference conditioning (sc-5872, epic 5480): a `flux_dev`/`flux_schnell`
-    // model with a reference image is the same bespoke candle lane (`generate_candle_flux_ipadapter_\
-    // stream`), NOT txt2img — branch it out before the gate (which rejects `referenceAssetId`). Pure IP
-    // only; img2img/edit shapes stay on torch (sc-5487). Mirrors the worker's `flux_ipadapter_available`.
-    if matches!(model, "flux_dev" | "flux_schnell") && flux_ipadapter_candle_eligible(&job.payload)
-    {
-        return true;
-    }
-    // Qwen-Image strict-pose ControlNet (sc-5489, epic 5480): `qwen_image` + `advanced.poses` is a
-    // bespoke candle lane (`generate_candle_qwen_control_stream`), NOT txt2img — the
-    // `image_request_candle_eligible` gate below DEFERS any `advanced.poses` job to torch. Branch it out
-    // first so `qwen_image` pose jobs reach candle (the kolors / z_image families follow below — all three
-    // strict-pose families are now wired; plain-sdxl pose has no product route). Mirrors the worker's
-    // `qwen_control_available`.
-    if model == "qwen_image" && qwen_control_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Kolors strict-pose ControlNet (sc-5489, epic 5480): `kolors` + `advanced.poses` is the bespoke
-    // candle lane (`generate_candle_kolors_control_stream`), NOT txt2img — the `image_request_candle_\
-    // eligible` gate below DEFERS any `advanced.poses` job to torch. Branch it out first (the Qwen-control
-    // reasoning, for the Kolors family). A pure-pose `kolors` job (no `referenceAssetId`) does NOT match
-    // the `kolors_ipadapter_candle_eligible` branch above, so it reaches here. Mirrors the worker's
-    // `kolors_control_available`.
-    if model == "kolors" && kolors_control_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Z-Image strict-pose Fun-ControlNet (sc-5489, epic 5480): `z_image_turbo` + `advanced.poses` is the
-    // bespoke candle lane (`generate_candle_zimage_control_stream`), NOT txt2img — the `image_request_\
-    // candle_eligible` gate below DEFERS any `advanced.poses` job to torch. Branch it out first (the
-    // Qwen/Kolors-control reasoning, for the last strict-pose family). Mirrors the worker's
-    // `zimage_control_available`. With this all three control families (qwen / kolors / z_image) are wired.
-    if model == "z_image_turbo" && zimage_control_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Base (non-distilled, full-CFG) Z-Image strict-control (sc-8379, epic 8236): `z_image` +
-    // `advanced.poses` is the SAME bespoke candle `ZImageControl` lane as Turbo
-    // (`generate_candle_zimage_control_stream`, base Fun-Controlnet-Union branch), NOT txt2img — branch it
-    // out before the txt2img gate (which would defer the pose job to torch and has no base-z-image txt2img
-    // provider anyway). Same payload shape as the Turbo gate. Mirrors the worker's `zimage_control_\
-    // available` (which accepts both `z_image_turbo` and `z_image`).
-    if model == "z_image" && zimage_control_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Z-Image base img2img (reference-guided latent-init, sc-10265, epic 8588): `z_image` (base, NOT
-    // Turbo) in a non-edit mode with a `referenceAssetId` is the REGISTRY img2img path — the candle
-    // `z_image` generator's `generate` already VAE-encodes a single `Conditioning::Reference` and denoises
-    // the reduced schedule tail (`base.rs` `resolve_reference` + `init_time_step` + `render_base`, sc-8646),
-    // and the worker `generate_candle_stream` resolves the init generically (`model_supports_img2img`,
-    // sc-10134). The txt2img gate below rejects any `referenceAssetId`, so branch it out (after the pose-
-    // control branch above — a pose job stays on control). `z_image_turbo` is the separate branch below.
-    if model == "z_image" && zimage_img2img_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Z-Image **Turbo** img2img (reference-guided latent-init, sc-11783, epic 8588): `z_image_turbo` in a
-    // non-edit mode with a `referenceAssetId` is now the REGISTRY img2img path too — the candle
-    // `z_image_turbo` generator advertises `Reference` and its `generate` blends the VAE-encoded reference
-    // into the CFG-free distilled denoise (the Turbo sibling of the base `render_base` img2img). Branched
-    // AFTER the `zimage_identity` (character_image + referenceStrength), `zimage_edit` (edit_image), and
-    // `zimage_control` (poses) branches above — a text_to_image reference with no identity strength / no
-    // poses reaches here. The worker resolves the init generically (`model_supports_img2img`, sc-10134).
-    if model == "z_image_turbo" && zimage_img2img_candle_eligible(&job.payload) {
-        return true;
-    }
-    // SD3.5 img2img (reference-guided latent-init, sc-11784, epic 8588): `sd3_5_large` / `sd3_5_large_turbo`
-    // / `sd3_5_medium` in a non-edit mode with a `referenceAssetId` is now the REGISTRY img2img path — the
-    // candle SD3.5 generators advertise `Reference` and their `generate` VAE-encodes a single
-    // `Conditioning::Reference` and denoises the reduced schedule tail (real CFG for Large/Medium, the
-    // CFG-free distilled loop for Turbo — `candle-gen-sd3` `resolve_reference` + `init_time_step` + `render`,
-    // candle-gen #493). The candle/CUDA parity of the MLX `denoise_img2img_cfg` lane (sc-10189). SD3.5 has no
-    // candle identity / edit / control lane, so the only reference shape is img2img — branch it out before
-    // the txt2img gate below (which rejects any `referenceAssetId`). The worker resolves the init generically
-    // (`model_supports_img2img`, sc-10134).
-    if is_sd3_family_candle_model(model) && sd3_img2img_candle_eligible(&job.payload) {
-        return true;
-    }
-    // FLUX.1-dev strict-control Shakker Union-Pro-2.0 (sc-8412, epic 8236): `flux_dev` + `advanced.poses` is
-    // the bespoke candle `Flux1DevControl` lane (`generate_candle_flux1_control_stream`), NOT txt2img — the
-    // `image_request_candle_eligible` gate below DEFERS any `advanced.poses` job to torch, and the
-    // pose-reject would otherwise claim-to-reject it (it now HAS a candle pose lane). Branch it out first (the
-    // qwen/kolors/z_image/flux2-control reasoning, for the FLUX.1-dev family). A `flux_dev` reference job (a
-    // `referenceAssetId`) is the FLUX XLabs IP-Adapter branch above; a pure-pose job reaches here. Mirrors
-    // the worker's `flux1_control_candle_available`.
-    if model == "flux_dev" && flux1_control_candle_eligible(&job.payload) {
-        return true;
-    }
-    // FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-7736, epic 6564): `flux2_dev` + `advanced.poses` is
-    // the bespoke candle `Flux2Control` lane (`generate_candle_flux2_control_stream`), NOT txt2img — the
-    // `image_request_candle_eligible` gate below DEFERS any `advanced.poses` job to torch, and the pose-
-    // reject would otherwise claim-to-reject it (it now HAS a candle pose lane). Branch it out first (the
-    // qwen/kolors/z_image-control reasoning, for the 4th wired strict-pose family). A flux2_dev edit job
-    // (with a source) is the edit branch above; a pure-pose job (no source) reaches here. Mirrors the
-    // worker's `flux2_control_candle_available`.
-    if model == "flux2_dev" && flux2_dev_control_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Krea 2 pose-ControlNet (sc-8464, epic 8459): `krea_2_turbo` + `advanced.poses` is the bespoke candle
-    // `Krea2Control` lane (`generate_candle_krea_control_stream`), NOT txt2img — `krea_2_turbo` is a
-    // registered candle txt2img id, so without diverting first a pose job would render as plain txt2img and
-    // drop the poses. Branch it out before the registry txt2img gate (mirrors the qwen/flux2-control
-    // reasoning, for the first Krea backbone). Mirrors the worker's `krea_control_candle_available`.
-    if model == "krea_2_turbo" && krea_control_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Krea 2 Turbo img2img (reference-guided latent-init, sc-10134, epic 8588): `krea_2_turbo` in a
-    // non-edit mode with a `referenceAssetId` is the bespoke candle `render_img2img` lane (a single
-    // `Conditioning::Reference` seeds the CFG-free denoise from the VAE-encoded reference at
-    // `advanced.strength`) — `krea_2_turbo` is a registered candle txt2img id, and the
-    // `image_request_candle_eligible` gate below rejects ANY `referenceAssetId`, so an img2img job would
-    // otherwise fall to the "conditioned shape on a txt2img candle family" gap. Branch it out AFTER the
-    // pose-control lane (a pose job with an identity reference stays on control) and BEFORE the txt2img
-    // gate. Mirrors the worker's `krea_2_turbo` img2img resolve in `generate_candle_stream`.
-    if model == "krea_2_turbo" && krea_img2img_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Krea 2 Raw img2img (reference-guided latent-init under full CFG, sc-10226, epic 8588): the
-    // undistilled `krea_2_raw` sibling of the Turbo lane above — a non-edit `referenceAssetId` seeds the
-    // engine's `render_base_img2img` (VAE-encode the reference → blend at `sigmas[init_time_step]` → the
-    // two-forward CFG denoise, honoring guidance + a user negative prompt). Same payload predicate as
-    // Turbo (`krea_img2img_candle_eligible`, gated to the id by this caller); `krea_2_raw` is a registered
-    // candle txt2img id, so without diverting first the `image_request_candle_eligible` gate below would
-    // reject the reference and drop it to the "conditioned shape on a txt2img candle family" gap. Behind
-    // the Krea edit lane (`edit_image`, branched earlier) so an edit never reaches here. The worker's
-    // generic `ui.img2img` arm in `generate_candle_stream` resolves the init for Raw exactly as Turbo.
-    if model == "krea_2_raw" && krea_img2img_candle_eligible(&job.payload) {
-        return true;
-    }
-    // PuLID-FLUX face identity (sc-5492, epic 5480): `pulid_flux_dev` is a distinct model id (not a
-    // candle txt2img id), so the `image_request_candle_eligible` gate below would reject it; the candle
-    // `candle-gen-pulid` provider serves it via a bespoke `generate_candle_pulid_stream` lane (the
-    // off-Mac sibling of the macOS `pulid_flux` registry route). Branch it out, returning eligibility
-    // directly — a non-character / reference-less job returns false → falls back to torch/MLX. Mirrors
-    // the worker's `pulid_candle_available`.
-    if model == "pulid_flux_dev" {
-        return pulid_flux_candle_eligible(&job.payload);
-    }
-    image_request_candle_eligible(model, &job.payload)
+
+    CANDLE_IMAGE_ROUTES
+        .iter()
+        .find(|route| route.matches(model, &job.payload))
+        .map(|route| route.lane)
+        .or_else(|| {
+            image_request_candle_eligible(model, &job.payload)
+                .then_some(CandleImageLane::TextToImage)
+        })
+}
+
+/// Does this image job belong on the Candle (Windows/CUDA) image lane?
+pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
+    image_job_candle_lane(job).is_some()
 }
 
 /// Per-model candle txt2img-eligibility, factored out of [`image_job_is_candle_eligible`] so the
