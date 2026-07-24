@@ -6145,6 +6145,85 @@ fn isolate_hf_hub_cache_to(hub: &std::path::Path) -> EnvVars {
     ])
 }
 
+/// sc-14249: the SenseNova q8 floor keeps the CAPABILITY DOWNTIER off q4, without taking q4 away
+/// from a user who asks for it.
+///
+/// This is the half that actually protects people. Tier selection is two stages: the default
+/// resolves to q8 and is clamped to what is INSTALLED ([`standard_tier_subdir`]), and then
+/// [`choose_downtier`] steps DOWN to the highest installed tier that fits the DEVICE. That second
+/// stage floors at q4 (rank 1) for any model declaring no `mlx.minQualityTier` — so on a 16/24 GB
+/// card, where q8 (22.5 GB) does not fit but q4 (14.8 GB) does, SenseNova would have been silently
+/// auto-selected onto q4. q4 on this family renders a structured ~4 px cross-hatch (the tier's own
+/// 4-bit fidelity, measured: high-pass 15.73 vs bf16 5.20 / q8 5.00), which is not something to
+/// hand someone who never picked it — with the floor the gate rejects with an actionable message
+/// instead.
+///
+/// Asserted at [`downtier_candidate_tiers`] because that is where the floor does the work; a
+/// regression here is silent (jobs still render, just hatched), so it needs a test rather than a
+/// comment.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn sensenova_q8_floor_keeps_the_capability_downtier_off_q4() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let snapshot = hub
+        .join("models--SceneWorks--sensenova-u1-8b-fast-mlx")
+        .join("snapshots")
+        .join("installed");
+    // ALL THREE tiers installed — the floor must be what excludes q4, not its absence from disk.
+    for tier in ["q4", "q8", "bf16"] {
+        let path = snapshot.join(tier).join("model.safetensors");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"weights").unwrap();
+    }
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+
+    let req = |advanced: serde_json::Value| {
+        ImageRequest::from_payload(
+            json!({
+                "model": "sensenova_u1_8b_fast",
+                "advanced": advanced,
+                "modelManifestEntry": {
+                    "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
+                    "mlx": { "standardTierLayout": true, "minQualityTier": "q8" }
+                }
+            })
+            .as_object()
+            .unwrap(),
+        )
+    };
+
+    // A DEFAULT job: the downtier may consider bf16 and q8, never q4 — so a card that cannot fit
+    // q8 rejects rather than silently rendering the hatched tier.
+    let default_job = req(json!({}));
+    let floor = min_quality_floor(&default_job);
+    assert_eq!(floor, Some("q8"));
+    assert_eq!(
+        downtier_candidate_tiers(&default_job, &settings, "q8", floor),
+        vec!["q8"],
+        "a default sensenova job must never have q4 as a downtier candidate"
+    );
+    // Without the floor q4 IS a candidate — i.e. this test would fail open if the manifest
+    // regressed, which is exactly what it is here to catch.
+    assert_eq!(
+        downtier_candidate_tiers(&default_job, &settings, "q8", None),
+        vec!["q8", "q4"],
+        "floorless models still downtier to q4 (the app-wide behavior this floor opts out of)"
+    );
+
+    // ...but q4 is NOT taken away: an explicit pick resolves the q4 tier dir. (The gate skips the
+    // downtier entirely for an explicit pick — `mlxQuantizeExplicit`, acceptance #7 — so this is
+    // the whole path a deliberate q4 choice takes.)
+    assert_eq!(
+        standard_tier_subdir(&snapshot, &req(json!({ "mlxQuantize": 4 }))),
+        snapshot.join("q4"),
+        "an explicit below-floor q4 pick must still be honored"
+    );
+}
+
 /// sc-14249 — **the wiring half**: `resolve_weights_dir` routes the candle SenseNova lane through the
 /// ordinary `standard_tier_subdir` descent, so the request's tier is what loads.
 ///

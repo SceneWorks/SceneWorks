@@ -1222,6 +1222,17 @@
         "measured": true
       },
       "mlx": {
+        // sc-14249: FLOOR THE CAPABILITY DOWNTIER AT q8. Without this `downtier_candidate_tiers`
+        // floors at q4 (rank 1), so on a card where q8 (22.5 GB) does not fit but q4 (14.8 GB) does
+        // — a 16/24 GB card — `choose_downtier` would SILENTLY auto-select q4 for a default job. q4
+        // on this family renders a structured ~4 px cross-hatch (high-pass energy 15.73 vs bf16 5.20
+        // / q8 5.00); that is the tier's own 4-bit fidelity, not a load bug, and it is not something
+        // to hand a user who never asked for it. With the floor the gate REJECTS with an actionable
+        // message instead. An EXPLICIT pick (`mlxQuantizeExplicit`) still skips the downtier and is
+        // honored, and `standard_tier_subdir` honors an explicit below-floor pick — so q4 stays
+        // available to anyone who chooses it deliberately. The floor only ever RAISES a default, and
+        // the default here is already q8, so nothing else moves.
+        "minQualityTier": "q8",
         // q4/ is the shipped default tier (sc-8771); q8/ + bf16/ are hosted and selectable via
         // advanced.mlxQuantize (standard_tier_subdir resolves the subdir).
         "quantize": 4,
@@ -1344,6 +1355,17 @@
         "measured": true
       },
       "mlx": {
+        // sc-14249: FLOOR THE CAPABILITY DOWNTIER AT q8. Without this `downtier_candidate_tiers`
+        // floors at q4 (rank 1), so on a card where q8 (22.5 GB) does not fit but q4 (14.8 GB) does
+        // — a 16/24 GB card — `choose_downtier` would SILENTLY auto-select q4 for a default job. q4
+        // on this family renders a structured ~4 px cross-hatch (high-pass energy 15.73 vs bf16 5.20
+        // / q8 5.00); that is the tier's own 4-bit fidelity, not a load bug, and it is not something
+        // to hand a user who never asked for it. With the floor the gate REJECTS with an actionable
+        // message instead. An EXPLICIT pick (`mlxQuantizeExplicit`) still skips the downtier and is
+        // honored, and `standard_tier_subdir` honors an explicit below-floor pick — so q4 stays
+        // available to anyone who chooses it deliberately. The floor only ever RAISES a default, and
+        // the default here is already q8, so nothing else moves.
+        "minQualityTier": "q8",
         "quantize": 4,
         "standardTierLayout": true
       },
@@ -1453,6 +1475,17 @@
         "measured": true
       },
       "mlx": {
+        // sc-14249: FLOOR THE CAPABILITY DOWNTIER AT q8. Without this `downtier_candidate_tiers`
+        // floors at q4 (rank 1), so on a card where q8 (22.5 GB) does not fit but q4 (14.8 GB) does
+        // — a 16/24 GB card — `choose_downtier` would SILENTLY auto-select q4 for a default job. q4
+        // on this family renders a structured ~4 px cross-hatch (high-pass energy 15.73 vs bf16 5.20
+        // / q8 5.00); that is the tier's own 4-bit fidelity, not a load bug, and it is not something
+        // to hand a user who never asked for it. With the floor the gate REJECTS with an actionable
+        // message instead. An EXPLICIT pick (`mlxQuantizeExplicit`) still skips the downtier and is
+        // honored, and `standard_tier_subdir` honors an explicit below-floor pick — so q4 stays
+        // available to anyone who chooses it deliberately. The floor only ever RAISES a default, and
+        // the default here is already q8, so nothing else moves.
+        "minQualityTier": "q8",
         "quantize": 4,
         "standardTierLayout": true
       },
@@ -1570,6 +1603,17 @@
         "measured": true
       },
       "mlx": {
+        // sc-14249: FLOOR THE CAPABILITY DOWNTIER AT q8. Without this `downtier_candidate_tiers`
+        // floors at q4 (rank 1), so on a card where q8 (22.5 GB) does not fit but q4 (14.8 GB) does
+        // — a 16/24 GB card — `choose_downtier` would SILENTLY auto-select q4 for a default job. q4
+        // on this family renders a structured ~4 px cross-hatch (high-pass energy 15.73 vs bf16 5.20
+        // / q8 5.00); that is the tier's own 4-bit fidelity, not a load bug, and it is not something
+        // to hand a user who never asked for it. With the floor the gate REJECTS with an actionable
+        // message instead. An EXPLICIT pick (`mlxQuantizeExplicit`) still skips the downtier and is
+        // honored, and `standard_tier_subdir` honors an explicit below-floor pick — so q4 stays
+        // available to anyone who chooses it deliberately. The floor only ever RAISES a default, and
+        // the default here is already q8, so nothing else moves.
+        "minQualityTier": "q8",
         // q4/ is the shipped default tier (sc-8775); q8/ + bf16/ are hosted and selectable via
         // advanced.mlxQuantize (standard_tier_subdir resolves the flat unified tier subdir). Same
         // unified-MoT packed layout as the base — the WHOLE (pre-merged) backbone packs, no separate
@@ -1696,6 +1740,17 @@
         "measured": true
       },
       "mlx": {
+        // sc-14249: FLOOR THE CAPABILITY DOWNTIER AT q8. Without this `downtier_candidate_tiers`
+        // floors at q4 (rank 1), so on a card where q8 (22.5 GB) does not fit but q4 (14.8 GB) does
+        // — a 16/24 GB card — `choose_downtier` would SILENTLY auto-select q4 for a default job. q4
+        // on this family renders a structured ~4 px cross-hatch (high-pass energy 15.73 vs bf16 5.20
+        // / q8 5.00); that is the tier's own 4-bit fidelity, not a load bug, and it is not something
+        // to hand a user who never asked for it. With the floor the gate REJECTS with an actionable
+        // message instead. An EXPLICIT pick (`mlxQuantizeExplicit`) still skips the downtier and is
+        // honored, and `standard_tier_subdir` honors an explicit below-floor pick — so q4 stays
+        // available to anyone who chooses it deliberately. The floor only ever RAISES a default, and
+        // the default here is already q8, so nothing else moves.
+        "minQualityTier": "q8",
         "quantize": 4,
         "standardTierLayout": true
       },
@@ -1814,6 +1869,17 @@
         "measured": true
       },
       "mlx": {
+        // sc-14249: FLOOR THE CAPABILITY DOWNTIER AT q8. Without this `downtier_candidate_tiers`
+        // floors at q4 (rank 1), so on a card where q8 (22.5 GB) does not fit but q4 (14.8 GB) does
+        // — a 16/24 GB card — `choose_downtier` would SILENTLY auto-select q4 for a default job. q4
+        // on this family renders a structured ~4 px cross-hatch (high-pass energy 15.73 vs bf16 5.20
+        // / q8 5.00); that is the tier's own 4-bit fidelity, not a load bug, and it is not something
+        // to hand a user who never asked for it. With the floor the gate REJECTS with an actionable
+        // message instead. An EXPLICIT pick (`mlxQuantizeExplicit`) still skips the downtier and is
+        // honored, and `standard_tier_subdir` honors an explicit below-floor pick — so q4 stays
+        // available to anyone who chooses it deliberately. The floor only ever RAISES a default, and
+        // the default here is already q8, so nothing else moves.
+        "minQualityTier": "q8",
         "quantize": 4,
         "standardTierLayout": true
       },
