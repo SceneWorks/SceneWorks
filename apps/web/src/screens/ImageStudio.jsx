@@ -20,15 +20,7 @@ import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../com
 import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
 import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
 import BatchPromptPanel from "../components/BatchPromptPanel.jsx";
-import {
-  cardinality,
-  expandBatch,
-  extractKeys,
-  linkedGroupIssues,
-  missingKeys,
-  parsePromptResolution,
-  splitPromptLines,
-} from "../promptBatch.js";
+import { expandBatch, linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
 import {
   MAX_IMAGE_DIMENSION,
   MIN_IMAGE_DIMENSION,
@@ -131,6 +123,8 @@ import {
   useSavePreset,
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { useBatchPromptState } from "./imageStudio/useBatchPromptState.js";
+import { usePidState, useStrictControlState } from "./imageStudio/useImageControlState.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import {
   batchPromptBudgetMessage,
@@ -221,13 +215,6 @@ const REFERENCE_TUNING_PRESET_KEYS = [
 // Above this many resolved images a batch run needs explicit confirmation, so a stray
 // value or an over-eager cross-product can't silently queue a huge job (sc-9957).
 const BATCH_RENDER_CAP = 100;
-
-// Join a saved batch's prompts back into the authoring textarea: multi-line prompts
-// round-trip through the `---` delimiter, a flat list joins on newlines.
-function batchTextFromPrompts(prompts) {
-  const list = Array.isArray(prompts) ? prompts : [];
-  return list.join(list.some((prompt) => prompt.includes("\n")) ? "\n---\n" : "\n");
-}
 
 function preferredOption(defaultValue, options) {
   return options.includes(defaultValue) ? defaultValue : options[0] ?? "default";
@@ -433,117 +420,14 @@ export function ImageStudio() {
   // Character tab — it swaps the single prompt for a list of {{templated}} prompts run
   // as one batch against the current settings. State persists like the rest of the
   // studio; the fan-out on "Run batch" is wired in sc-9956 (slice 4).
-  const [batchMode, setBatchMode] = useState(saved.batchMode ?? false);
-  const [batchPromptsText, setBatchPromptsText] = useState(saved.batchPromptsText ?? "");
-  const [batchVariableValues, setBatchVariableValues] = useState(saved.batchVariableValues ?? {});
-  const [batchName, setBatchName] = useState(saved.batchName ?? "");
-  const [batchScope, setBatchScope] = useState(saved.batchScope ?? "global");
-  const [loadedBatchId, setLoadedBatchId] = useState(saved.loadedBatchId ?? null);
-  const [batchError, setBatchError] = useState("");
-  const [batchBusy, setBatchBusy] = useState(false);
-  // An in-flight / just-finished batch run: { submitting, items: [{ prompt, jobId }] }.
-  // Progress + cancel are derived off the live jobs feed, mirroring the asset batch (sc-6112).
-  const [batchRun, setBatchRun] = useState(null);
-  // True once a run over BATCH_RENDER_CAP is awaiting the user's explicit confirmation.
-  const [batchConfirmPending, setBatchConfirmPending] = useState(false);
-  // Set by Stop/Cancel to break the (possibly slow, structured) enqueue loop mid-flight.
-  const batchAbortRef = useRef(false);
-
-  const batchPrompts = useMemo(() => splitPromptLines(batchPromptsText), [batchPromptsText]);
-  const batchVariables = useMemo(
-    () =>
-      extractKeys(batchPrompts).map((key) => ({
-        key,
-        // The value editor keeps a trailing empty slot; drop blanks so saved batches
-        // and the run payload carry only real values (the engine ignores them anyway).
-        values: (batchVariableValues[key] ?? []).filter((value) => value.trim() !== ""),
-      })),
-    [batchPrompts, batchVariableValues],
-  );
-  // Number of resolved-prompt jobs (pose-independent). Image count = jobs × images-per-prompt,
-  // computed as batchTotal once the pose payload is known (poses replace `count`).
-  const batchJobCount = useMemo(
-    () => cardinality(batchPrompts, batchVariables, 1),
-    [batchPrompts, batchVariables],
-  );
-
-  const applyBatchContent = useCallback(({ prompts, variables, lastValues, name }) => {
-    setBatchPromptsText(batchTextFromPrompts(prompts));
-    const values = {};
-    for (const variable of variables ?? []) {
-      if (variable?.key) values[variable.key] = Array.isArray(variable.values) ? variable.values : [];
-    }
-    for (const [key, vals] of Object.entries(lastValues ?? {})) {
-      if (!(key in values) && Array.isArray(vals)) values[key] = vals;
-    }
-    setBatchVariableValues(values);
-    if (name !== undefined) setBatchName(name ?? "");
-    setBatchError("");
-  }, []);
-
-  const handleSaveBatch = useCallback(async () => {
-    setBatchBusy(true);
-    setBatchError("");
-    try {
-      const payload = {
-        name: batchName.trim(),
-        scope: batchScope,
-        prompts: batchPrompts,
-        variables: batchVariables,
-        lastValues: Object.fromEntries(batchVariables.map((variable) => [variable.key, variable.values])),
-      };
-      const result = loadedBatchId
-        ? await updatePromptBatch(loadedBatchId, payload, batchScope)
-        : await createPromptBatch(payload);
-      if (result?.id) setLoadedBatchId(result.id);
-    } catch (err) {
-      setBatchError(err.message);
-    } finally {
-      setBatchBusy(false);
-    }
-  }, [batchName, batchScope, batchPrompts, batchVariables, loadedBatchId, updatePromptBatch, createPromptBatch]);
-
-  const handleLoadBatch = useCallback(
-    (batch) => {
-      applyBatchContent(batch);
-      setBatchScope(batch.scope === "project" ? "project" : "global");
-      setLoadedBatchId(batch.id ?? null);
-    },
-    [applyBatchContent],
-  );
-
-  const handleDeleteBatch = useCallback(
-    async (batch) => {
-      setBatchError("");
-      try {
-        await deletePromptBatch(batch.id, batch.scope);
-        setLoadedBatchId((current) => (current === batch.id ? null : current));
-      } catch (err) {
-        setBatchError(err.message);
-      }
-    },
-    [deletePromptBatch],
-  );
-
-  const handleImportBatch = useCallback(
-    (payload) => {
-      applyBatchContent(payload);
-      setLoadedBatchId(null);
-    },
-    [applyBatchContent],
-  );
-
-  // Detach from the loaded batch and clear the authoring fields so the next Save creates a
-  // brand-new batch. Needed because loadedBatchId now persists in the studio snapshot: after
-  // a restart the panel restores its last-loaded batch and Save is stuck on "Update" with no
-  // way back to a blank slate. Scope is left as-is (a user preference, not batch content).
-  const handleNewBatch = useCallback(() => {
-    setBatchPromptsText("");
-    setBatchVariableValues({});
-    setBatchName("");
-    setLoadedBatchId(null);
-    setBatchError("");
-  }, []);
+  const {
+    batchMode, setBatchMode, batchPromptsText, setBatchPromptsText,
+    batchVariableValues, setBatchVariableValues, batchName, setBatchName,
+    batchScope, setBatchScope, loadedBatchId, batchError, setBatchError,
+    batchBusy, batchRun, setBatchRun, batchConfirmPending, setBatchConfirmPending,
+    batchAbortRef, batchPrompts, batchVariables, batchJobCount, handleSaveBatch,
+    handleLoadBatch, handleDeleteBatch, handleImportBatch, handleNewBatch,
+  } = useBatchPromptState({ saved, createPromptBatch, updatePromptBatch, deletePromptBatch });
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? imageModels[0]?.id ?? "z_image_turbo");
   const [seed, setSeed] = useState(saved.seed ?? "");
@@ -607,15 +491,15 @@ export function ImageStudio() {
   // gated to the backbone's `ui.controlModes`. Pose reuses `selectedPoseIds`; canny/depth use a
   // control-image asset + a preprocess-vs-passthrough toggle. `controlScale` (advanced.controlScale)
   // is the control-lock strength. All reset to the model's defaults on model change (below).
-  const [controlMode, setControlMode] = useState(saved.controlMode ?? "pose");
-  const [controlImageAssetId, setControlImageAssetId] = useState("");
+  const {
+    controlMode, setControlMode, controlImageAssetId, setControlImageAssetId,
+    controlImagePassthrough, setControlImagePassthrough, controlScale,
+    setControlScale, controlOverlayId, setControlOverlayId,
+  } = useStrictControlState(saved);
   // false = preprocess (worker auto-derives the map from the image → request.sourceAssetId);
   // true = use-as-is (the user-supplied map passes through verbatim → advanced.controlImage).
-  const [controlImagePassthrough, setControlImagePassthrough] = useState(false);
-  const [controlScale, setControlScale] = useState(saved.controlScale ?? null);
   // Selected trained ControlNet overlay id (sc-10165 B4) — for backbones whose pose control rides a
   // registered overlay (Krea 2 Turbo). Flows to advanced.controlWeights.overlayId; the API resolves it.
-  const [controlOverlayId, setControlOverlayId] = useState(null);
   // Configurable sampler / scheduler (epic 1753). Restored from per-workspace
   // settings; reset to the selected model's manifest defaults whenever the
   // model changes.
@@ -663,12 +547,11 @@ export function ImageStudio() {
   // (decode + 2K/4K super-resolve, non-commercial output). Sticky pref, default off; the
   // toggle only renders + emits when the model is PiD-eligible AND its checkpoint is installed
   // (showPidToggle), so a stale `true` on a non-eligible model is inert — mirrors bf16Precision.
-  const [usePid, setUsePid] = useState(saved.usePid ?? false);
   // PiD output tier (epic 7840, sc-10054): PiD always super-resolves the base latent 4×, so this picks
   // the effective base — "4k" keeps the requested base (~4096 output, the pre-tier behavior), "2k" caps
   // it (~2048 output, faster + less GPU memory). Sticky pref, default "4k". Rides `advanced.pidTarget`
   // (emitted only when the PiD toggle is shown+on AND "2k" is picked — "4k" is the worker default).
-  const [pidTarget, setPidTarget] = useState(saved.pidTarget === "2k" ? "2k" : "4k");
+  const { usePid, setUsePid, pidTarget, setPidTarget } = usePidState(saved);
   const [faceRestore, setFaceRestore] = useState(false);
   // User-created poses (reserved global project) join the built-in library in both
   // the picker and the id→keypoints resolver below, so saved poses can generate.

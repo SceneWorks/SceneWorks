@@ -79,69 +79,31 @@ function DatasetHealth({ health }) {
 // caption grid becomes a bare Results zone beneath it. The topbar names the page, so
 // the panel carries no title of its own.
 export function DatasetEditorPanel({
-  loadingDatasets,
-  onRefreshDatasets,
-  busyDatasetId,
-  datasetThumbAsset,
-  datasets,
-  startNewDataset,
-  openDataset,
-  activeDataset,
-  selectedDatasetId,
-  datasetsError,
-  datasetError,
-  datasetMessage,
-  draftName,
-  setDraftName,
-  dirty,
-  discardDraft,
-  setAddDialogOpen,
-  renamePrefix,
-  setRenamePrefix,
-  renaming,
-  memberAssets,
-  applyOrderedNames,
-  setCaptionDialog,
-  health,
-  // sc-8942 (F-140): the Dataset Doctor's readout props (report/loading + the six
-  // fix-action callbacks) are grouped into one `datasetDoctor` bundle instead of being
-  // threaded individually. ConfigureJobPanel takes the same bundle, so the identical
-  // set of props is no longer hand-mirrored across two panels. Shaped exactly like the
-  // DatasetDoctorReadout signature so it can be spread straight onto it.
-  datasetDoctor,
-  readinessByKey,
-  onToggleItemAck,
-  canSave,
-  saveValidity,
-  saveDataset,
-  savingDataset,
-  unavailableAssetIds,
-  removeUnavailableAsset,
-  captionDraftById,
-  onPreview,
-  updateCaption,
-  captioning,
-  addDialogOpen,
-  imageAssets,
-  characters,
-  associatedCharacterId,
-  setActiveView,
-  importingAssets,
-  selectedAssetIds,
-  addAssets,
-  handleImport,
-  captionDialog,
-  gpuOptions,
-  updateCaptionSetting,
-  runCaptionJob,
-  toggleCaptionExtraOption,
-  displayedCaptionPrompt,
-  captionSettings,
-  captionModelMissing = false,
-  onDownloadCaptionModel,
-  captionModelSizeLabel = "",
-  captionModelName = "JoyCaption",
+  datasetSession,
+  captionSession,
+  doctorSession,
+  config,
 }) {
+  const {
+    loadingDatasets, onRefreshDatasets, busyDatasetId, datasetThumbAsset, datasets,
+    startNewDataset, openDataset, activeDataset, selectedDatasetId, datasetsError,
+    datasetError, datasetMessage, draftName, setDraftName, dirty, discardDraft,
+    setAddDialogOpen, renamePrefix, setRenamePrefix, renaming, memberAssets,
+    applyOrderedNames, setCaptionDialog, health, canSave, saveValidity, saveDataset,
+    savingDataset, unavailableAssetIds, removeUnavailableAsset,
+  } = datasetSession;
+  const {
+    captionDraftById, onPreview, updateCaption, captioning, addDialogOpen,
+    selectedAssetIds, addAssets, handleImport, captionDialog, updateCaptionSetting,
+    runCaptionJob, toggleCaptionExtraOption, displayedCaptionPrompt, captionSettings,
+    captionModelMissing = false, onDownloadCaptionModel, captionModelSizeLabel = "",
+    captionModelName = "JoyCaption",
+  } = captionSession;
+  const { datasetDoctor, readinessByKey, onToggleItemAck } = doctorSession;
+  const {
+    imageAssets, characters, associatedCharacterId, setActiveView, importingAssets,
+    gpuOptions,
+  } = config;
   // Local aliases for the doctor readout's report/loading, still referenced directly by
   // the distributions block and the per-card readiness badges below.
   const { report: readiness = null, loading: readinessLoading = false } = datasetDoctor ?? {};
