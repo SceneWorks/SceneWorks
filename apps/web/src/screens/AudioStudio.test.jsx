@@ -13,6 +13,7 @@ vi.mock("../api.js", async (importOriginal) => {
 import { AppContext } from "../context/AppContext.js";
 import { AudioStudio } from "./AudioStudio.jsx";
 import { KEEP_ALIVE_VIEWS, navSections, viewTitles } from "../App.jsx";
+import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
 
 // Fixture audio models mirroring the seeded `type:"audio"` catalog entries (constants.js). Each
 // carries only the `audio` sub-block the eligibility predicates + UI read — voices (speech),
@@ -32,7 +33,10 @@ const KOKORO = {
     sampleRates: [24000],
     maxDurationSecs: 30,
   },
-  ui: { label: "Kokoro 82M" },
+  ui: {
+    label: "Kokoro 82M",
+    promptGuide: { title: "Kokoro Speech Guide", path: "/prompt-guides/kokoro-82m.md" },
+  },
 };
 
 const MOSS = {
@@ -40,7 +44,10 @@ const MOSS = {
   name: "MOSS SoundEffect v2 (SFX)",
   type: "audio",
   audio: { languages: ["en", "zh"], sampleRates: [48000], maxDurationSecs: 30 },
-  ui: { label: "MOSS SoundEffect v2" },
+  ui: {
+    label: "MOSS SoundEffect v2",
+    promptGuide: { title: "MOSS SoundEffect Guide", path: "/prompt-guides/moss-soundeffect-v2.md" },
+  },
 };
 
 const ACESTEP = {
@@ -54,7 +61,10 @@ const ACESTEP = {
     editModes: ["inpaint", "repaint", "extend", "cover"],
     conditioning: ["AudioEdit"],
   },
-  ui: { label: "ACE-Step v1.5 XL Turbo" },
+  ui: {
+    label: "ACE-Step v1.5 XL Turbo",
+    promptGuide: { title: "ACE-Step Music Guide", path: "/prompt-guides/acestep-v15-turbo.md" },
+  },
 };
 
 const OPENVOICE = {
@@ -62,7 +72,10 @@ const OPENVOICE = {
   name: "OpenVoice V2 (Voice Conversion)",
   type: "audio",
   audio: { sampleRates: [22050], conditioning: ["ReferenceAudio"] },
-  ui: { label: "OpenVoice V2" },
+  ui: {
+    label: "OpenVoice V2",
+    promptGuide: { title: "OpenVoice Guide", path: "/prompt-guides/openvoice-v2.md" },
+  },
 };
 
 // Native clone-TTS generator (sc-13412): ReferenceAudio + VoiceEmbedding marks it as a single-call clone
@@ -78,7 +91,10 @@ const CHATTERBOX_TTS = {
     maxDurationSecs: 30,
     conditioning: ["VoiceEmbedding", "ReferenceAudio"],
   },
-  ui: { label: "Chatterbox Clone-TTS" },
+  ui: {
+    label: "Chatterbox Clone-TTS",
+    promptGuide: { title: "Chatterbox Guide", path: "/prompt-guides/chatterbox-tts.md" },
+  },
 };
 
 // Streaming TTS (sc-13675): NO voice bank — serves Speech via audio.supportsStreaming. Kept OUT of
@@ -93,7 +109,10 @@ const MOSS_TTS_REALTIME = {
     maxDurationSecs: 2400,
     supportsStreaming: true,
   },
-  ui: { label: "MOSS-TTS-Realtime (Streaming)" },
+  ui: {
+    label: "MOSS-TTS-Realtime (Streaming)",
+    promptGuide: { title: "MOSS Realtime Guide", path: "/prompt-guides/moss-tts-realtime.md" },
+  },
 };
 
 // Multi-speaker dialogue TTS (sc-13676): NO voice bank — serves Speech via audio.supportsMultiSpeaker
@@ -110,7 +129,10 @@ const MOSS_TTSD = {
     supportsMultiSpeaker: true,
     maxSpeakers: 2,
   },
-  ui: { label: "MOSS-TTSD v0.5 (Multi-Speaker)" },
+  ui: {
+    label: "MOSS-TTSD v0.5 (Multi-Speaker)",
+    promptGuide: { title: "MOSS Multi-Speaker Guide", path: "/prompt-guides/moss-ttsd-v05.md" },
+  },
 };
 
 const ALL_AUDIO = [KOKORO, MOSS, ACESTEP, OPENVOICE];
@@ -190,6 +212,23 @@ const fieldByLabelStart = (container, label) =>
   [...container.querySelectorAll(".settings-bar label")].find((el) =>
     el.textContent.trim().startsWith(label),
   );
+const setTextareaValue = async (el, value) => {
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    ).set;
+    setter.call(el, value);
+    el.dispatchEvent(new window.Event("input", { bubbles: true }));
+  });
+};
+const settle = async () => {
+  await act(async () => {
+    for (let index = 0; index < 8; index += 1) {
+      await Promise.resolve();
+    }
+  });
+};
 
 describe("AudioStudio shell (sc-13407)", () => {
   let container;
@@ -328,6 +367,27 @@ describe("AudioStudio shell (sc-13407)", () => {
     expect(options).not.toContain("chatterbox_ve");
   });
 
+  it("does not treat a prompt-free voice encoder as a generator in a reduced catalog", async () => {
+    const chatterbox = {
+      id: "chatterbox_ve",
+      name: "Chatterbox Voice Encoder",
+      type: "audio",
+      audio: { conditioning: ["VoiceEmbedding"] },
+      ui: {
+        label: "Chatterbox Voice Encoder",
+        promptGuide: {
+          title: "Chatterbox Voice Encoder Guide",
+          path: "/prompt-guides/chatterbox-ve.md",
+        },
+      },
+    };
+    await render(baseContext({ audioModels: [chatterbox], models: [chatterbox] }));
+
+    expect(container.querySelector(".model-availability-gate")).toBeTruthy();
+    expect(container.querySelector(".audio-studio")).toBeNull();
+    expect(buttonWithText(container, "Refine my prompt")).toBeUndefined();
+  });
+
   it("renders the studio body when an audio model is installed (gate open)", async () => {
     await render(baseContext());
     expect(container.querySelector(".audio-studio")).toBeTruthy();
@@ -341,6 +401,227 @@ describe("AudioStudio shell (sc-13407)", () => {
     expect(container.querySelector(".model-availability-gate")).toBeTruthy();
     expect(container.querySelector(".audio-studio")).toBeNull();
     expect(container.textContent).toContain("Audio Studio needs an audio model");
+  });
+});
+
+describe("AudioStudio prompt guides and refinement (sc-14353)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.restoreAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <AudioStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  it("opens the selected model's guide and switches from Kokoro to ACE-Step without stale content", async () => {
+    const fetchGuide = vi.spyOn(globalThis, "fetch").mockImplementation(async (path) => ({
+      ok: true,
+      text: async () => `Guide for ${path}`,
+    }));
+    await render(baseContext());
+
+    await click(buttonWithText(container, "Prompt guide"));
+    await settle();
+    expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/kokoro-82m.md");
+    expect(document.querySelector("#prompt-guide-title").textContent).toBe("Kokoro Speech Guide");
+
+    await click(buttonWithText(document, "Close"));
+    await click(modeTab(container, "Music"));
+    await click(buttonWithText(container, "Prompt guide"));
+    await settle();
+    expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/acestep-v15-turbo.md");
+    expect(document.querySelector("#prompt-guide-title").textContent).toBe("ACE-Step Music Guide");
+  });
+
+  it("refines an ACE-Step music description with the audio workflow and applies only after review", async () => {
+    const fetchGuide = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      text: async () => "# ACE-Step guide\n\nRefine only the Music Description.",
+    });
+    const refinePrompt = vi.fn(async () => "Dreamy synth-pop with warm analog pads and a rising final chorus.");
+    await render(
+      baseContext({
+        refinePrompt,
+        models: [
+          ...ALL_AUDIO,
+          { id: PROMPT_REFINE_MODEL_ID, name: "Prompt Refiner", installState: "installed" },
+        ],
+      }),
+    );
+
+    await click(modeTab(container, "Music"));
+    const promptInput = container.querySelector('textarea[aria-label="Prompt"]');
+    await setTextareaValue(promptInput, "dreamy pop");
+    await click(buttonWithText(container, "Refine my prompt"));
+    await settle();
+
+    expect(fetchGuide).toHaveBeenCalledWith(
+      "/prompt-guides/acestep-v15-turbo.md",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: "dreamy pop",
+      modelId: "acestep_v15_turbo",
+      workflow: "audio",
+      guide: "# ACE-Step guide\n\nRefine only the Music Description.",
+      signal: expect.any(AbortSignal),
+    }));
+    expect(promptInput.value).toBe("dreamy pop");
+
+    await click(buttonWithText(container, "Keep original"));
+    expect(promptInput.value).toBe("dreamy pop");
+
+    await click(buttonWithText(container, "Refine my prompt"));
+    await settle();
+    await click(buttonWithText(container, "Apply"));
+    expect(promptInput.value).toBe(
+      "Dreamy synth-pop with warm analog pads and a rising final chorus.",
+    );
+  });
+
+  it("uses the generic audio guide for a third-party model without usable guide metadata", async () => {
+    const thirdParty = {
+      ...MOSS,
+      id: "third_party_sfx",
+      name: "Third-party SFX",
+      ui: {
+        label: "Third-party SFX",
+        promptGuide: { title: " ", path: "" },
+      },
+    };
+    const fetchGuide = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      text: async () => "# Generic audio guide",
+    });
+    await render(baseContext({ audioModels: [thirdParty], models: [thirdParty] }));
+
+    await click(modeTab(container, "Sound FX"));
+    await click(buttonWithText(container, "Prompt guide"));
+    await settle();
+    expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/generic-audio.md");
+    expect(document.querySelector("#prompt-guide-title").textContent).toBe("Audio Prompt Guide");
+  });
+
+  it("aborts an in-flight refinement when the mode/model changes", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      text: async () => "# Speech guide",
+    });
+    let refineSignal;
+    const refinePrompt = vi.fn(({ signal }) => {
+      refineSignal = signal;
+      return new Promise((resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+      });
+    });
+    await render(baseContext({ refinePrompt }));
+    await setTextareaValue(container.querySelector('textarea[aria-label="Prompt"]'), "Read this aloud.");
+    await click(buttonWithText(container, "Refine my prompt"));
+    await settle();
+    expect(refineSignal.aborted).toBe(false);
+
+    await click(modeTab(container, "Music"));
+    await settle();
+    expect(refineSignal.aborted).toBe(true);
+    expect(container.querySelector(".refine-review")).toBeNull();
+    expect(container.querySelector(".refine-error")).toBeNull();
+  });
+
+  it("reuses the missing-refiner download affordance inside Audio Studio", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, text: async () => "# Guide" });
+    const refinePrompt = vi.fn(async () => {
+      throw new Error("prompt-refine model snapshot is not cached.");
+    });
+    const createModelDownloadJob = vi.fn(async () => ({ id: "download-refiner" }));
+    await render(
+      baseContext({
+        refinePrompt,
+        createModelDownloadJob,
+        models: [
+          ...ALL_AUDIO,
+          { id: PROMPT_REFINE_MODEL_ID, name: "Prompt Refiner", installState: "missing" },
+        ],
+      }),
+    );
+    await setTextareaValue(container.querySelector('textarea[aria-label="Prompt"]'), "Read this.");
+    await click(buttonWithText(container, "Refine my prompt"));
+    await settle();
+
+    await click(buttonWithText(container, "Download refinement model"));
+    await settle();
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({
+      id: PROMPT_REFINE_MODEL_ID,
+    }));
+    expect(container.querySelector(".refine-missing-model").textContent).toContain("Downloading");
+  });
+
+  it("guides and non-destructively refines each multi-speaker script turn", async () => {
+    const fetchGuide = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      text: async () => "# Multi-speaker guide",
+    });
+    const refinePrompt = vi.fn(async () => "Hello there, and welcome.");
+    await render(
+      baseContext({
+        audioModels: [MOSS_TTSD],
+        models: [
+          MOSS_TTSD,
+          { id: PROMPT_REFINE_MODEL_ID, name: "Prompt Refiner", installState: "installed" },
+        ],
+        refinePrompt,
+      }),
+    );
+    expect(container.querySelector('[data-testid="multi-speaker-script"]')).toBeTruthy();
+
+    await click(buttonWithText(container, "Prompt guide"));
+    await settle();
+    expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/moss-ttsd-v05.md");
+    expect(document.querySelector("#prompt-guide-title").textContent).toBe(
+      "MOSS Multi-Speaker Guide",
+    );
+    await click(buttonWithText(document, "Close"));
+
+    const firstTurn = container.querySelector('textarea[aria-label="Segment 1 text"]');
+    const secondTurn = container.querySelector('textarea[aria-label="Segment 2 text"]');
+    await setTextareaValue(firstTurn, "hello there and welcome");
+    await setTextareaValue(secondTurn, "Keep my second turn.");
+    const refineButtons = [...container.querySelectorAll("button")].filter((button) =>
+      button.textContent.includes("Refine my prompt"),
+    );
+    expect(refineButtons).toHaveLength(2);
+    await click(refineButtons[0]);
+    await settle();
+
+    expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: "hello there and welcome",
+      modelId: "moss_ttsd_v05",
+      workflow: "audio",
+      guide: "# Multi-speaker guide",
+      signal: expect.any(AbortSignal),
+    }));
+    expect(firstTurn.value).toBe("hello there and welcome");
+    expect(secondTurn.value).toBe("Keep my second turn.");
+
+    await click(buttonWithText(container, "Apply"));
+    expect(firstTurn.value).toBe("Hello there, and welcome.");
+    expect(secondTurn.value).toBe("Keep my second turn.");
   });
 });
 

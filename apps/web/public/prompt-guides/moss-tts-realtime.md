@@ -14,7 +14,7 @@ MOSS-TTS-Realtime runs natively (Candle) on every platform, on CPU / Accelerate.
 
 ## Streaming
 
-This is the studio's first streaming model. As the clip renders, the results card advances chunk by chunk and the first speech is produced long before the whole clip is done. The finished, fully-assembled clip is what lands in your library and plays back — streaming is about how quickly it starts, not a different result.
+As the clip renders, the results card advances chunk by chunk. The current browser player becomes audible after the fully assembled clip is saved; it does not yet play partial chunks while synthesis is still running.
 
 ## Duration
 
@@ -22,4 +22,6 @@ Output is 24 kHz mono. Ask for the length you need; longer scripts simply take l
 
 ## Practical notes
 
-Because synthesis is autoregressive (one block of speech tokens at a time), latency to the first chunk stays low even for a long script — you hear it start almost immediately, then it fills in.
+Because synthesis is autoregressive (one block of speech tokens at a time), worker progress can begin well before a long script is complete.
+
+**Refine my prompt** treats the input as a script. It preserves the words and meaning and makes only minimal punctuation or readability adjustments.

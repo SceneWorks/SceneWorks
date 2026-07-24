@@ -2323,6 +2323,12 @@ label {
   min-width: 108px;
 }
 
+.script-segment-content {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
 .script-segment-text {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -2338,6 +2344,11 @@ label {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--shadow-glow);
+}
+
+.script-segment-content .refine-button {
+  padding-block: 4px;
+  font-size: 12px;
 }
 
 .script-segment-remove {

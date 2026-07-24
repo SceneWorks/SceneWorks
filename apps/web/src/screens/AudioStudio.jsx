@@ -14,6 +14,9 @@ import {
 } from "../modelEligibility.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
+import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
+import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
+import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
 
 // SceneWorks Audio Studio — the navigable shell (epic 13400, C0 / sc-13407). This screen mirrors
 // the canonical studio shell (VideoStudio.jsx): page-frame > WorkPanel + .mode-tabs + AdvancedSection
@@ -180,6 +183,21 @@ function groupVoicesByGenderAccent(voices) {
   return groups;
 }
 
+const GENERIC_AUDIO_PROMPT_GUIDE = Object.freeze({
+  title: "Audio Prompt Guide",
+  path: "/prompt-guides/generic-audio.md",
+});
+
+function usablePromptGuide(guide) {
+  return (
+    guide &&
+    typeof guide.title === "string" &&
+    guide.title.trim() &&
+    typeof guide.path === "string" &&
+    guide.path.trim()
+  );
+}
+
 export function AudioStudio() {
   const {
     activeProject,
@@ -191,6 +209,7 @@ export function AudioStudio() {
     recentAudioAssets = [],
     jobAction,
     createAudioJob,
+    refinePrompt,
     createModelDownloadJob,
     rememberLocalGenerationJob,
     setActiveView,
@@ -257,6 +276,7 @@ export function AudioStudio() {
   const [registeringVoice, setRegisteringVoice] = useState(false);
   const [savedVoiceNotice, setSavedVoiceNotice] = useState(null);
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
+  const [guideOpen, setGuideOpen] = useState(false);
   // Guards a Speech run in flight so a second submit (double-click / ⌘↵) can't double-enqueue
   // (mirrors VideoStudio's `submitting`). Cleared in submit's finally.
   const [submitting, setSubmitting] = useState(false);
@@ -278,12 +298,17 @@ export function AudioStudio() {
       .filter(isVoiceCloneConverter)
       .sort((a, b) => Number(isNativeCloneGenerator(b)) - Number(isNativeCloneGenerator(a)));
   };
-  const selectedModel = audioModels.find((item) => item.id === model) ?? audioModels[0] ?? null;
+  const modeModels = modelsForMode(mode);
+  // Resolve only against models that can actually generate in this mode. A reduced catalog may
+  // contain audio utility components (for example Chatterbox-VE) that must never become a prompt
+  // target merely because there is no compatible generator to put in the picker.
+  const selectedModel =
+    modeModels.find((item) => item.id === model) ?? modeModels[0] ?? null;
 
-  // Model-availability gate: `ready` follows the picker (audioModels is live-catalog-then-fallback in
-  // App.jsx — empty only once the catalog has loaded with no installed audio model). Offers come from
-  // the full catalog via audioModelUsable, recommended-first.
-  const modelReady = audioModels.length > 0;
+  // Model-availability gate: an installed audio utility alone is not enough; at least one model must
+  // serve a real Audio Studio generation mode. Offers still come from the full catalog so the user
+  // can install a compatible generator.
+  const modelReady = AUDIO_MODES.some((value) => modelsForMode(value).length > 0);
   const modelOffers = useMemo(
     () => downloadOffersFor(models, audioModelUsable, macCapabilities),
     [models, macCapabilities],
@@ -292,6 +317,18 @@ export function AudioStudio() {
     () => (jobs ?? []).filter((job) => job.type === "model_download"),
     [jobs],
   );
+  // Same local refinement model used by Image / Video Studio. The shared control owns the
+  // missing-model download affordance; Audio Studio only resolves the catalog entry.
+  const refineModel = useMemo(
+    () => models.find((entry) => entry.id === PROMPT_REFINE_MODEL_ID),
+    [models],
+  );
+  // Built-ins declare a model-specific guide. Keep third-party / legacy entries useful with an
+  // audio-aware fallback instead of silently hiding the guide and refinement surfaces.
+  const declaredPromptGuide = selectedModel?.ui?.promptGuide;
+  const promptGuide = usablePromptGuide(declaredPromptGuide)
+    ? declaredPromptGuide
+    : GENERIC_AUDIO_PROMPT_GUIDE;
 
   // The selected model's audio capabilities — the single source every field below reads from. Never
   // hardcoded: an absent sub-block simply hides the dependent control.
@@ -456,20 +493,23 @@ export function AudioStudio() {
   const canGenerate =
     WIRED_MODES.has(mode) &&
     modelReady &&
-    Boolean(model) &&
+    Boolean(selectedModel) &&
     contentReady &&
     referenceReady &&
     !submitting;
 
-  // Snap the model to one that serves the active mode (mirrors VideoStudio). A no-op when the current
-  // model already serves the mode, or when nothing serves it (a reduced catalog).
+  // Snap a reduced catalog to its first usable mode, then snap the model state to the resolved
+  // generator for that mode. This keeps prompt-free audio utilities out of the picker/refiner path.
   useEffect(() => {
-    if (modelServesMode(selectedModel, mode)) {
+    if (!modeModels.length) {
+      const fallbackMode = AUDIO_MODES.find((value) => modelsForMode(value).length > 0);
+      if (fallbackMode && fallbackMode !== mode) {
+        setMode(fallbackMode);
+      }
       return;
     }
-    const fallback = modelsForMode(mode)[0];
-    if (fallback && fallback.id !== model) {
-      setModel(fallback.id);
+    if (selectedModel && selectedModel.id !== model) {
+      setModel(selectedModel.id);
     }
     // modelServesMode / modelsForMode close over audioModels, captured below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -613,7 +653,7 @@ export function AudioStudio() {
       // language-casing seam (en-US → en-us) is handled server-side. Language is omitted when unset so
       // the model derives its own default. Mirrors how VideoStudio builds createVideoJob's payload.
       const payload = {
-        model,
+        model: selectedModel.id,
         prompt: prompt.trim(),
         language: language || undefined,
         targetDurationSecs: clampedDuration,
@@ -699,9 +739,9 @@ export function AudioStudio() {
     }
   }
 
-  // The model list the picker offers: those that serve the active mode, falling back to the full
-  // available list if none do (a reduced catalog) so the picker is never empty.
-  const pickerModels = modelsForMode(mode).length ? modelsForMode(mode) : audioModels;
+  // The picker must contain only models that can generate in the active mode. Utility-only or
+  // incompatible reduced catalogs are handled by the availability gate / mode snap above.
+  const pickerModels = modeModels;
 
   return (
     <ModelAvailabilityGate
@@ -741,6 +781,11 @@ export function AudioStudio() {
                   );
                 })}
               </div>
+              <div className="prompt-hero-links">
+                <button className="hero-link" onClick={() => setGuideOpen(true)} type="button">
+                  <Icon.Book size={14} /> Prompt guide
+                </button>
+              </div>
             </div>
 
             <div className="prompt-input-row">
@@ -771,14 +816,29 @@ export function AudioStudio() {
                           </option>
                         ))}
                       </select>
-                      <textarea
-                        aria-label={`Segment ${index + 1} text`}
-                        className="script-segment-text"
-                        onChange={(event) => updateSegment(index, { text: event.target.value })}
-                        placeholder="What this speaker says…"
-                        rows={2}
-                        value={segment.text ?? ""}
-                      />
+                      <div className="script-segment-content">
+                        <textarea
+                          aria-label={`Segment ${index + 1} text`}
+                          className="script-segment-text"
+                          onChange={(event) => updateSegment(index, { text: event.target.value })}
+                          placeholder="What this speaker says…"
+                          rows={2}
+                          value={segment.text ?? ""}
+                        />
+                        <RefinePromptControl
+                          key={`${mode}:${selectedModel?.id}:${script.length}:${index}`}
+                          guidePath={promptGuide.path}
+                          modelId={selectedModel?.id}
+                          onApply={(refined) => updateSegment(index, { text: refined })}
+                          prompt={segment.text}
+                          refinePrompt={refinePrompt}
+                          refineModel={refineModel}
+                          onDownloadRefineModel={
+                            refineModel ? () => createModelDownloadJob(refineModel) : undefined
+                          }
+                          workflow="audio"
+                        />
+                      </div>
                       <button
                         aria-label={`Remove segment ${index + 1}`}
                         className="script-segment-remove"
@@ -829,6 +889,25 @@ export function AudioStudio() {
               </div>
             </div>
 
+            {/* Multi-speaker turns own one refiner apiece inside their structured editor above. Plain
+                prompt modes share this single control. Key by mode + resolved model so switching either
+                aborts an in-flight request and cannot surface a stale rewrite from the previous guide. */}
+            {!showMultiSpeaker && selectedModel ? (
+              <RefinePromptControl
+                key={`${mode}:${selectedModel.id}`}
+                guidePath={promptGuide.path}
+                modelId={selectedModel.id}
+                onApply={setPrompt}
+                prompt={prompt}
+                refinePrompt={refinePrompt}
+                refineModel={refineModel}
+                onDownloadRefineModel={
+                  refineModel ? () => createModelDownloadJob(refineModel) : undefined
+                }
+                workflow="audio"
+              />
+            ) : null}
+
             {/* Settings bar (epic 14361 / sc-14363). The row is a FIXED 4-column grid — Model ·
                 Voice · Language · Length — with `align-items: end`, and the model's capability
                 hint has moved out of the Model label onto its own full-width footer row (shared
@@ -840,9 +919,11 @@ export function AudioStudio() {
               <div className="settings-bar-row">
                 <label className="settings-field settings-field-model">
                   Model
-                  <select onChange={(event) => setModel(event.target.value)} value={model}>
-                    {/* Models gated on the selected tab: only those that serve the active mode,
-                        falling back to the full list so the picker is never empty. */}
+                  <select
+                    onChange={(event) => setModel(event.target.value)}
+                    value={selectedModel?.id ?? ""}
+                  >
+                    {/* Models gated on the selected tab: only real generators that serve this mode. */}
                     {pickerModels.map((item) => (
                       <option key={item.id} value={item.id}>
                         {item.name ?? item.ui?.label ?? item.id}
@@ -1280,6 +1361,13 @@ export function AudioStudio() {
             />
           </div>
         </form>
+        {guideOpen ? (
+          <PromptGuideModal
+            guide={promptGuide}
+            modelName={selectedModel?.name}
+            onClose={() => setGuideOpen(false)}
+          />
+        ) : null}
       </section>
     </ModelAvailabilityGate>
   );

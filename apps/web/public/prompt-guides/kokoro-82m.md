@@ -17,6 +17,8 @@ Kokoro ships **28 English voices** — 20 American (`af_*` female, `am_*` male) 
 - Output is 24 kHz mono, up to about **30 seconds** per request. For longer passages, split into multiple clips.
 - An optional target duration nudges the pace (the model derives a speed factor, clamped to 0.5–2.0×).
 
+**Refine my prompt** treats the prompt as a script. It preserves the words and meaning and makes only minimal punctuation or readability adjustments; it does not turn the script into a description of a voice.
+
 ## Practical notes
 
 Kokoro is single-speaker per request — render each speaker separately for a dialogue. It is small and fast, so iterating on wording and voice is cheap.
