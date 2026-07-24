@@ -400,11 +400,13 @@ async fn validate_merged_generation_model(
     validate_payload_model(&merged)
 }
 
-/// Utility jobs created through the raw queue route do not pass a typed request validator.
-/// `image_upscale` is the utility lane whose `model` value participates in model/path
-/// resolution, so guard that field at the API boundary before the job is persisted.
+/// Jobs created through the raw queue route do not pass a typed request validator. Keep this
+/// inventory aligned with worker payload fields that reach filesystem model resolution:
+/// `image_upscale` and `prompt_refine` consume `model`; the model-management jobs consume
+/// `modelId`. Other raw job payloads may contain descriptive model metadata, but are deliberately
+/// absent unless that field selects a filesystem path.
 fn validate_raw_job_model_id(job_type: &JobType, payload: &JsonObject) -> Result<(), ApiError> {
-    if matches!(job_type, JobType::ImageUpscale) {
+    if matches!(job_type, JobType::ImageUpscale | JobType::PromptRefine) {
         validate_payload_model(payload)?;
     }
     if matches!(

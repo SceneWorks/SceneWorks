@@ -113,28 +113,27 @@ async fn generic_jobs_route_still_serves_non_generation_types() {
     }
 }
 
-/// sc-13617 / F-055: the generic queue route is the only create boundary for standalone
-/// upscales, so a caller-supplied model id must be rejected before a job row exists.
+/// sc-13617 / F-055: raw jobs whose `model` reaches worker-side model path resolution must
+/// reject traversal before a job row exists. This table is the API-side inventory for that key.
 #[tokio::test]
-async fn generic_image_upscale_rejects_path_unsafe_model_before_create() {
+async fn generic_model_backed_jobs_reject_path_unsafe_model_before_create() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (status, body) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/jobs",
-        json!({
-            "type": "image_upscale",
-            "requestedGpu": "auto",
-            "payload": {
-                "sourceAssetId": "asset-1",
-                "model": "../../outside"
-            },
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    for job_type in ["image_upscale", "prompt_refine"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": job_type,
+                "requestedGpu": "auto",
+                "payload": { "model": "../../outside" },
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{job_type}: {body}");
+    }
 
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert!(jobs.as_array().expect("jobs array").is_empty());
