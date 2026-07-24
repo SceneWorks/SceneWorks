@@ -1,26 +1,22 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Icon } from "../components/Icons.jsx";
-import { AssetMedia } from "../components/assetMedia.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { audioModelServesMode } from "../modelEligibility.js";
-import { resolveJobResultAssets } from "../jobResultAssets.js";
+import { audioAssetRunGroups, audioRunGroups } from "../audioTakes.js";
+import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";
 import { buildSimpleAudioRequest } from "./simpleJobs.js";
+import { SimpleAudioDeck, SimpleTakeCard, takeGridColumns } from "./simpleAudioParts.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";
-import {
-  Chips,
-  DownloadButton,
-  SheetSelect,
-  StudioRunStatus,
-  jobIsRunning,
-  newestLocalJob,
-} from "./studioParts.jsx";
+import { Chips, SheetSelect, StudioRunStatus, jobIsRunning, newestLocalJob } from "./studioParts.jsx";
 
-// Simple Audio Studio (design handoff). The design flags this studio as a PREVIEW —
-// "the models and controls will change as it lands" — and asks for the warning banner
-// to be kept, so it is rendered verbatim.
+// Simple Audio Studio (design handoff → Audio Studio redesign, epic 14361 / sc-14365).
 //
 // Music / Speech / SFX are the three modes the design shows. Voice Clone (the fourth
 // mode the advanced studio serves) is deliberately not surfaced here.
+//
+// The mode control is the `.su-tabs` underline tab set the Image and Video studios use, and
+// the results zone is the same take grid + play deck the Advanced studio grew — sized off
+// the MEASURED band (breakpointFor via the shell's `breakpoint`), never a media query. The
+// old "this studio is a preview" notice is gone: the studio ships.
 
 const MODES = [
   { id: "music", label: "Music" },
@@ -35,10 +31,13 @@ export function SimpleAudioStudio() {
     createAudioJob,
     rememberLocalGenerationJob,
     audioLocalJobs = [],
+    recentAudioAssets = [],
     assets = [],
     activeProject,
   } = useAppContext();
-  const { toast } = useSimpleUi();
+  const { toast, breakpoint } = useSimpleUi();
+  // One transport for the screen, so loading a take always pauses the previous one.
+  const player = useAudioTakePlayer();
 
   const [mode, setMode] = useState("music");
   const [prompt, setPrompt] = useState("");
@@ -101,7 +100,30 @@ export function SimpleAudioStudio() {
   const latestJob = newestLocalJob(audioLocalJobs);
   const busy = submitting || jobIsRunning(latestJob);
   const canGenerate = Boolean(prompt.trim()) && Boolean(model) && !busy;
-  const resultAssets = latestJob ? resolveJobResultAssets(latestJob, assets, { type: "audio" }) : [];
+
+  // Every take this project's audio runs have produced, newest run first — the same derived
+  // grouping the Advanced studio reads, flattened into one grid (Simple shows takes, not runs).
+  const runs = useMemo(() => {
+    const jobRuns = audioRunGroups(audioLocalJobs, assets, audioModels);
+    const covered = new Set(jobRuns.flatMap((run) => run.takes.map((asset) => asset.id)));
+    return [...jobRuns, ...audioAssetRunGroups(recentAudioAssets, audioModels, covered)];
+  }, [audioLocalJobs, assets, recentAudioAssets, audioModels]);
+  const takes = useMemo(
+    () => runs.flatMap((run) => run.takes.map((asset, index) => ({ run, asset, index }))),
+    [runs],
+  );
+  const loaded = takes.find((take) => take.asset.id === player.loadedTakeId) ?? null;
+
+  // "Run again" re-submits the run's OWN recorded payload, not the current controls.
+  async function runAgain(job) {
+    if (!job?.payload) {
+      return;
+    }
+    const next = await createAudioJob(job.payload);
+    if (next) {
+      rememberLocalGenerationJob?.("audio", next);
+    }
+  }
 
   async function generate() {
     if (!canGenerate) {
@@ -132,11 +154,11 @@ export function SimpleAudioStudio() {
 
   return (
     <div className="su-screen">
-      <div className="su-segmented" role="tablist">
+      <div className="su-tabs" role="tablist">
         {MODES.map((entry) => (
           <button
             aria-selected={mode === entry.id}
-            className={mode === entry.id ? "active" : ""}
+            className={mode === entry.id ? "su-tab active" : "su-tab"}
             key={entry.id}
             onClick={() => setMode(entry.id)}
             role="tab"
@@ -145,11 +167,6 @@ export function SimpleAudioStudio() {
             {entry.label}
           </button>
         ))}
-      </div>
-
-      <div className="su-notice" role="note">
-        <Icon.Warning size={16} />
-        <span>Audio Studio is a preview — the models and controls will change as it lands.</span>
       </div>
 
       <div>
@@ -212,10 +229,39 @@ export function SimpleAudioStudio() {
       {/* Live run strip: progress + Cancel + the outcome, right under Generate. */}
       <StudioRunStatus job={latestJob} />
 
-      {resultAssets.length ? (
-        <div className="su-audio-result">
-          <AssetMedia asset={resultAssets[0]} />
-          <DownloadButton asset={resultAssets[0]} className="su-icon-btn" />
+      {takes.length ? (
+        <div>
+          <div className="su-results-head">
+            <strong>Latest audio</strong>
+            <span>
+              {takes.length} {takes.length === 1 ? "clip" : "clips"}
+            </span>
+          </div>
+          {loaded ? (
+            <SimpleAudioDeck
+              asset={loaded.asset}
+              breakpoint={breakpoint}
+              onRunAgain={runAgain}
+              player={player}
+              run={loaded.run}
+              takeIndex={loaded.index}
+            />
+          ) : null}
+          <div className="su-take-grid" style={{ "--su-take-cols": takeGridColumns(breakpoint) }}>
+            {takes.map(({ run, asset, index }) => (
+              <SimpleTakeCard
+                asset={asset}
+                index={index}
+                key={asset.id}
+                loaded={asset.id === player.loadedTakeId}
+                onToggle={player.toggleTake}
+                phone={breakpoint === "phone"}
+                playing={player.isPlaying}
+                progress={player.progress}
+                run={run}
+              />
+            ))}
+          </div>
         </div>
       ) : null}
     </div>

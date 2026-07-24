@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { actionStatuses, terminalStatuses } from "../jobTypes.js";
 import { formatSeconds, liveElapsedSeconds, percent } from "../formatting.js";
+// m:ss transport clock — shared with the Audio Studio's take deck (epic 14361) so both
+// transports read the same way.
+import { formatClock } from "../audioTakes.js";
 import { useAppLive } from "../context/AppContext.js";
 import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { deriveWorkerHardware, findWorkerForJob, liveMeters } from "../workers.js";
@@ -388,14 +391,6 @@ function VideoThumbnail({ assets, onThumbnailClick }) {
 export function audioAssetDurationSeconds(asset) {
   const declared = Number(asset?.file?.duration);
   return Number.isFinite(declared) && declared > 0 ? declared : 0;
-}
-
-// m:ss clock for the transport read-out. Clamps NaN/negative to 0:00.
-function formatClock(seconds) {
-  const total = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
-  const mins = Math.floor(total / 60);
-  const secs = total % 60;
-  return `${mins}:${String(secs).padStart(2, "0")}`;
 }
 
 const PlayGlyph = (

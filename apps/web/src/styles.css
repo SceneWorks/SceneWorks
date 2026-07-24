@@ -15162,3 +15162,598 @@ textarea[aria-invalid="true"]:focus {
 .multiphase-cfg-hint {
   margin-top: 2px;
 }
+
+/* ══ Audio Studio redesign — take grid, run groups and the play deck (epic 14361) ═══════
+   The results zone stopped being a job monitor: runs group into waveform take cards on the
+   same .review-grid geometry the Image/Video studios use, with a now-playing deck docked
+   above them. Presentation only — every value is a token, so light theme and all six accent
+   palettes keep working, and nothing here hardcodes a resolved oklch literal. */
+
+/* ---------- Work panel: settings bar as a fixed 4-column grid (sc-14363) ---------- */
+/* Scoped to the Audio Studio so the Image/Video studios' flex settings rows are untouched.
+   Model · Voice · Length are the fixed columns; every capability-gated extra field (Language,
+   BPM, Key, region start/end, edit strength) simply becomes another cell. */
+.audio-settings-bar .settings-bar-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr;
+  gap: 14px;
+  align-items: end;
+}
+
+.audio-settings-bar .settings-field {
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .audio-settings-bar .settings-bar-row {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* The capability hint owns the start of the Advanced disclosure's header row — the settings
+   bar's footer — instead of sitting inside the Model label where it displaced the caption. */
+.advanced-section-leading {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.advanced-section--leading .advanced-section-toggle {
+  flex: 0 0 auto;
+}
+
+.audio-capability-hint {
+  margin-top: 0;
+  font-size: 12px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The ⌘↵ hint moved from the results head to sit under the Generate CTA. */
+.prompt-cta-stack {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  justify-items: center;
+  gap: 6px;
+}
+
+.prompt-cta-stack .prompt-cta {
+  width: 100%;
+}
+
+/* ---------- Waveform primitive ---------- */
+.audio-wave {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  overflow: hidden;
+}
+
+button.audio-wave {
+  cursor: pointer;
+}
+
+.audio-wave__svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  stroke: color-mix(in oklch, var(--accent) 55%, var(--bg-2));
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  fill: none;
+}
+
+.audio-wave--idle .audio-wave__svg {
+  stroke: color-mix(in oklch, var(--accent) 26%, var(--bg-2));
+}
+
+/* The played band + its playhead. Width is currentTime / duration; the transition matches
+   .progress-track span so the two progress surfaces move at the same rate. */
+.audio-wave__played {
+  position: absolute;
+  inset: 0 auto 0 0;
+  pointer-events: none;
+  background: color-mix(in oklch, var(--accent) 20%, transparent);
+  border-right: 2px solid var(--accent-strong);
+  transition: width 180ms ease;
+}
+
+/* ---------- Transport controls ---------- */
+.audio-play-btn {
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--accent-fg);
+  cursor: pointer;
+  transition: background var(--t-fast);
+}
+
+.audio-play-btn:hover {
+  background: var(--accent-strong);
+}
+
+.audio-play-btn--xs { width: 22px; height: 22px; }
+.audio-play-btn--sm { width: 28px; height: 28px; }
+.audio-play-btn--md { width: 32px; height: 32px; }
+.audio-play-btn--lg { width: 44px; height: 44px; }
+
+.audio-play-btn--xl {
+  width: 46px;
+  height: 46px;
+  box-shadow: 0 8px 22px color-mix(in oklch, var(--accent) 30%, transparent);
+}
+
+.audio-round-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color var(--t-fast), color var(--t-fast);
+}
+
+.audio-round-btn:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.audio-round-btn.is-on {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.audio-clock {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.audio-clock strong {
+  font-weight: 500;
+  color: var(--text);
+}
+
+/* Accent text link used by "See all in Assets", "Run again" and the strip's Queue link. */
+.audio-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-strong);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.audio-link:hover {
+  text-decoration: underline;
+}
+
+/* ---------- Mode chip ---------- */
+.audio-mode-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.audio-mode-chip__extra {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  opacity: 0.85;
+}
+
+.audio-mode-chip--music {
+  background: color-mix(in oklch, var(--warm) 22%, var(--surface));
+  color: var(--warm);
+}
+
+.audio-mode-chip--sfx {
+  background: color-mix(in oklch, var(--success) 20%, var(--surface));
+  color: var(--success);
+}
+
+.audio-mode-chip--voiceclone {
+  background: color-mix(in oklch, var(--accent) 16%, var(--surface));
+  color: var(--accent-strong);
+}
+
+/* ---------- Results zone ---------- */
+.audio-results {
+  min-width: 0;
+}
+
+.audio-results__count {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.audio-results__all {
+  align-self: center;
+}
+
+/* In-flight strip — the trimmed progress row that replaces the full worker card here. */
+.audio-inflight {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.audio-inflight__status {
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.audio-inflight__body {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.audio-inflight__titles {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.audio-inflight__title {
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.audio-inflight__message {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-inflight__track {
+  height: 6px;
+}
+
+.audio-inflight__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.audio-inflight .secondary-action {
+  height: 30px;
+}
+
+/* Run group — header row then the take grid. */
+.audio-run {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.audio-run__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.audio-run__model {
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.audio-run__chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.audio-run__chip {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.audio-run__rule {
+  flex: 1 1 20px;
+  min-width: 12px;
+  height: 1px;
+  background: var(--border);
+}
+
+.audio-run__time {
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.audio-take-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: var(--gap-3);
+}
+
+/* Take card — .review-card geometry with a waveform well instead of a poster frame. */
+.audio-take {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  min-width: 0;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+
+.audio-take.is-loaded {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 20%, transparent);
+}
+
+.audio-take__wave {
+  position: relative;
+  height: 118px;
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.audio-take__badge,
+.audio-take__duration {
+  position: absolute;
+  padding: 2px 6px;
+  border-radius: var(--r-xs);
+  background: color-mix(in oklch, var(--bg-2) 82%, transparent);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  pointer-events: none;
+}
+
+.audio-take__badge {
+  top: 7px;
+  left: 7px;
+}
+
+.audio-take__duration {
+  right: 7px;
+  bottom: 7px;
+  font-size: 11px;
+}
+
+.audio-take__play {
+  position: absolute;
+  left: 7px;
+  bottom: 7px;
+}
+
+.audio-take__prompt {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.audio-take__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  min-width: 0;
+}
+
+.audio-take__meta span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-take__meta-duration {
+  font-family: var(--font-mono);
+  flex: 0 0 auto;
+}
+
+.audio-take__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.audio-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+
+.audio-icon-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.audio-icon-btn.is-on {
+  color: var(--accent-strong);
+}
+
+.audio-icon-btn--danger:hover {
+  color: var(--danger);
+}
+
+/* ---------- Play deck ---------- */
+/* The explicit minmax(0, 1fr) matters: without it the no-wrap transport row makes the grid
+   column max-content and the deck overflows narrow containers. */
+.audio-deck {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  background: var(--bg-2);
+}
+
+.audio-deck__el {
+  display: none;
+}
+
+.audio-deck__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.audio-deck__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-deck__head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.audio-deck__head-actions .secondary-action {
+  height: 32px;
+}
+
+.audio-deck__again {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.audio-deck__close {
+  width: 32px;
+  padding: 0;
+  justify-content: center;
+}
+
+.audio-deck__stage {
+  padding: 14px 16px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg);
+}
+
+.audio-deck__stage .audio-wave {
+  height: 140px;
+}
+
+.audio-deck__ticks {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.audio-deck__transport {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.audio-deck__meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: right;
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .audio-deck__head {
+    flex-wrap: wrap;
+  }
+
+  .audio-deck__transport {
+    flex-wrap: wrap;
+  }
+
+  .audio-deck__meta {
+    flex-basis: 100%;
+    text-align: left;
+  }
+}

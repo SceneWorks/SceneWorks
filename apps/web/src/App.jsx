@@ -998,6 +998,18 @@ export function App() {
         .slice(0, 20),
     [assets, activeProject?.id],
   );
+  // The audio twin of recentImage/recentVideoAssets (epic 14361): the Audio Studio's results
+  // zone groups this session's runs AND the project's recent clips, so "Latest audio" is
+  // populated on a fresh launch instead of empty until you generate something.
+  const recentAudioAssets = useMemo(
+    () =>
+      assets
+        .filter((asset) => asset.type === "audio" && (!activeProject?.id || asset.projectId === activeProject.id))
+        .slice()
+        .sort(sortNewest)
+        .slice(0, 20),
+    [assets, activeProject?.id],
+  );
   const imageLocalJobs = useMemo(
     () => buildLocalJobStack(localGenerationJobIds.image, jobs, activeProject?.id, isImageGenerationJob),
     [activeProject?.id, jobs, localGenerationJobIds.image],
@@ -2406,6 +2418,7 @@ export function App() {
     latestVideoAssets,
     recentImageAssets,
     recentVideoAssets,
+    recentAudioAssets,
     studioLaunch,
     // sc-8730: Image Editor launch channel + the two Edit paths. sendAssetToImageEditor
     // routes to the editor canvas (FullscreenPreview Edit button); sendAssetToImageEdit
@@ -2530,7 +2543,7 @@ export function App() {
     jobAction, clearCompletedJobs, cancelPendingJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     projectFilter, setProjectFilter, projects,
     createVideoJob, createVideoUpscaleJob, createImageJob, createAudioJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
-    recentVideoAssets, studioLaunch,
+    recentVideoAssets, recentAudioAssets, studioLaunch,
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
     rememberLocalGenerationJob, personTracks, createPersonDetectionJob,
     createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, audioModels, models, macCapabilities,
