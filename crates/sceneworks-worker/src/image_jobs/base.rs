@@ -752,6 +752,74 @@ fn requested_receipt_variant(request: &ImageRequest) -> Option<String> {
 ))]
 const IDEOGRAM_BF16_REPO: &str = "SceneWorks/ideogram-4";
 
+/// Exact snapshots used by the on-demand non-default tier fetches.  The API replaces a submitted
+/// `modelManifestEntry` with its resolved builtin/user manifest entry before enqueueing, so a repo
+/// different from the engine default is an intentional configured override.  First-party turnkeys
+/// never follow a mutable ref; configured override repos retain `main` because SceneWorks cannot know
+/// their release commit in advance.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const BOOGU_MLX_TURNKEY_REVISION: &str = "a459e614d408bfdf57089c32cc3da706f5a017de";
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const IDEOGRAM_MLX_TURNKEY_REVISION: &str = "a3095855b8819dc0d6b067cb1354aaa7da189ff8";
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn turnkey_tier_revision<'a>(
+    repo: &str,
+    default_repo: &str,
+    default_revision: &'a str,
+) -> &'a str {
+    if repo == default_repo {
+        default_revision
+    } else {
+        "main"
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn pinned_turnkey_snapshot_for_request(
+    data_dir: &Path,
+    request: &ImageRequest,
+    repo: &str,
+    default_repo: &str,
+    revision: &str,
+) -> Option<PathBuf> {
+    if repo != default_repo {
+        return None;
+    }
+    let root =
+        crate::model_jobs::huggingface_pinned_snapshot_dir(data_dir, repo, revision)?;
+    let selected = match request.model.as_str() {
+        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => {
+            boogu_model_subdir(&root, request)
+        }
+        "ideogram_4" | "ideogram_4_turbo" => ideogram_model_subdir(&root, request),
+        _ => return None,
+    };
+    let complete = if request.model.starts_with("boogu_") {
+        selected
+            .join("transformer/diffusion_pytorch_model.safetensors")
+            .is_file()
+            || selected
+                .join("transformer/diffusion_pytorch_model.safetensors.index.json")
+                .is_file()
+    } else {
+        selected.join("transformer/model.safetensors").is_file()
+    };
+    complete.then_some(root)
+}
+
 /// The whole-repo `Efficient-Large-Model/Sana_1600M_1024px_diffusers` HF snapshot the candle SANA
 /// lane loads (sc-11780, epic 8485). The `candle-gen-sana` pipeline reads the diffusers-layout tree
 /// (`transformer/` + `vae/` + `text_encoder/`) directly, so the off-Mac lane resolves this repo's
@@ -812,13 +880,34 @@ pub(crate) fn resolve_weights_dir(
         Some(&request.model),
         receipt_variant.as_deref(),
     );
-    let snapshot = receipt_snapshot
-        .clone()
+    let pinned_turnkey_snapshot = match request.model.as_str() {
+        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => {
+            pinned_turnkey_snapshot_for_request(
+                &settings.data_dir,
+                request,
+                &repo,
+                model.default_repo(),
+                BOOGU_MLX_TURNKEY_REVISION,
+            )
+        }
+        "ideogram_4" | "ideogram_4_turbo" => pinned_turnkey_snapshot_for_request(
+            &settings.data_dir,
+            request,
+            &repo,
+            model.default_repo(),
+            IDEOGRAM_MLX_TURNKEY_REVISION,
+        ),
+        _ => None,
+    };
+    let has_pinned_turnkey_snapshot = pinned_turnkey_snapshot.is_some();
+    let snapshot = pinned_turnkey_snapshot
+        .or_else(|| receipt_snapshot.clone())
         .or_else(|| huggingface_snapshot_dir(&settings.data_dir, &repo));
     // A tier receipt already resolves to the exact self-contained tier directory.  Returning it
     // before the family pickers prevents a second `q4/q8/bf16` descent and, more importantly, keeps
     // all load inputs on the receipt side of the all-receipt-or-all-current boundary.
-    if receipt_snapshot
+    if !has_pinned_turnkey_snapshot
+        && receipt_snapshot
         .as_deref()
         .and_then(tier_key_from_resolved_dir)
         .is_some()
@@ -2081,19 +2170,33 @@ async fn ensure_boogu_tier_present(
     let Some(model) = mlx_model(&request.model) else {
         return Ok(());
     };
-    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, &model_repo(request, &model))
-    else {
+    let repo = model_repo(request, &model);
+    let root = if repo == model.default_repo() {
+        crate::model_jobs::huggingface_pinned_snapshot_dir(
+            &settings.data_dir,
+            &repo,
+            BOOGU_MLX_TURNKEY_REVISION,
+        )
+    } else {
+        huggingface_snapshot_dir(&settings.data_dir, &repo)
+    };
+    let repo_is_installed = root.is_some()
+        || (repo == model.default_repo()
+            && huggingface_snapshot_dir(&settings.data_dir, &repo).is_some());
+    if !repo_is_installed {
         // Turnkey not downloaded at all → leave it to the load path's "weights not found" error.
         return Ok(());
-    };
-    let tier_dir = root.join(&tier);
+    }
+    let tier_dir = root.as_ref().map(|root| root.join(&tier));
     // Present already (packed single-file q4 OR sharded-dense bf16 `.index.json`) → no fetch.
-    if tier_dir
-        .join("transformer/diffusion_pytorch_model.safetensors")
-        .is_file()
-        || tier_dir
-            .join("transformer/diffusion_pytorch_model.safetensors.index.json")
+    if tier_dir.as_ref().is_some_and(|tier_dir| {
+        tier_dir
+            .join("transformer/diffusion_pytorch_model.safetensors")
             .is_file()
+            || tier_dir
+                .join("transformer/diffusion_pytorch_model.safetensors.index.json")
+                .is_file()
+    })
     {
         return Ok(());
     }
@@ -2103,14 +2206,9 @@ async fn ensure_boogu_tier_present(
         format!("{tier}/mllm/*"),
         format!("{tier}/vae/*"),
     ];
-    crate::model_jobs::ensure_hf_files_cached(
-        api,
-        settings,
-        job,
-        &model_repo(request, &model),
-        "main",
-        &files,
-    )
+    let revision =
+        turnkey_tier_revision(&repo, model.default_repo(), BOOGU_MLX_TURNKEY_REVISION);
+    crate::model_jobs::ensure_hf_files_cached(api, settings, job, &repo, revision, &files)
     .await
     .map(|_| ())
 }
@@ -2149,28 +2247,36 @@ async fn ensure_ideogram_tier_present(
     let Some(model) = mlx_model(&request.model) else {
         return Ok(());
     };
-    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, &model_repo(request, &model))
-    else {
+    let repo = model_repo(request, &model);
+    let root = if repo == model.default_repo() {
+        crate::model_jobs::huggingface_pinned_snapshot_dir(
+            &settings.data_dir,
+            &repo,
+            IDEOGRAM_MLX_TURNKEY_REVISION,
+        )
+    } else {
+        huggingface_snapshot_dir(&settings.data_dir, &repo)
+    };
+    let repo_is_installed = root.is_some()
+        || (repo == model.default_repo()
+            && huggingface_snapshot_dir(&settings.data_dir, &repo).is_some());
+    if !repo_is_installed {
         // Turnkey not downloaded at all → leave it to the load path's "weights not found" error.
         return Ok(());
-    };
+    }
     // Present already (the packed single-file transformer) → no fetch.
-    if root
-        .join(tier)
-        .join("transformer/model.safetensors")
-        .is_file()
+    if root.as_ref().is_some_and(|root| {
+        root.join(tier)
+            .join("transformer/model.safetensors")
+            .is_file()
+    })
     {
         return Ok(());
     }
     let files = vec![format!("{tier}/*")];
-    crate::model_jobs::ensure_hf_files_cached(
-        api,
-        settings,
-        job,
-        &model_repo(request, &model),
-        "main",
-        &files,
-    )
+    let revision =
+        turnkey_tier_revision(&repo, model.default_repo(), IDEOGRAM_MLX_TURNKEY_REVISION);
+    crate::model_jobs::ensure_hf_files_cached(api, settings, job, &repo, revision, &files)
     .await
     .map(|_| ())
 }
