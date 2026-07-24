@@ -301,18 +301,16 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
         return CandleVideoRoute::Stub;
     }
     if request.mode == "replace_person" {
-        match candle_scail2_engine_id(&request.model) {
+        match scail2_engine_id(&request.model) {
             Some(engine_id) => CandleVideoRoute::ReplacePersonScail2(engine_id),
             None => CandleVideoRoute::ReplacePersonWanVace,
         }
-    } else if request.mode == "animate_character"
-        && candle_scail2_engine_id(&request.model).is_some()
-    {
-        let engine_id = candle_scail2_engine_id(&request.model).expect("scail2 model");
+    } else if request.mode == "animate_character" && scail2_engine_id(&request.model).is_some() {
+        let engine_id = scail2_engine_id(&request.model).expect("scail2 model");
         CandleVideoRoute::AnimateScail2(engine_id)
     } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge") {
         CandleVideoRoute::WanVaceExtendBridge
-    } else if let Some(engine_id) = candle_bernini_engine_id(&request.model) {
+    } else if let Some(engine_id) = bernini_engine_id(&request.model) {
         // Bernini (sc-10997, epic 6562): the full Qwen planner + Wan2.2-T2V-A14B renderer serves t2v +
         // the editing/reference/multi-source modes (v2v / r2v / rv2v / mv2v / ads2v). A DISTINCT engine
         // (`crate::inference_runtime::load("bernini")`), NOT a wan/ltx `is_candle_video_engine` id, so it is routed off the
@@ -706,7 +704,7 @@ pub(crate) async fn run_video_generate_job(
                     decoded,
                     CANDLE_SCAIL2_ADAPTER,
                     // The replace_person path doesn't resolve user LoRAs (sc-5452), so no lightning recipe.
-                    candle_scail2_raw_settings(&request, false),
+                    scail2_raw_settings(&request, false),
                     Some(status),
                 )
             }
@@ -784,7 +782,7 @@ pub(crate) async fn run_video_generate_job(
                 (
                     decoded,
                     CANDLE_BERNINI_ADAPTER,
-                    candle_bernini_raw_settings(&request),
+                    bernini_raw_settings(&request),
                     None::<Value>,
                 )
             }
@@ -1516,15 +1514,13 @@ use bernini::{
 };
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use bernini::{
-    candle_bernini_engine_id, candle_bernini_raw_settings, generate_candle_bernini,
-    CANDLE_BERNINI_ADAPTER,
+    bernini_engine_id, bernini_raw_settings, generate_candle_bernini, CANDLE_BERNINI_ADAPTER,
 };
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle::{
-    candle_scail2_engine_id, candle_scail2_raw_settings, generate_candle_scail2,
-    generate_candle_scail2_replace, generate_candle_video, generate_candle_wan_comfyui,
-    generate_candle_wan_vace, generate_candle_wan_vace_extend_bridge, is_candle_video_engine,
-    wan_comfyui_available, CANDLE_SCAIL2_ADAPTER, CANDLE_WAN_VACE_ADAPTER,
+    generate_candle_scail2, generate_candle_scail2_replace, generate_candle_video,
+    generate_candle_wan_comfyui, generate_candle_wan_vace, generate_candle_wan_vace_extend_bridge,
+    is_candle_video_engine, wan_comfyui_available, CANDLE_SCAIL2_ADAPTER, CANDLE_WAN_VACE_ADAPTER,
 };
 mod scail2;
 #[cfg(target_os = "macos")]
@@ -1532,6 +1528,8 @@ use scail2::{
     generate_scail2, generate_scail2_replace, scail2_available, scail2_engine_id,
     scail2_raw_settings, SCAIL2_ADAPTER,
 };
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use scail2::{scail2_engine_id, scail2_raw_settings};
 pub(crate) mod ltx;
 #[cfg(target_os = "macos")]
 use ltx::{generate_ltx, ltx_available, ltx_engine_id, ltx_raw_settings, LTX_ADAPTER};
