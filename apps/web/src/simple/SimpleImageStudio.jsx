@@ -7,6 +7,7 @@ import { fitsResolutionOptions } from "../resolutionMemory.js";
 import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
 import { resultGridColumns } from "./breakpoint.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
+import { preferredResolution } from "./modelDefaults.js";
 import { buildSimpleImageRequest, referenceStrengthFor, resolveSimpleTier } from "./simpleJobs.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
@@ -89,11 +90,22 @@ export function SimpleImageStudio() {
     return gated.length ? gated : declared;
   }, [selectedModel, macCapabilities, unifiedMemoryGb]);
 
+  // Seed from the model's DECLARED default, not `limits.resolutions[0]` — for 16 shipped
+  // image models those differ (z_image declares 1024², its list leads with 768²), so [0]
+  // would silently start a Simple run at a lower resolution than the same model in the full
+  // workspace.
   useEffect(() => {
-    if (resolutions.length && !resolutions.includes(resolution)) {
-      setResolution(resolutions[0]);
+    // Guard on a RESOLVED model (mirrors ImageStudio's sc-11962 guard). Before the catalog
+    // lands, `resolutions` is the generic fallback list — seeding from it seeds 1024², and
+    // because almost every model also allows 1024² the value then STICKS and the model's own
+    // declared default is never applied. The guard is what makes the seed above actually bite.
+    if (!selectedModel) {
+      return;
     }
-  }, [resolutions, resolution]);
+    if (resolutions.length && !resolutions.includes(resolution)) {
+      setResolution(preferredResolution(selectedModel, resolutions));
+    }
+  }, [resolutions, resolution, selectedModel]);
 
   // Resolved against the FULL catalog, not just the picker's recent-20 list: a reference
   // routed in from the Assets preview ("Use as reference") can be any library asset.

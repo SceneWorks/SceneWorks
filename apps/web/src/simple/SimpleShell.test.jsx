@@ -498,6 +498,38 @@ describe("SimpleShell", () => {
     expect(container.querySelector(".su-job-badge").textContent).toBe("Running");
   });
 
+  // The audit's headline finding, pinned end-to-end: the studio must SEED from the model's
+  // declared default, not the first allowed value. z_image declares 1024² while its limits
+  // list leads with 768², so the wrong seed silently downgraded every Simple run of it.
+  it("seeds the resolution from the model's declared default, not limits[0]", async () => {
+    // Rendered as the FIRST model this shell ever sees. A prior render would leave a
+    // still-valid resolution in state, which correctly sticks (switching model keeps a
+    // selection the new model also allows — same as the advanced studio) and would mask
+    // what the seed actually chose. That stickiness is exactly why a click-through in the
+    // browser missed this bug.
+    // Declared default, first-allowed, and the 1024² fallback are three DISTINCT values here,
+    // so this can only pass by actually reading `defaults.resolution`. (A model declaring
+    // 1024² — which every mismatching shipped model happens to do — would pass even with the
+    // bug, because the fallback lands on the same answer.)
+    const leadsLow = {
+      ...IMAGE_MODEL,
+      defaults: { resolution: "1344x768" },
+      limits: { resolutions: ["768x768", "1024x1024", "1344x768"] },
+    };
+    const lowContext = baseContext({ imageModels: [leadsLow], models: [leadsLow] });
+    await renderShell(root, lowContext);
+
+    expect(
+      [...container.querySelectorAll(".su-select")].some((n) => n.textContent.includes("1344×768")),
+    ).toBe(true);
+
+    await typePrompt(container, "a lighthouse");
+    await click(container.querySelector(".su-generate"));
+    const payload = lowContext.createImageJob.mock.calls[0][0];
+    expect(payload.width).toBe(1344);
+    expect(payload.height).toBe(768);
+  });
+
   it("refuses to submit with an empty prompt", async () => {
     const context = baseContext();
     await renderShell(root, context);

@@ -288,24 +288,30 @@ describe("buildSimpleVideoRequest", () => {
     model: "ltx_2_3",
     resolution: "1280x720",
     duration: 5,
-    fps: 25,
     styleId: null,
     sourceAssetId: null,
   };
 
-  it("emits the geometry, duration and fps the studio shows", () => {
+  it("emits the geometry and duration the studio shows", () => {
     const request = buildSimpleVideoRequest(base);
     expect(request).toMatchObject({
       mode: "text_to_video",
       model: "ltx_2_3",
       duration: 5,
-      fps: 25,
       width: 1280,
       height: 720,
       quality: "balanced",
       seed: null,
     });
     expect(request.advanced.resolution).toBe("1280x720");
+  });
+
+  // Simple exposes no frame-rate control, and the route resolves an absent fps from the
+  // model's declared `defaults.fps` (sc-12347). Sending an invented rate is what the DTO
+  // calls out as harmful — Wan 2.2 declares 24 but lists 16 first, so a `limits.fps[0]`
+  // guess rendered it 33% slow.
+  it("omits fps entirely so the route resolves the model's declared rate", () => {
+    expect("fps" in buildSimpleVideoRequest(base)).toBe(false);
   });
 
   it("refuses an unparseable resolution", () => {

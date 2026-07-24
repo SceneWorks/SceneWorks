@@ -239,7 +239,6 @@ export function buildSimpleVideoRequest({
   model,
   resolution,
   duration,
-  fps,
   styleId,
   sourceAssetId,
 }) {
@@ -257,7 +256,11 @@ export function buildSimpleVideoRequest({
     negativePrompt: "",
     model,
     duration: Number(duration),
-    fps: Number(fps),
+    // fps is deliberately OMITTED. Simple exposes no frame-rate control, and the route
+    // resolves an absent fps from the model's declared `defaults.fps` (sc-12347) — which is
+    // exactly what the advanced studio sends when its fps picker is untouched. Sending a
+    // value we invented instead is what the DTO's own comment calls out as harmful: a blanket
+    // rate "is not a value any model chose", and it makes `limits.fps` unenforceable.
     width: size.width,
     height: size.height,
     quality: "balanced",
