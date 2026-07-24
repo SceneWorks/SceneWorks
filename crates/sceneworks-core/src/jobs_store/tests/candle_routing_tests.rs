@@ -857,6 +857,100 @@ fn qwen_image_quant_tier_select_stays_on_candle() {
 }
 
 #[test]
+fn flux2_turnkey_quant_tier_select_stays_on_candle() {
+    // sc-10222 (epic 9083): the LAST families carrying the "engine wired, router half missed" skew
+    // (sc-9983 krea/ideogram/boogu, sc-11020 qwen). `flux2_klein_9b`/`_kv`/`flux2_dev` are worker
+    // `STANDARD_TIER_MODELS` members whose `SceneWorks/flux2-*-mlx` turnkeys ship q4/q8/bf16 packed
+    // subdirs, resolved by `standard_tier_subdir` and MEASURED in the manifest `candle.vramGbByTier`
+    // — but `candle_quant` was `false`, so an explicit tier-select enforce-failed `candle_unsupported`
+    // at routing before ever reaching the worker. FLUX.2-klein has no torch path at all, and dev's own
+    // fit-gate asks a 48 GB user for q4 (44.0 GB) over the q8 default (70.7) — the only tier that fits
+    // was the one tier that could not be routed.
+    for model in ["flux2_klein_9b", "flux2_klein_9b_kv", "flux2_dev"] {
+        for bits in [4, 8] {
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": bits } }))
+                ),
+                "{model} Q{bits} tier-select should stay on candle (sc-10222)"
+            );
+        }
+        // An explicit bf16 pick (<= 0) and a plain job were always eligible — unchanged.
+        for advanced in [json!({ "mlxQuantize": 0 }), json!({ "steps": 28 })] {
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "prompt": "x", "advanced": advanced }))
+                ),
+                "{model} dense/plain shape must stay candle-eligible"
+            );
+        }
+        // No candle inference LoRA on any FLUX.2 id — a LoRA still defers to torch.
+        assert!(
+            !image_request_candle_eligible(
+                model,
+                &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
+            ),
+            "{model} LoRA must still defer (quant and LoRA are decoupled caps)"
+        );
+    }
+    // `_true_v2` is deliberately NOT flipped: the wikeeyang fine-tune installs by convert-at-install
+    // into a FLAT `modelPath` dir with no q4/q8/bf16 tier matrix, so there is no tier for a pick to
+    // select. Its plain txt2img stays candle-eligible; only the tier-select defers.
+    assert!(image_request_candle_eligible(
+        "flux2_klein_9b_true_v2",
+        &object(json!({ "prompt": "x" }))
+    ));
+    assert!(!image_request_candle_eligible(
+        "flux2_klein_9b_true_v2",
+        &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 4 } }))
+    ));
+}
+
+#[test]
+fn sensenova_family_quant_tier_select_stays_on_candle() {
+    // sc-14249 (epic 9083): `candle-gen-sensenova` was dense-f32-only — it mmapped its backbone at
+    // a hardcoded F32 and hard-rejected `spec.quantize`, so the candle lane could read only the
+    // `bf16/` tier, at DOUBLE its on-disk size (a measured 70.5 GB peak on sm_120 for a 32.7 GiB
+    // checkpoint — a 96 GB-card feature). It now packed-detects each backbone projection, so the
+    // turnkey's q4/q8 tiers load natively and a tier-select must reach the worker instead of
+    // enforce-failing `candle_unsupported` at routing.
+    for model in [
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_infographic_v3_fast",
+    ] {
+        for bits in [4, 8] {
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": bits } }))
+                ),
+                "{model} Q{bits} tier-select should stay on candle (sc-14249)"
+            );
+        }
+        // The dense/plain shapes were always eligible — unchanged.
+        assert!(image_request_candle_eligible(
+            model,
+            &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 0 } }))
+        ));
+        // Quant and LoRA stay decoupled: the family advertises no candle inference LoRA (the
+        // fast ids' distill LoRA is merged internally by the loader, never user-supplied).
+        assert!(
+            !image_request_candle_eligible(
+                model,
+                &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
+            ),
+            "{model} must still defer a user LoRA"
+        );
+    }
+}
+
+#[test]
 fn sdxl_family_quant_and_lora_stay_on_candle() {
     // sc-10767 (epic 9083): the SDXL family advertises Q4/Q8 packed tiers (candle-gen sc-9416/9527)
     // AND inference LoRA/LoKr on a packed tier (sc-9528), so a quant tier-select AND a LoRA both

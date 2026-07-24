@@ -66,6 +66,218 @@ fn worker_credentials_env_overrides_file_per_host() {
 }
 
 #[tokio::test]
+async fn source_url_query_token_is_redacted_from_status_errors() {
+    let app = Router::new().route(
+        "/download/style.safetensors",
+        get(|| async { AxumStatusCode::INTERNAL_SERVER_ERROR })
+            .head(|| async { AxumStatusCode::INTERNAL_SERVER_ERROR }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+
+    let temp = tempdir().expect("tempdir creates");
+    let api_base = spawn_binary_stub(b"ignored".to_vec()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = api_base;
+    settings.allow_private_lora_urls = true;
+    settings.credentials = vec![WorkerCredential {
+        host: "127.0.0.1".to_owned(),
+        token: "super-secret-query-token".to_owned(),
+        scheme: CredentialScheme::Query,
+    }];
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let error = download_lora_source_url(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "job-1",
+            cancel_message: "canceled",
+            fresh_download: false,
+        },
+        &format!("http://{address}/download/style.safetensors"),
+        &temp.path().join("redaction-target"),
+    )
+    .await
+    .expect_err("500 response is surfaced");
+    let message = error.to_string();
+    assert!(message.contains("sourceUrl"));
+    assert!(!message.contains("super-secret-query-token"));
+    assert!(!message.contains("token="));
+}
+
+#[tokio::test]
+async fn source_url_resumes_an_existing_partial_file_with_range() {
+    let bytes = b"complete-source-url-weights".to_vec();
+    let download_base = spawn_binary_stub(bytes.clone()).await;
+    let temp = tempdir().expect("tempdir creates");
+    let api_base = spawn_binary_stub(b"ignored".to_vec()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = api_base;
+    settings.allow_private_lora_urls = true;
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let target_dir = temp.path().join("resume-target");
+    tokio::fs::create_dir_all(&target_dir).await.unwrap();
+    tokio::fs::write(
+        target_dir.join("style.safetensors"),
+        &bytes[..bytes.len() / 2],
+    )
+    .await
+    .unwrap();
+
+    download_lora_source_url(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "job-1",
+            cancel_message: "canceled",
+            fresh_download: false,
+        },
+        &format!("{download_base}/style.safetensors"),
+        &target_dir,
+    )
+    .await
+    .expect("partial source URL download resumes");
+
+    assert_eq!(
+        tokio::fs::read(target_dir.join("style.safetensors"))
+            .await
+            .unwrap(),
+        bytes
+    );
+}
+
+#[derive(Clone)]
+struct InterruptedSourceState {
+    bytes: Vec<u8>,
+    gets: Arc<AtomicUsize>,
+    ranges: Arc<AtomicUsize>,
+}
+
+#[tokio::test]
+async fn source_url_resumes_after_a_midstream_network_error() {
+    let bytes = b"midstream-interruption-must-resume".to_vec();
+    let state = InterruptedSourceState {
+        bytes: bytes.clone(),
+        gets: Arc::new(AtomicUsize::new(0)),
+        ranges: Arc::new(AtomicUsize::new(0)),
+    };
+    let gets = state.gets.clone();
+    let ranges = state.ranges.clone();
+    let app = Router::new()
+        .route(
+            "/style.safetensors",
+            get(interrupted_source).head(interrupted_source),
+        )
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+
+    let temp = tempdir().expect("tempdir creates");
+    let api_base = spawn_binary_stub(b"ignored".to_vec()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = api_base;
+    settings.allow_private_lora_urls = true;
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let target_dir = temp.path().join("interrupted-target");
+    download_source_url(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "job-1",
+            cancel_message: "canceled",
+            fresh_download: false,
+        },
+        &format!("http://{address}/style.safetensors"),
+        &target_dir,
+        "LoRA",
+        bytes.len() as u64,
+    )
+    .await
+    .expect("midstream transport failure resumes with Range");
+
+    assert_eq!(gets.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        ranges.load(Ordering::SeqCst),
+        1,
+        "retry must carry a Range from the bytes written before disconnect"
+    );
+    assert_eq!(
+        tokio::fs::read(target_dir.join("style.safetensors"))
+            .await
+            .unwrap(),
+        bytes
+    );
+}
+
+async fn interrupted_source(
+    State(state): State<InterruptedSourceState>,
+    method: axum::http::Method,
+    headers: HeaderMap,
+) -> Response {
+    let total = state.bytes.len();
+    if method == axum::http::Method::HEAD {
+        let mut response = Response::new(Body::empty());
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_LENGTH,
+            axum::http::HeaderValue::from_str(&total.to_string()).unwrap(),
+        );
+        return response;
+    }
+    let attempt = state.gets.fetch_add(1, Ordering::SeqCst);
+    if headers
+        .get(axum::http::header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("bytes="))
+        .and_then(|value| value.strip_suffix('-'))
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some()
+    {
+        state.ranges.fetch_add(1, Ordering::SeqCst);
+        // Adversarial CDN behavior: ignore the valid Range and restart with a full 200.
+        return state.bytes.into_response();
+    }
+    if attempt > 0 {
+        return state.bytes.into_response();
+    }
+    let midpoint = total / 2;
+    let first = futures_util::stream::once(async move {
+        Ok::<_, std::io::Error>(axum::body::Bytes::copy_from_slice(
+            &state.bytes[..midpoint],
+        ))
+    });
+    let failure = futures_util::stream::once(async {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        Err::<axum::body::Bytes, _>(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "intentional test disconnect",
+        ))
+    });
+    let stream = futures_util::StreamExt::chain(first, failure);
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_LENGTH,
+        axum::http::HeaderValue::from_str(&total.to_string()).unwrap(),
+    );
+    response
+}
+
+#[tokio::test]
 async fn source_url_follows_redirect_and_strips_auth_across_hosts() {
     let temp = tempdir().expect("tempdir creates");
     // The download host (127.0.0.1) requires a bearer token, then 302-redirects to

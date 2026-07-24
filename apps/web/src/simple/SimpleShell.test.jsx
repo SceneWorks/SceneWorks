@@ -17,6 +17,17 @@ const IMAGE_MODEL = {
   capabilities: ["text_to_image", "edit_image"],
   installState: "installed",
   limits: { resolutions: ["1024x1024", "1344x768"] },
+  // Z-Image declares reference-guided generation in the real catalog, with this exact
+  // strength config — so the Text tab's Reference tile is live for it.
+  ui: { img2img: true, img2imgStrength: { default: 0.5, min: 0, max: 1, step: 0.05 } },
+};
+
+const REFERENCE_ASSET = {
+  id: "asset-9",
+  type: "image",
+  projectId: "project-1",
+  displayName: "cliff_ref.png",
+  url: "/media/cliff_ref.png",
 };
 
 function baseContext(overrides = {}) {
@@ -42,6 +53,7 @@ function baseContext(overrides = {}) {
     createAudioJob: vi.fn(async () => null),
     createModelDownloadJob: vi.fn(async () => null),
     createLoraDownloadJob: vi.fn(async () => null),
+    jobAction: vi.fn(async () => {}),
     rememberLocalGenerationJob: vi.fn(),
     refinePrompt: vi.fn(),
     deleteAsset: vi.fn(),
@@ -76,6 +88,26 @@ function buttonWithText(container, text) {
   );
 }
 
+// Nav items carry a count badge ("Queue1" when one job is pending), so they can't be
+// matched by exact text.
+function navButton(container, label) {
+  return [...container.querySelectorAll(".su-nav-item")].find((node) =>
+    node.textContent.startsWith(label),
+  );
+}
+
+async function typePrompt(container, value) {
+  const textarea = container.querySelector("#su-image-prompt");
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    ).set;
+    setter.call(textarea, value);
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+  });
+}
+
 describe("SimpleShell", () => {
   let container;
   let root;
@@ -104,9 +136,9 @@ describe("SimpleShell", () => {
 
   it("navigates between screens from the sidebar", async () => {
     await renderShell(root, baseContext());
-    await click(buttonWithText(container, "Queue"));
+    await click(navButton(container, "Queue"));
     expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Queue");
-    await click(buttonWithText(container, "Licenses"));
+    await click(navButton(container, "Licenses"));
     expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Licenses");
   });
 
@@ -187,6 +219,317 @@ describe("SimpleShell", () => {
     expect(context.rememberLocalGenerationJob).toHaveBeenCalledWith("image", { id: "job-1" });
   });
 
+  // Regression for a shipped bug: the Reference tile armed, showed SET + a thumbnail and
+  // toasted "Reference attached", but the id was routed to `sourceAssetId` — which
+  // buildImageJobRequest discards outside edit mode — so the run silently ignored it. This
+  // drives the REAL tile through the REAL picker sheet, which is what the payload-only
+  // tests could not catch.
+  it("attaches a Text-mode reference through the tile and sends it with a strength", async () => {
+    const context = baseContext({ assets: [REFERENCE_ASSET], recentImageAssets: [REFERENCE_ASSET] });
+    await renderShell(root, context);
+
+    await typePrompt(container, "a lighthouse");
+    await click(buttonWithText(container, "ReferenceTap to attach an image"));
+
+    // The picker sheet lists the project's images; choose the one asset.
+    const row = [...container.querySelectorAll(".su-option-row")].find((node) =>
+      node.textContent.includes("cliff_ref.png"),
+    );
+    expect(row).toBeTruthy();
+    await click(row);
+
+    // Armed: the tile reports SET rather than the empty hint.
+    expect(container.querySelector(".su-set-badge")).toBeTruthy();
+
+    await click(container.querySelector(".su-generate"));
+
+    const payload = context.createImageJob.mock.calls[0][0];
+    expect(payload.referenceAssetId).toBe("asset-9");
+    expect(payload.advanced.strength).toBe(0.5);
+    expect(payload.sourceAssetId).toBeNull();
+  });
+
+  it("disables the Reference tile, with a reason, on a model that can't use one", async () => {
+    const plainModel = { ...IMAGE_MODEL, id: "sdxl", name: "SDXL", ui: undefined };
+    const context = baseContext({
+      imageModels: [plainModel],
+      models: [plainModel],
+      assets: [REFERENCE_ASSET],
+      recentImageAssets: [REFERENCE_ASSET],
+    });
+    await renderShell(root, context);
+
+    const tile = [...container.querySelectorAll(".su-tile")].find((node) =>
+      node.textContent.includes("Reference"),
+    );
+    expect(tile.disabled).toBe(true);
+    expect(tile.textContent).toContain("SDXL can’t use a reference image");
+  });
+
+  // A Krea 2 edit run failed in the worker because Simple sent `loras: []`, and then the
+  // failure was invisible: the studio rendered nothing and the reason was only in Logs.
+  const KREA = {
+    ...IMAGE_MODEL,
+    id: "krea_2_turbo",
+    name: "Krea 2 Turbo",
+    family: "krea_2",
+  };
+  const KREA_LORA = {
+    id: "krea2_identity_edit",
+    name: "Krea 2 Identity Edit",
+    conditioningRole: "image_edit",
+    installState: "installed",
+    compatibility: { families: ["krea_2"] },
+    families: ["krea_2"],
+  };
+
+  it("auto-applies the managed edit LoRA on a Krea 2 edit run", async () => {
+    const context = baseContext({
+      imageModels: [KREA],
+      models: [KREA],
+      loras: [KREA_LORA],
+      assets: [REFERENCE_ASSET],
+      recentImageAssets: [REFERENCE_ASSET],
+    });
+    await renderShell(root, context);
+
+    await click(buttonWithText(container, "Edit"));
+    await typePrompt(container, "make it dusk");
+    await click([...container.querySelectorAll(".su-tile")].find((n) => n.textContent.includes("Source image")));
+    await click(
+      [...container.querySelectorAll(".su-option-row")].find((n) => n.textContent.includes("cliff_ref.png")),
+    );
+    await click(container.querySelector(".su-generate"));
+
+    const payload = context.createImageJob.mock.calls[0][0];
+    expect(payload.mode).toBe("edit_image");
+    expect(payload.sourceAssetId).toBe("asset-9");
+    expect(payload.loras.map((l) => l.id)).toEqual(["krea2_identity_edit"]);
+    expect(payload.loras[0].conditioningRole).toBe("image_edit");
+  });
+
+  it("blocks the run and offers the download when the edit LoRA isn't installed", async () => {
+    const context = baseContext({
+      imageModels: [KREA],
+      models: [KREA],
+      loras: [{ ...KREA_LORA, installState: "missing" }],
+      assets: [REFERENCE_ASSET],
+      recentImageAssets: [REFERENCE_ASSET],
+    });
+    await renderShell(root, context);
+    await click(buttonWithText(container, "Edit"));
+    await typePrompt(container, "make it dusk");
+
+    expect(container.textContent).toContain("needs the Krea 2 Identity Edit LoRA");
+    expect(container.querySelector(".su-generate").disabled).toBe(true);
+
+    await click(buttonWithText(container, "Download it"));
+    expect(context.createLoraDownloadJob).toHaveBeenCalledTimes(1);
+    expect(context.createLoraDownloadJob.mock.calls[0][0].id).toBe("krea2_identity_edit");
+  });
+
+  it("surfaces a failed run's reason in the studio instead of rendering nothing", async () => {
+    const failed = {
+      id: "job-x",
+      type: "image_generate",
+      status: "failed",
+      error: "Krea 2 edit requires the Krea 2 Identity Edit LoRA.",
+      payload: {},
+    };
+    const context = baseContext({ jobs: [failed], imageLocalJobs: [failed] });
+    await renderShell(root, context);
+
+    expect(container.querySelector(".su-job-error").textContent).toBe(
+      "Krea 2 edit requires the Krea 2 Identity Edit LoRA.",
+    );
+    expect(container.querySelector(".su-job-badge").textContent).toBe("Failed");
+  });
+
+  it("shows the failure reason on the Queue row too", async () => {
+    const failed = {
+      id: "job-x",
+      type: "image_generate",
+      status: "failed",
+      error: "no worker supports image_generate",
+      payload: { model: "z_image" },
+    };
+    await renderShell(root, baseContext({ jobs: [failed] }));
+    await click(navButton(container, "Queue"));
+
+    expect(container.querySelector(".su-job-error").textContent).toBe(
+      "no worker supports image_generate",
+    );
+    expect(container.querySelector(".su-job-badge").textContent).toBe("Failed");
+  });
+
+  it("badges a canceled job as Canceled, not Failed", async () => {
+    const canceled = {
+      id: "job-c",
+      type: "image_generate",
+      status: "canceled",
+      error: "Canceled before a worker started.",
+      payload: { model: "z_image" },
+    };
+    await renderShell(root, baseContext({ jobs: [canceled] }));
+    await click(navButton(container, "Queue"));
+    expect(container.querySelector(".su-job-badge").textContent).toBe("Canceled");
+  });
+
+  // Simple had NO way to cancel a run and no progress readout anywhere — a submitted job
+  // was a spinner with no end and no exit. The run strip under Generate is the same card
+  // the Queue lists, so both surfaces get progress + Cancel from one component.
+  const RUNNING_JOB = {
+    id: "job-run",
+    type: "image_generate",
+    status: "running",
+    progress: 0.42,
+    payload: { model: "z_image", width: 1024, height: 1024 },
+  };
+
+  it("shows progress and a Cancel for the running job under Generate", async () => {
+    const context = baseContext({ jobs: [RUNNING_JOB], imageLocalJobs: [RUNNING_JOB] });
+    await renderShell(root, context);
+
+    // The strip renders in the STUDIO, not only on the Queue screen.
+    expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Image Studio");
+    expect(container.querySelector(".su-job-badge").textContent).toBe("42%");
+    expect(container.querySelector(".su-bar > span").style.width).toBe("42%");
+
+    await click(buttonWithText(container, "Cancel"));
+    expect(context.jobAction).toHaveBeenCalledTimes(1);
+    expect(context.jobAction.mock.calls[0][0].id).toBe("job-run");
+    expect(context.jobAction.mock.calls[0][1]).toBe("cancel");
+  });
+
+  it("offers Cancel on the Queue screen too", async () => {
+    const context = baseContext({ jobs: [RUNNING_JOB] });
+    await renderShell(root, context);
+    await click(navButton(container, "Queue"));
+
+    await click(buttonWithText(container, "Cancel"));
+    expect(context.jobAction).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "job-run" }),
+      "cancel",
+    );
+  });
+
+  it("offers no Cancel once a run is terminal", async () => {
+    const failed = { ...RUNNING_JOB, status: "failed", error: "out of memory" };
+    await renderShell(root, baseContext({ jobs: [failed], imageLocalJobs: [failed] }));
+    expect(container.querySelector(".su-job")).toBeTruthy();
+    expect(buttonWithText(container, "Cancel")).toBeUndefined();
+  });
+
+  // The four terminal states are NOT interchangeable in a studio, which is exactly the
+  // assumption worth pinning per-status rather than as one "terminal" case.
+  //   completed → the results grid below IS the outcome
+  //   canceled  → the user did it deliberately
+  //   failed / interrupted → the card is the studio's ONLY carrier of the worker's reason
+  const STUDIO_CARD_BY_STATUS = [
+    ["completed", false],
+    ["canceled", false],
+    ["failed", true],
+    ["interrupted", true],
+  ];
+
+  for (const [status, stays] of STUDIO_CARD_BY_STATUS) {
+    it(`${stays ? "keeps" : "clears"} the studio run card for a ${status} run`, async () => {
+      const job = { ...RUNNING_JOB, status, progress: 1, error: "out of memory" };
+      await renderShell(root, baseContext({ jobs: [job], imageLocalJobs: [job] }));
+      expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Image Studio");
+      if (stays) {
+        expect(container.querySelector(".su-job")).toBeTruthy();
+        expect(container.querySelector(".su-job-error").textContent).toBe("out of memory");
+      } else {
+        expect(container.querySelector(".su-job")).toBeNull();
+      }
+    });
+
+    it(`offers ${stays ? "a Dismiss" : "no Dismiss"} on the studio card for a ${status} run`, async () => {
+      const job = { ...RUNNING_JOB, status, progress: 1, error: "out of memory" };
+      await renderShell(root, baseContext({ jobs: [job], imageLocalJobs: [job] }));
+      // Cancel and Dismiss are mutually exclusive — a terminal run can only be dismissed.
+      expect(buttonWithText(container, "Cancel")).toBeUndefined();
+      expect(Boolean(buttonWithText(container, "Dismiss"))).toBe(stays);
+    });
+
+    it(`always keeps the Queue row for a ${status} run`, async () => {
+      const job = { ...RUNNING_JOB, status, progress: 1, error: "out of memory" };
+      await renderShell(root, baseContext({ jobs: [job] }));
+      await click(navButton(container, "Queue"));
+      // The Queue is a history — it keeps every row regardless of outcome.
+      expect(container.querySelector(".su-job")).toBeTruthy();
+    });
+  }
+
+  it("dismisses a failed run's card from the studio without touching the Queue", async () => {
+    const failed = { ...RUNNING_JOB, status: "failed", error: "out of memory" };
+    await renderShell(root, baseContext({ jobs: [failed], imageLocalJobs: [failed] }));
+
+    expect(container.querySelector(".su-job")).toBeTruthy();
+    await click(buttonWithText(container, "Dismiss"));
+    expect(container.querySelector(".su-job")).toBeNull();
+
+    // The Queue is the history — dismissing in a studio must not remove it there.
+    await click(navButton(container, "Queue"));
+    expect(container.querySelector(".su-job")).toBeTruthy();
+    expect(container.querySelector(".su-job-error").textContent).toBe("out of memory");
+  });
+
+  // The studios unmount on navigation, so a studio-local dismissal flag would resurrect the
+  // card on the way back. This is why the dismissed set lives on the shell.
+  it("keeps a dismissal after navigating away and back", async () => {
+    const failed = { ...RUNNING_JOB, status: "failed", error: "out of memory" };
+    await renderShell(root, baseContext({ jobs: [failed], imageLocalJobs: [failed] }));
+
+    await click(buttonWithText(container, "Dismiss"));
+    await click(navButton(container, "Queue"));
+    await click(navButton(container, "Image"));
+
+    expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Image Studio");
+    expect(container.querySelector(".su-job")).toBeNull();
+  });
+
+  it("sweeps an indeterminate bar for a claimed run with no percentage yet", async () => {
+    const noProgress = { ...RUNNING_JOB, progress: 0 };
+    await renderShell(root, baseContext({ jobs: [noProgress], imageLocalJobs: [noProgress] }));
+    // A 0%-wide bar reads as "stuck"; the sweeping variant reads as "working".
+    expect(container.querySelector(".su-bar").className).toContain("su-bar--indeterminate");
+    expect(container.querySelector(".su-job-badge").textContent).toBe("Running");
+  });
+
+  // The audit's headline finding, pinned end-to-end: the studio must SEED from the model's
+  // declared default, not the first allowed value. z_image declares 1024² while its limits
+  // list leads with 768², so the wrong seed silently downgraded every Simple run of it.
+  it("seeds the resolution from the model's declared default, not limits[0]", async () => {
+    // Rendered as the FIRST model this shell ever sees. A prior render would leave a
+    // still-valid resolution in state, which correctly sticks (switching model keeps a
+    // selection the new model also allows — same as the advanced studio) and would mask
+    // what the seed actually chose. That stickiness is exactly why a click-through in the
+    // browser missed this bug.
+    // Declared default, first-allowed, and the 1024² fallback are three DISTINCT values here,
+    // so this can only pass by actually reading `defaults.resolution`. (A model declaring
+    // 1024² — which every mismatching shipped model happens to do — would pass even with the
+    // bug, because the fallback lands on the same answer.)
+    const leadsLow = {
+      ...IMAGE_MODEL,
+      defaults: { resolution: "1344x768" },
+      limits: { resolutions: ["768x768", "1024x1024", "1344x768"] },
+    };
+    const lowContext = baseContext({ imageModels: [leadsLow], models: [leadsLow] });
+    await renderShell(root, lowContext);
+
+    expect(
+      [...container.querySelectorAll(".su-select")].some((n) => n.textContent.includes("1344×768")),
+    ).toBe(true);
+
+    await typePrompt(container, "a lighthouse");
+    await click(container.querySelector(".su-generate"));
+    const payload = lowContext.createImageJob.mock.calls[0][0];
+    expect(payload.width).toBe(1344);
+    expect(payload.height).toBe(768);
+  });
+
   it("refuses to submit with an empty prompt", async () => {
     const context = baseContext();
     await renderShell(root, context);
@@ -209,7 +552,7 @@ describe("SimpleShell", () => {
     const context = baseContext();
     const onModeChange = vi.fn();
     await renderShell(root, context, { onModeChange });
-    await click(buttonWithText(container, "Model Manager"));
+    await click(navButton(container, "Model Manager"));
 
     const manage = buttonWithText(container, "Manage");
     expect(manage).toBeTruthy();
@@ -223,7 +566,7 @@ describe("SimpleShell", () => {
     const context = baseContext();
     const onModeChange = vi.fn();
     await renderShell(root, context, { onModeChange, lockedToSimple: true });
-    await click(buttonWithText(container, "Model Manager"));
+    await click(navButton(container, "Model Manager"));
     await click(buttonWithText(container, "Manage"));
 
     expect(context.setActiveView).not.toHaveBeenCalled();
@@ -236,7 +579,7 @@ describe("SimpleShell", () => {
       models: [IMAGE_MODEL, { ...IMAGE_MODEL, id: "flux_dev", name: "FLUX.1 [dev]", installState: "missing" }],
     });
     await renderShell(root, context);
-    await click(buttonWithText(container, "Model Manager"));
+    await click(navButton(container, "Model Manager"));
     await click(buttonWithText(container, "Download"));
 
     expect(context.createModelDownloadJob).toHaveBeenCalledTimes(1);

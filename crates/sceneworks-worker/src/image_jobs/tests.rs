@@ -6145,21 +6145,99 @@ fn isolate_hf_hub_cache_to(hub: &std::path::Path) -> EnvVars {
     ])
 }
 
-/// sc-13817 — **the wiring half** of the candle SenseNova dense-force.
+/// sc-14249: the SenseNova q8 floor keeps the CAPABILITY DOWNTIER off q4, without taking q4 away
+/// from a user who asks for it.
 ///
-/// The unit tests next to `sensenova_candle_dense_tier` prove the resolver picks bf16; this proves
-/// `resolve_weights_dir` actually ROUTES sensenova through it. Without that branch the request falls
-/// to `standard_tier_subdir` (every sensenova entry flags `mlx.standardTierLayout: true`), which with
-/// no explicit `mlxQuantize` and no `minQualityTier` resolves the app-wide **q8** default — an
-/// MLX-packed tier `candle-gen-sensenova` cannot read, since it dense-mmaps a flat `*.safetensors`
-/// backbone and hard-rejects `spec.quantize`.
+/// This is the half that actually protects people. Tier selection is two stages: the default
+/// resolves to q8 and is clamped to what is INSTALLED ([`standard_tier_subdir`]), and then
+/// [`choose_downtier`] steps DOWN to the highest installed tier that fits the DEVICE. That second
+/// stage floors at q4 (rank 1) for any model declaring no `mlx.minQualityTier` — so on a 16/24 GB
+/// card, where q8 (22.5 GB) does not fit but q4 (14.8 GB) does, SenseNova would have been silently
+/// auto-selected onto q4. q4 on this family renders a structured ~4 px cross-hatch (the tier's own
+/// 4-bit fidelity, measured: high-pass 15.73 vs bf16 5.20 / q8 5.00), which is not something to
+/// hand someone who never picked it — with the floor the gate rejects with an actionable message
+/// instead.
 ///
-/// Both tiers are seeded COMPLETE so the result cannot be an accident of the packed tier being
-/// absent — a torn q8 would fall through to bf16 on its own, which is exactly what masks this bug on
-/// a half-provisioned host (the dev box that filed the story had a weightless q8).
+/// Asserted at [`downtier_candidate_tiers`] because that is where the floor does the work; a
+/// regression here is silent (jobs still render, just hatched), so it needs a test rather than a
+/// comment.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn sensenova_weights_resolution_routes_the_candle_lane_to_the_dense_tier() {
+fn sensenova_q8_floor_keeps_the_capability_downtier_off_q4() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let snapshot = hub
+        .join("models--SceneWorks--sensenova-u1-8b-fast-mlx")
+        .join("snapshots")
+        .join("installed");
+    // ALL THREE tiers installed — the floor must be what excludes q4, not its absence from disk.
+    for tier in ["q4", "q8", "bf16"] {
+        let path = snapshot.join(tier).join("model.safetensors");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"weights").unwrap();
+    }
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+
+    let req = |advanced: serde_json::Value| {
+        ImageRequest::from_payload(
+            json!({
+                "model": "sensenova_u1_8b_fast",
+                "advanced": advanced,
+                "modelManifestEntry": {
+                    "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
+                    "mlx": { "standardTierLayout": true, "minQualityTier": "q8" }
+                }
+            })
+            .as_object()
+            .unwrap(),
+        )
+    };
+
+    // A DEFAULT job: the downtier may consider bf16 and q8, never q4 — so a card that cannot fit
+    // q8 rejects rather than silently rendering the hatched tier.
+    let default_job = req(json!({}));
+    let floor = min_quality_floor(&default_job);
+    assert_eq!(floor, Some("q8"));
+    assert_eq!(
+        downtier_candidate_tiers(&default_job, &settings, "q8", floor),
+        vec!["q8"],
+        "a default sensenova job must never have q4 as a downtier candidate"
+    );
+    // Without the floor q4 IS a candidate — i.e. this test would fail open if the manifest
+    // regressed, which is exactly what it is here to catch.
+    assert_eq!(
+        downtier_candidate_tiers(&default_job, &settings, "q8", None),
+        vec!["q8", "q4"],
+        "floorless models still downtier to q4 (the app-wide behavior this floor opts out of)"
+    );
+
+    // ...but q4 is NOT taken away: an explicit pick resolves the q4 tier dir. (The gate skips the
+    // downtier entirely for an explicit pick — `mlxQuantizeExplicit`, acceptance #7 — so this is
+    // the whole path a deliberate q4 choice takes.)
+    assert_eq!(
+        standard_tier_subdir(&snapshot, &req(json!({ "mlxQuantize": 4 }))),
+        snapshot.join("q4"),
+        "an explicit below-floor q4 pick must still be honored"
+    );
+}
+
+/// sc-14249 — **the wiring half**: `resolve_weights_dir` routes the candle SenseNova lane through the
+/// ordinary `standard_tier_subdir` descent, so the request's tier is what loads.
+///
+/// This replaces the sc-13817 assertion that it force-resolved `bf16/`. That force was a workaround
+/// for `candle-gen-sensenova` being dense-f32-only; the engine now packed-detects every backbone
+/// projection, so the packed tiers are loadable and pinning the lane to the heaviest one would just
+/// be a silent 70.5 GB tax (every job would still render — which is exactly why it needs a test).
+///
+/// Both tiers are seeded COMPLETE so the result cannot be an accident of one being absent: a torn
+/// tier falls through to a sibling on its own, and that is what masked sc-13817 on a
+/// half-provisioned host.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn sensenova_weights_resolution_takes_the_standard_tier_descent() {
     let root = tempfile::tempdir().unwrap();
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).unwrap();
@@ -6168,8 +6246,11 @@ fn sensenova_weights_resolution_routes_the_candle_lane_to_the_dense_tier() {
         .join("models--SceneWorks--sensenova-u1-8b-fast-mlx")
         .join("snapshots")
         .join("installed-revision");
-    // A COMPLETE packed q8 (what the default would pick) AND the dense bf16 tier.
-    for file in ["q8/model.safetensors", "bf16/model.safetensors"] {
+    for file in [
+        "q4/model.safetensors",
+        "q8/model.safetensors",
+        "bf16/model.safetensors",
+    ] {
         let path = snapshot.join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b"weights").unwrap();
@@ -6177,20 +6258,135 @@ fn sensenova_weights_resolution_routes_the_candle_lane_to_the_dense_tier() {
     let mut settings = Settings::from_env();
     settings.data_dir = root.path().to_path_buf();
 
-    let req = request(json!({
-        "projectId": "p",
-        "model": "sensenova_u1_8b_fast",
-        "modelManifestEntry": {
-            "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
-            "mlx": { "standardTierLayout": true, "quantize": 4 }
-        }
-    }));
+    let req = |bits: Option<i64>| {
+        let advanced = match bits {
+            Some(b) => json!({ "mlxQuantize": b }),
+            None => json!({}),
+        };
+        request(json!({
+            "projectId": "p",
+            "model": "sensenova_u1_8b_fast",
+            "advanced": advanced,
+            "modelManifestEntry": {
+                "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
+                "mlx": { "standardTierLayout": true, "quantize": 4 }
+            }
+        }))
+    };
 
+    // The packed tiers the story exists to unlock now resolve...
+    for (bits, tier) in [(Some(4), "q4"), (Some(8), "q8"), (Some(0), "bf16")] {
+        assert_eq!(
+            resolve_weights_dir(&req(bits), &settings).unwrap(),
+            Some(snapshot.join(tier)),
+            "mlxQuantize {bits:?} must resolve the {tier} tier"
+        );
+    }
+    // ...and the default is the shared q8, not the forced dense tier sc-13817 pinned.
     assert_eq!(
-        resolve_weights_dir(&req, &settings).unwrap(),
-        Some(snapshot.join("bf16")),
-        "the candle sensenova lane must resolve the DENSE bf16 tier, not the packed q8 default"
+        resolve_weights_dir(&req(None), &settings).unwrap(),
+        Some(snapshot.join("q8")),
+        "the candle sensenova default must be the app-wide q8, not a forced bf16"
     );
+}
+
+/// sc-10222 (epic 9083 gap #3) — the candle FLUX.2 **edit** lane resolves the re-hosted packed turnkey.
+///
+/// The lane used to key its own `black-forest-labs/FLUX.2-{klein-9B,dev}` dense-BFL constants, missed by
+/// the sc-9092 sweep that retired the other ad-hoc candle repo resolvers. The catalog's `downloads[]`
+/// pull ONLY the `SceneWorks/flux2-*-mlx` q4/q8/bf16 turnkeys (sc-8711 / sc-8513) — there is no
+/// dense-BFL download on any platform — so the probe found nothing, `resolve_flux2_edit_candle_base`
+/// returned `None`, and `flux2_edit_candle_available` reported the job not candle-runnable. Off-Mac that
+/// is fatal for klein, which has no torch path at all.
+///
+/// The hub is seeded with ONLY what the catalog actually downloads (no BFL snapshot anywhere), so a
+/// regression to any bespoke constant makes this fail rather than silently pass off a stale cache. The
+/// per-tier assertions additionally prove the lane goes through `standard_tier_subdir` — the whole point
+/// of the fix, since `Flux2Edit`'s `QLinear::linear_detect` picks its precision from the DIRECTORY.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn flux2_edit_candle_base_resolves_the_packed_turnkey_tier() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+
+    // (model id, the engines.rs `default_repo` turnkey the catalog downloads).
+    for (model, cache_dir) in [
+        ("flux2_klein_9b", "models--SceneWorks--flux2-klein-9b-mlx"),
+        ("flux2_dev", "models--SceneWorks--flux2-dev-mlx"),
+    ] {
+        let snapshot = hub.join(cache_dir).join("snapshots").join("installed");
+        for tier in ["q4", "q8", "bf16"] {
+            let path = snapshot
+                .join(tier)
+                .join("transformer")
+                .join("diffusion_pytorch_model.safetensors");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"weights").unwrap();
+        }
+        // An edit payload with NO manifest `repo`, so the resolution runs through the shared
+        // `mlx_model` → engines.rs `default_repo` — the exact seam the bespoke constants shadowed.
+        let edit = |advanced: serde_json::Value| {
+            request(json!({
+                "projectId": "p", "model": model, "prompt": "make it snow",
+                "mode": "edit_image", "sourceAssetId": "asset_1", "count": 1,
+                "advanced": advanced
+            }))
+        };
+
+        // No explicit tier → the app-wide q8 default, clamped to what is installed.
+        assert_eq!(
+            resolve_flux2_edit_candle_base(&edit(json!({})), &settings).unwrap(),
+            Some(snapshot.join("q8")),
+            "{model} edit must resolve the packed turnkey's q8 tier (sc-10222)"
+        );
+        // An explicit tier pick is honored — the edit lane A/Bs tiers like the txt2img lane.
+        for (bits, tier) in [(4, "q4"), (8, "q8"), (0, "bf16")] {
+            assert_eq!(
+                resolve_flux2_edit_candle_base(&edit(json!({ "mlxQuantize": bits })), &settings)
+                    .unwrap(),
+                Some(snapshot.join(tier)),
+                "{model} edit with mlxQuantize {bits} must resolve the {tier} tier"
+            );
+        }
+        // The whole point: the job is now candle-runnable off-Mac.
+        assert!(
+            flux2_edit_candle_available(&edit(json!({})), &settings),
+            "{model} edit must be candle-available once the turnkey is installed (sc-10222)"
+        );
+        // The recipe names the turnkey the load actually read, not a dense-BFL constant.
+        assert!(
+            flux2_edit_candle_repo(&edit(json!({}))).starts_with("SceneWorks/flux2-"),
+            "{model} edit telemetry must record the re-hosted turnkey repo"
+        );
+    }
+}
+
+/// sc-10222 — with NO FLUX.2 snapshot installed the edit lane still reports "not runnable" rather than
+/// handing the engine a path that does not exist. Guards the `None` half of the delegation: the shared
+/// `resolve_weights_dir` must not manufacture a directory for an unfetched repo.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn flux2_edit_candle_base_is_absent_without_the_turnkey() {
+    let dir = tempfile::tempdir().unwrap();
+    let _hf = isolate_hf_hub_cache_to(dir.path());
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+
+    let edit = request(json!({
+        "projectId": "p", "model": "flux2_klein_9b", "prompt": "make it snow",
+        "mode": "edit_image", "sourceAssetId": "asset_1", "count": 1
+    }));
+    assert_eq!(
+        resolve_flux2_edit_candle_base(&edit, &settings).unwrap(),
+        None
+    );
+    assert!(!flux2_edit_candle_available(&edit, &settings));
 }
 
 // sc-11171 (F-008): a strict-pose job on a WIRED candle pose family (e.g. `z_image_turbo`) whose control

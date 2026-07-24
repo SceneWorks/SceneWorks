@@ -17,6 +17,9 @@ import { createContext, useContext } from "react";
 //   openInAdvanced(view) — hand off to a full-workspace screen (returns false, with an
 //                          explanatory toast, when the viewport has Simple locked on)
 //   uiLocked            — true when the viewport forces Simple
+//   dismissedJobIds     — Set of failed-run ids the user has dismissed from a studio.
+//                         Shell-held, because the studios unmount on navigation.
+//   dismissJob(id)
 export const SimpleUiContext = createContext(null);
 
 export function useSimpleUi() {

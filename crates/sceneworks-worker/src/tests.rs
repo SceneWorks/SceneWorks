@@ -39,7 +39,7 @@ use tempfile::tempdir;
 use super::api_client::ApiClient;
 use super::downloads::{
     build_source_url_client, credential_for_host, download_lora_source_url,
-    download_progress_payload, download_snapshot_into_cache, normalize_sha256,
+    download_progress_payload, download_snapshot_into_cache, download_source_url, normalize_sha256,
     report_download_progress, DownloadContext, DownloadProgress, HuggingFaceSnapshot, SnapshotFile,
 };
 #[cfg(target_os = "macos")]

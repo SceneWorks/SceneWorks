@@ -2,11 +2,13 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { imageModelServesMode } from "../modelEligibility.js";
+import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
 import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
 import { resultGridColumns } from "./breakpoint.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
-import { buildSimpleImageRequest, resolveSimpleTier } from "./simpleJobs.js";
+import { preferredResolution } from "./modelDefaults.js";
+import { buildSimpleImageRequest, referenceStrengthFor, resolveSimpleTier } from "./simpleJobs.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 import {
@@ -15,6 +17,7 @@ import {
   ReferenceTile,
   SheetSelect,
   StudioResults,
+  StudioRunStatus,
   StyleStrip,
   jobIsRunning,
   newestLocalJob,
@@ -39,6 +42,8 @@ export function SimpleImageStudio() {
     assets = [],
     recentImageAssets = [],
     visibleWorkers = [],
+    loras = [],
+    createLoraDownloadJob,
     activeProject,
   } = useAppContext();
   const { breakpoint, openGuide, toast, referenceRequest, clearReferenceRequest } = useSimpleUi();
@@ -85,11 +90,22 @@ export function SimpleImageStudio() {
     return gated.length ? gated : declared;
   }, [selectedModel, macCapabilities, unifiedMemoryGb]);
 
+  // Seed from the model's DECLARED default, not `limits.resolutions[0]` — for 16 shipped
+  // image models those differ (z_image declares 1024², its list leads with 768²), so [0]
+  // would silently start a Simple run at a lower resolution than the same model in the full
+  // workspace.
   useEffect(() => {
-    if (resolutions.length && !resolutions.includes(resolution)) {
-      setResolution(resolutions[0]);
+    // Guard on a RESOLVED model (mirrors ImageStudio's sc-11962 guard). Before the catalog
+    // lands, `resolutions` is the generic fallback list — seeding from it seeds 1024², and
+    // because almost every model also allows 1024² the value then STICKS and the model's own
+    // declared default is never applied. The guard is what makes the seed above actually bite.
+    if (!selectedModel) {
+      return;
     }
-  }, [resolutions, resolution]);
+    if (resolutions.length && !resolutions.includes(resolution)) {
+      setResolution(preferredResolution(selectedModel, resolutions));
+    }
+  }, [resolutions, resolution, selectedModel]);
 
   // Resolved against the FULL catalog, not just the picker's recent-20 list: a reference
   // routed in from the Assets preview ("Use as reference") can be any library asset.
@@ -109,11 +125,43 @@ export function SimpleImageStudio() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [referenceRequest?.token]);
 
+  // Reference-guided generation on the TEXT tab is a per-model capability (`ui.img2img`):
+  // Z-Image, Krea 2, SD3.5, SANA, Ideogram 4 and Boogu declare it, most models don't. On a
+  // model without it the tile stays visible (the design's 2-up tile grid) but disabled and
+  // says why, rather than accepting a reference the payload would then drop.
+  const supportsImg2img = Boolean(selectedModel?.ui?.img2img);
+  const referenceUsable = mode === "edit_image" || supportsImg2img;
+
+  // Krea-style managed image-edit LoRA (epic 10871, sc-11069): Krea 2's edit lane requires an
+  // `image_edit`-role LoRA and fails the job without one. Like the advanced studio we MANAGE it
+  // rather than exposing a picker — auto-applied when installed, surfaced as a one-click download
+  // when not. Null for edit models that need none (Qwen-Image-Edit, FLUX.2), so this is inert
+  // for them.
+  const editLora = useMemo(
+    () => (mode === "edit_image" ? findModelEditLora(loras, selectedModel) : null),
+    [mode, loras, selectedModel],
+  );
+  const editLoraInstalled = loraIsInstalled(editLora);
+  const editLoraMissing = Boolean(editLora) && !editLoraInstalled;
+  const [editLoraRequested, setEditLoraRequested] = useState(false);
+  useEffect(() => {
+    if (!editLoraMissing) {
+      setEditLoraRequested(false);
+    }
+  }, [editLoraMissing]);
+
   const latestJob = newestLocalJob(imageLocalJobs);
   const busy = submitting || jobIsRunning(latestJob);
   const needsSource = mode === "edit_image" && !referenceAssetId;
   const canGenerate =
-    Boolean(prompt.trim()) && Boolean(model) && Boolean(resolution) && !busy && !needsSource;
+    Boolean(prompt.trim()) &&
+    Boolean(model) &&
+    Boolean(resolution) &&
+    !busy &&
+    !needsSource &&
+    // A required edit LoRA that isn't downloaded blocks the run HERE rather than letting the
+    // worker reject it — the job would fail with an error the studio never surfaces.
+    !editLoraMissing;
 
   async function generate() {
     if (!canGenerate) {
@@ -137,7 +185,13 @@ export function SimpleImageStudio() {
         resolution,
         count: variations,
         styleId,
-        sourceAssetId: mode === "edit_image" ? referenceAssetId : null,
+        // One armed reference; simpleJobs routes it by mode (edit source vs img2img
+        // reference + advanced.strength) and drops it when the model can't use it.
+        referenceAssetId,
+        supportsImg2img,
+        img2imgStrength: referenceStrengthFor(selectedModel),
+        // Auto-applied in edit mode; the worker's edit lane rejects the run without it.
+        editLora: editLoraInstalled ? editLora : null,
         ...tier,
       });
       if (!request) {
@@ -223,7 +277,14 @@ export function SimpleImageStudio() {
         <ReferenceTile
           asset={referenceAsset}
           assets={recentImageAssets}
-          hint={mode === "edit_image" ? "Required — tap to pick the image to edit" : "Tap to attach an image"}
+          disabled={!referenceUsable}
+          hint={
+            !referenceUsable
+              ? `${selectedModel?.name ?? "This model"} can’t use a reference image — switch model to use one.`
+              : mode === "edit_image"
+                ? "Required — tap to pick the image to edit"
+                : "Tap to attach an image"
+          }
           label={mode === "edit_image" ? "Source image" : "Reference"}
           onChange={setReferenceAssetId}
           required={mode === "edit_image"}
@@ -286,6 +347,35 @@ export function SimpleImageStudio() {
       {needsSource ? (
         <p className="su-empty">Pick the image you want to edit to start a run.</p>
       ) : null}
+      {/* The managed edit LoRA isn't downloaded yet. The worker would reject the run outright
+          ("the source-image conditioning is inert"), so offer the one-click fetch instead of
+          letting the user discover it as a failed job. */}
+      {editLoraMissing ? (
+        <div className="su-notice" role="status">
+          <Icon.Warning size={16} />
+          <span>
+            {selectedModel?.name ?? "This model"} needs the {editLora.name ?? "image-edit"} LoRA to
+            edit.{" "}
+            {editLoraRequested ? (
+              "Downloading — track it in the Queue, then generate again."
+            ) : (
+              <button
+                className="su-link"
+                onClick={() => {
+                  setEditLoraRequested(true);
+                  createLoraDownloadJob?.(editLora);
+                }}
+                type="button"
+              >
+                Download it
+              </button>
+            )}
+          </span>
+        </div>
+      ) : null}
+
+      {/* Live run strip: progress + Cancel + the outcome, right under Generate. */}
+      <StudioRunStatus job={latestJob} />
 
       <StudioResults
         assets={assets}
