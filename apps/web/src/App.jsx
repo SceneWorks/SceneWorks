@@ -69,6 +69,11 @@ import {
   readStoredAccent,
   readStoredTheme,
 } from "./appHelpers.js";
+import {
+  hasVisibleLocalFailureForView,
+  isCurrentAssetRefresh,
+  reconcileSelectedAssetId,
+} from "./appStateHelpers.js";
 
 // Desktop (Tauri) shell detection (unified helper, epic 4484 story 6). The first-run
 // setup wizard is desktop-only; web/Docker (and a remote LAN browser) keep the
@@ -410,8 +415,16 @@ export function App() {
   const [trainingPresets, setTrainingPresets] = useState({ schemaVersion: 1, presets: [] });
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
   const [trainingPresetsError, setTrainingPresetsError] = useState("");
-  const [assets, setAssets] = useState([]);
-  const [selectedAssetId, setSelectedAssetId] = useState(null);
+  const [loadedAssets, setAssets] = useState([]);
+  const [loadedAssetsProjectId, setLoadedAssetsProjectId] = useState(null);
+  const [storedSelectedAssetId, setSelectedAssetId] = useState(null);
+  // Scope project data during render, not in a passive effect. On A → B (or A
+  // → no project), B's first render therefore cannot observe A's assets or raw
+  // selection while B's catalog request is still pending.
+  const assets =
+    loadedAssetsProjectId === activeProject?.id ? loadedAssets : [];
+  const selectedAssetId =
+    loadedAssetsProjectId === activeProject?.id ? storedSelectedAssetId : null;
   const [projectFilter, setProjectFilter] = useState("all");
   const [requestedGpu, setRequestedGpu] = useState("auto");
   const [jobPrompt, setJobPrompt] = useState("Placeholder generation");
@@ -1236,6 +1249,7 @@ export function App() {
   useEffect(() => {
     if (!activeProject || !ready) {
       setAssets([]);
+      setLoadedAssetsProjectId(null);
       setCharacters([]);
       setSavedVoices([]);
       setPersonTracks([]);
@@ -1273,18 +1287,11 @@ export function App() {
   // useCallback is both stable and always current — the `stableRefreshData` ref-delegation
   // pattern used elsewhere in this file, expressed inline here since the whole body is refs.
   const hasVisibleLocalFailure = useCallback((job) => {
-    const active = activeViewRef.current;
-    const localIds = localGenerationJobIdsRef.current;
-    if (active === "Image" && localIds.image.includes(job.id)) {
-      return true;
-    }
-    if (active === "Video" && localIds.video.includes(job.id)) {
-      return true;
-    }
-    if (active === "Document" && localIds.document.includes(job.id)) {
-      return true;
-    }
-    return active === "Models" && job.type === "model_download";
+    return hasVisibleLocalFailureForView(
+      activeViewRef.current,
+      localGenerationJobIdsRef.current,
+      job,
+    );
   }, []);
 
   // Live job/worker/queue SSE stream, extracted to a hook (sc-9750). The handlers reach
@@ -1397,12 +1404,12 @@ export function App() {
       // after the user switches away; committing then would clobber the new
       // project's assets with the old one's. Drop the stale response — mirrors
       // refreshTimelines' guard (useTimelines.js).
-      if (activeProjectRef.current?.id && activeProjectRef.current.id !== projectId) {
+      if (!isCurrentAssetRefresh(activeProjectRef.current?.id ?? null, projectId)) {
         return;
       }
       setAssets(items);
-      const defaultAsset = items.find((asset) => !asset.status?.trashed && !asset.status?.rejected) ?? items[0] ?? null;
-      setSelectedAssetId((current) => current ?? defaultAsset?.id ?? null);
+      setLoadedAssetsProjectId(projectId);
+      setSelectedAssetId((current) => reconcileSelectedAssetId(items, current));
       setError("");
     } catch (err) {
       if (isAbortError(err)) return;
