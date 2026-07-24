@@ -1519,9 +1519,9 @@ mod tests {
     use crate::test_env::EnvVars;
 
     /// sc-9989: only LTX-2.3 gets a trainer `LoadSpec::text_encoder` override, and only from the
-    /// bundled sibling `gemma/` (the self-contained turnkey install). Every other family's TE lives
-    /// inside the weights dir → `None`. An operator `$LTX_GEMMA_DIR` is the intended passthrough → the
-    /// engine reads the env var itself, so the override is `None`.
+    /// complete bundled sibling `gemma/` (the self-contained turnkey install). Every other family's
+    /// TE lives inside the weights dir → `None`. A complete operator `$LTX_GEMMA_DIR` override wins
+    /// and is threaded onto the spec by the shared resolver.
     #[cfg(target_os = "macos")]
     #[test]
     fn training_text_encoder_gates_on_engine_and_bundle() {
@@ -1533,13 +1533,16 @@ mod tests {
         let (tier, gemma) = (root.join("q4"), root.join("gemma"));
         std::fs::create_dir_all(&tier).unwrap();
         std::fs::create_dir_all(&gemma).unwrap();
+        std::fs::write(gemma.join("config.json"), b"{}").unwrap();
+        std::fs::write(gemma.join("tokenizer.json"), b"{}").unwrap();
+        std::fs::write(gemma.join("model.safetensors"), b"x").unwrap();
 
         // Non-LTX engines never resolve an external TE (theirs lives inside the weights dir).
         assert!(training_text_encoder("kolors", &tier).is_none());
         assert!(training_text_encoder("sdxl", &tier).is_none());
 
-        // LTX with a bundled `gemma/` sibling → threads it (unless an operator `$LTX_GEMMA_DIR` is set,
-        // in which case the engine reads the env var and the override is `None`).
+        // LTX with a complete bundled `gemma/` sibling → threads it unless a complete operator
+        // `$LTX_GEMMA_DIR` override wins.
         let te = training_text_encoder("ltx_2_3", &tier);
         if std::env::var_os("LTX_GEMMA_DIR").is_none() {
             assert!(
@@ -1548,7 +1551,7 @@ mod tests {
             );
         }
 
-        // LTX with no `gemma/` sibling → `None` (engine falls back to its env/HF-cache path).
+        // LTX with no `gemma/` sibling → `None` (the required-slot error remains actionable).
         let bare = root.join("no_sibling").join("q4");
         std::fs::create_dir_all(&bare).unwrap();
         assert!(training_text_encoder("ltx_2_3", &bare).is_none());
