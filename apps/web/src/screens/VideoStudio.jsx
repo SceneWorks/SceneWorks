@@ -12,7 +12,6 @@ import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
 import { VideoUpscalePanel } from "./VideoUpscalePanel.jsx";
-import { StylePicker } from "../components/StylePicker.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { STYLE_GROUPS, styleTextForId } from "../data/styleCatalog.js";
 import { composeStyledPrompt } from "../styleComposer.js";
@@ -51,7 +50,11 @@ import {
   PresetGuidanceStrip,
   PresetStackPreview,
   SavePresetPanel,
+  ModeTabs,
+  StyleAxisRow,
+  TierPickerField,
   useGenerationStudio,
+  useQuantTierPicker,
   useSavePreset,
 } from "./generationStudio.jsx";
 import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
@@ -72,7 +75,6 @@ import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioS
 import { qualityChoices } from "../jobTypes.js";
 import {
   allPossibleTiers,
-  defaultTierSelection,
   installedTiers,
   quantizeTier,
   tierLabel,
@@ -84,7 +86,6 @@ import {
   recipeLoraSelection,
   recipeRequestedResolution,
 } from "../recipeFields.js";
-import { readLastTier, writeLastTier } from "../lastTierStore.js";
 import {
   SAMPLER_LABELS,
   SCHEDULER_LABELS,
@@ -192,8 +193,6 @@ export function VideoStudio() {
   const [quantization, setQuantization] = useState(saved.quantization ?? "auto");
   // MLX generation tier (sc-12165), separate from the torch/GGUF `quantization` state above.
   // The explicit pick is persisted per (video, model), outside the workspace settings snapshot.
-  const [quantTier, setQuantTier] = useState("");
-  const [tierSwitching, setTierSwitching] = useState("");
   // The model a replayed recipe asked for, when it isn't installed (sc-12324). Its settings still
   // restore; the mode-snap effect moves the picker to a model that serves the mode. Named rather
   // than silent so the swap doesn't read as the recipe's own choice.
@@ -432,57 +431,26 @@ export function VideoStudio() {
     () => mlxTierLane && possibleTiers.length > 1 && availableTiers.length > 0,
     [mlxTierLane, possibleTiers, availableTiers],
   );
+  // Seed from the per-(video, model) sticky, then the video-specific q4 base, clamped to installed.
+  // A model transition always re-seeds even when both models happen to expose the same tier list.
+  const {
+    quantTier,
+    setQuantTier,
+    tierSwitching,
+    handleTierChange,
+    skipNextReseed,
+  } = useQuantTierPicker({
+    screen: TIER_SCREEN,
+    model,
+    selectedModel,
+    availableTiers,
+    tierOptions,
+    reseedOnModelChange: true,
+  });
   const showTorchQuantization = !mlxTierLane && supportsQuantization;
   const selectedMlxQuantize =
     mlxTierLane && availableTiers.includes(quantTier) ? tierQuantize(quantTier) : null;
   const tierHasMemoryRisk = showTierPicker && ["q8", "bf16"].includes(quantTier);
-
-  // Seed from the per-(video, model) sticky, then the video-specific q4 base, clamped to installed.
-  // A model transition always re-seeds even when both models happen to expose the same tier list.
-  const availableTiersKey = availableTiers.join(",");
-  const quantTierModelRef = useRef(null);
-  // sc-12324: a recipe replay pins the tier its clip was generated at and usually sets the model
-  // too, which would otherwise re-seed the tier back to the default below. The tier is an
-  // aesthetic choice, so re-seeding would silently replay a different look. Armed only when the
-  // recipe actually changes the model — the one case where this effect is guaranteed to fire —
-  // so the one-shot is always consumed on the next commit and can never go stale.
-  const skipQuantTierReseed = useRef(false);
-  useEffect(() => {
-    const modelChanged = quantTierModelRef.current !== model;
-    quantTierModelRef.current = model;
-    if (skipQuantTierReseed.current) {
-      skipQuantTierReseed.current = false;
-      // Honor the recipe's tier only while the new model can actually serve it; otherwise fall
-      // through and re-seed rather than pinning a tier that isn't installed.
-      if (availableTiers.includes(quantTier)) {
-        return;
-      }
-    }
-    if (!modelChanged && availableTiers.includes(quantTier)) {
-      return;
-    }
-    setQuantTier(
-      defaultTierSelection(selectedModel, readLastTier(TIER_SCREEN, model), tierOptions) ?? "",
-    );
-    // `availableTiersKey` is the stable install-state dependency; the remaining values are read from
-    // the render that produced it, matching Image Studio's catalog-refresh seed behavior.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model, availableTiersKey]);
-
-  const tierSwitchTimer = useRef(null);
-  useEffect(() => () => clearTimeout(tierSwitchTimer.current), []);
-  const handleTierChange = (nextTier) => {
-    // Only an installed-and-complete tier can be selected; the disabled options are shown for
-    // discoverability, never as a pickable target (belt behind the native `<option disabled>`).
-    if (nextTier === quantTier || !availableTiers.includes(nextTier)) {
-      return;
-    }
-    setQuantTier(nextTier);
-    writeLastTier(TIER_SCREEN, model, nextTier);
-    setTierSwitching(nextTier);
-    clearTimeout(tierSwitchTimer.current);
-    tierSwitchTimer.current = setTimeout(() => setTierSwitching(""), 1500);
-  };
   const samplerOptions = useMemo(
     () => samplerOptionsFromModel(selectedModel, activeBackend),
     [selectedModel, activeBackend],
@@ -780,7 +748,7 @@ export function VideoStudio() {
     const recipeTier = quantizeTier(rawSettings.mlxQuantize);
     if (recipeTier) {
       if (recipe.model && recipeModelAvailable && recipe.model !== model) {
-        skipQuantTierReseed.current = true;
+        skipNextReseed();
       }
       setQuantTier(recipeTier);
     }
@@ -1297,28 +1265,16 @@ export function VideoStudio() {
       <form className="studio-shell" onSubmit={submit}>
         <WorkPanel className="studio-work-panel">
           <div className="prompt-hero-top">
-            <div className="mode-tabs mode-control" role="tablist" aria-label="Video mode">
-              {modeOptions.map(([value, label]) => {
-                // Disabled only when no available model serves this mode on Mac — and never the
-                // active tab, so the user can always switch away (sc-5716).
-                const blocked = value !== mode && macModeTabBlocked(value);
-                const active = mode === value;
-                return (
-                  <button
-                    className={active ? "mode-tab active" : "mode-tab"}
-                    key={value}
-                    role="tab"
-                    aria-selected={active}
-                    onClick={() => setMode(value)}
-                    type="button"
-                    disabled={blocked}
-                    title={blocked ? "No installed model supports this mode on macOS." : undefined}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
+            <ModeTabs
+              className="mode-tabs mode-control"
+              label="Video mode"
+              options={modeOptions}
+              mode={mode}
+              onChange={setMode}
+              blockFor={(value, active) => !active && macModeTabBlocked(value)
+                ? { text: "No installed model supports this mode on macOS." }
+                : null}
+            />
             <div className="prompt-hero-links">
               <button className="hero-link" onClick={() => setGuideOpen(true)} type="button">
                 <Icon.Book size={14} /> Prompt guide
@@ -1619,53 +1575,19 @@ export function VideoStudio() {
                 image-conditioned models and for booru-tag models), followed by the model's Style
                 presets — mirrors the Image Studio. The catalog wraps the outgoing prompt
                 (Subject:/Style:); "None" resets. */}
-            <div className="settings-bar-styles settings-bar-style-axis">
-              {styleAxisAvailable ? (
-                <div className="style-axis-field style-axis-catalog">
-                  <span className="settings-bar-label">Style</span>
-                  <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
-                </div>
-              ) : null}
-              <div className="style-axis-field style-axis-presets">
-                <span className="settings-bar-label">Style preset</span>
-                <div className="preset-chips">
-                  <button
-                    className={!selectedPreset ? "preset-chip active" : "preset-chip"}
-                    onClick={() => setSelectedPresetId(noPresetId)}
-                    type="button"
-                  >
-                    None
-                  </button>
-                  {availablePresets.map((preset) => (
-                    <button
-                      className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
-                      key={preset.id}
-                      onClick={() => setSelectedPresetId(preset.id)}
-                      type="button"
-                    >
-                      {preset.name ?? preset.id}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-            {availableGeneralPresets.length ? (
-              <div className="settings-bar-styles">
-                <span className="settings-bar-label">General</span>
-                <div className="preset-chips general-preset-chips">
-                  {availableGeneralPresets.map((preset) => (
-                    <button
-                      className={generalStackIds.includes(preset.id) ? "preset-chip active" : "preset-chip"}
-                      key={preset.id}
-                      onClick={() => toggleGeneralPreset(preset.id)}
-                      type="button"
-                    >
-                      {preset.name ?? preset.id}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : null}
+            <StyleAxisRow
+              available={styleAxisAvailable}
+              groups={STYLE_GROUPS}
+              styleId={styleId}
+              onStyleChange={setStyleId}
+              selectedPreset={selectedPreset}
+              presets={availablePresets}
+              onPresetChange={setSelectedPresetId}
+              generalPresets={availableGeneralPresets}
+              generalStackIds={generalStackIds}
+              onToggleGeneral={toggleGeneralPreset}
+              noPresetValue={noPresetId}
+            />
           </div>
 
           {/* sc-13136: the EXACT composed prompt the run will send once a style is active — recomputed
@@ -1818,30 +1740,20 @@ export function VideoStudio() {
                 </>
               ) : null}
               {showTierPicker ? (
-                <label
-                  className="quant-tier-picker"
+                <TierPickerField
+                  value={quantTier}
+                  onChange={handleTierChange}
+                  items={tierPickerItems}
+                  tierSwitching={tierSwitching}
+                  tierLabel={tierLabel}
                   title="Switch which installed MLX quant tier generates. Higher precision uses more memory; switching a heavy tier reloads it before the next generation."
-                >
-                  Quant tier
-                  <select onChange={(event) => handleTierChange(event.target.value)} value={quantTier}>
-                    {tierPickerItems.map((item) => (
-                      <option key={item.tier} value={item.tier} disabled={item.disabled}>
-                        {item.label}
-                      </option>
-                    ))}
-                  </select>
-                  {tierSwitching ? (
-                    <span className="field-hint" role="status">
-                      Loading {tierLabel(tierSwitching)}…
-                    </span>
-                  ) : null}
-                  {tierHasMemoryRisk ? (
+                  warning={tierHasMemoryRisk ? (
                     <span className="field-hint quant-tier-memory-note">
                       Higher MLX video tiers may run out of memory on long or high-resolution clips.
                       Your pick is honored.
                     </span>
                   ) : null}
-                </label>
+                />
               ) : null}
               {showTorchQuantization ? (
                 <label>
