@@ -802,7 +802,8 @@ export function ImageStudio() {
   );
   const macGating = macGatingActive(macCapabilities);
   const imageModelServesMode = useCallback((item, value) => {
-    const caps = item?.capabilities ?? [];
+    const capabilitiesDeclared = Array.isArray(item?.capabilities);
+    const caps = capabilitiesDeclared ? item.capabilities : [];
     if (value === "edit_image") {
       return (
         (caps.includes("edit_image") || caps.includes("image_edit")) &&
@@ -819,7 +820,11 @@ export function ImageStudio() {
     // sourceless edit) and reference-only identity models (MLX-ineligible without a
     // reference → strand on "Waiting for an available worker"); both classes lack
     // text_to_image. Mirrors the per-capability gating the other three modes use.
-    return caps.includes("text_to_image");
+    // Older installed-model records predate the capability array and historically
+    // represented the Text workflow. Preserve that compatibility, while treating
+    // every explicit capability list — including [] — as authoritative (so
+    // unsupported, edit-only, and reference-only models can never leak into Text).
+    return !capabilitiesDeclared || caps.includes("text_to_image");
   }, [macCapabilities]);
   const modelsForMode = useCallback(
     (value) => macImageModels.filter((item) => imageModelServesMode(item, value)),
@@ -829,11 +834,12 @@ export function ImageStudio() {
     () => modelsForMode(mode),
     [mode, modelsForMode],
   );
-  const pickerModels = mode === "text_to_image" && availableModels.length === 0 ? macImageModels : availableModels;
+  const pickerModels = availableModels;
   // Model-availability gate (sc-5947): when the user has no mac-available image model at all,
   // show recommended image-model downloads instead of the studio. `ready` matches the picker
-  // (which falls back to all macImageModels for the text tab); offers come from the full catalog
-  // via imageModelUsable, recommended-first.
+  // across any of its modes; offers come from the full catalog via imageModelUsable,
+  // recommended-first. A mode with no compatible installed model stays inside the
+  // studio so the user can switch tabs, but renders an empty, actionable picker.
   const modelReady = macImageModels.length > 0;
   const modelOffers = useMemo(
     () => downloadOffersFor(models, imageModelUsable, macCapabilities),
@@ -851,7 +857,13 @@ export function ImageStudio() {
       setModel(pickerModels[0].id);
     }
   }, [pickerModels, model]);
-  const selectedModel = imageModels.find((item) => item.id === model);
+  // Resolve only through the current mode's capability-filtered set. A restored
+  // selection can be stale until the snap effect runs; it must never become the
+  // effective model for either rendering defaults or submitting a job.
+  const selectedModel = availableModels.find((item) => item.id === model);
+  const selectedModelServesMode = Boolean(selectedModel);
+  const modeLabel =
+    mode === "edit_image" ? "Edit" : mode === "character_image" ? "With character" : "Text";
   // Booru-convention prompt hint (sc-10760): non-null for danbooru-tag models (Anima, Illustrious)
   // that declare `ui.promptHint`; rendered under the prompt box with a link into the prompt guide.
   const promptHint = promptHintFor(selectedModel?.ui);
@@ -1992,6 +2004,13 @@ export function ImageStudio() {
     if (submitting) {
       return;
     }
+    // Defense in depth for Enter/programmatic submits and restored stale state.
+    // The disabled button is only an affordance; capability eligibility is the
+    // actual authorization to create a job.
+    if (!selectedModelServesMode) {
+      setSubmitError(`Install or select a model that supports ${modeLabel} generation.`);
+      return;
+    }
     if (dimensionsInvalid) {
       setSubmitError("Width and height must each be between 256 and 4096.");
       return;
@@ -2215,6 +2234,10 @@ export function ImageStudio() {
     if (batchRun?.submitting || !activeProject) {
       return;
     }
+    if (!selectedModelServesMode) {
+      setBatchError(`Install or select a model that supports ${modeLabel} generation.`);
+      return;
+    }
     const resolved = expandBatch(batchPrompts, batchVariables);
     if (!resolved.length) {
       return;
@@ -2428,11 +2451,13 @@ export function ImageStudio() {
   const generateValidity = useValidation(imageGenerateValidation, generateDraft, undefined);
   // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
   // already folded into batchValidity — no need to repeat it here.
-  const batchRunDisabled = !batchValidity.ready || Boolean(batchRun?.submitting);
+  const batchRunDisabled =
+    !batchValidity.ready || !selectedModelServesMode || Boolean(batchRun?.submitting);
   // The two conditions whose message has its own home stay explicit gates: a structured
   // caption's field errors live in the builder, and a Mac block prints its own note.
   const generateDisabled =
     submitting ||
+    !selectedModelServesMode ||
     !generateValidity.ready ||
     (structuredActive && !captionValidation?.ok) ||
     Boolean(macActiveModeBlock);
@@ -3170,6 +3195,14 @@ export function ImageStudio() {
                     </option>
                   ))}
                 </select>
+                {!pickerModels.length ? (
+                  <span className="field-hint" role="status">
+                    No installed model supports {modeLabel} generation.{" "}
+                    <button onClick={() => setActiveView("Models")} type="button">
+                      Browse models
+                    </button>
+                  </span>
+                ) : null}
                 <StudioUpdateNotice item={selectedModel} onUpdate={createModelDownloadJob} />
               </label>
               <label className="settings-field settings-field-aspect">
