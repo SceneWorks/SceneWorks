@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
 import { GPU_REQUIRED_JOB_TYPES, NON_GPU_JOB_TYPES, pendingStatuses } from "../jobTypes.js";
@@ -189,6 +189,7 @@ function WorkerCard({ worker }) {
 }
 
 export function QueueScreen() {
+  const [jobPrompt, setJobPrompt] = useState("Placeholder generation");
   const {
     activeProject,
     assets = [],
@@ -200,17 +201,15 @@ export function QueueScreen() {
     gpuOptions,
     jobAction,
     jobs = filteredJobs,
-    jobPrompt,
     projectFilter,
     projects,
     requestedGpu,
-    setJobPrompt,
     setProjectFilter,
     setPreviewAsset,
     setRequestedGpu,
     visibleWorkers,
   } = useAppContext();
-  const createJob = createPlaceholderJob;
+  const createJob = (event) => createPlaceholderJob(event, jobPrompt);
   const workers = visibleWorkers;
   // Prefer the shared index from context (sc-2082); fall back for legacy
   // contexts that may not yet expose it (test harnesses, etc.).
