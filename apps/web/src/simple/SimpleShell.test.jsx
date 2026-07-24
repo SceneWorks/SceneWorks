@@ -17,6 +17,17 @@ const IMAGE_MODEL = {
   capabilities: ["text_to_image", "edit_image"],
   installState: "installed",
   limits: { resolutions: ["1024x1024", "1344x768"] },
+  // Z-Image declares reference-guided generation in the real catalog, with this exact
+  // strength config — so the Text tab's Reference tile is live for it.
+  ui: { img2img: true, img2imgStrength: { default: 0.5, min: 0, max: 1, step: 0.05 } },
+};
+
+const REFERENCE_ASSET = {
+  id: "asset-9",
+  type: "image",
+  projectId: "project-1",
+  displayName: "cliff_ref.png",
+  url: "/media/cliff_ref.png",
 };
 
 function baseContext(overrides = {}) {
@@ -74,6 +85,18 @@ function buttonWithText(container, text) {
   return [...container.querySelectorAll("button")].find(
     (node) => node.textContent.trim() === text,
   );
+}
+
+async function typePrompt(container, value) {
+  const textarea = container.querySelector("#su-image-prompt");
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    ).set;
+    setter.call(textarea, value);
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+  });
 }
 
 describe("SimpleShell", () => {
@@ -185,6 +208,53 @@ describe("SimpleShell", () => {
       height: 1024,
     });
     expect(context.rememberLocalGenerationJob).toHaveBeenCalledWith("image", { id: "job-1" });
+  });
+
+  // Regression for a shipped bug: the Reference tile armed, showed SET + a thumbnail and
+  // toasted "Reference attached", but the id was routed to `sourceAssetId` — which
+  // buildImageJobRequest discards outside edit mode — so the run silently ignored it. This
+  // drives the REAL tile through the REAL picker sheet, which is what the payload-only
+  // tests could not catch.
+  it("attaches a Text-mode reference through the tile and sends it with a strength", async () => {
+    const context = baseContext({ assets: [REFERENCE_ASSET], recentImageAssets: [REFERENCE_ASSET] });
+    await renderShell(root, context);
+
+    await typePrompt(container, "a lighthouse");
+    await click(buttonWithText(container, "ReferenceTap to attach an image"));
+
+    // The picker sheet lists the project's images; choose the one asset.
+    const row = [...container.querySelectorAll(".su-option-row")].find((node) =>
+      node.textContent.includes("cliff_ref.png"),
+    );
+    expect(row).toBeTruthy();
+    await click(row);
+
+    // Armed: the tile reports SET rather than the empty hint.
+    expect(container.querySelector(".su-set-badge")).toBeTruthy();
+
+    await click(container.querySelector(".su-generate"));
+
+    const payload = context.createImageJob.mock.calls[0][0];
+    expect(payload.referenceAssetId).toBe("asset-9");
+    expect(payload.advanced.strength).toBe(0.5);
+    expect(payload.sourceAssetId).toBeNull();
+  });
+
+  it("disables the Reference tile, with a reason, on a model that can't use one", async () => {
+    const plainModel = { ...IMAGE_MODEL, id: "sdxl", name: "SDXL", ui: undefined };
+    const context = baseContext({
+      imageModels: [plainModel],
+      models: [plainModel],
+      assets: [REFERENCE_ASSET],
+      recentImageAssets: [REFERENCE_ASSET],
+    });
+    await renderShell(root, context);
+
+    const tile = [...container.querySelectorAll(".su-tile")].find((node) =>
+      node.textContent.includes("Reference"),
+    );
+    expect(tile.disabled).toBe(true);
+    expect(tile.textContent).toContain("SDXL can’t use a reference image");
   });
 
   it("refuses to submit with an empty prompt", async () => {

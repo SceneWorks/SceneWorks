@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_IMG2IMG_STRENGTH,
   buildSimpleAudioRequest,
   buildSimpleImageRequest,
   buildSimpleVideoRequest,
   parseResolutionPair,
+  referenceStrengthFor,
 } from "./simpleJobs.js";
 import { buildImageJobRequest } from "../imageJobRequest.js";
 import { STYLE_GROUPS, styleTextForId } from "../data/styleCatalog.js";
@@ -30,7 +32,7 @@ describe("buildSimpleImageRequest", () => {
     resolution: "1344x768",
     count: 4,
     styleId: null,
-    sourceAssetId: null,
+    referenceAssetId: null,
   };
 
   it("emits the geometry, count and mode the studio shows", () => {
@@ -153,11 +155,59 @@ describe("buildSimpleImageRequest", () => {
     const request = buildSimpleImageRequest({
       ...base,
       mode: "edit_image",
-      sourceAssetId: "asset-7",
+      referenceAssetId: "asset-7",
     });
     expect(request.mode).toBe("edit_image");
     expect(request.sourceAssetId).toBe("asset-7");
     expect(request.fitMode).toBe("crop");
+    // The edit path has no strength knob — the model's edit pipeline owns the conditioning.
+    expect(request.advanced.strength).toBeUndefined();
+    expect(request.referenceAssetId).toBeNull();
+  });
+
+  // The bug this suite missed on the first pass: a TEXT-mode reference was routed to
+  // `sourceAssetId`, which buildImageJobRequest drops for non-edit modes — so the tile
+  // armed, badged and toasted, and then nothing was sent. The reference has to ride the
+  // img2img channel, which is also what makes `advanced.strength` appear.
+  it("routes a TEXT-mode reference through img2img and sends the model's strength", () => {
+    const request = buildSimpleImageRequest({
+      ...base,
+      referenceAssetId: "asset-9",
+      supportsImg2img: true,
+      img2imgStrength: 0.5,
+    });
+    expect(request.referenceAssetId).toBe("asset-9");
+    expect(request.advanced.strength).toBe(0.5);
+    // Never as the edit source — that field is edit-mode-only and would be discarded.
+    expect(request.sourceAssetId).toBeNull();
+  });
+
+  it("honors a model-declared reference strength over the fallback", () => {
+    const request = buildSimpleImageRequest({
+      ...base,
+      referenceAssetId: "asset-9",
+      supportsImg2img: true,
+      img2imgStrength: 0.35,
+    });
+    expect(request.advanced.strength).toBe(0.35);
+  });
+
+  it("drops a TEXT-mode reference on a model that can't do img2img", () => {
+    const request = buildSimpleImageRequest({
+      ...base,
+      referenceAssetId: "asset-9",
+      supportsImg2img: false,
+    });
+    expect(request.referenceAssetId).toBeNull();
+    expect(request.sourceAssetId).toBeNull();
+    // No strength for a reference that isn't being sent.
+    expect(request.advanced.strength).toBeUndefined();
+  });
+
+  it("emits no img2img fields at all when nothing is armed", () => {
+    const request = buildSimpleImageRequest({ ...base, supportsImg2img: true });
+    expect(request.referenceAssetId).toBeNull();
+    expect(request.advanced.strength).toBeUndefined();
   });
 
   it("emits the resolved quant tier, and marks it explicit only for a deliberate pick", () => {
@@ -167,6 +217,28 @@ describe("buildSimpleImageRequest", () => {
 
     const sticky = buildSimpleImageRequest({ ...base, quantTier: "q4", tierExplicit: true });
     expect(sticky.advanced.mlxQuantizeExplicit).toBe(true);
+  });
+});
+
+describe("referenceStrengthFor", () => {
+  it("reads the model's declared default so a tuned catalog entry is honored", () => {
+    expect(referenceStrengthFor({ ui: { img2imgStrength: { default: 0.35 } } })).toBe(0.35);
+    // 0 is a legitimate strength and must not be treated as "unset".
+    expect(referenceStrengthFor({ ui: { img2imgStrength: { default: 0 } } })).toBe(0);
+  });
+
+  it("falls back when the entry declares img2img but no strength config", () => {
+    expect(referenceStrengthFor({ ui: { img2img: true } })).toBe(DEFAULT_IMG2IMG_STRENGTH);
+    expect(referenceStrengthFor(null)).toBe(DEFAULT_IMG2IMG_STRENGTH);
+    expect(referenceStrengthFor({ ui: { img2imgStrength: { default: "half" } } })).toBe(
+      DEFAULT_IMG2IMG_STRENGTH,
+    );
+  });
+
+  it("matches what every img2img entry in the shipped catalog declares", () => {
+    // Pins the fallback to the catalog's actual value, so a manifest sweep that changed it
+    // wouldn't leave this constant silently disagreeing with every model.
+    expect(DEFAULT_IMG2IMG_STRENGTH).toBe(0.5);
   });
 });
 

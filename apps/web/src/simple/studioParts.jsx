@@ -63,7 +63,7 @@ function StyleTile({ active, name, onSelect, styleId }) {
 // Reference / source-image tile. Armed state shows the design's "SET" badge plus a
 // thumbnail and the asset's display name; tapping an armed tile clears it, tapping an
 // empty one opens the picker sheet over the project's recent images.
-export function ReferenceTile({ label, hint, asset, assets, onChange, required = false }) {
+export function ReferenceTile({ label, hint, asset, assets, onChange, required = false, disabled = false }) {
   const { openSheet, toast } = useSimpleUi();
   const pick = useCallback(() => {
     if (asset) {
@@ -91,13 +91,20 @@ export function ReferenceTile({ label, hint, asset, assets, onChange, required =
   }, [asset, assets, onChange, openSheet, toast]);
 
   return (
-    <button className={asset ? "su-tile active" : "su-tile"} onClick={pick} type="button">
+    <button
+      className={asset && !disabled ? "su-tile active" : "su-tile"}
+      disabled={disabled}
+      onClick={pick}
+      type="button"
+    >
       <span className="su-tile-head">
         <Icon.Image size={15} />
         {label}
-        {asset ? <span className="su-set-badge">SET</span> : null}
+        {asset && !disabled ? <span className="su-set-badge">SET</span> : null}
       </span>
-      {asset ? (
+      {/* A disabled tile shows its REASON, never the armed thumbnail — an armed reference the
+          model can't consume must not read as active. */}
+      {asset && !disabled ? (
         <span className="su-tile-ref">
           <AssetThumbnail asset={asset} />
           <span>{asset.displayName ?? asset.id}</span>

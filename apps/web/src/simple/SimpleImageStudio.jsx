@@ -6,7 +6,7 @@ import { fitsResolutionOptions } from "../resolutionMemory.js";
 import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
 import { resultGridColumns } from "./breakpoint.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
-import { buildSimpleImageRequest, resolveSimpleTier } from "./simpleJobs.js";
+import { buildSimpleImageRequest, referenceStrengthFor, resolveSimpleTier } from "./simpleJobs.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 import {
@@ -109,6 +109,13 @@ export function SimpleImageStudio() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [referenceRequest?.token]);
 
+  // Reference-guided generation on the TEXT tab is a per-model capability (`ui.img2img`):
+  // Z-Image, Krea 2, SD3.5, SANA, Ideogram 4 and Boogu declare it, most models don't. On a
+  // model without it the tile stays visible (the design's 2-up tile grid) but disabled and
+  // says why, rather than accepting a reference the payload would then drop.
+  const supportsImg2img = Boolean(selectedModel?.ui?.img2img);
+  const referenceUsable = mode === "edit_image" || supportsImg2img;
+
   const latestJob = newestLocalJob(imageLocalJobs);
   const busy = submitting || jobIsRunning(latestJob);
   const needsSource = mode === "edit_image" && !referenceAssetId;
@@ -137,7 +144,11 @@ export function SimpleImageStudio() {
         resolution,
         count: variations,
         styleId,
-        sourceAssetId: mode === "edit_image" ? referenceAssetId : null,
+        // One armed reference; simpleJobs routes it by mode (edit source vs img2img
+        // reference + advanced.strength) and drops it when the model can't use it.
+        referenceAssetId,
+        supportsImg2img,
+        img2imgStrength: referenceStrengthFor(selectedModel),
         ...tier,
       });
       if (!request) {
@@ -223,7 +234,14 @@ export function SimpleImageStudio() {
         <ReferenceTile
           asset={referenceAsset}
           assets={recentImageAssets}
-          hint={mode === "edit_image" ? "Required — tap to pick the image to edit" : "Tap to attach an image"}
+          disabled={!referenceUsable}
+          hint={
+            !referenceUsable
+              ? `${selectedModel?.name ?? "This model"} can’t use a reference image — switch model to use one.`
+              : mode === "edit_image"
+                ? "Required — tap to pick the image to edit"
+                : "Tap to attach an image"
+          }
           label={mode === "edit_image" ? "Source image" : "Reference"}
           onChange={setReferenceAssetId}
           required={mode === "edit_image"}
