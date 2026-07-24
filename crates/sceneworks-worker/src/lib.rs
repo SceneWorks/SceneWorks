@@ -1584,5 +1584,16 @@ fn retry_delay(poll_seconds: u64, attempt: u32) -> u64 {
 #[cfg(test)]
 mod test_env;
 
+// Reads pinned download entries (repo/revision/files) out of the embedded builtin catalog so
+// provisioning harnesses follow a manifest pin bump instead of mirroring it (sc-13810).
+#[cfg(test)]
+mod manifest_pins;
+
+// Pinned-snapshot provisioning helpers + the install-layout smokes (sc-13797/sc-13810). Compiled on
+// EVERY platform — the download/layout code is platform-agnostic; only the live-network smoke inside
+// carries `#[cfg(target_os = "macos")]` for lane confinement.
+#[cfg(test)]
+mod snapshot_install;
+
 #[cfg(test)]
 mod tests;

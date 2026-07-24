@@ -1583,6 +1583,241 @@ async fn download_snapshot_into_cache_confines_a_path_escaping_revision() {
     );
 }
 
+/// sc-13810 (item 3) — **network-free, cross-platform** proof of the pinned-revision hub layout.
+///
+/// The live `whisper_base_fresh_install_pinned_layout_smoke` (sc-13797) is confined to the
+/// self-hosted macOS lane: it pulls ~279 MiB from the real hub, so spreading it onto hosted Windows
+/// and fork PRs would amplify exactly the transient flakiness its transport-skip already works
+/// around. The consequence was that `downloads.rs`'s layout contract — which is entirely
+/// platform-agnostic code — had NO coverage on the platforms where its filesystem behavior actually
+/// differs (Windows has no symlinks for the blob→snapshot placement and falls back to a copy).
+///
+/// This test closes that hole with zero internet: a local stub serves the HF tree API and the file
+/// bytes, and the REAL seam (`HuggingFaceSnapshot::resolve` + `download_snapshot_into_cache`) runs
+/// against it. It therefore runs on EVERY lane — hosted Windows, Linux, fork PRs — and cannot flake
+/// on hub availability.
+///
+/// The pin comes from the builtin manifest (sc-13810 item 2), so an allow-list or revision edit is
+/// carried into the assertions rather than mirrored beside them.
+#[tokio::test]
+async fn pinned_snapshot_layout_materializes_without_network() {
+    let pin = crate::manifest_pins::builtin_model_pin("whisper_base");
+    let temp = tempdir().expect("tempdir creates");
+    // A file the manifest does NOT allow-list. whisper-base really does ship many more files
+    // upstream, so serving one here makes "only the allow-listed files materialize" a
+    // DISCRIMINATING assertion rather than a tautology over a stub that offered nothing else.
+    let decoy = "pytorch_model.bin";
+    let (base_url, contents) = spawn_pinned_repo_stub(&pin, decoy).await;
+
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let repo_dir = temp.path().join(pin.repo_slug());
+
+    let snapshot = HuggingFaceSnapshot::resolve(
+        &client,
+        &settings,
+        &pin.repo,
+        &pin.revision,
+        &pin.files,
+    )
+    .await
+    .expect("resolves the stubbed tree");
+    assert_eq!(
+        snapshot.files.len(),
+        pin.files.len(),
+        "the allow-list must filter the tree down to exactly the manifest's files, got {:?}",
+        snapshot
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let mut progress = DownloadProgress::new(
+        &pin.repo,
+        0,
+        snapshot.total_bytes(),
+        Duration::from_secs(3600),
+    );
+    let commit = download_snapshot_into_cache(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "sc-13810",
+            cancel_message: "canceled",
+            fresh_download: false,
+        },
+        &repo_dir,
+        &pin.revision,
+        &snapshot,
+        &mut progress,
+    )
+    .await
+    .expect("materializes the pinned layout");
+
+    // A pinned commit-SHA revision resolves to itself, so the snapshot dir the OFFLINE resolver
+    // reads (`snapshots/<sha>/`) is the one written here.
+    assert_eq!(
+        commit, pin.revision,
+        "a pinned commit revision must resolve to itself"
+    );
+    let refs_pointer = repo_dir.join("refs").join(&pin.revision);
+    assert_eq!(
+        tokio::fs::read_to_string(&refs_pointer)
+            .await
+            .expect("refs/<sha> pointer written")
+            .trim(),
+        pin.revision,
+        "refs/<rev> must record the resolved commit (the layout's rev→commit link)"
+    );
+
+    // Every allow-listed file resolves to its exact content through the snapshot placement —
+    // symlink on unix, copy on Windows. Reading the bytes back (rather than checking existence)
+    // is what makes this meaningful on the copy path.
+    let snapshot_dir = repo_dir.join("snapshots").join(&commit);
+    for file in &pin.files {
+        let placed = tokio::fs::read(snapshot_dir.join(file))
+            .await
+            .unwrap_or_else(|error| panic!("{file} must materialize in the snapshot: {error}"));
+        assert_eq!(
+            placed,
+            contents[file.as_str()],
+            "{file} must resolve to its downloaded content"
+        );
+    }
+
+    // ONLY the allow-listed files materialized — the manifest allow-list, not the repo, decides
+    // what is fetched. A regression that ignored the filter would drag the decoy in.
+    let mut installed: Vec<String> = std::fs::read_dir(&snapshot_dir)
+        .expect("read pinned snapshot dir")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    installed.sort();
+    let mut expected = pin.files.clone();
+    expected.sort();
+    assert_eq!(
+        installed, expected,
+        "only the manifest's allow-listed files may materialize (the whole repo is NOT pulled)"
+    );
+    assert!(
+        !snapshot_dir.join(decoy).exists(),
+        "the non-allow-listed {decoy} must never be fetched"
+    );
+}
+
+/// Serve one pinned HF repo — the tree listing plus the file bytes — from a local socket, so the
+/// real download seam can run with no internet. Returns the base URL and the exact bytes served for
+/// each allow-listed file, so the caller can assert content round-trips through the placement.
+///
+/// The HEAD mirrors the metadata `download_snapshot_into_cache` reads: `x-repo-commit` (set to the
+/// PINNED sha, so the layout is asserted against the pin) and an `ETag` that names the blob.
+async fn spawn_pinned_repo_stub(
+    pin: &crate::manifest_pins::ManifestPin,
+    decoy: &str,
+) -> (String, HashMap<String, Vec<u8>>) {
+    // Deterministic per-file content, distinct per name so a mixed-up placement is detectable.
+    let mut contents: HashMap<String, Vec<u8>> = pin
+        .files
+        .iter()
+        .map(|file| (file.clone(), format!("content of {file}").into_bytes()))
+        .collect();
+    contents.insert(
+        decoy.to_owned(),
+        format!("content of {decoy}").into_bytes(),
+    );
+
+    #[derive(Clone)]
+    struct PinnedRepoState {
+        contents: HashMap<String, Vec<u8>>,
+        revision: String,
+    }
+
+    // The tree API lists the allow-listed files AND the decoy; `resolve` applies the filter.
+    async fn tree(State(state): State<PinnedRepoState>) -> Response {
+        let mut entries: Vec<Value> = state
+            .contents
+            .iter()
+            .map(|(path, bytes)| json!({ "type": "file", "path": path, "size": bytes.len() }))
+            .collect();
+        // Stable order so a failure message reads the same way twice.
+        entries.sort_by_key(|entry| {
+            entry
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        });
+        Json(entries).into_response()
+    }
+
+    // `resolve` builds `<base>/<repo>/resolve/<revision>/<path>`, so the trailing segment after the
+    // revision is the repo-relative file path.
+    fn requested_file(state: &PinnedRepoState, path: &str) -> Option<Vec<u8>> {
+        let marker = format!("/resolve/{}/", state.revision);
+        let relative = path.split_once(&marker).map(|(_, tail)| tail)?;
+        state.contents.get(relative).cloned()
+    }
+
+    async fn file_get(
+        State(state): State<PinnedRepoState>,
+        axum::extract::Path(path): axum::extract::Path<String>,
+    ) -> Response {
+        match requested_file(&state, &format!("/{path}")) {
+            Some(bytes) => bytes.into_response(),
+            None => (AxumStatusCode::NOT_FOUND, "no such file").into_response(),
+        }
+    }
+
+    async fn file_head(
+        State(state): State<PinnedRepoState>,
+        axum::extract::Path(path): axum::extract::Path<String>,
+    ) -> Response {
+        let Some(bytes) = requested_file(&state, &format!("/{path}")) else {
+            return (AxumStatusCode::NOT_FOUND, "no such file").into_response();
+        };
+        let mut response = Response::new(Body::empty());
+        let headers = response.headers_mut();
+        headers.insert(
+            axum::http::header::CONTENT_LENGTH,
+            axum::http::HeaderValue::from_str(&bytes.len().to_string())
+                .expect("content length header"),
+        );
+        let last_segment = path.rsplit('/').next().unwrap_or("blob");
+        headers.insert(
+            axum::http::header::ETAG,
+            axum::http::HeaderValue::from_str(&format!("\"etag-{last_segment}\""))
+                .expect("etag header"),
+        );
+        // The pinned sha, so `refs/<rev>` and `snapshots/<commit>` are asserted against the pin.
+        headers.insert(
+            "x-repo-commit",
+            axum::http::HeaderValue::from_str(&state.revision).expect("commit header"),
+        );
+        response
+    }
+
+    let state = PinnedRepoState {
+        contents: contents.clone(),
+        revision: pin.revision.clone(),
+    };
+    let app = Router::new()
+        .route("/api/models/:owner/:repo/tree/:revision", get(tree))
+        .route("/*path", get(file_get).head(file_head))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    (format!("http://{address}"), contents)
+}
+
 /// A tree stub that paginates: page 1 (no cursor) returns bf16/q4 files plus a `Link: rel="next"`
 /// header pointing at page 2; page 2 (cursor=next) returns the q8 file and no further link.
 async fn spawn_paginated_tree_stub() -> String {
