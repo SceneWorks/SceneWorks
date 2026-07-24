@@ -8337,13 +8337,13 @@ fn ltx_dir_is_complete(dir: &Path) -> bool {
 }
 
 /// Whether `dir` is a complete Gemma-3 text-encoder snapshot the LTX engine can load: its
-/// `config.json`, the sharded `model.safetensors.index.json`, and every shard that index maps (or a
-/// lone `model.safetensors` for a single-file checkpoint). Used so the eros gemma fetch
-/// ([`ensure_ltx_gemma_present`]) no-ops only when gemma is genuinely present and a half-downloaded
-/// dir never shadows a re-fetch ([`resolve_ltx_eros_gemma_dir`]).
+/// `config.json`, `tokenizer.json`, the sharded `model.safetensors.index.json`, and every shard that
+/// a non-empty index maps (or a lone `model.safetensors` for a single-file checkpoint). Used so the
+/// eros gemma fetch ([`ensure_ltx_gemma_present`]) no-ops only when gemma is genuinely present and a
+/// half-downloaded dir never shadows a re-fetch ([`resolve_ltx_eros_gemma_dir`]).
 #[cfg(target_os = "macos")]
 fn ltx_gemma_dir_is_complete(dir: &Path) -> bool {
-    if !dir.join("config.json").is_file() {
+    if !dir.join("config.json").is_file() || !dir.join("tokenizer.json").is_file() {
         return false;
     }
     let Ok(index_raw) = std::fs::read_to_string(dir.join("model.safetensors.index.json")) else {
@@ -8356,11 +8356,16 @@ fn ltx_gemma_dir_is_complete(dir: &Path) -> bool {
     let Some(weight_map) = index.get("weight_map").and_then(Value::as_object) else {
         return false;
     };
-    let shards: std::collections::BTreeSet<String> = weight_map
+    let Some(shards) = weight_map
         .values()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect();
+        .map(|value| value.as_str().map(str::to_owned))
+        .collect::<Option<std::collections::BTreeSet<String>>>()
+    else {
+        return false;
+    };
+    if shards.is_empty() {
+        return false;
+    }
     shards.iter().all(|shard| dir.join(shard).is_file())
 }
 
@@ -8485,13 +8490,39 @@ fn resolve_ltx_model_dir(settings: &Settings, request: &VideoRequest) -> WorkerR
     )))
 }
 
-/// The Gemma-3 text encoder bundled beside a resolved LTX dir, if present: `<parent>/gemma`
-/// (sc-5608). The SceneWorks bundle ships it as a sibling of the `q4/`/`q8/` checkpoint dir; a
-/// local/legacy conversion has none (→ the engine falls back to the HF-cache gemma snapshot).
+/// The complete Gemma-3 text encoder managed with a resolved LTX dir, if present (sc-5608).
+///
+/// Normally the SceneWorks bundle ships it beside the selected `q4/`/`q8/` checkpoint dir as
+/// `<snapshot>/gemma`. Hugging Face can retain different filtered downloads in different snapshot
+/// revisions, though: a tier may resolve from `snapshots/<tier-rev>/q8` while the co-requisite lives
+/// at `snapshots/<gemma-rev>/gemma`. After checking the selected snapshot, scan sibling revisions so
+/// that valid managed layout still resolves one `LoadSpec::text_encoder` (sc-14377). A local/legacy
+/// conversion is not under a `snapshots/` directory and therefore keeps the old sibling-only
+/// behavior.
 #[cfg(target_os = "macos")]
 fn bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
-    let gemma = model_dir.parent()?.join("gemma");
-    gemma.is_dir().then_some(gemma)
+    let selected_snapshot = model_dir.parent()?;
+    let gemma = selected_snapshot.join("gemma");
+    if ltx_gemma_dir_is_complete(&gemma) {
+        return Some(gemma);
+    }
+
+    let snapshots = selected_snapshot.parent()?;
+    if snapshots.file_name().and_then(|name| name.to_str()) != Some("snapshots") {
+        return None;
+    }
+
+    let mut revisions: Vec<PathBuf> = std::fs::read_dir(snapshots)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && path != selected_snapshot)
+        .collect();
+    revisions.sort();
+    revisions
+        .into_iter()
+        .map(|snapshot| snapshot.join("gemma"))
+        .find(|candidate| ltx_gemma_dir_is_complete(candidate))
 }
 
 /// The operator `$LTX_GEMMA_DIR` override as an existence-checked gemma snapshot path (pure over the
@@ -17818,7 +17849,7 @@ mod tests {
         write_complete_ltx_dir(&q4);
         write_complete_ltx_dir(&q8);
         write_complete_ltx_dir(&bf16);
-        std::fs::create_dir_all(root.join("gemma")).unwrap();
+        write_complete_gemma_dir(&root.join("gemma"));
 
         // Each tier order prefers its own subdir (default q4, mlxQuantize:8 q8, mlxQuantize<=0 bf16).
         assert_eq!(
@@ -17867,13 +17898,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&bare);
     }
 
-    /// Lay down a complete Gemma-3 text-encoder snapshot at `dir`: `config.json`, a two-shard
-    /// `model.safetensors.index.json`, and the shards it maps. Mirrors the real bundle `gemma/` so the
-    /// completeness + eros-resolution tests are hermetic.
+    /// Lay down a complete Gemma-3 text-encoder snapshot at `dir`: config, tokenizer, a two-shard
+    /// index, and the shards it maps. Mirrors the real bundle `gemma/` so the completeness +
+    /// eros-resolution tests are hermetic.
     #[cfg(target_os = "macos")]
     fn write_complete_gemma_dir(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        std::fs::write(dir.join("tokenizer.json"), b"{}").unwrap();
         std::fs::write(
             dir.join("model.safetensors.index.json"),
             br#"{"weight_map":{"a":"model-00001-of-00002.safetensors","b":"model-00002-of-00002.safetensors"}}"#,
@@ -17883,8 +17915,8 @@ mod tests {
         std::fs::write(dir.join("model-00002-of-00002.safetensors"), b"x").unwrap();
     }
 
-    /// `ltx_gemma_dir_is_complete`: needs `config.json` + every shard the index maps (or a lone
-    /// single-file checkpoint); a missing shard, missing config, or bad index all fail.
+    /// `ltx_gemma_dir_is_complete`: needs config + tokenizer + every shard a non-empty index maps
+    /// (or a lone single-file checkpoint); missing load inputs and malformed/empty maps all fail.
     #[cfg(target_os = "macos")]
     #[test]
     fn ltx_gemma_completeness_requires_config_and_all_shards() {
@@ -17901,16 +17933,74 @@ mod tests {
         std::fs::remove_file(root.join("config.json")).unwrap();
         assert!(!ltx_gemma_dir_is_complete(&root));
 
-        // Single-file checkpoint (no index) is complete once config + the lone weights file exist.
+        // Missing tokenizer.json → incomplete even with config + all weights present.
+        std::fs::write(root.join("config.json"), b"{}").unwrap();
+        std::fs::remove_file(root.join("tokenizer.json")).unwrap();
+        assert!(!ltx_gemma_dir_is_complete(&root));
+
+        // Empty or non-string weight maps must not pass vacuously.
+        std::fs::write(root.join("tokenizer.json"), b"{}").unwrap();
+        std::fs::write(
+            root.join("model.safetensors.index.json"),
+            br#"{"weight_map":{}}"#,
+        )
+        .unwrap();
+        assert!(!ltx_gemma_dir_is_complete(&root));
+        std::fs::write(
+            root.join("model.safetensors.index.json"),
+            br#"{"weight_map":{"bad":42}}"#,
+        )
+        .unwrap();
+        assert!(!ltx_gemma_dir_is_complete(&root));
+
+        // Single-file checkpoint (no index) is complete once config + tokenizer + weights exist.
         let single = std::env::temp_dir().join(format!("sw_gemma_1f_{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(&single).unwrap();
         std::fs::write(single.join("config.json"), b"{}").unwrap();
+        std::fs::write(single.join("tokenizer.json"), b"{}").unwrap();
         assert!(!ltx_gemma_dir_is_complete(&single));
         std::fs::write(single.join("model.safetensors"), b"x").unwrap();
         assert!(ltx_gemma_dir_is_complete(&single));
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&single);
+    }
+
+    /// sc-14377: filtered HF downloads can split one managed bundle across revisions. The selected
+    /// Q8 tier may live in one snapshot while the complete Gemma co-requisite lives in another; the
+    /// base resolver must still pass that Gemma through `LoadSpec::text_encoder`. A partial Gemma
+    /// beside the selected tier must not shadow the complete sibling revision.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundled_ltx_gemma_resolves_across_split_snapshot_revisions() {
+        let root = std::env::temp_dir().join(format!("sw_ltx_split_{}", Uuid::new_v4().simple()));
+        let snapshots = root.join("models--SceneWorks--ltx-2.3-mlx/snapshots");
+        let tier_snapshot = snapshots.join("tier-revision");
+        let tier = tier_snapshot.join("q8");
+        std::fs::create_dir_all(&tier).unwrap();
+
+        // A torn co-requisite beside the selected tier cannot win.
+        let partial = tier_snapshot.join("gemma");
+        std::fs::create_dir_all(&partial).unwrap();
+        std::fs::write(partial.join("config.json"), b"{}").unwrap();
+
+        // The managed co-requisite is complete, but was downloaded at a different revision.
+        let complete = snapshots.join("gemma-revision").join("gemma");
+        write_complete_gemma_dir(&complete);
+
+        assert_eq!(
+            bundled_ltx_gemma_dir(&tier).as_deref(),
+            Some(complete.as_path()),
+            "a complete Gemma in another snapshot revision must satisfy the selected LTX tier"
+        );
+
+        // This fallback is deliberately limited to HF's snapshots/<revision>/<tier> shape: a local
+        // conversion with no sibling Gemma must not scan unrelated directories.
+        let local = root.join("models/mlx/ltx_2_3_base_q8");
+        std::fs::create_dir_all(&local).unwrap();
+        assert!(bundled_ltx_gemma_dir(&local).is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// sc-13664: the operator `$LTX_GEMMA_DIR` override now RIDES `LoadSpec::text_encoder` (the MLX LTX
