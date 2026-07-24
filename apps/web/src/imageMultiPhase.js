@@ -76,7 +76,9 @@ export function acceleratorLoraIndex(selectedLoras = []) {
   );
 }
 
-// A fresh phase: 4 steps, true-CFG on (guidance 3.5, the Raw default), base-only.
+// A fresh phase: 4 steps, true-CFG on, base-only. Seeds guidance 3.5 as the short structure-phase value
+// for the "Turbo finish" workflow (NOT the single-pass Raw default — that is ~1.0 as of sc-14203); a few
+// high-CFG structure steps are the point here, and the user can retune per phase.
 export function newPhase(overrides = {}) {
   return { steps: 4, guidance: 3.5, loras: [], ...overrides };
 }
@@ -84,7 +86,8 @@ export function newPhase(overrides = {}) {
 // The canonical S4 "Turbo finish (4+4)" example: phase 1 = 4 steps Raw true-CFG base-only; phase 2 =
 // 4 steps Raw + the selected turbo accelerator LoRA, CFG off. When no accelerator LoRA is selected,
 // phase 2 is left base-only (the Studio surfaces the "select the turbo LoRA" hint) so the structure
-// is still produced — the per-phase toggle can wire the LoRA once it is picked.
+// is still produced — the per-phase toggle can wire the LoRA once it is picked. Phase 1's guidance 3.5
+// is the deliberate short structure-phase value (the single-pass Raw default is now ~1.0, sc-14203).
 export function buildTurboFinishPhases(selectedLoras = []) {
   const accel = acceleratorLora(selectedLoras);
   return [
