@@ -23,6 +23,15 @@ pub(crate) struct UiPreferences {
     /// Last-used accent palette id (see `ACCENT_IDS`); absent until first set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     accent: Option<String>,
+    /// "Use Simple UI by default" (the Simple UI design handoff): whether the reduced-surface
+    /// Simple shell is the one the app opens on. Absent until first set, which the web reads as
+    /// OFF — an existing install keeps the full workspace it already has. Made durable through
+    /// this API for the same reason as theme/accent: the desktop shell's per-launch
+    /// `127.0.0.1:<port>` origin changes every launch, wiping origin-keyed `localStorage`.
+    /// A phone viewport forces the Simple shell regardless of this value; that rule is
+    /// client-side (it depends on the viewport, not on stored state).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    simple_ui: Option<bool>,
     /// App-wide default generation quality (`auto`|`bf16`|`q8`|`q4`); the baseline the
     /// per-model default tier derives from when no per-(screen,model) sticky pick exists
     /// (sc-10728). `auto` (epic 10721 R3) is the default: each model defaults to the
@@ -177,6 +186,13 @@ pub(crate) async fn set_ui_preferences(
         }
         if let Some(accent) = normalize_accent(payload.accent.as_deref()) {
             prefs.accent = Some(accent);
+        }
+        // Only touch the Simple-UI default when the payload actually carries it, so a
+        // theme/accent/quality-only PUT can't reset it (same partial-merge rule as the fields
+        // above). It is a plain bool, so there is nothing to normalize — an out-of-vocabulary
+        // value can't parse in the first place.
+        if let Some(simple_ui) = payload.simple_ui {
+            prefs.simple_ui = Some(simple_ui);
         }
         // Only touch the quality when the payload actually carries it, so a theme- or accent-only PUT
         // can't reset it. A present-but-invalid value coerces to `auto`. A deliberate quality PUT also

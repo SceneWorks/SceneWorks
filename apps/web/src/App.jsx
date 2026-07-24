@@ -55,6 +55,20 @@ import { buildWorkersById } from "./workers.js";
 import { createEditorScratchRegistry } from "./editorScratch.js";
 import { appConfirm, ConfirmHost } from "./appConfirm.jsx";
 import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
+// Simple UI (design handoff "Simple UI for creative studios") — an ALTERNATIVE shell that
+// renders instead of this workspace when the sidebar switch is on Simple. The workspace
+// below is unchanged apart from that switch in its footer.
+import { SimpleShell } from "./simple/SimpleShell.jsx";
+import { SimpleModeSwitch } from "./simple/SimpleModeSwitch.jsx";
+import { useViewportWidth } from "./simple/useContainerWidth.js";
+import {
+  ADVANCED_MODE,
+  SIMPLE_MODE,
+  readStoredSimpleDefault,
+  resolveUiMode,
+  uiModeLockedToSimple,
+  writeStoredSimpleDefault,
+} from "./simple/uiMode.js";
 import {
   buildLocalJobStack,
   isActiveWorker,
@@ -536,6 +550,29 @@ export function App() {
       body: JSON.stringify({ accent: next }),
     }).catch(() => {});
   };
+  // Simple UI (design handoff). `simpleUiDefault` is the persisted "Use Simple UI by
+  // default" preference — same durable contract as theme/accent (server copy in
+  // ui-preferences.json + a localStorage instant-paint cache), because the desktop
+  // shell's per-launch 127.0.0.1:<port> origin wipes origin-keyed localStorage.
+  // `uiModeOverride` is this session's sidebar pick, which wins over the preference;
+  // a phone viewport wins over both (the full workspace is unusable at that width).
+  const [simpleUiDefault, setSimpleUiDefault] = useState(readStoredSimpleDefault);
+  const [uiModeOverride, setUiModeOverride] = useState(null);
+  const viewportWidth = useViewportWidth();
+  const uiModeLocked = uiModeLockedToSimple(viewportWidth);
+  const uiMode = resolveUiMode({
+    simpleDefault: simpleUiDefault,
+    override: uiModeOverride,
+    width: viewportWidth,
+  });
+  const changeSimpleUiDefault = useCallback((next) => {
+    setSimpleUiDefault(next);
+    writeStoredSimpleDefault(next);
+    apiFetch("/api/v1/ui-preferences", "", {
+      method: "PUT",
+      body: JSON.stringify({ simpleUi: next }),
+    }).catch(() => {});
+  }, []);
   const activeProjectRef = useRef(null);
   const activeViewRef = useRef(activeView);
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
@@ -1094,6 +1131,13 @@ export function App() {
         }
         if (isAccentId(prefs?.accent)) {
           setAccent(prefs.accent);
+        }
+        // "Use Simple UI by default" (design handoff). Seeded from the durable copy for
+        // the same reason as theme/accent; the localStorage cache only gives the first
+        // paint. A session override (the sidebar switch) still wins over it.
+        if (typeof prefs?.simpleUi === "boolean") {
+          setSimpleUiDefault(prefs.simpleUi);
+          writeStoredSimpleDefault(prefs.simpleUi);
         }
         // Re-prime the default-generation-quality cache from the durable server copy (sc-10728).
         // It isn't React state here — the studio reads it fresh from localStorage via
@@ -2257,6 +2301,17 @@ export function App() {
   // desktop — hold the studio/gate back briefly to avoid a flash.
   const setupGateLoading = isDesktopShell && setupCompleted === null;
   const showSetupWizard = isDesktopShell && setupCompleted === false && authenticated;
+  // The Simple shell replaces the workspace only once the app is actually usable. The
+  // first-run flows — the desktop setup wizard, the "create your first workspace" gate,
+  // and the remote-browser password band — stay on the existing shell that owns them, so
+  // Simple never renders studios whose Generate could only fail. Once past them the
+  // switch is live, and the Settings toggle + the sidebar switch both reach it.
+  const shellGated =
+    showSetupWizard ||
+    setupGateLoading ||
+    needsFirstProject ||
+    (access.authRequired && !isDesktopShell && !token);
+  const showSimpleShell = uiMode === SIMPLE_MODE && !shellGated;
 
   // sc-1651 Phase B: shared primitives screens read via useAppContext() instead of
   // drilled props. Screens build any screen-specific wrappers from these (e.g. a
@@ -2500,6 +2555,27 @@ export function App() {
     sendCharacterToImage, sendCharacterToVideo, sendPresetToStudio, openDatasetInLibrary, theme, changeTheme,
   ]);
 
+  // Simple UI (design handoff): an ALTERNATIVE shell rendered in place of the workspace
+  // below. It mounts INSIDE the same two providers, so its screens read the identical
+  // catalogs, job feed and actions — there is no second data layer, and switching back
+  // to Advanced lands on the same live state.
+  if (showSimpleShell) {
+    return (
+      <AppStaticContext.Provider value={appStaticValue}>
+        <AppLiveContext.Provider value={appLiveValue}>
+          <SimpleShell
+            accent={accent}
+            lockedToSimple={uiModeLocked}
+            onAccentChange={changeAccent}
+            onModeChange={setUiModeOverride}
+            onSimpleDefaultChange={changeSimpleUiDefault}
+            simpleDefault={simpleUiDefault}
+          />
+        </AppLiveContext.Provider>
+      </AppStaticContext.Provider>
+    );
+  }
+
   return (
     <AppStaticContext.Provider value={appStaticValue}>
     <AppLiveContext.Provider value={appLiveValue}>
@@ -2549,13 +2625,21 @@ export function App() {
           </div>
         ))}
 
-        {APP_VERSION ? (
-          <div className="sidebar-footer">
+        {/* Simple ⇄ Advanced switch (design handoff). The ONE addition this shell makes for
+            the Simple UI; the same component renders in the Simple sidebar footer, so the
+            control can never present differently between the two. */}
+        <div className="sidebar-footer">
+          <SimpleModeSwitch
+            locked={uiModeLocked}
+            mode={ADVANCED_MODE}
+            onChange={setUiModeOverride}
+          />
+          {APP_VERSION ? (
             <span className="app-version" title={`SceneWorks ${APP_VERSION}`}>
               v{APP_VERSION}
             </span>
-          </div>
-        ) : null}
+          ) : null}
+        </div>
       </aside>
 
       <section className="workspace">

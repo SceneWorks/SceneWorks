@@ -388,6 +388,68 @@ async fn ui_preferences_migrates_a_legacy_q8_to_auto_once() {
     );
 }
 
+/// Simple UI design handoff: "Use Simple UI by default" persists server-side for the same reason as
+/// theme/accent — the desktop shell's per-launch `127.0.0.1:<port>` origin wipes origin-keyed
+/// localStorage, so a user who opted into the Simple shell would be dropped back into the full
+/// workspace on every relaunch. Absent until first set (⇒ the web reads OFF and an existing install
+/// keeps the workspace it has), and the PUT merges like every other field.
+#[tokio::test]
+async fn ui_preferences_simple_ui_round_trips_and_merges() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir); // no token configured ⇒ PUT is open
+    let app = create_app(settings).expect("app creates");
+
+    // Fresh install: absent, so the web falls back to the full workspace.
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(prefs.get("simpleUi").is_none());
+
+    // Opting in persists and is echoed back.
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "simpleUi": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["simpleUi"], true);
+
+    // Survives a "relaunch".
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["simpleUi"], true);
+
+    // A partial PUT (theme only) MERGES — it must not silently drop the user back into the
+    // full workspace on their next launch.
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["simpleUi"], true);
+    assert_eq!(prefs["theme"], "dark");
+
+    // Opting back out persists too (a false must be stored, not treated as "unset").
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "simpleUi": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["simpleUi"], false);
+    let (status, prefs) = request(app, "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["simpleUi"], false);
+}
+
 /// epic 10721 R1: the per-(screen, model) tier sticky persists server-side so a user's studio pick
 /// survives a desktop relaunch (localStorage alone is wiped by the shell's per-launch origin). A PUT
 /// carrying the map replaces it wholesale (the web sends the full merged map); a PUT without it merges.
