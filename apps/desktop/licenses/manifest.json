@@ -1059,6 +1059,36 @@
           "key": "cmudict-bsd-2-clause"
         }
       ]
+    },
+    {
+      "id": "candle-transformers-source",
+      "models": [],
+      "name": "Hugging Face Candle source",
+      "publisher": "Hugging Face",
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/huggingface/candle",
+      "usage": "The native FLUX VAE contains a modified vendored copy of candle-transformers source.",
+      "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
+    },
+    {
+      "id": "opencv-source",
+      "models": [],
+      "name": "OpenCV drawing primitives",
+      "publisher": "OpenCV team",
+      "license": "Apache-2.0",
+      "homepage": "https://opencv.org/",
+      "usage": "InstantID keypoint rendering faithfully ports OpenCV drawing primitives and its literal sine table.",
+      "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
+    },
+    {
+      "id": "diffusers-source",
+      "models": [],
+      "name": "Hugging Face Diffusers source",
+      "publisher": "Hugging Face",
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/huggingface/diffusers",
+      "usage": "Native provider modules include structural Rust ports of Diffusers implementations, including ACE-Step OobleckDecoder.",
+      "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
     }
   ]
 }

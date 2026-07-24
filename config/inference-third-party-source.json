@@ -1,7 +1,7 @@
 {
   "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
   "inferenceRevision": "8b0534512add4007cf6034f5d200e5649ed9b5f0",
-  "auditDigest": "61703792524ad14e83f5fdf6251ccdaf862cd5d1cb6d45e8cf1bf7ba82396c75",
+  "auditDigest": "3efb5c9d2485eb12fd8e560152198832b85a370bc7c08e467cb4757b70b4414f",
   "artifacts": [
     {
       "id": "cmudict",
@@ -20,6 +20,50 @@
       "firstInferenceRevision": "4dd518a5",
       "source": "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs",
       "evidence": "Current inference main, but not the pinned revision above, contains the Cephes port. The notice is pre-staged so the future pin cannot ship without disclosure."
+    }
+  ],
+  "provenanceScan": {
+    "method": "Pinned git archive; production Rust files outside tests/testdata/_vendor matched case-insensitive faithful port, ported from, port of, vendored verbatim, transcribed verbatim, copied verbatim, or adapted from markers.",
+    "matchedFiles": 451,
+    "sortedFileListSha256": "83bf228045fd1dd47fe45816b0fd13927a30714ea8da0f245e2dc1fa9f3308a5",
+    "defaultDisposition": "architecture-or-formula reimplementation under the repository/model's already-recorded terms; no copied expressive source. Exact copied/ported exceptions are listed below."
+  },
+  "portedSourceAreas": [
+    {
+      "source": "crates/media/candle-gen/candle-gen-flux/src/vae/native.rs",
+      "provenance": "Vendored verbatim from Hugging Face candle-transformers; only budgeted SDPA differs.",
+      "disposition": "about-license",
+      "component": "candle-transformers-source"
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen-instantid/src/kps.rs",
+      "provenance": "Bit-exact draw_kps plus faithful OpenCV 4.13 drawing.cpp primitives and literal SinTable.",
+      "disposition": "about-license",
+      "component": "opencv-source"
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-instantid/src/kps.rs",
+      "provenance": "MLX sibling of the same bit-exact InstantID/OpenCV keypoint rasterizer.",
+      "disposition": "about-license",
+      "component": "opencv-source"
+    },
+    {
+      "source": "crates/audio/candle-audio-acestep/src/vae.rs",
+      "provenance": "Structural Rust port of Hugging Face diffusers OobleckDecoder; no verbatim source tables.",
+      "disposition": "about-license",
+      "component": "diffusers-source"
+    },
+    {
+      "source": "crates/contracts/gen-core/src/sampling/cfgpp.rs",
+      "provenance": "CFG++ formula reimplemented from paper/ComfyUI behavior; source explicitly says nothing is vendored and upstream CFGpp repository has no license.",
+      "disposition": "formula-reimplementation-no-notice",
+      "evidence": "Mathematical formula and independently written Rust implementation are not copied expressive source."
+    },
+    {
+      "source": "remaining 446 provenance-marked production files",
+      "provenance": "Exact population is bound by provenanceScan matchedFiles and sortedFileListSha256.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Markers describe architecture/formula/backend ports within model/provider crates; applicable model terms are already mapped in manifest. No additional verbatim source area was found in the systematic pinned-revision review."
     }
   ],
   "includeSites": [

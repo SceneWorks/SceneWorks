@@ -51,6 +51,9 @@ const CARGO_LOCK = path.join(ROOT, "Cargo.lock");
 const PACKAGE_JSON = path.join(ROOT, "package.json");
 const TAURI_CONFIG = path.join(ROOT, "apps/desktop/tauri.conf.json");
 const RUST_API_LIB = path.join(ROOT, "apps/rust-api/src/lib.rs");
+const DESKTOP_PACKAGE = path.join(ROOT, "apps/desktop/package.json");
+const BUILD_SIDECAR = path.join(ROOT, "apps/desktop/scripts/build-sidecar.mjs");
+const BUILD_PLAN = path.join(ROOT, "apps/desktop/scripts/build-sidecar-platform.mjs");
 
 // Catalog models whose UPSTREAM declares no license at all, so no entry can be
 // recorded honestly yet. Each needs a licensing decision, not a guess — writing a
@@ -115,6 +118,8 @@ function validateSourceAudit(audit, componentIndex, pinText, lockText) {
   const canonical = JSON.stringify({
     artifacts: audit.artifacts,
     prospectiveDisclosures: audit.prospectiveDisclosures,
+    provenanceScan: audit.provenanceScan,
+    portedSourceAreas: audit.portedSourceAreas,
     includeSites: audit.includeSites,
   });
   const digest = crypto.createHash("sha256").update(canonical).digest("hex");
@@ -179,10 +184,33 @@ function validateSourceAudit(audit, componentIndex, pinText, lockText) {
     }
   }
   if (siteKeys.size === 0) auditErrors.push("inference source audit has no production include sites.");
+  if (!Number.isInteger(audit.provenanceScan?.matchedFiles) || audit.provenanceScan.matchedFiles < 1 ||
+      !/^[0-9a-f]{64}$/.test(audit.provenanceScan?.sortedFileListSha256 ?? "")) {
+    auditErrors.push("ported-source provenance scan count/hash is missing.");
+  }
+  for (const area of audit.portedSourceAreas ?? []) {
+    if (!area.source || !area.provenance || !area.disposition) {
+      auditErrors.push("ported-source area lacks source/provenance/disposition.");
+    }
+    if (area.component && !componentIndex.has(area.component)) {
+      auditErrors.push(`ported-source area "${area.source}" maps to missing About component "${area.component}".`);
+    }
+    if (!area.component && !area.evidence) {
+      auditErrors.push(`excluded ported-source area "${area.source}" has no evidence.`);
+    }
+  }
   return auditErrors;
 }
 
-function validateDesktopNoticeContract(packageJson, tauriConfig, rustApiSource, bundledSource) {
+function validateDesktopNoticeContract(
+  packageJson,
+  tauriConfig,
+  rustApiSource,
+  bundledSource,
+  desktopPackage,
+  buildSidecar,
+  buildPlan,
+) {
   const contractErrors = [];
   if (tauriConfig.build?.frontendDist !== "ui") {
     contractErrors.push('Tauri build.frontendDist must remain "ui" for the signed desktop bootstrap.');
@@ -190,13 +218,41 @@ function validateDesktopNoticeContract(packageJson, tauriConfig, rustApiSource, 
   if (tauriConfig.bundle?.licenseFile || tauriConfig.bundle?.["license-file"]) {
     contractErrors.push("Tauri bundle.licenseFile must not become a competing third-party notice corpus.");
   }
+  if (tauriConfig.build?.beforeBuildCommand !== "node scripts/build-sidecar.mjs") {
+    contractErrors.push("Tauri beforeBuildCommand must invoke build-sidecar.mjs.");
+  }
+  if (!desktopPackage.scripts?.build?.includes("tauri build")) {
+    contractErrors.push("desktop build script must invoke tauri build.");
+  }
+  if (!buildSidecar.includes('from "./build-sidecar-platform.mjs"') ||
+      !buildSidecar.includes("sidecarBuildPlan(process.platform, process.env)") ||
+      !buildSidecar.includes('run(npmCmd, ["run", buildPlan.npmScript]')) {
+    contractErrors.push("build-sidecar must select and execute sidecarBuildPlan's embedded npm script.");
+  }
+  for (const platformContract of [
+    'if (platform === "linux") return true',
+    'platform === "win32"',
+    'npmScript: "api:build:embedded"',
+    'npmScript: "api:build:embedded:candle"',
+  ]) {
+    if (!buildPlan.includes(platformContract)) {
+      contractErrors.push(`sidecar platform plan lost supported-platform contract: ${platformContract}`);
+    }
+  }
   if (!packageJson.scripts?.["api:build:embedded"]?.includes("web:build") ||
       !packageJson.scripts?.["api:build:embedded"]?.includes("embed-web")) {
     contractErrors.push("api:build:embedded must build and compile the web corpus into the Rust API sidecar.");
   }
+  if (!packageJson.scripts?.["api:build:embedded:candle"]?.includes("web:build") ||
+      !packageJson.scripts?.["api:build:embedded:candle"]?.includes("embed-web,backend-candle")) {
+    contractErrors.push("api:build:embedded:candle must retain web:build plus embed-web,backend-candle.");
+  }
   if (!rustApiSource.includes('#[folder = "../web/dist"]') ||
       !rustApiSource.includes("struct WebAssets")) {
     contractErrors.push("rust-api embed-web must embed apps/web/dist in the packaged sidecar.");
+  }
+  if (!(tauriConfig.bundle?.externalBin ?? []).includes("binaries/sceneworks-api")) {
+    contractErrors.push("Tauri bundle.externalBin must package binaries/sceneworks-api.");
   }
   for (const key of ["cephes-bsd-3-clause", "cmudict-bsd-2-clause"]) {
     if (!bundledSource.includes(`"${key}"`)) {
@@ -256,7 +312,12 @@ errors.push(...validateSourceAudit(sourceAudit, components, pinSources, lock));
 const packageJson = JSON.parse(fs.readFileSync(PACKAGE_JSON, "utf8"));
 const tauriConfig = JSON.parse(fs.readFileSync(TAURI_CONFIG, "utf8"));
 const rustApiSource = fs.readFileSync(RUST_API_LIB, "utf8");
-errors.push(...validateDesktopNoticeContract(packageJson, tauriConfig, rustApiSource, bundledJs));
+const desktopPackage = JSON.parse(fs.readFileSync(DESKTOP_PACKAGE, "utf8"));
+const buildSidecar = fs.readFileSync(BUILD_SIDECAR, "utf8");
+const buildPlan = fs.readFileSync(BUILD_PLAN, "utf8");
+errors.push(...validateDesktopNoticeContract(
+  packageJson, tauriConfig, rustApiSource, bundledJs, desktopPackage, buildSidecar, buildPlan,
+));
 
 if (process.argv.includes("--self-test")) {
   const withoutSite = structuredClone(sourceAudit);
@@ -278,12 +339,26 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   const missingMapping = bundledJs.replace('"cmudict-bsd-2-clause"', '"removed-cmudict-key"');
-  if (!validateDesktopNoticeContract(packageJson, tauriConfig, rustApiSource, missingMapping)
+  if (!validateDesktopNoticeContract(packageJson, tauriConfig, rustApiSource, missingMapping, desktopPackage, buildSidecar, buildPlan)
       .some((error) => error.includes("cmudict-bsd-2-clause"))) {
     console.error("self-test: removing a packaged notice mapping did not fail closed");
     process.exit(1);
   }
-  console.log("[license-coverage] self-test PASS — site add/delete, stale revision, and lost packaged mapping mutations were rejected.");
+  const contractMutations = [
+    ["beforeBuildCommand", packageJson, { ...tauriConfig, build: { ...tauriConfig.build, beforeBuildCommand: "broken" } }, rustApiSource, bundledJs, desktopPackage, buildSidecar, buildPlan],
+    ["build-sidecar plan import", packageJson, tauriConfig, rustApiSource, bundledJs, desktopPackage, buildSidecar.replace('from "./build-sidecar-platform.mjs"', 'from "./broken.mjs"'), buildPlan],
+    ["mac embedded selection", packageJson, tauriConfig, rustApiSource, bundledJs, desktopPackage, buildSidecar, buildPlan.replace('npmScript: "api:build:embedded"', 'npmScript: "broken"')],
+    ["candle embedded selection", packageJson, tauriConfig, rustApiSource, bundledJs, desktopPackage, buildSidecar, buildPlan.replace('npmScript: "api:build:embedded:candle"', 'npmScript: "broken"')],
+    ["candle web embed script", { ...packageJson, scripts: { ...packageJson.scripts, "api:build:embedded:candle": "cargo build --features backend-candle" } }, tauriConfig, rustApiSource, bundledJs, desktopPackage, buildSidecar, buildPlan],
+    ["externalBin", packageJson, { ...tauriConfig, bundle: { ...tauriConfig.bundle, externalBin: [] } }, rustApiSource, bundledJs, desktopPackage, buildSidecar, buildPlan],
+  ];
+  for (const [label, ...args] of contractMutations) {
+    if (validateDesktopNoticeContract(...args).length === 0) {
+      console.error(`self-test: breaking ${label} did not fail closed`);
+      process.exit(1);
+    }
+  }
+  console.log("[license-coverage] self-test PASS — audit and every Tauri→sidecar→embedded-web packaging-link mutation were rejected.");
 }
 
 for (const [id] of shipped) {
