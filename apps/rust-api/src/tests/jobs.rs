@@ -113,6 +113,134 @@ async fn generic_jobs_route_still_serves_non_generation_types() {
     }
 }
 
+/// sc-13617 / F-055: raw jobs whose `model` reaches worker-side model path resolution must
+/// reject traversal before a job row exists. This table is the API-side inventory for that key.
+#[tokio::test]
+async fn generic_model_backed_jobs_reject_path_unsafe_model_before_create() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    for job_type in ["image_upscale", "prompt_refine"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": job_type,
+                "requestedGpu": "auto",
+                "payload": { "model": "../../outside" },
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{job_type}: {body}");
+    }
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(jobs.as_array().expect("jobs array").is_empty());
+}
+
+/// sc-13617 / F-055: raw utility jobs whose `modelId` reaches worker-side model path
+/// construction must reject traversal before persistence.
+#[tokio::test]
+async fn generic_model_utility_jobs_reject_path_unsafe_model_id_before_create() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    for job_type in ["model_download", "model_import", "model_convert"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": job_type,
+                "requestedGpu": "auto",
+                "payload": { "modelId": "../../outside" },
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{job_type}: {body}");
+    }
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(jobs.as_array().expect("jobs array").is_empty());
+}
+
+/// sc-13617 / F-011: retry and duplicate merge payloadChanges into an existing generation
+/// payload. Validate the merged model before either operation can persist a new job.
+#[tokio::test]
+async fn retry_and_duplicate_reject_path_unsafe_merged_generation_model_before_create() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Audio Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (status, audio_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "kokoro_82m",
+            "prompt": "Safe original",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{audio_job}");
+
+    let (status, vqa_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vqa/jobs",
+        json!({
+            "projectId": project_id,
+            "sourceAssetId": "asset-1",
+            "question": "What is shown?",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{vqa_job}");
+
+    let (status, interleave_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/interleave/jobs",
+        json!({
+            "projectId": project_id,
+            "prompt": "Create a safe image",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{interleave_job}");
+
+    for job in [&audio_job, &vqa_job, &interleave_job] {
+        let job_id = job["id"].as_str().expect("job id");
+        for operation in ["retry", "duplicate"] {
+            let (status, body) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "model": "../../outside" } }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{} {operation}: {body}",
+                job["type"]
+            );
+        }
+    }
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(jobs.as_array().expect("jobs array").len(), 3);
+}
+
 #[test]
 fn serialize_job_lora_carries_network_type_to_payload() {
     // A trained LoKr adapter records networkType (epic 2193); the generation
