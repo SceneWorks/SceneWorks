@@ -427,7 +427,6 @@ export function App() {
     loadedAssetsProjectId === activeProject?.id ? storedSelectedAssetId : null;
   const [projectFilter, setProjectFilter] = useState("all");
   const [requestedGpu, setRequestedGpu] = useState("auto");
-  const [jobPrompt, setJobPrompt] = useState("Placeholder generation");
   const [latestGenerationSetId, setLatestGenerationSetId] = useState(null);
   const [previewAsset, setPreviewAsset] = useState(null);
   // The collection the fullscreen preview was launched from, as an ordered list
@@ -1492,7 +1491,7 @@ export function App() {
   }
 
   const createPlaceholderJob = useCallback(
-    async (event) => {
+    async (event, prompt) => {
       event.preventDefault();
       try {
         await apiFetch("/api/v1/jobs", token, {
@@ -1503,8 +1502,8 @@ export function App() {
             projectName: activeProject?.name ?? null,
             requestedGpu,
             payload: {
-              prompt: jobPrompt,
-              createdFrom: activeView,
+              prompt,
+              createdFrom: activeViewRef.current,
             },
           }),
         });
@@ -1514,7 +1513,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token, activeProject, requestedGpu, jobPrompt, activeView],
+    [token, activeProject, requestedGpu],
   );
 
   const createImageJob = useCallback(
@@ -2336,8 +2335,6 @@ export function App() {
     createInterleaveJob,
     // Queue screen (sc-1651 Phase B batch 2)
     createPlaceholderJob,
-    jobPrompt,
-    setJobPrompt,
     projectFilter,
     setProjectFilter,
     projects,
@@ -2476,7 +2473,7 @@ export function App() {
     assets, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobAction, clearCompletedJobs, cancelPendingJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
-    jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects,
+    projectFilter, setProjectFilter, projects,
     createVideoJob, createVideoUpscaleJob, createImageJob, createAudioJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, studioLaunch,
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
