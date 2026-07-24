@@ -90,6 +90,7 @@ pub(crate) async fn create_job(
             payload.job_type.as_str()
         )));
     }
+    validate_raw_job_model_id(&payload.job_type, &payload.payload)?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: payload.job_type,
@@ -332,6 +333,7 @@ pub(crate) async fn retry_job(
     request: AxumRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     let payload = retry_job_request_from_body(request).await?;
+    validate_merged_generation_model(&state, &job_id, &payload.payload_changes).await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.retry_job(
             &job_id,
@@ -364,6 +366,7 @@ pub(crate) async fn duplicate_job(
     Path(job_id): Path<String>,
     ApiJson(payload): ApiJson<DuplicateJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_merged_generation_model(&state, &job_id, &payload.payload_changes).await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.duplicate_job(
             &job_id,
@@ -377,6 +380,44 @@ pub(crate) async fn duplicate_job(
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Validate the exact payload a retry/duplicate will enqueue. Existing job payloads are
+/// immutable, so reading and merging before the create transaction cannot race with a payload
+/// update; importantly, validation still happens before the new row is persisted or published.
+async fn validate_merged_generation_model(
+    state: &AppState,
+    job_id: &str,
+    payload_changes: &JsonObject,
+) -> Result<(), ApiError> {
+    let job_id = job_id.to_owned();
+    let job = store_call(state.clone(), move |store, _timeout| store.get_job(&job_id)).await?;
+    if typed_generation_route(&job.job_type).is_none() {
+        return Ok(());
+    }
+    let mut merged = job.payload;
+    merged.extend(payload_changes.clone());
+    validate_payload_model(&merged)
+}
+
+/// Utility jobs created through the raw queue route do not pass a typed request validator.
+/// `image_upscale` is the utility lane whose `model` value participates in model/path
+/// resolution, so guard that field at the API boundary before the job is persisted.
+fn validate_raw_job_model_id(job_type: &JobType, payload: &JsonObject) -> Result<(), ApiError> {
+    if matches!(job_type, JobType::ImageUpscale) {
+        validate_payload_model(payload)?;
+    }
+    Ok(())
+}
+
+fn validate_payload_model(payload: &JsonObject) -> Result<(), ApiError> {
+    if let Some(model) = payload.get("model") {
+        let model = model
+            .as_str()
+            .ok_or_else(|| ApiError::bad_request("model must be a string"))?;
+        validate_model_id(model)?;
+    }
+    Ok(())
 }
 
 /// Clear completed items from the queue (sc-12231, issue #1556). Soft-hides every
