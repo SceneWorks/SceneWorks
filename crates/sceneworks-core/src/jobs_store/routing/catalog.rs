@@ -1078,6 +1078,16 @@ derive_model_list! {
     pub(crate) CANDLE_ROUTED_MODELS, IMAGE_MODEL_CAPS, candle_routed
 }
 
+/// Built-in image model ids whose native, unconditioned shape is routed to the Candle worker.
+///
+/// This is the public read-only oracle for worker/scheduler parity checks. Callers must still apply
+/// request-shape routing: some ids (currently `bernini_image`) use a bespoke Candle lane rather than
+/// the generic txt2img engine, and imported `external_base_*` rows are routed from their forwarded
+/// manifest instead of this built-in catalog.
+pub fn candle_routed_image_models() -> &'static [&'static str] {
+    CANDLE_ROUTED_MODELS
+}
+
 derive_model_list! {
     /// The candle image families that advertise on-the-fly Q4/Q8 quant AND LoRA/LoKr adapters — Lens /
     /// Lens-Turbo and Krea 2 Turbo (derived from [`IMAGE_MODEL_CAPS`]`.candle_quant_lora`, sc-9495; Krea
