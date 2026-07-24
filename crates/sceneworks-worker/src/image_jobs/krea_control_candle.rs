@@ -456,10 +456,13 @@ async fn generate_candle_krea_control_stream(
     // plan — fixing the repeated-control-render needless downtier / reject. Same treatment as
     // `qwen_edit_candle.rs`; base.rs already gets it for free via the evicting cache. The admitted peak is
     // recorded (`note_loaded_peak` below) so a repeated control render can reclaim these pooled pages.
-    // sc-11042: `base` is the tier dir this lane resolved (`krea_model_subdir`'s output when the user has
-    // the packed MLX turnkey; a dense diffusers snapshot root otherwise, which is never an `nvfp4/` dir),
-    // so the NVFP4 tier is sized only when it is the tier that actually resolved.
-    let tier = crate::vram_gate::requested_tier_key(
+    // sc-11042 / sc-13619: budget the tier `resolve_krea_control_base` ACTUALLY selected. The turnkey
+    // resolver clamps/falls back to an installed tier, so request bits can disagree with the directory
+    // that loads (for example, requested q4 with only q8 installed). Dense/opaque roots have no tier
+    // basename and deliberately retain the request/NVFP4 fallback.
+    let tier = gate_tier_key(
+        /* convrot_resolved */ false,
+        &base,
         &request.advanced,
         &request.model_manifest_entry,
         nvfp4_selected(request, nvfp4_host_eligible(), Some(&base)),
@@ -597,4 +600,60 @@ async fn generate_candle_krea_control_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod krea_control_tier_reconcile_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(bits: i64) -> ImageRequest {
+        ImageRequest::from_payload(
+            json!({
+                "model": "krea_2_turbo",
+                "advanced": { "mlxQuantize": bits },
+                "modelManifestEntry": {}
+            })
+            .as_object()
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn fit_ladder_sizes_the_resolved_base_tier_before_request_fallback() {
+        let req = request(4);
+
+        // Installed-tier fallback: a q4 request that resolved q8 must budget q8.
+        assert_eq!(
+            gate_tier_key(
+                false,
+                Path::new("/cache/SceneWorks/krea-2-turbo-mlx/q8"),
+                &req.advanced,
+                &req.model_manifest_entry,
+                false,
+            ),
+            "q8"
+        );
+        assert_eq!(
+            crate::vram_gate::requested_tier_key(
+                &req.advanced,
+                &req.model_manifest_entry,
+                false,
+            ),
+            "q4",
+            "the request key intentionally differs in this regression"
+        );
+
+        // Bring-your-own dense snapshots have opaque basenames, preserving the request-derived fallback.
+        assert_eq!(
+            gate_tier_key(
+                false,
+                Path::new("/models/krea-dense-snapshot"),
+                &req.advanced,
+                &req.model_manifest_entry,
+                false,
+            ),
+            "q4"
+        );
+    }
 }

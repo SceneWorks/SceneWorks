@@ -5051,6 +5051,19 @@ fn vram_reject_tail(installed_smaller: &[&str]) -> String {
     )
 }
 
+/// Build the candle reject advice for `rejected_tier` from the tiers the loader can actually resolve.
+/// Kept pure so bespoke candle lanes can share the same truthfulness contract as the main image lane.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn vram_reject_tail_for_tier(installed: Vec<&'static str>, rejected_tier: &str) -> String {
+    let smaller: Vec<&'static str> = installed
+        .into_iter()
+        .filter(|candidate| {
+            tier_quality_rank(candidate) < tier_quality_rank(rejected_tier)
+        })
+        .collect();
+    vram_reject_tail(&smaller)
+}
+
 /// Candle per-tier capability fit for the downtier chooser (sc-10733): fold the full candle fit decision
 /// (predicted resident peak vs the live budget, plus the sequential-residency second stage where the
 /// provider stages components) down to [`TierFit`]. `Fits` = runs resident OR sequentially; `TooBig` =
