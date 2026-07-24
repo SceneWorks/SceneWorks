@@ -3016,10 +3016,13 @@
       },
       "defaults": {
         // Raw: undistilled base, TRUE CFG (the engine forwards a real guidance value + negative prompt),
-        // resolution-dynamic mu. Reference Raw preset (sc-7566 spike): 52 steps / guidance 3.5.
+        // resolution-dynamic mu. 52 steps / guidance 1.0. sc-14203: lowered the default from 3.5 to 1.0 —
+        // Krea's nominal 3.5 is effectively standard-CFG 4.5 on this true-CFG pipeline and oversaturates;
+        // ~1.0 renders natural (on-device render-validated). This is the Guidance-slider placeholder the
+        // Studio shows (guidanceDefaultFromModel) and the worker's resolve_guidance fallback both resolve to.
         "resolution": "1024x1024",
         "steps": 52,
-        "guidanceScale": 3.5,
+        "guidanceScale": 1.0,
         "count": 1,
         "sampler": "default",
         "scheduler": "default"
@@ -3105,27 +3108,26 @@
           "secondaryLabel": "Image 2 (optional)",
           "secondaryHint": "Optional — a second image combined with Image 1 in a fixed order (Image 1, then Image 2). In your instruction, refer to each subject by position (\"the person in image 1 / image 2\") or by description (\"the woman in the green jacket\") — either works."
         },
-        // sc-13881 (epic 13879): curated default negative prompt. UNLIKE the CFG-free Turbo (no negative),
-        // Raw runs TRUE classifier-free guidance and USES a negative — a concise quality negative is the
-        // single biggest lever on Raw's "soft/over-warm" look (S0 sc-13880 proved the pipeline is faithful;
-        // the softness was prompting/defaults, not an engine bug). Image Studio seeds this into an EMPTY
-        // negative box on text-to-image / character mode (promptSeed.seedsNegativeInMode + the seeding
-        // effect in ImageStudio.jsx), so it rides the SAME `negativePrompt` path Raw already forwards to
-        // the TRUE-CFG denoise — no new manifest key, no Rust wiring. User-overridable and clearable (a
-        // cleared box stays cleared; an empty override yields no negative). Deliberately MILD: the
-        // aggressive "smooth waxy skin, plastic skin" variant over-corrected into plastic. Cross-platform.
-        "defaultNegativePrompt": "blurry, soft focus, low detail, low quality",
+        // sc-14203 (partially revises sc-13881): NO default negative is seeded. sc-13881 shipped a curated
+        // default negative ("blurry, soft focus, low detail, low quality") to fight Raw's "soft/over-warm"
+        // look, but on-device render-validation showed the heat was driven by the guidance default (Krea's
+        // nominal 3.5 ≡ standard-CFG 4.5), and the S1 negative was a co-cause of the oversaturation: guidance
+        // 1.0 WITH the S1 negative still rendered hot, while guidance ~1.0 + an EMPTY negative renders
+        // natural. So a fresh Krea 2 Raw job now starts with an empty negative box. The negative-prompt
+        // CAPABILITY is unchanged — Raw still runs TRUE CFG and forwards a user-typed negative to the denoise
+        // — only the default seeding is removed. (Turbo remains CFG-free with no negative.)
         "label": "Krea 2 Raw",
-        "description": "Krea 2 Raw — Krea AI's undistilled 12B single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). The full-fidelity, TRUE classifier-free-guidance counterpart to the fast CFG-free Krea 2 Turbo: run ~52 steps with a real guidance scale (~3.5) and an optional negative prompt for the highest quality and the most control. Pre-quantized Q8 (~20.5 GB download, default); the dense bf16 tier doubles as the Krea 2 LoRA training base. Krea 2 Community License (non-commercial). Runs on Apple Silicon (MLX) and Windows/Linux NVIDIA GPUs (candle/CUDA, sc-9994); needs a 48 GB-class Mac or a ~32 GB-class CUDA GPU.",
+        "description": "Krea 2 Raw — Krea AI's undistilled 12B single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). The full-fidelity, TRUE classifier-free-guidance counterpart to the fast CFG-free Krea 2 Turbo: run ~52 steps with a real guidance scale (~1.0 renders natural on this pipeline) and an optional negative prompt for the highest quality and the most control. Pre-quantized Q8 (~20.5 GB download, default); the dense bf16 tier doubles as the Krea 2 LoRA training base. Krea 2 Community License (non-commercial). Runs on Apple Silicon (MLX) and Windows/Linux NVIDIA GPUs (candle/CUDA, sc-9994); needs a 48 GB-class Mac or a ~32 GB-class CUDA GPU.",
         "recommendedFor": ["text_to_image"],
         // PiD decoder (epic 7840, qwenimage latent space — Krea 2 Raw reuses the Qwen VAE, like Turbo) —
         // optional per-generation VAE replacement, decode + 2K/4K SR; NC output. See `qwen_image`.
         "pid": { "checkpointId": "pid_qwenimage" },
         // sc-13881 (epic 13879): Raw gets its OWN guide. The shared krea-2.md is TURBO-specific — it says
         // "no negative prompt", "~8 steps", "guidance none/CFG-off", all WRONG for Raw and steering users
-        // (and the Refine feature, which fetches this path) away from the negative + true-CFG regime that
-        // fixes Raw. krea-2-raw.md documents the real Raw regime: TRUE-CFG, ~52 steps, guidance ~3.5, USE a
-        // concise quality negative, SPECIFY lighting. Turbo (krea_2_turbo) still points at krea-2.md.
+        // (and the Refine feature, which fetches this path) away from the true-CFG regime Raw needs.
+        // krea-2-raw.md documents the real Raw regime: TRUE-CFG, ~52 steps, guidance ~1.0 (sc-14203 — Krea's
+        // nominal 3.5 ≡ std-CFG 4.5 and oversaturates), no default negative (add one only to steer away from
+        // a specific artifact), SPECIFY lighting. Turbo (krea_2_turbo) still points at krea-2.md.
         "promptGuide": {
           "title": "Krea 2 Raw Prompt Guide",
           "path": "/prompt-guides/krea-2-raw.md",

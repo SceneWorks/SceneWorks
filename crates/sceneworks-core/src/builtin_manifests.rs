@@ -184,13 +184,15 @@ mod tests {
     }
 
     #[test]
-    fn krea_2_raw_declares_the_sc13881_default_negative_and_raw_guide() {
-        // sc-13881 (epic 13879): Raw's UX/defaults fix set (NOT a pipeline fix — S0 sc-13880 proved the
-        // pipeline is faithful). Two source-of-truth manifest facts:
-        //   1. Raw seeds a MILD quality negative (biggest lever: Raw is TRUE-CFG and uses a negative,
-        //      unlike CFG-free Turbo). The aggressive "plastic skin" variant over-corrected, so the
-        //      shipped default is deliberately the conservative string.
-        //   2. Raw points at its OWN guide krea-2-raw.md (the shared krea-2.md is Turbo-specific — "no
+    fn krea_2_raw_declares_no_default_negative_and_low_guidance_with_raw_guide() {
+        // sc-14203 (partially revises sc-13881): Raw's defaults fix. On-device render-validation showed the
+        // "soft/over-warm" heat was driven by the guidance default (Krea's nominal 3.5 ≡ standard-CFG 4.5)
+        // AND the sc-13881 S1 negative was a CO-CAUSE — guidance 1.0 WITH the S1 negative still rendered hot,
+        // while guidance ~1.0 + an EMPTY negative renders natural. Source-of-truth manifest facts now:
+        //   1. Raw seeds NO default negative (the sc-13881 seeding is removed — a fresh job starts empty).
+        //      The negative-prompt capability is unchanged; only the default is gone.
+        //   2. Raw's default guidance is 1.0 (down from 3.5).
+        //   3. Raw points at its OWN guide krea-2-raw.md (the shared krea-2.md is Turbo-specific — "no
         //      negative", "~8 steps", "CFG-off" — all wrong for Raw); Turbo keeps krea-2.md.
         let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
         let manifest: serde_json::Value =
@@ -206,10 +208,18 @@ mod tests {
         };
 
         let raw = find("krea_2_raw");
+        // No default negative is seeded (sc-14203). Discriminating: this fails if a default negative — the
+        // sc-13881 string or any other — is re-added under ui.defaultNegativePrompt.
+        assert!(
+            raw["ui"]["defaultNegativePrompt"].is_null(),
+            "krea_2_raw declares no default negative (sc-14203 dropped the sc-13881 seeding), got {:?}",
+            raw["ui"]["defaultNegativePrompt"]
+        );
+        // Default guidance is 1.0, not the old 3.5 (pins the non-default so it discriminates a revert).
         assert_eq!(
-            raw["ui"]["defaultNegativePrompt"].as_str(),
-            Some("blurry, soft focus, low detail, low quality"),
-            "krea_2_raw seeds the sc-13881 mild quality negative"
+            raw["defaults"]["guidanceScale"].as_f64(),
+            Some(1.0),
+            "krea_2_raw defaults to guidance 1.0 (sc-14203)"
         );
         assert_eq!(
             raw["ui"]["promptGuide"]["path"].as_str(),

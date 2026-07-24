@@ -1759,6 +1759,47 @@ fn resolve_guidance_none_for_distilled_set_for_dev() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn fresh_krea_2_raw_job_resolves_default_guidance_1_and_empty_negative() {
+    // sc-14203: a fresh Krea 2 Raw job (no advanced.guidanceScale, no negativePrompt) must resolve to the
+    // TRUE-CFG guidance default 1.0 and an EMPTY negative. Raw advertises supports_guidance +
+    // supports_negative_prompt, so this exercises the real product path: `resolve_guidance` falls back to
+    // the ModelRow `default_guidance` (1.0, down from 3.5) and `resolve_negative_prompt` returns None
+    // because nothing is seeded server-side (the sc-13881 default-negative seeding was dropped).
+    let raw = mlx_model("krea_2_raw").unwrap();
+    // Pins the non-default 1.0 so it discriminates a revert to 3.5.
+    assert_eq!(
+        resolve_guidance(&request(json!({ "projectId": "p" })), &raw),
+        Some(1.0),
+        "fresh krea_2_raw resolves the sc-14203 default guidance 1.0"
+    );
+    // An explicit advanced.guidanceScale still overrides the default.
+    assert_eq!(
+        resolve_guidance(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 3.5 } })),
+            &raw
+        ),
+        Some(3.5),
+        "krea_2_raw honors an explicit guidance override"
+    );
+    // No negative is provided → empty (the worker never seeds one; the default seeding was removed).
+    assert_eq!(
+        resolve_negative_prompt(&request(json!({ "projectId": "p" })), &raw),
+        None,
+        "fresh krea_2_raw carries no default negative (sc-14203)"
+    );
+    // A user-typed negative is still honored — the capability is unchanged.
+    assert_eq!(
+        resolve_negative_prompt(
+            &request(json!({ "projectId": "p", "negativePrompt": "blurry" })),
+            &raw
+        ),
+        Some("blurry".to_owned()),
+        "krea_2_raw still forwards a user-typed negative"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn adapter_id_reports_per_family_mlx_label() {
     assert_eq!(
         adapter_id(&request(json!({ "model": "z_image_turbo" }))),
