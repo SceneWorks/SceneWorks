@@ -199,7 +199,7 @@ pub enum BaseWeightDetection {
 /// detector recognizes by its `txtfusion.` marker, whose builtins already route to the Krea MLX
 /// engine. Grows one entry per landed loader; keep it aligned with [`import_supported`]'s arms and
 /// with `MLX_ROUTED_FAMILIES` (routing).
-pub const IMPORT_SUPPORTED_FAMILIES: &[&str] = &["krea_2"];
+pub const IMPORT_SUPPORTED_FAMILIES: &[&str] = &["krea_2", "sdxl"];
 
 /// Whether an imported community single-file **base checkpoint** described by `verdict` can be
 /// assembled and run by a real engine today (sc-14019, epic 14015) — the compatibility gate behind
@@ -224,6 +224,11 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
             ComponentRole::Transformer,
             QuantFormat::Bf16 | QuantFormat::Int8TensorwisePerRow,
         ) => Ok(()),
+        (
+            Some("sdxl"),
+            ComponentRole::Checkpoint,
+            QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32,
+        ) => Ok(()),
 
         // --- Refusals: most specific first, each with an actionable, client-facing reason ---
         (None, _, _) => Err(
@@ -235,13 +240,24 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
             "Model import does not yet support the '{family}' family. Supported today: {}.",
             IMPORT_SUPPORTED_FAMILIES.join(", ")
         )),
-        (Some(family), component, _) if component != ComponentRole::Transformer => Err(format!(
-            "Model import for the '{family}' family currently supports only the diffusion \
-             transformer, not a {component} file."
+        (Some("krea_2"), component, _) if component != ComponentRole::Transformer => Err(format!(
+            "Model import for the 'krea_2' family requires a diffusion transformer, not a \
+             {component} file."
         )),
-        (Some(family), _, quant) => Err(format!(
-            "Model import for the '{family}' family currently supports only dense bf16 or \
-             descriptor-gated int8-per-row weights, not {quant}. Re-export the checkpoint in bf16."
+        (Some("sdxl"), component, _) if component != ComponentRole::Checkpoint => Err(format!(
+            "Model import for the 'sdxl' family requires a fused checkpoint containing the UNet, \
+             both text encoders, and VAE, not a {component} file."
+        )),
+        (Some("krea_2"), _, quant) => Err(format!(
+            "Model import for the 'krea_2' family supports dense bf16 or descriptor-gated \
+             int8-per-row weights, not {quant}. Re-export the checkpoint in bf16."
+        )),
+        (Some("sdxl"), _, quant) => Err(format!(
+            "Model import for the 'sdxl' family supports dense f16, bf16, or f32 fused checkpoints, \
+             not {quant}."
+        )),
+        (Some(family), _, _) => Err(format!(
+            "Model import has no compatible loader arm for the '{family}' family."
         )),
     }
 }
@@ -518,6 +534,17 @@ fn detect_base_family(keys: &[&str]) -> Option<String> {
 /// we ship, so one hit is decisive (mirroring the LoRA detector's
 /// `detect_unique_key_family` posture).
 fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
+    // Classic SDXL LDM/A1111 fused checkpoint: a UNet under `model.diffusion_model.input_blocks`,
+    // dual CLIP conditioners, and a `first_stage_model` VAE. The UNet input/output/middle block
+    // grammar is distinct from modern DiTs; requiring the SDXL second conditioner prevents an SD1.5
+    // checkpoint from being misrouted into the dual-CLIP SDXL loader.
+    if any_key_contains(keys, "model.diffusion_model.input_blocks.")
+        && any_key_contains(keys, "model.diffusion_model.middle_block.")
+        && any_key_contains(keys, "conditioner.embedders.1.model.")
+        && any_key_contains(keys, "first_stage_model.")
+    {
+        return Some("sdxl");
+    }
     // Z-Image (epic 1408): `context_refiner`/`noise_refiner`/`cap_embedder` are
     // unique. Shares the bare `layers.N.attention.qkv` fused-QKV layout with
     // Ideogram, so it must be checked by its own refiner markers first.
@@ -704,6 +731,33 @@ mod tests {
         assert_eq!(verdict.family.as_deref(), Some("krea_2"));
         assert_eq!(verdict.component, ComponentRole::Transformer);
         assert_eq!(verdict.quant, QuantFormat::Bf16);
+    }
+
+    #[test]
+    fn fused_sdxl_a1111_file_is_checkpoint() {
+        let verdict = recognized(classify_base_header(&header(&[
+            (
+                "model.diffusion_model.input_blocks.7.0.out_layers.3.weight",
+                "F16",
+            ),
+            (
+                "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+                "F16",
+            ),
+            (
+                "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight",
+                "F16",
+            ),
+            (
+                "conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight",
+                "F16",
+            ),
+            ("first_stage_model.encoder.conv_in.weight", "F16"),
+            ("first_stage_model.decoder.conv_out.weight", "F16"),
+        ])));
+        assert_eq!(verdict.family.as_deref(), Some("sdxl"));
+        assert_eq!(verdict.component, ComponentRole::Checkpoint);
+        assert_eq!(verdict.quant, QuantFormat::F16);
     }
 
     #[test]
@@ -1228,6 +1282,27 @@ mod tests {
     }
 
     #[test]
+    fn import_supported_accepts_dense_fused_sdxl_only() {
+        for quant in [QuantFormat::F16, QuantFormat::Bf16, QuantFormat::F32] {
+            assert!(
+                import_supported(&verdict(Some("sdxl"), ComponentRole::Checkpoint, quant)).is_ok()
+            );
+        }
+        assert!(import_supported(&verdict(
+            Some("sdxl"),
+            ComponentRole::Transformer,
+            QuantFormat::F16
+        ))
+        .is_err());
+        assert!(import_supported(&verdict(
+            Some("sdxl"),
+            ComponentRole::Checkpoint,
+            QuantFormat::Fp8E4m3
+        ))
+        .is_err());
+    }
+
+    #[test]
     fn import_supported_refuses_krea2_transformer_deferred_quant() {
         // Same family + component, but a packed quant with no loader → refused with the quant named.
         let reason = import_supported(&verdict(
@@ -1314,13 +1389,13 @@ mod tests {
         // Guardrail: every family the gate advertises must actually have an Ok triple, so the
         // advertised set and the `match` arms can never drift (add the family here + its arm together).
         for family in IMPORT_SUPPORTED_FAMILIES {
+            let component = if *family == "sdxl" {
+                ComponentRole::Checkpoint
+            } else {
+                ComponentRole::Transformer
+            };
             assert!(
-                import_supported(&verdict(
-                    Some(family),
-                    ComponentRole::Transformer,
-                    QuantFormat::Bf16
-                ))
-                .is_ok(),
+                import_supported(&verdict(Some(family), component, QuantFormat::Bf16)).is_ok(),
                 "IMPORT_SUPPORTED_FAMILIES lists {family} but no bf16 transformer arm accepts it"
             );
         }

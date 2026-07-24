@@ -11039,6 +11039,63 @@ fn resolve_image_route_sends_imported_single_file_krea_to_the_bespoke_lane() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_image_route_sends_only_plain_imported_sdxl_to_fused_lane() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir
+        .path()
+        .join("models")
+        .join("imports")
+        .join("community-xl.safetensors");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"sdxl").unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    let payload = |extra: Value| {
+        let mut value = json!({
+            "projectId": "p",
+            "model": "community_xl",
+            "prompt": "a fox",
+            "modelManifestEntry": {
+                "family": "sdxl",
+                "modelPath": file.to_str().unwrap()
+            }
+        });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        request(value)
+    };
+
+    let plain = payload(json!({}));
+    assert_eq!(
+        resolve_imported_sdxl_file(&plain, &settings).unwrap(),
+        Some(std::fs::canonicalize(&file).unwrap_or(file.clone()))
+    );
+    assert!(sdxl_imported_available(&plain, &settings));
+    assert_eq!(
+        resolve_image_route(&plain, &settings),
+        Some(ImageRoute::SdxlImported)
+    );
+
+    for conditioned in [
+        payload(json!({ "referenceAssetId": "asset-1" })),
+        payload(json!({ "mode": "edit_image", "sourceAssetId": "asset-1" })),
+        payload(json!({ "advanced": { "poses": [{}] } })),
+    ] {
+        assert!(
+            !sdxl_imported_available(&conditioned, &settings),
+            "conditioning must never be silently dropped by the fused txt2img lane"
+        );
+        assert_ne!(
+            resolve_image_route(&conditioned, &settings),
+            Some(ImageRoute::SdxlImported)
+        );
+    }
+}
+
 /// Candle twin of the MLX route regression above: the external id is absent from the builtin table,
 /// yet a real app-managed single-file Krea manifest resolves to the bespoke Candle dispatch variant.
 /// The exhaustive match in `run_image_job` maps that variant to `generate_krea_imported_stream`.
