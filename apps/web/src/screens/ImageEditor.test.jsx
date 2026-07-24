@@ -85,6 +85,9 @@ import {
   leaveGuardArming,
   closeConfirmMessage,
   saveStatusIndicator,
+  consumeEditorLaunch,
+  createEditorLaunchGuard,
+  InlineLayerName,
 } from "./ImageEditor.jsx";
 import { verifyCaption, serializeCaption, ELEMENT_KEY_ORDER_OBJ } from "../ideogramCaption.js";
 
@@ -297,8 +300,9 @@ describe("ImageEditor scaffold", () => {
       expect(fetchSpy.mock.calls[0][0]).toContain(
         "/api/v1/projects/project_1/files/assets/images/launched.png",
       );
-      // The launch is consumed exactly once so returning to the editor won't re-open it.
-      expect(clearEditorLaunch).toHaveBeenCalledTimes(1);
+      // Clearing is deliberately deferred until image decoding/open handling completes.
+      // The ordering and cancellation behavior is pinned by the helper test below.
+      expect(clearEditorLaunch).not.toHaveBeenCalled();
     });
 
     it("ignores a launch whose asset isn't a renderable image in the project", async () => {
@@ -315,6 +319,113 @@ describe("ImageEditor scaffold", () => {
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(clearEditorLaunch).toHaveBeenCalledTimes(1);
     });
+
+    it("keeps a launch pending when discard is cancelled and only clears after opening", async () => {
+      const openAsset = vi.fn(async () => {});
+      const clearLaunch = vi.fn();
+      const launch = { id: "launch-dirty", assetId: IMAGE_ASSET.id };
+
+      expect(
+        await consumeEditorLaunch({
+          launch,
+          confirmDiscard: vi.fn(async () => false),
+          openAsset,
+          clearLaunch,
+        }),
+      ).toBe(false);
+      expect(openAsset).not.toHaveBeenCalled();
+      expect(clearLaunch).not.toHaveBeenCalled();
+
+      expect(
+        await consumeEditorLaunch({
+          launch,
+          confirmDiscard: vi.fn(async () => true),
+          openAsset,
+          clearLaunch,
+        }),
+      ).toBe(true);
+      expect(openAsset).toHaveBeenCalledWith(IMAGE_ASSET.id);
+      expect(clearLaunch).toHaveBeenCalledTimes(1);
+      expect(openAsset.mock.invocationCallOrder[0]).toBeLessThan(clearLaunch.mock.invocationCallOrder[0]);
+    });
+
+    it("serializes dirty transitions and ignores a stale launch replaced during confirmation", async () => {
+      let resolveFirst;
+      const firstConfirm = new Promise((resolve) => {
+        resolveFirst = resolve;
+      });
+      const guard = createEditorLaunchGuard();
+      let currentId = "launch-old";
+      const confirmDiscard = vi.fn(() => firstConfirm);
+      const openAsset = vi.fn(async () => {});
+      const clearLaunch = vi.fn();
+      const oldLaunch = { id: "launch-old", assetId: "asset-old" };
+
+      const oldAttempt = guard.consume({
+        launch: oldLaunch,
+        isCurrent: (id) => currentId === id,
+        confirmDiscard,
+        openAsset,
+        clearLaunch,
+      });
+      // A dirty-state rerender for the same launch must not raise a second prompt.
+      await guard.consume({
+        launch: oldLaunch,
+        isCurrent: (id) => currentId === id,
+        confirmDiscard,
+        openAsset,
+        clearLaunch,
+      });
+      expect(confirmDiscard).toHaveBeenCalledTimes(1);
+
+      currentId = "launch-new";
+      const newAttempt = guard.consume({
+        launch: { id: "launch-new", assetId: "asset-new" },
+        isCurrent: (id) => currentId === id,
+        confirmDiscard: vi.fn(async () => true),
+        openAsset,
+        clearLaunch,
+      });
+      await newAttempt;
+      resolveFirst(true);
+      await oldAttempt;
+
+      expect(openAsset).toHaveBeenCalledTimes(1);
+      expect(openAsset).toHaveBeenCalledWith("asset-new");
+      expect(clearLaunch).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+describe("inline layer rename", () => {
+  it("uses a keyboard-accessible inline field, commits Enter, and cancels Escape", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const onRename = vi.fn();
+    const layer = { id: "layer-1", name: "Background" };
+
+    await act(async () => root.render(<InlineLayerName layer={layer} onRename={onRename} />));
+    const button = container.querySelector('button[title="Rename layer"]');
+    await act(async () => button.click());
+    let input = container.querySelector('input[aria-label="Rename Background"]');
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+      setter.call(input, "  Plate  ");
+      input.dispatchEvent(new window.Event("input", { bubbles: true }));
+      input.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    expect(onRename).toHaveBeenCalledWith("layer-1", "Plate");
+
+    await act(async () => container.querySelector('button[title="Rename layer"]').click());
+    input = container.querySelector('input[aria-label="Rename Background"]');
+    await act(async () =>
+      input.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })),
+    );
+    expect(onRename).toHaveBeenCalledTimes(1);
+
+    await act(async () => root.unmount());
+    container.remove();
   });
 });
 

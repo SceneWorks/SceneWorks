@@ -41,7 +41,7 @@ function presetSourceUrl(preset) {
 
 // --- Library tab ------------------------------------------------------------
 
-function PresetCard({ preset, onDelete }) {
+function PresetCard({ preset, onDelete, deleting }) {
   return (
     <div className="keypoint-card">
       <div className="keypoint-card-figure">
@@ -60,15 +60,15 @@ function PresetCard({ preset, onDelete }) {
         </span>
       </div>
       {!preset.builtin && onDelete ? (
-        <button className="link-button danger" onClick={() => onDelete(preset)} type="button">
-          Delete
+        <button className="link-button danger" disabled={deleting} onClick={() => onDelete(preset)} type="button">
+          {deleting ? "Deleting…" : "Delete"}
         </button>
       ) : null}
     </div>
   );
 }
 
-function KeypointLibraryPanel({ hidden, presets, loading, error, onDelete }) {
+function KeypointLibraryPanel({ hidden, presets, loading, error, onDelete, deletingPresetId }) {
   const builtins = presets.filter((preset) => preset.builtin);
   const custom = presets.filter((preset) => !preset.builtin);
   return (
@@ -95,7 +95,12 @@ function KeypointLibraryPanel({ hidden, presets, loading, error, onDelete }) {
             {custom.length ? (
               <div className="keypoint-grid">
                 {custom.map((preset) => (
-                  <PresetCard key={preset.id} preset={preset} onDelete={onDelete} />
+                  <PresetCard
+                    deleting={Boolean(deletingPresetId)}
+                    key={preset.id}
+                    preset={preset}
+                    onDelete={onDelete}
+                  />
                 ))}
               </div>
             ) : (
@@ -372,6 +377,7 @@ function KeypointCollectionsPanel({ hidden, presets, collections, collectionsLoa
   const [editingId, setEditingId] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const deletePendingRef = useRef(false);
 
   const presetById = useMemo(() => Object.fromEntries(presets.map((preset) => [preset.id, preset])), [presets]);
 
@@ -453,6 +459,33 @@ function KeypointCollectionsPanel({ hidden, presets, collections, collectionsLoa
     });
   }, [name, orderedIds, editingId, token, wrap, resetBuilder]);
 
+  const deleteCollection = useCallback(
+    async (collection) => {
+      if (deletePendingRef.current) return;
+      deletePendingRef.current = true;
+      setBusy(true);
+      setError("");
+      try {
+        const ok = await appConfirm({
+          title: "Delete keypoint collection?",
+          message: `Delete “${collection.name}”? This cannot be undone.`,
+          confirmLabel: "Delete",
+          cancelLabel: "Keep collection",
+          tone: "danger",
+        });
+        if (!ok) return;
+        await deleteKeypointCollection(token, collection.id);
+        onChanged?.();
+      } catch (err) {
+        setError(String(err?.message ?? err));
+      } finally {
+        deletePendingRef.current = false;
+        setBusy(false);
+      }
+    },
+    [token, onChanged],
+  );
+
   return (
     <div aria-labelledby="keypoint-tab-collections" hidden={hidden} id="keypoint-panel-collections" role="tabpanel">
       <div className="keypoint-collections">
@@ -493,7 +526,7 @@ function KeypointCollectionsPanel({ hidden, presets, collections, collectionsLoa
                         <button
                           className="link-button danger"
                           disabled={busy}
-                          onClick={() => wrap(() => deleteKeypointCollection(token, collection.id))}
+                          onClick={() => deleteCollection(collection)}
                           type="button"
                         >
                           Delete
@@ -626,6 +659,9 @@ async function postExtractJob(token, requestedGpu, sourcePath) {
 
 export function KeyPointLibraryScreen() {
   const [activeTab, setActiveTab] = useState("library");
+  const [deleteError, setDeleteError] = useState("");
+  const [deletingPresetId, setDeletingPresetId] = useState(null);
+  const deletePendingRef = useRef(false);
   const { token } = useAppStatic();
   const { presets, loading: presetsLoading, error: presetsError, reload: reloadPresets } = useKeypointPresets();
   const {
@@ -636,9 +672,28 @@ export function KeyPointLibraryScreen() {
 
   const deletePreset = useCallback(
     async (preset) => {
-      await deleteKeypointPreset(token, preset.id);
-      await reloadPresets();
-      await reloadCollections();
+      if (deletePendingRef.current) return;
+      deletePendingRef.current = true;
+      setDeletingPresetId(preset.id);
+      setDeleteError("");
+      try {
+        const ok = await appConfirm({
+          title: "Delete keypoint preset?",
+          message: `Delete “${preset.name}”? Collections that use it may also be affected.`,
+          confirmLabel: "Delete",
+          cancelLabel: "Keep preset",
+          tone: "danger",
+        });
+        if (!ok) return;
+        await deleteKeypointPreset(token, preset.id);
+        await reloadPresets();
+        await reloadCollections();
+      } catch (err) {
+        setDeleteError(String(err?.message ?? err));
+      } finally {
+        deletePendingRef.current = false;
+        setDeletingPresetId(null);
+      }
     },
     [token, reloadPresets, reloadCollections],
   );
@@ -668,8 +723,9 @@ export function KeyPointLibraryScreen() {
         hidden={activeTab !== "library"}
         presets={presets}
         loading={presetsLoading}
-        error={presetsError}
+        error={deleteError || presetsError}
         onDelete={deletePreset}
+        deletingPresetId={deletingPresetId}
       />
       <KeypointCapturePanel
         hidden={activeTab !== "capture"}
