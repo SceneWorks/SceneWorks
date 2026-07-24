@@ -295,6 +295,15 @@ fails before the API launches with the exact path and an actionable permissions
 error; fix the export/ACL or use writable per-path overrides. No existing data
 is removed.
 
+Release tags matching `vX.Y.Z` publish the combined `linux/amd64` image to
+`ghcr.io/sceneworks/sceneworks-runpod:X.Y.Z` and `:latest`. The same workflow can
+be dispatched manually for verification; it publishes only a `manual-*` tag
+(default `manual-<short-sha>`) and cannot update `latest`. This is intentionally
+a heavy build: nvcc compiles every candle provider inside the Dockerfile, so a
+cold run can occupy a hosted runner for well over an hour. The workflow keeps
+the image's CUDA 12.9.1 builder/runtime pin aligned with the standing candle CI
+lanes and publishes only `linux/amd64` in v1.
+
 Key knobs:
 
 - `SCENEWORKS_API_PORT` / `SCENEWORKS_WEB_PORT` — container/host ports for the API

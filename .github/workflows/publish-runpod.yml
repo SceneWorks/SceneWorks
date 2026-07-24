@@ -1,0 +1,145 @@
+name: Publish RunPod image
+
+# A release build compiles every candle CUDA provider and can consume most of a
+# hosted runner's 120-minute budget. Keep this lane off pull requests and branch
+# pushes; the normal Check workflow provides PR-time scaffold/parity coverage.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Optional safe tag (must start with manual-); defaults to manual-<short-sha>"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-runpod-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/sceneworks/sceneworks-runpod
+  CARGO_NET_OFFLINE: "true"
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate publication ref and derive tags
+        id: publication
+        shell: bash
+        env:
+          MANUAL_TAG_INPUT: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            if [[ "${GITHUB_REF}" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+              release_tag="${BASH_REMATCH[1]}"
+            else
+              echo "Refusing to publish: release refs must be exact vX.Y.Z tags." >&2
+              exit 1
+            fi
+            {
+              echo "release=true"
+              echo "release_tag=${release_tag}"
+              echo "manual_tag=manual-disabled"
+            } >> "${GITHUB_OUTPUT}"
+          else
+            tag="${MANUAL_TAG_INPUT}"
+            if [[ -z "${tag}" ]]; then
+              tag="manual-${GITHUB_SHA:0:12}"
+            fi
+            if [[ ! "${tag}" =~ ^manual-[a-z0-9][a-z0-9._-]{0,119}$ ]]; then
+              echo "Refusing to publish: manual tags must match ^manual-[a-z0-9][a-z0-9._-]{0,119}$." >&2
+              exit 1
+            fi
+            {
+              echo "release=false"
+              echo "release_tag=0.0.0"
+              echo "manual_tag=${tag}"
+            } >> "${GITHUB_OUTPUT}"
+          fi
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: stable
+
+      # Do the cheap repository invariants before spending runner time on nvcc.
+      # The Dockerfile itself performs the web + embed-web/backend-candle release
+      # builds, so repeating those host compilations here would double the cost.
+      - name: Validate scaffold and RunPod publication contracts
+        run: |
+          npm run check
+          npm run check:docker:runpod
+      - name: Fetch the private inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+          GIT_CONFIG_COUNT: "1"
+          # The dedicated read token takes precedence if inference becomes
+          # private again. It is currently public, so GITHUB_TOKEN is a secure,
+          # always-nonempty fallback rather than an empty BuildKit secret.
+          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}@github.com/SceneWorks/inference.insteadOf"
+          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
+        run: cargo fetch --locked
+      - name: Guard against gen-core version skew (candle)
+        run: |
+          bash scripts/check-gen-core-skew.sh --self-test
+          bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle
+          bash scripts/check-gen-core-skew.sh sceneworks-rust-api --features embed-web,backend-candle
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Derive OCI metadata
+        id: metadata
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ steps.publication.outputs.release_tag }},enable=${{ steps.publication.outputs.release == 'true' }}
+            type=raw,value=latest,enable=${{ steps.publication.outputs.release == 'true' }}
+            type=raw,value=${{ steps.publication.outputs.manual_tag }},enable=${{ steps.publication.outputs.release != 'true' }}
+      - name: Build and publish combined RunPod image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/rust.Dockerfile
+          target: runpod
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          secrets: |
+            inference_token=${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+          cache-from: type=gha,scope=runpod-amd64
+          cache-to: type=gha,mode=max,scope=runpod-amd64
+
+      - name: Publish summary
+        env:
+          IMAGE_TAGS: ${{ steps.metadata.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### RunPod image published"
+            echo
+            echo '```text'
+            echo "${IMAGE_TAGS}"
+            echo "digest=${IMAGE_DIGEST}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
