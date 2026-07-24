@@ -1127,24 +1127,22 @@ async fn encode_inner(
     Ok(())
 }
 
-/// Peak-normalize the f32 PCM to 16-bit and write a canonical WAV. Silence (peak 0)
-/// stays silent rather than dividing by zero. `pub(crate)` so the pure-audio job path reuses it
-/// (sc-13404).
+/// Encode the f32 PCM to 16-bit and write a canonical WAV, using the standard float→PCM
+/// convention: clamp to `[-1, 1]`, then scale by `i16::MAX`. `pub(crate)` so the pure-audio job
+/// path reuses it (sc-13404).
+///
+/// This deliberately does **not** peak-normalize. Dividing by the clip's own peak forces every
+/// asset to 0 dBFS, which (a) destroys the generator's absolute loudness — a deliberately quiet
+/// render and a loud one become indistinguishable — and (b) turns a *failed*, near-silent render
+/// into full-scale noise by applying enormous make-up gain to nothing but the residual floor. A
+/// MOSS-SoundEffect render whose peak came out at 0.02 was being amplified by +33.8 dB here and
+/// registered as a loud, hissy asset instead of the silence it actually was. Level correction, if
+/// ever wanted, belongs in an explicit, opt-in loudness stage (BS.1770-4), not silently in the
+/// encoder.
 pub(crate) fn write_wav_pcm16(audio: &AudioTrack, path: &Path) -> WorkerResult<()> {
-    let peak = audio
-        .samples
-        .iter()
-        .fold(0.0f32, |max, &sample| max.max(sample.abs()));
-    let scale = if peak > 0.0 {
-        i16::MAX as f32 / peak
-    } else {
-        0.0
-    };
     let mut pcm = Vec::with_capacity(audio.samples.len() * 2);
     for &sample in &audio.samples {
-        let value = (sample * scale)
-            .round()
-            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
         pcm.extend_from_slice(&value.to_le_bytes());
     }
 
@@ -14583,7 +14581,7 @@ mod tests {
     }
 
     #[test]
-    fn wav_header_is_canonical_and_peak_normalized() {
+    fn wav_header_is_canonical_and_preserves_absolute_level() {
         let audio = AudioTrack {
             samples: vec![0.0, 0.5, -0.25, 0.5],
             sample_rate: 48_000,
@@ -14599,13 +14597,33 @@ mod tests {
         assert_eq!(&bytes[36..40], b"data");
         // 4 mono 16-bit samples → 8 bytes of PCM, 44-byte header.
         assert_eq!(bytes.len(), 44 + 8);
-        // Peak (0.5) maps to i16::MAX; the matching trough (-0.25) is half-scale negative.
+        // Absolute level is PRESERVED, not normalized: 0.5 stays half scale rather than being
+        // lifted to full scale. The writer used to divide by the clip's own peak, which made a
+        // collapsed near-silent render indistinguishable from a loud one (and amplified its noise
+        // floor to 0 dBFS) — see the writer's doc comment.
         let first = i16::from_le_bytes([bytes[44], bytes[45]]);
-        let peak = i16::from_le_bytes([bytes[46], bytes[47]]);
-        let trough = i16::from_le_bytes([bytes[48], bytes[49]]);
+        let half = i16::from_le_bytes([bytes[46], bytes[47]]);
+        let quarter = i16::from_le_bytes([bytes[48], bytes[49]]);
         assert_eq!(first, 0);
-        assert_eq!(peak, i16::MAX);
-        assert_eq!(trough, -(i16::MAX / 2) - 1); // -0.25/0.5 * 32767, rounded
+        assert_eq!(half, (0.5 * i16::MAX as f32) as i16);
+        assert_eq!(quarter, (-0.25 * i16::MAX as f32) as i16);
+    }
+
+    #[test]
+    fn wav_writer_clamps_out_of_range_samples_instead_of_wrapping() {
+        // A generator that overshoots [-1, 1] must clip, never wrap around to the opposite sign.
+        let audio = AudioTrack {
+            samples: vec![2.0, -2.0],
+            sample_rate: 48_000,
+            channels: 1,
+        };
+        let dir = std::env::temp_dir().join(format!("sw_wav_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clamp.wav");
+        write_wav_pcm16(&audio, &path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(i16::from_le_bytes([bytes[44], bytes[45]]), i16::MAX);
+        assert_eq!(i16::from_le_bytes([bytes[46], bytes[47]]), -i16::MAX);
     }
 
     #[test]

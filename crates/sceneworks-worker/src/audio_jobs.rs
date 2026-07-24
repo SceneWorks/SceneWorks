@@ -541,11 +541,23 @@ pub(crate) async fn run_audio_generate_job(
         .samples
         .iter()
         .fold(0.0f32, |max, &sample| max.max(sample.abs()));
-    if sample_count == 0 || peak == 0.0 {
+    // Dead-render guard. An exact `peak == 0.0` test is too weak: a collapsed diffusion render
+    // returns a residual noise floor, not true zeros (a MOSS-SoundEffect run at its default 100
+    // solver steps came back at peak 0.02 / RMS 0.0002 — inaudible, but not zero), so it slipped
+    // through and was registered as a real asset. Gate on RMS instead: -60 dBFS is far below any
+    // usable render while still admitting deliberately quiet content, which a peak test cannot
+    // distinguish because one stray sample lifts the peak arbitrarily.
+    const MIN_RMS: f32 = 1e-3; // -60 dBFS
+    let rms = if sample_count == 0 {
+        0.0
+    } else {
+        (track.samples.iter().map(|s| s * s).sum::<f32>() / sample_count as f32).sqrt()
+    };
+    if sample_count == 0 || peak == 0.0 || rms < MIN_RMS {
         return Err(WorkerError::Engine(format!(
-            "{}: the audio generator produced silence ({} samples, peak {peak}) — refusing to \
-             register an empty clip.",
-            request.model, sample_count
+            "{}: the audio generator produced silence ({sample_count} samples, peak {peak:.5}, \
+             RMS {rms:.6} < {MIN_RMS}) — refusing to register an empty clip.",
+            request.model
         )));
     }
 
