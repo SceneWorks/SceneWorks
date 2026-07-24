@@ -490,6 +490,18 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::SdxlImported => {
+                generate_sdxl_imported_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::InstantId => {
                 // InstantID identity-preserving character image (sc-3345): single identity or
                 // grouped angle/pose sets, on RealVisXL + IdentityNet + the native face stack.
@@ -960,6 +972,18 @@ pub(crate) async fn run_image_generate_job(
                 // unconditioned request; keep it distinct from the builtin registry path.
                 CandleImageRoute::KreaImported => {
                     generate_krea_imported_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                CandleImageRoute::SdxlImported => {
+                    generate_sdxl_imported_stream(
                         api,
                         settings,
                         job,
@@ -1812,6 +1836,11 @@ include!("image_jobs/krea_control.rs");
 // loaded through the selected runtime's native single-file entrypoint, bypassing the registry
 // snapshot-dir path. Shared by MLX and Candle so global import acceptance always has a real route.
 include!("image_jobs/krea_imported.rs");
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+include!("image_jobs/sdxl_imported.rs");
 #[cfg(target_os = "macos")]
 // SenseNova edit routing.
 include!("image_jobs/sensenova.rs");

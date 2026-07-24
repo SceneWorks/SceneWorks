@@ -113,6 +113,9 @@ enum ImageRoute {
     /// `resolve_imported_krea_dit` returns `None` for it, so the snapshot-dir Krea path is untouched.
     /// txt2img only (a bare imported DiT carries no conditioning components).
     KreaImported,
+    /// A fused SDXL LDM/A1111 single-file checkpoint. The file carries the UNet, both text encoders,
+    /// and VAE; tokenizer assets are borrowed from the installed SDXL base turnkey.
+    SdxlImported,
     InstantId,
     PulidFlux,
     SdxlAdvanced,
@@ -225,6 +228,8 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         // builtin Krea. The imported id is in no `MODEL_TABLE`, so `mlx_available` is `false` for it — this
         // arm is what routes it to real MLX generation at all (S0d marked it Mac-routable; this loads it).
         Some(ImageRoute::KreaImported)
+    } else if sdxl_imported_available(request, settings) {
+        Some(ImageRoute::SdxlImported)
     } else if instantid_available(request, settings) {
         Some(ImageRoute::InstantId)
     } else if pulid_flux_available(request, settings) {
@@ -307,6 +312,7 @@ impl ImageRoute {
             // Imported single-file Krea 2 (S0c) is plain per-image txt2img: `count` renders, each its own
             // seed. No angle/pose grouping (a bare imported DiT carries no conditioning).
             | ImageRoute::KreaImported
+            | ImageRoute::SdxlImported
             | ImageRoute::PoseControlBaseMissing
             | ImageRoute::PoseReject
             | ImageRoute::Mlx => request.count,
@@ -362,6 +368,9 @@ enum CandleImageRoute {
     /// the off-Mac twin of [`ImageRoute::KreaImported`], required because imported IDs are not registry
     /// engine IDs and would otherwise fall through to the procedural stub.
     KreaImported,
+    /// Off-Mac twin of [`ImageRoute::SdxlImported`], loaded by candle from the fused checkpoint plus
+    /// the three caller-staged SDXL components.
+    SdxlImported,
     /// Z-Image identity-init for Image Studio "With Character" (sc-8409).
     ZimageIdentity,
     /// SDXL IP-Adapter-Plus reference conditioning (sc-5488).
@@ -543,6 +552,8 @@ fn resolve_candle_image_route(
         // Imported/user Krea 2 single-file t2i: external IDs are absent from `is_candle_engine`, so
         // this bespoke route must claim them before the generic/external fall-through.
         Some(CandleImageRoute::KreaImported)
+    } else if sdxl_imported_available(request, settings) {
+        Some(CandleImageRoute::SdxlImported)
     } else if zimage_comfyui_available(request, settings) {
         // In-place ComfyUI Z-Image base (sc-10668): an `external_base_*` id, so it matches no
         // `is_candle_engine` arm below — route it here off the forwarded `modelManifestEntry`.

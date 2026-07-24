@@ -884,7 +884,7 @@ derive_model_list! {
 /// alone and has no id→family map; keep it aligned with the same-family builtins above and with the
 /// import gate (`sceneworks_core::base_weights::IMPORT_SUPPORTED_FAMILIES`). Pinned by the
 /// `EXPECTED_MLX_ROUTED_FAMILIES` snapshot test.
-pub(crate) const MLX_ROUTED_FAMILIES: &[&str] = &["krea_2"];
+pub(crate) const MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "sdxl"];
 
 /// Whether an image `family` string routes to an in-process MLX engine via the route-by-family path
 /// (sc-14019) — i.e. it is a member of [`MLX_ROUTED_FAMILIES`]. Consulted only for non-builtin ids.
@@ -897,7 +897,7 @@ pub(crate) fn image_family_is_mlx_routed(family: &str) -> bool {
 /// checkpoints have novel ids and are claimed only after the scheduler validates their manifest
 /// family and supported request shape. Seeded by the descriptor-gated Krea single-file lane
 /// (sc-14023).
-pub(crate) const CANDLE_ROUTED_FAMILIES: &[&str] = &["krea_2"];
+pub(crate) const CANDLE_ROUTED_FAMILIES: &[&str] = &["krea_2", "sdxl"];
 
 /// Whether `id` names a builtin image model (a row in [`IMAGE_MODEL_CAPS`]). The route-by-family
 /// path applies only to non-builtin (imported/user) ids, so a builtin's id-keyed routing is never
@@ -930,11 +930,8 @@ pub(crate) fn imported_image_request_family_eligible(
     let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
         return false;
     };
-    let family_is_routed = entry
-        .get("family")
-        .and_then(Value::as_str)
-        .is_some_and(|family| routed_families.contains(&family));
-    if !family_is_routed {
+    let family = entry.get("family").and_then(Value::as_str);
+    if !family.is_some_and(|family| routed_families.contains(&family)) {
         return false;
     }
     let has_nonempty_path = entry
@@ -980,6 +977,23 @@ pub(crate) fn imported_image_request_family_eligible(
         .and_then(|advanced| advanced.get("phases"))
         .and_then(Value::as_array)
         .is_some_and(|phases| !phases.is_empty());
+
+    // A fused SDXL checkpoint contains the complete denoiser + dual text encoders + VAE, so its
+    // single-file lane is not Krea's bare-transformer assembly surface. Both native loaders accept
+    // UNet LoRA/LoKr adapters, but the worker lane intentionally claims only the descriptor's common
+    // txt2img surface; edit/reference/control requests keep flowing to their established specialized
+    // routes instead of silently dropping conditioning.
+    if family == Some("sdxl") {
+        return payload.get("mode").and_then(Value::as_str).map(str::trim) != Some("edit_image")
+            && !has_reference_list
+            && !has_nonempty_id("referenceAssetId")
+            && !has_nonempty_id("sourceAssetId")
+            && !has_poses
+            && !has_phases
+            && !has_nonempty_id("maskAssetId")
+            && !has_nonempty_id("characterId")
+            && !has_nonempty_id("characterLookId");
+    }
 
     // Never on this bare-transformer lane, on any backend: strict pose, multi-phase, inpaint mask,
     // and character / look identity conditioning (all need base-tier components it does not stage).
@@ -1542,8 +1556,8 @@ mod tests {
     /// The MLX-routed *family* allow-list, pinned like the model lists above. Adding a family here is
     /// a deliberate edit (it makes every imported same-family checkpoint Mac-routable), so it must be
     /// mirrored here — the guardrail that a family is never silently added to the import surface.
-    const EXPECTED_MLX_ROUTED_FAMILIES: &[&str] = &["krea_2"];
-    const EXPECTED_CANDLE_ROUTED_FAMILIES: &[&str] = &["krea_2"];
+    const EXPECTED_MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "sdxl"];
+    const EXPECTED_CANDLE_ROUTED_FAMILIES: &[&str] = &["krea_2", "sdxl"];
 
     #[test]
     fn mlx_routed_families_match_snapshot() {
@@ -1712,5 +1726,52 @@ mod tests {
         // Base-tier-only shapes stay rejected on both regardless of adapter support.
         let pose = payload(serde_json::json!({ "advanced": { "poses": [{}] } }));
         assert!(!mlx(&pose) && !candle(&pose), "pose rejected on both");
+    }
+
+    #[test]
+    fn imported_sdxl_family_gate_claims_t2i_on_both_backends_without_dropping_conditioning() {
+        let imported_id = "community_xl";
+        let payload = |extra: serde_json::Value| {
+            let mut value = serde_json::json!({
+                "model": imported_id,
+                "modelManifestEntry": {
+                    "id": imported_id,
+                    "family": "sdxl",
+                    "paths": { "model": "/app/models/imports/community-xl" }
+                }
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            value.as_object().unwrap().clone()
+        };
+        let eligible = |p: &serde_json::Map<String, serde_json::Value>| {
+            (
+                imported_image_request_family_eligible(imported_id, p, MLX_ROUTED_FAMILIES, true),
+                imported_image_request_family_eligible(
+                    imported_id,
+                    p,
+                    CANDLE_ROUTED_FAMILIES,
+                    false,
+                ),
+            )
+        };
+
+        assert_eq!(eligible(&payload(serde_json::json!({}))), (true, true));
+        assert_eq!(
+            eligible(&payload(
+                serde_json::json!({ "loras": [{ "id": "style" }] })
+            )),
+            (true, true),
+            "both fused SDXL loaders accept UNet adapters"
+        );
+        for conditioned in [
+            payload(serde_json::json!({ "referenceAssetId": "asset-1" })),
+            payload(serde_json::json!({ "mode": "edit_image", "sourceAssetId": "asset-1" })),
+            payload(serde_json::json!({ "advanced": { "poses": [{}] } })),
+        ] {
+            assert_eq!(eligible(&conditioned), (false, false));
+        }
     }
 }
