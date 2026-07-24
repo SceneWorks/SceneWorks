@@ -1312,7 +1312,7 @@ async fn provision_ltx_eros_gemma(
         ),
     )
     .await?;
-    crate::video_jobs::ensure_ltx_bundle_gemma_present(api, settings, job).await
+    crate::video_jobs::ltx::ensure_ltx_bundle_gemma_present(api, settings, job).await
 }
 
 #[cfg(not(target_os = "macos"))]
