@@ -27,8 +27,160 @@ import {
 import { savePresetDialogValidation } from "../generationValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
+import { StylePicker } from "../components/StylePicker.jsx";
+import { defaultTierSelection } from "../quantTier.js";
+import { readLastTier, writeLastTier } from "../lastTierStore.js";
+import { readDefaultGenerationQuality } from "../generationQuality.js";
 
 const completedResultFallbackMs = 30000;
+
+export function useQuantTierPicker({
+  screen,
+  model,
+  selectedModel,
+  availableTiers,
+  tierOptions,
+  autoTier = null,
+  useGenerationQuality = false,
+  reseedOnModelChange = false,
+}) {
+  const [quantTier, setQuantTier] = useState("");
+  const [tierSwitching, setTierSwitching] = useState("");
+  const modelRef = useRef(null);
+  const skipReseedRef = useRef(false);
+  const availableTiersKey = availableTiers.join(",");
+
+  useEffect(() => {
+    const modelChanged = modelRef.current !== model;
+    modelRef.current = model;
+    if (skipReseedRef.current) {
+      skipReseedRef.current = false;
+      if (availableTiers.includes(quantTier)) return;
+    }
+    if ((!reseedOnModelChange || !modelChanged) && availableTiers.includes(quantTier)) return;
+    setQuantTier(
+      defaultTierSelection(selectedModel, readLastTier(screen, model), {
+        ...tierOptions,
+        ...(useGenerationQuality
+          ? { defaultQuality: readDefaultGenerationQuality(), autoTier }
+          : {}),
+      }) ?? "",
+    );
+    // Install-state is intentionally represented by the stable key; the other values belong
+    // to the render which produced it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model, availableTiersKey, autoTier]);
+
+  const timerRef = useRef(null);
+  useEffect(() => () => clearTimeout(timerRef.current), []);
+  const handleTierChange = useCallback(
+    (nextTier) => {
+      if (nextTier === quantTier || !availableTiers.includes(nextTier)) return;
+      setQuantTier(nextTier);
+      writeLastTier(screen, model, nextTier);
+      setTierSwitching(nextTier);
+      clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => setTierSwitching(""), 1500);
+    },
+    [availableTiers, model, quantTier, screen],
+  );
+
+  return {
+    quantTier,
+    setQuantTier,
+    tierSwitching,
+    handleTierChange,
+    skipNextReseed: () => {
+      skipReseedRef.current = true;
+    },
+  };
+}
+
+export function TierPickerField({ value, onChange, items, tierSwitching, tierLabel, title, warning }) {
+  return (
+    <label className="quant-tier-picker" title={title}>
+      Quant tier
+      <select onChange={(event) => onChange(event.target.value)} value={value}>
+        {items.map((item) => (
+          <option key={item.tier} value={item.tier} disabled={item.disabled}>
+            {item.label}
+          </option>
+        ))}
+      </select>
+      {tierSwitching ? (
+        <span className="field-hint" role="status">Loading {tierLabel(tierSwitching)}…</span>
+      ) : null}
+      {warning}
+    </label>
+  );
+}
+
+export function StyleAxisRow({
+  available,
+  groups,
+  styleId,
+  onStyleChange,
+  selectedPreset,
+  presets,
+  onPresetChange,
+  generalPresets,
+  generalStackIds,
+  onToggleGeneral,
+  noPresetValue,
+}) {
+  return (
+    <>
+      <div className="settings-bar-styles settings-bar-style-axis">
+        {available ? (
+          <div className="style-axis-field style-axis-catalog">
+            <span className="settings-bar-label">Style</span>
+            <StylePicker groups={groups} selectedId={styleId} onSelect={onStyleChange} label="Style" />
+          </div>
+        ) : null}
+        <div className="style-axis-field style-axis-presets">
+          <span className="settings-bar-label">Style preset</span>
+          <div className="preset-chips">
+            <button className={!selectedPreset ? "preset-chip active" : "preset-chip"} onClick={() => onPresetChange(noPresetValue)} type="button">None</button>
+            {presets.map((preset) => (
+              <button className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"} key={preset.id} onClick={() => onPresetChange(preset.id)} type="button">
+                {preset.name ?? preset.id}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      {generalPresets.length ? (
+        <div className="settings-bar-styles">
+          <span className="settings-bar-label">General</span>
+          <div className="preset-chips general-preset-chips">
+            {generalPresets.map((preset) => (
+              <button className={generalStackIds.includes(preset.id) ? "preset-chip active" : "preset-chip"} key={preset.id} onClick={() => onToggleGeneral(preset.id)} type="button">
+                {preset.name ?? preset.id}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+export function ModeTabs({ label, className = "mode-tabs", options, mode, onChange, blockFor, leadingIcon }) {
+  return (
+    <div className={className} role="tablist" aria-label={label}>
+      {options.map(([value, text]) => {
+        const active = mode === value;
+        const block = blockFor?.(value, active) ?? null;
+        return (
+          <button className={active ? "mode-tab active" : "mode-tab"} key={value} role="tab" aria-selected={active} onClick={() => onChange(value)} type="button" disabled={Boolean(block)} title={block?.text}>
+            {leadingIcon?.(value)}
+            {text}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 // Cmd/Ctrl+Enter submits the studio form from the prompt textarea.
 export function onPromptKeyDown(event) {

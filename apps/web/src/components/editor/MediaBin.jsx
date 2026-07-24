@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { AssetMedia, assetCanRenderAsImage } from "../assetMedia.jsx";
+import { AssetThumbnail, assetCanRenderAsImage } from "../assetMedia.jsx";
 import { Icon } from "../Icons.jsx";
 import { isAiAsset } from "./editorUtils.js";
 
@@ -45,7 +45,7 @@ export function MediaBin({ assets = [], onAddToTrack, onPreview }) {
               title={tab === "media" ? `Add ${asset.displayName} to timeline` : asset.displayName}
               type="button"
             >
-              <AssetMedia asset={asset} className="ve-bin-thumb" controls={false} />
+              <AssetThumbnail asset={asset} className="ve-bin-thumb" />
               {isAiAsset(asset) ? (
                 <span className="ve-ai-badge" aria-label="AI generated">
                   <Icon.Stars size={10} />

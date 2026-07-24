@@ -242,6 +242,27 @@ docker build --secret id=inference_token,env=SCENEWORKS_INFERENCE_READ_TOKEN `
   --tag sceneworks-api-embed:local .
 ```
 
+For a one-image RunPod GPU deployment, build the `runpod` target instead. It
+contains the embedded-web API, candle CUDA worker, CPU utility worker, ffmpeg,
+and the native Model Manager downloader. PID 1 health-gates the worker on the
+loopback API and drains every process on SIGTERM; Compose is not used.
+
+```powershell
+docker build --secret id=inference_token,env=SCENEWORKS_INFERENCE_READ_TOKEN `
+  --file docker/rust.Dockerfile `
+  --target runpod `
+  --tag sceneworks-runpod:local .
+
+docker run --gpus all --publish 8010:8010 `
+  --env SCENEWORKS_ACCESS_TOKEN=choose-a-private-token `
+  --volume sceneworks-data:/sceneworks `
+  sceneworks-runpod:local
+```
+
+On RunPod, attach the pod's persistent volume at `/sceneworks` in place of the
+example named volume. Provider-specific volume layout and ownership hardening
+are handled separately; this image only defines the shared mount contract.
+
 Key knobs:
 
 - `SCENEWORKS_API_PORT` / `SCENEWORKS_WEB_PORT` — container/host ports for the API

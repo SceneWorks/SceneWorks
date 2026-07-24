@@ -23,6 +23,6 @@ export function reconcileSelectedAssetId(items, currentId) {
   return defaultAsset?.id ?? null;
 }
 
-export function isCurrentAssetRefresh(activeProjectId, requestedProjectId) {
+export function isCurrentProjectRequest(activeProjectId, requestedProjectId) {
   return activeProjectId === requestedProjectId;
 }

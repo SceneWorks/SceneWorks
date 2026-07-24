@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
 import { GPU_REQUIRED_JOB_TYPES, NON_GPU_JOB_TYPES, pendingStatuses } from "../jobTypes.js";
@@ -96,7 +96,12 @@ function jobWaitingMessage(job, workers, jobs) {
   if (job.requestedGpu && job.requestedGpu !== "auto") {
     return `Waiting for GPU ${job.requestedGpu} to claim the job.`;
   }
-  return NON_GPU_JOB_TYPES.has(job.type) ? "Waiting for a utility worker." : "Waiting for an available GPU worker.";
+  if (NON_GPU_JOB_TYPES.has(job.type)) {
+    return "Waiting for a utility worker.";
+  }
+  return GPU_REQUIRED_JOB_TYPES.has(job.type)
+    ? "Waiting for an available GPU worker."
+    : "Waiting for an available worker with the required capability.";
 }
 
 function workerStatusLine(worker) {
@@ -184,6 +189,7 @@ function WorkerCard({ worker }) {
 }
 
 export function QueueScreen() {
+  const [jobPrompt, setJobPrompt] = useState("Placeholder generation");
   const {
     activeProject,
     assets = [],
@@ -195,17 +201,15 @@ export function QueueScreen() {
     gpuOptions,
     jobAction,
     jobs = filteredJobs,
-    jobPrompt,
     projectFilter,
     projects,
     requestedGpu,
-    setJobPrompt,
     setProjectFilter,
     setPreviewAsset,
     setRequestedGpu,
     visibleWorkers,
   } = useAppContext();
-  const createJob = createPlaceholderJob;
+  const createJob = (event) => createPlaceholderJob(event, jobPrompt);
   const workers = visibleWorkers;
   // Prefer the shared index from context (sc-2082); fall back for legacy
   // contexts that may not yet expose it (test harnesses, etc.).

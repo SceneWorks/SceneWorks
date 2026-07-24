@@ -123,7 +123,11 @@ import {
   PresetGuidanceStrip,
   PresetStackPreview,
   SavePresetPanel,
+  ModeTabs,
+  StyleAxisRow,
+  TierPickerField,
   useGenerationStudio,
+  useQuantTierPicker,
   useSavePreset,
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
@@ -146,7 +150,6 @@ import { ControlPanel } from "../components/ControlPanel.jsx";
 import { pidToggleVisible } from "../pidEligibility.js";
 import {
   allPossibleTiers,
-  defaultTierSelection,
   installedTiers,
   isBelowFloor,
   modelQualityFloor,
@@ -155,8 +158,7 @@ import {
 } from "../quantTier.js";
 import { suggestTier } from "../tierSuggestion.js";
 import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
-import { readLastTier, writeLastTier } from "../lastTierStore.js";
-import { readDefaultGenerationQuality } from "../generationQuality.js";
+import { readLastTier } from "../lastTierStore.js";
 import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
@@ -176,7 +178,6 @@ import {
   useUpscaleEngineFallback,
 } from "../upscaleEngines.js";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
-import { StylePicker } from "../components/StylePicker.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { STYLE_GROUPS, styleHintForId, styleTextForId } from "../data/styleCatalog.js";
 import {
@@ -657,11 +658,6 @@ export function ImageStudio() {
   // so re-entering a model on this screen restores the tier you last generated with, in any
   // workspace and across app restarts. It seeds the picker as the top rung below a same-session pick
   // and above the model's base default (see the seed effect + `defaultTierSelection`).
-  const [quantTier, setQuantTier] = useState("");
-  // Brief "loading <tier>" hint shown right after a switch (reload-always): switching a heavy
-  // tier evicts + reloads on the worker, so we surface a transient loading note rather than
-  // implying an instant swap. Cleared on a short timer; purely cosmetic.
-  const [tierSwitching, setTierSwitching] = useState("");
   // PiD decoder toggle (epic 7840, sc-7851): off = the model's native VAE decode; on emits
   // `advanced.usePid: true`, routing decode through the optional PiD pixel-diffusion decoder
   // (decode + 2K/4K super-resolve, non-commercial output). Sticky pref, default off; the
@@ -802,7 +798,8 @@ export function ImageStudio() {
   );
   const macGating = macGatingActive(macCapabilities);
   const imageModelServesMode = useCallback((item, value) => {
-    const caps = item?.capabilities ?? [];
+    const capabilitiesDeclared = Array.isArray(item?.capabilities);
+    const caps = capabilitiesDeclared ? item.capabilities : [];
     if (value === "edit_image") {
       return (
         (caps.includes("edit_image") || caps.includes("image_edit")) &&
@@ -819,7 +816,11 @@ export function ImageStudio() {
     // sourceless edit) and reference-only identity models (MLX-ineligible without a
     // reference → strand on "Waiting for an available worker"); both classes lack
     // text_to_image. Mirrors the per-capability gating the other three modes use.
-    return caps.includes("text_to_image");
+    // Older installed-model records predate the capability array and historically
+    // represented the Text workflow. Preserve that compatibility, while treating
+    // every explicit capability list — including [] — as authoritative (so
+    // unsupported, edit-only, and reference-only models can never leak into Text).
+    return !capabilitiesDeclared || caps.includes("text_to_image");
   }, [macCapabilities]);
   const modelsForMode = useCallback(
     (value) => macImageModels.filter((item) => imageModelServesMode(item, value)),
@@ -829,11 +830,12 @@ export function ImageStudio() {
     () => modelsForMode(mode),
     [mode, modelsForMode],
   );
-  const pickerModels = mode === "text_to_image" && availableModels.length === 0 ? macImageModels : availableModels;
+  const pickerModels = availableModels;
   // Model-availability gate (sc-5947): when the user has no mac-available image model at all,
   // show recommended image-model downloads instead of the studio. `ready` matches the picker
-  // (which falls back to all macImageModels for the text tab); offers come from the full catalog
-  // via imageModelUsable, recommended-first.
+  // across any of its modes; offers come from the full catalog via imageModelUsable,
+  // recommended-first. A mode with no compatible installed model stays inside the
+  // studio so the user can switch tabs, but renders an empty, actionable picker.
   const modelReady = macImageModels.length > 0;
   const modelOffers = useMemo(
     () => downloadOffersFor(models, imageModelUsable, macCapabilities),
@@ -851,7 +853,13 @@ export function ImageStudio() {
       setModel(pickerModels[0].id);
     }
   }, [pickerModels, model]);
-  const selectedModel = imageModels.find((item) => item.id === model);
+  // Resolve only through the current mode's capability-filtered set. A restored
+  // selection can be stale until the snap effect runs; it must never become the
+  // effective model for either rendering defaults or submitting a job.
+  const selectedModel = availableModels.find((item) => item.id === model);
+  const selectedModelServesMode = Boolean(selectedModel);
+  const modeLabel =
+    mode === "edit_image" ? "Edit" : mode === "character_image" ? "With character" : "Text";
   // Booru-convention prompt hint (sc-10760): non-null for danbooru-tag models (Anima, Illustrious)
   // that declare `ui.promptHint`; rendered under the prompt box with a link into the prompt guide.
   const promptHint = promptHintFor(selectedModel?.ui);
@@ -965,6 +973,15 @@ export function ImageStudio() {
     () => suggestTier(selectedModel, unifiedMemoryGb),
     [selectedModel, unifiedMemoryGb],
   );
+  const { quantTier, tierSwitching, handleTierChange } = useQuantTierPicker({
+    screen: TIER_SCREEN,
+    model,
+    selectedModel,
+    availableTiers,
+    tierOptions,
+    autoTier,
+    useGenerationQuality: true,
+  });
   const possibleTiers = useMemo(
     () => allPossibleTiers(selectedModel, tierOptions),
     [selectedModel, tierOptions],
@@ -1379,46 +1396,6 @@ export function ImageStudio() {
   // survives restarts and is honored above the base default whenever that tier is still installed.
   // Keyed on `model` (not `selectedModel`) plus the installed-tier list so a catalog refresh that
   // newly installs a second tier re-derives the default without churning on every render.
-  const availableTiersKey = availableTiers.join(",");
-  useEffect(() => {
-    if (availableTiers.includes(quantTier)) {
-      return;
-    }
-    setQuantTier(
-      defaultTierSelection(selectedModel, readLastTier(TIER_SCREEN, model), {
-        ...tierOptions,
-        // Rung 3 (sc-10728): the app-wide default-generation-quality setting is the base default below
-        // the per-(screen,model) sticky. Read fresh here (like readLastTier) so a change made in Settings
-        // is picked up the next time this effect derives a default — no stale in-memory copy.
-        defaultQuality: readDefaultGenerationQuality(),
-        // When that setting is Auto (the default), the base is this capability-aware suggestion.
-        autoTier,
-      }) ?? "",
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model, availableTiersKey, autoTier]);
-  // Switch the active quant tier (sc-8515): persist it as this (screen, model)'s last EXPLICIT tier
-  // (sc-10727 — sticky) and surface a brief "loading <tier>" note (reload-always — the worker evicts
-  // + reloads a heavy tier on the next generation; there is no co-residence). The note self-clears.
-  const tierSwitchTimer = useRef(null);
-  useEffect(() => () => clearTimeout(tierSwitchTimer.current), []);
-  const handleTierChange = useCallback(
-    (nextTier) => {
-      // Only an installed-and-complete tier can be selected — the disabled options in the dropdown are
-      // shown for discoverability, never as a pickable target. This is the belt behind the native
-      // `<option disabled>` (which already blocks selection) so no code path can strand the state on a
-      // tier that isn't in the cache.
-      if (nextTier === quantTier || !availableTiers.includes(nextTier)) {
-        return;
-      }
-      setQuantTier(nextTier);
-      writeLastTier(TIER_SCREEN, model, nextTier);
-      setTierSwitching(nextTier);
-      clearTimeout(tierSwitchTimer.current);
-      tierSwitchTimer.current = setTimeout(() => setTierSwitching(""), 1500);
-    },
-    [model, quantTier, availableTiers],
-  );
   const {
     availablePresets,
     selectedPreset,
@@ -1992,6 +1969,13 @@ export function ImageStudio() {
     if (submitting) {
       return;
     }
+    // Defense in depth for Enter/programmatic submits and restored stale state.
+    // The disabled button is only an affordance; capability eligibility is the
+    // actual authorization to create a job.
+    if (!selectedModelServesMode) {
+      setSubmitError(`Install or select a model that supports ${modeLabel} generation.`);
+      return;
+    }
     if (dimensionsInvalid) {
       setSubmitError("Width and height must each be between 256 and 4096.");
       return;
@@ -2215,6 +2199,10 @@ export function ImageStudio() {
     if (batchRun?.submitting || !activeProject) {
       return;
     }
+    if (!selectedModelServesMode) {
+      setBatchError(`Install or select a model that supports ${modeLabel} generation.`);
+      return;
+    }
     const resolved = expandBatch(batchPrompts, batchVariables);
     if (!resolved.length) {
       return;
@@ -2428,11 +2416,13 @@ export function ImageStudio() {
   const generateValidity = useValidation(imageGenerateValidation, generateDraft, undefined);
   // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
   // already folded into batchValidity — no need to repeat it here.
-  const batchRunDisabled = !batchValidity.ready || Boolean(batchRun?.submitting);
+  const batchRunDisabled =
+    !batchValidity.ready || !selectedModelServesMode || Boolean(batchRun?.submitting);
   // The two conditions whose message has its own home stay explicit gates: a structured
   // caption's field errors live in the builder, and a Mac block prints its own note.
   const generateDisabled =
     submitting ||
+    !selectedModelServesMode ||
     !generateValidity.ready ||
     (structuredActive && !captionValidation?.ok) ||
     Boolean(macActiveModeBlock);
@@ -2453,31 +2443,18 @@ export function ImageStudio() {
       <form className="studio-shell" onSubmit={submit}>
         <WorkPanel className="studio-work-panel">
           <div className="prompt-hero-top">
-            <div className="mode-tabs" role="tablist" aria-label="Image mode">
-              {[
+            <ModeTabs
+              label="Image mode"
+              options={[
                 ["text_to_image", "Text"],
                 ["edit_image", "Edit"],
                 ["character_image", "With character"],
-              ].map(([value, label]) => {
-                const macBlock = macModeTabBlock(value);
-                const active = mode === value;
-                return (
-                  <button
-                    className={active ? "mode-tab active" : "mode-tab"}
-                    key={value}
-                    role="tab"
-                    aria-selected={active}
-                    onClick={() => handleModeChange(value)}
-                    type="button"
-                    disabled={Boolean(macBlock)}
-                    title={macBlock ? macBlock.text : undefined}
-                  >
-                    {value === "text_to_image" ? <Icon.Sparkle size={13} /> : null}
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
+              ]}
+              mode={mode}
+              onChange={handleModeChange}
+              blockFor={(value) => macModeTabBlock(value)}
+              leadingIcon={(value) => value === "text_to_image" ? <Icon.Sparkle size={13} /> : null}
+            />
             <button
               aria-pressed={batchMode}
               className={batchMode ? "batch-toggle active" : "batch-toggle"}
@@ -3170,6 +3147,14 @@ export function ImageStudio() {
                     </option>
                   ))}
                 </select>
+                {!pickerModels.length ? (
+                  <span className="field-hint" role="status">
+                    No installed model supports {modeLabel} generation.{" "}
+                    <button onClick={() => setActiveView("Models")} type="button">
+                      Browse models
+                    </button>
+                  </span>
+                ) : null}
                 <StudioUpdateNotice item={selectedModel} onUpdate={createModelDownloadJob} />
               </label>
               <label className="settings-field settings-field-aspect">
@@ -3191,53 +3176,19 @@ export function ImageStudio() {
                 composes the prompt (free-text) or merges into the caption (Ideogram, sc-13224); "None"
                 resets to pass-through. Hidden for booru-tag models, whose convention the catalog's prose
                 entries do not fit. NB: distinct from Krea's numeric "text style" (textStyleGain). */}
-            <div className="settings-bar-styles settings-bar-style-axis">
-              {styleAxisAvailable ? (
-                <div className="style-axis-field style-axis-catalog">
-                  <span className="settings-bar-label">Style</span>
-                  <StylePicker groups={STYLE_GROUPS} selectedId={styleId} onSelect={setStyleId} label="Style" />
-                </div>
-              ) : null}
-              <div className="style-axis-field style-axis-presets">
-                <span className="settings-bar-label">Style preset</span>
-                <div className="preset-chips">
-                  <button
-                    className={!selectedPreset ? "preset-chip active" : "preset-chip"}
-                    onClick={() => setSelectedPresetId(noPresetId)}
-                    type="button"
-                  >
-                    None
-                  </button>
-                  {availablePresets.map((preset) => (
-                    <button
-                      className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
-                      key={preset.id}
-                      onClick={() => setSelectedPresetId(preset.id)}
-                      type="button"
-                    >
-                      {preset.name ?? preset.id}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-            {availableGeneralPresets.length ? (
-              <div className="settings-bar-styles">
-                <span className="settings-bar-label">General</span>
-                <div className="preset-chips general-preset-chips">
-                  {availableGeneralPresets.map((preset) => (
-                    <button
-                      className={generalStackIds.includes(preset.id) ? "preset-chip active" : "preset-chip"}
-                      key={preset.id}
-                      onClick={() => toggleGeneralPreset(preset.id)}
-                      type="button"
-                    >
-                      {preset.name ?? preset.id}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : null}
+            <StyleAxisRow
+              available={styleAxisAvailable}
+              groups={STYLE_GROUPS}
+              styleId={styleId}
+              onStyleChange={setStyleId}
+              selectedPreset={selectedPreset}
+              presets={availablePresets}
+              onPresetChange={setSelectedPresetId}
+              generalPresets={availableGeneralPresets}
+              generalStackIds={generalStackIds}
+              onToggleGeneral={toggleGeneralPreset}
+              noPresetValue={noPresetId}
+            />
           </div>
 
           {/* sc-13131: the EXACT composed prompt (Subject:/Style:, preserved sibling directives,
@@ -3426,31 +3377,21 @@ export function ImageStudio() {
                 </label>
               ) : null}
               {showTierPicker ? (
-                <label className="quant-tier-picker" title="Switch which installed quant tier generates, for A/B comparison. Higher precision = larger memory footprint; switching a heavy tier reloads it before the next generation. Tiers you haven't downloaded are shown but disabled — install them from the Models page to enable.">
-                  Quant tier
-                  <select
-                    onChange={(event) => handleTierChange(event.target.value)}
-                    value={quantTier}
-                  >
-                    {tierPickerItems.map((item) => (
-                      <option key={item.tier} value={item.tier} disabled={item.disabled}>
-                        {item.label}
-                      </option>
-                    ))}
-                  </select>
-                  {tierSwitching ? (
-                    <span className="field-hint" role="status">
-                      Loading {tierLabel(tierSwitching)}…
-                    </span>
-                  ) : null}
-                  {tierBelowFloor ? (
+                <TierPickerField
+                  value={quantTier}
+                  onChange={handleTierChange}
+                  items={tierPickerItems}
+                  tierSwitching={tierSwitching}
+                  tierLabel={tierLabel}
+                  title="Switch which installed quant tier generates, for A/B comparison. Higher precision = larger memory footprint; switching a heavy tier reloads it before the next generation. Tiers you haven't downloaded are shown but disabled — install them from the Models page to enable."
+                  warning={tierBelowFloor ? (
                     <span className="field-hint quant-tier-floor-note">
                       {tierLabel(quantTier)} is below the {tierLabel(qualityFloor)} recommended for{" "}
                       {selectedModel?.name ?? "this model"} — it can look washed or lose fine detail
                       here (quantization error is amplified under CFG). Your pick is honored.
                     </span>
                   ) : null}
-                </label>
+                />
               ) : null}
               {precisionToggle && !showTierPicker ? (
                 <label

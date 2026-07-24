@@ -18,6 +18,8 @@ import {
   snapshotLayers,
   sameLayerStack,
   compositeLayersToCanvas,
+  drawLayerIntoCrop,
+  replaceLayerWithCroppedBitmap,
 } from "./imageLayers.js";
 
 // A minimal stand-in for a decoded bitmap — only naturalWidth/Height are read by
@@ -37,6 +39,92 @@ describe("blend modes (sc-6120)", () => {
     // Every entry has a non-empty token + label, and tokens are unique.
     expect(BLEND_MODES.every((m) => m.value && m.label)).toBe(true);
     expect(new Set(values).size).toBe(values.length);
+  });
+});
+
+describe("transform-aware layer crop (sc-13628)", () => {
+  const recordingCropCtx = () => {
+    const calls = [];
+    return {
+      calls,
+      save: () => calls.push(["save"]),
+      restore: () => calls.push(["restore"]),
+      translate: (x, y) => calls.push(["translate", x, y]),
+      rotate: (angle) => calls.push(["rotate", angle]),
+      scale: (x, y) => calls.push(["scale", x, y]),
+      drawImage: (...args) => calls.push(["drawImage", ...args]),
+    };
+  };
+
+  it("translates the crop origin before baking move, rotation, and scale", () => {
+    const image = fakeImage();
+    const layer = liveLayer("moved", {
+      image,
+      opacity: 0.4,
+      blendMode: "multiply",
+      transform: { x: 30, y: -8, rotation: 90, scaleX: 2, scaleY: 0.5 },
+    });
+    const ctx = recordingCropCtx();
+
+    drawLayerIntoCrop(ctx, layer, { x: 12, y: 7, width: 60, height: 40 });
+
+    expect(ctx.calls).toEqual([
+      ["save"],
+      ["translate", -12, -7],
+      ["translate", 30, -8],
+      ["rotate", Math.PI / 2],
+      ["scale", 2, 0.5],
+      ["drawImage", image, 0, 0],
+      ["restore"],
+    ]);
+    // Compositing properties are intentionally preserved outside the baked pixels.
+    expect(layer).toMatchObject({ opacity: 0.4, blendMode: "multiply", visible: true });
+  });
+
+  it("combines straighten about the crop centre with the layer transform", () => {
+    const image = fakeImage();
+    const layer = liveLayer("rotated", {
+      image,
+      transform: { x: 9, y: 11, rotation: -15, scaleX: 1.25, scaleY: 0.75 },
+    });
+    const ctx = recordingCropCtx();
+
+    drawLayerIntoCrop(ctx, layer, { x: 20, y: 30, width: 80, height: 60 }, 10);
+
+    expect(ctx.calls).toEqual([
+      ["save"],
+      ["translate", 40, 30],
+      ["rotate", (10 * Math.PI) / 180],
+      ["translate", -60, -60],
+      ["translate", 9, 11],
+      ["rotate", (-15 * Math.PI) / 180],
+      ["scale", 1.25, 0.75],
+      ["drawImage", image, 0, 0],
+      ["restore"],
+    ]);
+  });
+
+  it("preserves stack metadata while normalizing the baked transform", () => {
+    const original = liveLayer("hidden-top", {
+      name: "Foreground",
+      visible: false,
+      opacity: 0.35,
+      blendMode: "screen",
+      transform: { x: 12, y: 4, rotation: 22, scaleX: 0.8, scaleY: 1.4 },
+    });
+    const replacement = { image: fakeImage(40, 30), objectUrl: "blob:crop", blob: { cropped: true } };
+
+    const cropped = replaceLayerWithCroppedBitmap(original, replacement);
+
+    expect(cropped).toMatchObject({
+      id: "hidden-top",
+      name: "Foreground",
+      visible: false,
+      opacity: 0.35,
+      blendMode: "screen",
+      ...replacement,
+      transform: identityTransform(),
+    });
   });
 });
 

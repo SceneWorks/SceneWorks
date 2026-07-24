@@ -10400,6 +10400,143 @@ fn instantid_revisions_are_pinned_commits_not_main() {
     assert_eq!(instantid_revision("some/override-repo"), "main");
 }
 
+/// The Boogu/Ideogram on-demand tier fetches pin first-party turnkeys while preserving the established
+/// control-lane convention for explicitly configured override repos.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn turnkey_tier_fetch_revisions_pin_defaults_and_allow_explicit_overrides() {
+    assert_pinned_revision("BOOGU_MLX_TURNKEY_REVISION", BOOGU_MLX_TURNKEY_REVISION);
+    assert_pinned_revision(
+        "IDEOGRAM_MLX_TURNKEY_REVISION",
+        IDEOGRAM_MLX_TURNKEY_REVISION,
+    );
+
+    let boogu = mlx_model("boogu_image").expect("Boogu engine");
+    assert_eq!(boogu.default_repo(), "SceneWorks/boogu-image-mlx");
+    assert_eq!(
+        turnkey_tier_revision(
+            boogu.default_repo(),
+            boogu.default_repo(),
+            BOOGU_MLX_TURNKEY_REVISION,
+        ),
+        BOOGU_MLX_TURNKEY_REVISION
+    );
+
+    let ideogram = mlx_model("ideogram_4").expect("Ideogram engine");
+    assert_eq!(ideogram.default_repo(), "SceneWorks/ideogram-4-mlx");
+    assert_eq!(
+        turnkey_tier_revision(
+            ideogram.default_repo(),
+            ideogram.default_repo(),
+            IDEOGRAM_MLX_TURNKEY_REVISION,
+        ),
+        IDEOGRAM_MLX_TURNKEY_REVISION
+    );
+
+    assert_eq!(
+        turnkey_tier_revision(
+            "example/custom-boogu",
+            boogu.default_repo(),
+            BOOGU_MLX_TURNKEY_REVISION,
+        ),
+        "main"
+    );
+    assert_eq!(
+        turnkey_tier_revision(
+            "example/custom-ideogram",
+            ideogram.default_repo(),
+            IDEOGRAM_MLX_TURNKEY_REVISION,
+        ),
+        "main"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn turnkey_resolution_prefers_pinned_tier_over_stale_main_but_override_uses_main() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+
+    for (repo, revision, relative) in [
+        (
+            "SceneWorks/boogu-image-mlx",
+            BOOGU_MLX_TURNKEY_REVISION,
+            "base-q4/transformer/diffusion_pytorch_model.safetensors",
+        ),
+        (
+            "SceneWorks/ideogram-4-mlx",
+            IDEOGRAM_MLX_TURNKEY_REVISION,
+            "q8/transformer/model.safetensors",
+        ),
+    ] {
+        let cache = hub.join(format!("models--{}", repo.replace('/', "--")));
+        std::fs::create_dir_all(cache.join("refs")).unwrap();
+        std::fs::write(cache.join("refs/main"), "stale-main").unwrap();
+        for (snapshot, contents) in [("stale-main", b"A".as_slice()), (revision, b"B".as_slice())] {
+            let file = cache.join("snapshots").join(snapshot).join(relative);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, contents).unwrap();
+        }
+    }
+
+    let boogu = request(json!({
+        "projectId": "p", "model": "boogu_image",
+        "advanced": {"mlxQuantize": 4},
+        "modelManifestEntry": {"repo": "SceneWorks/boogu-image-mlx"}
+    }));
+    assert_eq!(
+        resolve_weights_dir(&boogu, &settings).unwrap(),
+        Some(
+            hub.join("models--SceneWorks--boogu-image-mlx/snapshots")
+                .join(BOOGU_MLX_TURNKEY_REVISION)
+                .join("base-q4")
+        )
+    );
+
+    let ideogram = request(json!({
+        "projectId": "p", "model": "ideogram_4",
+        "advanced": {"mlxQuantize": 8},
+        "modelManifestEntry": {"repo": "SceneWorks/ideogram-4-mlx"}
+    }));
+    assert_eq!(
+        resolve_weights_dir(&ideogram, &settings).unwrap(),
+        Some(
+            hub.join("models--SceneWorks--ideogram-4-mlx/snapshots")
+                .join(IDEOGRAM_MLX_TURNKEY_REVISION)
+                .join("q8")
+        )
+    );
+
+    let override_repo = "example/custom-boogu";
+    let override_cache = hub.join("models--example--custom-boogu");
+    std::fs::create_dir_all(override_cache.join("refs")).unwrap();
+    std::fs::write(override_cache.join("refs/main"), "override-main").unwrap();
+    let override_file = override_cache
+        .join("snapshots/override-main/base-q4/transformer")
+        .join("diffusion_pytorch_model.safetensors");
+    std::fs::create_dir_all(override_file.parent().unwrap()).unwrap();
+    std::fs::write(override_file, b"override").unwrap();
+    let override_request = request(json!({
+        "projectId": "p", "model": "boogu_image",
+        "advanced": {"mlxQuantize": 4},
+        "modelManifestEntry": {"repo": override_repo}
+    }));
+    assert_eq!(
+        resolve_weights_dir(&override_request, &settings).unwrap(),
+        Some(override_cache.join("snapshots/override-main/base-q4"))
+    );
+}
+
 /// The MLX-only strict-control pins (`flux1_control.rs` / `flux2.rs`) + the MLX Qwen distill-LoRA pin
 /// (`qwen.rs`). These files are `#[cfg(target_os = "macos")]`-gated `include!`s.
 #[cfg(target_os = "macos")]

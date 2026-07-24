@@ -85,7 +85,7 @@ import {
 } from "./appHelpers.js";
 import {
   hasVisibleLocalFailureForView,
-  isCurrentAssetRefresh,
+  isCurrentProjectRequest,
   reconcileSelectedAssetId,
 } from "./appStateHelpers.js";
 
@@ -441,7 +441,6 @@ export function App() {
     loadedAssetsProjectId === activeProject?.id ? storedSelectedAssetId : null;
   const [projectFilter, setProjectFilter] = useState("all");
   const [requestedGpu, setRequestedGpu] = useState("auto");
-  const [jobPrompt, setJobPrompt] = useState("Placeholder generation");
   const [latestGenerationSetId, setLatestGenerationSetId] = useState(null);
   const [previewAsset, setPreviewAsset] = useState(null);
   // The collection the fullscreen preview was launched from, as an ordered list
@@ -784,7 +783,7 @@ export function App() {
     updatePreset,
     duplicatePreset,
     deletePreset,
-  } = usePresets({ token, activeProject, setError });
+  } = usePresets({ token, activeProject, activeProjectRef, setError });
 
   const {
     savedVoices,
@@ -802,7 +801,7 @@ export function App() {
     updatePromptBatch,
     duplicatePromptBatch,
     deletePromptBatch,
-  } = usePromptBatches({ token, activeProject, setError });
+  } = usePromptBatches({ token, activeProject, activeProjectRef, setError });
 
   const {
     trainingDatasets,
@@ -828,7 +827,7 @@ export function App() {
     smartCropTrainingDataset,
     stripExifTrainingDataset,
     createTrainingJob,
-  } = useTraining({ token, activeProject, setError, setJobs });
+  } = useTraining({ token, activeProject, activeProjectRef, setError, setJobs });
 
   // sc-8811: useModelsAndLoras lists these two cross-cutting refresh orchestrators as
   // useCallback deps of deleteModel/deleteLora, which sit in appContextValue's
@@ -1448,7 +1447,7 @@ export function App() {
       // after the user switches away; committing then would clobber the new
       // project's assets with the old one's. Drop the stale response — mirrors
       // refreshTimelines' guard (useTimelines.js).
-      if (!isCurrentAssetRefresh(activeProjectRef.current?.id ?? null, projectId)) {
+      if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
         return;
       }
       setAssets(items);
@@ -1536,7 +1535,7 @@ export function App() {
   }
 
   const createPlaceholderJob = useCallback(
-    async (event) => {
+    async (event, prompt) => {
       event.preventDefault();
       try {
         await apiFetch("/api/v1/jobs", token, {
@@ -1547,8 +1546,8 @@ export function App() {
             projectName: activeProject?.name ?? null,
             requestedGpu,
             payload: {
-              prompt: jobPrompt,
-              createdFrom: activeView,
+              prompt,
+              createdFrom: activeViewRef.current,
             },
           }),
         });
@@ -1558,7 +1557,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token, activeProject, requestedGpu, jobPrompt, activeView],
+    [token, activeProject, requestedGpu],
   );
 
   const createImageJob = useCallback(
@@ -2391,8 +2390,6 @@ export function App() {
     createInterleaveJob,
     // Queue screen (sc-1651 Phase B batch 2)
     createPlaceholderJob,
-    jobPrompt,
-    setJobPrompt,
     projectFilter,
     setProjectFilter,
     projects,
@@ -2531,7 +2528,7 @@ export function App() {
     assets, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobAction, clearCompletedJobs, cancelPendingJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
-    jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects,
+    projectFilter, setProjectFilter, projects,
     createVideoJob, createVideoUpscaleJob, createImageJob, createAudioJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, studioLaunch,
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,

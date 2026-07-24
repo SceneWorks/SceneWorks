@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, ErrorBoundary } from "./main.jsx";
 import { assetUrl } from "./components/assetMedia.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
-import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
+import { AppStaticContext, AppLiveContext, useAppStatic } from "./context/AppContext.js";
 import { FakeEventSource, response, settle, navLabels, changeField } from "./main.testSupport.jsx";
 
 describe("SceneWorks app shell", () => {
@@ -463,6 +463,80 @@ describe("SceneWorks app shell", () => {
       const after = providedValues[providedValues.length - 1];
       expect(providedValues.length).toBeGreaterThan(countBefore); // the event really re-rendered App
       expect(after).toBe(before); // identity preserved → consumer tree memoization holds
+    } finally {
+      AppStaticContext.Provider = OriginalProvider;
+    }
+  });
+
+  it("keeps Queue prompt churn out of static context while submitting the latest prompt and view (sc-13633)", async () => {
+    const providedValues = [];
+    let staticConsumerRenders = 0;
+    const OriginalProvider = AppStaticContext.Provider;
+    const StaticConsumer = React.memo(function StaticConsumer() {
+      useAppStatic();
+      staticConsumerRenders += 1;
+      return null;
+    });
+    const staticConsumer = <StaticConsumer />;
+
+    AppStaticContext.Provider = function RecordingProvider({ value, children }) {
+      providedValues.push(value);
+      return (
+        <OriginalProvider value={value}>
+          {children}
+          {staticConsumer}
+        </OriginalProvider>
+      );
+    };
+    try {
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<App />);
+      });
+      await settle();
+
+      const staticBeforeNavigation = providedValues.at(-1);
+      const createJobBeforeNavigation = staticBeforeNavigation.createPlaceholderJob;
+      const consumerRendersBeforeNavigation = staticConsumerRenders;
+
+      const queueButton = [...container.querySelectorAll("button")].find(
+        (button) => button.querySelector(".nav-label")?.textContent === "Queue",
+      );
+      await act(async () => {
+        queueButton.click();
+      });
+      await settle();
+
+      const staticAfterNavigation = providedValues.at(-1);
+      expect(staticAfterNavigation).toBe(staticBeforeNavigation);
+      expect(staticAfterNavigation.createPlaceholderJob).toBe(createJobBeforeNavigation);
+      expect(staticConsumerRenders).toBe(consumerRendersBeforeNavigation);
+
+      const promptInput = container.querySelector("#queue-job-prompt");
+      const providerRendersBeforeTyping = providedValues.length;
+      await changeField(promptInput, "Latest local Queue prompt");
+
+      // Prompt state belongs to QueueScreen: typing neither re-renders App's provider
+      // nor wakes an unrelated static-only consumer.
+      expect(providedValues.length).toBe(providerRendersBeforeTyping);
+      expect(staticConsumerRenders).toBe(consumerRendersBeforeNavigation);
+      expect(providedValues.at(-1).createPlaceholderJob).toBe(createJobBeforeNavigation);
+
+      const form = container.querySelector(".job-composer");
+      await act(async () => {
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      });
+      await settle();
+
+      const request = global.fetch.mock.calls.find(
+        ([url, options]) =>
+          new URL(url).pathname.endsWith("/jobs") && options?.method === "POST",
+      );
+      expect(request).toBeTruthy();
+      expect(JSON.parse(request[1].body).payload).toEqual({
+        prompt: "Latest local Queue prompt",
+        createdFrom: "Queue",
+      });
     } finally {
       AppStaticContext.Provider = OriginalProvider;
     }
