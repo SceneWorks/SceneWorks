@@ -200,16 +200,6 @@ impl ImageRequest {
             upscale: parse_upscale(payload),
         }
     }
-
-    /// The resolved seed for image `index`: an explicit per-image seed wins, else the
-    /// base seed offset by the index (so a multi-image batch from one seed differs),
-    /// else `None` (the generator picks a random seed and records it).
-    pub fn seed_for(&self, index: usize) -> Option<i64> {
-        if let Some(seed) = self.seeds.get(index) {
-            return Some(*seed);
-        }
-        self.seed.map(|base| base.wrapping_add(index as i64))
-    }
 }
 
 /// Parse the optional `upscale` object (the Image Studio "Upscale" toggle). A missing or
@@ -317,20 +307,6 @@ mod tests {
         assert_eq!(request.count, 3);
         assert_eq!(request.seed, Some(42));
         assert_eq!(request.seeds, vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn seed_for_prefers_explicit_then_offsets_base() {
-        let explicit = ImageRequest::from_payload(&payload(json!({
-            "projectId": "p", "seed": 100, "seeds": [7, 8]
-        })));
-        assert_eq!(explicit.seed_for(0), Some(7));
-        assert_eq!(explicit.seed_for(1), Some(8));
-        // No explicit seed at index 2 -> base + index.
-        assert_eq!(explicit.seed_for(2), Some(102));
-
-        let none = ImageRequest::from_payload(&payload(json!({ "projectId": "p" })));
-        assert_eq!(none.seed_for(0), None);
     }
 
     #[test]
