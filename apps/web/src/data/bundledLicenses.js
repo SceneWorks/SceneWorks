@@ -57,6 +57,43 @@ import mmaudioBigvganMit from "../../../desktop/licenses/mmaudio/MIT.txt?raw";
 import whisperBaseApache from "../../../desktop/licenses/whisper-base/Apache-2.0.txt?raw";
 import clapHtsatApache from "../../../desktop/licenses/clap-htsat-unfused/Apache-2.0.txt?raw";
 
+// Image / video / utility model weights (sc-13803). The About→Licenses page recorded only the
+// bundled binaries, the Wan2.2/LTX video models and the audio models; every other shipped catalog
+// primary was missing its upstream attribution. Each license below was verified against the
+// upstream Hugging Face cardData, or against the LICENSE file shipped inside the SceneWorks
+// re-host where cardData declared none. Several are RESTRICTED (non-commercial, RAIL use-based
+// restrictions, or revenue-threshold community licenses) and are surfaced as such.
+import animaCircleStoneLabsNonCommercialLicense from "../../../desktop/licenses/anima/CircleStone-Labs-Non-Commercial-License.txt?raw";
+import berniniApache20 from "../../../desktop/licenses/bernini/Apache-2.0.txt?raw";
+import booguImageApache20 from "../../../desktop/licenses/boogu-image/Apache-2.0.txt?raw";
+import chroma1Apache20 from "../../../desktop/licenses/chroma1/Apache-2.0.txt?raw";
+import flux1DevFLUX1DevNonCommercialLicense from "../../../desktop/licenses/flux1-dev/FLUX.1-dev-Non-Commercial-License.txt?raw";
+import flux1SchnellApache20 from "../../../desktop/licenses/flux1-schnell/Apache-2.0.txt?raw";
+import flux2DevFLUX2DevNonCommercialLicense from "../../../desktop/licenses/flux2-dev/FLUX.2-dev-Non-Commercial-License.txt?raw";
+import flux2KleinFLUXNonCommercialLicense from "../../../desktop/licenses/flux2-klein/FLUX-Non-Commercial-License.txt?raw";
+import ideogram4IdeogramNonCommercialModelAgreement from "../../../desktop/licenses/ideogram-4/Ideogram-Non-Commercial-Model-Agreement.txt?raw";
+import illustriousXlV1CreativeMLOpenRAILM from "../../../desktop/licenses/illustrious-xl-v1/CreativeML-Open-RAIL++-M.txt?raw";
+import illustriousXlV2CreativeMLOpenRAILM from "../../../desktop/licenses/illustrious-xl-v2/CreativeML-Open-RAIL-M.txt?raw";
+import kolorsKolorsModelLicense from "../../../desktop/licenses/kolors/Kolors-Model-License.txt?raw";
+import krea2NOTICE from "../../../desktop/licenses/krea-2/NOTICE.txt?raw";
+import lensMIT from "../../../desktop/licenses/lens/MIT.txt?raw";
+import qwenImageApache20 from "../../../desktop/licenses/qwen-image/Apache-2.0.txt?raw";
+import realvisxlCreativeMLOpenRAILM from "../../../desktop/licenses/realvisxl/CreativeML-Open-RAIL++-M.txt?raw";
+import sanaNVIDIAOpenModelLicense from "../../../desktop/licenses/sana/NVIDIA-Open-Model-License.txt?raw";
+import sd35StabilityAICommunityLicense from "../../../desktop/licenses/sd3.5/Stability-AI-Community-License.txt?raw";
+import sdxlCreativeMLOpenRAILM from "../../../desktop/licenses/sdxl/CreativeML-Open-RAIL++-M.txt?raw";
+import sensenovaU1Apache20 from "../../../desktop/licenses/sensenova-u1/Apache-2.0.txt?raw";
+import zImageApache20 from "../../../desktop/licenses/z-image/Apache-2.0.txt?raw";
+import ltx23ErosLTX2CommunityLicense from "../../../desktop/licenses/ltx-2.3-eros/LTX-2-Community-License.txt?raw";
+import scail2MIT from "../../../desktop/licenses/scail2/MIT.txt?raw";
+import svdStableVideoDiffusionCommunityLicense from "../../../desktop/licenses/svd/Stable-Video-Diffusion-Community-License.txt?raw";
+import wan22VaceFunApache20 from "../../../desktop/licenses/wan2.2-vace-fun/Apache-2.0.txt?raw";
+import auraSrV2Apache20 from "../../../desktop/licenses/aura-sr-v2/Apache-2.0.txt?raw";
+import controlnetTileSdxlApache20 from "../../../desktop/licenses/controlnet-tile-sdxl/Apache-2.0.txt?raw";
+import pidNVIDIALicense from "../../../desktop/licenses/pid/NVIDIA-License.txt?raw";
+import realEsrganBSD3Clause from "../../../desktop/licenses/real-esrgan/BSD-3-Clause.txt?raw";
+import qwen3VlCaptionApache20 from "../../../desktop/licenses/qwen3-vl-caption/Apache-2.0.txt?raw";
+
 // Maps a manifest document `key` to its imported text. New components: add the
 // files under apps/desktop/licenses/<id>/, list them in manifest.json, and wire
 // their keys here.
@@ -88,6 +125,36 @@ const DOCUMENT_TEXT = {
   "mmaudio-bigvgan-mit": mmaudioBigvganMit,
   "whisper-base-apache": whisperBaseApache,
   "clap-htsat-unfused-apache": clapHtsatApache,
+  "anima-circlestone-labs-non-commercial-license": animaCircleStoneLabsNonCommercialLicense,
+  "bernini-apache": berniniApache20,
+  "boogu-image-apache": booguImageApache20,
+  "chroma1-apache": chroma1Apache20,
+  "flux1-dev-flux-1-dev-non-commercial-license": flux1DevFLUX1DevNonCommercialLicense,
+  "flux1-schnell-apache": flux1SchnellApache20,
+  "flux2-dev-flux-2-dev-non-commercial-license": flux2DevFLUX2DevNonCommercialLicense,
+  "flux2-klein-flux-non-commercial-license": flux2KleinFLUXNonCommercialLicense,
+  "ideogram-4-ideogram-non-commercial-model-agreement": ideogram4IdeogramNonCommercialModelAgreement,
+  "illustrious-xl-v1-creativeml-open-rail-m": illustriousXlV1CreativeMLOpenRAILM,
+  "illustrious-xl-v2-creativeml-open-rail-m": illustriousXlV2CreativeMLOpenRAILM,
+  "kolors-kolors-model-license": kolorsKolorsModelLicense,
+  "krea-2-notice": krea2NOTICE,
+  "lens-mit": lensMIT,
+  "qwen-image-apache": qwenImageApache20,
+  "realvisxl-creativeml-open-rail-m": realvisxlCreativeMLOpenRAILM,
+  "sana-nvidia-open-model-license": sanaNVIDIAOpenModelLicense,
+  "sd3.5-stability-ai-community-license": sd35StabilityAICommunityLicense,
+  "sdxl-creativeml-open-rail-m": sdxlCreativeMLOpenRAILM,
+  "sensenova-u1-apache": sensenovaU1Apache20,
+  "z-image-apache": zImageApache20,
+  "ltx-2.3-eros-ltx-2-community-license": ltx23ErosLTX2CommunityLicense,
+  "scail2-mit": scail2MIT,
+  "svd-stable-video-diffusion-community-license": svdStableVideoDiffusionCommunityLicense,
+  "wan2.2-vace-fun-apache": wan22VaceFunApache20,
+  "aura-sr-v2-apache": auraSrV2Apache20,
+  "controlnet-tile-sdxl-apache": controlnetTileSdxlApache20,
+  "pid-nvidia-license": pidNVIDIALicense,
+  "real-esrgan-bsd-3-clause": realEsrganBSD3Clause,
+  "qwen3-vl-caption-apache": qwen3VlCaptionApache20,
 };
 
 // Resolve each component's document keys to its actual text once, at module load.

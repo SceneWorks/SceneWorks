@@ -1,0 +1,15 @@
+Krea 2 (Raw and Turbo) is licensed by Krea AI under the Krea 2 Community
+License.
+
+SceneWorks downloads on first use a converted copy of the Krea 2 weights,
+re-hosted at SceneWorks/krea-2-turbo-mlx, SceneWorks/krea-2-raw-mlx and
+SceneWorks/krea-2-turbo-int8-convrot.
+
+Upstream publishes the Krea 2 Community License as a PDF rather than as plain
+text, so it cannot be reproduced verbatim here. The authoritative text is at:
+
+    https://www.krea.ai/krea-2-licensing
+    https://huggingface.co/SceneWorks/krea-2-turbo-mlx/blob/main/LICENSE.pdf
+
+The Krea 2 Community License restricts use of the model weights and their
+derivatives. Review it before any commercial deployment.
