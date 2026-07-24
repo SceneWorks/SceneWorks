@@ -36,6 +36,7 @@
 // Usage: node scripts/check-license-coverage.mjs
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -47,6 +48,9 @@ const SOURCE_AUDIT = path.join(ROOT, "config/inference-third-party-source.json")
 const WORKER_CARGO = path.join(ROOT, "crates/sceneworks-worker/Cargo.toml");
 const ROOT_CARGO = path.join(ROOT, "Cargo.toml");
 const CARGO_LOCK = path.join(ROOT, "Cargo.lock");
+const PACKAGE_JSON = path.join(ROOT, "package.json");
+const TAURI_CONFIG = path.join(ROOT, "apps/desktop/tauri.conf.json");
+const RUST_API_LIB = path.join(ROOT, "apps/rust-api/src/lib.rs");
 
 // Catalog models whose UPSTREAM declares no license at all, so no entry can be
 // recorded honestly yet. Each needs a licensing decision, not a guess — writing a
@@ -108,6 +112,16 @@ function validateSourceAudit(audit, componentIndex, pinText, lockText) {
     );
   }
 
+  const canonical = JSON.stringify({
+    artifacts: audit.artifacts,
+    prospectiveDisclosures: audit.prospectiveDisclosures,
+    includeSites: audit.includeSites,
+  });
+  const digest = crypto.createHash("sha256").update(canonical).digest("hex");
+  if (audit.auditDigest !== digest) {
+    auditErrors.push(`inference source audit digest mismatch: expected ${audit.auditDigest}, computed ${digest}. Re-run the exact pinned-revision audit; do not edit sites piecemeal.`);
+  }
+
   const sourceIds = new Set();
   for (const artifact of audit.artifacts ?? []) {
     if (sourceIds.has(artifact.id)) {
@@ -122,16 +136,74 @@ function validateSourceAudit(audit, componentIndex, pinText, lockText) {
     if (!Array.isArray(component.documents) || component.documents.length === 0) {
       auditErrors.push(`inference ${artifact.kind} "${artifact.id}" component "${artifact.component}" has no license document.`);
     }
-    if (artifact.package && !lockText.includes(`name = "${artifact.package}"`)) {
-      auditErrors.push(`inference ${artifact.kind} "${artifact.id}" claims absent Cargo package "${artifact.package}".`);
+  }
+
+  const prospectiveIds = new Set();
+  for (const disclosure of audit.prospectiveDisclosures ?? []) {
+    prospectiveIds.add(disclosure.id);
+    if (sourceIds.has(disclosure.id)) {
+      auditErrors.push(`"${disclosure.id}" cannot be both pinned and prospective.`);
+    }
+    if (!componentIndex.has(disclosure.component)) {
+      auditErrors.push(`prospective disclosure "${disclosure.id}" has no About→Licenses component "${disclosure.component}".`);
     }
   }
-  for (const required of ["cephes", "cmudict"]) {
-    if (!sourceIds.has(required)) {
-      auditErrors.push(`required ported/embedded inference artifact "${required}" is missing from config/inference-third-party-source.json.`);
+
+  const siteKeys = new Set();
+  const validDispositions = new Set([
+    "artifact",
+    "model-asset",
+    "shared-model-asset",
+    "generated-numeric-data",
+    "first-party-source",
+    "model-data-no-separate-notice",
+    "generated-build-output",
+  ]);
+  for (const site of audit.includeSites ?? []) {
+    const key = `${site.source}|${site.included}`;
+    if (siteKeys.has(key)) auditErrors.push(`duplicate audited include site "${key}".`);
+    siteKeys.add(key);
+    if (!validDispositions.has(site.disposition)) {
+      auditErrors.push(`audited include site "${site.source}" has invalid disposition "${site.disposition}".`);
+    }
+    if (!site.evidence && site.disposition !== "artifact") {
+      auditErrors.push(`audited include site "${site.source}" has no evidence-based disposition.`);
+    }
+    if (site.artifact && !sourceIds.has(site.artifact)) {
+      auditErrors.push(`audited include site "${site.source}" maps to unknown artifact "${site.artifact}".`);
+    }
+    for (const component of [site.component, ...(site.components ?? [])].filter(Boolean)) {
+      if (!componentIndex.has(component)) {
+        auditErrors.push(`audited include site "${site.source}" maps to missing About component "${component}".`);
+      }
     }
   }
+  if (siteKeys.size === 0) auditErrors.push("inference source audit has no production include sites.");
   return auditErrors;
+}
+
+function validateDesktopNoticeContract(packageJson, tauriConfig, rustApiSource, bundledSource) {
+  const contractErrors = [];
+  if (tauriConfig.build?.frontendDist !== "ui") {
+    contractErrors.push('Tauri build.frontendDist must remain "ui" for the signed desktop bootstrap.');
+  }
+  if (tauriConfig.bundle?.licenseFile || tauriConfig.bundle?.["license-file"]) {
+    contractErrors.push("Tauri bundle.licenseFile must not become a competing third-party notice corpus.");
+  }
+  if (!packageJson.scripts?.["api:build:embedded"]?.includes("web:build") ||
+      !packageJson.scripts?.["api:build:embedded"]?.includes("embed-web")) {
+    contractErrors.push("api:build:embedded must build and compile the web corpus into the Rust API sidecar.");
+  }
+  if (!rustApiSource.includes('#[folder = "../web/dist"]') ||
+      !rustApiSource.includes("struct WebAssets")) {
+    contractErrors.push("rust-api embed-web must embed apps/web/dist in the packaged sidecar.");
+  }
+  for (const key of ["cephes-bsd-3-clause", "cmudict-bsd-2-clause"]) {
+    if (!bundledSource.includes(`"${key}"`)) {
+      contractErrors.push(`packaged web notice mapping "${key}" is missing.`);
+    }
+  }
+  return contractErrors;
 }
 
 for (const component of manifest.components ?? []) {
@@ -181,13 +253,22 @@ const pinSources = [
 ].join("\n");
 const lock = fs.readFileSync(CARGO_LOCK, "utf8");
 errors.push(...validateSourceAudit(sourceAudit, components, pinSources, lock));
+const packageJson = JSON.parse(fs.readFileSync(PACKAGE_JSON, "utf8"));
+const tauriConfig = JSON.parse(fs.readFileSync(TAURI_CONFIG, "utf8"));
+const rustApiSource = fs.readFileSync(RUST_API_LIB, "utf8");
+errors.push(...validateDesktopNoticeContract(packageJson, tauriConfig, rustApiSource, bundledJs));
 
 if (process.argv.includes("--self-test")) {
-  const withoutCmudict = structuredClone(sourceAudit);
-  withoutCmudict.artifacts = withoutCmudict.artifacts.filter(({ id }) => id !== "cmudict");
-  const missingErrors = validateSourceAudit(withoutCmudict, components, pinSources, lock);
-  if (!missingErrors.some((error) => error.includes('required ported/embedded inference artifact "cmudict"'))) {
-    console.error("self-test: removing CMUDICT did not fail closed");
+  const withoutSite = structuredClone(sourceAudit);
+  withoutSite.includeSites.pop();
+  if (!validateSourceAudit(withoutSite, components, pinSources, lock).some((error) => error.includes("digest mismatch"))) {
+    console.error("self-test: deleting an audited include site did not fail closed");
+    process.exit(1);
+  }
+  const addedSite = structuredClone(sourceAudit);
+  addedSite.includeSites.push({ source: "new.rs:1", included: "new.dat", disposition: "first-party-source", evidence: "mutation" });
+  if (!validateSourceAudit(addedSite, components, pinSources, lock).some((error) => error.includes("digest mismatch"))) {
+    console.error("self-test: adding an unaudited include site did not fail closed");
     process.exit(1);
   }
   const staleRevision = structuredClone(sourceAudit);
@@ -196,7 +277,13 @@ if (process.argv.includes("--self-test")) {
     console.error("self-test: stale inference revision did not fail closed");
     process.exit(1);
   }
-  console.log("[license-coverage] self-test PASS — missing disclosure and stale audit mutations were rejected.");
+  const missingMapping = bundledJs.replace('"cmudict-bsd-2-clause"', '"removed-cmudict-key"');
+  if (!validateDesktopNoticeContract(packageJson, tauriConfig, rustApiSource, missingMapping)
+      .some((error) => error.includes("cmudict-bsd-2-clause"))) {
+    console.error("self-test: removing a packaged notice mapping did not fail closed");
+    process.exit(1);
+  }
+  console.log("[license-coverage] self-test PASS — site add/delete, stale revision, and lost packaged mapping mutations were rejected.");
 }
 
 for (const [id] of shipped) {

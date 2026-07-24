@@ -19,4 +19,15 @@ compile-time-embedded source/data in the separately versioned inference
 repository. The inventory revision must match SceneWorks' Cargo pins. When
 bumping inference, audit its `NOTICE`, `LICENSE-*`, and production
 `include_str!`/`include_bytes!` sites, update the inventory, and add every real
-case to this corpus.
+case to this corpus. `artifacts` and `includeSites` describe only the exact
+pinned revision; `prospectiveDisclosures` records notices intentionally staged
+for a later revision without falsely claiming that source is already shipped.
+The inventory digest makes additions, deletions, and changed dispositions fail
+until the complete audit is intentionally regenerated.
+
+The executable guard also pins the packaging path: `api:build:embedded` must
+build the web app with the raw notice imports and compile `apps/web/dist` into
+the Rust API sidecar, while Tauri must package that sidecar. A production web
+build verifies that both full notices survive bundling. A signed installer was
+not constructed for this license-only check; release CI remains the final
+signed-bundle smoke.

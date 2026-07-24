@@ -1,22 +1,152 @@
 {
-  "_comment": "Audited ported or compile-time-embedded third-party source/data in the inference revision consumed by SceneWorks. check-license-coverage.mjs requires this revision to match every inference Cargo pin, so an inference bump cannot land without explicitly re-auditing NOTICE, LICENSE-*, and production include_str!/include_bytes! sites. Dev-only fixtures and independently reimplemented algorithms are excluded.",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
   "inferenceRevision": "8b0534512add4007cf6034f5d200e5649ed9b5f0",
+  "auditDigest": "61703792524ad14e83f5fdf6251ccdaf862cd5d1cb6d45e8cf1bf7ba82396c75",
   "artifacts": [
     {
       "id": "cmudict",
-      "kind": "embedded-data",
+      "kind": "embedded-third-party-data",
       "component": "cmudict",
-      "package": "candle-audio-kokoro",
-      "source": "crates/audio/candle-audio-kokoro/resources/cmudict.dict",
-      "evidence": "crates/audio/candle-audio-kokoro/src/g2p.rs includes cmudict.dict with include_str! in production."
-    },
+      "source": "crates/audio/candle-audio-kokoro/src/g2p.rs:67",
+      "included": "crates/audio/candle-audio-kokoro/resources/cmudict.dict",
+      "disposition": "about-license",
+      "evidence": "CMUdict is third-party dictionary data; its complete BSD-2 notice is rendered by component cmudict."
+    }
+  ],
+  "prospectiveDisclosures": [
     {
       "id": "cephes",
-      "kind": "ported-source",
       "component": "cephes",
-      "package": null,
+      "firstInferenceRevision": "4dd518a5",
       "source": "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs",
-      "evidence": "Current inference main ports Cephes ndtri/erf/erfc and coefficient tables for Mage parity. It is disclosed ahead of the next SceneWorks inference pin that contains mlx-gen-mage."
+      "evidence": "Current inference main, but not the pinned revision above, contains the Cephes port. The notice is pre-staged so the future pin cannot ship without disclosure."
+    }
+  ],
+  "includeSites": [
+    {
+      "source": "crates/audio/candle-audio-kokoro/src/g2p.rs:67",
+      "included": "resources/cmudict.dict",
+      "disposition": "artifact",
+      "artifact": "cmudict"
+    },
+    {
+      "source": "crates/audio/candle-audio-mmaudio/src/clip.rs:455",
+      "included": "dfn5b_clip_merges.txt",
+      "disposition": "model-asset",
+      "component": "mmaudio",
+      "evidence": "DFN5B-CLIP tokenizer merges belong to the Apple-conditioned MMAudio model assembly already disclosed by the MMAudio Apple ML Research notice."
+    },
+    {
+      "source": "crates/audio/candle-audio-whisper/src/mel.rs:25",
+      "included": "melfilters.bytes",
+      "disposition": "generated-numeric-data",
+      "evidence": "Fixed mel-filter coefficients generated from the public signal-processing formula; no copied expressive source or separate notice."
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen-anima/src/tokenizer.rs:20",
+      "included": "assets/qwen_tokenizer.json",
+      "disposition": "model-asset",
+      "component": "anima",
+      "evidence": "Tokenizer asset distributed as part of the Anima model assembly and covered by its displayed upstream terms."
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen-anima/src/tokenizer.rs:22",
+      "included": "assets/t5_tokenizer.json",
+      "disposition": "model-asset",
+      "component": "anima",
+      "evidence": "Tokenizer asset distributed as part of the Anima model assembly and covered by its displayed upstream terms."
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen-chroma/src/text.rs:25",
+      "included": "assets/t5_tokenizer.json",
+      "disposition": "model-asset",
+      "component": "chroma1",
+      "evidence": "Tokenizer asset belongs to the Chroma model assembly already disclosed under Apache-2.0."
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen-flux/src/pipeline.rs:982",
+      "included": "assets/clip_tokenizer.json",
+      "disposition": "shared-model-asset",
+      "components": ["flux1-dev", "flux1-schnell", "flux2-dev", "flux2-klein"],
+      "evidence": "CLIP tokenizer is a model co-requisite; every shipped FLUX family using it has an About entry."
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen-mochi/src/tokenizer.rs:17",
+      "included": "assets/t5_tokenizer.json",
+      "disposition": "model-data-no-separate-notice",
+      "evidence": "Standard tokenizer vocabulary data, not a hand-ported source implementation; this crate is compiled into the catalog but Mochi is not exposed as a SceneWorks model."
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen-seedvr2/src/pipeline.rs:60",
+      "included": "data/neg_embed.safetensors",
+      "disposition": "model-data-no-separate-notice",
+      "evidence": "Fixed negative-conditioning numeric tensor, not source code; SeedVR2 is compiled into the catalog but is not exposed as a SceneWorks model."
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen/src/quant/cublaslt.rs:185",
+      "included": "quant/nvfp4_quant.cu",
+      "disposition": "first-party-source",
+      "evidence": "SceneWorks inference source compiled at runtime by NVRTC; not third-party source and covered by the project license."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-anima/src/tokenizer.rs:23",
+      "included": "assets/qwen_tokenizer.json",
+      "disposition": "model-asset",
+      "component": "anima",
+      "evidence": "Tokenizer asset distributed as part of the Anima model assembly and covered by its displayed upstream terms."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-anima/src/tokenizer.rs:25",
+      "included": "assets/t5_tokenizer.json",
+      "disposition": "model-asset",
+      "component": "anima",
+      "evidence": "Tokenizer asset distributed as part of the Anima model assembly and covered by its displayed upstream terms."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-chroma/src/loader.rs:22",
+      "included": "assets/t5_tokenizer.json",
+      "disposition": "model-asset",
+      "component": "chroma1",
+      "evidence": "Tokenizer asset belongs to the Chroma model assembly already disclosed under Apache-2.0."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-flux/src/loader.rs:41",
+      "included": "assets/clip_tokenizer.json",
+      "disposition": "shared-model-asset",
+      "components": ["flux1-dev", "flux1-schnell", "flux2-dev", "flux2-klein"],
+      "evidence": "CLIP tokenizer is a model co-requisite; every shipped FLUX family using it has an About entry."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-ltx/src/enhance.rs:38",
+      "included": "prompts/gemma_t2v_system_prompt.txt",
+      "disposition": "model-asset",
+      "component": "ltx-2.3",
+      "evidence": "Gemma enhancement prompt is part of the LTX/Gemma assembly whose two applicable terms are displayed."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-ltx/src/enhance.rs:39",
+      "included": "prompts/gemma_i2v_system_prompt.txt",
+      "disposition": "model-asset",
+      "component": "ltx-2.3",
+      "evidence": "Gemma enhancement prompt is part of the LTX/Gemma assembly whose two applicable terms are displayed."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-mochi/src/tokenizer.rs:17",
+      "included": "assets/t5_tokenizer.json",
+      "disposition": "model-data-no-separate-notice",
+      "evidence": "Standard tokenizer vocabulary data, not a hand-ported source implementation; this crate is compiled into the catalog but Mochi is not exposed as a SceneWorks model."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-seedvr2/src/pipeline.rs:75",
+      "included": "data/neg_embed.safetensors",
+      "disposition": "model-data-no-separate-notice",
+      "evidence": "Fixed negative-conditioning numeric tensor, not source code; SeedVR2 is compiled into the catalog but is not exposed as a SceneWorks model."
+    },
+    {
+      "source": "crates/media/candle-gen/vendor/candle-kernels/src/ptx.rs:1-11",
+      "included": "OUT_DIR/*.ptx",
+      "disposition": "generated-build-output",
+      "evidence": "Eleven include_str! calls embed PTX generated by this crate's build script from its already-licensed kernel sources; they introduce no independent source/data."
     }
   ]
 }
