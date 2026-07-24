@@ -1574,6 +1574,24 @@ pub(crate) fn seedvr2_estimated_output_bytes(frame_count: u64, out_w: u64, out_h
     frame_count.saturating_mul(per_frame)
 }
 
+/// Peak scratch footprint while SeedVR2 is streaming: the native-resolution source PNG sequence and
+/// the upscaled output sequence coexist until the final encode. Both use a raw-RGB upper bound.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn seedvr2_estimated_scratch_bytes(
+    frame_count: u64,
+    src_w: u64,
+    src_h: u64,
+    out_w: u64,
+    out_h: u64,
+) -> u64 {
+    seedvr2_estimated_output_bytes(frame_count, src_w, src_h)
+        .saturating_add(seedvr2_estimated_output_bytes(frame_count, out_w, out_h))
+}
+
 /// Bytes currently AVAILABLE on the volume backing `path`, best-effort and portable with NO new crate
 /// dependency: macOS + Linux run POSIX `df -k -P <path>` and read the 4th column (available 1K
 /// blocks); Windows (candle lane) uses `fs2::available_space` (a safe wrapper over the Win32
@@ -1628,6 +1646,7 @@ pub(crate) fn available_disk_bytes(path: &Path) -> Option<u64> {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+#[allow(dead_code)] // retained as the output-only regression seam for sc-9646/sc-13585 tests
 pub(crate) fn check_seedvr2_output_disk(
     scratch_dir: &Path,
     frame_count: u64,
@@ -1653,6 +1672,43 @@ pub(crate) fn check_seedvr2_output_disk(
              {out_w}×{out_h} would write ~{needed:.1} GB of PNG frames to the scratch volume, over \
              the ~{budget:.1} GB usable of ~{available:.1} GB free. Trim the clip to about \
              {max_frames} frames (or fewer), lower the target resolution, or free up disk space.",
+            needed = needed as f64 / GIB,
+            budget = budget as f64 / GIB,
+            available = available as f64 / GIB,
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn check_seedvr2_scratch_disk(
+    scratch_dir: &Path,
+    frame_count: u64,
+    src_w: u64,
+    src_h: u64,
+    out_w: u64,
+    out_h: u64,
+) -> WorkerResult<()> {
+    if frame_count == 0 || src_w == 0 || src_h == 0 || out_w == 0 || out_h == 0 {
+        return Ok(());
+    }
+    let Some(available) = available_disk_bytes(scratch_dir) else {
+        return Ok(());
+    };
+    let needed = seedvr2_estimated_scratch_bytes(frame_count, src_w, src_h, out_w, out_h);
+    let budget = ((available as f64) * SEEDVR2_DISK_OUTPUT_FRACTION) as u64;
+    if needed > budget {
+        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        let per_frame = seedvr2_estimated_scratch_bytes(1, src_w, src_h, out_w, out_h).max(1);
+        let max_frames = budget / per_frame;
+        return Err(WorkerError::InvalidPayload(format!(
+            "Not enough disk space to upscale this clip: {frame_count} source frames at \
+             {src_w}×{src_h} plus {frame_count} output frames at {out_w}×{out_h} need ~{needed:.1} GB \
+             of PNG scratch, over the ~{budget:.1} GB usable of ~{available:.1} GB free. Trim the clip \
+             to about {max_frames} frames (or fewer), lower the target resolution, or free disk space.",
             needed = needed as f64 / GIB,
             budget = budget as f64 / GIB,
             available = available as f64 / GIB,
@@ -1902,6 +1958,90 @@ async fn decode_seedvr2_source_to_disk(
     Ok(paths)
 }
 
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Seedvr2SourceProbe {
+    frame_count: u64,
+    width: u32,
+    height: u32,
+}
+
+/// Parse FFmpeg's mapped output-stream geometry and final `frame=` counter. The output stream is
+/// authoritative because FFmpeg applies input rotation metadata before the null mux (and before our
+/// PNG decode), so the first/input `Video:` line can report the opposite orientation. Kept pure so
+/// the admission plan is tested without real media. We intentionally ignore encoder/status tokens
+/// outside sane dimensions.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn parse_seedvr2_source_probe(stderr: &str) -> Option<Seedvr2SourceProbe> {
+    let frame_count = stderr.rmatch_indices("frame=").find_map(|(idx, _)| {
+        stderr[idx + 6..]
+            .trim_start()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .filter(|digits| !digits.is_empty())
+            .and_then(|digits| digits.parse::<u64>().ok())
+    })?;
+    let video_line = stderr.lines().rev().find(|line| line.contains("Video:"))?;
+    let (width, height) = video_line
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .find_map(|token| {
+            let token = token.trim_matches(|c: char| !c.is_ascii_digit() && c != 'x');
+            let (w, h) = token.split_once('x')?;
+            let (w, h) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
+            (w > 0 && h > 0 && w <= 65_535 && h <= 65_535).then_some((w, h))
+        })?;
+    (frame_count > 0).then_some(Seedvr2SourceProbe {
+        frame_count,
+        width,
+        height,
+    })
+}
+
+/// Decode-free, VFR-safe source probe using the bundled FFmpeg null mux. The shared runner preserves
+/// the normal heartbeat/cancellation lifecycle while FFmpeg walks the source.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn probe_seedvr2_source(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    source: &Path,
+) -> WorkerResult<Seedvr2SourceProbe> {
+    let ctx = FfmpegContext::new(api, settings, job_id, SEEDVR2_CANCEL_MESSAGE);
+    let stderr = crate::media_jobs::run_ffmpeg_capture_stderr(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-hide_banner".to_owned(),
+            "-i".to_owned(),
+            source.to_string_lossy().into_owned(),
+            "-map".to_owned(),
+            "0:v:0".to_owned(),
+            "-f".to_owned(),
+            "null".to_owned(),
+            "-".to_owned(),
+        ],
+        Some(ctx),
+    )
+    .await?;
+    parse_seedvr2_source_probe(&stderr).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Could not determine the source video's frame count and dimensions before upscale."
+                .to_owned(),
+        )
+    })
+}
+
 /// Load the temporal window `paths[start .. start+len]` (clamped to the sequence end) into engine
 /// [`Image`]s on demand (sc-9595). Real frames only — the engine's `preprocess_chunk` pads a partial
 /// trailing window with last-frame repeats internally, matching the whole-clip path. Runs the blocking
@@ -2120,38 +2260,59 @@ async fn run_seedvr2_stream(
     weights_dir: PathBuf,
 ) -> WorkerResult<Seedvr2Stream> {
     let seed = req.seed.unwrap_or(0);
-    // Decode the whole source to numbered PNGs on disk (RAM-free), then peek the first frame's dims.
+    // Probe BEFORE creating either PNG sequence. The source and output sequences coexist at peak, so
+    // admission must account for both before the first source frame can consume scratch.
+    let probe = probe_seedvr2_source(api, settings, &job.id, source_path).await?;
+    let (target_w, target_h) = match (req.target_width, req.target_height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+        _ => (
+            probe.width.saturating_mul(factor),
+            probe.height.saturating_mul(factor),
+        ),
+    };
+    let target_w = snap_seedvr2_dim(target_w);
+    let target_h = snap_seedvr2_dim(target_h);
+    {
+        let guard_dir = out_frames_dir
+            .parent()
+            .unwrap_or(out_frames_dir)
+            .to_path_buf();
+        let p = probe;
+        tokio::task::spawn_blocking(move || {
+            check_seedvr2_scratch_disk(
+                &guard_dir,
+                p.frame_count,
+                u64::from(p.width),
+                u64::from(p.height),
+                u64::from(target_w),
+                u64::from(target_h),
+            )
+        })
+        .await
+        .map_err(|error| task_join_error("seedvr2 disk preflight", error))??;
+    }
+
+    // Only an admitted job may materialize the native-resolution source PNG sequence.
     let paths =
         decode_seedvr2_source_to_disk(api, settings, &job.id, source_path, src_frames_dir).await?;
     let n = paths.len();
+    if n as u64 != probe.frame_count {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Source video changed while preparing upscale (probed {} frames, decoded {n}). Retry the job.",
+            probe.frame_count
+        )));
+    }
     let first = load_seedvr2_window(&paths, 0, 1).await?;
     let src_w = first[0].width;
     let src_h = first[0].height;
     drop(first);
-
-    // Resolve + snap the target output resolution (identical to the whole-clip path).
-    let (target_w, target_h) = match (req.target_width, req.target_height) {
-        (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
-        _ => (src_w.saturating_mul(factor), src_h.saturating_mul(factor)),
-    };
-    let target_w = snap_seedvr2_dim(target_w);
-    let target_h = snap_seedvr2_dim(target_h);
+    if (src_w, src_h) != (probe.width, probe.height) {
+        return Err(WorkerError::InvalidPayload(
+            "Source video dimensions changed while preparing upscale. Retry the job.".to_owned(),
+        ));
+    }
 
     tokio::fs::create_dir_all(out_frames_dir).await?;
-
-    // Disk-space preflight (sc-9646): sc-9595 streams the whole upscaled PNG sequence to this scratch
-    // dir before the final encode, so a long / high-res clip can write many GB with no bound (the
-    // removed sc-8829 host-RAM cap previously bounded the whole operation). Fail loud HERE — before the
-    // first window's decode + GPU work — when the estimated output footprint would exceed a generous
-    // fraction of the scratch volume's free space, so we don't fill the disk mid-run. Probed on a
-    // blocking thread (it shells out) but cheap and one-shot.
-    {
-        let guard_dir = out_frames_dir.to_path_buf();
-        let (frames, gw, gh) = (n as u64, u64::from(target_w), u64::from(target_h));
-        tokio::task::spawn_blocking(move || check_seedvr2_output_disk(&guard_dir, frames, gw, gh))
-            .await
-            .map_err(|error| task_join_error("seedvr2 disk preflight", error))??;
-    }
 
     // Plan the worker windows over the REAL frame count with the engine's own planner: a valid chunk
     // length + `DEFAULT_OVERLAP` cross-fade, so the worker-window seam handling matches the engine's
@@ -4524,8 +4685,14 @@ async fn generate_video_using(
                 Some((high, low, te, vae, snapshot, i2v)) => {
                     crate::generator_cache::with_uncached_generator(
                         move || {
-                            runtime_cuda::providers::wan::wan14b::load_from_comfyui_experts(
-                                high, low, te, vae, snapshot, i2v,
+                            runtime_cuda::providers::wan::wan14b::load_from_comfyui_experts_with_offload(
+                                high,
+                                low,
+                                te,
+                                vae,
+                                snapshot,
+                                i2v,
+                                OffloadPolicy::Sequential,
                             )
                             .map_err(|error| {
                                 crate::classify_engine_error("video load failed", error)
@@ -5915,6 +6082,55 @@ struct ComfyuiWanPaths {
     snapshot_dir: PathBuf,
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn comfyui_wan_admission_bytes(paths: &ComfyuiWanPaths) -> u64 {
+    let file_bytes = |path: &Path| path.metadata().map(|m| m.len()).unwrap_or(0);
+    file_bytes(&paths.high)
+        .saturating_add(file_bytes(&paths.low))
+        .saturating_add(match &paths.te {
+            Some(path) => file_bytes(path),
+            None => {
+                crate::mlx_fit_gate::sum_safetensors_bytes(&paths.snapshot_dir.join("text_encoder"))
+            }
+        })
+        .saturating_add(match &paths.vae {
+            Some(path) => file_bytes(path),
+            None => crate::mlx_fit_gate::sum_safetensors_bytes(&paths.snapshot_dir.join("vae")),
+        })
+}
+
+/// Conservative admission for external ComfyUI A14B. These user-supplied experts have no builtin
+/// manifest tier/measurement, so the only authoritative pre-load signal is their actual file set.
+/// Sequential expert swapping is explicit at the load seam below, but a 24–32 GB card must not admit
+/// a pair whose on-disk weights alone already exceed its live budget.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn comfyui_wan_vram_preflight(
+    paths: ComfyuiWanPaths,
+    gpu_id: &str,
+    budget: Option<crate::vram_gate::VramBudget>,
+) -> WorkerResult<ComfyuiWanPaths> {
+    let Some(budget) = budget else {
+        return Ok(paths);
+    };
+    let bytes = comfyui_wan_admission_bytes(&paths);
+    if bytes == 0 {
+        return Ok(paths);
+    }
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const CUDA_HEADROOM_GB: f64 = 2.0;
+    let needed = bytes as f64 / GIB + CUDA_HEADROOM_GB;
+    if budget.free_gb + f64::EPSILON < needed {
+        return Err(WorkerError::InvalidPayload(format!(
+            "ComfyUI Wan2.2 A14B needs at least ~{} GB of VRAM admission budget for its supplied \
+             experts and supporting weights, but GPU {gpu_id} has ~{} GB available. Use smaller \
+             quantized ComfyUI experts, close other GPU workloads, or run on a larger GPU.",
+            needed.ceil() as u64,
+            budget.free_gb.round() as u64,
+        )));
+    }
+    Ok(paths)
+}
+
 /// Peek a safetensors header (8-byte length + JSON) and return the `patch_embedding.weight`
 /// in-channels (`shape[1]`) — the T2V(16)/I2V(36) discriminator. `None` on any read/parse miss.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -6053,6 +6269,12 @@ async fn generate_candle_wan_comfyui(
                 .to_owned(),
         )
     })?;
+    // Admission happens before `generate_video` reaches the uncached external-expert load.
+    let paths = comfyui_wan_vram_preflight(
+        paths,
+        &settings.gpu_id,
+        candle_video_vram_budget(settings).await,
+    )?;
     let input = VideoGenInput {
         engine_id: WAN_COMFYUI_T2V_ENGINE,
         // The snapshot tier supplies the tokenizer (and the metrics `model_dir`, and the UMT5 TE / VAE
@@ -6071,6 +6293,7 @@ async fn generate_candle_wan_comfyui(
         guidance: None,
         seed: resolve_video_seed(request) as u64,
         conditioning: Vec::new(),
+        offload_policy: candle_wan_offload_policy(WAN_COMFYUI_T2V_ENGINE),
         comfyui: Some(ComfyuiWanExperts {
             high_file: paths.high,
             low_file: paths.low,
@@ -11245,6 +11468,106 @@ mod tests {
 
     fn request(value: Value) -> VideoRequest {
         VideoRequest::from_payload(&value.as_object().cloned().unwrap())
+    }
+
+    #[test]
+    fn seedvr2_probe_and_scratch_plan_cover_both_sequences_before_decode() {
+        let stderr = r#"
+          Stream #0:0: Video: h264 (High), yuv420p, 1920x1080, 30 fps
+        frame=  347 fps=0.0 q=-0.0 Lsize=N/A time=00:00:11.56
+        "#;
+        assert_eq!(
+            parse_seedvr2_source_probe(stderr),
+            Some(Seedvr2SourceProbe {
+                frame_count: 347,
+                width: 1920,
+                height: 1080,
+            })
+        );
+        let source = seedvr2_estimated_output_bytes(347, 1920, 1080);
+        let output = seedvr2_estimated_output_bytes(347, 3840, 2160);
+        assert_eq!(
+            seedvr2_estimated_scratch_bytes(347, 1920, 1080, 3840, 2160),
+            source + output,
+            "the pre-decode plan must reserve the coexisting native and upscaled PNG sequences"
+        );
+    }
+
+    #[test]
+    fn seedvr2_probe_uses_effective_output_geometry_after_rotation() {
+        let stderr = r#"
+          Stream #0:0: Video: h264 (High), yuv420p, 1920x1080, 30 fps
+        Output #0, null, to 'pipe:':
+          Stream #0:0: Video: wrapped_avframe, yuv420p, 1080x1920, 30 fps
+        frame=  347 fps=0.0 q=-0.0 Lsize=N/A time=00:00:11.56
+        "#;
+        assert_eq!(
+            parse_seedvr2_source_probe(stderr),
+            Some(Seedvr2SourceProbe {
+                frame_count: 347,
+                width: 1080,
+                height: 1920,
+            }),
+            "rotation metadata must use the effective mapped geometry produced by the PNG decode"
+        );
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn comfyui_wan_a14b_gate_rejects_32gb_and_admits_large_card() {
+        let root = std::env::temp_dir().join(format!(
+            "sc13621_comfy_wan_gate_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let high = root.join("high.safetensors");
+        let low = root.join("low.safetensors");
+        std::fs::File::create(&high)
+            .unwrap()
+            .set_len(20 * 1024 * 1024 * 1024)
+            .unwrap();
+        std::fs::File::create(&low)
+            .unwrap()
+            .set_len(20 * 1024 * 1024 * 1024)
+            .unwrap();
+        let make_paths = || ComfyuiWanPaths {
+            high: high.clone(),
+            low: low.clone(),
+            te: None,
+            vae: None,
+            snapshot_dir: root.clone(),
+        };
+        assert!(
+            comfyui_wan_vram_preflight(
+                make_paths(),
+                "0",
+                Some(crate::vram_gate::VramBudget {
+                    free_gb: 32.0,
+                    total_gb: 32.0,
+                }),
+            )
+            .is_err(),
+            "a 32 GB card must not reach the external A14B load"
+        );
+        assert!(
+            comfyui_wan_vram_preflight(
+                make_paths(),
+                "0",
+                Some(crate::vram_gate::VramBudget {
+                    free_gb: 96.0,
+                    total_gb: 96.0,
+                }),
+            )
+            .is_ok(),
+            "larger-card behavior remains admitted"
+        );
+        assert_eq!(
+            candle_wan_offload_policy(WAN_COMFYUI_T2V_ENGINE),
+            OffloadPolicy::Sequential
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// sc-13585: on Windows the free-space probe was inert — the old code matched an `fsutil` output

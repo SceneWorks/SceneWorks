@@ -3149,6 +3149,16 @@ pub(crate) async fn run_ffmpeg(
     args: Vec<String>,
     context: Option<FfmpegContext<'_>>,
 ) -> WorkerResult<()> {
+    run_ffmpeg_capture_stderr(args, context).await.map(|_| ())
+}
+
+/// Run FFmpeg with the shared heartbeat/cancellation lifecycle and return its stderr on success.
+/// Most callers use [`run_ffmpeg`]; media probes need FFmpeg's progress/stream metadata without
+/// introducing an `ffprobe` dependency (the desktop bundle ships only FFmpeg).
+pub(crate) async fn run_ffmpeg_capture_stderr(
+    args: Vec<String>,
+    context: Option<FfmpegContext<'_>>,
+) -> WorkerResult<String> {
     let Some((program, arguments)) = args.split_first() else {
         return Err(WorkerError::InvalidPayload(
             "FFmpeg command is empty.".to_owned(),
@@ -3218,10 +3228,10 @@ pub(crate) async fn run_ffmpeg(
     let stderr = stderr_task
         .await
         .map_err(|error| task_join_error("ffmpeg stderr reader task", error))?;
-    if status.success() {
-        return Ok(());
-    }
     let stderr = String::from_utf8_lossy(&stderr);
+    if status.success() {
+        return Ok(stderr.into_owned());
+    }
     let bounded = bounded_tail(&stderr, 10, 2000);
     if bounded.trim().is_empty() {
         Err(WorkerError::Engine(
