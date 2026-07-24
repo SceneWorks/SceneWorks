@@ -9,7 +9,17 @@ export { terminalStatuses, actionStatuses } from "./jobTypes.js";
 // else — Character Studio outputs (`character_studio`), Pose/Key Point library assets
 // (`pose_library` / `keypoint_library`), and any future origin — stays out by default.
 // Origins are assigned by the backend (`crates/sceneworks-core/src/asset_index.rs`).
-export const LIBRARY_ORIGINS = new Set(["image_studio", "video_studio", "document_studio", "upload"]);
+// `audio_studio` (epic 13400) was never added here when the Audio Studio landed, so every
+// generated clip was filtered out of BOTH asset libraries — the Advanced Library screen and
+// the Simple Assets grid, whose "Audio" filter pill could therefore never match anything.
+// Audio is studio-generated media like the other three, so it belongs (epic 14361).
+export const LIBRARY_ORIGINS = new Set([
+  "image_studio",
+  "video_studio",
+  "audio_studio",
+  "document_studio",
+  "upload",
+]);
 
 // True when an asset belongs in the Main Asset Library. A missing origin is treated as
 // eligible: the normalized API always stamps one, so only legacy/non-normalized records

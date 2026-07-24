@@ -6,6 +6,7 @@ import { isLibraryAsset } from "../constants.js";
 import { foldUpscaledAssetVariants } from "../assetVariants.js";
 import { assetMatchesSearch } from "../screens/LibraryScreen.jsx";
 import { assetGridColumns } from "./breakpoint.js";
+import { SimpleAudioTile } from "./simpleAudioParts.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";
 
 // Simple Assets (design handoff): search + type pills + a responsive thumbnail grid.
@@ -22,7 +23,7 @@ const FILTERS = [
 
 export function SimpleAssets() {
   const { assets = [] } = useAppContext();
-  const { breakpoint, openPreview } = useSimpleUi();
+  const { breakpoint, openPreview, loadedTakeId } = useSimpleUi();
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
 
@@ -75,37 +76,40 @@ export function SimpleAssets() {
           className="su-asset-grid"
           style={{ "--su-asset-cols": assetGridColumns(breakpoint) }}
         >
-          {visible.map((asset) => (
-            <button
-              className="su-asset"
-              key={asset.id}
-              onClick={() => openPreview(asset)}
-              title={asset.displayName ?? asset.id}
-              type="button"
-            >
-              {assetCanRenderAsAudio(asset) ? (
-                <span className="su-asset-placeholder">
-                  <Icon.Audio size={20} />
-                </span>
-              ) : (
+          {visible.map((asset) =>
+            /* Audio used to render a blank hatched placeholder. It now draws its waveform
+               INSIDE the same square cell (epic 14361 / sc-14366), so a row of mixed assets
+               keeps its rhythm — with its own play button, which opens the viewer already
+               playing while the cell body opens it paused. */
+            assetCanRenderAsAudio(asset) ? (
+              <SimpleAudioTile
+                asset={asset}
+                key={asset.id}
+                loaded={asset.id === loadedTakeId}
+                onOpen={(target) => openPreview(target)}
+                onToggle={(target) => openPreview(target, { play: true })}
+                phone={breakpoint === "phone"}
+              />
+            ) : (
+              <button
+                className="su-asset"
+                key={asset.id}
+                onClick={() => openPreview(asset)}
+                title={asset.displayName ?? asset.id}
+                type="button"
+              >
                 <AssetThumbnail asset={asset} />
-              )}
-              <span aria-hidden="true" className="su-asset-kind">
-                {assetCanRenderAsVideo(asset) ? (
-                  <Icon.Play size={11} />
-                ) : assetCanRenderAsAudio(asset) ? (
-                  <Icon.Audio size={11} />
-                ) : (
-                  <Icon.Image size={11} />
-                )}
-              </span>
-              {asset.status?.favorite ? (
-                <span aria-hidden="true" className="su-asset-fav">
-                  <Icon.Star filled size={14} />
+                <span aria-hidden="true" className="su-asset-kind">
+                  {assetCanRenderAsVideo(asset) ? <Icon.Play size={11} /> : <Icon.Image size={11} />}
                 </span>
-              ) : null}
-            </button>
-          ))}
+                {asset.status?.favorite ? (
+                  <span aria-hidden="true" className="su-asset-fav">
+                    <Icon.Star filled size={14} />
+                  </span>
+                ) : null}
+              </button>
+            ),
+          )}
         </div>
       ) : (
         <p className="su-empty">

@@ -2,8 +2,9 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
-import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
+import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";
+import { AudioResults } from "./audioResults.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import {
   AUDIO_MODES,
@@ -12,7 +13,6 @@ import {
   downloadOffersFor,
 } from "../modelEligibility.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
-import { jobAudioResultAssets } from "../jobResultAssets.js";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
@@ -206,14 +206,18 @@ export function AudioStudio() {
     models = [],
     jobs = [],
     audioLocalJobs = [],
+    recentAudioAssets = [],
     jobAction,
     createAudioJob,
     refinePrompt,
     createModelDownloadJob,
     rememberLocalGenerationJob,
     setActiveView,
-    setPreviewAsset,
     macCapabilities,
+    // Take-card actions (epic 14361): the four things you can do to a clip you just heard.
+    updateAssetStatus,
+    deleteAsset,
+    sendAssetToVideo,
     savedVoices = [],
     createSavedVoice,
     deleteSavedVoice,
@@ -585,20 +589,43 @@ export function AudioStudio() {
     audioModels.length > 0,
   );
 
-  // A human-readable capability summary (sample rate + max length) so the capability-driven nature of
-  // the settings is visible at a glance and survives a model switch. Cheap enough to build inline.
+  // A human-readable capability summary so the capability-driven nature of the settings is visible
+  // at a glance and survives a model switch. Every clause is READ off the model's own audio block —
+  // voice bank size, language count, output rate, length cap — and a clause a model doesn't
+  // advertise is simply absent (epic 14361: the hint now owns the settings bar's footer row, so it
+  // carries the whole capability picture rather than just the rate). Cheap enough to build inline.
   const capabilitySummary = [
+    voices.length ? `${voices.length} ${voices.length === 1 ? "voice" : "voices"}` : null,
+    languages.length ? `${languages.length} ${languages.length === 1 ? "language" : "languages"}` : null,
     sampleRates.length
       ? sampleRates.map((rate) => `${Math.round(Number(rate) / 100) / 10} kHz`).join(" / ")
       : null,
-    maxDurationSecs != null ? `up to ${maxDurationSecs}s` : null,
+    maxDurationSecs != null ? `max ${maxDurationSecs} s` : null,
+    showStreaming ? "streaming" : null,
   ]
     .filter(Boolean)
     .join(" · ");
 
   const onOpenQueue = () => setActiveView("Queue");
   const onCancelJob = (job) => jobAction?.(job, "cancel");
-  const onPreview = (asset, scope) => setPreviewAsset?.(asset, scope);
+
+  // The results zone's now-playing transport (epic 14361). One player per screen, so loading
+  // a take always pauses the previous one.
+  const player = useAudioTakePlayer();
+
+  // "Run again" re-submits the run's OWN stored payload verbatim — the request the job
+  // recorded, not the current control values (which may have moved on since). A new run
+  // lands at the top of the stack with its own in-flight strip.
+  async function runAgain(job) {
+    const payload = job?.payload;
+    if (!payload) {
+      return;
+    }
+    const next = await createAudioJob?.(payload);
+    if (next) {
+      rememberLocalGenerationJob?.("audio", next);
+    }
+  }
 
   async function submit(event) {
     event.preventDefault();
@@ -847,10 +874,19 @@ export function AudioStudio() {
                   form's onSubmit. Disabled — never a silent no-op — until a run can proceed: empty
                   content (prompt or multi-speaker script), no installed model, a non-Speech tab, or a
                   run already in flight all block it. */}
-              <button className="prompt-cta" type="submit" disabled={!canGenerate}>
-                <Icon.Sparkle size={14} />
-                Generate
-              </button>
+              {/* The CTA and the shortcut hint that used to live in the results head — the hint
+                  belongs with the action it describes (epic 14361, screen 2a). */}
+              <div className="prompt-cta-stack">
+                <button className="prompt-cta" type="submit" disabled={!canGenerate}>
+                  <Icon.Sparkle size={14} />
+                  Generate
+                </button>
+                <span className="kbd-hint">
+                  <kbd>⌘</kbd>
+                  <kbd>↵</kbd>
+                  to generate
+                </span>
+              </div>
             </div>
 
             {/* Multi-speaker turns own one refiner apiece inside their structured editor above. Plain
@@ -872,7 +908,14 @@ export function AudioStudio() {
               />
             ) : null}
 
-            <div className="settings-bar">
+            {/* Settings bar (epic 14361 / sc-14363). The row is a FIXED 4-column grid — Model ·
+                Voice · Language · Length — with `align-items: end`, and the model's capability
+                hint has moved out of the Model label onto its own full-width footer row (shared
+                with the Advanced trigger). Under the old flex row that hint lived inside the
+                Model label, so `align-items: flex-end` pushed the MODEL caption ~24px above its
+                neighbours and the field overflowed them. Mode-dependent extra fields keep their
+                capability gating and simply become cells in the same grid. */}
+            <div className="settings-bar audio-settings-bar">
               <div className="settings-bar-row">
                 <label className="settings-field settings-field-model">
                   Model
@@ -887,11 +930,6 @@ export function AudioStudio() {
                       </option>
                     ))}
                   </select>
-                  {capabilitySummary ? (
-                    <span className="field-hint" role="note">
-                      {capabilitySummary}
-                    </span>
-                  ) : null}
                 </label>
 
                 {/* Speech: the voice bank the selected model ships (audio.voices), grouped into
@@ -1191,8 +1229,20 @@ export function AudioStudio() {
               </div>
             ) : null}
 
+            {/* The Advanced disclosure doubles as the settings bar's footer row (screen 2a): the
+                selected model's capability hint sits at its start, the trigger + caret at its end,
+                and the panel opens contiguously beneath — one bordered row rather than a hint
+                stranded inside the Model field. */}
             <AdvancedSection
+              className="audio-advanced-section"
               hint="cleared values → model default"
+              leading={
+                capabilitySummary ? (
+                  <span className="field-hint audio-capability-hint" role="note">
+                    {capabilitySummary}
+                  </span>
+                ) : null
+              }
               onToggle={() => setAdvancedOpen((value) => !value)}
               open={advancedOpen}
             >
@@ -1273,56 +1323,42 @@ export function AudioStudio() {
             </AdvancedSection>
           </WorkPanel>
 
+          {/* Results zone (epic 14361 / sc-14364) — run-grouped waveform take cards, a slim
+              in-flight strip and the docked play deck. The full WorkerProgressCard is no longer
+              this surface's vocabulary; it stays in the Queue screen (and here only for a FAILED
+              run, which needs its error + Retry actions). */}
           <div className="studio-results">
-            <section className="review-panel">
-              <div className="review-panel-head">
-                <div className="review-panel-head-title">
-                  <h2>Latest audio</h2>
-                  {/* Streaming reveal (sc-13675): shown ONLY when the selected model advertises
-                      audio.supportsStreaming. It signals that the clip renders incrementally — the
-                      worker posts per-chunk progress, so the WorkerProgressCard below advances THROUGH
-                      the stream as chunks arrive, and the first audio is produced before the full clip
-                      finishes. Capability-driven, never a hardcoded id; hidden for every one-shot mode. */}
-                  {showStreaming ? (
-                    <span
-                      className="streaming-badge"
-                      data-testid="audio-streaming-badge"
-                      title="This model streams audio incrementally — the first audio arrives before the full clip finishes rendering."
-                    >
-                      Streams incrementally
-                    </span>
-                  ) : null}
-                </div>
-                <span className="kbd-hint">
-                  <kbd>⌘</kbd>
-                  <kbd>↵</kbd>
-                  to generate
-                </span>
-              </div>
-              {/* Results zone — empty in C0. Once C1 enqueues audio jobs (via
-                  rememberLocalGenerationJob('audio', job)) they surface here through the shared
-                  audio-player card (A5 / sc-13405); nothing else in the shell changes. */}
-              {audioLocalJobs.length ? (
-                <div className="worker-progress-card-stack local-job-stack">
-                  {audioLocalJobs.map((job) => {
-                    const jobAssets = jobAudioResultAssets(job, assets);
-                    return (
-                      <WorkerProgressCard
-                        key={job.id}
-                        job={job}
-                        thumbnailsVariant="audio-player"
-                        thumbnailAssets={jobAssets}
-                        onThumbnailClick={(asset) => onPreview(asset, jobAssets)}
-                        onCancel={onCancelJob}
-                        onOpenQueue={onOpenQueue}
-                      />
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="empty-panel">No audio yet</div>
-              )}
-            </section>
+            <AudioResults
+              assets={assets}
+              jobs={audioLocalJobs}
+              models={audioModels}
+              recentAssets={recentAudioAssets}
+              onCancelJob={onCancelJob}
+              onDiscard={(asset) => deleteAsset?.(asset)}
+              onFavorite={(asset) =>
+                updateAssetStatus?.(asset, { favorite: !asset.status?.favorite })
+              }
+              onOpenQueue={onOpenQueue}
+              onRunAgain={runAgain}
+              onSeeAll={() => setActiveView("Library")}
+              onSendToVideo={(asset) => sendAssetToVideo?.(asset)}
+              player={player}
+              streamingBadge={
+                /* Streaming reveal (sc-13675): shown ONLY when the selected model advertises
+                   audio.supportsStreaming — the clip renders incrementally, so the in-flight strip
+                   advances THROUGH the stream as chunks arrive and the first audio is produced
+                   before the full clip finishes. Capability-driven, never a hardcoded id. */
+                showStreaming ? (
+                  <span
+                    className="streaming-badge"
+                    data-testid="audio-streaming-badge"
+                    title="This model streams audio incrementally — the first audio arrives before the full clip finishes rendering."
+                  >
+                    Streams incrementally
+                  </span>
+                ) : null
+              }
+            />
           </div>
         </form>
         {guideOpen ? (

@@ -1,17 +1,60 @@
-import React from "react";
+import React, { useEffect, useMemo, useRef } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { AssetMedia, assetCanRenderAsAudio, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
+import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";
+import { audioAssetRunGroups, formatRelativeTime } from "../audioTakes.js";
+import { useAppContext } from "../context/AppContext.js";
+import { SimpleAudioViewer } from "./simpleAudioParts.jsx";
 import { DownloadButton } from "./studioParts.jsx";
 
 // Full-screen asset preview (design handoff): large media over four actions — "Use as
 // reference" (primary), Favorite, Download, Delete (danger).
 //
+// For an AUDIO asset the stage is the play deck (epic 14361 / sc-14366) rather than a bare
+// <audio> element: waveform panel, played band, transport and clock, plus "Send to Video
+// Editor" — on desktop at the transport's right edge, on phone in the primary slot that
+// "Use as reference" leaves empty (it stays hidden for audio, as before).
+//
 // Delete routes to `deleteAsset`, which moves the asset to the trash (recoverable in the
 // full workspace's Assets → Trashcan). The Simple UI deliberately has no permanent-purge
 // path: an irreversible delete is not a control this surface should own.
-export function SimplePreview({ asset, onClose, onUseAsReference, onToggleFavorite, onDelete }) {
-  const title = assetCanRenderAsVideo(asset) ? "Clip" : assetCanRenderAsAudio(asset) ? "Audio" : "Image";
+export function SimplePreview({
+  asset,
+  onClose,
+  onUseAsReference,
+  onToggleFavorite,
+  onDelete,
+  onSendToVideo,
+  audioAutoPlay = false,
+  breakpoint = "desktop",
+}) {
+  const { audioModels = [] } = useAppContext();
+  const audio = assetCanRenderAsAudio(asset);
+  const title = assetCanRenderAsVideo(asset) ? "Clip" : audio ? "Audio" : "Image";
   const favorite = Boolean(asset.status?.favorite);
+  const phone = breakpoint === "phone";
+  const player = useAudioTakePlayer();
+
+  // The clip's own run, reconstructed from its replay record — the same derivation the studios
+  // use, so the viewer's mode chip and model name can't disagree with the take grid's.
+  const run = useMemo(
+    () => (audio ? (audioAssetRunGroups([asset], audioModels)[0] ?? null) : null),
+    [audio, asset, audioModels],
+  );
+
+  // The tile's play button opens the viewer already playing; opening the tile itself just
+  // loads the clip. Guarded so a re-render can't restart playback the user paused.
+  const started = useRef(false);
+  useEffect(() => {
+    if (!audio || started.current) {
+      return;
+    }
+    started.current = true;
+    if (audioAutoPlay) {
+      player.toggleTake(asset);
+    }
+  }, [audio, audioAutoPlay, asset, player]);
+
   return (
     <div aria-label={`${title} preview`} className="su-preview" role="dialog">
       <div className="su-preview-head">
@@ -20,11 +63,29 @@ export function SimplePreview({ asset, onClose, onUseAsReference, onToggleFavori
         </button>
         <strong>{asset.displayName ?? title}</strong>
       </div>
-      <div className="su-preview-stage">
-        <AssetMedia asset={asset} />
+      <div className={audio ? "su-preview-stage su-preview-stage--audio" : "su-preview-stage"}>
+        {audio ? (
+          <SimpleAudioViewer
+            asset={asset}
+            breakpoint={breakpoint}
+            meta={audioMetaLine(asset, run)}
+            onSendToVideo={onSendToVideo}
+            player={player}
+            run={run}
+          />
+        ) : (
+          <AssetMedia asset={asset} />
+        )}
       </div>
       <div className="su-preview-actions">
-        {assetCanRenderAsAudio(asset) ? null : (
+        {audio ? (
+          phone && onSendToVideo ? (
+            <button className="su-preview-primary" onClick={() => onSendToVideo(asset)} type="button">
+              <Icon.Editor size={16} />
+              Send to Video Editor
+            </button>
+          ) : null
+        ) : (
           <button className="su-preview-primary" onClick={() => onUseAsReference(asset)} type="button">
             <Icon.Image size={16} />
             Use as reference
@@ -44,4 +105,30 @@ export function SimplePreview({ asset, onClose, onUseAsReference, onToggleFavori
       </div>
     </div>
   );
+}
+
+// The viewer's meta line — model · voice · language · rate/channels · age. Every clause is
+// read off the asset's OWN recorded recipe and measured file block (project_store's audio
+// asset record), so a clip that recorded none simply shows fewer clauses. The model is shown
+// by its catalog LABEL when it's still installed (the recipe records the id), falling back to
+// the recorded id so a clip from an uninstalled model still names what produced it.
+function audioMetaLine(asset, run) {
+  const settings = asset?.recipe?.normalizedSettings ?? {};
+  const rate = Number(asset?.file?.sampleRate);
+  const channels = Number(asset?.file?.channels);
+  const format = [
+    Number.isFinite(rate) && rate > 0 ? `${Math.round(rate / 100) / 10} kHz` : null,
+    channels === 1 ? "mono" : channels === 2 ? "stereo" : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return [
+    run?.modelName || asset?.recipe?.model || null,
+    settings.voice ?? null,
+    settings.language ?? null,
+    format || null,
+    formatRelativeTime(asset?.createdAt) || null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }

@@ -155,6 +155,54 @@ function baseContext(overrides = {}) {
   };
 }
 
+// A completed Speech run and its two takes (epic 14361 / sc-14364). The payload is what the
+// studio actually posts, so the run header's chips and "Run again" are exercised against a
+// real request rather than an invented shape.
+const SPEECH_RUN_PAYLOAD = Object.freeze({
+  model: "kokoro_82m",
+  prompt: "She paused at the door, listening to the rain gather in the gutters.",
+  voice: "af_heart",
+  language: "en-US",
+  targetDurationSecs: 12,
+  seed: 4821,
+});
+
+const SPEECH_TAKES = [
+  {
+    id: "audio-asset-1",
+    type: "audio",
+    projectId: "project_1",
+    displayName: "Take 1",
+    file: { path: "assets/audios/genset_x/kokoro_take_1.wav", mimeType: "audio/wav", duration: 12 },
+  },
+  {
+    id: "audio-asset-2",
+    type: "audio",
+    projectId: "project_1",
+    displayName: "Take 2",
+    file: { path: "assets/audios/genset_x/kokoro_take_2.wav", mimeType: "audio/wav", duration: 11 },
+  },
+];
+
+const COMPLETED_SPEECH_JOB = {
+  id: "audio-job-done",
+  type: "audio_generate",
+  status: "completed",
+  createdAt: "2026-07-24T12:00:00Z",
+  payload: SPEECH_RUN_PAYLOAD,
+  result: { assetIds: ["audio-asset-1", "audio-asset-2"], expectedCount: 2 },
+};
+
+function takesContext(overrides = {}) {
+  return baseContext({
+    assets: SPEECH_TAKES,
+    audioLocalJobs: [COMPLETED_SPEECH_JOB],
+    createAudioJob: vi.fn(async () => null),
+    rememberLocalGenerationJob: vi.fn(),
+    ...overrides,
+  });
+}
+
 const buttonWithText = (root, text) =>
   [...root.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
 const modeTabs = (container) => container.querySelector(".mode-control");
@@ -756,24 +804,114 @@ describe("AudioStudio Speech generation (sc-13408)", () => {
     ]);
   });
 
-  it("renders an audio-player results card for a completed audio job in the lane", async () => {
-    const audioAsset = {
-      id: "audio-asset-1",
-      type: "audio",
-      projectId: "project_1",
-      displayName: "The walking skeleton is alive.",
-      file: { path: "assets/audios/genset_x/2026-07-19_kokoro_walking.wav", mimeType: "audio/wav" },
-    };
-    const completedJob = {
-      id: "audio-job-done",
-      type: "audio_generate",
-      status: "completed",
-      result: { assetIds: ["audio-asset-1"], expectedCount: 1 },
-    };
+  it("groups a completed run into take cards instead of a worker card (sc-14364)", async () => {
+    await render(takesContext());
+
+    const results = container.querySelector(".studio-results");
+    // The full worker card is the QUEUE's vocabulary now — a completed run never renders one here.
+    expect(results.querySelector(".worker-progress-card")).toBeNull();
+    expect(results.querySelector('[data-testid="audio-run-group"]')).toBeTruthy();
+    expect(results.querySelectorAll('[data-testid="audio-take-card"]').length).toBe(2);
+    expect(results.textContent).not.toContain("No audio yet");
+    // The run header reads its chips off the job's OWN payload, never the live controls.
+    const head = results.querySelector(".audio-run__head");
+    expect([...head.querySelectorAll(".audio-run__chip")].map((el) => el.textContent)).toEqual([
+      "af_heart",
+      "en-US",
+      "12 s",
+      "seed 4821",
+    ]);
+    expect(head.textContent).toContain("Kokoro 82M (Speech)");
+    // Nothing is loaded, so there is no deck and no <audio> element yet.
+    expect(results.querySelector('[data-testid="audio-play-deck"]')).toBeNull();
+  });
+
+  it("playing a take mounts the deck on that clip and the × unloads it (sc-14364)", async () => {
+    await render(takesContext());
+    const results = container.querySelector(".studio-results");
+
+    await click(results.querySelector('[aria-label="Play take 2"]'));
+
+    const deck = results.querySelector('[data-testid="audio-play-deck"]');
+    expect(deck).toBeTruthy();
+    // The deck drives a REAL <audio> element pointed at the take that was played.
+    const audioEl = deck.querySelector("audio");
+    expect(audioEl.getAttribute("src")).toContain("kokoro_take_2.wav");
+    expect(deck.textContent).toContain("Take 2");
+    // …and that take's card carries the loaded ring, the first one does not.
+    const cards = [...results.querySelectorAll('[data-testid="audio-take-card"]')];
+    expect(cards[0].className).not.toContain("is-loaded");
+    expect(cards[1].className).toContain("is-loaded");
+
+    await click(deck.querySelector('[aria-label="Close player"]'));
+    expect(results.querySelector('[data-testid="audio-play-deck"]')).toBeNull();
+    expect(
+      [...results.querySelectorAll('[data-testid="audio-take-card"]')].some((card) =>
+        card.className.includes("is-loaded"),
+      ),
+    ).toBe(false);
+  });
+
+  it("Run again re-submits the run's OWN stored payload, not the current controls (sc-14364)", async () => {
+    const createAudioJob = vi.fn(async () => ({ id: "audio-job-2" }));
+    const rememberLocalGenerationJob = vi.fn();
+    await render(takesContext({ createAudioJob, rememberLocalGenerationJob }));
+
+    await click(buttonWithText(container.querySelector(".audio-run__head"), "Run again"));
+
+    expect(createAudioJob).toHaveBeenCalledTimes(1);
+    expect(createAudioJob.mock.calls[0][0]).toEqual(SPEECH_RUN_PAYLOAD);
+    expect(rememberLocalGenerationJob).toHaveBeenCalledWith("audio", { id: "audio-job-2" });
+  });
+
+  it("renders a running run as the slim in-flight strip, not the full worker card (sc-14364)", async () => {
+    const jobAction = vi.fn();
     await render(
       baseContext({
-        assets: [audioAsset],
-        audioLocalJobs: [completedJob],
+        audioLocalJobs: [
+          {
+            id: "audio-job-running",
+            type: "audio_generate",
+            status: "running",
+            progress: 0.44,
+            message: "chunk 4 of 9",
+            payload: { ...SPEECH_RUN_PAYLOAD },
+            result: { expectedCount: 3 },
+          },
+        ],
+        jobAction,
+        createAudioJob: vi.fn(),
+        rememberLocalGenerationJob: vi.fn(),
+      }),
+    );
+
+    const results = container.querySelector(".studio-results");
+    const strip = results.querySelector('[data-testid="audio-inflight-strip"]');
+    expect(strip).toBeTruthy();
+    expect(strip.textContent).toContain("Speech · Kokoro 82M (Speech) · 3 takes");
+    expect(strip.textContent).toContain("chunk 4 of 9");
+    // `job.progress` is a 0..1 fraction, not a percentage — the strip must not render "44%"
+    // for 0.44 (nor 4400% for 44).
+    expect(strip.querySelector(".progress-track span").style.width).toBe("44%");
+    // The GPU meters / job id / attempt counter stay in the Queue.
+    expect(results.querySelector(".worker-progress-card")).toBeNull();
+
+    await click(buttonWithText(strip, "Cancel"));
+    expect(jobAction).toHaveBeenCalledWith(expect.objectContaining({ id: "audio-job-running" }), "cancel");
+  });
+
+  it("keeps the full worker card for a FAILED run so its error and retries stay reachable", async () => {
+    await render(
+      baseContext({
+        audioLocalJobs: [
+          {
+            id: "audio-job-failed",
+            type: "audio_generate",
+            status: "failed",
+            error: "the vocoder gave up",
+            payload: { ...SPEECH_RUN_PAYLOAD },
+          },
+        ],
         createAudioJob: vi.fn(),
         rememberLocalGenerationJob: vi.fn(),
       }),
@@ -781,13 +919,7 @@ describe("AudioStudio Speech generation (sc-13408)", () => {
 
     const results = container.querySelector(".studio-results");
     expect(results.querySelector(".worker-progress-card")).toBeTruthy();
-    // The completed clip surfaces through the shared audio-player card with a real <audio> src.
-    const audioEl = results.querySelector("audio");
-    expect(audioEl).toBeTruthy();
-    expect(audioEl.getAttribute("src")).toContain(
-      "assets/audios/genset_x/2026-07-19_kokoro_walking.wav",
-    );
-    expect(results.textContent).not.toContain("No audio yet");
+    expect(results.textContent).toContain("the vocoder gave up");
   });
 
   it("Voice Clone needs a reference before Generate is enabled (sc-13411)", async () => {
