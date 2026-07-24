@@ -10,6 +10,7 @@ import {
   generationModelsForType,
   downloadOffersFor,
   hasUsableModelFor,
+  imageModelServesMode,
   imageModelUsable,
   poseModelUsable,
   supportedControlModes,
@@ -26,6 +27,24 @@ describe("modelEligibility predicates", () => {
     expect(imageModelUsable({ type: "image", capabilities: ["edit_image"] }, caps)).toBe(true);
     expect(imageModelUsable({ type: "image", capabilities: [] }, caps)).toBe(false);
     expect(imageModelUsable({ type: "video", capabilities: ["text_to_image"] }, caps)).toBe(false);
+  });
+
+  // sc-13634 (#1780) made ImageStudio's picker treat an ABSENT capability array as a legacy
+  // record that served Text; this shared mirror had kept the old `?? []` reading, so the two
+  // disagreed for exactly those records. The distinction that matters is absent vs explicit:
+  // an explicit [] (or an edit-only list) must still never serve Text.
+  it("imageModelServesMode treats an ABSENT capability array as legacy Text, but not an explicit one", () => {
+    expect(imageModelServesMode({ type: "image" }, "text_to_image", caps)).toBe(true);
+    expect(imageModelUsable({ type: "image" }, caps)).toBe(true);
+
+    expect(imageModelServesMode({ type: "image", capabilities: [] }, "text_to_image", caps)).toBe(false);
+    expect(
+      imageModelServesMode({ type: "image", capabilities: ["edit_image"] }, "text_to_image", caps),
+    ).toBe(false);
+    // A legacy record still only serves Text — the other three modes need a real declaration.
+    expect(imageModelServesMode({ type: "image" }, "edit_image", caps)).toBe(false);
+    expect(imageModelServesMode({ type: "image" }, "character_image", caps)).toBe(false);
+    expect(imageModelServesMode({ type: "image" }, "style_variations", caps)).toBe(false);
   });
 
   it("videoModelUsable matches video models with a video capability", () => {
