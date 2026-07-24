@@ -3161,11 +3161,13 @@ fn is_flux_model(model: &str) -> bool {
 /// The SenseNova-U1 SceneWorks ids (base + 8-step distill), both served by the unified
 /// `mlx-gen-sensenova` engine (sc-3900).
 ///
-/// sc-13817 widened the gate from macOS-only so the off-Mac candle lane could force a dense tier;
-/// sc-14249 retired that force (`candle-gen-sensenova` packed-detects all three tiers now), but the
-/// widened gate stays — the off-Mac VQA / interleave handlers (`image_jobs/sensenova.rs`) key on the
-/// same id set.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+/// sc-13817 widened the gate from macOS-only so the off-Mac candle lane could force a dense tier.
+/// sc-14249 retired that force (`candle-gen-sensenova` packed-detects all three tiers now), which
+/// removed the only candle-side caller — so the gate is back to **macOS-only**. Its lone remaining
+/// user is `image_jobs/sensenova.rs` (the MLX it2i / VQA / interleave routing), whose `include!` is
+/// itself `cfg(target_os = "macos")`; leaving the wider cfg makes this dead code on the candle build
+/// (`-D warnings` → `function is never used`).
+#[cfg(target_os = "macos")]
 fn is_sensenova_model(model: &str) -> bool {
     matches!(
         model,

@@ -16,7 +16,7 @@
 //! **sc-14249 retired that constraint.** `candle-gen-sensenova` now packed-detects every backbone
 //! projection off its `.scales` sibling, so `SENSENOVA_DIR` may be **any** tier of the turnkey —
 //! `q4/`, `q8/` or `bf16/`. The dir must still be a self-contained tier (a flat `model.safetensors`
-//! + `tokenizer.json`, plus `distill_merged.json` on the `_fast` turnkey); the smoke asserts that
+//! plus `tokenizer.json`, and `distill_merged.json` on the `_fast` turnkey); the smoke asserts that
 //! shape up front so a torn/half-downloaded tier is called out as the *setup* mistake it is rather
 //! than reaching the loader as an opaque tensor-name error.
 //!
