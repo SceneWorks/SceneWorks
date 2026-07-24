@@ -140,6 +140,32 @@ async fn generic_image_upscale_rejects_path_unsafe_model_before_create() {
     assert!(jobs.as_array().expect("jobs array").is_empty());
 }
 
+/// sc-13617 / F-055: raw utility jobs whose `modelId` reaches worker-side model path
+/// construction must reject traversal before persistence.
+#[tokio::test]
+async fn generic_model_utility_jobs_reject_path_unsafe_model_id_before_create() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    for job_type in ["model_download", "model_import", "model_convert"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": job_type,
+                "requestedGpu": "auto",
+                "payload": { "modelId": "../../outside" },
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{job_type}: {body}");
+    }
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(jobs.as_array().expect("jobs array").is_empty());
+}
+
 /// sc-13617 / F-011: retry and duplicate merge payloadChanges into an existing generation
 /// payload. Validate the merged model before either operation can persist a new job.
 #[tokio::test]
@@ -155,7 +181,7 @@ async fn retry_and_duplicate_reject_path_unsafe_merged_generation_model_before_c
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
-    let (status, original) = request(
+    let (status, audio_job) = request(
         app.clone(),
         "POST",
         "/api/v1/audio/jobs",
@@ -166,22 +192,54 @@ async fn retry_and_duplicate_reject_path_unsafe_merged_generation_model_before_c
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{original}");
-    let job_id = original["id"].as_str().expect("job id");
+    assert_eq!(status, StatusCode::CREATED, "{audio_job}");
 
-    for operation in ["retry", "duplicate"] {
-        let (status, body) = request(
-            app.clone(),
-            "POST",
-            &format!("/api/v1/jobs/{job_id}/{operation}"),
-            json!({ "payloadChanges": { "model": "../../outside" } }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {body}");
+    let (status, vqa_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vqa/jobs",
+        json!({
+            "projectId": project_id,
+            "sourceAssetId": "asset-1",
+            "question": "What is shown?",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{vqa_job}");
+
+    let (status, interleave_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/interleave/jobs",
+        json!({
+            "projectId": project_id,
+            "prompt": "Create a safe image",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{interleave_job}");
+
+    for job in [&audio_job, &vqa_job, &interleave_job] {
+        let job_id = job["id"].as_str().expect("job id");
+        for operation in ["retry", "duplicate"] {
+            let (status, body) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "model": "../../outside" } }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{} {operation}: {body}",
+                job["type"]
+            );
+        }
     }
 
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
-    assert_eq!(jobs.as_array().expect("jobs array").len(), 1);
+    assert_eq!(jobs.as_array().expect("jobs array").len(), 3);
 }
 
 #[test]

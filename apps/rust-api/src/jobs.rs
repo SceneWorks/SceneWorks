@@ -392,7 +392,7 @@ async fn validate_merged_generation_model(
 ) -> Result<(), ApiError> {
     let job_id = job_id.to_owned();
     let job = store_call(state.clone(), move |store, _timeout| store.get_job(&job_id)).await?;
-    if typed_generation_route(&job.job_type).is_none() {
+    if !generation_job_model_is_path_backed(&job.job_type) {
         return Ok(());
     }
     let mut merged = job.payload;
@@ -407,7 +407,31 @@ fn validate_raw_job_model_id(job_type: &JobType, payload: &JsonObject) -> Result
     if matches!(job_type, JobType::ImageUpscale) {
         validate_payload_model(payload)?;
     }
+    if matches!(
+        job_type,
+        JobType::ModelDownload | JobType::ModelImport | JobType::ModelConvert
+    ) {
+        validate_payload_model_id(payload)?;
+    }
     Ok(())
+}
+
+/// Generation kinds whose `model` selects weights and therefore reaches worker path resolution.
+/// This is deliberately separate from `typed_generation_route`: VQA/interleave have typed routes
+/// but need no manifest injection, so the raw-route predicate intentionally excludes them.
+fn generation_job_model_is_path_backed(job_type: &JobType) -> bool {
+    matches!(
+        job_type,
+        JobType::ImageGenerate
+            | JobType::ImageEdit
+            | JobType::ImageVqa
+            | JobType::ImageInterleave
+            | JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace
+            | JobType::AudioGenerate
+    )
 }
 
 fn validate_payload_model(payload: &JsonObject) -> Result<(), ApiError> {
@@ -416,6 +440,16 @@ fn validate_payload_model(payload: &JsonObject) -> Result<(), ApiError> {
             .as_str()
             .ok_or_else(|| ApiError::bad_request("model must be a string"))?;
         validate_model_id(model)?;
+    }
+    Ok(())
+}
+
+fn validate_payload_model_id(payload: &JsonObject) -> Result<(), ApiError> {
+    if let Some(model_id) = payload.get("modelId") {
+        let model_id = model_id
+            .as_str()
+            .ok_or_else(|| ApiError::bad_request("modelId must be a string"))?;
+        validate_model_id(model_id)?;
     }
     Ok(())
 }
