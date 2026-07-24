@@ -47,6 +47,19 @@ export function jobIsCancelable(job) {
   return Boolean(job) && !terminalStatuses.has(job.status);
 }
 
+// Whether a studio should stop showing this run's card. The QUEUE always keeps every row —
+// that is its job — but a studio is a workspace, not a history, so a finished run should not
+// sit between the Generate button and the results.
+//
+// Two outcomes clear themselves and two do not:
+//   completed → the results grid below IS the outcome; a "Done" row is redundant chrome.
+//   canceled  → the user did it deliberately, so they already know.
+//   failed / interrupted → the card is the ONLY place the worker's reason is shown in a
+//     studio. Dismissing it would put us back to a run that silently produced nothing.
+export function jobClearsFromStudio(job) {
+  return job?.status === "completed" || job?.status === "canceled";
+}
+
 // The job's headline: the model it runs, falling back to the job type — what the
 // advanced Queue card leads with, minus the worker/GPU detail.
 export function jobTitle(job) {

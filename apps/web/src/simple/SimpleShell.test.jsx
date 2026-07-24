@@ -414,10 +414,45 @@ describe("SimpleShell", () => {
   });
 
   it("offers no Cancel once a run is terminal", async () => {
-    const done = { ...RUNNING_JOB, status: "completed", progress: 1 };
-    await renderShell(root, baseContext({ jobs: [done], imageLocalJobs: [done] }));
+    const failed = { ...RUNNING_JOB, status: "failed", error: "out of memory" };
+    await renderShell(root, baseContext({ jobs: [failed], imageLocalJobs: [failed] }));
+    expect(container.querySelector(".su-job")).toBeTruthy();
     expect(buttonWithText(container, "Cancel")).toBeUndefined();
   });
+
+  // The four terminal states are NOT interchangeable in a studio, which is exactly the
+  // assumption worth pinning per-status rather than as one "terminal" case.
+  //   completed → the results grid below IS the outcome
+  //   canceled  → the user did it deliberately
+  //   failed / interrupted → the card is the studio's ONLY carrier of the worker's reason
+  const STUDIO_CARD_BY_STATUS = [
+    ["completed", false],
+    ["canceled", false],
+    ["failed", true],
+    ["interrupted", true],
+  ];
+
+  for (const [status, stays] of STUDIO_CARD_BY_STATUS) {
+    it(`${stays ? "keeps" : "clears"} the studio run card for a ${status} run`, async () => {
+      const job = { ...RUNNING_JOB, status, progress: 1, error: "out of memory" };
+      await renderShell(root, baseContext({ jobs: [job], imageLocalJobs: [job] }));
+      expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Image Studio");
+      if (stays) {
+        expect(container.querySelector(".su-job")).toBeTruthy();
+        expect(container.querySelector(".su-job-error").textContent).toBe("out of memory");
+      } else {
+        expect(container.querySelector(".su-job")).toBeNull();
+      }
+    });
+
+    it(`always keeps the Queue row for a ${status} run`, async () => {
+      const job = { ...RUNNING_JOB, status, progress: 1, error: "out of memory" };
+      await renderShell(root, baseContext({ jobs: [job] }));
+      await click(navButton(container, "Queue"));
+      // The Queue is a history — it keeps every row regardless of outcome.
+      expect(container.querySelector(".su-job")).toBeTruthy();
+    });
+  }
 
   it("sweeps an indeterminate bar for a claimed run with no percentage yet", async () => {
     const noProgress = { ...RUNNING_JOB, progress: 0 };

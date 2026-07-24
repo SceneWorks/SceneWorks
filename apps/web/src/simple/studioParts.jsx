@@ -5,7 +5,7 @@ import { resolveJobResultAssets } from "../jobResultAssets.js";
 import { terminalStatuses } from "../constants.js";
 import { STYLE_GROUPS } from "../data/styleCatalog.js";
 import { useAppStatic } from "../context/AppContext.js";
-import { SimpleJobCard } from "./SimpleJobCard.jsx";
+import { SimpleJobCard, jobClearsFromStudio } from "./SimpleJobCard.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";
 
 // Shared building blocks for the three Simple studios (design handoff). Each one is
@@ -219,12 +219,13 @@ export function jobIsRunning(job) {
 // in front of them instead of one navigation away — and because it is one component, the two
 // surfaces cannot drift.
 //
-// It stays mounted after the run ends so the outcome (Done / the failure reason) is readable
-// where the run was started; the results grid renders below it.
+// Unlike the Queue (which keeps every row), a studio clears the card once the run resolves
+// cleanly — see `jobClearsFromStudio`. A FAILED run keeps its card, because that card is the
+// only place a studio shows the worker's reason.
 export function StudioRunStatus({ job }) {
   const { toast } = useSimpleUi();
   const { jobAction } = useAppStatic();
-  if (!job) {
+  if (!job || jobClearsFromStudio(job)) {
     return null;
   }
   return (
