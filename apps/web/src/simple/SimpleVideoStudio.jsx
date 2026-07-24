@@ -12,6 +12,7 @@ import {
   ReferenceTile,
   SheetSelect,
   StudioResults,
+  StudioRunStatus,
   StyleStrip,
   jobIsRunning,
   newestLocalJob,
@@ -271,6 +272,9 @@ export function SimpleVideoStudio() {
         {busy ? "Rendering…" : "Generate video"}
       </button>
       {needsSource ? <p className="su-empty">Attach a start frame to render an Image → Video clip.</p> : null}
+
+      {/* Live run strip: progress + Cancel + the outcome, right under Generate. */}
+      <StudioRunStatus job={latestJob} />
 
       <StudioResults
         assets={assets}

@@ -16,6 +16,7 @@ import {
   ReferenceTile,
   SheetSelect,
   StudioResults,
+  StudioRunStatus,
   StyleStrip,
   jobIsRunning,
   newestLocalJob,
@@ -360,6 +361,9 @@ export function SimpleImageStudio() {
           </span>
         </div>
       ) : null}
+
+      {/* Live run strip: progress + Cancel + the outcome, right under Generate. */}
+      <StudioRunStatus job={latestJob} />
 
       <StudioResults
         assets={assets}

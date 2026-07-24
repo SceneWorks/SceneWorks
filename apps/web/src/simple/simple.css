@@ -1311,6 +1311,33 @@
   color: color-mix(in oklch, var(--danger) 72%, var(--text));
 }
 
+.su-job-cancel {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out);
+}
+
+.su-job-cancel:hover:not(:disabled) {
+  border-color: color-mix(in oklch, var(--danger) 45%, var(--border));
+  color: color-mix(in oklch, var(--danger) 75%, var(--text));
+}
+
+.su-job-cancel:disabled {
+  cursor: default;
+}
+
 .su-job-error {
   margin: 0;
   font-size: 11.5px;
@@ -1336,6 +1363,23 @@
 
 .su-bar--done > span {
   background: var(--success);
+}
+
+/* A claimed run that hasn't reported a percentage yet. A 0%-wide bar would be
+   indistinguishable from "stuck", so it sweeps instead. */
+.su-bar--indeterminate > span {
+  width: 40%;
+  transition: none;
+  animation: su-sweep 1.1s var(--ease-out) infinite;
+}
+
+@keyframes su-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
 }
 
 /* ---------- Settings ---------- */

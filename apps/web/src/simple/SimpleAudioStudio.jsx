@@ -9,9 +9,8 @@ import { useSimpleUi } from "./SimpleUiContext.js";
 import {
   Chips,
   DownloadButton,
-  JobFailureNotice,
   SheetSelect,
-  jobFailure,
+  StudioRunStatus,
   jobIsRunning,
   newestLocalJob,
 } from "./studioParts.jsx";
@@ -210,17 +209,13 @@ export function SimpleAudioStudio() {
         {busy ? "Generating…" : "Generate audio"}
       </button>
 
-      {jobFailure(latestJob) && !resultAssets.length ? (
-        <JobFailureNotice failure={jobFailure(latestJob)} />
-      ) : resultAssets.length ? (
+      {/* Live run strip: progress + Cancel + the outcome, right under Generate. */}
+      <StudioRunStatus job={latestJob} />
+
+      {resultAssets.length ? (
         <div className="su-audio-result">
           <AssetMedia asset={resultAssets[0]} />
           <DownloadButton asset={resultAssets[0]} className="su-icon-btn" />
-        </div>
-      ) : busy ? (
-        <div className="su-audio-result">
-          <span aria-hidden="true" className="su-spinner" />
-          <span className="su-card-note">Rendering audio…</span>
         </div>
       ) : null}
     </div>

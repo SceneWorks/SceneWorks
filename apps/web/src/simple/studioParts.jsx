@@ -3,9 +3,9 @@ import { Icon } from "../components/Icons.jsx";
 import { AssetThumbnail, assetUrl } from "../components/assetMedia.jsx";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
 import { terminalStatuses } from "../constants.js";
-import { errorStatuses } from "../jobTypes.js";
 import { STYLE_GROUPS } from "../data/styleCatalog.js";
 import { useAppStatic } from "../context/AppContext.js";
+import { SimpleJobCard } from "./SimpleJobCard.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";
 
 // Shared building blocks for the three Simple studios (design handoff). Each one is
@@ -213,33 +213,28 @@ export function jobIsRunning(job) {
   return Boolean(job) && !terminalStatuses.has(job.status);
 }
 
-// A run that ended badly, and the reason. The worker's message is the useful part — it is
-// frequently ACTIONABLE ("Select it in the LoRA picker", "needs N GB") — so it is surfaced
-// verbatim rather than replaced with a generic failure string.
-export function jobFailure(job) {
-  if (!job || !errorStatuses.has(job.status)) {
-    return null;
-  }
-  const detail = job.error ?? job.message ?? "";
-  const label = job.status === "canceled" ? "Canceled" : job.status === "interrupted" ? "Interrupted" : "Failed";
-  return { label, detail: String(detail).trim() };
-}
 
-// The shared failure notice. Rendered in the studios' results zone so a job that dies in the
-// worker is visible where the user is looking — before this, a failed Simple run showed
-// NOTHING at all and the reason was only in the Logs screen.
-export function JobFailureNotice({ failure }) {
-  if (!failure) {
+// The studio's live run strip: the SAME job card the Queue screen lists, rendered directly
+// under Generate. That is where the user's attention already is, so progress and Cancel are
+// in front of them instead of one navigation away — and because it is one component, the two
+// surfaces cannot drift.
+//
+// It stays mounted after the run ends so the outcome (Done / the failure reason) is readable
+// where the run was started; the results grid renders below it.
+export function StudioRunStatus({ job }) {
+  const { toast } = useSimpleUi();
+  const { jobAction } = useAppStatic();
+  if (!job) {
     return null;
   }
   return (
-    <div className="su-notice su-notice--error" role="alert">
-      <Icon.Warning size={16} />
-      <span>
-        <strong>{failure.label}.</strong>
-        {failure.detail ? ` ${failure.detail}` : " The worker gave no reason — check Logs in the Advanced workspace."}
-      </span>
-    </div>
+    <SimpleJobCard
+      job={job}
+      onCancel={async (target) => {
+        await jobAction?.(target, "cancel");
+        toast("Run canceled");
+      }}
+    />
   );
 }
 
@@ -250,12 +245,8 @@ export function StudioResults({ job, assets, type, columns, meta, pendingCount =
   const { updateAssetStatus } = useAppStatic();
   const results = job ? resolveJobResultAssets(job, assets, { type }) : [];
   const running = jobIsRunning(job);
-  const failure = jobFailure(job);
-  // A failed run produces no assets, so the old "no results ⇒ render nothing" guard swallowed
-  // the failure entirely. Show the reason instead.
-  if (failure && results.length === 0) {
-    return <JobFailureNotice failure={failure} />;
-  }
+  // Failure/outcome reporting lives in StudioRunStatus (the run strip above this), so this
+  // block is purely the output grid — a failed run simply has none.
   if (!job || (!running && results.length === 0)) {
     return null;
   }

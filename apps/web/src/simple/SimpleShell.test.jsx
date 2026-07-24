@@ -53,6 +53,7 @@ function baseContext(overrides = {}) {
     createAudioJob: vi.fn(async () => null),
     createModelDownloadJob: vi.fn(async () => null),
     createLoraDownloadJob: vi.fn(async () => null),
+    jobAction: vi.fn(async () => {}),
     rememberLocalGenerationJob: vi.fn(),
     refinePrompt: vi.fn(),
     deleteAsset: vi.fn(),
@@ -84,6 +85,14 @@ function renderShell(root, context, props = {}) {
 function buttonWithText(container, text) {
   return [...container.querySelectorAll("button")].find(
     (node) => node.textContent.trim() === text,
+  );
+}
+
+// Nav items carry a count badge ("Queue1" when one job is pending), so they can't be
+// matched by exact text.
+function navButton(container, label) {
+  return [...container.querySelectorAll(".su-nav-item")].find((node) =>
+    node.textContent.startsWith(label),
   );
 }
 
@@ -127,9 +136,9 @@ describe("SimpleShell", () => {
 
   it("navigates between screens from the sidebar", async () => {
     await renderShell(root, baseContext());
-    await click(buttonWithText(container, "Queue"));
+    await click(navButton(container, "Queue"));
     expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Queue");
-    await click(buttonWithText(container, "Licenses"));
+    await click(navButton(container, "Licenses"));
     expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Licenses");
   });
 
@@ -330,8 +339,10 @@ describe("SimpleShell", () => {
     const context = baseContext({ jobs: [failed], imageLocalJobs: [failed] });
     await renderShell(root, context);
 
-    expect(container.textContent).toContain("Failed.");
-    expect(container.textContent).toContain("Krea 2 edit requires the Krea 2 Identity Edit LoRA.");
+    expect(container.querySelector(".su-job-error").textContent).toBe(
+      "Krea 2 edit requires the Krea 2 Identity Edit LoRA.",
+    );
+    expect(container.querySelector(".su-job-badge").textContent).toBe("Failed");
   });
 
   it("shows the failure reason on the Queue row too", async () => {
@@ -343,7 +354,7 @@ describe("SimpleShell", () => {
       payload: { model: "z_image" },
     };
     await renderShell(root, baseContext({ jobs: [failed] }));
-    await click(buttonWithText(container, "Queue"));
+    await click(navButton(container, "Queue"));
 
     expect(container.querySelector(".su-job-error").textContent).toBe(
       "no worker supports image_generate",
@@ -360,8 +371,60 @@ describe("SimpleShell", () => {
       payload: { model: "z_image" },
     };
     await renderShell(root, baseContext({ jobs: [canceled] }));
-    await click(buttonWithText(container, "Queue"));
+    await click(navButton(container, "Queue"));
     expect(container.querySelector(".su-job-badge").textContent).toBe("Canceled");
+  });
+
+  // Simple had NO way to cancel a run and no progress readout anywhere — a submitted job
+  // was a spinner with no end and no exit. The run strip under Generate is the same card
+  // the Queue lists, so both surfaces get progress + Cancel from one component.
+  const RUNNING_JOB = {
+    id: "job-run",
+    type: "image_generate",
+    status: "running",
+    progress: 0.42,
+    payload: { model: "z_image", width: 1024, height: 1024 },
+  };
+
+  it("shows progress and a Cancel for the running job under Generate", async () => {
+    const context = baseContext({ jobs: [RUNNING_JOB], imageLocalJobs: [RUNNING_JOB] });
+    await renderShell(root, context);
+
+    // The strip renders in the STUDIO, not only on the Queue screen.
+    expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Image Studio");
+    expect(container.querySelector(".su-job-badge").textContent).toBe("42%");
+    expect(container.querySelector(".su-bar > span").style.width).toBe("42%");
+
+    await click(buttonWithText(container, "Cancel"));
+    expect(context.jobAction).toHaveBeenCalledTimes(1);
+    expect(context.jobAction.mock.calls[0][0].id).toBe("job-run");
+    expect(context.jobAction.mock.calls[0][1]).toBe("cancel");
+  });
+
+  it("offers Cancel on the Queue screen too", async () => {
+    const context = baseContext({ jobs: [RUNNING_JOB] });
+    await renderShell(root, context);
+    await click(navButton(container, "Queue"));
+
+    await click(buttonWithText(container, "Cancel"));
+    expect(context.jobAction).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "job-run" }),
+      "cancel",
+    );
+  });
+
+  it("offers no Cancel once a run is terminal", async () => {
+    const done = { ...RUNNING_JOB, status: "completed", progress: 1 };
+    await renderShell(root, baseContext({ jobs: [done], imageLocalJobs: [done] }));
+    expect(buttonWithText(container, "Cancel")).toBeUndefined();
+  });
+
+  it("sweeps an indeterminate bar for a claimed run with no percentage yet", async () => {
+    const noProgress = { ...RUNNING_JOB, progress: 0 };
+    await renderShell(root, baseContext({ jobs: [noProgress], imageLocalJobs: [noProgress] }));
+    // A 0%-wide bar reads as "stuck"; the sweeping variant reads as "working".
+    expect(container.querySelector(".su-bar").className).toContain("su-bar--indeterminate");
+    expect(container.querySelector(".su-job-badge").textContent).toBe("Running");
   });
 
   it("refuses to submit with an empty prompt", async () => {
@@ -386,7 +449,7 @@ describe("SimpleShell", () => {
     const context = baseContext();
     const onModeChange = vi.fn();
     await renderShell(root, context, { onModeChange });
-    await click(buttonWithText(container, "Model Manager"));
+    await click(navButton(container, "Model Manager"));
 
     const manage = buttonWithText(container, "Manage");
     expect(manage).toBeTruthy();
@@ -400,7 +463,7 @@ describe("SimpleShell", () => {
     const context = baseContext();
     const onModeChange = vi.fn();
     await renderShell(root, context, { onModeChange, lockedToSimple: true });
-    await click(buttonWithText(container, "Model Manager"));
+    await click(navButton(container, "Model Manager"));
     await click(buttonWithText(container, "Manage"));
 
     expect(context.setActiveView).not.toHaveBeenCalled();
@@ -413,7 +476,7 @@ describe("SimpleShell", () => {
       models: [IMAGE_MODEL, { ...IMAGE_MODEL, id: "flux_dev", name: "FLUX.1 [dev]", installState: "missing" }],
     });
     await renderShell(root, context);
-    await click(buttonWithText(container, "Model Manager"));
+    await click(navButton(container, "Model Manager"));
     await click(buttonWithText(container, "Download"));
 
     expect(context.createModelDownloadJob).toHaveBeenCalledTimes(1);
