@@ -28,7 +28,7 @@ RUN npm run build --prefix apps/web \
 
 FROM rust:1-bookworm AS builder
 # Which workspace binary to build (sceneworks-rust-api | sceneworks-rust-worker).
-ARG BIN
+ARG BIN=sceneworks-rust-api
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
@@ -271,3 +271,43 @@ ENV PATH="/opt/ort/bin:${PATH}"
 COPY --from=candle-builder /out/sceneworks-rust-worker /usr/local/bin/sceneworks-rust-worker
 
 CMD ["sceneworks-rust-worker"]
+
+# --- Combined RunPod GPU runtime ---------------------------------------------
+# RunPod starts one image per pod, so this target packages the embedded-web API
+# and the candle/CUDA worker together. The PID-1 entrypoint starts the API, waits
+# for its loopback health endpoint, then starts the worker in `auto` mode. The
+# worker's existing supervisor discovers the visible NVIDIA GPU(s) and starts a
+# dedicated CPU utility child alongside the GPU child; those children advertise
+# disjoint capabilities, so generation cannot leak onto the utility lane and
+# downloads/imports/exports cannot occupy the GPU lane.
+#
+# Keep this runtime based on rust-worker-candle: it is the validated CUDA 12.9.1
+# + cuDNN 9 + onnxruntime-gpu image and already contains ffmpeg. Model Manager
+# downloads run through the worker's native in-process downloader; intentionally
+# do not install the retired Hugging Face CLI (sc-12227 / sc-12232).
+FROM rust-worker-candle AS runpod
+
+COPY --from=embed-builder /out/sceneworks-rust-api /usr/local/bin/sceneworks-rust-api
+COPY docker/runpod-entrypoint.sh /usr/local/bin/sceneworks-runpod-entrypoint
+RUN chmod 0755 /usr/local/bin/sceneworks-runpod-entrypoint
+
+ENV SCENEWORKS_API_HOST=0.0.0.0 \
+    SCENEWORKS_API_PORT=8010 \
+    SCENEWORKS_API_URL=http://127.0.0.1:8010 \
+    SCENEWORKS_DATA_DIR=/sceneworks/data \
+    SCENEWORKS_CONFIG_DIR=/sceneworks/config \
+    SCENEWORKS_JOBS_DB_PATH=/sceneworks/data/cache/jobs.db \
+    SCENEWORKS_CANDLE_REQUIRED=1 \
+    SCENEWORKS_CANDLE_UNSUPPORTED_MODE=enforce \
+    SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE=1 \
+    SCENEWORKS_WORKER_ID=runpod-worker-0 \
+    HF_HOME=/sceneworks/data/cache/huggingface \
+    HF_HUB_CACHE=/sceneworks/data/cache/huggingface/hub \
+    HUGGINGFACE_HUB_CACHE=/sceneworks/data/cache/huggingface/hub
+
+EXPOSE 8010
+VOLUME ["/sceneworks"]
+HEALTHCHECK --interval=20s --timeout=5s --retries=3 --start-period=10s \
+    CMD curl -fsS "http://127.0.0.1:${SCENEWORKS_API_PORT:-8010}/api/v1/health" >/dev/null || exit 1
+
+ENTRYPOINT ["/usr/local/bin/sceneworks-runpod-entrypoint"]
