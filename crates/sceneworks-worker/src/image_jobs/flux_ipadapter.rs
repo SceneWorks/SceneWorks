@@ -1,3 +1,15 @@
+use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
+use super::{
+    consume_gen_events, drive_gen_items_scored, load_reference_image, non_empty,
+    resolve_advanced_or_manifest_f32_with, resolve_advanced_or_manifest_u32_with,
+    resolve_character_image_likeness_source, resolve_seed, stage_likeness, start_gen_stream,
+    ApiClient, Image, ImagePlan, ImageRequest, IpAdapterFlux, IpAdapterFluxPaths,
+    IpAdapterFluxRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
+    WorkerResult,
+};
+use super::{resolve_app_managed_model_dir, DownloadContext};
+use serde_json::json;
+
 // Candle (Windows/CUDA) FLUX XLabs IP-Adapter reference route (sc-5872, epic 5480) — reference-image
 // (identity) conditioning on FLUX.1 [dev]/[schnell] off-Mac via `runtime_cuda::providers::flux::IpAdapterFlux`. The
 // FLUX sibling of the candle SDXL/Kolors IP-Adapter lanes (sdxl_ipadapter.rs / kolors_ipadapter.rs):
@@ -7,8 +19,8 @@
 //
 // **Candle-only.** macOS keeps the MLX FLUX XLabs IP path (epic 3621, the registry `Reference` route
 // the `flux1_*` generators handle via `with_ip_adapter`); the candle `IpAdapterFlux` is a bespoke
-// provider, so this whole file is gated to the Windows/CUDA candle build (the `include!` in
-// image_jobs.rs carries the cfg). It is `include!`d into the `image_jobs` module, so it shares that
+// provider, so this whole file is gated to the Windows/CUDA candle build (the module declaration in
+// image_jobs.rs carries the cfg). It is a child module of the `image_jobs` module, so it shares that
 // module's imports (ImageRequest/Settings/WorkerResult/`advanced`/`load_reference_image`/
 // `huggingface_snapshot_dir`/`ensure_hf_cached_file`/`start_gen_stream`/… all in scope unqualified).
 
@@ -26,8 +38,8 @@ const FLUX_IPADAPTER_ENCODER_FILE: &str = "model.safetensors";
 /// defense-in-depth (mirrors sc-8879/sc-9682). HF's tree API still reports each file's `lfs.oid`, which
 /// `ensure_hf_cached_file` verifies the downloaded content against. (Split per repo because a single sha
 /// cannot address two different repos.)
-const FLUX_IPADAPTER_ADAPTER_REVISION: &str = "18f6940238ab5dc3744df7a8e30315892279d5f9";
-const FLUX_IPADAPTER_ENCODER_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
+pub(super) const FLUX_IPADAPTER_ADAPTER_REVISION: &str = "18f6940238ab5dc3744df7a8e30315892279d5f9";
+pub(super) const FLUX_IPADAPTER_ENCODER_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 /// IP-Adapter scale default — the XLabs resemblance tier 0.7 (matches `base.rs` `FLUX_IP_SCALE`, the MLX
 /// path, and the candle `IpAdapterFlux::DEFAULT_IP_SCALE`).
 const FLUX_IPADAPTER_IP_SCALE: f32 = 0.7;
@@ -82,7 +94,8 @@ fn resolve_flux_ipadapter_base(
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
     {
-        return resolve_app_managed_model_dir(settings, &path, "FLUX IP-Adapter modelPath").map(Some);
+        return resolve_app_managed_model_dir(settings, &path, "FLUX IP-Adapter modelPath")
+            .map(Some);
     }
     let repo = request
         .model_manifest_entry
@@ -97,7 +110,7 @@ fn resolve_flux_ipadapter_base(
 /// True when this is a candle-eligible FLUX IP-Adapter job: a `flux_dev`/`flux_schnell` model with a
 /// reference image (and NOT an img2img/inpaint/edit shape — those are sc-5487) whose base resolves
 /// locally. Mirrors `jobs_store::flux_ipadapter_candle_eligible` so the worker and router agree.
-fn flux_ipadapter_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn flux_ipadapter_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_flux_ipadapter_model(&request.model)
         && request.mode != "edit_image"
         && non_empty(&request.reference_asset_id)
@@ -227,7 +240,7 @@ fn flux_ipadapter_raw_settings(
 /// images, each its own seed; `generate` takes the per-job `CancelFlag` + a `Progress` callback, so
 /// streaming is per-step and cancellation is honoured mid-denoise — same contract as the SDXL/Kolors IP
 /// lanes.
-async fn generate_candle_flux_ipadapter_stream(
+pub(super) async fn generate_candle_flux_ipadapter_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -367,7 +380,13 @@ async fn generate_candle_flux_ipadapter_stream(
                         Some(likeness_source_ref.as_str()),
                     )
                 });
-                Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
+                Ok(Some((
+                    seed,
+                    out.width,
+                    out.height,
+                    out.pixels,
+                    face_likeness,
+                )))
             })
         },
     );

@@ -1,3 +1,14 @@
+use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
+use super::{
+    pid_effective_dims, pid_output_tier, pose_entries, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_quant,
+    run_candle_strict_control, ApiClient, CancelFlag, CandleStrictControl, Flux2Control,
+    Flux2ControlPaths, Flux2ControlRequest, Image, ImagePlan, ImageRequest, JobSnapshot,
+    JsonObject, Path, PathBuf, Progress, Quant, Settings, Value, WorkerError, WorkerResult,
+};
+use super::{resolve_app_managed_model_dir, safe_weight_filename, DownloadContext};
+use serde_json::json;
+
 // Candle (Windows/CUDA) FLUX.2-dev strict-pose Fun-Controlnet-Union route (sc-7736, epic 6564) —
 // `flux2_dev` + `advanced.poses` off-Mac via `runtime_cuda::providers::flux2::Flux2Control`. The candle sibling of the
 // MLX FLUX.2-dev strict-pose path (flux2.rs `generate_flux2_dev_control_stream`, sc-6055 / engine
@@ -8,7 +19,7 @@
 //
 // **Candle-only.** macOS keeps the MLX `flux2_dev_control` registry generator (flux2.rs); the candle
 // `Flux2Control` is a bespoke provider, so this whole file is gated to the Windows/CUDA candle build (the
-// `include!` in image_jobs.rs carries the cfg). It is `include!`d into the `image_jobs` module, so it
+// the module declaration in image_jobs.rs carries the cfg). It is a child module of the `image_jobs` module, so it
 // shares that module's imports (`parse_poses`/`pose_entries`/`Settings`/`WorkerResult`/`resolve_quant`/
 // `huggingface_snapshot_dir`/`ensure_hf_cached_file`/`start_gen_stream`/… all in scope unqualified).
 //
@@ -28,24 +39,24 @@ const FLUX2_CONTROL_CANDLE_FILE: &str = "FLUX.2-dev-Fun-Controlnet-Union-2602.sa
 /// checkpoint we load; pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). Applied ONLY
 /// to the default repo — a manifest `controlWeights.repo` override keeps `main`. HF's tree API still
 /// reports the file's `lfs.oid`, which `ensure_hf_cached_file` verifies against.
-const FLUX2_CONTROL_CANDLE_REVISION: &str = "b3dcd7836a0e926248dac3ccba8fc0853495764b";
+pub(super) const FLUX2_CONTROL_CANDLE_REVISION: &str = "b3dcd7836a0e926248dac3ccba8fc0853495764b";
 /// The FLUX.2-dev base diffusers repo when the manifest omits `repo` (the 32B flagship). The candle lane
 /// loads the dense snapshot and Q4-quantizes it at load.
 const FLUX2_CONTROL_CANDLE_BASE_REPO: &str = "black-forest-labs/FLUX.2-dev";
 /// Pose ControlNet conditioning-scale default — the dev Fun-Controlnet-Union README sweet spot is
 /// 0.65–0.80, the worker (and engine `DEFAULT_CONTROL_SCALE`) default 0.75. Clamp [0, 2].
-const FLUX2_CONTROL_CANDLE_DEFAULT_SCALE: f32 = 0.75;
+pub(super) const FLUX2_CONTROL_CANDLE_DEFAULT_SCALE: f32 = 0.75;
 /// Denoise-steps default — the guidance-distilled dev (FLUX.1-dev pattern, ~28 steps).
 const FLUX2_CONTROL_CANDLE_DEFAULT_STEPS: u32 = 28;
 /// Embedded-guidance default — distilled dev scalar (NOT true-CFG, no negative pass).
 const FLUX2_CONTROL_CANDLE_DEFAULT_GUIDANCE: f32 = 4.0;
 /// The adapter/engine id recorded on candle FLUX.2-dev control assets (distinct from the txt2img
 /// `candle_flux2` + edit `candle_flux2_edit` lanes).
-const FLUX2_CONTROL_CANDLE_ENGINE: &str = "candle_flux2_control";
+pub(super) const FLUX2_CONTROL_CANDLE_ENGINE: &str = "candle_flux2_control";
 /// The [`STRICT_CONTROL_ENGINES`] catalog id this candle lane validates `advanced.controlMode` against
 /// (the dev Fun-Controlnet-Union row — `{Pose, Canny, Depth}`). Mirrors the MLX `flux2_dev_control`
 /// registry engine's `supported_kinds` (sc-8304).
-const FLUX2_CONTROL_CANDLE_ENGINE_ID: &str = "flux2_dev_control";
+pub(super) const FLUX2_CONTROL_CANDLE_ENGINE_ID: &str = "flux2_dev_control";
 
 /// Model ids the candle FLUX.2 strict-pose control route accepts (klein has no control checkpoint).
 fn is_flux2_control_model(model: &str) -> bool {
@@ -68,7 +79,8 @@ fn resolve_flux2_control_base(
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
     {
-        return resolve_app_managed_model_dir(settings, &path, "FLUX.2 control modelPath").map(Some);
+        return resolve_app_managed_model_dir(settings, &path, "FLUX.2 control modelPath")
+            .map(Some);
     }
     let repo = request
         .model_manifest_entry
@@ -84,7 +96,7 @@ fn resolve_flux2_control_base(
 /// `advanced.poses`, not edit mode, whose base resolves locally. Mirrors
 /// `jobs_store::flux2_dev_control_candle_eligible` so the worker and router agree. Control-weights
 /// presence is NOT part of the gate: they are fetched on first use in the stream.
-fn flux2_control_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn flux2_control_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_flux2_control_model(&request.model)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
@@ -110,7 +122,9 @@ fn flux2_control_candle_guidance(request: &ImageRequest) -> f32 {
 /// The (repo, filename) of the control weights — `advanced.controlWeights.{repo,filename}` overrides,
 /// else the Fun-Controlnet-Union `-2602` default (parity with the MLX `flux2_control_repo_file`).
 /// The payload filename must be a plain component (sc-8821 / F-019).
-fn flux2_control_candle_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
+pub(super) fn flux2_control_candle_repo_file(
+    request: &ImageRequest,
+) -> WorkerResult<(String, String)> {
     let cw = request
         .advanced
         .get("controlWeights")
@@ -162,7 +176,8 @@ async fn ensure_flux2_control_candle_weights(
         client: &client,
         settings,
         job_id: &job.id,
-        cancel_message: "FLUX.2-dev strict-pose generation canceled while fetching control weights.",
+        cancel_message:
+            "FLUX.2-dev strict-pose generation canceled while fetching control weights.",
         fresh_download: false,
     };
     let dst = settings
@@ -216,7 +231,7 @@ fn flux2_control_candle_raw_settings(
 /// the resolved base + control weight paths, the Q4 quant policy, and the request numerics. dev keeps its
 /// embedded guidance (no true-CFG / negative pass). Moved onto the blocking thread, loaded once (Q4
 /// CPU-stage → quantize-onto-GPU), drives every pose.
-struct Flux2StrictControl {
+pub(super) struct Flux2StrictControl {
     base: PathBuf,
     control: PathBuf,
     quant: Option<Quant>,
@@ -231,6 +246,22 @@ struct Flux2StrictControl {
     /// load; `use_pid` on the request is `is_some()` so the two stay in lockstep (the engine rejects a
     /// mismatch). `None` ⇒ native FLUX.2 VAE decode.
     pid: Option<gen_core::PidWeights>,
+}
+
+#[cfg(test)]
+pub(super) fn flux2_strict_control_test_fixture(path: PathBuf) -> Flux2StrictControl {
+    Flux2StrictControl {
+        base: path.clone(),
+        control: path,
+        quant: None,
+        prompt: "p".to_owned(),
+        width: 512,
+        height: 512,
+        steps: 28,
+        guidance: 4.0,
+        control_scale: 0.75,
+        pid: None,
+    }
 }
 
 impl CandleStrictControl for Flux2StrictControl {
@@ -262,7 +293,9 @@ impl CandleStrictControl for Flux2StrictControl {
             control: self.control.clone(),
         };
         let model = Flux2Control::load(&paths, self.quant).map_err(|error| {
-            WorkerError::Engine(format!("FLUX.2-dev strict-pose control load failed: {error}"))
+            WorkerError::Engine(format!(
+                "FLUX.2-dev strict-pose control load failed: {error}"
+            ))
         })?;
         // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND the snapshots are cached.
         match &self.pid {
@@ -306,7 +339,7 @@ impl CandleStrictControl for Flux2StrictControl {
 /// `flux2_dev_control`'s `supported_kinds`, per-pose preprocessing, scoring). dev (32B) loads Q4 (manifest
 /// `mlx.quantize: 4` → `resolve_quant`); the control overlay quantizes in place. dev keeps its embedded
 /// guidance (no CFG). The pose path is byte-preserved.
-async fn generate_candle_flux2_control_stream(
+pub(super) async fn generate_candle_flux2_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -349,8 +382,12 @@ async fn generate_candle_flux2_control_stream(
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). The shared driver renders the control map at these
     // same dims (via `out_width`/`out_height`), keeping control + latent aligned.
-    let (width, height) =
-        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    let (width, height) = pid_effective_dims(
+        request.width,
+        request.height,
+        use_pid,
+        pid_output_tier(request),
+    );
     let mut raw_settings = flux2_control_candle_raw_settings(
         request,
         &repo,

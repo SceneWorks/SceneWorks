@@ -1,3 +1,14 @@
+use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
+use super::{
+    control_kind_label, pose_entries, requested_control_kind, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32, run_candle_strict_control, ApiClient, CancelFlag,
+    CandleStrictControl, Flux1ControlPaths, Flux1ControlRequest, Flux1DevControl, Image, ImagePlan,
+    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Settings, Value, WorkerError,
+    WorkerResult,
+};
+use super::{resolve_app_managed_model_dir, safe_weight_filename, DownloadContext};
+use serde_json::json;
+
 // Candle (Windows/CUDA) FLUX.1-dev strict-control Fun-Controlnet-Union route (sc-8412, epic 8236) —
 // `flux_dev` + `advanced.poses` off-Mac via `runtime_cuda::providers::flux::Flux1DevControl`. The candle sibling of the
 // MLX FLUX.1-dev strict-control path (flux1_control.rs `generate_flux1_dev_control_stream`, sc-8244 /
@@ -8,7 +19,7 @@
 //
 // **Candle-only.** macOS keeps the MLX `flux1_dev_control` registry generator (flux1_control.rs); the
 // candle `Flux1DevControl` is a bespoke provider, so this whole file is gated to the Windows/CUDA candle
-// build (the `include!` in image_jobs.rs carries the cfg). It is `include!`d into the `image_jobs`
+// build (the module declaration in image_jobs.rs carries the cfg). It is a child module of the `image_jobs`
 // module, so it shares that module's imports (`parse_poses`/`pose_entries`/`Settings`/`WorkerResult`/
 // `huggingface_snapshot_dir`/`ensure_hf_cached_file`/`start_gen_stream`/… all in scope unqualified).
 //
@@ -29,27 +40,27 @@ const FLUX1_CONTROL_CANDLE_FILE: &str = "diffusion_pytorch_model.safetensors";
 /// checkpoint we load; pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). Applied ONLY
 /// to the default repo — a manifest `controlWeights.repo` override keeps `main`. HF's tree API still
 /// reports the file's `lfs.oid`, which `ensure_hf_cached_file` verifies against.
-const FLUX1_CONTROL_CANDLE_REVISION: &str = "5d700aaad96c5ddcdf8a38ef9b22a82aac2c38e5";
+pub(super) const FLUX1_CONTROL_CANDLE_REVISION: &str = "5d700aaad96c5ddcdf8a38ef9b22a82aac2c38e5";
 /// The FLUX.1-dev base diffusers repo when the manifest omits `repo` (HF-gated). The candle lane loads
 /// the dense bf16 snapshot.
-const FLUX1_CONTROL_CANDLE_BASE_REPO: &str = "black-forest-labs/FLUX.1-dev";
+pub(super) const FLUX1_CONTROL_CANDLE_BASE_REPO: &str = "black-forest-labs/FLUX.1-dev";
 /// Control-conditioning-scale default — the Shakker Union-Pro-2.0 README sweet spot ≈ 0.7 (the engine
 /// `DEFAULT_CONTROL_SCALE` too, and the MLX lane's default). Clamp [0, 2].
-const FLUX1_CONTROL_CANDLE_DEFAULT_SCALE: f32 = 0.7;
+pub(super) const FLUX1_CONTROL_CANDLE_DEFAULT_SCALE: f32 = 0.7;
 /// Denoise-steps default — the guidance-distilled dev (~25 steps; the engine request default).
 const FLUX1_CONTROL_CANDLE_DEFAULT_STEPS: u32 = 25;
 /// Embedded-guidance default — distilled dev scalar (NOT true-CFG, no negative pass).
 const FLUX1_CONTROL_CANDLE_DEFAULT_GUIDANCE: f32 = 3.5;
 /// The adapter/engine id recorded on candle FLUX.1-dev control assets (distinct from the txt2img
 /// `candle_flux` + FLUX.2 `candle_flux2_control` lanes).
-const FLUX1_CONTROL_CANDLE_ENGINE: &str = "candle_flux1_control";
+pub(super) const FLUX1_CONTROL_CANDLE_ENGINE: &str = "candle_flux1_control";
 /// The [`STRICT_CONTROL_ENGINES`] catalog id this candle lane validates `advanced.controlMode` against
 /// (the FLUX.1-dev Union-Pro-2.0 row — `{Pose, Canny, Depth}`). Mirrors the MLX `flux1_dev_control`
 /// registry engine's `supported_kinds` (sc-8304).
-const FLUX1_CONTROL_CANDLE_ENGINE_ID: &str = "flux1_dev_control";
+pub(super) const FLUX1_CONTROL_CANDLE_ENGINE_ID: &str = "flux1_dev_control";
 
 /// Model ids the candle FLUX.1 strict-control route accepts (schnell has no control checkpoint).
-fn is_flux1_control_model(model: &str) -> bool {
+pub(super) fn is_flux1_control_model(model: &str) -> bool {
     model == "flux_dev"
 }
 
@@ -69,7 +80,8 @@ fn resolve_flux1_control_base(
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
     {
-        return resolve_app_managed_model_dir(settings, &path, "FLUX.1 control modelPath").map(Some);
+        return resolve_app_managed_model_dir(settings, &path, "FLUX.1 control modelPath")
+            .map(Some);
     }
     let repo = request
         .model_manifest_entry
@@ -85,7 +97,7 @@ fn resolve_flux1_control_base(
 /// `advanced.poses`, not edit mode, whose base resolves locally. Mirrors
 /// `jobs_store::flux1_control_candle_eligible` so the worker and router agree. Control-weights presence is
 /// NOT part of the gate: they are fetched on first use in the stream.
-fn flux1_control_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn flux1_control_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_flux1_control_model(&request.model)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
@@ -111,7 +123,9 @@ fn flux1_control_candle_guidance(request: &ImageRequest) -> f32 {
 /// The (repo, filename) of the control weights — `advanced.controlWeights.{repo,filename}` overrides,
 /// else the Shakker Union-Pro-2.0 default (parity with the MLX `flux1_control_repo_file`).
 /// The payload filename must be a plain component (sc-8821 / F-019).
-fn flux1_control_candle_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
+pub(super) fn flux1_control_candle_repo_file(
+    request: &ImageRequest,
+) -> WorkerResult<(String, String)> {
     let cw = request
         .advanced
         .get("controlWeights")
@@ -163,7 +177,8 @@ async fn ensure_flux1_control_candle_weights(
         client: &client,
         settings,
         job_id: &job.id,
-        cancel_message: "FLUX.1-dev strict-control generation canceled while fetching control weights.",
+        cancel_message:
+            "FLUX.1-dev strict-control generation canceled while fetching control weights.",
         fresh_download: false,
     };
     let dst = settings
@@ -212,7 +227,7 @@ fn flux1_control_candle_raw_settings(
 /// label (input-agnostic — used only to satisfy the engine's accepted-set check, shared across the pose
 /// set). dev keeps its embedded guidance (no true-CFG / negative pass). Moved onto the blocking thread,
 /// loaded once (dense bf16), drives every pose.
-struct Flux1StrictControl {
+pub(super) struct Flux1StrictControl {
     base: PathBuf,
     control: PathBuf,
     prompt: String,
@@ -225,6 +240,21 @@ struct Flux1StrictControl {
     /// validates it against its accepted set but does NOT branch the forward (Union-Pro-2.0 dropped the
     /// discrete mode index). The whole pose set shares one `controlMode`, so a single label is correct.
     control_kind: String,
+}
+
+#[cfg(test)]
+pub(super) fn flux1_strict_control_test_fixture(path: PathBuf) -> Flux1StrictControl {
+    Flux1StrictControl {
+        base: path.clone(),
+        control: path,
+        prompt: "p".to_owned(),
+        width: 512,
+        height: 512,
+        steps: 25,
+        guidance: 3.5,
+        control_scale: 0.7,
+        control_kind: "pose".to_owned(),
+    }
 }
 
 impl CandleStrictControl for Flux1StrictControl {
@@ -284,7 +314,9 @@ impl CandleStrictControl for Flux1StrictControl {
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
-            WorkerError::Engine(format!("FLUX.1-dev strict-control generation failed: {error}"))
+            WorkerError::Engine(format!(
+                "FLUX.1-dev strict-control generation failed: {error}"
+            ))
         })
     }
 }
@@ -295,7 +327,7 @@ impl CandleStrictControl for Flux1StrictControl {
 /// the shared [`run_candle_strict_control`] driver (validation against `flux1_dev_control`'s
 /// `supported_kinds`, per-pose preprocessing, scoring). dev loads dense bf16 (no quant) and keeps its
 /// embedded guidance (no CFG). The pose path is byte-preserved.
-async fn generate_candle_flux1_control_stream(
+pub(super) async fn generate_candle_flux1_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -333,8 +365,14 @@ async fn generate_candle_flux1_control_stream(
         .to_owned();
 
     let pose_count = pose_entries(request).len();
-    let raw_settings =
-        flux1_control_candle_raw_settings(request, &repo, steps, guidance, control_scale, pose_count);
+    let raw_settings = flux1_control_candle_raw_settings(
+        request,
+        &repo,
+        steps,
+        guidance,
+        control_scale,
+        pose_count,
+    );
 
     let provider = Flux1StrictControl {
         base,

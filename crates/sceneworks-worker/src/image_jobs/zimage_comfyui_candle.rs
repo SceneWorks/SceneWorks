@@ -1,3 +1,12 @@
+use super::huggingface_snapshot_dir;
+use super::{
+    consume_gen_events, drive_gen_items, pose_entries, resolve_advanced_or_manifest_u32,
+    resolve_seed, start_gen_stream, ApiClient, GenerationOutput, GenerationRequest, ImagePlan,
+    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
+    WorkerResult,
+};
+use serde_json::json;
+
 // Candle (Windows/CUDA) in-place ComfyUI Z-Image txt2img route (epic 10451 Phase 2, sc-10668). Renders
 // a user's existing ComfyUI Z-Image base weights — read in place, no copy, no re-download — via
 // `runtime_cuda::providers::z_image::load_from_comfyui_components`, which remaps the ComfyUI-native DiT + VAE keys and
@@ -8,7 +17,7 @@
 // **Candle-only**, and a **bespoke provider** (like `ZImageEdit`/`ZImageControl`): the loaded generator is
 // not registry-resolvable (its weights are three separate in-place files, not a diffusers snapshot dir),
 // so it is loaded fresh per job through `start_gen_stream` rather than the cached registry path. This file
-// is `include!`d into the `image_jobs` module, sharing its imports.
+// is a child module of the `image_jobs` module, sharing its imports.
 
 /// The adapter/engine id recorded on candle ComfyUI Z-Image assets + telemetry (distinct from the
 /// registry `candle_z_image` txt2img and the `candle_zimage_edit`/`_control` lanes).
@@ -86,11 +95,7 @@ fn resolve_zimage_comfyui_paths(
             text_encoder,
             "ComfyUI Z-Image text encoder",
         )?,
-        vae: crate::paths::normalize_app_managed_model_path(
-            settings,
-            vae,
-            "ComfyUI Z-Image VAE",
-        )?,
+        vae: crate::paths::normalize_app_managed_model_path(settings, vae, "ComfyUI Z-Image VAE")?,
         tokenizer_dir,
     }))
 }
@@ -98,7 +103,7 @@ fn resolve_zimage_comfyui_paths(
 /// True when this is a candle-runnable in-place ComfyUI Z-Image txt2img job: an `external_base_*` model
 /// whose forwarded row is a usable z-image with all three component paths, no source image / pose (the
 /// candle Z-Image comfyui lane is txt2img only). Mirrors the edit/control availability predicates.
-fn zimage_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn zimage_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model.starts_with("external_base_")
         && request.mode != "edit_image"
         && pose_entries(request).is_empty()
@@ -126,7 +131,7 @@ fn zimage_comfyui_raw_settings(request: &ImageRequest, steps: u32) -> JsonObject
 /// the async side, then load `load_from_comfyui_components` once + generate each image on the blocking
 /// thread. `request.count` images, each its own seed. Z-Image-Turbo is distilled (no CFG / negative
 /// prompt). The loaded `Box<dyn Generator>` is bespoke (not registry-cached), driven like the edit lane.
-async fn generate_candle_zimage_comfyui_stream(
+pub(super) async fn generate_candle_zimage_comfyui_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -138,7 +143,8 @@ async fn generate_candle_zimage_comfyui_stream(
     let request = &plan.request;
     let paths = resolve_zimage_comfyui_paths(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(
-            "ComfyUI Z-Image components could not be resolved (family/usable/components)".to_owned(),
+            "ComfyUI Z-Image components could not be resolved (family/usable/components)"
+                .to_owned(),
         )
     })?;
 
