@@ -66,6 +66,26 @@ const KREA_CONTROL_OVERLAY_FILE: &str = "control_step5000.safetensors";
 /// `lfs.oid` from HF's tree API.
 const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac";
 
+/// The Krea control fit-ladder tier for the base directory the resolver will actually load.
+///
+/// Standard turnkey basenames are authoritative because `krea_model_subdir` can clamp/fall back away
+/// from the requested bits. Opaque dense roots deliberately fall through to the request key; NVFP4 is
+/// likewise used only when no standard tier basename resolved.
+fn krea_control_gate_tier(
+    resolved_base: &Path,
+    advanced: &JsonObject,
+    manifest_entry: &JsonObject,
+    nvfp4: bool,
+) -> &'static str {
+    gate_tier_key(
+        /* convrot_resolved */ false,
+        resolved_base,
+        advanced,
+        manifest_entry,
+        nvfp4,
+    )
+}
+
 /// Model ids the candle Krea strict-pose control route accepts (the deployed base the overlay applies on).
 fn is_krea_control_model(model: &str) -> bool {
     model == "krea_2_turbo"
@@ -456,10 +476,12 @@ async fn generate_candle_krea_control_stream(
     // plan — fixing the repeated-control-render needless downtier / reject. Same treatment as
     // `qwen_edit_candle.rs`; base.rs already gets it for free via the evicting cache. The admitted peak is
     // recorded (`note_loaded_peak` below) so a repeated control render can reclaim these pooled pages.
-    // sc-11042: `base` is the tier dir this lane resolved (`krea_model_subdir`'s output when the user has
-    // the packed MLX turnkey; a dense diffusers snapshot root otherwise, which is never an `nvfp4/` dir),
-    // so the NVFP4 tier is sized only when it is the tier that actually resolved.
-    let tier = crate::vram_gate::requested_tier_key(
+    // sc-11042 / sc-13619: budget the tier `resolve_krea_control_base` ACTUALLY selected. The turnkey
+    // resolver clamps/falls back to an installed tier, so request bits can disagree with the directory
+    // that loads (for example, requested q4 with only q8 installed). Dense/opaque roots have no tier
+    // basename and deliberately retain the request/NVFP4 fallback.
+    let tier = krea_control_gate_tier(
+        &base,
         &request.advanced,
         &request.model_manifest_entry,
         nvfp4_selected(request, nvfp4_host_eligible(), Some(&base)),
@@ -597,4 +619,108 @@ async fn generate_candle_krea_control_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod krea_control_tier_reconcile_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(bits: i64) -> ImageRequest {
+        ImageRequest::from_payload(
+            json!({
+                "model": "krea_2_turbo",
+                "advanced": { "mlxQuantize": bits },
+                "modelManifestEntry": {}
+            })
+            .as_object()
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn fit_ladder_sizes_the_resolved_base_tier_before_request_fallback() {
+        let req = request(4);
+
+        // Installed-tier fallback: a q4 request that resolved q8 must budget q8.
+        assert_eq!(
+            krea_control_gate_tier(
+                Path::new("/cache/SceneWorks/krea-2-turbo-mlx/q8"),
+                &req.advanced,
+                &req.model_manifest_entry,
+                false,
+            ),
+            "q8"
+        );
+        assert_eq!(
+            crate::vram_gate::requested_tier_key(
+                &req.advanced,
+                &req.model_manifest_entry,
+                false,
+            ),
+            "q4",
+            "the request key intentionally differs in this regression"
+        );
+
+        // Every recognized resolved tier is authoritative, independent of the requested q4.
+        assert_eq!(
+            krea_control_gate_tier(
+                Path::new("/cache/SceneWorks/krea-2-turbo-mlx/q4"),
+                &req.advanced,
+                &req.model_manifest_entry,
+                false,
+            ),
+            "q4"
+        );
+        assert_eq!(
+            krea_control_gate_tier(
+                Path::new("/cache/SceneWorks/krea-2-turbo-mlx/bf16"),
+                &req.advanced,
+                &req.model_manifest_entry,
+                false,
+            ),
+            "bf16"
+        );
+
+        // An eligible NVFP4 selection survives only when the resolved directory is itself NVFP4/opaque;
+        // a standard installed fallback remains authoritative.
+        assert_eq!(
+            krea_control_gate_tier(
+                Path::new("/cache/SceneWorks/krea-2-turbo-mlx/nvfp4"),
+                &req.advanced,
+                &req.model_manifest_entry,
+                true,
+            ),
+            NVFP4_TIER
+        );
+        assert_eq!(
+            krea_control_gate_tier(
+                Path::new("/cache/SceneWorks/krea-2-turbo-mlx/q8"),
+                &req.advanced,
+                &req.model_manifest_entry,
+                true,
+            ),
+            "q8"
+        );
+
+        // Bring-your-own dense snapshots have opaque basenames, preserving the request-derived fallback.
+        assert_eq!(
+            krea_control_gate_tier(
+                Path::new("/models/krea-dense-snapshot"),
+                &req.advanced,
+                &req.model_manifest_entry,
+                false,
+            ),
+            "q4"
+        );
+        assert_eq!(
+            krea_control_gate_tier(
+                Path::new("/models/krea-dense-snapshot"),
+                &req.advanced,
+                &req.model_manifest_entry,
+                true,
+            ),
+            NVFP4_TIER
+        );
+    }
 }

@@ -531,6 +531,11 @@ async fn generate_candle_qwen_edit_stream(
         )
         .await?;
         let available_gb = budget.map_or(0.0, |b| b.free_gb);
+        // sc-13619: the quant picker is hidden when no alternative tier is installed. Derive advice
+        // from the same forced-tier probes as the main candle lane so both reject arms name only
+        // smaller tiers this installation can really load.
+        let reject_tail =
+            vram_reject_tail_for_tier(installed_tier_keys(request, settings), tier);
         match plan {
             crate::vram_gate::LoadPlan::Sequential => {
                 tracing::info!(
@@ -559,12 +564,12 @@ async fn generate_candle_qwen_edit_stream(
                     return Err(WorkerError::InvalidPayload(format!(
                         "{model} at the {tier} tier needs ~{seq} GB of VRAM even with sequential \
                          component residency (loading one component at a time), but GPU {gpu} has \
-                         ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
-                         resolution, or run on a card with more VRAM.",
+                         ~{available} GB available. {tail}",
                         model = request.model,
                         seq = seq_gb.round() as i64,
                         available = available_gb.round() as i64,
                         gpu = settings.gpu_id,
+                        tail = reject_tail,
                     )));
                 }
                 // Defensive: a resident overflow with no staging — unreachable for this lane (it is always
@@ -572,12 +577,12 @@ async fn generate_candle_qwen_edit_stream(
                 // honest message rather than an unwrap if that ever changes.
                 return Err(WorkerError::InvalidPayload(format!(
                     "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU \
-                     {gpu} has ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
-                     resolution, or run on a card with more VRAM.",
+                     {gpu} has ~{available} GB available. {tail}",
                     model = request.model,
                     needed = needed.unwrap_or(0.0).round() as i64,
                     available = available_gb.round() as i64,
                     gpu = settings.gpu_id,
+                    tail = reject_tail,
                 )));
             }
             // Resident admit (`Fits`) — or `Unknown` when a tier is unmeasured. Record the RESIDENT peak
@@ -864,6 +869,19 @@ mod qwen_edit_tier_reconcile_tests {
             gate_tier_key(false, opaque.path(), &req.advanced, entry, false),
             "q4"
         );
+    }
+
+    #[test]
+    fn reject_advice_names_only_smaller_installed_tiers() {
+        let none = vram_reject_tail_for_tier(vec!["q8"], "q8");
+        assert!(none.contains("No smaller tier is installed"));
+        assert!(!none.contains("Pick a lower tier"));
+        assert!(!none.contains("Q4/Q8"));
+
+        let q4 = vram_reject_tail_for_tier(vec!["bf16", "q8", "q4"], "q8");
+        assert!(q4.contains("(Q4)"));
+        assert!(!q4.contains("BF16"));
+        assert!(!q4.contains("Q8 /"));
     }
 
     /// The PRODUCTION default path, end to end: a stock install fetches only the `default: true` q4
