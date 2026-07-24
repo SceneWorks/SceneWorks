@@ -19,6 +19,34 @@ log() {
   printf '[runpod] %s\n' "$*" >&2
 }
 
+trim_whitespace() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "${value}"
+}
+
+effective_api_host() {
+  local host
+  if [[ -v SCENEWORKS_API_HOST ]]; then
+    host="$(trim_whitespace "${SCENEWORKS_API_HOST}")"
+    # Match the API's env_string fallback for an explicitly blank value.
+    [[ -n "${host}" ]] || host="127.0.0.1"
+  else
+    # The combined image's Dockerfile sets this value. Keeping the same fallback
+    # here makes direct entrypoint tests exercise the production posture.
+    host="0.0.0.0"
+  fi
+  printf '%s' "${host}"
+}
+
+is_loopback_host() {
+  case "$1" in
+    127.* | "::1" | "[::1]") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 is_running() {
   local pid="$1"
   local state
@@ -94,12 +122,26 @@ handle_signal() {
 
 trap handle_signal TERM INT HUP
 
+# This is a combined-image contract, not merely a late API-server safeguard:
+# fail before creating directories or starting any process when the configured
+# bind is network-reachable and the token is missing/blank. The legacy API
+# override is deliberately removed from every child so an injected value cannot
+# bypass this image's secure-by-default posture.
+api_host="$(effective_api_host)"
+access_token_trimmed="$(trim_whitespace "${SCENEWORKS_ACCESS_TOKEN:-}")"
+unset SCENEWORKS_ALLOW_OPEN_BIND
+if ! is_loopback_host "${api_host}" && [[ -z "${access_token_trimmed}" ]]; then
+  log "refusing network bind ${api_host}:${api_port}: SCENEWORKS_ACCESS_TOKEN is required by the combined RunPod image. Set a non-blank SCENEWORKS_ACCESS_TOKEN or bind to a loopback address; SCENEWORKS_ALLOW_OPEN_BIND cannot override this requirement."
+  exit 1
+fi
+unset access_token_trimmed
+
 mkdir -p \
   "${SCENEWORKS_DATA_DIR:-/sceneworks/data}/cache" \
   "${SCENEWORKS_CONFIG_DIR:-/sceneworks/config}" \
   "${HF_HOME:-/sceneworks/data/cache/huggingface}"
 
-log "starting embedded-web API on 0.0.0.0:${api_port}"
+log "starting embedded-web API on ${api_host}:${api_port}"
 "${api_bin}" &
 api_pid=$!
 
@@ -131,6 +173,7 @@ log "API healthy; starting candle GPU and utility workers"
 # the capability-routing boundary this combined image relies on.
 SCENEWORKS_API_URL="${api_url}" \
 SCENEWORKS_GPU_ID=auto \
+SCENEWORKS_ACCESS_TOKEN="${SCENEWORKS_ACCESS_TOKEN:-}" \
 "${worker_bin}" &
 worker_pid=$!
 

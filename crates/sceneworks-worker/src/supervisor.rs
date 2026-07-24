@@ -314,7 +314,7 @@ pub(crate) async fn terminate_child(child: &mut Child) {
     let _ = child.start_kill();
 }
 
-pub(crate) fn start_child_worker(_settings: &Settings, spec: &WorkerSpec) -> WorkerResult<Child> {
+pub(crate) fn start_child_worker(settings: &Settings, spec: &WorkerSpec) -> WorkerResult<Child> {
     let executable = std::env::current_exe()?;
     emit_event_value(
         Level::INFO,
@@ -325,7 +325,11 @@ pub(crate) fn start_child_worker(_settings: &Settings, spec: &WorkerSpec) -> Wor
         }),
     );
     let mut command = Command::new(executable);
-    command.envs(child_environment(spec));
+    // Make the auth contract explicit for every supervised GPU/utility child.
+    // Do not rely on ambient inheritance: first remove any raw parent value,
+    // then add the trimmed, nonblank value Settings accepted (if configured).
+    command.env_remove("SCENEWORKS_ACCESS_TOKEN");
+    command.envs(child_environment(settings, spec));
     // Windows graceful-shutdown channel (sc-11184 / F-014). Windows has no per-child
     // SIGTERM, so give the child a supervisor-held stdin pipe: closing the write end in
     // `terminate_child` delivers EOF, which the child's `shutdown_signal()` selects on
@@ -385,11 +389,17 @@ async fn report_worker_terminated(
     }
 }
 
-pub(crate) fn child_environment(spec: &WorkerSpec) -> BTreeMap<String, String> {
+pub(crate) fn child_environment(
+    settings: &Settings,
+    spec: &WorkerSpec,
+) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert("SCENEWORKS_WORKER_CHILD".to_owned(), "1".to_owned());
     env.insert("SCENEWORKS_WORKER_ID".to_owned(), spec.worker_id.clone());
     env.insert("SCENEWORKS_GPU_ID".to_owned(), spec.gpu_id.clone());
+    if let Some(access_token) = &settings.access_token {
+        env.insert("SCENEWORKS_ACCESS_TOKEN".to_owned(), access_token.clone());
+    }
     if spec.gpu_id == "cpu" {
         env.insert("CUDA_VISIBLE_DEVICES".to_owned(), String::new());
         env.insert("SCENEWORKS_UTILITY_JOBS".to_owned(), "1".to_owned());
