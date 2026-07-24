@@ -909,6 +909,48 @@ fn flux2_turnkey_quant_tier_select_stays_on_candle() {
 }
 
 #[test]
+fn sensenova_family_quant_tier_select_stays_on_candle() {
+    // sc-14249 (epic 9083): `candle-gen-sensenova` was dense-f32-only — it mmapped its backbone at
+    // a hardcoded F32 and hard-rejected `spec.quantize`, so the candle lane could read only the
+    // `bf16/` tier, at DOUBLE its on-disk size (a measured 70.5 GB peak on sm_120 for a 32.7 GiB
+    // checkpoint — a 96 GB-card feature). It now packed-detects each backbone projection, so the
+    // turnkey's q4/q8 tiers load natively and a tier-select must reach the worker instead of
+    // enforce-failing `candle_unsupported` at routing.
+    for model in [
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_infographic_v3_fast",
+    ] {
+        for bits in [4, 8] {
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": bits } }))
+                ),
+                "{model} Q{bits} tier-select should stay on candle (sc-14249)"
+            );
+        }
+        // The dense/plain shapes were always eligible — unchanged.
+        assert!(image_request_candle_eligible(
+            model,
+            &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 0 } }))
+        ));
+        // Quant and LoRA stay decoupled: the family advertises no candle inference LoRA (the
+        // fast ids' distill LoRA is merged internally by the loader, never user-supplied).
+        assert!(
+            !image_request_candle_eligible(
+                model,
+                &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
+            ),
+            "{model} must still defer a user LoRA"
+        );
+    }
+}
+
+#[test]
 fn sdxl_family_quant_and_lora_stay_on_candle() {
     // sc-10767 (epic 9083): the SDXL family advertises Q4/Q8 packed tiers (candle-gen sc-9416/9527)
     // AND inference LoRA/LoKr on a packed tier (sc-9528), so a quant tier-select AND a LoRA both

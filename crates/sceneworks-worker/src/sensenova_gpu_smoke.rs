@@ -1,4 +1,5 @@
-//! Local real-weight GPU smoke for the candle **SenseNova-U1 8B** worker lane (sc-13817, epic 13678).
+//! Local real-weight GPU smoke for the candle **SenseNova-U1 8B** worker lane (sc-13817, epic 13678;
+//! generalized to every tier by sc-14249, epic 9083).
 //! `#[ignore]`d — run by hand on the RTX PRO 6000. It drives the real candle SenseNova engine via
 //! `crate::inference_runtime::load("sensenova_u1_8b{,_fast}")` with a `LoadSpec` pointed at the tier
 //! `resolve_weights_dir` resolves — the exact runtime seam `generate_candle_stream` uses, minus the
@@ -9,23 +10,27 @@
 //! also never *worked*: the loader (`candle-gen-sensenova`) dense-loads a flat `*.safetensors`
 //! backbone via `f32_vb` and hard-rejects `spec.quantize`, but every sensenova catalog entry flags
 //! `mlx.standardTierLayout: true` with no `mlx.minQualityTier`, so `standard_tier_subdir` resolved
-//! the app-wide **q8** default — an MLX-packed tier the engine cannot read. sc-13817 forces the lane
-//! onto the dense `bf16/` tier; this smoke is the hardware evidence for that fix.
+//! the app-wide **q8** default — an MLX-packed tier the engine cannot read. sc-13817 forced the lane
+//! onto the dense `bf16/` tier; this smoke was the hardware evidence for that fix.
 //!
-//! **The tier is the point.** `SENSENOVA_DIR` must be the **dense bf16** tier dir (a flat
-//! `model.safetensors` + `tokenizer.json`, plus `distill_merged.json` on the `_fast` turnkey). The
-//! smoke asserts that shape up front rather than letting a packed q4/q8 dir reach the loader and fail
-//! with an opaque tensor-name error — pointing this at a packed tier is a *setup* mistake and should
-//! say so.
+//! **sc-14249 retired that constraint.** `candle-gen-sensenova` now packed-detects every backbone
+//! projection off its `.scales` sibling, so `SENSENOVA_DIR` may be **any** tier of the turnkey —
+//! `q4/`, `q8/` or `bf16/`. The dir must still be a self-contained tier (a flat `model.safetensors`
+//! plus `tokenizer.json`, and `distill_merged.json` on the `_fast` turnkey); the smoke asserts that
+//! shape up front so a torn/half-downloaded tier is called out as the *setup* mistake it is rather
+//! than reaching the loader as an opaque tensor-name error.
 //!
-//! Note the dense tier is ~35 GB of bf16 and `f32_vb` mmaps it as **F32**, so expect roughly double
-//! that resident on the device. This is a 96 GB-class-card smoke.
+//! MEASURED per tier on an idle RTX PRO 6000 (sm_120), 1024², the distilled 8-step id:
+//! **bf16 36.7 GB | q8 22.5 GB | q4 14.8 GB** — against the 70.5 GB this lane took before sc-14249,
+//! when the bf16 tier was the only readable one AND was mmapped at F32. q8 is visually faithful to
+//! bf16; q4 carries a visible ~4 px cross-hatch that is the tier's own 4-bit fidelity (the loader is
+//! bit-exact against the tier's affine grid — see the inference-side repack guard).
 //!
 //! Build with `CUDA_COMPUTE_CAP=120` (native Blackwell sm_120).
 //!
 //! Setup (PowerShell):
 //! ```text
-//! $env:SENSENOVA_DIR="E:\huggingface\hub\models--SceneWorks--sensenova-u1-8b-fast-mlx\snapshots\<hash>\bf16"
+//! $env:SENSENOVA_DIR="E:\huggingface\hub\models--SceneWorks--sensenova-u1-8b-fast-mlx\snapshots\<hash>\q8"
 //! $env:SENSENOVA_OUT_DIR="D:\sceneworks-sensenova-validate"
 //! # optional: SENSENOVA_VARIANT=base|fast  SENSENOVA_W=1024 SENSENOVA_H=1024
 //! #           SENSENOVA_STEPS=..  SENSENOVA_GUIDANCE=..  SENSENOVA_SEED=42  SENSENOVA_PROMPT="..."
@@ -113,18 +118,19 @@ mod variant_tests {
 }
 
 #[test]
-#[ignore = "real-weight GPU smoke; needs the DENSE bf16 SenseNova-U1 tier (~35GB) + a CUDA device (cap=120)"]
+#[ignore = "real-weight GPU smoke; needs a SenseNova-U1 tier dir (q4 ~11GB / q8 ~19GB / bf16 ~33GB) + a CUDA device (cap=120)"]
 fn sensenova_candle_gpu_smoke() {
     let weights_dir = env_path("SENSENOVA_DIR");
     let (variant_raw, _) = (env_or("SENSENOVA_VARIANT", "fast"), ());
     let (engine_id, default_steps, default_guidance) = resolve_variant(&variant_raw);
 
-    // The tier is the whole point of sc-13817 — fail loudly on a packed/torn dir rather than letting
-    // it reach the loader as an opaque tensor error.
+    // Any tier is loadable since sc-14249 (packed-detect per projection), but it must be a COMPLETE
+    // one — fail loudly on a torn dir rather than letting it reach the loader as an opaque tensor
+    // error. A configs-only tier is exactly what a partial download leaves behind.
     assert!(
         has_flat_safetensors(&weights_dir),
-        "SENSENOVA_DIR must be the DENSE bf16 tier (a flat model.safetensors), got no .safetensors \
-         in {}. The q4/q8 tiers are MLX-packed and unreadable by the candle engine.",
+        "SENSENOVA_DIR must be a self-contained SenseNova-U1 tier (q4/q8/bf16), but {} holds no \
+         .safetensors — a torn or half-downloaded tier.",
         weights_dir.display()
     );
     assert!(
@@ -163,10 +169,12 @@ fn sensenova_candle_gpu_smoke() {
     );
 
     // Same seam as `generate_candle_stream`: a registry load of the candle sensenova engine with a
-    // DENSE `LoadSpec` (no `.with_quant(..)` — the descriptor advertises `supported_quants: &[]` and
-    // the engine hard-rejects a quantize request, so the worker resolves `(None, None)`).
+    // `LoadSpec` carrying no `.with_quant(..)`. Since sc-14249 that is not a "dense" spec — the
+    // precision comes from the WEIGHTS in `weights_dir` (each projection packed-detects its
+    // `.scales` sibling), so this one call loads whichever tier was pointed at. An explicit Quant
+    // would be a no-op on an already-packed tier, which is why the worker need not thread one.
     println!(
-        "[smoke] loading {engine_id} (dense) from {} ...",
+        "[smoke] loading {engine_id} from {} (tier decided by the dir) ...",
         weights_dir.display()
     );
     let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.clone()));
@@ -213,7 +221,7 @@ fn sensenova_candle_gpu_smoke() {
     assert!(
         std > DEGENERATE_STD_FLOOR_DEFAULT,
         "{engine_id} render looks degenerate (std {std:.2}) — possible NaN / all-black decode \
-         (check CUDA_COMPUTE_CAP=120 and that SENSENOVA_DIR is the DENSE bf16 tier)"
+         (check CUDA_COMPUTE_CAP=120 and that SENSENOVA_DIR is a complete tier dir)"
     );
-    println!("[smoke] DONE: {engine_id} dense render coherent at {steps} steps");
+    println!("[smoke] DONE: {engine_id} render coherent at {steps} steps");
 }

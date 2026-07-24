@@ -667,14 +667,26 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("chroma1_base", true, true, false, false, false),
     ModelCaps::new("chroma1_flash", true, true, false, false, false),
     // SenseNova-U1 (epic 3180 / sc-3900 MLX; sc-5576 candle). Pure txt2img on candle.
-    ModelCaps::new("sensenova_u1_8b", true, true, false, false, false),
+    //
+    // sc-14249 (epic 9083): `candle_quant = true` across the whole family. `candle-gen-sensenova`
+    // used to mmap its backbone at a hardcoded F32 and hard-reject `spec.quantize`, so the candle
+    // lane could read only the dense `bf16/` tier — at DOUBLE its on-disk size (a measured 70.5 GB
+    // peak on sm_120 for a 32.7 GiB checkpoint). It now packed-detects each of the 588 backbone
+    // projections off the `.scales` sibling in the weights, so the turnkey's `q4/` and `q8/` tiers
+    // load natively and an `advanced.mlxQuantize` is a turnkey tier-SELECT. Without this flip
+    // `image_request_candle_eligible` would keep bouncing every tier pick off the candle lane, and
+    // the worker's `standard_tier_subdir` descent could never reach the cheap tiers.
+    //
+    // NOT `candle_quant_lora`: the family advertises no candle inference LoRA (the fast ids' 8-step
+    // distill LoRA is merged internally by the loader, never user-supplied).
+    ModelCaps::new("sensenova_u1_8b", true, true, true, false, false),
     // Infographic-V2 (epic 9959): coexisting checkpoint refresh of the SAME NEO-unify engine as the
-    // base id — routes identically (MLX full surface; candle pure txt2img).
+    // base id — routes identically (MLX full surface; candle txt2img + the sc-14249 tier matrix).
     ModelCaps::new(
         "sensenova_u1_8b_infographic_v2",
         true,
         true,
-        false,
+        true,
         false,
         false,
     ),
@@ -685,17 +697,17 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
         "sensenova_u1_8b_infographic_v3",
         true,
         true,
-        false,
+        true,
         false,
         false,
     ),
-    ModelCaps::new("sensenova_u1_8b_fast", true, true, false, false, false),
+    ModelCaps::new("sensenova_u1_8b_fast", true, true, true, false, false),
     // Infographic-V2 8-step distilled variant (epic 9959): same fast engine, routes like the base fast.
     ModelCaps::new(
         "sensenova_u1_8b_infographic_v2_fast",
         true,
         true,
-        false,
+        true,
         false,
         false,
     ),
@@ -704,7 +716,7 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
         "sensenova_u1_8b_infographic_v3_fast",
         true,
         true,
-        false,
+        true,
         false,
         false,
     ),
@@ -1383,6 +1395,14 @@ mod tests {
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
         "flux2_dev",
+        // sc-14249: the whole SenseNova-U1 family, once `candle-gen-sensenova` gained the packed
+        // q4/q8 load path (it was dense-f32-only, and only the bf16 tier was readable at all).
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_infographic_v3_fast",
     ];
 
     // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle
