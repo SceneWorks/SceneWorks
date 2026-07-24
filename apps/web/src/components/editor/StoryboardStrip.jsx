@@ -1,5 +1,5 @@
 import React from "react";
-import { AssetMedia, assetCanRenderAsImage } from "../assetMedia.jsx";
+import { AssetThumbnail, assetCanRenderAsImage, assetCanRenderAsVideo } from "../assetMedia.jsx";
 import { Icon } from "../Icons.jsx";
 import { itemDuration } from "../../timeline.js";
 import { formatTimecode } from "../../formatting.js";
@@ -53,7 +53,7 @@ export function StoryboardStrip({ clips = [], assetsById, fps = 30, selectedItem
           }
           const clip = node.clip;
           const asset = assetsById?.get?.(clip.assetId) ?? null;
-          const showImage = assetCanRenderAsImage(asset);
+          const showThumbnail = assetCanRenderAsImage(asset) || assetCanRenderAsVideo(asset);
           const ai = isAiItem(clip, assetsById);
           return (
             <button
@@ -64,7 +64,7 @@ export function StoryboardStrip({ clips = [], assetsById, fps = 30, selectedItem
               title={clip.displayName}
               type="button"
             >
-              {showImage ? <AssetMedia asset={asset} className="ve-key-media" controls={false} /> : null}
+              {showThumbnail ? <AssetThumbnail asset={asset} className="ve-key-media" /> : null}
               <span className="ve-key-tc">{formatTimecode(clip.timelineStart, fps)}</span>
               <span className="ve-key-label">{clip.displayName}</span>
             </button>
