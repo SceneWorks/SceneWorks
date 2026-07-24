@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::asset_index::{
-    asset_origin, asset_sidecars, find_asset_sidecar_path_on_connection, index_asset_on_connection,
-    normalize_asset, normalize_asset_cached, GenerationSetCache,
+    asset_origin, asset_sidecars, find_asset_sidecar_path_on_connection,
+    hydrate_indexed_asset_cached, index_asset_on_connection, normalize_asset,
+    normalize_asset_cached, sidecar_content_fingerprint, GenerationSetCache,
 };
 use crate::character_store::{
     apply_character_migrations, clear_character_tables, reindex_characters_on_connection,
@@ -382,9 +383,17 @@ impl ProjectStore {
         // lazily-provisioned global pose/keypoint projects): translate a write
         // denial on the project.db migration into the actionable, path-naming
         // error instead of a raw SQLITE_READONLY (issue #1435 / sc-11855).
-        if let Err(error) =
-            connect_project_db(project_path).and_then(|conn| apply_project_migrations(&conn))
-        {
+        if let Err(error) = connect_project_db(project_path).and_then(|conn| {
+            apply_project_migrations(&conn)?;
+            // A newly provisioned project has no legacy sidecars to backfill;
+            // mark its empty index complete so the first indexed write is not
+            // immediately erased by an unnecessary rebuild.
+            conn.execute(
+                "insert or replace into project_metadata (key, value) values (?1, ?2)",
+                params![ASSET_INDEX_VERSION_KEY, PROJECT_SCHEMA_VERSION.to_string()],
+            )?;
+            Ok(())
+        }) {
             return Err(if is_write_denied(&error) {
                 ProjectStoreError::StorageNotWritable(storage_not_writable_message(
                     project_path.parent().unwrap_or(project_path),
@@ -1017,7 +1026,8 @@ impl ProjectStore {
         };
         let mut statement = connection.prepare(&format!(
             "
-            select sidecar_path, file_path
+            select sidecar_path, file_path, asset_json, sidecar_size, sidecar_modified_ns,
+                   sidecar_sha256
               from assets
              where (?1 or rejected = 0)
                and (?2 or trashed = 0)
@@ -1025,12 +1035,19 @@ impl ProjectStore {
              order by created_at desc
             "
         ))?;
-        let rows = statement.query_map(params![include_rejected, include_trashed], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-            ))
-        })?;
+        let rows = statement
+            .query_map(params![include_rejected, include_trashed], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<u64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
         // HashSet dedup (was an O(n²) Vec linear scan) and a per-call
         // generation-set cache so a set's JSON is read once, not once per asset
         // in it (sc-4270 / F-CORE-10).
@@ -1038,7 +1055,61 @@ impl ProjectStore {
         let mut generation_sets = GenerationSetCache::default();
         let mut assets = Vec::new();
         for row in rows {
-            let (sidecar_rel, file_rel) = row?;
+            let (
+                sidecar_rel,
+                file_rel,
+                asset_json,
+                indexed_size,
+                _indexed_modified_ns,
+                indexed_sha256,
+            ) = row;
+            let indexed_sidecar = sidecar_rel
+                .as_ref()
+                .map(|path| project_path.join(path))
+                .or_else(|| {
+                    file_rel
+                        .as_ref()
+                        .map(|path| project_path.join(path).with_extension("sceneworks.json"))
+                });
+            // Size and mtime alone are not content identity: editors can
+            // preserve timestamps and same-length rewrites are common. The
+            // hash makes the sidecar authoritative even when mtime is absent.
+            let indexed_fingerprint_matches = indexed_sidecar
+                .as_ref()
+                .and_then(|path| sidecar_content_fingerprint(path).ok())
+                .is_some_and(|(size, _modified_ns, sha256)| {
+                    indexed_size == Some(size) && indexed_sha256.as_deref() == Some(sha256.as_str())
+                });
+            if indexed_fingerprint_matches {
+                if let Some(asset_json) = asset_json {
+                    if let Ok(mut asset) = serde_json::from_str::<Value>(&asset_json) {
+                        if let Some(sidecar_rel) = sidecar_rel.as_ref() {
+                            if let Some(object) = asset.as_object_mut() {
+                                object.insert(
+                                    "sidecarPath".to_owned(),
+                                    Value::String(sidecar_rel.clone()),
+                                );
+                            }
+                        }
+                        if let Ok(asset) = hydrate_indexed_asset_cached(
+                            project_id,
+                            &project_path,
+                            asset,
+                            &mut generation_sets,
+                        ) {
+                            let asset_id = asset
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned();
+                            if seen_asset_ids.insert(asset_id) {
+                                assets.push(asset);
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
             let mut candidates = Vec::new();
             if let Some(sidecar_rel) = sidecar_rel {
                 candidates.push(project_path.join(sidecar_rel));
@@ -1062,6 +1133,17 @@ impl ProjectStore {
                 ) else {
                     continue;
                 };
+                // The sidecar changed outside a store write (or this is a
+                // legacy row without a fingerprint). Refresh the indexed
+                // envelope once; subsequent listings stay read-free.
+                if let Ok(raw_asset) = read_json(&sidecar_path) {
+                    let _ = index_asset_on_connection(
+                        &connection,
+                        &project_path,
+                        &raw_asset,
+                        Some(&sidecar_path),
+                    );
+                }
                 let asset_id = asset
                     .get("id")
                     .and_then(Value::as_str)
@@ -2744,7 +2826,8 @@ struct ReindexCounts {
 /// registry). The bump lets existing DBs pick up the new table through the gated
 /// migration; the table is DB-authoritative (no sidecar), so the reindex the bump
 /// triggers — which only clears the sidecar-rebuilt tables — leaves it intact.
-const PROJECT_SCHEMA_VERSION: i64 = 5;
+const PROJECT_SCHEMA_VERSION: i64 = 6;
+const ASSET_INDEX_VERSION_KEY: &str = "assetIndexVersion";
 
 fn project_schema_version(connection: &Connection) -> ProjectStoreResult<i64> {
     Ok(connection.query_row("pragma user_version", [], |row| row.get(0))?)
@@ -2800,6 +2883,23 @@ pub fn apply_project_migrations(connection: &Connection) -> ProjectStoreResult<(
     // document_studio / character_studio / upload). Existing rows are backfilled
     // by the reindex that `ensure_project_db_ready` runs on this version bump.
     ensure_column(connection, "assets", "origin", "text")?;
+    // Normalized sidecar envelope + lineage keys make list hydration and
+    // upscale-fold traversal indexed operations. Existing projects are
+    // backfilled by the version-bump reindex below.
+    ensure_column(connection, "assets", "asset_json", "text")?;
+    ensure_column(connection, "assets", "source_asset_id", "text")?;
+    ensure_column(connection, "assets", "upscaled_from_asset_id", "text")?;
+    ensure_column(connection, "assets", "sidecar_size", "integer")?;
+    ensure_column(connection, "assets", "sidecar_modified_ns", "text")?;
+    ensure_column(connection, "assets", "sidecar_sha256", "text")?;
+    connection.execute_batch(
+        "
+        create index if not exists idx_assets_source_asset
+          on assets(source_asset_id);
+        create index if not exists idx_assets_upscaled_from
+          on assets(upscaled_from_asset_id);
+        ",
+    )?;
     apply_character_migrations(connection)?;
     apply_training_dataset_migrations(connection)?;
     crate::voice_store::apply_voice_migrations(connection)?;
@@ -2810,13 +2910,19 @@ pub fn apply_project_migrations(connection: &Connection) -> ProjectStoreResult<(
 
 pub fn ensure_project_db_ready(project_path: &Path) -> ProjectStoreResult<()> {
     let connection = connect_project_db(project_path)?;
-    let version_before = project_schema_version(&connection)?;
     apply_project_migrations(&connection)?;
+    let indexed_version = connection
+        .query_row(
+            "select value from project_metadata where key = ?1",
+            params![ASSET_INDEX_VERSION_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
     drop(connection);
-    // A schema bump can add derived columns (e.g. `origin`, sc-2024) that
-    // existing rows lack. Rebuild the index from sidecars once so those columns
-    // are backfilled; subsequent calls are no-ops (version already current).
-    if version_before < PROJECT_SCHEMA_VERSION {
+    // The schema stamp and the derived-data rebuild are separate operations.
+    // Record completion only in the rebuild transaction so a failed reindex is
+    // retried even though PRAGMA user_version already reached this version.
+    if indexed_version.as_deref() != Some(&PROJECT_SCHEMA_VERSION.to_string()) {
         reindex_project_path(project_path)?;
     }
     Ok(())
@@ -2948,54 +3054,34 @@ fn apply_upscale_variant_link(asset: &mut Value, base_id: &str, factor: u8, engi
 /// tile, so a move of the visible asset must carry the whole group. The requested
 /// id is always first. Unreadable sidecars are skipped — worst case the group
 /// degrades to the single asset, never to an error.
+const UPSCALE_LINEAGE_QUERY: &str = "
+    with recursive connected(id) as (
+      values (?1)
+      union
+      select parent.upscaled_from_asset_id
+        from assets parent join connected c on parent.id = c.id
+       where parent.upscaled_from_asset_id is not null
+      union
+      select child.id
+        from assets child join connected c on child.upscaled_from_asset_id = c.id
+    )
+    select id from connected
+";
+
 fn upscale_lineage_group(project_path: &Path, asset_id: &str) -> Vec<String> {
     let mut group = vec![asset_id.to_owned()];
-    let Ok(sidecars) = asset_sidecars(project_path) else {
+    let Ok(connection) = connect_project_db(project_path) else {
         return group;
     };
-    // Every asset's fold parent (the original it was upscaled from), if any.
-    let mut parent_of: Vec<(String, String)> = Vec::new();
-    for sidecar_path in sidecars {
-        let Ok(asset) = read_json(&sidecar_path) else {
-            continue;
-        };
-        let Some(id) = asset.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        let parent = asset
-            .pointer("/extra/upscaledFromAssetId")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                asset
-                    .pointer("/extra/isUpscaled")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                    .then(|| {
-                        asset
-                            .pointer("/lineage/sourceAssetId")
-                            .and_then(Value::as_str)
-                    })
-                    .flatten()
-            });
-        if let Some(parent) = parent {
-            parent_of.push((id.to_owned(), parent.to_owned()));
-        }
-    }
-    // Fixed-point closure over the parent links in both directions (covers
-    // upscale-of-upscale chains and multiple variants of one original).
-    loop {
-        let before = group.len();
-        for (child, parent) in &parent_of {
-            let child_in = group.iter().any(|id| id == child);
-            let parent_in = group.iter().any(|id| id == parent);
-            if child_in && !parent_in {
-                group.push(parent.clone());
-            } else if parent_in && !child_in {
-                group.push(child.clone());
-            }
-        }
-        if group.len() == before {
-            break;
+    let Ok(mut statement) = connection.prepare(UPSCALE_LINEAGE_QUERY) else {
+        return group;
+    };
+    let Ok(rows) = statement.query_map(params![asset_id], |row| row.get::<_, String>(0)) else {
+        return group;
+    };
+    for id in rows.filter_map(Result::ok) {
+        if id != asset_id && !group.contains(&id) {
+            group.push(id);
         }
     }
     group
@@ -3096,6 +3182,10 @@ fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexCounts
     }
 
     reindex_characters_on_connection(&transaction, project_path)?;
+    transaction.execute(
+        "insert or replace into project_metadata (key, value) values (?1, ?2)",
+        params![ASSET_INDEX_VERSION_KEY, PROJECT_SCHEMA_VERSION.to_string()],
+    )?;
 
     transaction.commit()?;
     Ok(counts)
@@ -4697,14 +4787,15 @@ fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()
 mod tests {
     use super::{
         apply_project_migrations, backfill_upscale_variant_lineage, build_generated_asset_sidecar,
-        connect_project_db, find_timeline_file, guess_mime_from_filename, index_timeline,
-        is_safe_relative_path, is_safe_upload_extension, normalize_asset_tags, read_json,
-        sniff_image_format, upload_extension, AssetScope, CharacterCreateInput, CharacterLookInput,
-        CharacterReferenceInput, ProjectStore, ProjectStoreError, UploadAsset,
-        GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
-        PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
+        connect_project_db, ensure_project_db_ready, find_timeline_file, guess_mime_from_filename,
+        index_timeline, is_safe_relative_path, is_safe_upload_extension, normalize_asset_tags,
+        read_json, sniff_image_format, upload_extension, upscale_lineage_group, AssetScope,
+        CharacterCreateInput, CharacterLookInput, CharacterReferenceInput, ProjectStore,
+        ProjectStoreError, UploadAsset, ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID,
+        GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
+        UPSCALE_LINEAGE_QUERY,
     };
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection, OptionalExtension};
     use serde_json::{json, Value};
     use std::sync::Arc;
 
@@ -4846,8 +4937,8 @@ mod tests {
     /// alongside a deliberate schema change — and when you do, you MUST bump
     /// `PROJECT_SCHEMA_VERSION` so the `user_version=` line below changes too.
     const EXPECTED_PROJECT_DB_SCHEMA: &str = concat!(
-        "user_version=5\n",
-        "table assets: id TEXT notnull=0 default=NULL pk=1, type TEXT notnull=1 default=NULL pk=0, display_name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, generation_set_id TEXT notnull=0 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, favorite INTEGER notnull=1 default=0 pk=0, rating INTEGER notnull=1 default=0 pk=0, rejected INTEGER notnull=1 default=0 pk=0, trashed INTEGER notnull=1 default=0 pk=0, sidecar_path TEXT notnull=0 default=NULL pk=0, origin TEXT notnull=0 default=NULL pk=0\n",
+        "user_version=6\n",
+        "table assets: id TEXT notnull=0 default=NULL pk=1, type TEXT notnull=1 default=NULL pk=0, display_name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, generation_set_id TEXT notnull=0 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, favorite INTEGER notnull=1 default=0 pk=0, rating INTEGER notnull=1 default=0 pk=0, rejected INTEGER notnull=1 default=0 pk=0, trashed INTEGER notnull=1 default=0 pk=0, sidecar_path TEXT notnull=0 default=NULL pk=0, origin TEXT notnull=0 default=NULL pk=0, asset_json TEXT notnull=0 default=NULL pk=0, source_asset_id TEXT notnull=0 default=NULL pk=0, upscaled_from_asset_id TEXT notnull=0 default=NULL pk=0, sidecar_size INTEGER notnull=0 default=NULL pk=0, sidecar_modified_ns TEXT notnull=0 default=NULL pk=0, sidecar_sha256 TEXT notnull=0 default=NULL pk=0\n",
         "table character_looks: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, description TEXT notnull=1 default='' pk=0, approved_reference_ids TEXT notnull=1 default='[]' pk=0, recipe_settings TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "table character_loras: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, lora_id TEXT notnull=0 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, source_path TEXT notnull=0 default=NULL pk=0, project_path TEXT notnull=0 default=NULL pk=0, copied_into_project INTEGER notnull=1 default=0 pk=0, category TEXT notnull=1 default='character' pk=0, scope TEXT notnull=1 default='project' pk=0, trigger_words TEXT notnull=1 default='[]' pk=0, default_weight REAL notnull=1 default=1.0 pk=0, compatibility TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "table character_references: character_id TEXT notnull=1 default=NULL pk=1, asset_id TEXT notnull=1 default=NULL pk=2, approved INTEGER notnull=1 default=0 pk=0, role TEXT notnull=1 default='reference' pk=0, notes TEXT notnull=1 default='' pk=0, added_at TEXT notnull=1 default=NULL pk=0, approved_at TEXT notnull=0 default=NULL pk=0\n",
@@ -4857,6 +4948,8 @@ mod tests {
         "table saved_voices: id TEXT notnull=0 default=NULL pk=1, project_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, reference_audio_asset_id TEXT notnull=1 default=NULL pk=0, embedding TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0\n",
         "table timelines: id TEXT notnull=0 default=NULL pk=1, name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, aspect_ratio TEXT notnull=1 default=NULL pk=0, width INTEGER notnull=1 default=NULL pk=0, height INTEGER notnull=1 default=NULL pk=0, fps INTEGER notnull=1 default=NULL pk=0, duration REAL notnull=1 default=0 pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "table training_datasets: id TEXT notnull=0 default=NULL pk=1, project_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, modality TEXT notnull=1 default=NULL pk=0, status TEXT notnull=1 default=NULL pk=0, version INTEGER notnull=1 default=NULL pk=0, item_count INTEGER notnull=1 default=0 pk=0, character_id TEXT notnull=0 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
+        "index idx_assets_source_asset on assets\n",
+        "index idx_assets_upscaled_from on assets\n",
         "index idx_training_datasets_project_updated on training_datasets",
     );
 
@@ -4880,6 +4973,116 @@ mod tests {
              Forgetting step 1 is exactly the sc-2537 bug.\n\n\
              ----- actual schema -----\n{actual}\n-------------------------\n"
         );
+    }
+
+    #[test]
+    fn completed_asset_index_backfill_retries_after_failure() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Retry").expect("project creates");
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        let connection = connect_project_db(&project_path).expect("db opens");
+        connection
+            .execute(
+                "delete from project_metadata where key = ?1",
+                params![ASSET_INDEX_VERSION_KEY],
+            )
+            .expect("remove completion marker");
+        let stamped: i64 = connection
+            .query_row("pragma user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stamped, PROJECT_SCHEMA_VERSION);
+        drop(connection);
+
+        let generation_sets = project_path.join("generation-sets");
+        std::fs::remove_dir(&generation_sets).expect("empty generation set directory removes");
+        std::fs::write(&generation_sets, b"not a directory").expect("failure fixture");
+        assert!(
+            ensure_project_db_ready(&project_path).is_err(),
+            "reindex must fail while a required index source is unreadable"
+        );
+        let connection = connect_project_db(&project_path).unwrap();
+        let marker: Option<String> = connection
+            .query_row(
+                "select value from project_metadata where key = ?1",
+                params![ASSET_INDEX_VERSION_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(
+            marker.is_none(),
+            "failed rebuild must not be marked complete"
+        );
+        drop(connection);
+
+        std::fs::remove_file(&generation_sets).unwrap();
+        std::fs::create_dir(&generation_sets).unwrap();
+        ensure_project_db_ready(&project_path).expect("next open retries and completes");
+        let connection = connect_project_db(&project_path).unwrap();
+        let marker: String = connection
+            .query_row(
+                "select value from project_metadata where key = ?1",
+                params![ASSET_INDEX_VERSION_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, PROJECT_SCHEMA_VERSION.to_string());
+    }
+
+    #[test]
+    fn upscale_lineage_query_uses_indexes_and_ignores_unrelated_assets() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Lineage").expect("project creates");
+        let project_path = store.find_project_path(&project.id).unwrap();
+        let connection = connect_project_db(&project_path).unwrap();
+        connection
+            .execute_batch(
+                "
+                with recursive seq(n) as (
+                  values(1) union all select n + 1 from seq where n < 5000
+                )
+                insert into assets (
+                  id,type,display_name,file_path,created_at
+                )
+                select printf('unrelated-%05d', n), 'image', 'unrelated',
+                       printf('assets/images/unrelated-%05d.png', n), ''
+                  from seq;
+                insert into assets (id,type,display_name,file_path,created_at)
+                  values ('base','image','base','base.png','');
+                insert into assets (
+                  id,type,display_name,file_path,created_at,upscaled_from_asset_id
+                ) values
+                  ('child','image','child','child.png','','base'),
+                  ('grandchild','image','grandchild','grandchild.png','','child');
+                ",
+            )
+            .unwrap();
+        let plan_sql = format!("explain query plan {UPSCALE_LINEAGE_QUERY}");
+        let details: Vec<String> = connection
+            .prepare(&plan_sql)
+            .unwrap()
+            .query_map(params!["grandchild"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let plan = details.join("\n");
+        assert!(
+            plan.contains("idx_assets_upscaled_from"),
+            "child traversal must use the lineage index:\n{plan}"
+        );
+        assert!(
+            plan.contains("sqlite_autoindex_assets_1"),
+            "parent traversal must use the assets primary key:\n{plan}"
+        );
+        drop(connection);
+
+        let group = upscale_lineage_group(&project_path, "grandchild");
+        assert_eq!(group.first().map(String::as_str), Some("grandchild"));
+        assert_eq!(group.len(), 3);
+        assert!(group.contains(&"base".to_owned()));
+        assert!(group.contains(&"child".to_owned()));
     }
 
     #[test]
@@ -5804,6 +6007,125 @@ mod tests {
             .list_assets(&project.id, false, false, AssetScope::All)
             .expect("second list");
         assert_eq!(again.len(), 1, "result is stable on subsequent opens");
+    }
+
+    #[test]
+    fn list_assets_refreshes_a_stale_indexed_envelope_once() {
+        use crate::store_util::write_json;
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Indexed").expect("project creates");
+        let fact = json!({
+            "assetId": "asset_cached",
+            "mediaPath": "assets/images/set/asset_cached.png",
+            "mimeType": "image/png",
+            "displayName": "Before",
+            "createdAt": "2026-05-25T00:00:00Z",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "adapter": "z_image_diffusers",
+            "prompt": "cache",
+        });
+        store
+            .persist_generated_asset(&project.id, "job-1", "set", &fact)
+            .expect("asset persists");
+        let project_path = store.find_project_path(&project.id).unwrap();
+        let sidecar = project_path.join("assets/images/set/asset_cached.sceneworks.json");
+        let mut asset = read_json(&sidecar).unwrap();
+        asset["displayName"] = json!("After");
+        write_json(&sidecar, &asset).unwrap();
+
+        let listed = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("list refreshes");
+        assert_eq!(listed[0]["displayName"], json!("After"));
+        let connection = connect_project_db(&project_path).unwrap();
+        let cached: String = connection
+            .query_row(
+                "select asset_json from assets where id='asset_cached'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&cached).unwrap()["displayName"],
+            json!("After")
+        );
+    }
+
+    #[test]
+    fn list_assets_rejects_same_metadata_and_missing_mtime_cache_false_hits() {
+        use crate::store_util::write_json;
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Content fingerprint").unwrap();
+        let fact = json!({
+            "assetId": "asset_fingerprint",
+            "mediaPath": "assets/images/set/asset_fingerprint.png",
+            "mimeType": "image/png",
+            "displayName": "Before",
+            "createdAt": "2026-05-25T00:00:00Z",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "adapter": "z_image_diffusers",
+            "prompt": "cache",
+        });
+        store
+            .persist_generated_asset(&project.id, "job-1", "set", &fact)
+            .unwrap();
+        let project_path = store.find_project_path(&project.id).unwrap();
+        let sidecar = project_path.join("assets/images/set/asset_fingerprint.sceneworks.json");
+
+        let mut asset = read_json(&sidecar).unwrap();
+        asset["displayName"] = json!("After!");
+        write_json(&sidecar, &asset).unwrap();
+        let metadata = std::fs::metadata(&sidecar).unwrap();
+        let modified_ns = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let connection = connect_project_db(&project_path).unwrap();
+        connection
+            .execute(
+                "update assets set sidecar_size=?1, sidecar_modified_ns=?2
+                  where id='asset_fingerprint'",
+                params![metadata.len(), modified_ns],
+            )
+            .unwrap();
+        drop(connection);
+        let listed = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .unwrap();
+        assert_eq!(
+            listed[0]["displayName"],
+            json!("After!"),
+            "content hash catches same-size/same-mtime rewrites"
+        );
+
+        let mut asset = read_json(&sidecar).unwrap();
+        asset["displayName"] = json!("Later!");
+        write_json(&sidecar, &asset).unwrap();
+        let metadata = std::fs::metadata(&sidecar).unwrap();
+        let connection = connect_project_db(&project_path).unwrap();
+        connection
+            .execute(
+                "update assets set sidecar_size=?1, sidecar_modified_ns=null
+                  where id='asset_fingerprint'",
+                params![metadata.len()],
+            )
+            .unwrap();
+        drop(connection);
+        let listed = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .unwrap();
+        assert_eq!(
+            listed[0]["displayName"],
+            json!("Later!"),
+            "content hash remains authoritative when mtime is unavailable"
+        );
     }
 
     /// V-4 guard: a genuinely empty project (no sidecars on disk) must NOT trigger

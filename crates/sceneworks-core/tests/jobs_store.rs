@@ -58,6 +58,193 @@ fn register_image_worker(store: &JobsStore) {
 }
 
 #[test]
+fn startup_retention_purges_only_expired_terminal_jobs_and_owned_metrics() {
+    let path = temp_db("retention");
+    let store = JobsStore::new(path.clone());
+    store.initialize().expect("store initializes");
+    let connection = Connection::open(&path).expect("db opens");
+    for (id, status, completed_at) in [
+        ("old-completed", "completed", "2020-01-01T00:00:00Z"),
+        ("old-failed", "failed", "2020-01-01T00:00:00Z"),
+        ("old-canceled", "canceled", "2020-01-01T00:00:00Z"),
+        ("old-interrupted", "interrupted", "2020-01-01T00:00:00Z"),
+        ("recent", "failed", "2999-01-01T00:00:00Z"),
+        ("active", "running", "2020-01-01T00:00:00Z"),
+    ] {
+        connection
+            .execute(
+                "insert into jobs (
+                   id,type,status,payload_json,result_json,requested_gpu,progress,stage,message,
+                   attempts,cancel_requested,created_at,updated_at,completed_at
+                 ) values (?1,'image_generate',?2,'{}','{}','auto',0,?2,'',1,0,?3,?3,?3)",
+                params![id, status, completed_at],
+            )
+            .expect("job seeds");
+        connection
+            .execute(
+                "insert into generation_metrics(job_id,updated_at) values (?1,?2)",
+                params![id, completed_at],
+            )
+            .expect("metrics seed");
+    }
+    connection
+        .execute(
+            "insert into jobs (
+               id,type,status,payload_json,result_json,requested_gpu,progress,stage,message,
+               attempts,cancel_requested,created_at,updated_at,completed_at
+             ) values ('boundary','image_generate','completed','{}','{}','auto',1,'completed','',
+                       1,0,datetime('now','-90 days'),datetime('now','-90 days'),
+                       datetime('now','-90 days'))",
+            [],
+        )
+        .expect("boundary job seeds");
+    connection
+        .execute(
+            "insert into generation_metrics(job_id,updated_at) values
+             ('boundary',datetime('now','-90 days')),('orphan','2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("boundary and orphan metrics seed");
+    drop(connection);
+
+    assert_eq!(
+        store
+            .purge_terminal_jobs_older_than(90)
+            .expect("retention succeeds"),
+        4
+    );
+    let connection = Connection::open(&path).expect("db reopens");
+    assert_eq!(
+        connection
+            .query_row(
+                "select count(*) from jobs where id like 'old-%'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "select count(*) from generation_metrics where job_id like 'old-%'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row("select count(*) from jobs", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "select count(*) from generation_metrics where job_id='orphan'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0,
+        "legacy orphan metrics are job-owned garbage"
+    );
+    drop(connection);
+    let historical = store
+        .list_generation_metrics(None, None, None, 100)
+        .expect("aggregate history remains queryable");
+    assert_eq!(
+        historical
+            .iter()
+            .filter(|row| row.job_id.starts_with("old-"))
+            .count(),
+        4,
+        "purged queue rows remain in Generation Stats"
+    );
+    assert!(
+        historical.iter().any(|row| row.job_id == "boundary"),
+        "the exact cutoff boundary is retained"
+    );
+    let connection = Connection::open(&path).expect("db reopens");
+    assert!(connection
+        .query_row(
+            "select 1 from sqlite_master where type='index' and name='idx_jobs_worker_status'",
+            [],
+            |_| Ok(())
+        )
+        .is_ok());
+}
+
+#[test]
+fn retention_is_atomic_when_job_deletion_fails() {
+    let path = temp_db("retention-rollback");
+    let store = JobsStore::new(path.clone());
+    store.initialize().expect("store initializes");
+    let connection = Connection::open(&path).expect("db opens");
+    connection
+        .execute_batch(
+            "
+            insert into jobs (
+              id,type,status,payload_json,result_json,requested_gpu,progress,stage,message,
+              attempts,cancel_requested,created_at,updated_at,completed_at
+            ) values (
+              'old-fail','image_generate','completed','{}','{}','auto',1,'completed','',
+              1,0,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z'
+            );
+            insert into generation_metrics(job_id,updated_at)
+              values ('old-fail','2020-01-01T00:00:00Z'),
+                     ('orphan','2020-01-01T00:00:00Z');
+            create trigger fail_retention before delete on jobs
+              when old.id = 'old-fail'
+              begin select raise(abort, 'forced retention failure'); end;
+            ",
+        )
+        .expect("failure fixture seeds");
+    drop(connection);
+
+    assert!(
+        store.purge_terminal_jobs_older_than(90).is_err(),
+        "trigger forces the final delete to fail"
+    );
+    let connection = Connection::open(&path).expect("db reopens");
+    for (table, expected) in [
+        ("jobs", 1_i64),
+        ("generation_metrics", 2_i64),
+        ("generation_metrics_history", 0_i64),
+    ] {
+        let actual: i64 = connection
+            .query_row(&format!("select count(*) from {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(actual, expected, "{table} must roll back atomically");
+    }
+}
+
+#[test]
+fn zero_retention_preserves_terminal_history() {
+    let path = temp_db("retention-disabled");
+    let store = JobsStore::new(path.clone());
+    store.initialize().expect("store initializes");
+    let connection = Connection::open(&path).expect("db opens");
+    connection
+        .execute(
+            "insert into jobs (
+               id,type,status,payload_json,result_json,requested_gpu,progress,stage,message,
+               attempts,cancel_requested,created_at,updated_at,completed_at
+             ) values ('old','image_generate','completed','{}','{}','auto',1,'completed','',1,0,
+                       '2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert_eq!(store.purge_terminal_jobs_older_than(0).unwrap(), 0);
+    assert!(store.get_job("old").is_ok());
+}
+
+#[test]
 fn generation_metrics_upsert_get_list_and_merge() {
     let store = store("gen-metrics");
     let job = store

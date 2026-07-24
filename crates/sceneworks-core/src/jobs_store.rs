@@ -429,6 +429,8 @@ impl JobsStore {
               on jobs(project_id, created_at);
             create index if not exists idx_jobs_assigned_gpu_status
               on jobs(assigned_gpu, status);
+            create index if not exists idx_jobs_worker_status
+              on jobs(worker_id, status);
 
             create table if not exists workers (
               id text primary key,
@@ -506,8 +508,70 @@ impl JobsStore {
         // Batch size per job (epic 10402, sc-10426) — added after the table shipped,
         // so back-fill the column on existing generation_metrics tables.
         ensure_column(&transaction, "generation_metrics", "image_count", "integer")?;
+        // Retention may remove the owning queue row, but Generation Stats is
+        // historical product data rather than queue history. Materialize the
+        // joined row before purging so aggregate charts remain complete.
+        transaction.execute_batch(
+            "
+            create table if not exists generation_metrics_history as
+              select m.*, j.type as j_type, j.status as j_status,
+                     j.project_id as j_project_id, j.created_at as j_created_at
+                from generation_metrics m join jobs j on j.id = m.job_id
+               where 0;
+            create unique index if not exists idx_genmetrics_history_job
+              on generation_metrics_history(job_id);
+            ",
+        )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Remove terminal queue history older than `retention_days`.
+    ///
+    /// Zero disables retention. Job-owned metrics are materialized into the
+    /// independent Generation Stats history and then deleted in the same
+    /// immediate transaction as their owning jobs. Legacy orphan metrics are
+    /// also removed.
+    pub fn purge_terminal_jobs_older_than(&self, retention_days: u32) -> JobsStoreResult<usize> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let modifier = format!("-{retention_days} days");
+        let terminal = terminal_statuses_sql();
+        let predicate = format!(
+            "status in ({terminal}) and completed_at is not null \
+             and datetime(completed_at) < datetime('now', ?1)"
+        );
+        transaction.execute(
+            &format!(
+                "insert or replace into generation_metrics_history
+                 select m.*, j.type, j.status, j.project_id, j.created_at
+                   from generation_metrics m join jobs j on j.id = m.job_id
+                  where j.{predicate}"
+            ),
+            params![modifier],
+        )?;
+        transaction.execute(
+            &format!(
+                "delete from generation_metrics where job_id in \
+                 (select id from jobs where {predicate})"
+            ),
+            params![modifier],
+        )?;
+        transaction.execute(
+            "delete from generation_metrics
+              where not exists (select 1 from jobs where jobs.id = generation_metrics.job_id)",
+            [],
+        )?;
+        let deleted = transaction.execute(
+            &format!("delete from jobs where {predicate}"),
+            params![modifier],
+        )?;
+        transaction.commit()?;
+        Ok(deleted)
     }
 
     pub fn mark_interrupted_on_startup(&self) -> JobsStoreResult<Vec<JobSnapshot>> {
@@ -863,27 +927,31 @@ impl JobsStore {
         let mut conditions: Vec<&str> = Vec::new();
         let mut bindings: Vec<Box<dyn ToSql>> = Vec::new();
         if let Some(job_type) = job_type {
-            conditions.push("j.type = ?");
+            conditions.push("stats.j_type = ?");
             bindings.push(Box::new(job_type.to_owned()));
         }
         if let Some(model) = model {
-            conditions.push("m.model = ?");
+            conditions.push("stats.model = ?");
             bindings.push(Box::new(model.to_owned()));
         }
         if let Some(quant_label) = quant_label {
-            conditions.push("m.quant_label = ?");
+            conditions.push("stats.quant_label = ?");
             bindings.push(Box::new(quant_label.to_owned()));
         }
         let mut sql = String::from(
-            "select m.*, j.type as j_type, j.status as j_status, \
-             j.project_id as j_project_id, j.created_at as j_created_at \
-             from generation_metrics m join jobs j on j.id = m.job_id",
+            "select stats.* from (
+               select m.*, j.type as j_type, j.status as j_status,
+                      j.project_id as j_project_id, j.created_at as j_created_at
+                 from generation_metrics m join jobs j on j.id = m.job_id
+               union all
+               select * from generation_metrics_history
+             ) stats",
         );
         if !conditions.is_empty() {
             sql.push_str(" where ");
             sql.push_str(&conditions.join(" and "));
         }
-        sql.push_str(" order by j.created_at desc limit ?");
+        sql.push_str(" order by stats.j_created_at desc limit ?");
         bindings.push(Box::new(limit));
         let mut statement = connection.prepare(&sql)?;
         let rows = statement.query_map(
