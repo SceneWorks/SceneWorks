@@ -38,6 +38,10 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import {
+  parse as parseProvenanceCandidates,
+  populationSha256,
+} from "./scan-inference-provenance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CATALOG = path.join(ROOT, "config/manifests/builtin.models.jsonc");
@@ -45,6 +49,7 @@ const MANIFEST = path.join(ROOT, "apps/desktop/licenses/manifest.json");
 const LICENSES_DIR = path.join(ROOT, "apps/desktop/licenses");
 const BUNDLED_JS = path.join(ROOT, "apps/web/src/data/bundledLicenses.js");
 const SOURCE_AUDIT = path.join(ROOT, "config/inference-third-party-source.json");
+const PROVENANCE_CANDIDATES = path.join(ROOT, "config/inference-provenance-candidates.tsv");
 const WORKER_CARGO = path.join(ROOT, "crates/sceneworks-worker/Cargo.toml");
 const ROOT_CARGO = path.join(ROOT, "Cargo.toml");
 const CARGO_LOCK = path.join(ROOT, "Cargo.lock");
@@ -101,7 +106,7 @@ const components = new Map(
   (manifest.components ?? []).map((component) => [component.id, component]),
 );
 
-function validateSourceAudit(audit, componentIndex, pinText, lockText) {
+function validateSourceAudit(audit, componentIndex, pinText, lockText, candidateText) {
   const auditErrors = [];
   const inferencePins = new Set(
     [...pinText.matchAll(/github\.com\/SceneWorks\/inference"[^}\n]*\brev\s*=\s*"([0-9a-f]{40})"/g)]
@@ -184,20 +189,57 @@ function validateSourceAudit(audit, componentIndex, pinText, lockText) {
     }
   }
   if (siteKeys.size === 0) auditErrors.push("inference source audit has no production include sites.");
-  if (!Number.isInteger(audit.provenanceScan?.matchedFiles) || audit.provenanceScan.matchedFiles < 1 ||
-      !/^[0-9a-f]{64}$/.test(audit.provenanceScan?.sortedFileListSha256 ?? "")) {
-    auditErrors.push("ported-source provenance scan count/hash is missing.");
+  let candidates = [];
+  try {
+    candidates = parseProvenanceCandidates(candidateText);
+  } catch (error) {
+    auditErrors.push(`ported-source candidate inventory is malformed: ${error.message}`);
   }
+  const candidatePopulationHash = populationSha256(candidates);
+  if (audit.provenanceScan?.matchedFiles !== candidates.length) {
+    auditErrors.push(`ported-source population count changed: audit says ${audit.provenanceScan?.matchedFiles}, inventory has ${candidates.length}.`);
+  }
+  if (audit.provenanceScan?.populationSha256 !== candidatePopulationHash) {
+    auditErrors.push(`ported-source population hash changed: audit says ${audit.provenanceScan?.populationSha256}, inventory computes ${candidatePopulationHash}.`);
+  }
+  const areas = new Map();
   for (const area of audit.portedSourceAreas ?? []) {
-    if (!area.source || !area.provenance || !area.disposition) {
-      auditErrors.push("ported-source area lacks source/provenance/disposition.");
+    if (!area.id || areas.has(area.id)) {
+      auditErrors.push(`ported-source area has missing or duplicate id "${area.id ?? ""}".`);
+    }
+    areas.set(area.id, area);
+    if (!area.provenance || !area.disposition || (!area.pathPrefix && !area.paths)) {
+      auditErrors.push(`ported-source area "${area.id}" lacks paths/provenance/disposition.`);
     }
     if (area.component && !componentIndex.has(area.component)) {
-      auditErrors.push(`ported-source area "${area.source}" maps to missing About component "${area.component}".`);
+      auditErrors.push(`ported-source area "${area.id}" maps to missing About component "${area.component}".`);
     }
     if (!area.component && !area.evidence) {
-      auditErrors.push(`excluded ported-source area "${area.source}" has no evidence.`);
+      auditErrors.push(`excluded ported-source area "${area.id}" has no evidence.`);
     }
+  }
+  const candidatePaths = new Set();
+  const usedAreas = new Set();
+  for (const candidate of candidates) {
+    if (candidatePaths.has(candidate.path)) {
+      auditErrors.push(`duplicate ported-source candidate "${candidate.path}".`);
+    }
+    candidatePaths.add(candidate.path);
+    const matches = [...areas.values()].filter((area) =>
+      area.paths?.includes(candidate.path) ||
+      (area.pathPrefix && candidate.path.startsWith(area.pathPrefix) &&
+       !area.excludePaths?.includes(candidate.path)));
+    if (matches.length !== 1) {
+      auditErrors.push(`ported-source candidate "${candidate.path}" matches ${matches.length} disposition areas (expected exactly one).`);
+      continue;
+    }
+    if (matches[0].id !== candidate.area) {
+      auditErrors.push(`ported-source candidate "${candidate.path}" declares "${candidate.area}" but matches "${matches[0].id}".`);
+    }
+    usedAreas.add(matches[0].id);
+  }
+  for (const area of areas.keys()) {
+    if (!usedAreas.has(area)) auditErrors.push(`ported-source area "${area}" has no candidates.`);
   }
   return auditErrors;
 }
@@ -308,7 +350,8 @@ const pinSources = [
   fs.readFileSync(ROOT_CARGO, "utf8"),
 ].join("\n");
 const lock = fs.readFileSync(CARGO_LOCK, "utf8");
-errors.push(...validateSourceAudit(sourceAudit, components, pinSources, lock));
+const provenanceCandidates = fs.readFileSync(PROVENANCE_CANDIDATES, "utf8");
+errors.push(...validateSourceAudit(sourceAudit, components, pinSources, lock, provenanceCandidates));
 const packageJson = JSON.parse(fs.readFileSync(PACKAGE_JSON, "utf8"));
 const tauriConfig = JSON.parse(fs.readFileSync(TAURI_CONFIG, "utf8"));
 const rustApiSource = fs.readFileSync(RUST_API_LIB, "utf8");
@@ -322,21 +365,65 @@ errors.push(...validateDesktopNoticeContract(
 if (process.argv.includes("--self-test")) {
   const withoutSite = structuredClone(sourceAudit);
   withoutSite.includeSites.pop();
-  if (!validateSourceAudit(withoutSite, components, pinSources, lock).some((error) => error.includes("digest mismatch"))) {
+  if (!validateSourceAudit(withoutSite, components, pinSources, lock, provenanceCandidates).some((error) => error.includes("digest mismatch"))) {
     console.error("self-test: deleting an audited include site did not fail closed");
     process.exit(1);
   }
   const addedSite = structuredClone(sourceAudit);
   addedSite.includeSites.push({ source: "new.rs:1", included: "new.dat", disposition: "first-party-source", evidence: "mutation" });
-  if (!validateSourceAudit(addedSite, components, pinSources, lock).some((error) => error.includes("digest mismatch"))) {
+  if (!validateSourceAudit(addedSite, components, pinSources, lock, provenanceCandidates).some((error) => error.includes("digest mismatch"))) {
     console.error("self-test: adding an unaudited include site did not fail closed");
     process.exit(1);
   }
   const staleRevision = structuredClone(sourceAudit);
   staleRevision.inferenceRevision = "0".repeat(40);
-  if (!validateSourceAudit(staleRevision, components, pinSources, lock).some((error) => error.includes("but Cargo pins"))) {
+  if (!validateSourceAudit(staleRevision, components, pinSources, lock, provenanceCandidates).some((error) => error.includes("but Cargo pins"))) {
     console.error("self-test: stale inference revision did not fail closed");
     process.exit(1);
+  }
+  const candidateLines = provenanceCandidates.trimEnd().split("\n");
+  const provenanceMutations = [
+    [
+      "delete candidate",
+      sourceAudit,
+      [...candidateLines.slice(0, 1), ...candidateLines.slice(2), ""].join("\n"),
+      "population count changed",
+    ],
+    [
+      "add candidate",
+      sourceAudit,
+      [...candidateLines, candidateLines[1].replace(/^[^\t]+/, "crates/new-port/src/lib.rs"), ""].join("\n"),
+      "population count changed",
+    ],
+    [
+      "alter blob",
+      sourceAudit,
+      provenanceCandidates.replace(/\t[0-9a-f]{40}\t/, `\t${"0".repeat(40)}\t`),
+      "population hash changed",
+    ],
+    [
+      "unmatched candidate",
+      sourceAudit,
+      provenanceCandidates.replace(/\tarchitecture:[^\t\n]+/, "\tmissing-area"),
+      "declares \"missing-area\"",
+    ],
+  ];
+  const multiplyMatched = structuredClone(sourceAudit);
+  multiplyMatched.portedSourceAreas.find((area) => area.id === "cfgpp-formula").paths.push(
+    parseProvenanceCandidates(provenanceCandidates)[0].path,
+  );
+  provenanceMutations.push([
+    "multiply-matched candidate",
+    multiplyMatched,
+    provenanceCandidates,
+    "matches 2 disposition areas",
+  ]);
+  for (const [label, mutatedAudit, mutatedCandidates, expected] of provenanceMutations) {
+    if (!validateSourceAudit(mutatedAudit, components, pinSources, lock, mutatedCandidates)
+        .some((error) => error.includes(expected))) {
+      console.error(`self-test: ${label} mutation did not fail closed with "${expected}"`);
+      process.exit(1);
+    }
   }
   const missingMapping = bundledJs.replace('"cmudict-bsd-2-clause"', '"removed-cmudict-key"');
   if (!validateDesktopNoticeContract(packageJson, tauriConfig, rustApiSource, missingMapping, desktopPackage, buildSidecar, buildPlan)
@@ -358,7 +445,7 @@ if (process.argv.includes("--self-test")) {
       process.exit(1);
     }
   }
-  console.log("[license-coverage] self-test PASS — audit and every Tauri→sidecar→embedded-web packaging-link mutation were rejected.");
+  console.log("[license-coverage] self-test PASS — provenance population/dispositions, audit, and every Tauri→sidecar→embedded-web packaging-link mutation were rejected.");
 }
 
 for (const [id] of shipped) {
