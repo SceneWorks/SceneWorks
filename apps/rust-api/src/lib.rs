@@ -1607,6 +1607,14 @@ mod web_assets {
     #[folder = "../web/dist"]
     struct WebAssets;
 
+    #[cfg(test)]
+    pub(super) fn first_static_asset_path() -> String {
+        WebAssets::iter()
+            .find(|path| path.starts_with("assets/"))
+            .expect("production web bundle contains a static asset")
+            .into_owned()
+    }
+
     // The desktop shell navigates its privileged webview to this server, so the embedded
     // UI runs from this origin and its CSP must come from here (tauri.conf.json only
     // governs the bundled setup screen). Kept narrow: scripts only from this origin (the

@@ -226,6 +226,22 @@ GPU inference worker from target `rust-worker-candle`. The API sets
 `SCENEWORKS_CANDLE_REQUIRED=1`, so a job candle can't serve fails with a precise
 error instead of waiting forever.
 
+To build a production API image that serves the React SPA, static assets, and
+`/api/v1/*` from the same process and origin, use the opt-in `rust-api-embed`
+target. The plain `rust-api` target remains the non-embedded image used by
+Compose. The build needs a read token for the private inference dependency; this
+PowerShell example reuses the authenticated GitHub CLI token without writing it
+to disk:
+
+```powershell
+$env:SCENEWORKS_INFERENCE_READ_TOKEN = gh auth token
+docker build --secret id=inference_token,env=SCENEWORKS_INFERENCE_READ_TOKEN `
+  --file docker/rust.Dockerfile `
+  --target rust-api-embed `
+  --build-arg BIN=sceneworks-rust-api `
+  --tag sceneworks-api-embed:local .
+```
+
 Key knobs:
 
 - `SCENEWORKS_API_PORT` / `SCENEWORKS_WEB_PORT` — container/host ports for the API

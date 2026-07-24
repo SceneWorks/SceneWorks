@@ -3,6 +3,8 @@
 
 mod auth;
 mod catalog;
+#[cfg(feature = "embed-web")]
+mod embedded_web;
 mod jobs;
 mod mcp;
 mod media;

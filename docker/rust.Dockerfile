@@ -7,7 +7,24 @@
 # Build a specific image with `--target` + `--build-arg BIN=…`; docker-compose
 # sets both per service:
 #   docker build -f docker/rust.Dockerfile --target rust-api   --build-arg BIN=sceneworks-rust-api   .
+#   docker build -f docker/rust.Dockerfile --target rust-api-embed --build-arg BIN=sceneworks-rust-api .
 #   docker build -f docker/rust.Dockerfile --target rust-worker --build-arg BIN=sceneworks-rust-worker .
+
+# Production SPA bundle for the opt-in rust-api-embed target. The plain rust-api
+# target has no dependency on this stage, so it neither installs Node packages nor
+# embeds web assets. The license corpus is imported directly by the production UI.
+FROM node:22-bookworm-slim AS web-builder
+WORKDIR /app
+COPY apps/web/package.json apps/web/package-lock.json ./apps/web/
+RUN --mount=type=cache,target=/root/.npm npm ci --prefix apps/web
+COPY apps/web ./apps/web
+COPY apps/desktop/licenses ./apps/desktop/licenses
+# Explicit empty (not unset): apps/web/src/api.js maps this to window.location.origin.
+ENV VITE_API_BASE_URL=""
+# Guard the built artifact, not just the Dockerfile environment declaration:
+# an unset value bakes the local-Vite fallback into the production bundle.
+RUN npm run build --prefix apps/web \
+    && ! grep -R -q "http://localhost:8000" apps/web/dist
 
 FROM rust:1-bookworm AS builder
 # Which workspace binary to build (sceneworks-rust-api | sceneworks-rust-worker).
@@ -75,6 +92,25 @@ RUN apt-get update \
 COPY --from=builder /out/sceneworks-rust-api /usr/local/bin/sceneworks-rust-api
 
 CMD ["sceneworks-rust-api"]
+
+# --- Rust API + embedded production web runtime ------------------------------
+# Start from the unchanged API builder, add only the Node-built dist tree that
+# rust-embed consumes, and rebuild the API with the opt-in feature. Deriving the
+# runtime from rust-api keeps its packages and command identical to the plain image.
+FROM builder AS embed-builder
+
+COPY --from=web-builder /app/apps/web/dist ./apps/web/dist
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --offline -p sceneworks-rust-api --release --features embed-web \
+    && mkdir -p /out \
+    && cp target/release/sceneworks-rust-api /out/sceneworks-rust-api
+
+FROM rust-api AS rust-api-embed
+
+COPY --from=embed-builder /out/sceneworks-rust-api /usr/local/bin/sceneworks-rust-api
 
 # --- Rust worker runtime ------------------------------------------------------
 FROM debian:bookworm-slim AS rust-worker
