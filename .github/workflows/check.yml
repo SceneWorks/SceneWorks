@@ -93,6 +93,17 @@ jobs:
         run: |
           node scripts/check-no-nc-weights.mjs --self-test
           npm run check:nc-weights
+      - name: Guard About→Licenses coverage for every shipped model (sc-13803)
+        # The licenses page records the upstream license + attribution for every model
+        # whose weights SceneWorks downloads — including which ones are NON-COMMERCIAL.
+        # It had drifted to cover only the bundled binaries, Wan2.2/LTX and the audio
+        # models while ~30 image/video/utility primaries (SDXL, FLUX, Krea, Ideogram,
+        # SANA, SD3.5, Anima, the PiD decoders, …) shipped with no entry at all, because
+        # adding a catalog model had no mechanical link to the page. This fails the build
+        # if a downloading model is unclaimed, a claimed id no longer exists, or a
+        # document key is not wired into bundledLicenses.js (which would render an EMPTY
+        # license — worse than a missing one).
+        run: npm run check:license-coverage
       - name: Guard against gen-core version skew (sc-4482, epic 3720)
         # Fails if more than one distinct `sceneworks-gen-core` rev resolves in the worker's
         # build graph (split contract types can invalidate explicit catalog wiring). `--target all`

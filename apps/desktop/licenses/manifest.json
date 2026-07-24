@@ -4,274 +4,1022 @@
   "components": [
     {
       "id": "ffmpeg",
+      "models": [],
       "name": "FFmpeg",
       "version": "7.1",
       "publisher": "The FFmpeg developers",
       "license": "GPL-3.0-or-later",
       "homepage": "https://ffmpeg.org/",
-      "platforms": ["macos"],
+      "platforms": [
+        "macos"
+      ],
       "usage": "Bundled static binary (macOS arm64), invoked as a separate program for video/audio encode, mux, frame sampling and timeline export.",
       "documents": [
-        { "label": "Notice & written offer for source", "key": "ffmpeg-notice" },
-        { "label": "GNU General Public License v3", "key": "ffmpeg-gpl" }
+        {
+          "label": "Notice & written offer for source",
+          "key": "ffmpeg-notice"
+        },
+        {
+          "label": "GNU General Public License v3",
+          "key": "ffmpeg-gpl"
+        }
       ]
     },
     {
       "id": "onnxruntime",
+      "models": [],
       "name": "ONNX Runtime",
       "version": "1.26.0",
       "publisher": "Microsoft Corporation",
       "license": "MIT",
       "homepage": "https://onnxruntime.ai/",
-      "platforms": ["macos"],
+      "platforms": [
+        "macos"
+      ],
       "usage": "Bundled CoreML dynamic library (macOS arm64), loaded at runtime for the in-app DWPose pose detector.",
       "documents": [
-        { "label": "Notice", "key": "onnxruntime-notice" },
-        { "label": "MIT License", "key": "onnxruntime-license" }
+        {
+          "label": "Notice",
+          "key": "onnxruntime-notice"
+        },
+        {
+          "label": "MIT License",
+          "key": "onnxruntime-license"
+        }
       ]
     },
     {
       "id": "cuda",
+      "models": [],
       "name": "NVIDIA CUDA Runtime Libraries",
       "version": "12.9",
       "publisher": "NVIDIA Corporation",
       "license": "NVIDIA CUDA Toolkit EULA",
       "homepage": "https://developer.nvidia.com/cuda-toolkit",
-      "platforms": ["windows"],
+      "platforms": [
+        "windows"
+      ],
       "usage": "Bundled CUDA runtime redistributable DLLs (cudart, cuBLAS, cuBLAS Lt, cuRAND, NVRTC), loaded at runtime by the native candle (CUDA) generation backend. Requires an NVIDIA GPU and display driver 576.02 or newer.",
       "documents": [
-        { "label": "Notice & CUDA EULA reference", "key": "cuda-notice" }
+        {
+          "label": "Notice & CUDA EULA reference",
+          "key": "cuda-notice"
+        }
       ]
     },
     {
       "id": "wan2.2-ti2v-5b",
+      "models": [
+        "wan_2_2"
+      ],
       "name": "Wan2.2-TI2V-5B (MLX)",
       "publisher": "Wan-AI / Alibaba Tongyi Lab",
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B",
-      "platforms": ["macos"],
+      "platforms": [
+        "macos"
+      ],
       "usage": "Text/image-to-video model. On Apple Silicon, SceneWorks downloads on first use a converted MLX copy of the upstream Apache-2.0 weights, re-hosted at SceneWorks/wan2.2-ti2v-5b-mlx. Redistributed with attribution as permitted by Apache-2.0.",
       "documents": [
-        { "label": "Apache License 2.0", "key": "wan2.2-ti2v-5b-apache" }
+        {
+          "label": "Apache License 2.0",
+          "key": "wan2.2-ti2v-5b-apache"
+        }
       ]
     },
     {
       "id": "wan2.2-i2v-a14b",
+      "models": [
+        "wan_2_2_i2v_14b"
+      ],
       "name": "Wan2.2-I2V-A14B (MLX)",
       "publisher": "Wan-AI / Alibaba Tongyi Lab",
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B",
-      "platforms": ["macos"],
+      "platforms": [
+        "macos"
+      ],
       "usage": "Image-to-video mixture-of-experts model. On Apple Silicon, SceneWorks downloads on first use a converted MLX copy of the upstream Apache-2.0 weights, re-hosted at SceneWorks/wan2.2-i2v-a14b-mlx. Redistributed with attribution as permitted by Apache-2.0.",
       "documents": [
-        { "label": "Apache License 2.0", "key": "wan2.2-i2v-a14b-apache" }
+        {
+          "label": "Apache License 2.0",
+          "key": "wan2.2-i2v-a14b-apache"
+        }
       ]
     },
     {
       "id": "wan2.2-t2v-a14b",
+      "models": [
+        "wan_2_2_t2v_14b"
+      ],
       "name": "Wan2.2-T2V-A14B (MLX)",
       "publisher": "Wan-AI / Alibaba Tongyi Lab",
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B",
-      "platforms": ["macos"],
+      "platforms": [
+        "macos"
+      ],
       "usage": "Text-to-video mixture-of-experts model. On Apple Silicon, SceneWorks downloads on first use a converted MLX copy of the upstream Apache-2.0 weights, re-hosted at SceneWorks/wan2.2-t2v-a14b-mlx. Redistributed with attribution as permitted by Apache-2.0.",
       "documents": [
-        { "label": "Apache License 2.0", "key": "wan2.2-t2v-a14b-apache" }
+        {
+          "label": "Apache License 2.0",
+          "key": "wan2.2-t2v-a14b-apache"
+        }
       ]
     },
     {
       "id": "ltx-2.3",
+      "models": [
+        "ltx_2_3"
+      ],
       "name": "LTX-2.3 + Gemma-3-12B (MLX)",
       "publisher": "Lightricks (LTX-2.3) · Google (Gemma-3)",
       "license": "LTX-2 Community License · Gemma Terms",
       "homepage": "https://huggingface.co/Lightricks/LTX-2.3",
-      "platforms": ["macos"],
+      "platforms": [
+        "macos"
+      ],
       "usage": "Text/image-to-video model with audio. On Apple Silicon, SceneWorks downloads on first use a converted MLX bundle re-hosted at SceneWorks/ltx-2.3-mlx, containing the LTX-2.3 video weights (LTX-2 Community License) plus a Gemma-3-12B text encoder (Google Gemma Terms of Use). These are restricted licenses, not permissive — both notices below apply.",
       "documents": [
-        { "label": "LTX-2 Community License", "key": "ltx-2.3-license" },
-        { "label": "Google Gemma Terms", "key": "ltx-2.3-gemma" }
+        {
+          "label": "LTX-2 Community License",
+          "key": "ltx-2.3-license"
+        },
+        {
+          "label": "Google Gemma Terms",
+          "key": "ltx-2.3-gemma"
+        }
       ]
     },
     {
       "id": "kokoro-82m",
+      "models": [
+        "kokoro_82m"
+      ],
       "name": "Kokoro-82M (Speech)",
       "publisher": "hexgrad",
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/hexgrad/Kokoro-82M",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "Text-to-speech model (Audio Studio → Speech). SceneWorks downloads the upstream Apache-2.0 weights on first use from hexgrad/Kokoro-82M and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
       "documents": [
-        { "label": "Apache License 2.0", "key": "kokoro-82m-apache" }
+        {
+          "label": "Apache License 2.0",
+          "key": "kokoro-82m-apache"
+        }
       ]
     },
     {
       "id": "moss-soundeffect-v2",
+      "models": [
+        "moss_sfx_v2"
+      ],
       "name": "MOSS-SoundEffect v2.0 (SFX)",
       "publisher": "OpenMOSS Team",
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/OpenMOSS-Team/MOSS-SoundEffect-v2.0",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "Text-to-audio sound-effect / ambience model (Audio Studio → SFX). SceneWorks downloads the upstream Apache-2.0 weights on first use from OpenMOSS-Team/MOSS-SoundEffect-v2.0 and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
       "documents": [
-        { "label": "Apache License 2.0", "key": "moss-soundeffect-v2-apache" }
+        {
+          "label": "Apache License 2.0",
+          "key": "moss-soundeffect-v2-apache"
+        }
       ]
     },
     {
       "id": "acestep-v15-turbo",
+      "models": [
+        "acestep_v15_turbo"
+      ],
       "name": "ACE-Step v1.5 XL Turbo (Music)",
       "publisher": "ACE Studio · StepFun",
       "license": "MIT",
       "homepage": "https://huggingface.co/ACE-Step/acestep-v15-xl-turbo-diffusers",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "Text-to-music model with prompted audio editing (Audio Studio → Music). SceneWorks downloads the upstream MIT weights on first use from ACE-Step/acestep-v15-xl-turbo-diffusers and runs them natively (Candle) on every platform. Ships its own Oobleck VAE (no Stability-licensed component). Redistributed with attribution as permitted by MIT. Permissive — commercial use allowed.",
       "documents": [
-        { "label": "MIT License", "key": "acestep-v15-turbo-mit" }
+        {
+          "label": "MIT License",
+          "key": "acestep-v15-turbo-mit"
+        }
       ]
     },
     {
       "id": "acestep-v15-sft-cover",
+      "models": [],
       "name": "ACE-Step v1.5 XL SFT (Cover restyle)",
       "publisher": "ACE Studio · StepFun",
       "license": "MIT",
       "homepage": "https://huggingface.co/ACE-Step/acestep-v15-xl-sft-diffusers",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "Cover-restyle checkpoint for the ACE-Step Music model (Audio Studio → Music → Cover). SceneWorks downloads the upstream MIT weights on first use as a co-requisite of ACE-Step v1.5 XL Turbo, from ACE-Step/acestep-v15-xl-sft-diffusers — the non-distilled reference cover DiT (transformer) plus the FSQ audio_tokenizer and audio_token_detokenizer conditioning modules — and runs them natively (Candle) on every platform. Used only for the Cover edit mode; text-to-music and the inpaint/repaint/extend edits use the Turbo weights above. Redistributed with attribution as permitted by MIT. Permissive — commercial use allowed.",
       "documents": [
-        { "label": "MIT License", "key": "acestep-v15-sft-cover-mit" }
+        {
+          "label": "MIT License",
+          "key": "acestep-v15-sft-cover-mit"
+        }
       ]
     },
     {
       "id": "openvoice-v2",
+      "models": [
+        "openvoice_v2"
+      ],
       "name": "OpenVoice V2 (Voice Conversion)",
       "publisher": "MyShell.ai",
       "license": "MIT",
       "homepage": "https://huggingface.co/myshell-ai/OpenVoiceV2",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "Tone-color voice-conversion model (Audio Studio → VoiceClone). SceneWorks downloads the upstream MIT converter weights on first use from myshell-ai/OpenVoiceV2 and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by MIT. Permissive — commercial use allowed.",
       "documents": [
-        { "label": "MIT License", "key": "openvoice-v2-mit" }
+        {
+          "label": "MIT License",
+          "key": "openvoice-v2-mit"
+        }
       ]
     },
     {
       "id": "chatterbox-tts",
+      "models": [
+        "chatterbox_tts"
+      ],
       "name": "Chatterbox (Cloned-Voice TTS)",
       "publisher": "Resemble AI",
       "license": "MIT",
       "homepage": "https://huggingface.co/ResembleAI/chatterbox",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "Native cloned-voice text-to-speech model (Audio Studio → VoiceClone). SceneWorks downloads the upstream MIT primary weights on first use from ResembleAI/chatterbox — the T3 speech-token LM (t3_cfg.safetensors) and the S3Gen flow-matching token→waveform + HiFTNet vocoder stack (s3gen.safetensors) — and runs them natively (Candle) on every platform. Uses the Chatterbox voice encoder (listed separately below) for speaker conditioning. Redistributed with attribution as permitted by MIT. Permissive — commercial use allowed.",
       "documents": [
-        { "label": "MIT License", "key": "chatterbox-tts-mit" }
+        {
+          "label": "MIT License",
+          "key": "chatterbox-tts-mit"
+        }
       ]
     },
     {
       "id": "chatterbox-ve",
+      "models": [
+        "chatterbox_ve"
+      ],
       "name": "Chatterbox Voice Encoder (Voice Clone)",
       "publisher": "Resemble AI",
       "license": "MIT",
       "homepage": "https://huggingface.co/ResembleAI/chatterbox",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "Speaker voice-identity encoder for cloned-voice conditioning (Audio Studio → VoiceClone). SceneWorks downloads the upstream MIT ve.safetensors weights on first use from ResembleAI/chatterbox and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by MIT. Permissive — commercial use allowed.",
       "documents": [
-        { "label": "MIT License", "key": "chatterbox-ve-mit" }
+        {
+          "label": "MIT License",
+          "key": "chatterbox-ve-mit"
+        }
       ]
     },
     {
       "id": "chatterbox-perth",
+      "models": [],
       "name": "Perth Watermarker (Chatterbox provenance)",
       "publisher": "Resemble AI",
       "license": "MIT",
       "homepage": "https://huggingface.co/SceneWorks/perth-implicit",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "Perceptual-threshold (Perth) implicit audio watermarker that embeds a provenance watermark into every Chatterbox cloned-voice render (Audio Studio → VoiceClone). SceneWorks downloads the upstream MIT perth_implicit.safetensors weights on first use as a pinned co-requisite of the Chatterbox Cloned-Voice TTS model, re-hosted at SceneWorks/perth-implicit, and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by MIT. Permissive — commercial use allowed.",
       "documents": [
-        { "label": "MIT License", "key": "chatterbox-perth-mit" }
+        {
+          "label": "MIT License",
+          "key": "chatterbox-perth-mit"
+        }
       ]
     },
     {
       "id": "moss-ttsd-v05",
+      "models": [
+        "moss_ttsd_v05"
+      ],
       "name": "MOSS-TTSD v0.5 (Multi-Speaker Dialogue)",
       "publisher": "OpenMOSS Team",
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/OpenMOSS-Team/MOSS-TTSD-v0.5",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "Multi-speaker / long-form dialogue text-to-speech model (Audio Studio → Speech). SceneWorks downloads the upstream Apache-2.0 AR weights on first use from OpenMOSS-Team/MOSS-TTSD-v0.5 and runs them natively (Candle) on every platform. Requires the XY_Tokenizer codec (listed separately below) as a pinned co-requisite. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
       "documents": [
-        { "label": "Apache License 2.0", "key": "moss-ttsd-v05-apache" }
+        {
+          "label": "Apache License 2.0",
+          "key": "moss-ttsd-v05-apache"
+        }
       ]
     },
     {
       "id": "xy-tokenizer-ttsd",
+      "models": [],
       "name": "XY_Tokenizer (MOSS-TTSD codec)",
       "publisher": "OpenMOSS Team",
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/OpenMOSS-Team/XY_Tokenizer_TTSD_V0",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "RVQ delay-pattern audio codec that decodes MOSS-TTSD v0.5's frames into a 24 kHz waveform (Audio Studio → Speech). SceneWorks downloads the upstream Apache-2.0 xy_tokenizer.ckpt on first use from OpenMOSS-Team/XY_Tokenizer_TTSD_V0 as a pinned co-requisite of MOSS-TTSD v0.5 and runs it natively (Candle) on every platform. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
       "documents": [
-        { "label": "Apache License 2.0", "key": "xy-tokenizer-ttsd-apache" }
+        {
+          "label": "Apache License 2.0",
+          "key": "xy-tokenizer-ttsd-apache"
+        }
       ]
     },
     {
       "id": "moss-tts-realtime",
+      "models": [
+        "moss_tts_realtime"
+      ],
       "name": "MOSS-TTS-Realtime (Streaming Speech)",
       "publisher": "OpenMOSS Team",
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Realtime",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "Streaming text-to-speech model (Audio Studio → Speech). SceneWorks downloads the upstream Apache-2.0 AR weights on first use from OpenMOSS-Team/MOSS-TTS-Realtime and runs them natively (Candle) on every platform. Requires the MOSS-Audio-Tokenizer codec (listed separately below) as a pinned co-requisite. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
       "documents": [
-        { "label": "Apache License 2.0", "key": "moss-tts-realtime-apache" }
+        {
+          "label": "Apache License 2.0",
+          "key": "moss-tts-realtime-apache"
+        }
       ]
     },
     {
       "id": "moss-audio-tokenizer",
+      "models": [],
       "name": "MOSS-Audio-Tokenizer (MOSS-TTS-Realtime codec)",
       "publisher": "OpenMOSS Team",
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "RLFQ streaming audio codec that decodes MOSS-TTS-Realtime's RVQ frames into a 24 kHz waveform (Audio Studio → Speech). SceneWorks downloads the upstream Apache-2.0 codec weights on first use from OpenMOSS-Team/MOSS-Audio-Tokenizer as a pinned co-requisite of MOSS-TTS-Realtime and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
       "documents": [
-        { "label": "Apache License 2.0", "key": "moss-audio-tokenizer-apache" }
+        {
+          "label": "Apache License 2.0",
+          "key": "moss-audio-tokenizer-apache"
+        }
       ]
     },
     {
       "id": "mmaudio",
+      "models": [
+        "mmaudio_small_16k",
+        "mmaudio_large_44k"
+      ],
       "name": "MMAudio (video→audio / Foley)",
       "publisher": "MMAudio / Sony Research · Apple · NVIDIA · V. Iashin",
       "license": "Research / Non-Commercial (CC-BY-NC-4.0 · Apple ML Research · MIT)",
       "homepage": "https://huggingface.co/hkchengrex/MMAudio",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "Video→audio (Foley) model — RESEARCH / NON-COMMERCIAL USE ONLY. SceneWorks downloads on first use a five-checkpoint assembly across three repos: the MM-DiT / mel-VAE / in-repo BigVGAN weights (hkchengrex/MMAudio — CC-BY-NC-4.0, © Sony Research Inc.) with a bundled MIT Synchformer encoder (© V. Iashin), the DFN5B-CLIP conditioner (apple/DFN5B-CLIP-ViT-H-14-384 — Apple ML Research Model License, research-only), and the 44.1 kHz tier's external NVIDIA BigVGAN v2 vocoder (nvidia/bigvgan_v2_44khz_128band_512x — MIT). The EFFECTIVE license is the intersection (strictest) of these: research / non-commercial only, gated by the Apple ML Research license. SceneWorks is non-commercial, so the weights are usable, but this restriction is recorded and surfaced here — a legal read is warranted before any commercial use.",
       "documents": [
-        { "label": "Creative Commons BY-NC 4.0 (MMAudio MM-DiT / VAE / BigVGAN weights)", "key": "mmaudio-cc-by-nc" },
-        { "label": "Apple ML Research Model License (DFN5B-CLIP conditioner — research-only)", "key": "mmaudio-apple-amlr" },
-        { "label": "MIT License (NVIDIA BigVGAN v2 vocoder, 44.1 kHz tier)", "key": "mmaudio-bigvgan-mit" }
+        {
+          "label": "Creative Commons BY-NC 4.0 (MMAudio MM-DiT / VAE / BigVGAN weights)",
+          "key": "mmaudio-cc-by-nc"
+        },
+        {
+          "label": "Apple ML Research Model License (DFN5B-CLIP conditioner — research-only)",
+          "key": "mmaudio-apple-amlr"
+        },
+        {
+          "label": "MIT License (NVIDIA BigVGAN v2 vocoder, 44.1 kHz tier)",
+          "key": "mmaudio-bigvgan-mit"
+        }
       ]
     },
     {
       "id": "whisper-base",
+      "models": [
+        "whisper_base"
+      ],
       "name": "Whisper base (ASR)",
       "publisher": "OpenAI",
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/openai/whisper-base",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "Speech-to-text transcriber used as a utility dependency for audio validation / ASR round-trip checks (not a generation model). SceneWorks downloads the upstream Apache-2.0 weights on first use from openai/whisper-base and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
       "documents": [
-        { "label": "Apache License 2.0", "key": "whisper-base-apache" }
+        {
+          "label": "Apache License 2.0",
+          "key": "whisper-base-apache"
+        }
       ]
     },
     {
       "id": "clap-htsat-unfused",
+      "models": [
+        "clap_htsat_unfused"
+      ],
       "name": "CLAP HTSAT-unfused (audio embedder)",
       "publisher": "LAION",
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/laion/clap-htsat-unfused",
-      "platforms": ["macos", "windows", "linux"],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
       "usage": "Joint audio-text embedding model used as a utility dependency for semantic audio validation (audio↔text similarity) — not a generation model. SceneWorks downloads the upstream Apache-2.0 weights on first use from laion/clap-htsat-unfused and runs them natively (Candle) on every platform. Redistributed with attribution as permitted by Apache-2.0. Permissive — commercial use allowed.",
       "documents": [
-        { "label": "Apache License 2.0", "key": "clap-htsat-unfused-apache" }
+        {
+          "label": "Apache License 2.0",
+          "key": "clap-htsat-unfused-apache"
+        }
+      ]
+    },
+    {
+      "id": "anima",
+      "models": [
+        "anima_base",
+        "anima_aesthetic",
+        "anima_turbo"
+      ],
+      "name": "Anima 2B",
+      "publisher": "CircleStone Labs LLC",
+      "license": "CircleStone Labs Non-Commercial License v1.2",
+      "homepage": "https://huggingface.co/circlestone-labs/Anima",
+      "usage": "Image generation model (base / aesthetic / turbo). Downloaded on first use from the upstream circlestone-labs/Anima repository and run natively; NOT re-hosted or redistributed by SceneWorks. NON-COMMERCIAL: the license restricts the model weights and derivatives; generated Outputs are not restricted.",
+      "documents": [
+        {
+          "label": "CircleStone Labs Non-Commercial License v1.2",
+          "key": "anima-circlestone-labs-non-commercial-license"
+        }
+      ]
+    },
+    {
+      "id": "bernini",
+      "models": [
+        "bernini_image",
+        "bernini"
+      ],
+      "name": "Bernini",
+      "publisher": "ByteDance",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/SceneWorks/bernini-mlx",
+      "usage": "Image + video generation model. SceneWorks downloads on first use a converted copy of the upstream Apache-2.0 weights (ByteDance/Bernini-Diffusers, with Wan-AI/Wan2.2-T2V-A14B components), re-hosted at SceneWorks/bernini-mlx and SceneWorks/bernini. Redistributed with attribution as permitted by Apache-2.0.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "bernini-apache"
+        }
+      ]
+    },
+    {
+      "id": "boogu-image",
+      "models": [
+        "boogu_image",
+        "boogu_image_turbo",
+        "boogu_image_edit"
+      ],
+      "name": "Boogu-Image 0.1",
+      "publisher": "Boogu",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/Boogu/Boogu-Image-0.1-Base",
+      "usage": "Image generation + instruction-edit model (Base / Turbo / Edit). SceneWorks downloads on first use a converted copy of the upstream Apache-2.0 weights, re-hosted at SceneWorks/boogu-image-mlx. Redistributed with attribution as permitted by Apache-2.0.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "boogu-image-apache"
+        }
+      ]
+    },
+    {
+      "id": "chroma1",
+      "models": [
+        "chroma1_base",
+        "chroma1_hd",
+        "chroma1_flash"
+      ],
+      "name": "Chroma1",
+      "publisher": "Lodestone Rock",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/lodestones/Chroma1-Base",
+      "usage": "Image generation model (Base / HD / Flash). SceneWorks downloads on first use a converted copy of the upstream Apache-2.0 weights, re-hosted at SceneWorks/chroma1-{base,hd,flash}-mlx. Redistributed with attribution as permitted by Apache-2.0.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "chroma1-apache"
+        }
+      ]
+    },
+    {
+      "id": "flux1-dev",
+      "models": [
+        "flux_dev",
+        "pulid_flux_dev"
+      ],
+      "name": "FLUX.1 [dev]",
+      "publisher": "Black Forest Labs Inc.",
+      "license": "FLUX.1 [dev] Non-Commercial License v1.1.1",
+      "homepage": "https://huggingface.co/black-forest-labs/FLUX.1-dev",
+      "usage": "Image generation model, also the backbone for the PuLID identity lane. SceneWorks downloads on first use a converted copy re-hosted at SceneWorks/flux1-dev-mlx. NON-COMMERCIAL: the license restricts the model weights and derivatives; generated Outputs are not restricted.",
+      "documents": [
+        {
+          "label": "FLUX.1 [dev] Non-Commercial License v1.1.1",
+          "key": "flux1-dev-flux-1-dev-non-commercial-license"
+        }
+      ]
+    },
+    {
+      "id": "flux1-schnell",
+      "models": [
+        "flux_schnell"
+      ],
+      "name": "FLUX.1 [schnell]",
+      "publisher": "Black Forest Labs Inc.",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/black-forest-labs/FLUX.1-schnell",
+      "usage": "Distilled few-step image generation model. SceneWorks downloads on first use a converted copy of the upstream Apache-2.0 weights, re-hosted at SceneWorks/flux1-schnell-mlx. Redistributed with attribution as permitted by Apache-2.0.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "flux1-schnell-apache"
+        }
+      ]
+    },
+    {
+      "id": "flux2-dev",
+      "models": [
+        "flux2_dev"
+      ],
+      "name": "FLUX.2 [dev]",
+      "publisher": "Black Forest Labs Inc.",
+      "license": "FLUX.2 [dev] Non-Commercial License",
+      "homepage": "https://huggingface.co/black-forest-labs/FLUX.2-dev",
+      "usage": "Flagship image generation model. SceneWorks downloads on first use a converted copy re-hosted at SceneWorks/flux2-dev-mlx. NON-COMMERCIAL: the license restricts the model weights and derivatives; generated Outputs are not restricted.",
+      "documents": [
+        {
+          "label": "FLUX.2 [dev] Non-Commercial License",
+          "key": "flux2-dev-flux-2-dev-non-commercial-license"
+        }
+      ]
+    },
+    {
+      "id": "flux2-klein",
+      "models": [
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2"
+      ],
+      "name": "FLUX.2 klein 9B",
+      "publisher": "Black Forest Labs Inc.",
+      "license": "FLUX Non-Commercial License",
+      "homepage": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B",
+      "usage": "Distilled image generation model (klein 9B, its KV-cache variant, and the community True-V2 finetune wikeeyang/Flux2-Klein-9B-True-V2). SceneWorks downloads on first use a converted copy re-hosted at SceneWorks/flux2-klein-9b{,-kv}-mlx. NON-COMMERCIAL: the license restricts the model weights and derivatives; generated Outputs are not restricted.",
+      "documents": [
+        {
+          "label": "FLUX Non-Commercial License",
+          "key": "flux2-klein-flux-non-commercial-license"
+        }
+      ]
+    },
+    {
+      "id": "ideogram-4",
+      "models": [
+        "ideogram_4",
+        "ideogram_4_turbo"
+      ],
+      "name": "Ideogram 4",
+      "publisher": "Ideogram AI",
+      "license": "Ideogram Non-Commercial Model Agreement",
+      "homepage": "https://huggingface.co/ideogram-ai/ideogram-4-fp8",
+      "usage": "Image generation model (base + TurboTime distilled variant). SceneWorks downloads on first use a converted copy re-hosted at SceneWorks/ideogram-4-mlx and SceneWorks/ideogram-4. NON-COMMERCIAL: the agreement restricts the model weights and derivatives; generated Outputs are not restricted.",
+      "documents": [
+        {
+          "label": "Ideogram Non-Commercial Model Agreement",
+          "key": "ideogram-4-ideogram-non-commercial-model-agreement"
+        }
+      ]
+    },
+    {
+      "id": "illustrious-xl-v1",
+      "models": [
+        "illustrious_xl_v1"
+      ],
+      "name": "Illustrious-XL v1",
+      "publisher": "OnomaAI Research",
+      "license": "CreativeML Open RAIL++-M",
+      "homepage": "https://huggingface.co/OnomaAIResearch/Illustrious-XL-v1.0",
+      "usage": "SDXL-architecture illustration model. SceneWorks downloads on first use a converted copy re-hosted at SceneWorks/illustrious-xl-v1-mlx. The RAIL++ license carries USE-BASED RESTRICTIONS (Attachment A) that apply to the model and its outputs.",
+      "documents": [
+        {
+          "label": "CreativeML Open RAIL++-M License",
+          "key": "illustrious-xl-v1-creativeml-open-rail-m"
+        }
+      ]
+    },
+    {
+      "id": "illustrious-xl-v2",
+      "models": [
+        "illustrious_xl_v2"
+      ],
+      "name": "Illustrious-XL v2",
+      "publisher": "OnomaAI Research",
+      "license": "CreativeML Open RAIL-M",
+      "homepage": "https://huggingface.co/OnomaAIResearch/Illustrious-XL-v2.0",
+      "usage": "SDXL-architecture illustration model. SceneWorks downloads on first use a converted copy re-hosted at SceneWorks/illustrious-xl-v2-mlx. The RAIL license carries USE-BASED RESTRICTIONS (Attachment A) that apply to the model and its outputs.",
+      "documents": [
+        {
+          "label": "CreativeML Open RAIL-M License",
+          "key": "illustrious-xl-v2-creativeml-open-rail-m"
+        }
+      ]
+    },
+    {
+      "id": "kolors",
+      "models": [
+        "kolors"
+      ],
+      "name": "Kolors",
+      "publisher": "Kuaishou Kolors Team",
+      "license": "Kolors Model License",
+      "homepage": "https://huggingface.co/Kwai-Kolors/Kolors",
+      "usage": "Bilingual image generation model. SceneWorks downloads on first use a converted copy re-hosted at SceneWorks/kolors-mlx. The Kolors Model License permits free commercial use below a user threshold and requires a separate licence above it — review before commercial deployment.",
+      "documents": [
+        {
+          "label": "Kolors Model License",
+          "key": "kolors-kolors-model-license"
+        }
+      ]
+    },
+    {
+      "id": "krea-2",
+      "models": [
+        "krea_2_raw",
+        "krea_2_turbo"
+      ],
+      "name": "Krea 2",
+      "publisher": "Krea AI",
+      "license": "Krea 2 Community License",
+      "homepage": "https://www.krea.ai/krea-2-licensing",
+      "usage": "Image generation model (undistilled Raw + distilled Turbo, plus the INT8-ConvRot tier). SceneWorks downloads on first use converted copies re-hosted on its Hugging Face org. The Krea 2 Community License is published upstream as a PDF; this notice reproduces the reference rather than the text.",
+      "documents": [
+        {
+          "label": "Notice & Krea 2 Community License reference",
+          "key": "krea-2-notice"
+        }
+      ]
+    },
+    {
+      "id": "lens",
+      "models": [
+        "lens",
+        "lens_turbo"
+      ],
+      "name": "Lens",
+      "publisher": "Lens",
+      "license": "MIT",
+      "homepage": "https://huggingface.co/SceneWorks/Lens",
+      "usage": "Image generation model (base + turbo). SceneWorks downloads on first use a converted copy of the upstream MIT weights, re-hosted at SceneWorks/lens-mlx and SceneWorks/lens-turbo-mlx. Redistributed with attribution as permitted by the MIT License.",
+      "documents": [
+        {
+          "label": "MIT License",
+          "key": "lens-mit"
+        }
+      ]
+    },
+    {
+      "id": "qwen-image",
+      "models": [
+        "qwen_image",
+        "qwen_image_edit_2511",
+        "qwen_image_edit_2511_lightning"
+      ],
+      "name": "Qwen-Image",
+      "publisher": "Alibaba Qwen Team",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/Qwen/Qwen-Image",
+      "usage": "Image generation + Edit-2511 model (including the Lightning distilled variant). SceneWorks downloads on first use a converted copy of the upstream Apache-2.0 weights, re-hosted at SceneWorks/qwen-image-mlx and SceneWorks/qwen-image-edit-2511-mlx. Redistributed with attribution as permitted by Apache-2.0.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "qwen-image-apache"
+        }
+      ]
+    },
+    {
+      "id": "realvisxl",
+      "models": [
+        "realvisxl",
+        "realvisxl_lightning",
+        "instantid_realvisxl"
+      ],
+      "name": "RealVisXL",
+      "publisher": "SG161222",
+      "license": "CreativeML Open RAIL++-M",
+      "homepage": "https://huggingface.co/SG161222/RealVisXL_V4.0",
+      "usage": "SDXL-architecture photoreal model (base, Lightning, and the InstantID identity lane). SceneWorks downloads on first use converted copies re-hosted at SceneWorks/realvisxl-mlx and SceneWorks/realvisxl-lightning-mlx. The RAIL++ license carries USE-BASED RESTRICTIONS (Attachment A) that apply to the model and its outputs.",
+      "documents": [
+        {
+          "label": "CreativeML Open RAIL++-M License",
+          "key": "realvisxl-creativeml-open-rail-m"
+        }
+      ]
+    },
+    {
+      "id": "sana",
+      "models": [
+        "sana_1600m",
+        "sana_sprint_1600m"
+      ],
+      "name": "SANA 1.6B",
+      "publisher": "NVIDIA Corporation",
+      "license": "NVIDIA Open Model License",
+      "homepage": "https://huggingface.co/Efficient-Large-Model/Sana_1600M_1024px",
+      "usage": "Efficient image generation model (base + Sprint distilled). SceneWorks downloads on first use a converted copy re-hosted at SceneWorks/Sana_1600M_1024px_mlx and SceneWorks/Sana_Sprint_1.6B_1024px_mlx; the candle backend loads the upstream Efficient-Large-Model diffusers snapshots directly.",
+      "documents": [
+        {
+          "label": "NVIDIA Open Model License",
+          "key": "sana-nvidia-open-model-license"
+        }
+      ]
+    },
+    {
+      "id": "sd3.5",
+      "models": [
+        "sd3_5_large",
+        "sd3_5_large_turbo",
+        "sd3_5_medium"
+      ],
+      "name": "Stable Diffusion 3.5",
+      "publisher": "Stability AI Ltd.",
+      "license": "Stability AI Community License",
+      "homepage": "https://huggingface.co/stabilityai/stable-diffusion-3.5-large",
+      "usage": "Image generation model (Large / Large Turbo / Medium). SceneWorks downloads on first use converted copies re-hosted at SceneWorks/sd3.5-{large,large-turbo,medium}-mlx. The Community License is free for non-commercial use and for commercial use below an annual-revenue threshold; above it a separate Stability licence is required.",
+      "documents": [
+        {
+          "label": "Stability AI Community License",
+          "key": "sd3.5-stability-ai-community-license"
+        }
+      ]
+    },
+    {
+      "id": "sdxl",
+      "models": [
+        "sdxl"
+      ],
+      "name": "Stable Diffusion XL 1.0",
+      "publisher": "Stability AI Ltd.",
+      "license": "CreativeML Open RAIL++-M",
+      "homepage": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0",
+      "usage": "Base image generation model. SceneWorks downloads on first use a converted copy re-hosted at SceneWorks/sdxl-base-mlx. The RAIL++ license carries USE-BASED RESTRICTIONS (Attachment A) that apply to the model and its outputs.",
+      "documents": [
+        {
+          "label": "CreativeML Open RAIL++-M License",
+          "key": "sdxl-creativeml-open-rail-m"
+        }
+      ]
+    },
+    {
+      "id": "sensenova-u1",
+      "models": [
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_infographic_v3_fast"
+      ],
+      "name": "SenseNova-U1 8B",
+      "publisher": "SenseTime",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/SceneWorks/sensenova-u1-8b-mlx",
+      "usage": "Unified multimodal image generation model (base, 8-step distilled Fast, and the Infographic V2/V3 checkpoint refreshes). SceneWorks downloads on first use converted copies re-hosted on its Hugging Face org; each snapshot ships the Apache-2.0 LICENSE reproduced here. Redistributed with attribution as permitted by Apache-2.0.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "sensenova-u1-apache"
+        }
+      ]
+    },
+    {
+      "id": "z-image",
+      "models": [
+        "z_image",
+        "z_image_turbo",
+        "z_image_edit"
+      ],
+      "name": "Z-Image",
+      "publisher": "Tongyi MAI",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo",
+      "usage": "Image generation + edit model (base / Turbo / Edit). SceneWorks downloads on first use converted copies of the upstream Apache-2.0 weights, re-hosted at SceneWorks/z-image-mlx and SceneWorks/z-image-turbo-mlx. Redistributed with attribution as permitted by Apache-2.0.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "z-image-apache"
+        }
+      ]
+    },
+    {
+      "id": "ltx-2.3-eros",
+      "models": [
+        "ltx_2_3_eros"
+      ],
+      "name": "LTX-2.3 10Eros",
+      "publisher": "TenStrip (finetune of Lightricks LTX-2.3)",
+      "license": "LTX-2 Community License",
+      "homepage": "https://huggingface.co/TenStrip/LTX2.3-10Eros",
+      "usage": "Video generation finetune of Lightricks LTX-2.3. Downloaded on first use from the upstream TenStrip repository; NOT re-hosted by SceneWorks. The upstream repo declares no license of its own, so the LTX-2 Community License of its base model governs — it restricts the weights and derivatives and is free for commercial use below an annual-revenue threshold.",
+      "documents": [
+        {
+          "label": "LTX-2 Community License",
+          "key": "ltx-2.3-eros-ltx-2-community-license"
+        }
+      ]
+    },
+    {
+      "id": "scail2",
+      "models": [
+        "scail2_14b"
+      ],
+      "name": "SCAIL-2 14B",
+      "publisher": "Zhipu AI (zai-org)",
+      "license": "MIT",
+      "homepage": "https://huggingface.co/SceneWorks/scail2-mlx",
+      "usage": "Video generation model. SceneWorks downloads on first use a converted copy of the upstream MIT weights (zai-org/SCAIL-2), re-hosted at SceneWorks/scail2-mlx. Redistributed with attribution as permitted by the MIT License.",
+      "documents": [
+        {
+          "label": "MIT License",
+          "key": "scail2-mit"
+        }
+      ]
+    },
+    {
+      "id": "svd",
+      "models": [
+        "svd"
+      ],
+      "name": "Stable Video Diffusion img2vid XT",
+      "publisher": "Stability AI Ltd.",
+      "license": "Stable Video Diffusion Non-Commercial Community License",
+      "homepage": "https://huggingface.co/stabilityai/stable-video-diffusion-img2vid-xt",
+      "usage": "Image-to-video model. Downloaded on first use from the upstream Stability AI repository; NOT re-hosted by SceneWorks. The Community License restricts the weights and derivatives.",
+      "documents": [
+        {
+          "label": "Stable Video Diffusion Community License",
+          "key": "svd-stable-video-diffusion-community-license"
+        }
+      ]
+    },
+    {
+      "id": "wan2.2-vace-fun",
+      "models": [
+        "wan_2_2_vace_fun_14b"
+      ],
+      "name": "Wan2.2 VACE-Fun 14B",
+      "publisher": "Wan-AI / Alibaba Tongyi Lab",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/Wan-AI/Wan2.1-VACE-14B-diffusers",
+      "usage": "Reference-guided video generation (VACE) model. Downloaded on first use from the upstream diffusers repositories; NOT re-hosted by SceneWorks. The Wan2.x weights it is built from are Apache-2.0.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "wan2.2-vace-fun-apache"
+        }
+      ]
+    },
+    {
+      "id": "aura-sr-v2",
+      "models": [
+        "aura_sr_v2"
+      ],
+      "name": "AuraSR v2",
+      "publisher": "fal.ai",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/fal/AuraSR-v2",
+      "usage": "GAN image upscaler (utility model). Downloaded on first use from the upstream fal repository; NOT re-hosted by SceneWorks.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "aura-sr-v2-apache"
+        }
+      ]
+    },
+    {
+      "id": "controlnet-tile-sdxl",
+      "models": [
+        "controlnet_tile_sdxl"
+      ],
+      "name": "ControlNet Tile SDXL",
+      "publisher": "xinsir",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/xinsir/controlnet-tile-sdxl-1.0",
+      "usage": "Tile ControlNet for SDXL-architecture upscaling (utility model). Downloaded on first use from the upstream repository; NOT re-hosted by SceneWorks.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "controlnet-tile-sdxl-apache"
+        }
+      ]
+    },
+    {
+      "id": "pid",
+      "models": [
+        "pid_flux",
+        "pid_flux2",
+        "pid_qwenimage",
+        "pid_sdxl"
+      ],
+      "name": "PiD pixel-diffusion decoders",
+      "publisher": "NVIDIA Corporation",
+      "license": "NVIDIA License",
+      "homepage": "https://huggingface.co/SceneWorks/pid-flux",
+      "usage": "Pixel-diffusion decoders replacing the VAE decode for the FLUX / FLUX.2 / Qwen-Image / SDXL lanes (utility models). SceneWorks downloads them on first use from its re-hosts SceneWorks/pid-{flux,flux2,qwenimage,sdxl}. The NVIDIA License restricts use to non-commercial/research purposes.",
+      "documents": [
+        {
+          "label": "NVIDIA License",
+          "key": "pid-nvidia-license"
+        }
+      ]
+    },
+    {
+      "id": "real-esrgan",
+      "models": [
+        "real_esrgan"
+      ],
+      "name": "Real-ESRGAN",
+      "publisher": "Xintao Wang",
+      "license": "BSD-3-Clause",
+      "homepage": "https://github.com/xinntao/Real-ESRGAN",
+      "usage": "Image upscaler (utility model). Downloaded on first use from the upstream repository; NOT re-hosted by SceneWorks.",
+      "documents": [
+        {
+          "label": "BSD 3-Clause License",
+          "key": "real-esrgan-bsd-3-clause"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-vl-caption",
+      "models": [
+        "vision_caption_qwen3vl_8b"
+      ],
+      "name": "Qwen3-VL 8B Instruct (vision captioner)",
+      "publisher": "Alibaba Qwen Team",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated",
+      "usage": "Vision-language captioner (utility model). Downloaded on first use from the upstream repository; NOT re-hosted by SceneWorks.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "qwen3-vl-caption-apache"
+        }
       ]
     }
   ]
