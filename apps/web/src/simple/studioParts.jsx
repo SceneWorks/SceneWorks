@@ -5,6 +5,7 @@ import { resolveJobResultAssets } from "../jobResultAssets.js";
 import { terminalStatuses } from "../constants.js";
 import { STYLE_GROUPS } from "../data/styleCatalog.js";
 import { useAppStatic } from "../context/AppContext.js";
+import { SimpleJobCard, jobClearsFromStudio } from "./SimpleJobCard.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";
 
 // Shared building blocks for the three Simple studios (design handoff). Each one is
@@ -63,7 +64,7 @@ function StyleTile({ active, name, onSelect, styleId }) {
 // Reference / source-image tile. Armed state shows the design's "SET" badge plus a
 // thumbnail and the asset's display name; tapping an armed tile clears it, tapping an
 // empty one opens the picker sheet over the project's recent images.
-export function ReferenceTile({ label, hint, asset, assets, onChange, required = false }) {
+export function ReferenceTile({ label, hint, asset, assets, onChange, required = false, disabled = false }) {
   const { openSheet, toast } = useSimpleUi();
   const pick = useCallback(() => {
     if (asset) {
@@ -91,13 +92,20 @@ export function ReferenceTile({ label, hint, asset, assets, onChange, required =
   }, [asset, assets, onChange, openSheet, toast]);
 
   return (
-    <button className={asset ? "su-tile active" : "su-tile"} onClick={pick} type="button">
+    <button
+      className={asset && !disabled ? "su-tile active" : "su-tile"}
+      disabled={disabled}
+      onClick={pick}
+      type="button"
+    >
       <span className="su-tile-head">
         <Icon.Image size={15} />
         {label}
-        {asset ? <span className="su-set-badge">SET</span> : null}
+        {asset && !disabled ? <span className="su-set-badge">SET</span> : null}
       </span>
-      {asset ? (
+      {/* A disabled tile shows its REASON, never the armed thumbnail — an armed reference the
+          model can't consume must not read as active. */}
+      {asset && !disabled ? (
         <span className="su-tile-ref">
           <AssetThumbnail asset={asset} />
           <span>{asset.displayName ?? asset.id}</span>
@@ -205,6 +213,34 @@ export function jobIsRunning(job) {
   return Boolean(job) && !terminalStatuses.has(job.status);
 }
 
+
+// The studio's live run strip: the SAME job card the Queue screen lists, rendered directly
+// under Generate. That is where the user's attention already is, so progress and Cancel are
+// in front of them instead of one navigation away — and because it is one component, the two
+// surfaces cannot drift.
+//
+// Unlike the Queue (which keeps every row), a studio clears the card once the run resolves
+// cleanly — see `jobClearsFromStudio`. A FAILED run keeps its card, because that card is the
+// only place a studio shows the worker's reason — but the user can Dismiss it once read,
+// rather than being left staring at it. Dismissal is studio-local: the Queue row survives.
+export function StudioRunStatus({ job }) {
+  const { toast, dismissedJobIds, dismissJob } = useSimpleUi();
+  const { jobAction } = useAppStatic();
+  if (!job || jobClearsFromStudio(job) || dismissedJobIds?.has(job.id)) {
+    return null;
+  }
+  return (
+    <SimpleJobCard
+      job={job}
+      onCancel={async (target) => {
+        await jobAction?.(target, "cancel");
+        toast("Run canceled");
+      }}
+      onDismiss={(target) => dismissJob(target.id)}
+    />
+  );
+}
+
 // Results block. Renders the newest run's outputs; while that run is still in flight it
 // renders one placeholder tile per expected output so the grid doesn't pop in.
 export function StudioResults({ job, assets, type, columns, meta, pendingCount = 1, wide = false }) {
@@ -212,6 +248,8 @@ export function StudioResults({ job, assets, type, columns, meta, pendingCount =
   const { updateAssetStatus } = useAppStatic();
   const results = job ? resolveJobResultAssets(job, assets, { type }) : [];
   const running = jobIsRunning(job);
+  // Failure/outcome reporting lives in StudioRunStatus (the run strip above this), so this
+  // block is purely the output grid — a failed run simply has none.
   if (!job || (!running && results.length === 0)) {
     return null;
   }

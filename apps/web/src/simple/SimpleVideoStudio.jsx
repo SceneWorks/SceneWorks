@@ -4,6 +4,7 @@ import { useAppContext } from "../context/AppContext.js";
 import { videoModelServesMode } from "../modelEligibility.js";
 import { buildSimpleVideoRequest } from "./simpleJobs.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
+import { preferredDuration, preferredVideoResolution } from "./modelDefaults.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 import {
@@ -12,6 +13,7 @@ import {
   ReferenceTile,
   SheetSelect,
   StudioResults,
+  StudioRunStatus,
   StyleStrip,
   jobIsRunning,
   newestLocalJob,
@@ -73,21 +75,33 @@ export function SimpleVideoStudio() {
   const durations = selectedModel?.limits?.durations?.length
     ? selectedModel.limits.durations
     : DEFAULT_DURATIONS;
-  // The model's own fps list leads; the studio does not expose fps, so the first
-  // declared value is used — the same one the advanced picker defaults to.
-  const fps = selectedModel?.limits?.fps?.[0] ?? selectedModel?.defaults?.fps ?? 25;
 
+  // Both seeds read the model's DECLARED default rather than `limits.*[0]`, which is only
+  // the first ALLOWED value. For nearly every shipped video model they differ — LTX-2.3
+  // declares 6s but lists 4s first; Wan 2.2 A14B declares 1280×720 but lists 832×480 first —
+  // so [0] silently started a Simple run shorter and smaller than the same model in the full
+  // workspace.
+  // Both effects guard on a RESOLVED model (mirrors ImageStudio's sc-11962 guard): before the
+  // catalog lands these lists are the generic fallbacks, and seeding from them locks in a
+  // value the model also happens to allow — after which the model's own declared default is
+  // never applied.
   useEffect(() => {
+    if (!selectedModel) {
+      return;
+    }
     if (resolutions.length && !resolutions.includes(resolution)) {
-      setResolution(resolutions[0]);
+      setResolution(preferredVideoResolution(selectedModel, resolutions));
     }
-  }, [resolutions, resolution]);
+  }, [resolutions, resolution, selectedModel]);
 
   useEffect(() => {
-    if (durations.length && !durations.includes(duration)) {
-      setDuration(durations[0]);
+    if (!selectedModel) {
+      return;
     }
-  }, [durations, duration]);
+    if (durations.length && !durations.includes(duration)) {
+      setDuration(preferredDuration(selectedModel, durations));
+    }
+  }, [durations, duration, selectedModel]);
 
   const sourceAsset = useMemo(
     () => recentImageAssets.find((asset) => asset.id === sourceAssetId) ?? null,
@@ -116,7 +130,6 @@ export function SimpleVideoStudio() {
         model,
         resolution,
         duration,
-        fps,
         styleId,
         sourceAssetId,
       });
@@ -271,6 +284,9 @@ export function SimpleVideoStudio() {
         {busy ? "Rendering…" : "Generate video"}
       </button>
       {needsSource ? <p className="su-empty">Attach a start frame to render an Image → Video clip.</p> : null}
+
+      {/* Live run strip: progress + Cancel + the outcome, right under Generate. */}
+      <StudioRunStatus job={latestJob} />
 
       <StudioResults
         assets={assets}

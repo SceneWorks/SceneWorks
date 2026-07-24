@@ -1,5 +1,6 @@
 import { buildImageJobRequest } from "../imageJobRequest.js";
 import { composeStyledPrompt } from "../styleComposer.js";
+import { serializeLora } from "../presetUtils.js";
 import { styleTextForId } from "../data/styleCatalog.js";
 import { defaultTierSelection, installedTiers } from "../quantTier.js";
 import { suggestTier } from "../tierSuggestion.js";
@@ -130,8 +131,34 @@ export function parseResolutionPair(resolution) {
   return { width, height };
 }
 
+// The reference strength used when an img2img-capable model has a reference attached but
+// the surface shows no slider — which is every Simple run. The model declares its own
+// default under `ui.img2imgStrength.default` (every img2img entry in the shipped catalog
+// declares 0.5, the same value the advanced slider initializes to); this constant is only
+// the fallback for an entry that declares the `ui.img2img` flag but no strength config.
+export const DEFAULT_IMG2IMG_STRENGTH = 0.5;
+
+/**
+ * The reference strength a Simple run should send for `model`. Reads the model's declared
+ * default so a catalog entry that tunes it is honored without a code change here.
+ */
+export function referenceStrengthFor(model) {
+  const declared = model?.ui?.img2imgStrength?.default;
+  return Number.isFinite(declared) ? declared : DEFAULT_IMG2IMG_STRENGTH;
+}
+
 /**
  * The Image Studio job request for a Simple run.
+ *
+ * The single armed reference is routed by MODE, because the two modes condition on an
+ * image in completely different ways:
+ *   - edit_image      → `sourceAssetId`: the image being edited. No strength exists on this
+ *                       path; the model's edit pipeline owns it.
+ *   - text_to_image   → `img2imgReferenceAssetId` + `advanced.strength`, but ONLY on a model
+ *                       that declares `ui.img2img`. buildImageJobRequest drops a
+ *                       text-mode `sourceAssetId` on the floor, so routing it there would
+ *                       silently ignore the user's reference.
+ *
  * @param {object} input
  * @param {string} input.prompt
  * @param {"text_to_image"|"edit_image"} input.mode
@@ -139,7 +166,11 @@ export function parseResolutionPair(resolution) {
  * @param {string} input.resolution - "WIDTHxHEIGHT".
  * @param {number} input.count - variations.
  * @param {string|null} input.styleId - Style Catalog group/sub-style id, or null for "None".
- * @param {string|null} input.sourceAssetId - the edit source (edit_image only).
+ * @param {string|null} input.referenceAssetId - the armed reference, whichever mode is active.
+ * @param {boolean} [input.supportsImg2img] - the selected model's `ui.img2img` flag.
+ * @param {number} [input.img2imgStrength] - from referenceStrengthFor(selectedModel).
+ * @param {object|null} [input.editLora] - the model's managed `image_edit`-role LoRA catalog entry
+ *   (findModelEditLora), auto-applied in edit mode. Null for models needing none.
  * @param {string} [input.quantTier] / @param {boolean} [input.tierExplicit] - from resolveSimpleTier.
  * @returns {object|null} the payload for createImageJob, or null when the resolution is invalid.
  */
@@ -150,7 +181,10 @@ export function buildSimpleImageRequest({
   resolution,
   count,
   styleId,
-  sourceAssetId,
+  referenceAssetId,
+  supportsImg2img = false,
+  img2imgStrength = DEFAULT_IMG2IMG_STRENGTH,
+  editLora = null,
   quantTier = "",
   tierExplicit = false,
 }) {
@@ -158,8 +192,25 @@ export function buildSimpleImageRequest({
   if (!size) {
     return null;
   }
+  const editing = mode === "edit_image";
+  // Only claim img2img on the text path AND on a model that advertises it — the flag is
+  // what makes buildImageJobAdvanced emit `advanced.strength`, so claiming it for a model
+  // without the capability would send a knob the engine has no use for.
+  const img2imgActive = !editing && supportsImg2img && Boolean(referenceAssetId);
+  // Krea-style managed image-edit LoRA (epic 10871, sc-11069). Krea 2's edit lane REJECTS a run
+  // without an `image_edit`-role LoRA — "without it the source-image conditioning is inert" — so
+  // an edit payload that omits it fails in the worker, not the UI. The advanced studio already
+  // manages this for the user rather than exposing it in the LoRA picker, which is exactly the
+  // Simple behavior; it just has to actually be applied. `serializeLora` round-trips
+  // `conditioningRole`, which is what the worker's role check reads.
+  const loras = editing && editLora ? [serializeLora(editLora)] : [];
   return buildImageJobRequest({
     ...IMAGE_DEFAULTS,
+    loras,
+    sourceAssetId: editing ? referenceAssetId || null : null,
+    supportsImg2img: img2imgActive,
+    img2imgReferenceAssetId: img2imgActive ? referenceAssetId : null,
+    img2imgStrength,
     promptToSend: prompt,
     submitIntent: prompt,
     resolution,
@@ -172,7 +223,6 @@ export function buildSimpleImageRequest({
     // replays into the advanced Style picker unchanged (sc-13132).
     styleText: styleId ? styleTextForId(styleId) : null,
     styleId: styleId || null,
-    sourceAssetId: sourceAssetId || null,
     quantTier,
     tierExplicit,
   });
@@ -189,7 +239,6 @@ export function buildSimpleVideoRequest({
   model,
   resolution,
   duration,
-  fps,
   styleId,
   sourceAssetId,
 }) {
@@ -207,7 +256,11 @@ export function buildSimpleVideoRequest({
     negativePrompt: "",
     model,
     duration: Number(duration),
-    fps: Number(fps),
+    // fps is deliberately OMITTED. Simple exposes no frame-rate control, and the route
+    // resolves an absent fps from the model's declared `defaults.fps` (sc-12347) — which is
+    // exactly what the advanced studio sends when its fps picker is untouched. Sending a
+    // value we invented instead is what the DTO's own comment calls out as harmful: a blanket
+    // rate "is not a value any model chose", and it makes `limits.fps` unenforceable.
     width: size.width,
     height: size.height,
     quality: "balanced",

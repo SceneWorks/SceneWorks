@@ -88,6 +88,14 @@ export function SimpleShell({
   // The reference an asset preview hands to the Image Studio. Held here (not in the
   // studio) so "Use as reference" works from Assets, which is a different screen.
   const [referenceRequest, setReferenceRequest] = useState(null);
+  // Failed runs the user has dismissed from a studio. Held HERE rather than in the studio
+  // because the studios unmount on navigation — studio-local state would resurrect a
+  // dismissed failure the moment the user came back to the tab. Session-scoped by design:
+  // the Queue keeps the row permanently, so nothing is actually lost.
+  const [dismissedJobIds, setDismissedJobIds] = useState(() => new Set());
+  const dismissJob = useCallback((id) => {
+    setDismissedJobIds((current) => new Set(current).add(id));
+  }, []);
   const toastTimer = useRef(null);
 
   useEffect(() => () => clearTimeout(toastTimer.current), []);
@@ -137,8 +145,10 @@ export function SimpleShell({
       toast,
       referenceRequest,
       clearReferenceRequest: () => setReferenceRequest(null),
+      dismissedJobIds,
+      dismissJob,
     }),
-    [breakpoint, goTo, toast, referenceRequest, openInAdvanced, lockedToSimple],
+    [breakpoint, goTo, toast, referenceRequest, openInAdvanced, lockedToSimple, dismissedJobIds, dismissJob],
   );
 
   const active = SCREEN_BY_ID.get(screen) ?? SCREEN_BY_ID.get("image");
