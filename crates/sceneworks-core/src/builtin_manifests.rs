@@ -16,6 +16,7 @@
 //! `docker/rust.Dockerfile` builder stage `COPY config`s it in for this reason.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 /// `(file name, embedded contents)` for each builtin manifest, embedded at
 /// compile time from the canonical repo copies under `config/manifests/`.
@@ -44,6 +45,152 @@ pub const BUILTIN_MANIFESTS: &[(&str, &str)] = &[
         include_str!("../../../config/manifests/builtin.control_overlays.jsonc"),
     ),
 ];
+
+/// The immutable Hugging Face location of the Chatterbox voice-encoder weights.
+///
+/// This is derived from the shipped model manifest so downloads and runtime resolution have one pin
+/// authority. The standalone `chatterbox_ve` declaration is authoritative; the helper also rejects a
+/// catalog where `chatterbox_tts`'s primary or `voice_embedding` co-requisite has drifted away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatterboxVePin {
+    pub repo: String,
+    pub revision: String,
+}
+
+static CHATTERBOX_VE_PIN: OnceLock<Result<ChatterboxVePin, String>> = OnceLock::new();
+
+/// Resolve and validate the Chatterbox voice-encoder pin in the embedded builtin catalog.
+pub fn chatterbox_ve_pin() -> Result<&'static ChatterboxVePin, &'static str> {
+    CHATTERBOX_VE_PIN
+        .get_or_init(|| {
+            let contents = BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")
+                .map(|(_, contents)| *contents)
+                .ok_or_else(|| "builtin.models.jsonc is not embedded".to_owned())?;
+            parse_chatterbox_ve_pin(contents)
+        })
+        .as_ref()
+        .map_err(String::as_str)
+}
+
+fn parse_chatterbox_ve_pin(contents: &str) -> Result<ChatterboxVePin, String> {
+    fn downloads<'a>(
+        model: &'a serde_json::Value,
+        id: &str,
+    ) -> Result<&'a Vec<serde_json::Value>, String> {
+        model["downloads"]
+            .as_array()
+            .ok_or_else(|| format!("{id} has no downloads array"))
+    }
+
+    fn unique_download<'a>(
+        candidates: Vec<&'a serde_json::Value>,
+        description: &str,
+    ) -> Result<&'a serde_json::Value, String> {
+        match candidates.as_slice() {
+            [download] => Ok(*download),
+            [] => Err(format!("missing {description} download")),
+            _ => Err(format!("multiple {description} downloads are ambiguous")),
+        }
+    }
+
+    let stripped = crate::jsonc::strip_jsonc_comments(contents);
+    let manifest: serde_json::Value = serde_json::from_str(&stripped)
+        .map_err(|error| format!("builtin.models.jsonc is malformed: {error}"))?;
+    let models = manifest["models"]
+        .as_array()
+        .ok_or_else(|| "builtin.models.jsonc has no models array".to_owned())?;
+
+    let unique_model = |id: &str| -> Result<&serde_json::Value, String> {
+        let matches = models
+            .iter()
+            .filter(|model| model["id"].as_str() == Some(id))
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [model] => Ok(*model),
+            [] => Err(format!("builtin.models.jsonc is missing model {id}")),
+            _ => Err(format!(
+                "builtin.models.jsonc contains multiple models named {id}"
+            )),
+        }
+    };
+    let ve = unique_model("chatterbox_ve")?;
+    let ve_download = unique_download(
+        downloads(ve, "chatterbox_ve")?
+            .iter()
+            .filter(|download| {
+                download["provider"].as_str() == Some("huggingface")
+                    && download["files"]
+                        .as_array()
+                        .is_some_and(|files| files.iter().any(|file| file == "ve.safetensors"))
+            })
+            .collect(),
+        "chatterbox_ve ve.safetensors",
+    )?;
+    let repo = ve_download["repo"]
+        .as_str()
+        .ok_or_else(|| "chatterbox_ve ve.safetensors download has no repo".to_owned())?;
+    let revision = ve_download["revision"]
+        .as_str()
+        .ok_or_else(|| "chatterbox_ve ve.safetensors download has no revision".to_owned())?;
+    if revision.len() != 40
+        || !revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!(
+            "chatterbox_ve revision must be a full 40-character lowercase-hex commit SHA, got {revision:?}"
+        ));
+    }
+
+    let tts = unique_model("chatterbox_tts")?;
+    let tts_downloads = downloads(tts, "chatterbox_tts")?;
+    let tts_primary = unique_download(
+        tts_downloads
+            .iter()
+            .filter(|download| {
+                download["provider"].as_str() == Some("huggingface")
+                    && download["coRequisite"].as_bool() != Some(true)
+            })
+            .collect(),
+        "chatterbox_tts primary",
+    )?;
+    let tts_voice_embedding = unique_download(
+        tts_downloads
+            .iter()
+            .filter(|download| {
+                download["provider"].as_str() == Some("huggingface")
+                    && download["coRequisite"].as_bool() == Some(true)
+                    && download["componentId"].as_str() == Some("voice_embedding")
+                    && download["files"]
+                        .as_array()
+                        .is_some_and(|files| files.iter().any(|file| file == "ve.safetensors"))
+            })
+            .collect(),
+        "chatterbox_tts voice_embedding co-requisite",
+    )?;
+    for (description, download) in [
+        ("chatterbox_tts primary", tts_primary),
+        (
+            "chatterbox_tts voice_embedding co-requisite",
+            tts_voice_embedding,
+        ),
+    ] {
+        if download["repo"].as_str() != Some(repo)
+            || download["revision"].as_str() != Some(revision)
+        {
+            return Err(format!(
+                "{description} must share chatterbox_ve's repo {repo:?} and revision {revision:?}"
+            ));
+        }
+    }
+
+    Ok(ChatterboxVePin {
+        repo: repo.to_owned(),
+        revision: revision.to_owned(),
+    })
+}
 
 /// How an existing manifest file is treated when seeding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +243,7 @@ pub fn seed_builtin_manifests(config_dir: &Path, mode: SeedMode) -> std::io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn embedded(name: &str) -> &'static str {
         BUILTIN_MANIFESTS
@@ -103,6 +251,84 @@ mod tests {
             .find(|(file, _)| *file == name)
             .map(|(_, contents)| *contents)
             .expect("manifest present in BUILTIN_MANIFESTS")
+    }
+
+    fn chatterbox_catalog(
+        ve_revision: &str,
+        tts_primary_revision: &str,
+        tts_component_revision: &str,
+    ) -> String {
+        json!({
+            "models": [
+                {
+                    "id": "chatterbox_ve",
+                    "downloads": [{
+                        "provider": "huggingface",
+                        "repo": "ResembleAI/chatterbox",
+                        "revision": ve_revision,
+                        "files": ["ve.safetensors"]
+                    }]
+                },
+                {
+                    "id": "chatterbox_tts",
+                    "downloads": [
+                        {
+                            "provider": "huggingface",
+                            "repo": "ResembleAI/chatterbox",
+                            "revision": tts_primary_revision,
+                            "files": ["t3_cfg.safetensors"]
+                        },
+                        {
+                            "provider": "huggingface",
+                            "repo": "ResembleAI/chatterbox",
+                            "revision": tts_component_revision,
+                            "coRequisite": true,
+                            "componentId": "voice_embedding",
+                            "files": ["ve.safetensors"]
+                        }
+                    ]
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn shipped_chatterbox_downloads_share_one_manifest_authoritative_pin() {
+        let pin = chatterbox_ve_pin().expect("shipped Chatterbox pin is valid");
+        assert_eq!(pin.repo, "ResembleAI/chatterbox");
+        assert_eq!(pin.revision.len(), 40);
+        assert!(pin.revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn chatterbox_pin_rejects_malformed_and_divergent_revisions() {
+        let sha = "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18";
+        let malformed = chatterbox_catalog("main", sha, sha);
+        assert!(parse_chatterbox_ve_pin(&malformed)
+            .unwrap_err()
+            .contains("full 40-character lowercase-hex"));
+
+        let other = "1111111111111111111111111111111111111111";
+        let divergent = chatterbox_catalog(sha, other, sha);
+        assert!(parse_chatterbox_ve_pin(&divergent)
+            .unwrap_err()
+            .contains("must share chatterbox_ve's repo"));
+    }
+
+    #[test]
+    fn chatterbox_pin_rejects_ambiguous_voice_encoder_downloads() {
+        let sha = "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18";
+        let mut catalog: serde_json::Value =
+            serde_json::from_str(&chatterbox_catalog(sha, sha, sha)).unwrap();
+        let duplicate = catalog["models"][0]["downloads"][0].clone();
+        catalog["models"][0]["downloads"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        assert!(parse_chatterbox_ve_pin(&catalog.to_string())
+            .unwrap_err()
+            .contains("ambiguous"));
     }
 
     #[test]

@@ -18,16 +18,8 @@ use std::path::{Path, PathBuf};
 
 use gen_core::{LoadSpec, WeightsSource};
 
-/// The Hugging Face repo hosting the Chatterbox voice encoder weights (shared with `chatterbox_tts`).
-pub const CHATTERBOX_VE_REPO: &str = "ResembleAI/chatterbox";
 /// The single-file weights the Chatterbox-VE embedder loads (`WeightsSource::File`, not a snapshot dir).
 pub const CHATTERBOX_VE_WEIGHTS_FILE: &str = "ve.safetensors";
-/// The pinned commit `ve.safetensors` is installed to (the encoder crate's `HUB_REVISION`, and the
-/// `revision` on both the chatterbox_tts `voice_embedding` co-requisite and the standalone
-/// `chatterbox_ve` download — sc-13680). `ve.safetensors` lives in `snapshots/<this>/`, which is NOT
-/// `refs/main` when the chatterbox_tts primary (t3/s3gen/tokenizer @ main) shares this repo cache, so
-/// the register path must resolve THIS pinned snapshot rather than preferring `refs/main`.
-pub const CHATTERBOX_VE_REVISION: &str = "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18";
 /// The registry id of the Chatterbox voice embedder.
 pub const CHATTERBOX_VE_MODEL_ID: &str = "chatterbox_ve";
 
@@ -61,27 +53,27 @@ impl std::error::Error for VoiceEmbedError {}
 /// clone TTS install, sc-13541). Returns [`VoiceEmbedError::WeightsMissing`] when the snapshot or the
 /// file is absent, with an actionable message.
 pub fn resolve_chatterbox_ve_weights(data_dir: &Path) -> Result<PathBuf, VoiceEmbedError> {
-    // Resolve the PINNED snapshot first (ve.safetensors @ CHATTERBOX_VE_REVISION) — robust to the
-    // chatterbox_tts primary occupying `refs/main` in the shared repo cache (sc-13680). Fall back to
-    // the `refs/main`-preferring resolver for a legacy install that predates the pin (ve materialized
-    // into a main-branch snapshot).
-    let snapshot = crate::model_jobs::huggingface_pinned_snapshot_dir(
-        data_dir,
-        CHATTERBOX_VE_REPO,
-        CHATTERBOX_VE_REVISION,
-    )
-    .or_else(|| crate::model_jobs::huggingface_snapshot_dir(data_dir, CHATTERBOX_VE_REPO))
-    .ok_or_else(|| {
-        VoiceEmbedError::WeightsMissing(format!(
+    let pin = sceneworks_core::builtin_manifests::chatterbox_ve_pin().map_err(|error| {
+        VoiceEmbedError::Embed(format!(
+            "internal model catalog error while resolving {CHATTERBOX_VE_MODEL_ID}: {error}"
+        ))
+    })?;
+    // Resolve only the manifest-authoritative pinned snapshot. Falling back through refs/main would
+    // let a mutable/shared cache snapshot silently shadow the revision the installer provisioned.
+    let snapshot =
+        crate::model_jobs::huggingface_pinned_snapshot_dir(data_dir, &pin.repo, &pin.revision)
+            .ok_or_else(|| {
+                VoiceEmbedError::WeightsMissing(format!(
             "the Chatterbox voice encoder ({CHATTERBOX_VE_MODEL_ID}) is not installed — install \
              it from the Model Manager before registering a voice."
         ))
-    })?;
+            })?;
     let weights = snapshot.join(CHATTERBOX_VE_WEIGHTS_FILE);
     if !weights.is_file() {
         return Err(VoiceEmbedError::WeightsMissing(format!(
             "the Chatterbox voice encoder weights ({CHATTERBOX_VE_WEIGHTS_FILE}) were not found in \
-             the cached {CHATTERBOX_VE_REPO} snapshot — reinstall the voice encoder."
+             the cached {} snapshot — reinstall the voice encoder.",
+            pin.repo
         )));
     }
     Ok(weights)
@@ -105,4 +97,36 @@ pub fn embed_reference_clip(data_dir: &Path, wav_path: &Path) -> Result<Vec<f32>
         .embed(&track)
         .map_err(|error| VoiceEmbedError::Embed(error.to_string()))?;
     Ok(embedding)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolver_uses_manifest_pin_instead_of_refs_main() {
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ]);
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let pin = sceneworks_core::builtin_manifests::chatterbox_ve_pin().unwrap();
+        let repo_cache =
+            sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir.path(), &pin.repo)
+                .unwrap();
+        let pinned = repo_cache.join("snapshots").join(&pin.revision);
+        let mutable = repo_cache.join("snapshots").join("mutable-main-snapshot");
+        std::fs::create_dir_all(&pinned).unwrap();
+        std::fs::create_dir_all(&mutable).unwrap();
+        std::fs::create_dir_all(repo_cache.join("refs")).unwrap();
+        std::fs::write(pinned.join(CHATTERBOX_VE_WEIGHTS_FILE), b"pinned").unwrap();
+        std::fs::write(mutable.join(CHATTERBOX_VE_WEIGHTS_FILE), b"mutable").unwrap();
+        std::fs::write(repo_cache.join("refs/main"), "mutable-main-snapshot").unwrap();
+
+        assert_eq!(
+            resolve_chatterbox_ve_weights(data_dir.path()).unwrap(),
+            pinned.join(CHATTERBOX_VE_WEIGHTS_FILE)
+        );
+    }
 }
