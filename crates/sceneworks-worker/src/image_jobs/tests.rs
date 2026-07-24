@@ -6145,6 +6145,54 @@ fn isolate_hf_hub_cache_to(hub: &std::path::Path) -> EnvVars {
     ])
 }
 
+/// sc-13817 — **the wiring half** of the candle SenseNova dense-force.
+///
+/// The unit tests next to `sensenova_candle_dense_tier` prove the resolver picks bf16; this proves
+/// `resolve_weights_dir` actually ROUTES sensenova through it. Without that branch the request falls
+/// to `standard_tier_subdir` (every sensenova entry flags `mlx.standardTierLayout: true`), which with
+/// no explicit `mlxQuantize` and no `minQualityTier` resolves the app-wide **q8** default — an
+/// MLX-packed tier `candle-gen-sensenova` cannot read, since it dense-mmaps a flat `*.safetensors`
+/// backbone and hard-rejects `spec.quantize`.
+///
+/// Both tiers are seeded COMPLETE so the result cannot be an accident of the packed tier being
+/// absent — a torn q8 would fall through to bf16 on its own, which is exactly what masks this bug on
+/// a half-provisioned host (the dev box that filed the story had a weightless q8).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn sensenova_weights_resolution_routes_the_candle_lane_to_the_dense_tier() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let snapshot = hub
+        .join("models--SceneWorks--sensenova-u1-8b-fast-mlx")
+        .join("snapshots")
+        .join("installed-revision");
+    // A COMPLETE packed q8 (what the default would pick) AND the dense bf16 tier.
+    for file in ["q8/model.safetensors", "bf16/model.safetensors"] {
+        let path = snapshot.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"weights").unwrap();
+    }
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+
+    let req = request(json!({
+        "projectId": "p",
+        "model": "sensenova_u1_8b_fast",
+        "modelManifestEntry": {
+            "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
+            "mlx": { "standardTierLayout": true, "quantize": 4 }
+        }
+    }));
+
+    assert_eq!(
+        resolve_weights_dir(&req, &settings).unwrap(),
+        Some(snapshot.join("bf16")),
+        "the candle sensenova lane must resolve the DENSE bf16 tier, not the packed q8 default"
+    );
+}
+
 // sc-11171 (F-008): a strict-pose job on a WIRED candle pose family (e.g. `z_image_turbo`) whose control
 // base snapshot is NOT installed must route to the loud `PoseControlBaseMissing` reject, NOT fall through
 // to the plain candle txt2img lane (which would silently render an unconditioned image and drop the

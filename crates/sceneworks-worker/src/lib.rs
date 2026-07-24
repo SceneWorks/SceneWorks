@@ -259,6 +259,13 @@ mod flux2_dev_gpu_smoke;
 // the evidence that unblocks flipping `macOnly: false` / `candle_routed = true` (sc-10625).
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod anima_gpu_smoke;
+// Real-weight GPU smoke for the candle SenseNova-U1 8B lane (sc-13817, epic 13678). Test-only +
+// candle-only; drives `crate::inference_runtime::load("sensenova_u1_8b{,_fast}")` against the DENSE
+// bf16 turnkey tier. SenseNova was the one candle image family with no GPU smoke — and its lane had
+// never worked, because the tier resolver handed the dense-only loader an MLX-packed q8 tier. This is
+// the hardware evidence for the sc-13817 dense-force fix.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod sensenova_gpu_smoke;
 // Real-weight GPU smoke for the candle SANA 1600M lane (epic 8485, sc-11780). Test-only + candle-only;
 // drives the WORKER's `resolve_weights_dir("sana_1600m")` (the diffusers-snapshot-root resolution) +
 // `gen_core::load("sana_1600m")` against the whole `Efficient-Large-Model/Sana_1600M_1024px_diffusers`
