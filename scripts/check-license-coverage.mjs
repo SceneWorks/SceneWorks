@@ -43,6 +43,10 @@ const CATALOG = path.join(ROOT, "config/manifests/builtin.models.jsonc");
 const MANIFEST = path.join(ROOT, "apps/desktop/licenses/manifest.json");
 const LICENSES_DIR = path.join(ROOT, "apps/desktop/licenses");
 const BUNDLED_JS = path.join(ROOT, "apps/web/src/data/bundledLicenses.js");
+const SOURCE_AUDIT = path.join(ROOT, "config/inference-third-party-source.json");
+const WORKER_CARGO = path.join(ROOT, "crates/sceneworks-worker/Cargo.toml");
+const ROOT_CARGO = path.join(ROOT, "Cargo.toml");
+const CARGO_LOCK = path.join(ROOT, "Cargo.lock");
 
 // Catalog models whose UPSTREAM declares no license at all, so no entry can be
 // recorded honestly yet. Each needs a licensing decision, not a guess — writing a
@@ -74,6 +78,7 @@ function stripJsonc(source) {
 const catalog = JSON.parse(stripJsonc(fs.readFileSync(CATALOG, "utf8")));
 const manifest = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));
 const bundledJs = fs.readFileSync(BUNDLED_JS, "utf8");
+const sourceAudit = JSON.parse(fs.readFileSync(SOURCE_AUDIT, "utf8"));
 
 // A model "ships weights" when it declares any download entry. Entries with no
 // downloads (pure API/passthrough rows) redistribute nothing and need no notice.
@@ -85,6 +90,49 @@ const shipped = new Map(
 
 const errors = [];
 const claimed = new Map();
+const components = new Map(
+  (manifest.components ?? []).map((component) => [component.id, component]),
+);
+
+function validateSourceAudit(audit, componentIndex, pinText, lockText) {
+  const auditErrors = [];
+  const inferencePins = new Set(
+    [...pinText.matchAll(/github\.com\/SceneWorks\/inference"[^}\n]*\brev\s*=\s*"([0-9a-f]{40})"/g)]
+      .map((match) => match[1]),
+  );
+  if (inferencePins.size !== 1) {
+    auditErrors.push(`expected exactly one inference revision across Cargo manifests, found: ${[...inferencePins].join(", ") || "none"}.`);
+  } else if (!inferencePins.has(audit.inferenceRevision)) {
+    auditErrors.push(
+      `inference source audit is for ${audit.inferenceRevision}, but Cargo pins ${[...inferencePins][0]}. Re-audit inference NOTICE, LICENSE-*, and production include_str!/include_bytes! sites, then update config/inference-third-party-source.json.`,
+    );
+  }
+
+  const sourceIds = new Set();
+  for (const artifact of audit.artifacts ?? []) {
+    if (sourceIds.has(artifact.id)) {
+      auditErrors.push(`inference source audit contains duplicate artifact id "${artifact.id}".`);
+    }
+    sourceIds.add(artifact.id);
+    const component = componentIndex.get(artifact.component);
+    if (!component) {
+      auditErrors.push(`inference ${artifact.kind} "${artifact.id}" has no About→Licenses component "${artifact.component}".`);
+      continue;
+    }
+    if (!Array.isArray(component.documents) || component.documents.length === 0) {
+      auditErrors.push(`inference ${artifact.kind} "${artifact.id}" component "${artifact.component}" has no license document.`);
+    }
+    if (artifact.package && !lockText.includes(`name = "${artifact.package}"`)) {
+      auditErrors.push(`inference ${artifact.kind} "${artifact.id}" claims absent Cargo package "${artifact.package}".`);
+    }
+  }
+  for (const required of ["cephes", "cmudict"]) {
+    if (!sourceIds.has(required)) {
+      auditErrors.push(`required ported/embedded inference artifact "${required}" is missing from config/inference-third-party-source.json.`);
+    }
+  }
+  return auditErrors;
+}
 
 for (const component of manifest.components ?? []) {
   if (!Array.isArray(component.models)) {
@@ -120,6 +168,35 @@ for (const component of manifest.components ?? []) {
   if (component.documents?.length && !fs.existsSync(dir)) {
     errors.push(`component "${component.id}" has documents but no apps/desktop/licenses/${component.id}/ directory.`);
   }
+}
+
+// Inference is a separate repository and its sources are not available in a clean
+// SceneWorks CI checkout. Keep discovery deterministic by pinning the audit to the
+// exact inference revision consumed here. Any pin bump therefore fails until a
+// reviewer re-audits inference NOTICE/LICENSE-* plus production include_str!/
+// include_bytes! sites and updates this inventory.
+const pinSources = [
+  fs.readFileSync(WORKER_CARGO, "utf8"),
+  fs.readFileSync(ROOT_CARGO, "utf8"),
+].join("\n");
+const lock = fs.readFileSync(CARGO_LOCK, "utf8");
+errors.push(...validateSourceAudit(sourceAudit, components, pinSources, lock));
+
+if (process.argv.includes("--self-test")) {
+  const withoutCmudict = structuredClone(sourceAudit);
+  withoutCmudict.artifacts = withoutCmudict.artifacts.filter(({ id }) => id !== "cmudict");
+  const missingErrors = validateSourceAudit(withoutCmudict, components, pinSources, lock);
+  if (!missingErrors.some((error) => error.includes('required ported/embedded inference artifact "cmudict"'))) {
+    console.error("self-test: removing CMUDICT did not fail closed");
+    process.exit(1);
+  }
+  const staleRevision = structuredClone(sourceAudit);
+  staleRevision.inferenceRevision = "0".repeat(40);
+  if (!validateSourceAudit(staleRevision, components, pinSources, lock).some((error) => error.includes("but Cargo pins"))) {
+    console.error("self-test: stale inference revision did not fail closed");
+    process.exit(1);
+  }
+  console.log("[license-coverage] self-test PASS — missing disclosure and stale audit mutations were rejected.");
 }
 
 for (const [id] of shipped) {

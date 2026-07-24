@@ -1,0 +1,22 @@
+{
+  "_comment": "Audited ported or compile-time-embedded third-party source/data in the inference revision consumed by SceneWorks. check-license-coverage.mjs requires this revision to match every inference Cargo pin, so an inference bump cannot land without explicitly re-auditing NOTICE, LICENSE-*, and production include_str!/include_bytes! sites. Dev-only fixtures and independently reimplemented algorithms are excluded.",
+  "inferenceRevision": "8b0534512add4007cf6034f5d200e5649ed9b5f0",
+  "artifacts": [
+    {
+      "id": "cmudict",
+      "kind": "embedded-data",
+      "component": "cmudict",
+      "package": "candle-audio-kokoro",
+      "source": "crates/audio/candle-audio-kokoro/resources/cmudict.dict",
+      "evidence": "crates/audio/candle-audio-kokoro/src/g2p.rs includes cmudict.dict with include_str! in production."
+    },
+    {
+      "id": "cephes",
+      "kind": "ported-source",
+      "component": "cephes",
+      "package": null,
+      "source": "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs",
+      "evidence": "Current inference main ports Cephes ndtri/erf/erfc and coefficient tables for Mage parity. It is disclosed ahead of the next SceneWorks inference pin that contains mlx-gen-mage."
+    }
+  ]
+}

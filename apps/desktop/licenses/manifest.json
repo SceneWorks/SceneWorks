@@ -1021,6 +1021,44 @@
           "key": "qwen3-vl-caption-apache"
         }
       ]
+    },
+    {
+      "id": "cephes",
+      "models": [],
+      "name": "Cephes Math Library",
+      "publisher": "Stephen L. Moshier",
+      "license": "BSD-3-Clause",
+      "homepage": "https://netlib.org/cephes/",
+      "platforms": [
+        "macos"
+      ],
+      "usage": "Ported numerical source used by the native MLX Mage Gaussian-Shading watermark implementation. The Rust port contains Cephes ndtri, erf and erfc routines and coefficient tables; its notice is included here for binary redistribution.",
+      "documents": [
+        {
+          "label": "BSD 3-Clause License",
+          "key": "cephes-bsd-3-clause"
+        }
+      ]
+    },
+    {
+      "id": "cmudict",
+      "models": [],
+      "name": "CMU Pronouncing Dictionary",
+      "publisher": "Carnegie Mellon University",
+      "license": "BSD-2-Clause",
+      "homepage": "https://github.com/cmusphinx/cmudict",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "The complete pronunciation dictionary is compile-time embedded in the native Kokoro speech engine and used as its out-of-vocabulary pronunciation tier.",
+      "documents": [
+        {
+          "label": "CMUdict License",
+          "key": "cmudict-bsd-2-clause"
+        }
+      ]
     }
   ]
 }
