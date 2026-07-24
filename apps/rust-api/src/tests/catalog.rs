@@ -1981,6 +1981,87 @@ fn cache_health_does_not_let_an_appledouble_sidecar_satisfy_a_required_pattern()
 }
 
 #[test]
+fn quant_tier_with_an_empty_weight_component_reads_incomplete_not_installed() {
+    // sc-13815: the flux1-dev-mlx q8 tier loaded with an EMPTY `text_encoder_2/` on a dev host, so
+    // the render fell back to q4. The question was whether the manifest allow-list omits those
+    // weights (a provisioning bug) or the host cache was torn (host state). This pins BOTH halves of
+    // the answer — the allow-list is correct and a torn tier is detected — so the same symptom can
+    // never be misread as an allow-list gap again.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let repo_root = temp_dir.path().join("models--SceneWorks--flux1-dev-mlx");
+    let snapshot = repo_root.join("snapshots/abc123");
+    let q8 = snapshot.join("q8");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs creates");
+    std::fs::write(repo_root.join("refs/main"), "abc123").expect("ref writes");
+    // The real `SceneWorks/flux1-dev-mlx` q8 `model_index.json` (FluxPipeline), verbatim in shape:
+    // `text_encoder_2` is a weight-bearing T5EncoderModel, so its directory must hold config +
+    // weights. The tokenizers/scheduler are weightless and only need a non-empty directory.
+    std::fs::create_dir_all(q8.join("text_encoder_2")).expect("text_encoder_2 creates");
+    std::fs::write(
+        q8.join("model_index.json"),
+        r#"{
+            "_class_name": "FluxPipeline",
+            "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
+            "text_encoder": ["transformers", "CLIPTextModel"],
+            "text_encoder_2": ["transformers", "T5EncoderModel"],
+            "tokenizer": ["transformers", "CLIPTokenizer"],
+            "tokenizer_2": ["transformers", "T5TokenizerFast"],
+            "transformer": ["diffusers", "FluxTransformer2DModel"],
+            "vae": ["diffusers", "AutoencoderKL"]
+        }"#,
+    )
+    .expect("q8 model_index writes");
+    for component in ["text_encoder", "transformer", "vae"] {
+        std::fs::create_dir_all(q8.join(component)).expect("component creates");
+        std::fs::write(q8.join(component).join("config.json"), "{}").expect("config writes");
+        std::fs::write(q8.join(component).join("model.safetensors"), "weights")
+            .expect("weights write");
+    }
+    for component in ["scheduler", "tokenizer", "tokenizer_2"] {
+        std::fs::create_dir_all(q8.join(component)).expect("component creates");
+        std::fs::write(q8.join(component).join("config.json"), "{}").expect("config writes");
+    }
+
+    // The `q8/*` allow-list glob is RECURSIVE — it selects `q8/text_encoder_2/model.safetensors`
+    // just as it selects `q8/model_index.json`. The manifest entry is therefore NOT the gap; the
+    // weights were always in scope for the download.
+    assert!(
+        crate::pattern_matches("q8/*", "q8/text_encoder_2/model.safetensors"),
+        "`q8/*` must select nested tier weights, or the allow-list really would be the bug"
+    );
+    assert!(
+        !crate::pattern_matches("q8/*", "q4/text_encoder_2/model.safetensors"),
+        "`q8/*` must not leak across tiers"
+    );
+
+    // A torn tier — every other component present, `text_encoder_2/` empty — is INCOMPLETE, and
+    // names the offending component so the Fix button can repair it. A coarse `q8/*` glob alone is
+    // satisfied by the sibling files, so this is exactly the case the tier-completeness
+    // augmentation exists to catch.
+    let torn = crate::models::huggingface_cache_health(&repo_root, &["q8/*".to_owned()]);
+    assert!(
+        !torn.installed && torn.incomplete,
+        "an empty weight-bearing component makes the tier torn, not installed: {torn:?}"
+    );
+    assert!(
+        torn.missing_files
+            .iter()
+            .any(|file| file.starts_with("q8/text_encoder_2/")),
+        "missing_files must name text_encoder_2, got {:?}",
+        torn.missing_files
+    );
+
+    // Re-provisioning the component — the actual fix on the affected host — restores it to green.
+    std::fs::write(q8.join("text_encoder_2/config.json"), "{}").expect("config writes");
+    std::fs::write(q8.join("text_encoder_2/model.safetensors"), "weights").expect("weights write");
+    let repaired = crate::models::huggingface_cache_health(&repo_root, &["q8/*".to_owned()]);
+    assert!(
+        repaired.installed && !repaired.incomplete && repaired.missing_files.is_empty(),
+        "complete once text_encoder_2 is provisioned: {repaired:?}"
+    );
+}
+
+#[test]
 fn filtered_cache_health_reports_absent_filter_as_missing_not_incomplete() {
     // sc-9907: a filter whose files are ENTIRELY absent is cleanly missing, not torn. Only a
     // partially-present filter (some files there, some gone) counts as incomplete/repairable.
