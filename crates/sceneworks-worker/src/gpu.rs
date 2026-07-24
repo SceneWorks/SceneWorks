@@ -275,6 +275,14 @@ impl GpuDiscoveryAttempt {
         }
     }
 
+    pub(crate) fn configured_ids(gpus: Vec<DiscoveredGpu>, failure: GpuDiscoveryFailure) -> Self {
+        Self {
+            gpus,
+            failure: Some(failure),
+            retryable: false,
+        }
+    }
+
     fn final_failure(failure: GpuDiscoveryFailure) -> Self {
         Self {
             gpus: Vec::new(),
@@ -296,24 +304,28 @@ pub(crate) async fn discover_gpus_attempt() -> GpuDiscoveryAttempt {
         // configuration signal. Preserve the long-standing fallback descriptors
         // when nvidia-smi is still initializing so the supervisor selects GPU
         // children immediately for those configured ids.
-        let discovered = match query {
-            Ok(gpus) => gpus,
-            Err(_) => Vec::new(),
+        let (discovered, failure) = match query {
+            Ok(gpus) if gpus.is_empty() => (gpus, Some(GpuDiscoveryFailure::NoGpusReported)),
+            Ok(gpus) => (gpus, None),
+            Err(failure) => (Vec::new(), Some(failure)),
         };
         let by_id = discovered
             .into_iter()
             .map(|gpu| (gpu.id.clone(), gpu))
             .collect::<BTreeMap<_, _>>();
-        return GpuDiscoveryAttempt::success(
-            ids.into_iter()
-                .map(|gpu_id| {
-                    by_id
-                        .get(&gpu_id)
-                        .cloned()
-                        .unwrap_or_else(|| fallback_gpu(&gpu_id))
-                })
-                .collect(),
-        );
+        let gpus = ids
+            .into_iter()
+            .map(|gpu_id| {
+                by_id
+                    .get(&gpu_id)
+                    .cloned()
+                    .unwrap_or_else(|| fallback_gpu(&gpu_id))
+            })
+            .collect();
+        return match failure {
+            Some(failure) => GpuDiscoveryAttempt::configured_ids(gpus, failure),
+            None => GpuDiscoveryAttempt::success(gpus),
+        };
     }
 
     match query {
@@ -340,20 +352,28 @@ pub(crate) async fn query_nvidia_gpus() -> Vec<DiscoveredGpu> {
 }
 
 async fn query_nvidia_gpus_attempt() -> Result<Vec<DiscoveredGpu>, GpuDiscoveryFailure> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(3),
-        Command::new("nvidia-smi")
-            .args([
-                "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu",
-                "--format=csv,noheader,nounits",
-            ])
-            .output(),
-    )
-    .await;
-    match output {
-        Ok(Ok(output)) if output.status.success() => Ok(parse_nvidia_smi_gpus(
-            &String::from_utf8_lossy(&output.stdout),
-        )),
+    let mut command = Command::new("nvidia-smi");
+    command.args([
+        "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu",
+        "--format=csv,noheader,nounits",
+    ]);
+    let output = run_bounded_command(command, Duration::from_secs(3)).await?;
+    Ok(parse_nvidia_smi_gpus(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+pub(crate) async fn run_bounded_command(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<std::process::Output, GpuDiscoveryFailure> {
+    // Tokio leaves a spawned child running when its future is dropped unless
+    // kill-on-drop is explicit. Discovery is raced against both a timeout and
+    // supervisor shutdown, so make either cancellation path reap the in-flight
+    // nvidia-smi instead of leaking one process per retry.
+    command.kill_on_drop(true);
+    match tokio::time::timeout(timeout, command.output()).await {
+        Ok(Ok(output)) if output.status.success() => Ok(output),
         Ok(Ok(_)) => Err(GpuDiscoveryFailure::NonZeroExit),
         Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
             Err(GpuDiscoveryFailure::CommandNotFound)

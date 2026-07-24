@@ -68,6 +68,7 @@ pub(crate) async fn supervise_auto_workers(settings: Settings) -> WorkerResult<(
         settings.utility_workers,
         &AUTO_GPU_DISCOVERY_RETRY_DELAYS,
         discover_gpus_attempt,
+        shutdown_signal,
         |delay| async move {
             tokio::select! {
                 _ = tokio::time::sleep(delay) => false,
@@ -83,30 +84,64 @@ pub(crate) async fn supervise_auto_workers(settings: Settings) -> WorkerResult<(
 }
 
 /// Select automatic-supervisor child specs after bounded, cancellation-aware
-/// GPU discovery. `wait_for_retry` resolves `true` when startup was canceled.
+/// GPU discovery. `wait_for_shutdown` races each active probe, while
+/// `wait_for_retry` resolves `true` when shutdown wins during backoff.
 ///
 /// The injected discovery/wait seams keep the cold-start regression tests
 /// deterministic: no process-global environment mutation, real subprocess, or
 /// wall-clock sleep is required to reproduce timeout -> empty -> success.
-pub(crate) async fn choose_auto_worker_specs_with<D, DFut, W, WFut>(
+pub(crate) async fn choose_auto_worker_specs_with<D, DFut, S, SFut, W, WFut>(
     base_worker_id: &str,
     utility_workers: usize,
     retry_delays: &[Duration],
     mut discover: D,
+    mut wait_for_shutdown: S,
     mut wait_for_retry: W,
 ) -> Option<Vec<WorkerSpec>>
 where
     D: FnMut() -> DFut,
     DFut: std::future::Future<Output = GpuDiscoveryAttempt>,
+    S: FnMut() -> SFut,
+    SFut: std::future::Future<Output = ()>,
     W: FnMut(Duration) -> WFut,
     WFut: std::future::Future<Output = bool>,
 {
     let max_attempts = retry_delays.len().saturating_add(1);
     for attempt_index in 0..max_attempts {
         let attempt_number = attempt_index.saturating_add(1);
-        let result = discover().await;
+        let result = tokio::select! {
+            biased;
+            _ = wait_for_shutdown() => {
+                emit_event_value(
+                    Level::INFO,
+                    json!({
+                        "event": "gpu_discovery_shutdown",
+                        "attempt": attempt_number,
+                        "phase": "probe",
+                    }),
+                );
+                return None;
+            }
+            result = discover() => result,
+        };
         if !result.gpus.is_empty() {
-            if attempt_number > 1 {
+            if let Some(failure) = result.failure {
+                emit_event_value(
+                    Level::WARN,
+                    json!({
+                        "event": if failure == GpuDiscoveryFailure::Timeout {
+                            "gpu_discovery_timeout"
+                        } else {
+                            "gpu_discovery_unavailable"
+                        },
+                        "attempt": attempt_number,
+                        "maxAttempts": max_attempts,
+                        "reason": failure.event_reason(),
+                        "configuredGpuFallback": true,
+                        "gpuCount": result.gpus.len(),
+                    }),
+                );
+            } else if attempt_number > 1 {
                 emit_event_value(
                     Level::INFO,
                     json!({
