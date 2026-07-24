@@ -28,11 +28,6 @@ const FLUX2_EDIT_CANDLE_DEV_GUIDANCE: f32 = 4.0;
 /// The adapter/engine id recorded on candle FLUX.2 edit assets + telemetry (distinct from the txt2img
 /// `candle_flux2` lane). Shared by klein + dev edit (the dev variant is the same edit surface).
 const FLUX2_EDIT_CANDLE_ENGINE: &str = "candle_flux2_edit";
-/// Default FLUX.2-klein base repo when the manifest omits `repo`.
-const FLUX2_EDIT_CANDLE_DEFAULT_REPO: &str = "black-forest-labs/FLUX.2-klein-9B";
-/// Default FLUX.2-dev base repo (the 32B flagship; sc-7460/7736). The candle lane loads the dense
-/// diffusers snapshot and Q4-quantizes it at load (no install-time packed convert off-Mac).
-const FLUX2_EDIT_CANDLE_DEV_REPO: &str = "black-forest-labs/FLUX.2-dev";
 /// Cap on references fed to a single FLUX.2 edit (the multi-image picker, sc-6211): the dev edit is
 /// activation-bound, so cap at the engine's validated native fan-out. This deliberately differs from
 /// the MLX `MAX_EDIT_REFERENCES` (4): that bound is set by the 96 GB Apple-Silicon unified-memory
@@ -63,43 +58,46 @@ fn flux2_edit_candle_mode(request: &ImageRequest) -> bool {
     request.mode == "edit_image" && non_empty(&request.source_asset_id)
 }
 
-/// Resolve the FLUX.2 base snapshot: an explicit `modelPath` dir (advanced or manifest) wins, else the
-/// HF cache snapshot for the manifest `repo` (default per family — klein vs dev). `None` means the base
-/// is not present locally, so the job is not candle-runnable. Mirrors `resolve_sdxl_edit_candle_base`.
+/// Resolve the FLUX.2 base snapshot through the **shared** [`resolve_weights_dir`] — the same resolver
+/// the candle txt2img lane uses (sc-10222, epic 9083 gap #3).
+///
+/// This lane used to key its own `black-forest-labs/FLUX.2-{klein-9B,dev}` dense-BFL constants. The
+/// sc-9092 sweep that retired the ad-hoc candle repo resolvers into `standard_tier_subdir` covered
+/// ideogram/boogu/krea/lens + the generic txt2img lane but missed this bespoke edit lane, so it kept
+/// probing the pre-rehost gated repos. The catalog's `downloads[]` pull ONLY the re-hosted
+/// `SceneWorks/flux2-*-mlx` packed q4/q8/bf16 turnkeys (sc-8711 / sc-8513) — there is no dense-BFL
+/// download on any platform — so off-Mac the probe found nothing, `resolve_flux2_edit_candle_base`
+/// returned `None`, and every FLUX.2 edit job silently failed the candle-eligibility check.
+///
+/// Delegating fixes it end to end: `resolve_weights_dir` takes the `modelPath` override first (the
+/// `flux2_klein_9b_true_v2` convert-at-install seam, unchanged), then the engines.rs `default_repo`
+/// (the SceneWorks turnkey — one source of truth, so a future re-host can't drift this lane again),
+/// then descends into the request's tier via `standard_tier_subdir` for the `STANDARD_TIER_MODELS`
+/// members (`flux2_klein_9b`, `flux2_dev`).
+///
+/// **No engine change was needed.** `Flux2Edit::load{,_dev}` builds its TE + DiT through the shared
+/// `Pipeline::load_te_and_dit`, whose every projection is a `QLinear::linear_detect` — it packed-detects
+/// a `.scales` sibling per tensor independently of the load `Quant`, and degrades to dense when there
+/// is none. That is the identical code path the candle FLUX.2 **txt2img** lane has been loading these
+/// turnkeys through since sc-9092; only the DIRECTORY handed to it was wrong. `None` still means the
+/// base is not present locally, so the job is not candle-runnable. Mirrors `krea_edit_candle_available`
+/// (the newer candle edit lane, already on the shared resolver).
 fn resolve_flux2_edit_candle_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-    {
-        return resolve_app_managed_model_dir(settings, &path, "FLUX.2 edit modelPath").map(Some);
-    }
-    let repo = flux2_edit_candle_repo(request);
-    Ok(huggingface_snapshot_dir(&settings.data_dir, &repo))
+    resolve_weights_dir(request, settings)
 }
 
-/// The FLUX.2 base repo for this request: manifest `repo` else the per-family default (dev vs klein).
+/// The FLUX.2 base repo recorded on the asset telemetry: the shared manifest-`repo`-else-`default_repo`
+/// resolution ([`model_repo`]), so the recipe names the turnkey the load actually read rather than this
+/// lane's own constant (sc-10222). Falls back to the model id for an id outside the engine table (only
+/// reachable from a test payload — `is_flux2_edit_candle_model` gates the lane to three known ids).
 fn flux2_edit_candle_repo(request: &ImageRequest) -> String {
-    let default = if is_flux2_edit_candle_dev(&request.model) {
-        FLUX2_EDIT_CANDLE_DEV_REPO
-    } else {
-        FLUX2_EDIT_CANDLE_DEFAULT_REPO
-    };
-    request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(default)
-        .to_owned()
+    match mlx_model(&request.model) {
+        Some(model) => model_repo(request, &model),
+        None => request.model.clone(),
+    }
 }
 
 /// True when this is a candle-eligible FLUX.2 edit job (a klein/dev `edit_image` job with a source)
@@ -246,10 +244,19 @@ async fn generate_candle_flux2_edit_stream(
         pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
     let references = load_flux2_edit_references(request, project_path, settings, width, height)?;
 
-    // dev (32B) loads Q4 (manifest `mlx.quantize: 4` → `resolve_quant`); klein loads dense. The dev
-    // edit is activation-bound — multi-reference adds latent tokens to the DiT stream — but the candle
-    // engine query-row-chunks its joint attention (sc-6217/sc-7523), so a device OOM surfaces as a load/
-    // generate error rather than silently corrupting; no Mac-style unified-memory pre-guard applies here.
+    // Since sc-10222 `flux2_base` is the RESOLVED tier subdir (`q4/`/`q8/`/`bf16/`), so the tier the
+    // load reads is chosen by the DIRECTORY, not by this `Quant` — every projection packed-detects its
+    // `.scales` sibling. dev still resolves a `Quant` (it is the value `resolve_quant` records on the
+    // recipe, and it drives the dense CPU-stage → quantize-onto-GPU fallback when the resolved dir is a
+    // dense/`modelPath` tree rather than a packed turnkey). klein keeps a hardcoded `(None, None)`: it is
+    // a DENSE-TE turnkey (`DENSE_TE_TIER_MODELS`) whose bf16 Qwen3 text encoder must never be
+    // re-quantized — `resolve_quant`'s `is_dense_te_tier` carve-out returns exactly this for
+    // `flux2_klein_9b`, and the hardcode additionally keeps `_true_v2` (a convert-at-install dense dir,
+    // NOT in that list) on the dense load it has always used.
+    //
+    // The dev edit is activation-bound — multi-reference adds latent tokens to the DiT stream — but the
+    // candle engine query-row-chunks its joint attention (sc-6217/sc-7523), so a device OOM surfaces as a
+    // load/generate error rather than silently corrupting; no Mac-style unified-memory pre-guard applies.
     let (quant, quant_bits) = if is_dev {
         resolve_quant(request, Some(&flux2_base))
     } else {

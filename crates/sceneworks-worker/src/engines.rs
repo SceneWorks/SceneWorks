@@ -237,11 +237,10 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // the chosen tier's subdir via the shared `resolve_weights_dir` → `standard_tier_subdir`
     // (sc-9092 retired the old candle dense-BFL load for the generic lane). It must match the
     // manifest `downloads[].repo`; the pre-rehost gated `black-forest-labs/FLUX.2-dev` default
-    // made `model_repo` probe the wrong HF-cache dir. NOTE: the bespoke off-Mac candle *edit*
-    // lane in `flux2_edit_candle.rs` still keys its own dense-BFL default for both flux2 klein
-    // and dev, which no longer matches the re-hosted packed turnkey the catalog downloads — a
-    // separate off-Mac gap that needs candle-hardware verification, tracked as sc-10222 (epic
-    // 9083 gap #3), not touched here.
+    // made `model_repo` probe the wrong HF-cache dir. sc-10222 (epic 9083 gap #3) retired the
+    // last holdout: the bespoke off-Mac candle *edit* lane (`flux2_edit_candle.rs`) kept its own
+    // dense-BFL constants and now delegates to the same shared `resolve_weights_dir`, so THIS
+    // row is the single source of truth for the klein and dev base repo on every lane.
     ModelRow {
         sceneworks_id: "flux2_dev",
         engine_id: "flux2_dev",
