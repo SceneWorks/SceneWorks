@@ -1,6 +1,6 @@
 # OpenVoice V2 Voice Conversion Guide
 
-OpenVoice V2 is a **tone-color voice-conversion** model. It takes source speech and a short reference clip of a target voice, then re-renders the source in the target's timbre while preserving the original content and prosody. It is one of the models behind the Audio Studio **VoiceClone** tab.
+OpenVoice V2 is the conversion backend for Audio Studio’s **Voice Clone** fallback. You type a script and select a target reference voice. SceneWorks first synthesizes the script with its base speech model, then OpenVoice transfers the reference clip’s timbre onto that speech.
 
 ## Installation
 
@@ -8,15 +8,16 @@ OpenVoice runs natively (Candle) on every platform. Install it once from the **M
 
 ## How it works
 
-This is a **prompt-free** transform — there is no text prompt. You provide two inputs:
+You provide two user-facing inputs:
 
-- **Source audio** — the speech whose words and delivery you want to keep.
-- **Target reference** — a few seconds of the voice whose timbre you want to apply.
+- **Script** — the exact words to speak.
+- **Reference voice** — a few clean seconds of the target voice.
 
-The converter extracts the target's tone color and transfers it onto the source. Output is 22.05 kHz; it does not resample, so keep the studio's output rate at the model's native rate.
+SceneWorks creates the source speech internally; there is no source-audio picker in this flow. The converter extracts the target’s tone color and transfers it to that generated speech. Output is 22.05 kHz.
+
+**Refine my prompt** treats the prompt as a script: it preserves the words and meaning, making only minimal punctuation or readability adjustments. It does not describe the target voice or change the selected reference.
 
 ## Practical notes
 
 - A clean, dry reference clip gives the best timbre transfer.
-- A strength control adjusts how strongly the target timbre is applied.
-- Because content and prosody come from the source, record the performance you want first, then convert the voice.
+- Match strength controls how strongly the reference timbre is applied.

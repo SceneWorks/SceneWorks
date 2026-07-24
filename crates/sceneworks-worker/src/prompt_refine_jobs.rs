@@ -11,7 +11,7 @@
 //!
 //! The `TextLlm` contract is generic (`system` + `prompt` + sampling → text), so the
 //! prompt-refinement PRODUCT logic that lived in `prompt_refine.py` moves here caller-side: the
-//! rewrite rules + image/video medium switch + guide assembly (`build_refine_system_prompt`, into the
+//! rewrite rules + image/video/audio medium switch + guide assembly (`build_refine_system_prompt`, into the
 //! request `system`) and the reasoning-block / code-fence / surrounding-quote cleanup
 //! (`clean_refine_output`, over the model reply). Sampling matches the Python path (temperature 0.7,
 //! top_p 0.9, max_new_tokens 512), as does the empty-output → error behavior and the `{originalPrompt,
@@ -194,15 +194,16 @@ const PROGRESS_POST_INTERVAL: Duration = Duration::from_millis(250);
 // macOS + candle builds.
 // ----------------------------------------------------------------------------------------------
 
-/// The base rewrite rules with the `{medium}` placeholders filled (`image` / `video`). Verbatim port
-/// of the Python `_BASE_RULES.format(medium=…)`.
+/// The base rewrite rules with the `{medium}` placeholders filled (`image` / `video` / `audio`).
+/// Image-only photographic guidance is attached only to the image medium; audio adds protection for
+/// script/lyric text so a generic rewrite cannot silently change words intended to be spoken or sung.
 #[cfg(any(
     test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn base_rules(medium: &str) -> String {
-    [
+    let mut rules = vec![
         format!("You are a prompt rewriter for a generative {medium} model."),
         format!(
             "Rewrite the user's input into a single, precise {medium} prompt that follows the \
@@ -223,27 +224,42 @@ fn base_rules(medium: &str) -> String {
             .to_owned(),
         "- Follow the guide's recommended structure, phrasing, and what-to-avoid guidance."
             .to_owned(),
-        // sc-13881 (epic 13879): a refined PHOTOGRAPHIC prompt must keep the concrete camera/lens/
-        // film-stock specifications the user wrote — they carry real visual meaning to modern image
-        // models (Krea, for one, honors "Kodak Portra"). The refiner used to strip the whole trailing
-        // comma-list when trimming for concision, taking the camera/lens specs with the empty praise —
-        // a net-negative edit. Trim ONLY the empty praise; preserve the specifications.
-        "- Keep concrete photographic specifications the user wrote — camera body, lens and focal \
-         length, film stock, and aperture (e.g. \"85mm f/1.4\", \"Kodak Portra 400\", \"shot on a \
-         50mm lens\"). These carry real visual meaning; do not drop them when trimming."
-            .to_owned(),
-        "- When trimming for concision, remove ONLY empty praise that adds no visual information \
-         (\"masterpiece\", \"stunning\", \"premium\", \"gorgeous\", \"award-winning\", \
-         \"ultra-detailed\"), never the concrete camera, lens, film-stock, or lighting details."
-            .to_owned(),
         "- Match the user's language: if their prompt is not in English, respond in the same \
          language."
             .to_owned(),
         "- Do not wrap the output in quotes, markdown, JSON, or code fences unless those are part \
          of the described scene."
             .to_owned(),
-    ]
-    .join("\n")
+    ];
+    if medium.eq_ignore_ascii_case("image") {
+        // sc-13881 (epic 13879): a refined PHOTOGRAPHIC prompt must keep concrete camera/lens/
+        // film-stock specifications. Trim ONLY empty praise; preserve real visual specifications.
+        rules.extend([
+            "- Keep concrete photographic specifications the user wrote — camera body, lens and focal \
+             length, film stock, and aperture (e.g. \"85mm f/1.4\", \"Kodak Portra 400\", \"shot on a \
+             50mm lens\"). These carry real visual meaning; do not drop them when trimming."
+                .to_owned(),
+            "- When trimming for concision, remove ONLY empty praise that adds no visual information \
+             (\"masterpiece\", \"stunning\", \"premium\", \"gorgeous\", \"award-winning\", \
+             \"ultra-detailed\"), never the concrete camera, lens, film-stock, or lighting details."
+                .to_owned(),
+        ]);
+    } else if medium.eq_ignore_ascii_case("audio") {
+        rules.extend([
+            "- Treat the selected model guide as authoritative about whether the input is an audio \
+             description, a script, or lyrics."
+                .to_owned(),
+            "- If the input is a script or lyrics intended to be spoken or sung, preserve its words, \
+             meaning, section labels, and speaker labels. Make only minimal punctuation or formatting \
+             edits unless the guide explicitly asks for another transformation."
+                .to_owned(),
+            "- If the input describes music or sound, prefer concrete audible attributes such as \
+             instrumentation or sound source, performance, rhythm or pacing, space, dynamics, and \
+             production character. Do not add visual or camera terminology."
+                .to_owned(),
+        ]);
+    }
+    rules.join("\n")
 }
 
 /// Build the `system` message for the refiner: the rewrite rules (medium chosen from the workflow)
@@ -254,13 +270,10 @@ fn base_rules(medium: &str) -> String {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn build_refine_system_prompt(guide: Option<&str>, workflow: Option<&str>) -> String {
-    let medium = if workflow
-        .map(|w| w.trim().eq_ignore_ascii_case("video"))
-        .unwrap_or(false)
-    {
-        "video"
-    } else {
-        "image"
+    let medium = match workflow.map(str::trim) {
+        Some(value) if value.eq_ignore_ascii_case("video") => "video",
+        Some(value) if value.eq_ignore_ascii_case("audio") => "audio",
+        _ => "image",
     };
     let rules = base_rules(medium);
     let guide = guide.unwrap_or("").trim();
@@ -1487,6 +1500,21 @@ mod tests {
         let video = build_refine_system_prompt(None, Some("video"));
         assert!(video.contains("generative video model"));
         assert!(!video.contains("# Model prompt guide"));
+
+        let audio = build_refine_system_prompt(
+            Some("# ACE-Step Guide\n\nRefine only the music description."),
+            Some("audio"),
+        );
+        assert!(audio.contains("generative audio model"));
+        assert!(audio.contains("ACE-Step Guide"));
+        assert!(
+            audio.contains("script or lyrics"),
+            "audio rules protect text intended to be spoken or sung"
+        );
+        assert!(
+            !audio.contains("camera body"),
+            "audio refinement must not inherit image-only camera guidance"
+        );
     }
 
     #[test]

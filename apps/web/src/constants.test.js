@@ -37,3 +37,24 @@ describe("fallbackModels SD3.5 surfacing (sc-7873)", () => {
     expect(medium.defaults.guidanceScale).toBe(4.5);
   });
 });
+
+describe("fallbackModels audio prompt-guide parity (sc-14353)", () => {
+  it("gives every selectable built-in audio fallback its model-specific guide", () => {
+    const expected = {
+      kokoro_82m: "/prompt-guides/kokoro-82m.md",
+      moss_tts_realtime: "/prompt-guides/moss-tts-realtime.md",
+      moss_ttsd_v05: "/prompt-guides/moss-ttsd-v05.md",
+      moss_sfx_v2: "/prompt-guides/moss-soundeffect-v2.md",
+      acestep_v15_turbo: "/prompt-guides/acestep-v15-turbo.md",
+      openvoice_v2: "/prompt-guides/openvoice-v2.md",
+      chatterbox_tts: "/prompt-guides/chatterbox-tts.md",
+      chatterbox_ve: "/prompt-guides/chatterbox-ve.md",
+    };
+
+    for (const [id, path] of Object.entries(expected)) {
+      const model = fallbackModels.find((entry) => entry.id === id);
+      expect(model, `${id} must be present in fallbackModels`).toBeTruthy();
+      expect(model.ui?.promptGuide?.path).toBe(path);
+    }
+  });
+});

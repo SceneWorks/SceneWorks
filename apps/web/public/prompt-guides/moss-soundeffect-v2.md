@@ -9,13 +9,19 @@ MOSS-SFX runs natively (Candle) on every platform. Install it once from the **Mo
 ## Writing the prompt
 
 - Describe the source and its character: "heavy rain on a tin roof", "a distant thunderclap", "footsteps on gravel".
+- Add audible context when it matters: action, material, distance, intensity, environment, and acoustic space.
 - Bilingual prompts (English / Chinese) are supported; the language is advisory, not a mode switch.
 - Guidance (CFG) sharpens adherence to the prompt; the reference default is around 4.0, and 1.0 turns guidance off.
-- A negative prompt steers the model away from unwanted qualities.
+
+Example:
+
+> A heavy wooden cellar door creaks open slowly, rusty hinges grinding, close perspective in a damp stone room with a short dark echo; no speech or music.
+
+**Refine my prompt** rewrites this sound description only. It does not change length, language, guidance, steps, or seed. Audio Studio does not expose a negative-prompt field for this model.
 
 ## Duration
 
-Output is 48 kHz mono, up to **30 seconds**, with 0.1-second-granular duration control. Ask for the length you need directly.
+Output is 48 kHz mono, up to **30 seconds**, with whole-second duration control. Ask for the length you need directly.
 
 ## Practical notes
 
