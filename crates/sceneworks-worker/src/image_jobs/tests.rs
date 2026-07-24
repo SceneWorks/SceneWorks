@@ -1,4 +1,11 @@
 use super::*;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::{
+    flux1_control_candle::*, flux2_comfyui_candle::*, flux2_control_candle::*,
+    flux2_edit_candle::*, flux_ipadapter::*, kolors_control::*, kolors_ipadapter::*,
+    krea_control_candle::*, pulid_candle::*, qwen_control::*, qwen_edit_candle::*,
+    sdxl_ipadapter::*, zimage_control::*, zimage_identity_candle::*,
+};
 use serde_json::json;
 
 #[cfg(any(
@@ -10208,21 +10215,7 @@ fn candle_control_weight_filenames_reject_traversal() {
 fn candle_strict_control_trait_routes_each_provider() {
     let dummy = std::path::PathBuf::from("/nonexistent");
 
-    let zimage = ZImageStrictControl {
-        snapshot: dummy.clone(),
-        controlnet: dummy.clone(),
-        prompt: "p".to_owned(),
-        width: 512,
-        height: 512,
-        steps: 8,
-        control_scale: 1.0,
-        // Turbo: distilled, no CFG — `is_base` false, guidance/negative inert.
-        is_base: false,
-        guidance: 0.0,
-        negative_prompt: String::new(),
-        engine_id: ZIMAGE_CTRL_ENGINE_ID,
-        pid: None,
-    };
+    let zimage = zimage_strict_control_test_fixture(dummy.clone(), false);
     assert_eq!(zimage.engine_id(), ZIMAGE_CTRL_ENGINE_ID);
     assert_eq!(zimage.engine_label(), ZIMAGE_CTRL_ENGINE);
     assert_eq!(zimage.stream_tag(), "zimage_control");
@@ -10230,89 +10223,33 @@ fn candle_strict_control_trait_routes_each_provider() {
     // Base z_image (sc-8379 control + sc-8680 faithful base): the SAME provider with the `z_image_control`
     // engine-id row, `is_base = true` (the faithful shift-6.0 / ~50-step / real-CFG path), and threaded
     // guidance + negative prompt.
-    let zimage_base = ZImageStrictControl {
-        snapshot: dummy.clone(),
-        controlnet: dummy.clone(),
-        prompt: "p".to_owned(),
-        width: 512,
-        height: 512,
-        steps: 50,
-        control_scale: 1.0,
-        is_base: true,
-        guidance: 4.0,
-        negative_prompt: "blurry".to_owned(),
-        engine_id: ZIMAGE_CTRL_BASE_ENGINE_ID,
-        pid: None,
-    };
+    let zimage_base = zimage_strict_control_test_fixture(dummy.clone(), true);
     assert_eq!(zimage_base.engine_id(), ZIMAGE_CTRL_BASE_ENGINE_ID);
     assert_eq!(zimage_base.engine_label(), ZIMAGE_CTRL_ENGINE);
-    assert!(zimage_base.is_base);
-    assert_eq!(zimage_base.guidance, 4.0);
-    assert_eq!(zimage_base.negative_prompt, "blurry");
+    assert_eq!(
+        zimage_strict_control_test_cfg(&zimage_base),
+        (true, 4.0, "blurry")
+    );
 
     // FLUX.1-dev control (sc-8412) routes via the `Flux1StrictControl` provider.
-    let flux1 = Flux1StrictControl {
-        base: dummy.clone(),
-        control: dummy.clone(),
-        prompt: "p".to_owned(),
-        width: 512,
-        height: 512,
-        steps: 25,
-        guidance: 3.5,
-        control_scale: 0.7,
-        control_kind: "pose".to_owned(),
-    };
+    let flux1 = flux1_strict_control_test_fixture(dummy.clone());
     assert_eq!(flux1.engine_id(), FLUX1_CONTROL_CANDLE_ENGINE_ID);
     assert_eq!(flux1.engine_label(), FLUX1_CONTROL_CANDLE_ENGINE);
     assert_eq!(flux1.stream_tag(), "flux1_control");
 
-    let flux2 = Flux2StrictControl {
-        base: dummy.clone(),
-        control: dummy.clone(),
-        quant: None,
-        prompt: "p".to_owned(),
-        width: 512,
-        height: 512,
-        steps: 28,
-        guidance: 4.0,
-        control_scale: 0.75,
-        pid: None,
-    };
+    let flux2 = flux2_strict_control_test_fixture(dummy.clone());
     assert_eq!(flux2.engine_id(), FLUX2_CONTROL_CANDLE_ENGINE_ID);
     assert_eq!(flux2.engine_label(), FLUX2_CONTROL_CANDLE_ENGINE);
     assert_eq!(flux2.stream_tag(), "flux2_control");
 
-    let qwen = QwenStrictControl {
-        qwen_base: dummy.clone(),
-        controlnet: dummy.clone(),
-        prompt: "p".to_owned(),
-        negative: "n".to_owned(),
-        width: 512,
-        height: 512,
-        steps: 30,
-        guidance: 4.0,
-        control_scale: 1.0,
-    };
+    let qwen = qwen_strict_control_test_fixture(dummy.clone());
     assert_eq!(qwen.engine_id(), QWEN_CONTROL_ENGINE_ID);
     assert_eq!(qwen.engine_label(), QWEN_CONTROL_ENGINE);
     assert_eq!(qwen.stream_tag(), "qwen_control");
 
     // Kolors control (sc-8823) routes via the `KolorsStrictControl` provider — pose-only, real CFG +
     // curated sampler/scheduler carried through to the request.
-    let kolors = KolorsStrictControl {
-        kolors_base: dummy.clone(),
-        controlnet: dummy.clone(),
-        prompt: "p".to_owned(),
-        negative: "n".to_owned(),
-        width: 512,
-        height: 512,
-        steps: 50,
-        guidance: 5.0,
-        control_scale: 1.0,
-        sampler: None,
-        scheduler: None,
-        pid: None,
-    };
+    let kolors = kolors_strict_control_test_fixture(dummy);
     assert_eq!(kolors.engine_id(), KOLORS_CONTROL_ENGINE_ID);
     assert_eq!(kolors.engine_label(), KOLORS_CONTROL_ENGINE);
     assert_eq!(kolors.stream_tag(), "kolors_control");

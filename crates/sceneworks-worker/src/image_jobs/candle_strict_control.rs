@@ -1,3 +1,11 @@
+use super::{
+    consume_gen_events, drive_gen_items_scored, ensure_depth_estimator_dir, parse_poses,
+    preprocess_control_entry, requested_control_kind, resolve_control_identity_source,
+    resolve_control_source, resolve_seed, resolve_user_control_map, stage_likeness,
+    start_gen_stream, validate_control_kind, ApiClient, CancelFlag, ControlKind, Image, ImagePlan,
+    JobSnapshot, JsonObject, Path, Progress, Settings, Value, WorkerResult,
+};
+
 // Shared candle (Windows/CUDA) strict-control driver (sc-8304, epic 8236). The candle siblings of the
 // MLX `strict_control.rs` driver: the three bespoke non-registry candle control providers
 // (`ZImageControl` / `Flux2Control` / `QwenControl`) used to each carry a near-identical
@@ -12,7 +20,7 @@
 //
 // **Candle-only.** macOS keeps the MLX registry strict-control paths (driven by `strict_control.rs`
 // directly); this driver is the off-Mac candle lane (`#[cfg(all(not(target_os = "macos"), feature =
-// "backend-candle"))]`), `include!`d into the `image_jobs` module so it shares the unqualified imports.
+// "backend-candle"))]`), a child module of the `image_jobs` module so it shares the unqualified imports.
 //
 // **Pose is byte-preserved (REGRESSION-CRITICAL).** A pose job sets no `advanced.controlMode`, so
 // `requested_control_kind` returns [`ControlKind::Pose`] and `preprocess_control_entry` renders the
@@ -31,7 +39,7 @@
 /// and consumed entirely inside the one `spawn_blocking`, so it never needs to be `Send`. The implementor
 /// (the small per-lane config struct) IS moved across the blocking boundary, so it must be `Send +
 /// 'static`.
-trait CandleStrictControl: Send + 'static {
+pub(super) trait CandleStrictControl: Send + 'static {
     /// The loaded candle control provider.
     type Model;
 
@@ -86,7 +94,7 @@ trait CandleStrictControl: Send + 'static {
 /// `provider` is the per-lane [`CandleStrictControl`] config (it holds the resolved weight paths +
 /// request numerics); it is moved into the blocking thread, loaded once, and drives every pose.
 #[allow(clippy::too_many_arguments)]
-async fn run_candle_strict_control<P: CandleStrictControl>(
+pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -186,12 +194,17 @@ async fn run_candle_strict_control<P: CandleStrictControl>(
                     stickwidth,
                     depth_weights_dir,
                 )?;
-                let out =
-                    match provider.generate_one(&model, &control, seed as u64, &cancel, on_progress) {
-                        Ok(out) => out,
-                        Err(_) if cancel.is_cancelled() => return Ok(None),
-                        Err(error) => return Err(error),
-                    };
+                let out = match provider.generate_one(
+                    &model,
+                    &control,
+                    seed as u64,
+                    &cancel,
+                    on_progress,
+                ) {
+                    Ok(out) => out,
+                    Err(_) if cancel.is_cancelled() => return Ok(None),
+                    Err(error) => return Err(error),
+                };
                 // Score this finished pose against the cached source embedding (sc-4410). The candle
                 // strict-control lane produces the FINAL image directly (no face-restore pass). Clone
                 // paid ONLY when a scorer exists; a full-body / turned pose with no reliable frontal
@@ -207,7 +220,13 @@ async fn run_candle_strict_control<P: CandleStrictControl>(
                         likeness_source_ref.as_deref(),
                     )
                 });
-                Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
+                Ok(Some((
+                    seed,
+                    out.width,
+                    out.height,
+                    out.pixels,
+                    face_likeness,
+                )))
             })
         },
     );

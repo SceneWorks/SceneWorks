@@ -1,3 +1,15 @@
+use super::advanced;
+use super::zimage_edit_candle::{
+    resolve_zimage_edit_candle_base, zimage_edit_candle_steps, ZIMAGE_EDIT_CANDLE_DEFAULT_REPO,
+};
+use super::{
+    consume_gen_events, drive_gen_items_scored, fit_engine_image, load_reference_image,
+    pose_entries, resolve_character_image_likeness_source, resolve_seed, stage_likeness,
+    start_gen_stream, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path,
+    Settings, Value, WorkerError, WorkerResult, ZImageEdit, ZImageEditPaths, ZImageEditRequest,
+};
+use serde_json::json;
+
 // Candle (Windows/CUDA) Z-Image identity-init route for Image Studio "With Character" (sc-8409, epic
 // 4406) — the off-Mac sibling of the macOS MLX generic lane's Z-Image identity img2img path
 // (`resolve_zimage_identity_init` in zimage.rs, sc-3146). A `character_image` job with a chosen
@@ -24,7 +36,7 @@
 // macOS generic lane and the other identity lanes do — source embedded ONCE, reused across the N images,
 // non-fatal, the hot-path pixel clone gated behind `scorer.is_some()`, non-frontal → honest N/A.
 //
-// `include!`d into the `image_jobs` module (carrying the candle cfg), so it shares that module's imports
+// a child module of the `image_jobs` module (carrying the candle cfg), so it shares that module's imports
 // (`ImageRequest`/`Settings`/`WorkerResult`/`advanced`/`load_reference_image`/`fit_engine_image`/
 // `resolve_character_image_likeness_source`/`ensure_face_stack_dir`/`ZImageEdit`/`drive_gen_items_scored`/
 // `score_generated_image`/`consume_gen_events`/`resolve_seed`/`Image`/… all in scope). It also reuses the
@@ -53,7 +65,7 @@ fn is_zimage_identity_candle_model(model: &str) -> bool {
 /// gate + clamp are unit-testable without asset I/O. (Deliberately duplicates the macOS helper, which
 /// lives in the macOS-only `zimage.rs` include — the same per-lane-helper pattern the candle siblings use,
 /// kept in lockstep by the shared parity comment.)
-fn zimage_identity_candle_strength(request: &ImageRequest) -> Option<f32> {
+pub(super) fn zimage_identity_candle_strength(request: &ImageRequest) -> Option<f32> {
     let strength = request
         .advanced
         .get("referenceStrength")
@@ -77,7 +89,10 @@ fn zimage_identity_candle_strength(request: &ImageRequest) -> Option<f32> {
 /// their own lanes — the candle InstantID angle/pose paths and the Z-Image strict-control lane — and
 /// scored there), and whose Turbo base resolves locally. Mirrors `jobs_store::zimage_identity_candle_\
 /// eligible` (minus the local weight-resolve check) so the worker and router agree.
-fn zimage_identity_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn zimage_identity_candle_available(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> bool {
     is_zimage_identity_candle_model(&request.model)
         && request.mode == "character_image"
         && zimage_identity_candle_strength(request).is_some()
@@ -127,7 +142,7 @@ fn zimage_identity_candle_raw_settings(
 /// against the reference face through the shared sc-4411 seam (the `!Send` scorer built ONCE on the
 /// generator thread, source embedded once, reused across the N images; non-fatal; the pixel clone gated
 /// behind `scorer.is_some()`). Reuses [`drive_gen_items_scored`] + [`consume_gen_events`].
-async fn generate_candle_zimage_identity_stream(
+pub(super) async fn generate_candle_zimage_identity_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
