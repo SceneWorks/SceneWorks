@@ -259,6 +259,14 @@ docker run --gpus all --publish 8010:8010 `
   sceneworks-runpod:local
 ```
 
+The combined image binds publicly by default and therefore requires a non-blank
+`SCENEWORKS_ACCESS_TOKEN` before it starts either the API or workers. A missing or
+whitespace-only token fails immediately with an actionable error, even if
+`SCENEWORKS_ALLOW_OPEN_BIND` is injected; this image never enables that legacy
+override. The same token is passed to every candle GPU and CPU utility worker.
+Loopback-only binds remain available without a token for local development.
+Tokens are operator-provided and are never generated or written to logs.
+
 On RunPod, attach the pod's persistent volume at `/sceneworks` in place of the
 example named volume. Provider-specific volume layout and ownership hardening
 are handled separately; this image only defines the shared mount contract.

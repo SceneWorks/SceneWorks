@@ -110,19 +110,39 @@ fn auto_worker_ids_and_child_environment_match_python_supervisor() {
         ["0", "1", "cpu"]
     );
 
-    let gpu_env = child_environment(&WorkerSpec {
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    // Derive a process-local opaque value rather than committing a reusable
+    // credential fixture. The assertion never prints or logs its contents.
+    settings.access_token = Some(format!("{}-{}", env!("CARGO_PKG_NAME"), std::process::id()));
+
+    let gpu_env = child_environment(&settings, &WorkerSpec {
         worker_id: "worker-gpu-auto-1".to_owned(),
         gpu_id: "1".to_owned(),
     });
     assert_eq!(gpu_env["SCENEWORKS_UTILITY_JOBS"], "0");
     assert_eq!(gpu_env["CUDA_VISIBLE_DEVICES"], "1");
+    assert_eq!(
+        gpu_env.get("SCENEWORKS_ACCESS_TOKEN"),
+        settings.access_token.as_ref()
+    );
 
-    let cpu_env = child_environment(&WorkerSpec {
+    let cpu_env = child_environment(&settings, &WorkerSpec {
         worker_id: "worker-gpu-auto-cpu".to_owned(),
         gpu_id: "cpu".to_owned(),
     });
     assert_eq!(cpu_env["SCENEWORKS_UTILITY_JOBS"], "1");
     assert_eq!(cpu_env["CUDA_VISIBLE_DEVICES"], "");
+    assert_eq!(
+        cpu_env.get("SCENEWORKS_ACCESS_TOKEN"),
+        settings.access_token.as_ref()
+    );
+
+    settings.access_token = None;
+    let no_token_env = child_environment(&settings, &WorkerSpec {
+        worker_id: "worker-gpu-auto-cpu".to_owned(),
+        gpu_id: "cpu".to_owned(),
+    });
+    assert!(!no_token_env.contains_key("SCENEWORKS_ACCESS_TOKEN"));
 }
 
 #[test]
