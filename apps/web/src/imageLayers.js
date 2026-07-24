@@ -268,3 +268,38 @@ export function compositeLayersToCanvas(ctx, layers, { visibleOnly = true } = {}
     ctx.restore();
   }
 }
+
+// Draw one layer into a document crop, baking its document-space transform into
+// the output bitmap. The crop's top-left becomes output (0, 0). Straighten is a
+// document-level rotation about the crop centre, matching the crop preview/apply
+// semantics while still composing with the layer's own translate/rotate/scale.
+//
+// Opacity, blend mode, and visibility deliberately remain layer metadata: each
+// layer is rasterized independently so the preserved stack composites exactly as
+// it did before the crop.
+export function drawLayerIntoCrop(ctx, layer, { x, y, width, height }, straighten = 0) {
+  if (!layer?.image) return;
+  const t = layer.transform ?? identityTransform();
+  ctx.save();
+  if (straighten) {
+    const cx = x + width / 2;
+    const cy = y + height / 2;
+    ctx.translate(width / 2, height / 2);
+    ctx.rotate((straighten * Math.PI) / 180);
+    ctx.translate(-cx, -cy);
+  } else {
+    ctx.translate(-x, -y);
+  }
+  ctx.translate(t.x || 0, t.y || 0);
+  if (t.rotation) ctx.rotate((t.rotation * Math.PI) / 180);
+  ctx.scale(t.scaleX ?? 1, t.scaleY ?? 1);
+  ctx.drawImage(layer.image, 0, 0);
+  ctx.restore();
+}
+
+// Install a crop result without losing layer identity or compositing metadata.
+// The transform is identity because drawLayerIntoCrop already baked it into the
+// replacement bitmap; retaining it would apply the move/scale/rotation twice.
+export function replaceLayerWithCroppedBitmap(layer, { image, objectUrl, blob }) {
+  return { ...layer, image, objectUrl, blob, transform: identityTransform() };
+}

@@ -28,12 +28,14 @@ import {
   addLayer,
   compositeLayersToCanvas,
   createLayer,
+  drawLayerIntoCrop,
   duplicateLayer,
   identityTransform,
   layerById,
   moveLayer,
   removeLayer,
   replaceLayerBitmap,
+  replaceLayerWithCroppedBitmap,
   sameLayerStack,
   setActiveLayer,
   setLayerProps,
@@ -1897,9 +1899,9 @@ export function ImageEditor() {
     const sy = clamp(Math.round(cropRect.y), 0, working.height - 1);
     const sw = clamp(Math.round(cropRect.width), 1, working.width - sx);
     const sh = clamp(Math.round(cropRect.height), 1, working.height - sy);
-    // Document-level crop (sc-6119): crop EVERY layer's bitmap to the rect and set the
-    // doc dims — the stack is preserved. Layers are doc-aligned in this slice; per-layer
-    // transforms (and transform-aware crop) arrive with sc-6120.
+    // Crop every layer in document space. Per-layer transforms are baked into the
+    // new bitmap so the result matches the visible composition; layer compositing
+    // metadata remains intact and the baked transform is reset below.
     let cropped;
     try {
       cropped = await Promise.all(
@@ -1908,18 +1910,7 @@ export function ImageEditor() {
           canvas.width = sw;
           canvas.height = sh;
           const ctx = canvas.getContext("2d");
-          if (straighten) {
-            // Straighten (sc-10255): rotate the layer by `straighten°` about the crop-rect
-            // centre, then take the axis-aligned sw×sh window — a rotate-then-crop. Corners
-            // that rotate past the source edge come through transparent (inset your crop).
-            const cx = sx + sw / 2;
-            const cy = sy + sh / 2;
-            ctx.translate(sw / 2, sh / 2);
-            ctx.rotate((straighten * Math.PI) / 180);
-            ctx.drawImage(layer.image, -cx, -cy);
-          } else {
-            ctx.drawImage(layer.image, sx, sy, sw, sh, 0, 0, sw, sh);
-          }
+          drawLayerIntoCrop(ctx, layer, { x: sx, y: sy, width: sw, height: sh }, straighten);
           const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
           if (!blob) throw new Error("Could not encode the crop.");
           const { image, objectUrl } = await blobToImage(blob);
@@ -1942,7 +1933,7 @@ export function ImageEditor() {
       height: sh,
       layers: prev.layers.map((layer) => {
         const c = byId.get(layer.id);
-        return c ? { ...layer, image: c.image, objectUrl: c.objectUrl, blob: c.blob } : layer;
+        return c ? replaceLayerWithCroppedBitmap(layer, c) : layer;
       }),
     }));
     oldLayers.forEach((layer) => layer.objectUrl && URL.revokeObjectURL(layer.objectUrl));
