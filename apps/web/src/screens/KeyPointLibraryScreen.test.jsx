@@ -6,6 +6,7 @@ import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
 const apiCalls = [];
 let presets = [];
 let collections = [];
+let mutationFailure = null;
 
 // Desktop-safe confirm (sc-11971): mocked so the explicit discard / cancel guards are
 // deterministic and observable. Defaults to "confirm"; tests flip it to "cancel".
@@ -19,6 +20,7 @@ vi.mock("../api.js", async (importOriginal) => {
     apiFetch: vi.fn(async (path, _token, options = {}) => {
       const method = options.method ?? "GET";
       apiCalls.push({ path, method, body: options.body });
+      if (mutationFailure && method !== "GET") throw mutationFailure;
       if (method === "GET" && path === "/api/v1/keypoints/presets") return presets;
       if (method === "GET" && path === "/api/v1/keypoints/collections") return collections;
       if (method === "POST" && path === "/api/v1/keypoints/sources") {
@@ -65,6 +67,13 @@ async function setInputValue(input, value) {
 }
 const byText = (text, selector = "button") =>
   [...document.querySelectorAll(selector)].find((el) => el.textContent.includes(text));
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 function makeContext(overrides = {}) {
   return { token: "test-token", requestedGpu: "auto", jobs: [], ...overrides };
@@ -79,6 +88,7 @@ describe("KeyPointLibraryScreen", () => {
     apiCalls.length = 0;
     presets = [];
     collections = [];
+    mutationFailure = null;
     appConfirmMock.mockClear();
     appConfirmMock.mockResolvedValue(true);
     window.URL.createObjectURL = () => "blob:test";
@@ -142,18 +152,56 @@ describe("KeyPointLibraryScreen", () => {
     expect(image).toBeTruthy();
   });
 
-  it("protects built-ins (no delete) and deletes a user preset against the reserved project", async () => {
+  it("protects built-ins and danger-confirms a user preset delete", async () => {
     presets = [builtinPreset(), customPreset()];
     await render();
     const deletes = [...document.body.querySelectorAll("button")].filter((b) => b.textContent.trim() === "Delete");
     // Only the one custom preset is deletable; the built-in has no delete control.
     expect(deletes).toHaveLength(1);
     await click(deletes[0]);
+    expect(appConfirmMock).toHaveBeenCalledWith(expect.objectContaining({ tone: "danger" }));
     expect(
       apiCalls.some(
         (c) => c.method === "DELETE" && c.path === "/api/v1/projects/project_global_keypoints/assets/asset_k1",
       ),
     ).toBe(true);
+  });
+
+  it("keeps a preset when delete is cancelled and surfaces delete failures", async () => {
+    presets = [customPreset()];
+    await render();
+    appConfirmMock.mockResolvedValueOnce(false);
+    await click(exactBtn("Delete"));
+    expect(apiCalls.some((call) => call.method === "DELETE")).toBe(false);
+
+    appConfirmMock.mockResolvedValueOnce(true);
+    mutationFailure = new Error("preset delete failed");
+    await click(exactBtn("Delete"));
+    expect(document.body.querySelector("#keypoint-panel-library .inline-warning").textContent).toContain(
+      "preset delete failed",
+    );
+  });
+
+  it("serializes preset delete confirmation and mutation across rapid clicks", async () => {
+    presets = [customPreset(), customPreset({ id: "asset_k2", name: "Other" })];
+    await render();
+    const confirmation = deferred();
+    appConfirmMock.mockReturnValueOnce(confirmation.promise);
+    const deletes = [...document.body.querySelectorAll("button")].filter((button) =>
+      button.textContent.includes("Delete"),
+    );
+
+    await act(async () => {
+      deletes[0].click();
+      deletes[0].click();
+      deletes[1].click();
+    });
+    expect(appConfirmMock).toHaveBeenCalledTimes(1);
+    expect([...document.body.querySelectorAll(".keypoint-card button")].every((button) => button.disabled)).toBe(true);
+    await act(async () => confirmation.resolve(true));
+    await act(async () => {});
+
+    expect(apiCalls.filter((call) => call.method === "DELETE")).toHaveLength(1);
   });
 
   it("captures a preset: upload → extract → preview → save", async () => {
@@ -296,6 +344,54 @@ describe("KeyPointLibraryScreen", () => {
     expect(
       apiCalls.some((c) => c.method === "PUT" && c.path === "/api/v1/keypoints/collections/col_user/default"),
     ).toBe(true);
+  });
+
+  it("danger-confirms collection deletion, honors cancel, and surfaces failures", async () => {
+    presets = [builtinPreset()];
+    collections = [
+      { id: "col_user", name: "My Set", orderedPresetIds: ["builtin_front"], isDefault: false },
+    ];
+    await render();
+    await click(document.body.querySelector("#keypoint-tab-collections"));
+
+    appConfirmMock.mockResolvedValueOnce(false);
+    await click(exactBtn("Delete"));
+    expect(apiCalls.some((call) => call.method === "DELETE")).toBe(false);
+
+    appConfirmMock.mockResolvedValueOnce(true);
+    mutationFailure = new Error("collection delete failed");
+    await click(exactBtn("Delete"));
+    expect(appConfirmMock).toHaveBeenLastCalledWith(expect.objectContaining({ tone: "danger" }));
+    expect(document.body.querySelector("#keypoint-panel-collections .inline-warning").textContent).toContain(
+      "collection delete failed",
+    );
+  });
+
+  it("serializes collection delete confirmation across rapid clicks", async () => {
+    presets = [builtinPreset()];
+    collections = [
+      { id: "col_one", name: "One", orderedPresetIds: ["builtin_front"], isDefault: false },
+      { id: "col_two", name: "Two", orderedPresetIds: ["builtin_front"], isDefault: false },
+    ];
+    await render();
+    await click(document.body.querySelector("#keypoint-tab-collections"));
+    const confirmation = deferred();
+    appConfirmMock.mockReturnValueOnce(confirmation.promise);
+    const deletes = [...document.body.querySelectorAll("#keypoint-panel-collections button")].filter(
+      (button) => button.textContent.trim() === "Delete",
+    );
+
+    await act(async () => {
+      deletes[0].click();
+      deletes[0].click();
+      deletes[1].click();
+    });
+    expect(appConfirmMock).toHaveBeenCalledTimes(1);
+    expect(deletes.every((button) => button.disabled)).toBe(true);
+    await act(async () => confirmation.resolve(true));
+    await act(async () => {});
+
+    expect(apiCalls.filter((call) => call.method === "DELETE")).toHaveLength(1);
   });
 
   it("flags a completed capture as unsaved and prompts NO confirm to reach review (sc-11971)", async () => {

@@ -9301,7 +9301,23 @@ details[open] > summary.lora-scope-group-heading::before,
 .ie-layer-vis:hover { background: var(--ie-surface2); color: var(--ie-text); }
 .ie-layer-vis .ie-vis-off { opacity: 0.38; }
 .ie-layer-thumb { width: 36px; height: 30px; border-radius: var(--r-xs); border: 1px solid var(--ie-border); flex: 0 0 auto; object-fit: cover; }
-.ie-layer-name { flex: 1; font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ie-layer-name {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: text;
+}
+.ie-layer-name-input { flex: 1; min-width: 0; height: 26px; padding: 3px 6px; }
 .ie-layer-blend { font: 500 10.5px var(--ie-mono); color: var(--ie-faint); text-transform: uppercase; }
 .ie-layer-op { margin-top: 9px; display: flex; align-items: center; gap: 10px; }
 .ie-layer-op .ie-range { flex: 1; }

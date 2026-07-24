@@ -337,6 +337,75 @@ export function closeConfirmMessage({ dirty, aiOpPending }) {
   return null;
 }
 
+export async function consumeEditorLaunch({ launch, confirmDiscard, openAsset, clearLaunch }) {
+  if (!launch?.assetId || !(await confirmDiscard())) return false;
+  await openAsset(launch.assetId);
+  clearLaunch?.();
+  return true;
+}
+
+export function createEditorLaunchGuard() {
+  let activeId = null;
+  return {
+    async consume({ launch, isCurrent, confirmDiscard, openAsset, clearLaunch }) {
+      if (!launch?.assetId || activeId === launch.id) return false;
+      const launchId = launch.id;
+      activeId = launchId;
+      try {
+        if (!(await confirmDiscard()) || activeId !== launchId || !isCurrent(launchId)) return false;
+        await openAsset(launch.assetId);
+        if (activeId !== launchId || !isCurrent(launchId)) return false;
+        clearLaunch?.();
+        return true;
+      } finally {
+        if (activeId === launchId) activeId = null;
+      }
+    },
+  };
+}
+
+export function InlineLayerName({ layer, onRename }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(layer.name);
+
+  if (!editing) {
+    return (
+      <button
+        className="ie-layer-name"
+        onClick={(event) => {
+          event.stopPropagation();
+          setDraft(layer.name);
+          setEditing(true);
+        }}
+        title="Rename layer"
+        type="button"
+      >
+        {layer.name}
+      </button>
+    );
+  }
+
+  return (
+    <input
+      aria-label={`Rename ${layer.name}`}
+      autoFocus
+      className="ie-input ie-layer-name-input"
+      onBlur={() => {
+        const name = draft.trim();
+        if (name) onRename(layer.id, name);
+        setEditing(false);
+      }}
+      onChange={(event) => setDraft(event.target.value)}
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.currentTarget.blur();
+        if (event.key === "Escape") setEditing(false);
+      }}
+      value={draft}
+    />
+  );
+}
+
 // Which save-state indicator the top bar shows (sc-11968): the unsaved-edits pill while
 // `dirty`, the "Saved ✓" hint once a Save has landed and nothing has changed since, else
 // nothing. Pure so the badge logic is unit-testable without a mounted canvas.
@@ -808,6 +877,18 @@ export function ImageEditor() {
   const [status, setStatus] = useState({ loading: false, error: "" });
   const [pickerOpen, setPickerOpen] = useState(false);
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
+  const launchAttemptRef = useRef(null);
+  const launchGuardRef = useRef(null);
+  if (!launchGuardRef.current) launchGuardRef.current = createEditorLaunchGuard();
+  const editorLaunchRef = useRef(editorLaunch);
+  editorLaunchRef.current = editorLaunch;
+  const editorMountedRef = useRef(true);
+  useEffect(() => {
+    editorMountedRef.current = true;
+    return () => {
+      editorMountedRef.current = false;
+    };
+  }, []);
 
   // Redesign shell UI state (epic 10243). `layout` picks one of four panel
   // arrangements (accordion default) and persists to localStorage; `accCollapsed`
@@ -1574,18 +1655,25 @@ export function ImageEditor() {
   // sc-8730: consume the App-level Image Editor launch channel. When something outside
   // the editor (currently the FullscreenPreview "Edit" button via sendAssetToImageEditor)
   // routes an asset here, App switches activeView to "ImageEditor" and stashes
-  // { id, assetId } in editorLaunch. Keyed on the launch id so it fires once per launch
-  // (relaunching the same asset gets a fresh id) and never on unrelated re-renders.
-  // Entering via the nav with no launch leaves editorLaunch null → no auto-open. We clear
-  // the launch after consuming it so navigating away and back doesn't re-open a stale asset.
+  // { id, assetId } in editorLaunch. A dirty editor confirms before replacement. Cancelling
+  // leaves the launch pending; changing the dirty state re-arms it, while the attempt/in-flight
+  // refs prevent ordinary re-renders or the accepted open's own state updates from duplicating
+  // the prompt/load. Entering via the nav with no launch leaves editorLaunch null. We clear
+  // only after the accepted open has finished handling the asset.
   useEffect(() => {
-    if (!editorLaunch?.assetId) {
-      return;
-    }
-    openAsset(editorLaunch.assetId);
-    clearEditorLaunch?.();
+    if (!editorLaunch?.assetId) return;
+    const attemptKey = `${editorLaunch.id}:${dirty}`;
+    if (launchAttemptRef.current === attemptKey) return;
+    launchAttemptRef.current = attemptKey;
+    launchGuardRef.current.consume({
+      launch: editorLaunch,
+      isCurrent: (id) => editorMountedRef.current && editorLaunchRef.current?.id === id,
+      confirmDiscard: confirmDiscardEdits,
+      openAsset,
+      clearLaunch: clearEditorLaunch,
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editorLaunch?.id]);
+  }, [editorLaunch?.id, dirty]);
 
   const openFile = useCallback(
     (file) => {
@@ -3783,16 +3871,7 @@ export function ImageEditor() {
                     ) : (
                       <span className="ie-layer-thumb" />
                     )}
-                    <span
-                      className="ie-layer-name"
-                      onDoubleClick={() => {
-                        const name = window.prompt("Rename layer", layer.name)?.trim();
-                        if (name) renameLayer(layer.id, name);
-                      }}
-                      title="Double-click to rename"
-                    >
-                      {layer.name}
-                    </span>
+                    <InlineLayerName layer={layer} onRename={renameLayer} />
                     {layer.blendMode && layer.blendMode !== "source-over" ? (
                       <span className="ie-layer-blend">
                         {(BLEND_MODES.find((mode) => mode.value === layer.blendMode)?.label ?? layer.blendMode).slice(0, 4)}
