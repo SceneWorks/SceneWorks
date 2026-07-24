@@ -610,7 +610,7 @@ enum TrainEvent {
 fn training_text_encoder(engine_id: &str, weights_dir: &std::path::Path) -> Option<WeightsSource> {
     #[cfg(target_os = "macos")]
     if engine_id == "ltx_2_3" {
-        return crate::video_jobs::resolve_bundled_ltx_gemma_dir(weights_dir)
+        return crate::video_jobs::ltx::resolve_bundled_ltx_gemma_dir(weights_dir)
             .map(WeightsSource::Dir);
     }
     #[cfg(not(target_os = "macos"))]
