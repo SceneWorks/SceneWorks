@@ -1,5 +1,6 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
+import { isCurrentProjectRequest } from "../appStateHelpers.js";
 import { upsertJobNewest } from "../sorters.js";
 
 // Owns the project's training-dataset state plus dataset CRUD, caption sidecar/job,
@@ -10,41 +11,60 @@ import { upsertJobNewest } from "../sorters.js";
 //
 // sc-4194: actions are wrapped in useCallback so their identity is stable across App's
 // SSE-driven re-renders, letting appContextValue memoize.
-export function useTraining({ token, activeProject, setError, setJobs }) {
+export function useTraining({ token, activeProject, activeProjectRef, setError, setJobs }) {
   const [trainingDatasets, setTrainingDatasets] = useState([]);
   const [trainingDatasetsProjectId, setTrainingDatasetsProjectId] = useState(null);
   const [loadingTrainingDatasets, setLoadingTrainingDatasets] = useState(false);
   const [trainingDatasetsError, setTrainingDatasetsError] = useState("");
+  const trainingRefreshIdRef = useRef(0);
+
+  const isCurrentTrainingRequest = useCallback(
+    (projectId) =>
+      isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId),
+    [activeProjectRef],
+  );
 
   const refreshTrainingDatasets = useCallback(
     async (projectId = activeProject?.id, { signal } = {}) => {
+      // Reject an already-stale explicit call without letting it supersede the
+      // current project's in-flight refresh. Accepted calls receive monotonically
+      // increasing ownership so an older request for the *same* project cannot
+      // overwrite a newer request or clear its loading state.
+      if (!isCurrentTrainingRequest(projectId)) return [];
+      const refreshId = ++trainingRefreshIdRef.current;
+      const ownsCurrentRefresh = () =>
+        refreshId === trainingRefreshIdRef.current &&
+        isCurrentTrainingRequest(projectId);
+
       if (!projectId) {
         setTrainingDatasets([]);
         setTrainingDatasetsProjectId(null);
         setTrainingDatasetsError("");
+        setLoadingTrainingDatasets(false);
         return [];
       }
       setLoadingTrainingDatasets(true);
       try {
         const items = await apiFetch(`/api/v1/projects/${projectId}/training/datasets`, token, { signal });
+        if (!ownsCurrentRefresh()) return [];
         setTrainingDatasets(items);
         setTrainingDatasetsProjectId(projectId);
         setTrainingDatasetsError("");
         return items;
       } catch (err) {
         if (isAbortError(err)) return [];
+        if (!ownsCurrentRefresh()) return [];
         setTrainingDatasets([]);
         setTrainingDatasetsProjectId(projectId);
         setTrainingDatasetsError(err.message);
         return [];
       } finally {
-        // A superseded load must not clear the loading flag the new load just set.
-        if (!signal?.aborted) {
+        if (!signal?.aborted && ownsCurrentRefresh()) {
           setLoadingTrainingDatasets(false);
         }
       }
     },
-    [token, activeProject],
+    [token, activeProject, isCurrentTrainingRequest],
   );
 
   const loadTrainingDataset = useCallback(
@@ -115,10 +135,12 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      await refreshTrainingDatasets(projectId);
+      if (isCurrentTrainingRequest(projectId)) {
+        await refreshTrainingDatasets(projectId);
+      }
       return created;
     },
-    [token, activeProject, refreshTrainingDatasets],
+    [token, activeProject, isCurrentTrainingRequest, refreshTrainingDatasets],
   );
 
   const uploadTrainingDatasetItem = useCallback(
@@ -145,10 +167,12 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
         method: "PATCH",
         body: JSON.stringify(payload),
       });
-      await refreshTrainingDatasets(projectId);
+      if (isCurrentTrainingRequest(projectId)) {
+        await refreshTrainingDatasets(projectId);
+      }
       return updated;
     },
-    [token, activeProject, refreshTrainingDatasets],
+    [token, activeProject, isCurrentTrainingRequest, refreshTrainingDatasets],
   );
 
   const batchRenameTrainingDataset = useCallback(
@@ -164,10 +188,12 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
           body: JSON.stringify(payload),
         },
       );
-      await refreshTrainingDatasets(projectId);
+      if (isCurrentTrainingRequest(projectId)) {
+        await refreshTrainingDatasets(projectId);
+      }
       return updated;
     },
-    [token, activeProject, refreshTrainingDatasets],
+    [token, activeProject, isCurrentTrainingRequest, refreshTrainingDatasets],
   );
 
   const writeTrainingDatasetCaptionSidecars = useCallback(
@@ -183,10 +209,12 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
           body: JSON.stringify(payload),
         },
       );
-      await refreshTrainingDatasets(projectId);
+      if (isCurrentTrainingRequest(projectId)) {
+        await refreshTrainingDatasets(projectId);
+      }
       return result;
     },
-    [token, activeProject, refreshTrainingDatasets],
+    [token, activeProject, isCurrentTrainingRequest, refreshTrainingDatasets],
   );
 
   const createTrainingDatasetCaptionJob = useCallback(

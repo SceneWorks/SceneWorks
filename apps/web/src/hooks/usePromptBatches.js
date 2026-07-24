@@ -1,29 +1,39 @@
 import { useCallback, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
+import { isCurrentProjectRequest } from "../appStateHelpers.js";
 
 // Owns the prompt-batch list plus its scoped refresh/create/update/duplicate/delete
 // mutations (sc-9954, epic 9952). A direct sibling of usePresets — same scoping and
 // error handling — against the /api/v1/prompt-batches routes. Batches carry prompt
 // templates + variable definitions, not a generation recipe, so there is no
 // model/workflow filtering here.
-export function usePromptBatches({ token, activeProject, setError }) {
+export function usePromptBatches({ token, activeProject, activeProjectRef, setError }) {
   const [promptBatches, setPromptBatches] = useState([]);
+
+  const isCurrentBatchRequest = useCallback(
+    (projectId) =>
+      !projectId ||
+      isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId),
+    [activeProjectRef],
+  );
 
   const refreshPromptBatches = useCallback(
     async (projectId = activeProject?.id, { signal } = {}) => {
       try {
         const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
         const items = await apiFetch(`/api/v1/prompt-batches${query}`, token, { signal });
+        if (!isCurrentBatchRequest(projectId)) return [];
         setPromptBatches(items);
         setError("");
         return items;
       } catch (err) {
         if (isAbortError(err)) return [];
+        if (!isCurrentBatchRequest(projectId)) return [];
         setError(err.message);
         return [];
       }
     },
-    [token, activeProject, setError],
+    [token, activeProject, isCurrentBatchRequest, setError],
   );
 
   const batchQuery = useCallback(
@@ -50,10 +60,16 @@ export function usePromptBatches({ token, activeProject, setError }) {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      await refreshPromptBatches(activeProject?.id);
+      // Refresh the caller's current catalog view even when the mutation itself
+      // targets a global batch: a project view contains both global and project
+      // batches. Capture the id so a later project switch can suppress this refetch.
+      const projectId = activeProject?.id ?? null;
+      if (isCurrentBatchRequest(projectId)) {
+        await refreshPromptBatches(projectId);
+      }
       return created;
     },
-    [token, activeProject, batchQuery, refreshPromptBatches],
+    [token, activeProject, batchQuery, isCurrentBatchRequest, refreshPromptBatches],
   );
 
   const updatePromptBatch = useCallback(
@@ -63,10 +79,13 @@ export function usePromptBatches({ token, activeProject, setError }) {
         token,
         { method: "PATCH", body: JSON.stringify(payload) },
       );
-      await refreshPromptBatches(activeProject?.id);
+      const projectId = activeProject?.id ?? null;
+      if (isCurrentBatchRequest(projectId)) {
+        await refreshPromptBatches(projectId);
+      }
       return updated;
     },
-    [token, activeProject, batchQuery, refreshPromptBatches],
+    [token, activeProject, batchQuery, isCurrentBatchRequest, refreshPromptBatches],
   );
 
   const duplicatePromptBatch = useCallback(
@@ -76,10 +95,13 @@ export function usePromptBatches({ token, activeProject, setError }) {
         token,
         { method: "POST", body: JSON.stringify({}) },
       );
-      await refreshPromptBatches(activeProject?.id);
+      const projectId = activeProject?.id ?? null;
+      if (isCurrentBatchRequest(projectId)) {
+        await refreshPromptBatches(projectId);
+      }
       return duplicated;
     },
-    [token, activeProject, batchQuery, refreshPromptBatches],
+    [token, activeProject, batchQuery, isCurrentBatchRequest, refreshPromptBatches],
   );
 
   const deletePromptBatch = useCallback(
@@ -89,10 +111,13 @@ export function usePromptBatches({ token, activeProject, setError }) {
         token,
         { method: "DELETE" },
       );
-      await refreshPromptBatches(activeProject?.id);
+      const projectId = activeProject?.id ?? null;
+      if (isCurrentBatchRequest(projectId)) {
+        await refreshPromptBatches(projectId);
+      }
       return archived;
     },
-    [token, activeProject, batchQuery, refreshPromptBatches],
+    [token, activeProject, batchQuery, isCurrentBatchRequest, refreshPromptBatches],
   );
 
   return {

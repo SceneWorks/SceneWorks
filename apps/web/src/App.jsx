@@ -71,7 +71,7 @@ import {
 } from "./appHelpers.js";
 import {
   hasVisibleLocalFailureForView,
-  isCurrentAssetRefresh,
+  isCurrentProjectRequest,
   reconcileSelectedAssetId,
 } from "./appStateHelpers.js";
 
@@ -747,7 +747,7 @@ export function App() {
     updatePreset,
     duplicatePreset,
     deletePreset,
-  } = usePresets({ token, activeProject, setError });
+  } = usePresets({ token, activeProject, activeProjectRef, setError });
 
   const {
     savedVoices,
@@ -765,7 +765,7 @@ export function App() {
     updatePromptBatch,
     duplicatePromptBatch,
     deletePromptBatch,
-  } = usePromptBatches({ token, activeProject, setError });
+  } = usePromptBatches({ token, activeProject, activeProjectRef, setError });
 
   const {
     trainingDatasets,
@@ -791,7 +791,7 @@ export function App() {
     smartCropTrainingDataset,
     stripExifTrainingDataset,
     createTrainingJob,
-  } = useTraining({ token, activeProject, setError, setJobs });
+  } = useTraining({ token, activeProject, activeProjectRef, setError, setJobs });
 
   // sc-8811: useModelsAndLoras lists these two cross-cutting refresh orchestrators as
   // useCallback deps of deleteModel/deleteLora, which sit in appContextValue's
@@ -1404,7 +1404,7 @@ export function App() {
       // after the user switches away; committing then would clobber the new
       // project's assets with the old one's. Drop the stale response — mirrors
       // refreshTimelines' guard (useTimelines.js).
-      if (!isCurrentAssetRefresh(activeProjectRef.current?.id ?? null, projectId)) {
+      if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
         return;
       }
       setAssets(items);

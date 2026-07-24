@@ -1,13 +1,21 @@
 import { useCallback, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
+import { isCurrentProjectRequest } from "../appStateHelpers.js";
 
 // Owns the recipe-preset list plus its scoped refresh/create/update/duplicate/delete
 // mutations. Extracted from App.jsx (sc-1651). Behavior unchanged — token, the active
 // project, and error reporting are passed in. App's bulk refreshData still seeds the
 // list via the returned setPresets (same React setter identity), and the project-load
 // effect calls refreshCharacters/refreshPresets exactly as before.
-export function usePresets({ token, activeProject, setError }) {
+export function usePresets({ token, activeProject, activeProjectRef, setError }) {
   const [presets, setPresets] = useState([]);
+
+  const isCurrentPresetRequest = useCallback(
+    (projectId) =>
+      !projectId ||
+      isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId),
+    [activeProjectRef],
+  );
 
   // sc-4194: actions wrapped in useCallback so their identity is stable across
   // App's SSE-driven re-renders, enabling appContextValue to memoize.
@@ -16,16 +24,18 @@ export function usePresets({ token, activeProject, setError }) {
       try {
         const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
         const items = await apiFetch(`/api/v1/recipe-presets${query}`, token, { signal });
+        if (!isCurrentPresetRequest(projectId)) return [];
         setPresets(items);
         setError("");
         return items;
       } catch (err) {
         if (isAbortError(err)) return [];
+        if (!isCurrentPresetRequest(projectId)) return [];
         setError(err.message);
         return [];
       }
     },
-    [token, activeProject, setError],
+    [token, activeProject, isCurrentPresetRequest, setError],
   );
 
   const presetQuery = useCallback(
@@ -52,10 +62,16 @@ export function usePresets({ token, activeProject, setError }) {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      await refreshPresets(activeProject?.id);
+      // Refresh the caller's current catalog view even when the mutation itself
+      // targets a global preset: a project view contains both global and project
+      // presets. Capture the id so a later project switch can suppress this refetch.
+      const projectId = activeProject?.id ?? null;
+      if (isCurrentPresetRequest(projectId)) {
+        await refreshPresets(projectId);
+      }
       return created;
     },
-    [token, activeProject, presetQuery, refreshPresets],
+    [token, activeProject, isCurrentPresetRequest, presetQuery, refreshPresets],
   );
 
   const updatePreset = useCallback(
@@ -64,10 +80,13 @@ export function usePresets({ token, activeProject, setError }) {
         method: "PATCH",
         body: JSON.stringify(payload),
       });
-      await refreshPresets(activeProject?.id);
+      const projectId = activeProject?.id ?? null;
+      if (isCurrentPresetRequest(projectId)) {
+        await refreshPresets(projectId);
+      }
       return updated;
     },
-    [token, activeProject, presetQuery, refreshPresets],
+    [token, activeProject, isCurrentPresetRequest, presetQuery, refreshPresets],
   );
 
   const duplicatePreset = useCallback(
@@ -76,10 +95,13 @@ export function usePresets({ token, activeProject, setError }) {
         method: "POST",
         body: JSON.stringify({}),
       });
-      await refreshPresets(activeProject?.id);
+      const projectId = activeProject?.id ?? null;
+      if (isCurrentPresetRequest(projectId)) {
+        await refreshPresets(projectId);
+      }
       return duplicated;
     },
-    [token, activeProject, presetQuery, refreshPresets],
+    [token, activeProject, isCurrentPresetRequest, presetQuery, refreshPresets],
   );
 
   const deletePreset = useCallback(
@@ -87,10 +109,13 @@ export function usePresets({ token, activeProject, setError }) {
       const archived = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${presetQuery(scope)}`, token, {
         method: "DELETE",
       });
-      await refreshPresets(activeProject?.id);
+      const projectId = activeProject?.id ?? null;
+      if (isCurrentPresetRequest(projectId)) {
+        await refreshPresets(projectId);
+      }
       return archived;
     },
-    [token, activeProject, presetQuery, refreshPresets],
+    [token, activeProject, isCurrentPresetRequest, presetQuery, refreshPresets],
   );
 
   return {
