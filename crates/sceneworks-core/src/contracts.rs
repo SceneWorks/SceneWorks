@@ -257,7 +257,8 @@ string_enum! {
         // sc-4816) — SceneWorks' first video upscaler. Native-MLX SeedVR2 one-step
         // super-resolution on the macOS Rust worker (zero-Python, epic 3482): decode
         // the source clip -> temporal-chunked 5D upscale -> re-encode + source-audio
-        // passthrough. GPU-required like generation; mac-only (no torch fallback).
+        // passthrough. GPU-required like generation; native MLX on Mac and
+        // candle/CUDA off-Mac (no torch fallback).
         VideoUpscale => "video_upscale",
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",
@@ -429,8 +430,8 @@ string_enum! {
         // construction. See jobs_store::job_requires_gpu / mac_rust_supported.
         ImageSegment => "image_segment",
         // Standalone VIDEO upscale (Video Studio, epic 4811 / sc-4816). Advertised by
-        // the macOS Rust/MLX worker (native SeedVR2, zero-Python); mac-only, no other
-        // backend. GPU-required. See jobs_store::worker_supports_job.
+        // the macOS Rust/MLX worker and the off-Mac candle/CUDA worker (native
+        // SeedVR2, zero-Python). GPU-required. See jobs_store::worker_supports_job.
         VideoUpscale => "video_upscale",
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",

@@ -1596,6 +1596,9 @@ mod test_env;
 #[cfg(test)]
 mod manifest_pins;
 
+#[cfg(test)]
+mod architecture_tests;
+
 // Pinned-snapshot provisioning helpers + the install-layout smokes (sc-13797/sc-13810). Compiled on
 // EVERY platform — the download/layout code is platform-agnostic; only the live-network smoke inside
 // carries `#[cfg(target_os = "macos")]` for lane confinement.

@@ -18,13 +18,19 @@ new job kind does not get silently unsupported.
 - **Job kinds:** `crates/sceneworks-core/src/contracts.rs` → `enum JobType`
   (canonical; the `string_enum!` macro adds an `Unknown(String)` forward-compat
   variant, so the enum is the complete set of *known* kinds).
-- **Routing oracle:** `crates/sceneworks-core/src/jobs_store.rs` →
-  `mac_rust_supported` enumerates every kind's MLX/candle-eligibility decision.
-  It is a Rust `match` over every `JobType` variant with no wildcard for known
-  kinds, so the compiler guarantees exhaustiveness — **a new `JobType` will not
-  compile until it is added here.** That property is what makes the matrix below
-  provably complete.
+- **Capability gate:** `crates/sceneworks-core/src/jobs_store.rs` →
+  `required_capability` maps a job to the capability a worker must advertise
+  (including the person-preview and control-training exceptions).
+- **Routing oracles:** `crates/sceneworks-core/src/jobs_store/routing/gaps.rs` →
+  `mac_rust_supported` and `candle_supported`, backed by the eligibility
+  predicates in `routing/mlx.rs` and `routing/candle.rs`. Each oracle is a Rust
+  `match` over every known `JobType`, so adding a variant forces an explicit
+  routing decision.
 - **Dispatch site:** `crates/sceneworks-worker/src/lib.rs::run_utility_job`.
+- **Drift guard:** `crates/sceneworks-worker/src/architecture_tests.rs` extracts
+  the canonical `JobType` declarations and fails unless this matrix has exactly
+  one row for every known kind and `run_utility_job` has an explicit dispatch
+  arm for every variant.
 
 ## How a job reaches a worker
 
@@ -65,33 +71,43 @@ it to `0` to disable idle eviction.
 Legend: ✅ handled · ❌ never dispatched (explicit fail-arm) · ⚠️ handled but
 conditional/partial.
 
-| Job kind (`JobType`) | Native worker | Proof (file:line) |
+<!-- job-matrix:start -->
+| Job kind (`JobType`) | Native worker | Durable code anchors |
 |---|---|---|
-| `placeholder` | ✅ utility | rs `lib.rs:623` |
-| `image_generate` | ✅ MLX (Mac) / candle (Win), if eligible | rs `lib.rs:629`, gate `jobs_store.rs:4093` |
-| `image_edit` | ⚠️ MLX/candle-eligible edit models only | rs `lib.rs:637`, oracle `jobs_store.rs:2027` |
-| `image_vqa` | ⚠️ MLX, SenseNova-U1 only | rs `lib.rs:652`, oracle `2040` |
-| `image_interleave` | ⚠️ MLX, SenseNova-U1 only | rs `lib.rs:655`, oracle `2040` |
-| `image_detail` | ⚠️ MLX, SDXL/RealVisXL only | rs `lib.rs:643`, oracle `2029` |
-| `image_upscale` | ⚠️ MLX Real-ESRGAN/SeedVR2; **AuraSR dropped on Mac** | rs `lib.rs:752`, oracle `2099` |
-| `video_generate` | ⚠️ MLX/candle-eligible models | rs `lib.rs:669`, oracle `2047` |
-| `video_extend` | ⚠️ MLX, LTX IC-LoRA + Wan TI2V-5B only | rs `lib.rs:669`, oracle `2053` |
-| `video_bridge` | ⚠️ MLX, LTX IC-LoRA + Wan TI2V-5B only | rs `lib.rs:669`, oracle `2053` |
-| `person_replace` | ⚠️ MLX Wan-VACE/SCAIL-2 only | rs `lib.rs:682`, oracle `2066` |
-| `video_upscale` | ⚠️ **Mac-only**, MLX SeedVR2 | rs `lib.rs:761` (`cfg(macos)`), oracle `2116` |
-| `person_detect` | ✅ MLX/candle + CPU procedural preview | rs `lib.rs:726`, oracle `2079` |
-| `person_track` | ✅ MLX/candle + CPU procedural preview | rs `lib.rs:764`, oracle `2079` |
-| `pose_detect` | ✅ MLX RTMW (Mac) / candle (Win) | rs `lib.rs:734`, oracle `2084` |
-| `kps_extract` | ✅ MLX SCRFD (Mac) / candle (Win) | rs `lib.rs:742`, oracle `2090` |
-| `lora_train` | ⚠️ MLX/candle-native families only | rs `lib.rs:690`, oracle `2131` |
-| `training_caption` | ⚠️ MLX/candle JoyCaption only | rs `lib.rs:696`, oracle `2133` |
-| `prompt_refine` | ✅ MLX/candle TextLlm | rs `lib.rs:705`, oracle `2021` |
-| `model_download` | ✅ utility | rs `lib.rs:708`, oracle `2016` |
-| `model_import` | ✅ utility | rs `lib.rs:714`, oracle `2017` |
-| `model_convert` | ✅ utility | rs `lib.rs:717`, oracle `2129` |
-| `lora_import` | ✅ utility | rs `lib.rs:711`, oracle `2018` |
-| `frame_extract` | ✅ utility (FFmpeg) | rs `lib.rs:720`, oracle `2019` |
-| `timeline_export` | ✅ utility (FFmpeg MP4) | rs `lib.rs:723`, oracle `2020` |
+| `placeholder` | ✅ CPU utility | `run_utility_job` → `run_placeholder_job`; `cpu_gpu` |
+| `image_generate` | ⚠️ MLX / candle, eligible models and modes only | `run_utility_job` → `run_image_generate_job`; `job_is_mlx_eligible`; `image_job_is_candle_eligible` |
+| `image_edit` | ⚠️ MLX / candle, eligible edit models only | `run_utility_job` → `run_image_generate_job`; `job_is_mlx_eligible`; `image_job_is_candle_eligible` |
+| `image_vqa` | ⚠️ MLX / candle, SenseNova-U1 only | `run_utility_job` → `run_vqa_job`; `understanding_job_is_mlx_eligible` |
+| `image_interleave` | ⚠️ MLX / candle, SenseNova-U1 only | `run_utility_job` → `run_interleave_job`; `understanding_job_is_mlx_eligible` |
+| `video_generate` | ⚠️ MLX / candle, eligible models and modes only | `run_utility_job` → `run_video_generate_job`; `video_job_is_mlx_eligible`; `video_job_is_candle_eligible` |
+| `video_extend` | ⚠️ MLX LTX/Wan eligible paths; candle Wan-VACE eligible path | `run_utility_job` → `run_video_generate_job`; `video_job_is_mlx_eligible`; `video_job_is_candle_eligible` |
+| `video_bridge` | ⚠️ MLX LTX/Wan eligible paths; candle Wan-VACE eligible path | `run_utility_job` → `run_video_generate_job`; `video_job_is_mlx_eligible`; `video_job_is_candle_eligible` |
+| `person_detect` | ✅ MLX / candle model-backed; CPU procedural preview | `run_utility_job` → `run_person_detect_job`; `required_capability`; `mlx_gpu`; `with_candle_capabilities` |
+| `person_track` | ✅ MLX / candle model-backed; CPU procedural preview | `run_utility_job` → `run_person_track_job`; `required_capability`; `mlx_gpu`; `with_candle_capabilities` |
+| `person_replace` | ⚠️ MLX / candle, eligible Wan-VACE/SCAIL paths | `run_utility_job` → `run_video_generate_job`; `video_job_is_mlx_eligible`; `video_job_is_candle_eligible` |
+| `audio_generate` | ⚠️ native candle audio registry on Mac / CUDA when linked | `run_utility_job` → `run_audio_generate_job`; `inference_runtime::audio`; `mlx_gpu`; `with_candle_capabilities` |
+| `pose_detect` | ✅ MLX/CoreML on Mac / candle/CUDA off-Mac | `run_utility_job` → `run_pose_detect_job`; `mlx_gpu`; `with_candle_capabilities` |
+| `kps_extract` | ✅ MLX SCRFD on Mac / candle SCRFD off-Mac | `run_utility_job` → `run_kps_extract_job`; `mlx_gpu`; `with_candle_capabilities` |
+| `image_upscale` | ⚠️ MLX / candle Real-ESRGAN or SeedVR2; AuraSR dropped | `run_utility_job` → `run_image_upscale_job`; `upscale_job_is_mlx_eligible`; `upscale_job_is_candle_eligible` |
+| `image_detail` | ⚠️ MLX, SDXL/RealVisXL detail models only | `run_utility_job` → `run_image_detail_job`; `job_is_mlx_eligible`; `mlx_gpu` |
+| `image_segment` | ⚠️ Mac-only MLX SAM3 | `run_utility_job` → `run_image_segment_job`; `mlx_gpu`; `mac_rust_supported` |
+| `video_upscale` | ⚠️ MLX on Mac / candle off-Mac, SeedVR2 only | `run_utility_job` → `run_video_upscale_job`; `video_upscale_job_is_mlx_eligible`; `video_upscale_job_is_candle_eligible` |
+| `frame_extract` | ✅ CPU utility (FFmpeg) | `run_utility_job` → `run_frame_extract_job`; `cpu_gpu` |
+| `timeline_export` | ✅ CPU utility (FFmpeg MP4) | `run_utility_job` → `run_timeline_export_job`; `cpu_gpu` |
+| `model_download` | ✅ CPU utility | `run_utility_job` → `run_model_download_job`; `cpu_gpu` |
+| `model_import` | ✅ CPU utility | `run_utility_job` → `run_model_import_job`; `cpu_gpu` |
+| `model_convert` | ✅ CPU utility | `run_utility_job` → `run_model_convert_job`; `cpu_gpu` |
+| `lora_import` | ✅ CPU utility | `run_utility_job` → `run_lora_import_job`; `cpu_gpu` |
+| `lora_download` | ✅ CPU utility | `run_utility_job` → `run_lora_download_job`; `cpu_gpu` |
+| `lora_train` | ⚠️ MLX / candle, native trainable families only | `run_utility_job` → `run_lora_train_job`; `training_job_is_mlx_eligible`; `training_job_is_candle_eligible` |
+| `control_training` | ⚠️ candle ControlNet trainer only | `run_utility_job` → `run_control_training_job`; `required_capability`; `is_real_training_job`; `training_job_is_candle_eligible` |
+| `training_caption` | ⚠️ MLX / candle JoyCaption only | `run_utility_job` → `run_training_caption_job`; `caption_job_is_mlx_eligible` |
+| `dataset_analysis` | ⚠️ MLX CLIP lane when linked; no candle CLIP lane yet | `run_utility_job` → `run_dataset_analysis_job`; `mlx_gpu`; `mac_rust_supported` |
+| `dataset_upscale` | ✅ MLX/CoreML on Mac / candle/CUDA off-Mac | `run_utility_job` → `run_dataset_upscale_job`; `mlx_gpu`; `with_candle_capabilities` |
+| `dataset_face_analysis` | ✅ MLX face stack on Mac / candle face stack off-Mac | `run_utility_job` → `run_dataset_face_analysis_job`; `mlx_gpu`; `with_candle_capabilities` |
+| `face_likeness_compare` | ✅ MLX face stack on Mac / candle face stack off-Mac | `run_utility_job` → `run_face_likeness_compare_job`; `mlx_gpu`; `with_candle_capabilities` |
+| `prompt_refine` | ⚠️ native TextLlm provider when its registry lane is linked | `run_utility_job` → `run_prompt_refine_job`; `registry_capabilities`; `mac_rust_supported`; `candle_supported` |
+<!-- job-matrix:end -->
 
 **Not job kinds** (routing/readiness capabilities, not dispatchable rows):
 `person_detect_preview`, `person_track_preview` (Rust CPU procedural),
@@ -102,17 +118,18 @@ conditional/partial.
 ## Coverage notes
 
 - **Utility family (CPU, any platform):** `placeholder`, `model_download`,
-  `model_import`, `model_convert`, `lora_import`, `frame_extract`,
-  `timeline_export` — served by the Rust CPU utility worker.
-- **macOS-only:** `video_upscale` — native SeedVR2 has no lane off macOS
-  (`jobs_store.rs:2112`, `lib.rs:758`). Unsupported elsewhere by design.
+  `model_import`, `model_convert`, `lora_import`, `lora_download`,
+  `frame_extract`, `timeline_export` — served by the Rust CPU utility worker.
+- **Platform-specific:** `image_segment` is Mac-only MLX. `video_upscale` is
+  SeedVR2 on both native GPU lanes: MLX on Mac and candle/CUDA off-Mac.
 - **Generation kinds:** each ⚠️ row serves the MLX/candle-eligible subset of its
   model/payload shapes; a shape outside the native lane is refused (no torch
   fallback), so it stays queued rather than silently downgraded.
 
 ## Maintenance
 
-When adding a `JobType` variant, the compiler will force you to update
-`mac_rust_supported` in `jobs_store.rs`. Also update: the dispatch arm in
-`lib.rs::run_utility_job`, the capability mirrors in `contracts.rs`, and **this
-matrix**.
+When adding a `JobType` variant, the routing-oracle matches force an explicit
+backend decision. Also update the dispatch arm in `lib.rs::run_utility_job`, the
+capability mirrors in `contracts.rs`, and this matrix. The
+`architecture_matrix_covers_every_known_job_type_and_dispatch_arm` test guards
+the enum/dispatch/documentation boundary against silent drift.

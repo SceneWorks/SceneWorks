@@ -755,10 +755,10 @@ pub(crate) fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 }
 
 /// Whether a `video_upscale` job is MLX-eligible (epic 4811 / sc-4816). The only Mac engine is the
-/// native-MLX SeedVR2 upscaler (`mlx-gen-seedvr2`); there is no torch fallback (mac-only). A job with
-/// any other engine is refused by the mlx worker — though no other backend advertises `video_upscale`
-/// today, so an unsupported engine simply has nowhere to run (surfaced as unsupported, not silently
-/// dropped). Defaults to `seedvr2` when the payload omits the engine.
+/// native-MLX SeedVR2 upscaler (`mlx-gen-seedvr2`); there is no torch fallback. A job with any other
+/// engine is refused by the mlx worker. The off-Mac candle lane mirrors this predicate for its
+/// SeedVR2 provider, so both native GPU backends enforce the same contract boundary. Defaults to
+/// `seedvr2` when the payload omits the engine.
 pub(crate) fn video_upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if !matches!(job.job_type, JobType::VideoUpscale) {
         return false;
