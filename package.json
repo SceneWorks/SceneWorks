@@ -17,6 +17,8 @@
     "hooks:install": "git config core.hooksPath scripts/git-hooks",
     "check:docker:rust-api:self-test": "node --test scripts/check-docker-api-runtime.test.mjs",
     "check:docker:rust-api": "node scripts/check-docker-api-runtime.mjs",
+    "check:docker:runpod": "node scripts/check-runpod-image.mjs",
+    "check:docker:runpod:supervisor": "bash scripts/check-runpod-supervisor.sh",
     "bump:inference": "node scripts/bump-inference.mjs",
     "bump:inference:self-test": "node scripts/bump-inference.mjs --self-test",
     "rust:fmt": "cargo fmt --all -- --check",
