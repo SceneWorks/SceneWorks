@@ -3,11 +3,12 @@ import { readFile } from "node:fs/promises";
 
 const templatePath = "config/runpod-template.json";
 const docPath = "docs/deploy-runpod.md";
-const [templateText, doc, workflow, readme] = await Promise.all([
+const [templateText, doc, workflow, readme, dockerfile] = await Promise.all([
   readFile(templatePath, "utf8"),
   readFile(docPath, "utf8"),
   readFile(".github/workflows/publish-runpod.yml", "utf8"),
   readFile("README.md", "utf8"),
+  readFile("docker/rust.Dockerfile", "utf8"),
 ]);
 
 const template = JSON.parse(templateText);
@@ -87,6 +88,20 @@ for (const contract of [
   ":latest",
   "vX.Y.Z",
   "RUNPOD_SECRET_sceneworks_access_token",
+  "CUDA_COMPUTE_CAP=80",
+  "compute_80",
+  "sm_80",
+  "sm_90",
+  "sm_120",
+  "sm_75",
+  "sm_100",
+  "Ampere",
+  "Ada",
+  "Hopper",
+  "Turing",
+  "Datacenter Blackwell",
+  "Unsupported in v1",
+  "sc-14423",
 ]) {
   assert.ok(doc.includes(contract), `${docPath} is missing ${contract}`);
 }
@@ -110,6 +125,28 @@ assert.ok(
 assert.ok(
   readme.includes("docs/deploy-runpod.md"),
   "README must link to the turnkey RunPod guide",
+);
+assert.match(
+  dockerfile,
+  /^ARG CUDA_COMPUTE_CAP=80$/m,
+  "RunPod's documented v1 baseline must remain compute capability 8.0",
+);
+for (const contract of [
+  "cuobjdump --list-elf /out/sceneworks-rust-worker",
+  "cuobjdump --list-ptx /out/sceneworks-rust-worker",
+  "sm_80\\.cubin",
+  "sm_90\\.cubin",
+  "sm_120\\.cubin",
+  "sm_120\\.ptx",
+]) {
+  assert.ok(
+    dockerfile.includes(contract),
+    `RunPod image build is missing the quantized-kernel guard ${contract}`,
+  );
+}
+assert.ok(
+  !dockerfile.includes("find target/release/build"),
+  "RunPod image build must inspect the shipped worker, not a cached Cargo archive candidate",
 );
 
 console.log("SceneWorks RunPod deployment template and documentation contract check passed.");

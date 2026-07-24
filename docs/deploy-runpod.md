@@ -118,6 +118,50 @@ RunPod documents network-volume attachment and lifecycle constraints in
 [Network volumes](https://docs.runpod.io/storage/network-volumes), and the
 template fields in [Manage Pod templates](https://docs.runpod.io/pods/templates/manage-templates).
 
+## Supported GPUs
+
+The v1 image uses `CUDA_COMPUTE_CAP=80`, and its complete support contract has
+two parts:
+
+- Candle's general CUDA kernels include `compute_80` PTX, which the NVIDIA
+  driver can JIT for compute capability 8.0 or newer.
+- The quantized GGUF/MoE kernels are a separate fat binary with `sm_80`,
+  `sm_90`, and `sm_120` cubins plus `compute_120` PTX. NVIDIA's same-major
+  binary compatibility lets the `sm_80` cubin run on 8.6 and 8.9 GPUs.
+
+The image build inspects that quantized-kernel fat binary with `cuobjdump`
+before packaging it. Based on that whole-image contract, use this matrix:
+
+| Architecture | Compute capability | Common RunPod GPUs | v1 status |
+| --- | --- | --- | --- |
+| Ampere | 8.0, 8.6 | A100, A30, A40, A10, RTX A6000/A5000/A4000, RTX 30-series | **Supported.** `sm_80` covers the quantized path; the general path carries `compute_80` PTX. |
+| Ada | 8.9 | L4, L40/L40S, RTX 6000/5000/4500 Ada, RTX 40-series | **Supported.** NVIDIA guarantees an `sm_80` cubin on later 8.x devices. |
+| Hopper | 9.0 | H100, H200 | **Supported.** The quantized path includes native `sm_90`; the general path JITs `compute_80` PTX. |
+| Consumer/workstation Blackwell | 12.0 | RTX PRO 6000/5000/4500/4000/2000 Blackwell, RTX 50-series | **Supported.** The quantized path includes native `sm_120`; the general path JITs `compute_80` PTX. |
+| Turing | 7.5 | T4, RTX 20-series, Quadro RTX | **Unsupported in v1.** Neither `compute_80` PTX nor an 8.x-or-newer cubin can run backward on `sm_75`. |
+| Datacenter Blackwell | 10.0, 10.3 | B200/GB200, B300/GB300 | **Unsupported in v1.** General kernels can JIT from `compute_80`, but the quantized fat binary has no `sm_100`/`sm_103` cubin and its `compute_120` PTX cannot JIT backward. |
+
+On 2026-07-24, `cuobjdump` inspection of the worker executable extracted
+from the public validation manifest
+`sha256:fdd60e35655708915ea046a9db86093360a81c2946f08fe63cef58f59f9ab065`
+reported `sm_80`, `sm_90`, and `sm_120` cubins plus `sm_120` PTX. This
+checks the shipped artifact, while the Docker build guard prevents future
+publications from dropping those targets unnoticed.
+
+This is an image-level support statement, not a promise that every model fits
+every supported card. Check the model's VRAM requirement separately. RunPod's
+GPU inventory also changes over time; confirm the exact product name and
+compute capability shown for the Pod. NVIDIA maintains the authoritative
+[GPU compute-capability table](https://developer.nvidia.com/cuda/gpus), and its
+[CUDA programming guide](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/cuda-platform.html)
+defines cubin and PTX compatibility.
+
+For v1, SceneWorks deliberately keeps the `sm_80` baseline and does not add
+Turing code to this already-large image. Expanding the general and quantized
+kernel builds together for Turing and datacenter Blackwell is tracked in
+`sc-14423`; changing only the top-level `CUDA_COMPUTE_CAP` would not cover every
+native CUDA archive.
+
 ## Open and authenticate the UI
 
 RunPod proxy URLs have the form
