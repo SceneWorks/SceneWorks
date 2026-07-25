@@ -45,9 +45,9 @@ use super::downloads::{
 #[cfg(target_os = "macos")]
 use super::gpu::mlx_gpu;
 use super::gpu::{
-    cpu_gpu, cpu_worker_id, fallback_gpu, gpu_worker_id, parse_max_compute_cap,
-    parse_nvidia_smi_gpus, run_bounded_command, visible_gpu_ids, worker_capabilities_with_utility,
-    GpuDiscoveryAttempt, GpuDiscoveryFailure,
+    cached_gpu_utilization_with, cpu_gpu, cpu_worker_id, fallback_gpu, gpu_worker_id,
+    parse_max_compute_cap, parse_nvidia_smi_gpus, run_bounded_command, visible_gpu_ids,
+    worker_capabilities_with_utility, GpuDiscoveryAttempt, GpuDiscoveryFailure,
 };
 use super::media_jobs::{
     candidate_people, concat_file_contents, crossfade_duration, output_dimensions, plan_segments,
@@ -80,11 +80,11 @@ use super::{
     copy_lora_source, fresh_asset_id, heartbeat_while_blocking, import_lora_source_file_as,
     import_lora_source_path, normalize_app_managed_cache_path, now_rfc3339, parse_credentials_env,
     resolve_model_convert_output, resolve_model_import_target, safe_download_dir,
-    safe_project_path, value_f64, wan_moe_pair_filenames, write_model_download_receipt,
-    write_model_install_marker, CredentialScheme, IdleHeartbeat, JsonObject,
-    SafetensorsHeaderError, Settings, WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES,
-    DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
-    MODEL_CONVERSION_BACKUPS_DIR_NAME,
+    safe_project_path, value_f64, wait_for_shutdown_latch, wan_moe_pair_filenames,
+    write_model_download_receipt, write_model_install_marker, CredentialScheme, IdleHeartbeat,
+    JsonObject, SafetensorsHeaderError, Settings, WorkerCredential, WorkerError,
+    DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS,
+    INSTALL_MARKER, MODEL_CONVERSION_BACKUPS_DIR_NAME,
 };
 
 // HF-CLI input validation, downloaded-model family detection, atomic converted-dir finalize, and the

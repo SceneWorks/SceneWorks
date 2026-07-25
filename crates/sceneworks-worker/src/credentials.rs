@@ -12,11 +12,22 @@ pub enum CredentialScheme {
 
 /// A per-host download credential injected via `SCENEWORKS_CREDENTIALS`, matched
 /// against LoRA/model `sourceUrl` hosts.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WorkerCredential {
     pub host: String,
     pub token: String,
     pub scheme: CredentialScheme,
+}
+
+impl fmt::Debug for WorkerCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkerCredential")
+            .field("host", &self.host)
+            .field("token", &"***")
+            .field("scheme", &self.scheme)
+            .finish()
+    }
 }
 
 /// Parse the `SCENEWORKS_CREDENTIALS` env value: a JSON object mapping host to

@@ -305,20 +305,6 @@ pub(crate) async fn ensure_cached_file_verified(
             return Ok(target.to_path_buf());
         }
     }
-    if expected_size.is_none() && target.exists() {
-        if let Some(expected) = expected_sha256 {
-            verify_file_sha256(
-                context.api,
-                context.settings,
-                context.job_id,
-                target,
-                expected,
-                label,
-            )
-            .await?;
-        }
-        return Ok(target.to_path_buf());
-    }
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }

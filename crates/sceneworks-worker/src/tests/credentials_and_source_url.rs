@@ -27,6 +27,25 @@ fn parse_credentials_env_tolerates_invalid_json() {
 }
 
 #[test]
+fn secret_bearing_debug_output_is_redacted() {
+    let mut settings =
+        test_settings("https://huggingface.co".to_owned(), Some("hf-secret-token"));
+    settings.access_token = Some("api-secret-token".to_owned());
+    settings.credentials = vec![WorkerCredential {
+        host: "civitai.com".to_owned(),
+        token: "download-secret-token".to_owned(),
+        scheme: CredentialScheme::Bearer,
+    }];
+
+    let debug = format!("{settings:?}");
+    assert!(!debug.contains("hf-secret-token"));
+    assert!(!debug.contains("api-secret-token"));
+    assert!(!debug.contains("download-secret-token"));
+    assert!(debug.contains("***"));
+    assert!(debug.contains("civitai.com"));
+}
+
+#[test]
 fn credential_for_host_matches_case_insensitively() {
     let mut settings = test_settings("https://huggingface.co".to_owned(), None);
     settings.credentials = vec![WorkerCredential {

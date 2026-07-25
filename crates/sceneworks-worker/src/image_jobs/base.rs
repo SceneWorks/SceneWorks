@@ -1720,15 +1720,6 @@ async fn ensure_ideogram_tier_present(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn quant_int(value: &Value) -> Option<i64> {
-    if value.is_boolean() {
-        return None;
-    }
-    value
-        .as_i64()
-        .or_else(|| value.as_str()?.trim().parse().ok())
-}
-
 /// Resolve quantization: the explicit `advanced.quantTier: "nvfp4"` label → `advanced.mlxQuantize` →
 /// `manifest.mlx.quantize` → Q8 default. The engine supports Q4/Q8/NVFP4; map (<=0 → dense, <=4 → Q4,
 /// else Q8). Returns the engine quant + the effective bit count for the recipe (None = dense bf16).

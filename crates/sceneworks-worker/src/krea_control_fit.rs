@@ -326,13 +326,6 @@ pub(crate) fn incurred_peak_gb(
     Some(peak.max(0.0))
 }
 
-/// Parse a JSON float from either a number or a numeric string (mirrors [`crate::vram_gate`]'s helper).
-fn json_f64(value: &Value) -> Option<f64> {
-    value
-        .as_f64()
-        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

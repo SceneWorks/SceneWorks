@@ -751,20 +751,6 @@ fn video_weights_too_big_error(
     ))
 }
 
-/// Parse a JSON uint/int from either a number or a numeric string (mirrors base.rs `quant_int`).
-fn quant_int(value: &Value) -> Option<i64> {
-    value
-        .as_i64()
-        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
-}
-
-/// Parse a JSON float from either a number or a numeric string.
-fn json_f64(value: &Value) -> Option<f64> {
-    value
-        .as_f64()
-        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
