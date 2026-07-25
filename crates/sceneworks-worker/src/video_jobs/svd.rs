@@ -49,7 +49,10 @@ pub(super) fn svd_available(request: &VideoRequest, settings: &Settings) -> bool
 
 /// Whether `dir` is a usable SVD-XT snapshot — each component subdir carries the safetensors the
 /// engine reads (preferring the on-disk `.fp16` variant, else the full-precision file).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(test, not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn svd_dir_is_complete(dir: &Path) -> bool {
     let has = |sub: &str, stem: &str| {
         dir.join(sub)
