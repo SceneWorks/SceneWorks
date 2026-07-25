@@ -1,6 +1,6 @@
 import process from "node:process";
 
-const apiBaseUrl = process.env.SCENEWORKS_API_BASE_URL ?? "http://localhost:8000";
+const apiBaseUrl = process.env.SCENEWORKS_API_BASE_URL ?? "http://localhost:8010";
 
 const response = await fetch(`${apiBaseUrl}/api/v1/health`);
 if (!response.ok) {

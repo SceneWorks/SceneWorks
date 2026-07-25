@@ -65,11 +65,6 @@ $resultsPath = Join-Path $DataDir "lens-smoke-results-$stamp.json"
 $apiProc = $null; $workerProc = $null
 $results = @()
 
-# Clean slate: kill any leftover API/worker from a prior run (else they hold port $Port / the GPU).
-Get-Process -ErrorAction SilentlyContinue |
-  Where-Object { $_.ProcessName -in @("sceneworks-rust-api", "sceneworks-rust-worker") } |
-  ForEach-Object { try { Stop-Process -Id $_.Id -Force -ErrorAction Stop } catch {} }
-Start-Sleep -Seconds 1
 # Remove any stale recent-projects.json: POST /projects reads it, and a corrupt/BOM copy from a prior
 # run makes the API fail project creation with "expected value at line 1 column 1". A clean BOM-less
 # one is written after the project is created.

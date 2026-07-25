@@ -3,6 +3,7 @@ import path from "node:path";
 import process from "node:process";
 import { promptGuideRequiredForModel } from "../apps/web/src/promptGuideContract.js";
 import { describeXmlCommentDefect, findXmlCommentDefects } from "../apps/web/src/entitlementsPlistContract.js";
+import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 const root = process.cwd();
 
@@ -267,49 +268,6 @@ async function assertEmbeddedApiDockerTarget() {
       `${dockerfilePath} rust-api-embed must inherit the unchanged rust-api runtime`,
     );
   }
-}
-
-function stripJsoncComments(body) {
-  let result = "";
-  let inString = false;
-  let escaped = false;
-  for (let index = 0; index < body.length; index += 1) {
-    const char = body[index];
-    const next = body[index + 1];
-    if (inString) {
-      result += char;
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === '"') {
-        inString = false;
-      }
-      continue;
-    }
-    if (char === '"') {
-      inString = true;
-      result += char;
-      continue;
-    }
-    if (char === "/" && next === "/") {
-      while (index < body.length && body[index] !== "\n") {
-        index += 1;
-      }
-      result += "\n";
-      continue;
-    }
-    if (char === "/" && next === "*") {
-      index += 2;
-      while (index < body.length && !(body[index] === "*" && body[index + 1] === "/")) {
-        index += 1;
-      }
-      index += 1;
-      continue;
-    }
-    result += char;
-  }
-  return result;
 }
 
 async function readJsonc(relativePath) {

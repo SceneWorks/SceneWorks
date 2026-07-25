@@ -44,54 +44,11 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MODEL_MANIFEST = "config/manifests/builtin.models.jsonc";
 const LORA_MANIFEST = "config/manifests/builtin.loras.jsonc";
-
-// -- JSONC parsing (manifests carry // comments). Mirrors scripts/check-no-nc-weights.mjs. --
-function stripJsoncComments(body) {
-  let result = "";
-  let inString = false;
-  let escaped = false;
-  for (let index = 0; index < body.length; index += 1) {
-    const char = body[index];
-    const next = body[index + 1];
-    if (inString) {
-      result += char;
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === '"') {
-        inString = false;
-      }
-      continue;
-    }
-    if (char === '"') {
-      inString = true;
-      result += char;
-      continue;
-    }
-    if (char === "/" && next === "/") {
-      while (index < body.length && body[index] !== "\n") {
-        index += 1;
-      }
-      result += "\n";
-      continue;
-    }
-    if (char === "/" && next === "*") {
-      index += 2;
-      while (index < body.length && !(body[index] === "*" && body[index + 1] === "/")) {
-        index += 1;
-      }
-      index += 1;
-      continue;
-    }
-    result += char;
-  }
-  return result;
-}
 
 // Glob semantics must mirror the worker's `pattern_matches` (imports.rs), which uses the
 // Rust `glob` crate with default MatchOptions — `*` and `?` DO cross `/` there

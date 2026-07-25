@@ -54,6 +54,7 @@ on:
       - "config/manifests/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".github/actions/prepare-rust-runner/**"
       - ".github/workflows/windows-candle.yml"
   pull_request:
     branches: [main]
