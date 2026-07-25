@@ -1432,18 +1432,37 @@ fn receipt_file_sets(
 /// leading dir), require that subdir to pass the same per-component weight check the cache-health path
 /// uses. A non-diffusers set (no `<tier>/model_index.json`, or a flat single-variant filter) keeps the
 /// prior file-existence contract.
-fn snapshot_tier_is_loadable(snapshot: &FsPath, files: &[String]) -> bool {
+///
+/// `family_complete` is the model's shared per-tier predicate ([`no_model_index_family_predicate`]) for
+/// a no-`model_index` MLX turnkey, or `None`. Without it this check was diffusers-only, so a FLAT tier
+/// (SenseNova/SANA/Boogu/Anima) passed unconditionally: a backfill could mint a "complete" receipt for a
+/// tier whose tokenizer never landed, and that receipt then kept the model reading installed through the
+/// usable-stale path even once the cache-health lane had correctly demoted it (sc-14432).
+fn snapshot_tier_is_loadable(
+    snapshot: &FsPath,
+    files: &[String],
+    family_complete: Option<fn(&FsPath) -> bool>,
+) -> bool {
     match tier_subdir_name(files) {
         Some(tier) => {
             let tier_dir = snapshot.join(&tier);
-            !path_is_readable_file(&tier_dir.join("model_index.json"))
-                || diffusers_snapshot_health(&tier_dir).installed
+            let diffusers_ok = !path_is_readable_file(&tier_dir.join("model_index.json"))
+                || diffusers_snapshot_health(&tier_dir).installed;
+            match family_complete {
+                Some(complete) => diffusers_ok && complete(&tier_dir),
+                None => diffusers_ok,
+            }
         }
         None => true,
     }
 }
 
-fn receipt_files_present(data_dir: &FsPath, repo: &str, receipt: &ReceiptFileSet) -> bool {
+fn receipt_files_present(
+    data_dir: &FsPath,
+    repo: &str,
+    receipt: &ReceiptFileSet,
+    family_complete: Option<fn(&FsPath) -> bool>,
+) -> bool {
     !receipt.files.is_empty()
         && huggingface_repo_cache_path(data_dir, repo)
             .map(|root| {
@@ -1457,7 +1476,9 @@ fn receipt_files_present(data_dir: &FsPath, repo: &str, receipt: &ReceiptFileSet
                     })
                     // A torn tier's recorded files all exist but the install can't load — it must not
                     // count as a "usable stale" install that keeps the model falsely installed.
-                    .filter(|snapshot| snapshot_tier_is_loadable(snapshot, &receipt.files))
+                    .filter(|snapshot| {
+                        snapshot_tier_is_loadable(snapshot, &receipt.files, family_complete)
+                    })
                     .collect::<Vec<_>>();
                 receipt
                     .revision
@@ -1476,6 +1497,18 @@ fn receipt_files_present(data_dir: &FsPath, repo: &str, receipt: &ReceiptFileSet
 // two first-seen entries from truncating the same backfill file at once.
 static RECEIPT_BACKFILL_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// [`no_model_index_family_predicate`] for a whole manifest `model` entry — the receipt lanes carry the
+/// model, not a pre-split family/id pair.
+fn model_family_tier_predicate(model: &Value) -> Option<fn(&FsPath) -> bool> {
+    no_model_index_family_predicate(
+        model
+            .get("family")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        model.get("id").and_then(Value::as_str).unwrap_or_default(),
+    )
+}
+
 fn backfill_current_receipt(
     managed_path: &FsPath,
     model: &Value,
@@ -1486,6 +1519,7 @@ fn backfill_current_receipt(
     if !receipt_file_sets(managed_path, &context.repo, Some(model_id)).is_empty() {
         return;
     }
+    let family_complete = model_family_tier_predicate(model);
     let receipts = model
         .get("downloads")
         .and_then(Value::as_array)
@@ -1501,8 +1535,10 @@ fn backfill_current_receipt(
             })?;
             // Never manufacture a receipt for a torn tier: a `<tier>/*` glob matches as soon as one
             // metadata file exists, so backfilling it would record a "complete" install that cannot
-            // load. Require the tier to actually hold its weights before preserving it (sc-13076).
-            if !snapshot_tier_is_loadable(&snapshot, &files) {
+            // load. Require the tier to actually hold its weights before preserving it (sc-13076), and
+            // — for a no-`model_index` turnkey, where "holds its weights" is family-specific — to pass
+            // the shared per-tier predicate too (sc-14432).
+            if !snapshot_tier_is_loadable(&snapshot, &files, family_complete) {
                 return None;
             }
             let resolved = snapshot_files(&snapshot).into_iter()
@@ -1753,6 +1789,64 @@ mod download_receipt_tests {
         );
     }
 
+    /// sc-14432: the RECEIPT lane was diffusers-only, so a flat no-`model_index` tier passed
+    /// `snapshot_tier_is_loadable` unconditionally. A receipt recording exactly what the `<tier>/*` glob
+    /// matched (the very shape the story cited as evidence of a bad re-host) therefore kept the model
+    /// reading installed through the usable-stale path even once the cache-health lane had correctly
+    /// demoted the tier. Both receipt halves — this one and `backfill_current_receipt` — now consult the
+    /// shared family predicate.
+    #[test]
+    fn a_torn_flat_tier_is_not_counted_as_a_usable_stale_install() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "SceneWorks/sensenova-u1-8b-mlx";
+        let model = json!({
+            "id": "sensenova_u1_8b",
+            "family": "sensenova-u1",
+            "downloads": [{ "provider": "huggingface", "repo": repo, "variant": "q4", "files": ["q4/*"] }]
+        });
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        let tier = snapshot.join("q4");
+        std::fs::create_dir_all(&tier).unwrap();
+        // The backbone landed; the tokenizer never did, and there is no sibling tier to borrow one from.
+        std::fs::write(tier.join("model.safetensors"), b"weights").unwrap();
+        std::fs::write(tier.join("config.json"), b"{}").unwrap();
+
+        let marker_dir = data_dir.join("models").join(safe_download_dir(repo));
+        let marker = marker_dir.join(".sceneworks-download-complete.json");
+
+        // A pre-existing receipt (written before this tightening, or by a download that recorded exactly
+        // what the glob matched) whose every recorded file DOES exist — the usable-stale route. The tier
+        // still cannot load, so it must not resurrect the install.
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        std::fs::write(
+            &marker,
+            serde_json::to_vec(&json!({
+                "schemaVersion": 2, "repo": repo, "modelId": "sensenova_u1_8b", "variant": "q4",
+                "manifestFiles": ["q4/*"],
+                "resolvedFiles": ["q4/model.safetensors", "q4/config.json"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            !state.installed,
+            "a receipt whose files all exist must not keep a torn flat tier installed"
+        );
+
+        // Mutation check: the tokenizer arriving makes the tier genuinely loadable, and the SAME receipt
+        // now legitimately counts — proving the assertion above discriminates on loadability, not on the
+        // receipt merely being present.
+        std::fs::write(tier.join("tokenizer.json"), b"{}").unwrap();
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(state.installed);
+    }
+
     #[test]
     fn complete_pre_receipt_install_is_backfilled_and_protected_after_rename() {
         let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
@@ -1868,21 +1962,21 @@ mod download_receipt_tests {
 
         let files = receipt_file_sets(&managed, repo, None);
         assert_eq!(files[0].files, vec!["old.safetensors".to_owned()]);
-        assert!(receipt_files_present(data_dir, repo, &files[0]));
+        assert!(receipt_files_present(data_dir, repo, &files[0], None));
         assert!(!huggingface_cache_health(&cache, &["new.safetensors".to_owned()]).installed);
 
         let ambiguous = cache.join("snapshots/rev-b");
         std::fs::create_dir_all(&ambiguous).unwrap();
         std::fs::write(ambiguous.join("old.safetensors"), b"other weights").unwrap();
         assert!(
-            !receipt_files_present(data_dir, repo, &files[0]),
+            !receipt_files_present(data_dir, repo, &files[0], None),
             "legacy receipt must identify one snapshot"
         );
 
         std::fs::remove_file(snapshot.join("old.safetensors")).unwrap();
         std::fs::remove_file(ambiguous.join("old.safetensors")).unwrap();
         assert!(
-            !receipt_files_present(data_dir, repo, &files[0]),
+            !receipt_files_present(data_dir, repo, &files[0], None),
             "torn stale install is missing"
         );
     }
@@ -2436,6 +2530,7 @@ fn install_state_for(
                 if installed
                     && no_model_index_tier_is_torn(
                         family,
+                        model.get("id").and_then(Value::as_str).unwrap_or_default(),
                         &download_context.files,
                         cache_path.as_deref(),
                         &managed_path,
@@ -2463,9 +2558,14 @@ fn install_state_for(
             backfill_current_receipt(&managed_path, model, &download_context, data_dir);
         }
         let stale_files_present = !cache_installed
-            && receipt_file_sets
-                .iter()
-                .any(|receipt| receipt_files_present(data_dir, &download_context.repo, receipt));
+            && receipt_file_sets.iter().any(|receipt| {
+                receipt_files_present(
+                    data_dir,
+                    &download_context.repo,
+                    receipt,
+                    model_family_tier_predicate(model),
+                )
+            });
         let breaking_update = model
             .get("breaking")
             .and_then(Value::as_bool)
@@ -2614,12 +2714,23 @@ fn model_has_variant_matrix(model: &Value) -> bool {
 // (sc-13513). Anima is included so its convert-output states (`mlx_convert_output_tier_states`) tighten;
 // on its variants[] source download the exact-path `files` filter already reports torn accurately, so
 // this is a no-op there.
-fn no_model_index_family_predicate(family: &str) -> Option<fn(&FsPath) -> bool> {
+//
+// `model_id` refines the choice where one family spans two on-disk contracts: the `sensenova-u1`
+// family covers both the base ids and the distilled `_fast` twins, and only the latter need the
+// 8-step distill accounted for (sc-14432).
+fn no_model_index_family_predicate(family: &str, model_id: &str) -> Option<fn(&FsPath) -> bool> {
     use sceneworks_core::mlx_tier_completeness as tc;
     match family {
         "anima" => Some(tc::anima_tier_complete),
         "boogu" => Some(tc::boogu_tier_complete),
         "sana" => Some(tc::sana_tier_complete),
+        // sc-14432: the SenseNova-U1 turnkeys ship a FLAT unified tier (backbone + config at the tier
+        // root, no `model_index.json`), so without a predicate a torn tier read `installed` and then
+        // failed at load — "complete but unloadable", with re-downloading the only (useless) repair.
+        // The `_fast` twins additionally need the pre-merged distill marker to be loadable, so the id —
+        // not the family — picks the predicate. Dispatched through the SHARED id list the worker's tier
+        // resolver uses, so an id the worker would not tighten is not tightened here either.
+        "sensenova-u1" => tc::sensenova_tier_predicate(model_id),
         _ => None,
     }
 }
@@ -2635,11 +2746,12 @@ fn no_model_index_family_predicate(family: &str) -> Option<fn(&FsPath) -> bool> 
 // location must not be dragged down by a sibling that lacks it.
 fn no_model_index_tier_is_torn(
     family: &str,
+    model_id: &str,
     files: &[String],
     cache_path: Option<&FsPath>,
     managed_path: &FsPath,
 ) -> bool {
-    let Some(complete) = no_model_index_family_predicate(family) else {
+    let Some(complete) = no_model_index_family_predicate(family, model_id) else {
         return false;
     };
     let Some(tier) = tier_subdir_name(files) else {
@@ -2674,6 +2786,7 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
         .get("family")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let model_id = model.get("id").and_then(Value::as_str).unwrap_or_default();
     // Emitted variant keys must be unique: the single-variant case is exactly one "default", and a
     // quant matrix has one entry per distinct q4/q8/bf16 tier. Guard against a manifest that maps two
     // supported entries to the same key (unlabeled alternate sources both collapsing to "default", or
@@ -2729,7 +2842,13 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
             // tier is never promoted, and a family without a bespoke predicate (diffusers turnkeys,
             // accurate via the `model_index.json` augmentation) is untouched.
             if installed
-                && no_model_index_tier_is_torn(family, &files, cache_path.as_deref(), &managed_path)
+                && no_model_index_tier_is_torn(
+                    family,
+                    model_id,
+                    &files,
+                    cache_path.as_deref(),
+                    &managed_path,
+                )
             {
                 installed = false;
                 cache_incomplete = true;
@@ -2887,8 +3006,12 @@ fn mlx_convert_output_tiers(converted_dir: &FsPath) -> Vec<&'static str> {
 /// predicate the worker's `anima_tier_subdir` resolver uses ([`no_model_index_family_predicate`]), so a
 /// torn convert output reads `incomplete` rather than `installed`. Any other convert family keeps the
 /// coarse [`tier_subdir_has_weights`] backbone probe.
-fn mlx_convert_output_tier_states(converted_dir: &FsPath, family: &str) -> Vec<Value> {
-    let predicate = no_model_index_family_predicate(family);
+fn mlx_convert_output_tier_states(
+    converted_dir: &FsPath,
+    family: &str,
+    model_id: &str,
+) -> Vec<Value> {
+    let predicate = no_model_index_family_predicate(family, model_id);
     ["q4", "q8", "bf16"]
         .into_iter()
         .map(|tier| {
@@ -2997,6 +3120,11 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
+                let model_id = object
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
                 object.insert("mlxTiers".to_owned(), json!(tiers));
                 // The FULL possible tier set with per-tier state, so the Studio shows un-converted tiers
                 // disabled rather than omitting them (the web reads `mlxTierStates` in preference to the
@@ -3004,7 +3132,9 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
                 // present), matching `mlxTiers` — an unconverted model still renders no picker.
                 object.insert(
                     "mlxTierStates".to_owned(),
-                    Value::Array(mlx_convert_output_tier_states(converted, &family)),
+                    Value::Array(mlx_convert_output_tier_states(
+                        converted, &family, &model_id,
+                    )),
                 );
             }
         }
@@ -4882,6 +5012,82 @@ mod variant_install_tests {
         assert!(states.iter().find(|s| s.variant == "q8").unwrap().installed);
     }
 
+    /// A SenseNova-U1 quant-matrix turnkey (family `sensenova-u1`). Ships a FLAT unified tier — packed
+    /// backbone + `config.json` + tokenizer files at the tier root, NO `model_index.json` and no
+    /// component subdirs — so the diffusers augmentation is a no-op and the tightening comes from the
+    /// shared `sensenova_tier_complete` (sc-14432).
+    fn sensenova_matrix_model(repo: &str) -> Value {
+        json!({
+            "id": "sensenova_u1_8b",
+            "family": "sensenova-u1",
+            "downloads": [
+                { "provider": "huggingface", "repo": repo, "variant": "q4", "default": true, "files": ["q4/*"] },
+                { "provider": "huggingface", "repo": repo, "variant": "q8", "files": ["q8/*"] },
+                { "provider": "huggingface", "repo": repo, "variant": "bf16", "files": ["bf16/*"] }
+            ]
+        })
+    }
+
+    /// Seed a SenseNova quant tier: always the packed backbone + `config.json`, plus its own
+    /// `tokenizer.json` only when `with_tokenizer`. A tokenizer-less tier still matches its `<tier>/*`
+    /// glob on the backbone, and loads ONLY if a sibling tier carries a tokenizer to borrow.
+    fn seed_sensenova_tier(data_dir: &FsPath, repo: &str, tier: &str, with_tokenizer: bool) {
+        let cache = huggingface_repo_cache_path(data_dir, repo).expect("cache path");
+        let root = cache.join("snapshots").join("abc123").join(tier);
+        let write = |rel: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        };
+        write("model.safetensors");
+        write("config.json");
+        if with_tokenizer {
+            write("tokenizer.json");
+        }
+    }
+
+    /// sc-14432: a SenseNova tier whose `tokenizer.json` never landed cleared the coarse `<tier>/*` glob
+    /// on its backbone and reported a green "Installed" badge, then died at load on the absent
+    /// tokenizer — "complete but unloadable", with no repair offered. It must read `incomplete`, UNLESS a
+    /// sibling tier carries a tokenizer the engine can borrow (`resolve_tokenizer_path`), in which case
+    /// the tier genuinely loads and must keep reading installed.
+    #[test]
+    fn tokenizerless_sensenova_tier_reads_incomplete_unless_a_sibling_can_lend_one() {
+        let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "SceneWorks/sensenova-u1-8b-mlx";
+        let model = sensenova_matrix_model(repo);
+
+        // q4 alone, and it ships no tokenizer: nothing to borrow, so it cannot load.
+        seed_sensenova_tier(data_dir, repo, "q4", false);
+        let states = model_variant_states(&model, data_dir);
+        let by_variant = |name: &str| states.iter().find(|s| s.variant == name).unwrap();
+        assert!(
+            !by_variant("q4").installed,
+            "a tokenizer-less q4 with no sibling to borrow from must NOT read installed"
+        );
+        assert!(
+            by_variant("q4").cache_incomplete,
+            "it is a repairable incomplete, not a clean missing"
+        );
+        assert!(
+            !by_variant("bf16").installed && !by_variant("bf16").cache_incomplete,
+            "a never-fetched tier stays a clean missing (no spurious repair prompt)"
+        );
+
+        // Mutation check: installing q8 (which DOES ship the tokenizer) makes q4 loadable by borrowing
+        // it — proving the predicate tracks the engine's sibling resolution, not mere file presence.
+        seed_sensenova_tier(data_dir, repo, "q8", true);
+        let states = model_variant_states(&model, data_dir);
+        let by_variant = |name: &str| states.iter().find(|s| s.variant == name).unwrap();
+        assert!(
+            by_variant("q4").installed,
+            "q4 borrows q8's tokenizer, so it loads and must read installed"
+        );
+        assert!(by_variant("q8").installed);
+    }
+
     /// A Boogu turnkey (family `boogu`): a single unlabeled "default" download whose `files` filter
     /// enumerates the three component subdirs of the shipped `base/` Q8 subfolder.
     fn boogu_model(repo: &str) -> Value {
@@ -5416,7 +5622,7 @@ mod mlx_tier_probe_tests {
 
         // family "anima" gates on the shared per-tier predicate: the torn q8 reads incomplete, NOT
         // installed (sc-13513).
-        let anima = mlx_convert_output_tier_states(root, "anima");
+        let anima = mlx_convert_output_tier_states(root, "anima", "anima_base");
         assert_eq!(anima.len(), 3);
         let a = tier_state_map(&anima);
         assert_eq!(a["q4"], ("installed".into(), "complete".into()));
@@ -5429,13 +5635,13 @@ mod mlx_tier_probe_tests {
 
         // A convert family with no bespoke predicate keeps the coarse backbone probe — a DiT-only tier
         // reads installed (byte-identical to the pre-sc-13513 behavior for any non-anima convert family).
-        let coarse = tier_state_map(&mlx_convert_output_tier_states(root, "flux2"));
+        let coarse = tier_state_map(&mlx_convert_output_tier_states(root, "flux2", "flux2_dev"));
         assert_eq!(coarse["q8"], ("installed".into(), "complete".into()));
 
         // Mutation check: completing q8 (add the text encoder + VAE) flips it to installed — proving the
         // predicate discriminates on the components, not merely the backbone.
         seed_anima_tier(root, "q8", true);
-        let a2 = tier_state_map(&mlx_convert_output_tier_states(root, "anima"));
+        let a2 = tier_state_map(&mlx_convert_output_tier_states(root, "anima", "anima_base"));
         assert_eq!(a2["q8"], ("installed".into(), "complete".into()));
     }
 
