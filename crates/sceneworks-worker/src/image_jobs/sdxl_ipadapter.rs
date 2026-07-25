@@ -1,3 +1,17 @@
+use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
+use super::{
+    consume_gen_events, curated_image_menu, dense_tier_subdir, drive_gen_items_scored,
+    load_reference_image, non_empty, normalize_sampling_knob, pid_effective_dims, pid_output_tier,
+    read_advanced_sampling_knobs, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32, resolve_character_image_likeness_source, resolve_pid_weights,
+    resolve_sdxl_components, resolve_seed, stage_likeness, standard_tier_subdir, start_gen_stream,
+    uses_standard_tier_layout, ApiClient, Image, ImagePlan, ImageRequest, IpAdapterSdxl,
+    IpAdapterSdxlPaths, IpAdapterSdxlRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings,
+    Value, WorkerError, WorkerResult,
+};
+use super::{resolve_app_managed_model_dir, DownloadContext};
+use serde_json::json;
+
 // Candle (Windows/CUDA) SDXL IP-Adapter-Plus reference route (sc-5488, epic 5480) — reference-image
 // (identity) conditioning on SDXL/RealVisXL off-Mac via `runtime_cuda::providers::sdxl::IpAdapterSdxl`. The
 // reference-conditioning sibling of the candle InstantID lane (instantid.rs), but plain SDXL: no face
@@ -5,7 +19,7 @@
 //
 // **Candle-only.** macOS keeps the MLX SDXL IP path (the registry `SdxlSubMode::Ip` in sdxl.rs); there
 // is no MLX `IpAdapterSdxl`, so this whole file is gated to the Windows/CUDA candle build (the
-// `include!` in image_jobs.rs carries the cfg). It is `include!`d into the `image_jobs` module, so it
+// the module declaration in image_jobs.rs carries the cfg). It is a child module of the `image_jobs` module, so it
 // shares that module's imports (ImageRequest/Settings/WorkerResult/`advanced`/`load_reference_image`/
 // `huggingface_snapshot_dir`/`ensure_hf_cached_file`/`start_gen_stream`/… all in scope unqualified).
 
@@ -17,7 +31,7 @@ const SDXL_IPADAPTER_REPO: &str = "h94/IP-Adapter";
 /// means an upstream re-push could silently swap the adapter / CLIP-encoder weights we load. Pin the
 /// exact commit for defense-in-depth (mirrors sc-8879/sc-9682). HF's tree API still reports each file's
 /// `lfs.oid`, which `ensure_hf_cached_file` verifies the downloaded content against.
-const SDXL_IPADAPTER_REVISION: &str = "018e402774aeeddd60609b4ecdb7e298259dc729";
+pub(super) const SDXL_IPADAPTER_REVISION: &str = "018e402774aeeddd60609b4ecdb7e298259dc729";
 /// The IP-Adapter-Plus (ViT-H) bundle inside the repo (`image_proj` Resampler + `ip_adapter.*` K/V).
 const SDXL_IPADAPTER_BUNDLE_SRC: &str = "sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors";
 /// The CLIP ViT-H image-encoder files inside the repo (config + weights).
@@ -77,7 +91,8 @@ fn resolve_sdxl_ipadapter_base(
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
     {
-        return resolve_app_managed_model_dir(settings, &path, "SDXL IP-Adapter modelPath").map(Some);
+        return resolve_app_managed_model_dir(settings, &path, "SDXL IP-Adapter modelPath")
+            .map(Some);
     }
     let repo = request
         .model_manifest_entry
@@ -92,19 +107,21 @@ fn resolve_sdxl_ipadapter_base(
     // packed-detects the tier. A flat upstream diffusers snapshot (no q4/q8/bf16 subdirs) has no present
     // tier, so `standard_tier_subdir` returns its root untouched; a NON-standard tiered turnkey keeps the
     // dense `bf16/` descent (sc-10614). Both fall through `dense_tier_subdir` on the non-standard branch.
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo).map(|root| {
-        if uses_standard_tier_layout(request) {
-            standard_tier_subdir(&root, request)
-        } else {
-            dense_tier_subdir(root)
-        }
-    }))
+    Ok(
+        huggingface_snapshot_dir(&settings.data_dir, repo).map(|root| {
+            if uses_standard_tier_layout(request) {
+                standard_tier_subdir(&root, request)
+            } else {
+                dense_tier_subdir(root)
+            }
+        }),
+    )
 }
 
 /// True when this is a candle-eligible SDXL IP-Adapter job: an sdxl-family model with a reference image
 /// (and NOT an img2img/inpaint/edit shape — those advanced SDXL modes are sc-5487) whose base resolves
 /// locally. Mirrors `jobs_store::sdxl_ipadapter_candle_eligible` so the worker and router agree.
-fn sdxl_ipadapter_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn sdxl_ipadapter_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_sdxl_ipadapter_model(&request.model)
         && request.mode != "edit_image"
         && non_empty(&request.reference_asset_id)
@@ -142,7 +159,9 @@ async fn ensure_sdxl_ipadapter_weights(
     // validation (`SCENEWORKS_IPADAPTER_SDXL`).
     if let Ok(root) = std::env::var("SCENEWORKS_IPADAPTER_SDXL") {
         let root = PathBuf::from(root);
-        let bundle = root.join("sdxl_models").join("ip-adapter-plus_sdxl_vit-h.safetensors");
+        let bundle = root
+            .join("sdxl_models")
+            .join("ip-adapter-plus_sdxl_vit-h.safetensors");
         let encoder = root.join("models").join("image_encoder");
         if bundle.is_file() && encoder.is_dir() {
             return Ok((bundle, encoder));
@@ -219,7 +238,7 @@ fn sdxl_ipadapter_raw_settings(
 /// images, each its own seed; the engine `generate` takes the per-job `CancelFlag` + a `Progress`
 /// callback, so streaming is per-step and cancellation is honoured mid-denoise — same contract as the
 /// registry families + the InstantID lane. Reuses [`consume_gen_events`] for the asset writes.
-async fn generate_candle_sdxl_ipadapter_stream(
+pub(super) async fn generate_candle_sdxl_ipadapter_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -326,8 +345,12 @@ async fn generate_candle_sdxl_ipadapter_stream(
     // Per-image work items: (seed, prompt) — `request.count` images at the reference identity.
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched).
-    let (width, height) =
-        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    let (width, height) = pid_effective_dims(
+        request.width,
+        request.height,
+        use_pid,
+        pid_output_tier(request),
+    );
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
@@ -422,7 +445,13 @@ async fn generate_candle_sdxl_ipadapter_stream(
                         Some(likeness_source_ref.as_str()),
                     )
                 });
-                Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
+                Ok(Some((
+                    seed,
+                    out.width,
+                    out.height,
+                    out.pixels,
+                    face_likeness,
+                )))
             })
         },
     );

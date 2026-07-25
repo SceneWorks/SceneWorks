@@ -1,3 +1,13 @@
+use super::{
+    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, mlx_model,
+    model_repo, non_empty, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_quant, resolve_seed,
+    resolve_weights_dir, start_gen_stream, ApiClient, Flux2Edit, Flux2EditPaths, Flux2EditRequest,
+    Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value,
+    WorkerError, WorkerResult,
+};
+use serde_json::json;
+
 // Candle (Windows/CUDA) FLUX.2 image-edit route (sc-5487 klein, epic 5480; sc-7736 dev, epic 6564) —
 // Kontext-style reference-conditioned editing off-Mac via `runtime_cuda::providers::flux2::Flux2Edit`. FLUX.2-klein has
 // no torch path (it is diffusers/MLX-only), so before this an off-Mac `edit_image` job on klein had no
@@ -7,7 +17,7 @@
 //
 // **Candle-only.** macOS keeps the MLX FLUX.2 edit path (flux2.rs `generate_flux2_edit_stream`); the
 // candle `Flux2Edit` is a bespoke provider, so this whole file is gated to the Windows/CUDA candle build
-// (the `include!` in image_jobs.rs carries the cfg). It is `include!`d into the `image_jobs` module, so
+// (the module declaration in image_jobs.rs carries the cfg). It is a child module of the `image_jobs` module, so
 // it shares that module's imports (ImageRequest/Settings/WorkerResult/`advanced`/`load_reference_image`/
 // `huggingface_snapshot_dir`/`resolve_app_managed_model_dir`/`resolve_quant`/`resolve_seed`/
 // `start_gen_stream`/`drive_gen_items`/`consume_gen_events`/`non_empty`/`gen_core`/… all in scope).
@@ -82,7 +92,7 @@ fn flux2_edit_candle_mode(request: &ImageRequest) -> bool {
 /// turnkeys through since sc-9092; only the DIRECTORY handed to it was wrong. `None` still means the
 /// base is not present locally, so the job is not candle-runnable. Mirrors `krea_edit_candle_available`
 /// (the newer candle edit lane, already on the shared resolver).
-fn resolve_flux2_edit_candle_base(
+pub(super) fn resolve_flux2_edit_candle_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
@@ -93,7 +103,7 @@ fn resolve_flux2_edit_candle_base(
 /// resolution ([`model_repo`]), so the recipe names the turnkey the load actually read rather than this
 /// lane's own constant (sc-10222). Falls back to the model id for an id outside the engine table (only
 /// reachable from a test payload — `is_flux2_edit_candle_model` gates the lane to three known ids).
-fn flux2_edit_candle_repo(request: &ImageRequest) -> String {
+pub(super) fn flux2_edit_candle_repo(request: &ImageRequest) -> String {
     match mlx_model(&request.model) {
         Some(model) => model_repo(request, &model),
         None => request.model.clone(),
@@ -103,7 +113,7 @@ fn flux2_edit_candle_repo(request: &ImageRequest) -> String {
 /// True when this is a candle-eligible FLUX.2 edit job (a klein/dev `edit_image` job with a source)
 /// whose base resolves locally. Mirrors `jobs_store::flux2_edit_candle_eligible` (minus the weight-
 /// resolve check).
-fn flux2_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn flux2_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_flux2_edit_candle_model(&request.model)
         && flux2_edit_candle_mode(request)
         && matches!(
@@ -217,7 +227,7 @@ fn load_flux2_edit_references(
 /// `load_dev` with embedded distilled guidance; klein loads dense (CFG-free at guidance 1.0; >1 adds a
 /// negative pass). `generate` takes `&self`, so the per-item closure needs no `mut`. Reuses
 /// [`consume_gen_events`].
-async fn generate_candle_flux2_edit_stream(
+pub(super) async fn generate_candle_flux2_edit_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -240,8 +250,12 @@ async fn generate_candle_flux2_edit_stream(
     // base (references + latent stay aligned). `use_pid`/`with_pid` stay paired below.
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
     let use_pid = pid_weights.is_some();
-    let (width, height) =
-        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    let (width, height) = pid_effective_dims(
+        request.width,
+        request.height,
+        use_pid,
+        pid_output_tier(request),
+    );
     let references = load_flux2_edit_references(request, project_path, settings, width, height)?;
 
     // Since sc-10222 `flux2_base` is the RESOLVED tier subdir (`q4/`/`q8/`/`bf16/`), so the tier the
@@ -281,8 +295,14 @@ async fn generate_candle_flux2_edit_stream(
     let repo = flux2_edit_candle_repo(request);
     // `pid_weights`/`use_pid`/`width`/`height` were resolved above (ahead of the reference fit) so the
     // PiD output tier (sc-10054) could size the effective base; `use_pid`/`with_pid` stay in lockstep.
-    let mut raw_settings =
-        flux2_edit_candle_raw_settings(request, &repo, steps, guidance, quant_bits, references.len());
+    let mut raw_settings = flux2_edit_candle_raw_settings(
+        request,
+        &repo,
+        steps,
+        guidance,
+        quant_bits,
+        references.len(),
+    );
     // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
     raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 

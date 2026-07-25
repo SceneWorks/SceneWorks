@@ -1760,6 +1760,23 @@ fn lerp(a: u8, t: f32) -> u8 {
 // MLX/candle generator stream helpers.
 include!("image_jobs/stream.rs");
 
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+mod tier_resolver;
+#[cfg(target_os = "macos")]
+use tier_resolver::resolved_tier_is_complete;
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+use tier_resolver::standard_tier_subdir_gated;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) use tier_resolver::INT8_CONVROT_TIER;
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(crate) use tier_resolver::NVFP4_TIER;
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+use tier_resolver::{
+    is_dense_te_tier, min_quality_floor, nvfp4_host_eligible, nvfp4_requested, nvfp4_selected,
+    pick_loadable_tier, preferred_tier, standard_tier_subdir, tier_components_present,
+    tier_quality_rank, tier_static_name, uses_standard_tier_layout,
+};
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1872,104 +1889,148 @@ include!("image_jobs/instantid.rs");
 // the MLX SDXL IP path (sdxl.rs `SdxlSubMode::Ip`); there is no MLX `IpAdapterSdxl`, so this is
 // candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/sdxl_ipadapter.rs");
+mod sdxl_ipadapter;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use sdxl_ipadapter::{generate_candle_sdxl_ipadapter_stream, sdxl_ipadapter_available};
 // SDXL img2img / inpaint / outpaint edit — the Windows/CUDA candle lane ONLY (sc-5487). macOS keeps the
 // MLX SDXL advanced path (sdxl.rs `SdxlSubMode::{Edit,Inpaint,Outpaint}`); the candle `SdxlEdit` is a
 // bespoke provider, so this is candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/sdxl_edit_candle.rs");
+mod sdxl_edit_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use sdxl_edit_candle::{generate_candle_sdxl_edit_stream, sdxl_edit_candle_available};
 // FLUX.2-klein reference / img2img edit — the Windows/CUDA candle lane ONLY (sc-5487). macOS keeps the
 // MLX FLUX.2 edit path (flux2.rs `generate_flux2_edit_stream`); the candle `Flux2Edit` is a bespoke
 // provider, so this is candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/flux2_edit_candle.rs");
+mod flux2_edit_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use flux2_edit_candle::{flux2_edit_candle_available, generate_candle_flux2_edit_stream};
 // Qwen-Image-Edit reference / dual-latent edit — the Windows/CUDA candle lane ONLY (sc-5487). macOS keeps
 // the MLX Qwen-Image-Edit path (qwen.rs); the candle `QwenEdit` is a bespoke provider, so this is
 // candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/qwen_edit_candle.rs");
+mod qwen_edit_candle;
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) use qwen_edit_candle::resolve_qwen_edit_candle_base;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use qwen_edit_candle::{generate_candle_qwen_edit_stream, qwen_edit_candle_available};
 // Krea 2 Kontext-style dual-conditioned image-edit — the Windows/CUDA candle lane ONLY (epic 10871).
 // macOS keeps the MLX Krea edit path (krea_edit.rs, the `krea_2_edit` registry generator); the candle
 // Krea edit is a bespoke pipeline, so this is candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/krea_edit_candle.rs");
+mod krea_edit_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use krea_edit_candle::{generate_candle_krea_edit_stream, krea_edit_candle_available};
 // Kolors IP-Adapter-Plus reference conditioning — the Windows/CUDA candle lane ONLY (sc-5488). macOS
 // keeps the MLX Kolors IP path (kolors.rs, the registry `Reference` route); the candle `IpAdapterKolors`
 // is a bespoke provider, so this is candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/kolors_ipadapter.rs");
+mod kolors_ipadapter;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use kolors_ipadapter::{generate_candle_kolors_ipadapter_stream, kolors_ipadapter_available};
 // FLUX XLabs IP-Adapter reference conditioning — the Windows/CUDA candle lane ONLY (sc-5872). macOS keeps
 // the MLX FLUX XLabs IP path (epic 3621, the registry `Reference` route); the candle `IpAdapterFlux` is a
 // bespoke provider, so this is candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/flux_ipadapter.rs");
+mod flux_ipadapter;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use flux_ipadapter::{flux_ipadapter_available, generate_candle_flux_ipadapter_stream};
 // Shared candle strict-control driver (sc-8304, epic 8236): the `CandleStrictControl` trait + the one
 // `run_candle_strict_control` driver the candle trio (qwen/zimage/flux2 control below) route through —
 // reusing the SAME `STRICT_CONTROL_ENGINES` table + `preprocess_control_entry` (pose/canny/depth) as the
 // MLX `strict_control.rs`. Must precede the three lanes (they reference the trait + driver).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/candle_strict_control.rs");
+mod candle_strict_control;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_strict_control::{run_candle_strict_control, CandleStrictControl};
 // Qwen-Image 2512-Fun-Controlnet-Union (strict control) — the Windows/CUDA candle lane ONLY (sc-5489
 // origin / sc-8350 repoint). macOS keeps the MLX `qwen_image_control` registry generator; the candle
 // `QwenFunControl` is a bespoke provider (the InstantX `QwenControl` is retired on the candle lane).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/qwen_control.rs");
+mod qwen_control;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use qwen_control::{generate_candle_qwen_control_stream, qwen_control_available};
 // Kolors ControlNet (strict pose) — the Windows/CUDA candle lane ONLY (sc-5489). macOS keeps the MLX
 // Kolors ControlNet path; the candle `KolorsControl` is a bespoke provider.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/kolors_control.rs");
+mod kolors_control;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use kolors_control::{generate_candle_kolors_control_stream, kolors_control_available};
 // Z-Image Fun-ControlNet (strict pose) — the Windows/CUDA candle lane ONLY (sc-5489). macOS keeps the
 // MLX `z_image_turbo_control` registry generator; the candle `ZImageControl` is a bespoke provider.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/zimage_control.rs");
+mod zimage_control;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use zimage_control::{generate_candle_zimage_control_stream, zimage_control_available};
 // FLUX.2-dev Fun-Controlnet-Union (strict pose) — the Windows/CUDA candle lane ONLY (sc-7736, epic 6564).
 // macOS keeps the MLX `flux2_dev_control` registry generator (flux2.rs); the candle `Flux2Control` is a
 // bespoke provider (the dev VACE control branch over the Q4 dev DiT).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/flux2_control_candle.rs");
+mod flux2_control_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use flux2_control_candle::{flux2_control_candle_available, generate_candle_flux2_control_stream};
 // FLUX.1-dev Shakker Union-Pro-2.0 (strict control) — the Windows/CUDA candle lane ONLY (sc-8412, epic
 // 8236). macOS keeps the MLX `flux1_dev_control` registry generator (flux1_control.rs); the candle
 // `Flux1DevControl` is a bespoke provider (the Shakker residual-emitter control branch over the dense
 // bf16 dev DiT).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/flux1_control_candle.rs");
+mod flux1_control_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use flux1_control_candle::{flux1_control_candle_available, generate_candle_flux1_control_stream};
 // Krea 2 pose-ControlNet (strict pose) — the Windows/CUDA candle lane ONLY (sc-8464, epic 8459). There is
 // no MLX Krea control twin yet (8459 S5 / sc-8465); the candle `Krea2Control` loads a trained
 // control-branch overlay on the frozen dense bf16 Turbo base.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/krea_control_candle.rs");
+mod krea_control_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use krea_control_candle::{generate_candle_krea_control_stream, krea_control_candle_available};
 // Z-Image img2img / edit — the Windows/CUDA candle lane ONLY (sc-6595). macOS keeps the MLX
 // `z_image_turbo` registry generator's `Conditioning::Reference` img2img path; the candle `ZImageEdit`
 // is a bespoke provider.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/zimage_edit_candle.rs");
+mod zimage_edit_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use zimage_edit_candle::{generate_candle_zimage_edit_stream, zimage_edit_candle_available};
 // In-place ComfyUI Z-Image base txt2img — Windows/CUDA candle lane ONLY (sc-10668, epic 10451). Renders
 // a user's ComfyUI Z-Image weights in place via `runtime_cuda::providers::z_image::load_from_comfyui_components`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/zimage_comfyui_candle.rs");
+mod zimage_comfyui_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use zimage_comfyui_candle::{generate_candle_zimage_comfyui_stream, zimage_comfyui_available};
 // Qwen-Image txt2img from an in-place ComfyUI DiT (plain fp8_e4m3fn → bf16) — the Windows/CUDA candle
 // lane ONLY (sc-10670, epic 10451 Phase 2b). Sibling of the Z-Image comfyui lane; TE/VAE/tokenizer come
 // from a resident `SceneWorks/qwen-image-mlx` snapshot tier.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/qwen_comfyui_candle.rs");
+mod qwen_comfyui_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use qwen_comfyui_candle::{generate_candle_qwen_comfyui_stream, qwen_comfyui_available};
 // FLUX.2-dev txt2img from an in-place ComfyUI fp8-mixed DiT (inline-scale fp8 dequant → f32, then
 // quantized onto the GPU) — the Windows/CUDA candle lane ONLY (sc-10680, epic 10451 Phase 2e). Sibling
 // of the Qwen-Image comfyui lane; the Mistral-3 TE / VAE / tokenizer come from a resident FLUX.2-dev
 // snapshot tier.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/flux2_comfyui_candle.rs");
+mod flux2_comfyui_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use flux2_comfyui_candle::{flux2_comfyui_available, generate_candle_flux2_comfyui_stream};
 // Z-Image identity-init for Image Studio "With Character" — the Windows/CUDA candle lane ONLY (sc-8409,
 // epic 4406). macOS keeps the MLX `z_image_turbo` generic-lane identity img2img (`generate_stream` ⇒
 // `resolve_zimage_identity_init`); off-Mac this bespoke lane reuses the candle `ZImageEdit` engine with
 // the identity `referenceAssetId` as the source-latent init + wires the sc-4411 face-likeness scorer.
 // Reuses the sibling `zimage_edit_candle.rs` base/steps helpers, so it is included right after it.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/zimage_identity_candle.rs");
+mod zimage_identity_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use zimage_identity_candle::{
+    generate_candle_zimage_identity_stream, zimage_identity_candle_available,
+};
 // PuLID-FLUX face identity — the Windows/CUDA candle lane ONLY (sc-5492). macOS keeps the
 // inventory-registered `pulid_flux` MLX generator (image_jobs/pulid.rs); the candle `PulidFlux` is a
 // bespoke provider, so this file is candle-gated and distinct from the macOS route.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-include!("image_jobs/pulid_candle.rs");
+mod pulid_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use pulid_candle::{generate_candle_pulid_stream, pulid_candle_available};
 #[cfg(target_os = "macos")]
 // PuLID-FLUX native routing.
 include!("image_jobs/pulid.rs");

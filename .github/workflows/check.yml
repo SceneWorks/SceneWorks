@@ -95,7 +95,7 @@ jobs:
         run: |
           node scripts/check-no-nc-weights.mjs --self-test
           npm run check:nc-weights
-      - name: Guard About→Licenses coverage for every shipped model (sc-13803)
+      - name: Guard About→Licenses coverage for shipped models and embedded source
         # The licenses page records the upstream license + attribution for every model
         # whose weights SceneWorks downloads — including which ones are NON-COMMERCIAL.
         # It had drifted to cover only the bundled binaries, Wan2.2/LTX and the audio
@@ -104,8 +104,13 @@ jobs:
         # adding a catalog model had no mechanical link to the page. This fails the build
         # if a downloading model is unclaimed, a claimed id no longer exists, or a
         # document key is not wired into bundledLicenses.js (which would render an EMPTY
-        # license — worse than a missing one).
-        run: npm run check:license-coverage
+        # license — worse than a missing one). The same executable guard also
+        # revision-locks the audited inventory of ported/embedded inference source
+        # (Cephes, CMUDICT), forcing every inference pin bump to re-audit upstream
+        # NOTICE/LICENSE-* and production include_str!/include_bytes! sites.
+        run: |
+          node scripts/check-license-coverage.mjs --self-test
+          npm run check:license-coverage
       - name: Guard against gen-core version skew (sc-4482, epic 3720)
         # Fails if more than one distinct `sceneworks-gen-core` rev resolves in the worker's
         # build graph (split contract types can invalidate explicit catalog wiring). `--target all`

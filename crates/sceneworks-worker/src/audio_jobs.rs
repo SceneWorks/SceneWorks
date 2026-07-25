@@ -889,7 +889,7 @@ fn resolve_voice_clone_plan(
         })?;
     // Resolve the reference through the same project-scoped guard the extend/edit source clip uses, then
     // decode its PCM-16 WAV into the host AudioTrack OpenVoice consumes as its tone-color target.
-    let reference_path = crate::video_jobs::resolve_clip_media_path(
+    let reference_path = crate::video_jobs::ltx::resolve_clip_media_path(
         settings,
         &request.project_id,
         reference_id,
@@ -1057,7 +1057,7 @@ fn resolve_native_voice_clone_plan(
     // Resolve the reference through the same project-scoped guard the conversion chain + the
     // extend/edit source clip use, then decode its PCM-16 WAV into the host AudioTrack the clone
     // generator consumes as its `Conditioning::ReferenceAudio` voice.
-    let reference_path = crate::video_jobs::resolve_clip_media_path(
+    let reference_path = crate::video_jobs::ltx::resolve_clip_media_path(
         settings,
         &request.project_id,
         reference_id,
@@ -1234,7 +1234,7 @@ fn build_audio_edit(
         )
     })?;
     let mode = parse_audio_edit_mode(mode)?;
-    let source_path = crate::video_jobs::resolve_clip_media_path(
+    let source_path = crate::video_jobs::ltx::resolve_clip_media_path(
         settings,
         &request.project_id,
         source_id,

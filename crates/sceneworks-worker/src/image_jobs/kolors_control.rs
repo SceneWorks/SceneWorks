@@ -1,3 +1,18 @@
+use super::advanced;
+use super::{
+    curated_image_menu, normalize_sampling_knob, pid_effective_dims, pid_output_tier, pose_entries,
+    read_advanced_sampling_knobs, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32, resolve_pid_weights, run_candle_strict_control, ApiClient,
+    CancelFlag, CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
+    KolorsControl, KolorsControlPaths, KolorsControlRequest, Path, PathBuf, Progress, Settings,
+    Value, WorkerError, WorkerResult,
+};
+use super::{
+    ensure_hf_cached_file, huggingface_snapshot_dir, resolve_app_managed_model_dir,
+    safe_weight_filename, DownloadContext,
+};
+use serde_json::json;
+
 // Candle (Windows/CUDA) Kolors ControlNet (strict pose) route (sc-5489, epic 5480; sc-8823 driver route)
 // — `kolors` + `advanced.poses` off-Mac via `runtime_cuda::providers::kolors::KolorsControl`. The Kolors sibling of the
 // candle Qwen strict-control path (qwen_control.rs): one image per pose, each conditioned on a full DWPose
@@ -14,8 +29,8 @@
 // never validated the mode). The pose path (no `controlMode`) is byte-preserved.
 //
 // **Candle-only.** macOS keeps the MLX Kolors ControlNet path; the candle `KolorsControl` is a bespoke
-// provider, so this whole file is gated to the Windows/CUDA candle build (the `include!` in image_jobs.rs
-// carries the cfg). It is `include!`d into the `image_jobs` module, so it shares that module's imports
+// provider, so this whole file is gated to the Windows/CUDA candle build (the module declaration in image_jobs.rs
+// carries the cfg). It is a child module of the `image_jobs` module, so it shares that module's imports
 // (`parse_poses`/`pose_entries`/`Settings`/`WorkerResult`/`huggingface_snapshot_dir`/
 // `ensure_hf_cached_file`/`start_gen_stream`/… all in scope unqualified).
 
@@ -28,7 +43,7 @@ const KOLORS_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
 /// checkpoint we load; pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). Applied ONLY
 /// to the default repo — a manifest `controlWeights.repo` override carries its own revision layout, so it
 /// keeps `main`. HF's tree API still reports the file's `lfs.oid`, which `ensure_hf_cached_file` verifies.
-const KOLORS_CONTROL_REVISION: &str = "83e35a8033a89d2e75044b412d0e2474111578f7";
+pub(super) const KOLORS_CONTROL_REVISION: &str = "83e35a8033a89d2e75044b412d0e2474111578f7";
 /// The Kolors base diffusers repo when the manifest omits `repo`.
 const KOLORS_CONTROL_DEFAULT_REPO: &str = "Kwai-Kolors/Kolors-diffusers";
 /// ControlNet conditioning-scale default (the strict-pose tier).
@@ -39,7 +54,7 @@ const KOLORS_CONTROL_DEFAULT_STEPS: u32 = 50;
 const KOLORS_CONTROL_DEFAULT_GUIDANCE: f32 = 5.0;
 /// The adapter/engine id recorded on candle Kolors control assets (distinct from the txt2img
 /// `candle_kolors` lane and the `candle_kolors_ipadapter` reference lane).
-const KOLORS_CONTROL_ENGINE: &str = "candle_kolors_control";
+pub(super) const KOLORS_CONTROL_ENGINE: &str = "candle_kolors_control";
 
 /// Model ids the candle Kolors ControlNet route accepts.
 fn is_kolors_control_model(model: &str) -> bool {
@@ -62,7 +77,8 @@ fn resolve_kolors_control_base(
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
     {
-        return resolve_app_managed_model_dir(settings, &path, "Kolors control modelPath").map(Some);
+        return resolve_app_managed_model_dir(settings, &path, "Kolors control modelPath")
+            .map(Some);
     }
     let repo = request
         .model_manifest_entry
@@ -77,7 +93,7 @@ fn resolve_kolors_control_base(
 /// True when this is a candle-eligible Kolors strict-pose job: `kolors` with a non-empty
 /// `advanced.poses`, not edit mode, whose base resolves locally. Mirrors
 /// `jobs_store::kolors_control_candle_eligible` so the worker and router agree.
-fn kolors_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn kolors_control_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_kolors_control_model(&request.model)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
@@ -102,8 +118,11 @@ fn kolors_control_guidance(request: &ImageRequest) -> f32 {
 /// The (repo, filename) of the ControlNet weights — `advanced.controlWeights.{repo,filename}` overrides,
 /// else the Kolors-ControlNet-Pose default (parity with the MLX `resolve_control_weights_for`).
 /// The payload filename must be a plain component (sc-8821 / F-019).
-fn kolors_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
-    let cw = request.advanced.get("controlWeights").and_then(Value::as_object);
+pub(super) fn kolors_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
+    let cw = request
+        .advanced
+        .get("controlWeights")
+        .and_then(Value::as_object);
     let pick = |key: &str, default: &str| {
         cw.and_then(|m| m.get(key))
             .and_then(Value::as_str)
@@ -197,14 +216,14 @@ fn kolors_control_raw_settings(
 /// `Kwai-Kolors/Kolors-ControlNet-Pose` DWPose-skeleton branch (NOT a Fun-Union input-agnostic VACE
 /// engine), so a `controlMode = canny | depth` request is REJECTED by the shared driver rather than
 /// silently rendered as a pose skeleton.
-const KOLORS_CONTROL_ENGINE_ID: &str = "kolors_control";
+pub(super) const KOLORS_CONTROL_ENGINE_ID: &str = "kolors_control";
 
 /// The per-lane half of the candle Kolors strict-control [`CandleStrictControl`] driver (sc-8304 /
 /// sc-8823): the resolved base + Kolors-ControlNet-Pose weight paths + the request numerics (Kolors runs
 /// true CFG, so it carries a negative prompt + guidance, plus the curated unified-sampler selection). It
 /// is moved onto the blocking thread, loaded once, and drives every pose. `KolorsControl::generate` takes
 /// `&self`, so `generate_one` borrows the model immutably.
-struct KolorsStrictControl {
+pub(super) struct KolorsStrictControl {
     kolors_base: PathBuf,
     controlnet: PathBuf,
     prompt: String,
@@ -222,6 +241,24 @@ struct KolorsStrictControl {
     /// AND the `sdxl` PiD + Gemma snapshots are cached (Kolors composes the SDXL VAE). Threaded into
     /// `with_pid` at load; `use_pid` on the request is `is_some()`. `None` ⇒ native SDXL VAE decode.
     pid: Option<gen_core::PidWeights>,
+}
+
+#[cfg(test)]
+pub(super) fn kolors_strict_control_test_fixture(path: PathBuf) -> KolorsStrictControl {
+    KolorsStrictControl {
+        kolors_base: path.clone(),
+        controlnet: path,
+        prompt: "p".to_owned(),
+        negative: "n".to_owned(),
+        width: 512,
+        height: 512,
+        steps: 50,
+        guidance: 5.0,
+        control_scale: 1.0,
+        sampler: None,
+        scheduler: None,
+        pid: None,
+    }
 }
 
 impl CandleStrictControl for KolorsStrictControl {
@@ -299,7 +336,7 @@ impl CandleStrictControl for KolorsStrictControl {
 /// `supported_kinds`, per-pose preprocessing, identity-likeness scoring, streaming). A `controlMode =
 /// canny | depth` request is REJECTED by the driver (Kolors is pose-only) instead of silently rendering a
 /// pose skeleton (sc-8823). The pose path is byte-preserved.
-async fn generate_candle_kolors_control_stream(
+pub(super) async fn generate_candle_kolors_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -361,8 +398,12 @@ async fn generate_candle_kolors_control_stream(
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). The shared driver renders the control map at these
     // same dims (via `out_width`/`out_height`), keeping control + latent aligned.
-    let (width, height) =
-        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    let (width, height) = pid_effective_dims(
+        request.width,
+        request.height,
+        use_pid,
+        pid_output_tier(request),
+    );
     let mut raw_settings =
         kolors_control_raw_settings(request, &repo, steps, guidance, control_scale, pose_count);
     // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
