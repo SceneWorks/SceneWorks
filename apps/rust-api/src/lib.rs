@@ -65,6 +65,7 @@ use sceneworks_core::video_request::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
@@ -992,6 +993,7 @@ pub(crate) fn create_app_with_state(
             MAX_OUTSTANDING_EVENT_TICKETS,
         )),
         media_tickets: Arc::new(TicketStore::new(MEDIA_TICKET_TTL_SECONDS)),
+        thumbnail_generation_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         auth_throttle: Arc::new(AuthThrottle::default()),
         manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
         manifest_write_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -1514,12 +1516,21 @@ async fn verify_access(
     Json(VerifyResponse { ok })
 }
 
+const GRID_THUMBNAIL_SIZE: u32 = 384;
+const PROJECT_MEDIA_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
+
+#[derive(Debug, Default, Deserialize)]
+struct ProjectFileQuery {
+    thumbnail: Option<u32>,
+}
+
 async fn get_project_file(
     State(state): State<AppState>,
     Path((project_id, relative_path)): Path<(String, String)>,
+    Query(query): Query<ProjectFileQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let project_file = project_call(state, {
+    let project_file = project_call(state.clone(), {
         let project_id = project_id.clone();
         let relative_path = relative_path.clone();
         move |store| store.project_file(&project_id, &relative_path)
@@ -1543,15 +1554,74 @@ async fn get_project_file(
             );
         }
     })?;
-    let mut file = tokio::fs::File::open(&project_file.path)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let total = file
-        .metadata()
+
+    // One fixed representation prevents unbounded cache variants. Derivatives
+    // are generated on first use, so assets written before this route existed
+    // backfill without a migration.
+    let (served_path, content_type) = if let Some(size) = query.thumbnail {
+        if size != GRID_THUMBNAIL_SIZE {
+            return Err(ApiError::bad_request(format!(
+                "thumbnail must be {GRID_THUMBNAIL_SIZE}"
+            )));
+        }
+        if !project_file.content_type.starts_with("image/") {
+            return Err(ApiError::bad_request(
+                "thumbnail is only available for image media",
+            ));
+        }
+        let permit = state
+            .thumbnail_generation_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let source_path = project_file.path.clone();
+        let cache_root = state
+            .settings
+            .data_dir
+            .join("cache")
+            .join("media-thumbnails")
+            .join("v1");
+        let thumbnail_path = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            ensure_grid_thumbnail(&source_path, &cache_root)
+        })
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?
-        .len();
-    let content_type = project_file.content_type;
+        .map_err(|error| {
+            tracing::debug!(
+                event = "project_thumbnail_unavailable",
+                project_id = %project_id,
+                relative_path = %relative_path,
+                error = %error,
+                "could not create bounded project thumbnail"
+            );
+            ApiError::bad_request("Thumbnail unavailable for this media")
+        })?;
+        (thumbnail_path, "image/png".to_owned())
+    } else {
+        (project_file.path, project_file.content_type)
+    };
+
+    let mut file = tokio::fs::File::open(&served_path)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let total = metadata.len();
+    let etag = project_file_etag(&metadata);
+    let last_modified = metadata.modified().ok();
+    let base_headers = project_file_response_headers(&content_type, total, &etag, last_modified)?;
+
+    if project_file_is_not_modified(&headers, &etag, last_modified) {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::NOT_MODIFIED;
+        *response.headers_mut() = base_headers;
+        response.headers_mut().remove(header::CONTENT_LENGTH);
+        return Ok(response);
+    }
 
     // WebKit/WKWebView (the macOS desktop webview) requires HTTP byte-range
     // responses to play <video>: it probes with `Range: bytes=0-1` and treats
@@ -1565,10 +1635,10 @@ async fn get_project_file(
                     .await
                     .map_err(|error| ApiError::internal(error.to_string()))?;
                 let stream = ReaderStream::new(file.take(len));
-                return Ok((
+                let mut response = (
                     StatusCode::PARTIAL_CONTENT,
                     [
-                        (header::CONTENT_TYPE, content_type),
+                        (header::CONTENT_TYPE, content_type.clone()),
                         (header::ACCEPT_RANGES, "bytes".to_string()),
                         (
                             header::CONTENT_RANGE,
@@ -1586,20 +1656,30 @@ async fn get_project_file(
                     ],
                     Body::from_stream(stream),
                 )
-                    .into_response());
+                    .into_response();
+                response.headers_mut().extend(base_headers);
+                response.headers_mut().insert(
+                    header::CONTENT_LENGTH,
+                    HeaderValue::from_str(&len.to_string())
+                        .map_err(|error| ApiError::internal(error.to_string()))?,
+                );
+                return Ok(response);
             }
             None => {
-                return Ok((
+                let mut response = (
                     StatusCode::RANGE_NOT_SATISFIABLE,
                     [(header::CONTENT_RANGE, format!("bytes */{total}"))],
                 )
-                    .into_response());
+                    .into_response();
+                response.headers_mut().extend(base_headers);
+                response.headers_mut().remove(header::CONTENT_LENGTH);
+                return Ok(response);
             }
         }
     }
 
     let stream = ReaderStream::new(file);
-    Ok((
+    let mut response = (
         [
             (header::CONTENT_TYPE, content_type),
             (header::ACCEPT_RANGES, "bytes".to_string()),
@@ -1610,7 +1690,139 @@ async fn get_project_file(
         ],
         Body::from_stream(stream),
     )
-        .into_response())
+        .into_response();
+    response.headers_mut().extend(base_headers);
+    Ok(response)
+}
+
+fn ensure_grid_thumbnail(source_path: &FsPath, cache_root: &FsPath) -> Result<PathBuf, String> {
+    let metadata = std::fs::metadata(source_path).map_err(|error| error.to_string())?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .unwrap_or_default();
+    let mut hash = Sha256::new();
+    hash.update(source_path.to_string_lossy().as_bytes());
+    hash.update(metadata.len().to_le_bytes());
+    hash.update(modified.as_nanos().to_le_bytes());
+    hash.update(GRID_THUMBNAIL_SIZE.to_le_bytes());
+    let key = format!("{:x}", hash.finalize());
+    let target = cache_root.join(format!("{key}.png"));
+    if target.is_file() {
+        return Ok(target);
+    }
+
+    std::fs::create_dir_all(cache_root).map_err(|error| error.to_string())?;
+    let decoded = match image::open(source_path) {
+        Ok(decoded) => decoded,
+        Err(decode_error) => {
+            // Project imports normalize these formats today, but old projects
+            // can still contain AVIF/HEIC/HEIF (and other platform-decodable
+            // raster files). Reuse the worker's cross-platform compatibility
+            // path before declaring the thumbnail unavailable.
+            let converted =
+                cache_root.join(format!("{key}.{}.converted.png", Uuid::new_v4().simple()));
+            let transcode_result =
+                sceneworks_core::media_convert::transcode_to_png(source_path, &converted);
+            let decoded = transcode_result
+                .map_err(|error| format!("{decode_error}; {error}"))
+                .and_then(|()| image::open(&converted).map_err(|error| error.to_string()));
+            let _ = std::fs::remove_file(&converted);
+            decoded?
+        }
+    };
+    let thumbnail = decoded.thumbnail(GRID_THUMBNAIL_SIZE, GRID_THUMBNAIL_SIZE);
+    let temporary = cache_root.join(format!("{key}.{}.tmp", Uuid::new_v4().simple()));
+    thumbnail
+        .save_with_format(&temporary, image::ImageFormat::Png)
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = std::fs::rename(&temporary, &target) {
+        if target.is_file() {
+            let _ = std::fs::remove_file(&temporary);
+        } else {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error.to_string());
+        }
+    }
+    Ok(target)
+}
+
+fn project_file_etag(metadata: &std::fs::Metadata) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .unwrap_or_default();
+    // Weak avoids reading and hashing a multi-gigabyte original before it can
+    // stream; project media is immutable after publication.
+    format!(
+        "W/\"{:x}-{:x}-{:x}\"",
+        metadata.len(),
+        modified.as_secs(),
+        modified.subsec_nanos()
+    )
+}
+
+fn project_file_response_headers(
+    content_type: &str,
+    total: u64,
+    etag: &str,
+    last_modified: Option<SystemTime>,
+) -> Result<HeaderMap, ApiError> {
+    let mut headers = HeaderMap::new();
+    for (name, value) in [
+        (header::CONTENT_TYPE, content_type.to_owned()),
+        (header::ACCEPT_RANGES, "bytes".to_owned()),
+        (header::CONTENT_LENGTH, total.to_string()),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),
+        (
+            header::CACHE_CONTROL,
+            PROJECT_MEDIA_CACHE_CONTROL.to_owned(),
+        ),
+        (header::ETAG, etag.to_owned()),
+    ] {
+        headers.insert(
+            name,
+            HeaderValue::from_str(&value).map_err(|error| ApiError::internal(error.to_string()))?,
+        );
+    }
+    if let Some(modified) = last_modified {
+        headers.insert(
+            header::LAST_MODIFIED,
+            HeaderValue::from_str(&httpdate::fmt_http_date(modified))
+                .map_err(|error| ApiError::internal(error.to_string()))?,
+        );
+    }
+    Ok(headers)
+}
+
+fn project_file_is_not_modified(
+    request_headers: &HeaderMap,
+    etag: &str,
+    last_modified: Option<SystemTime>,
+) -> bool {
+    if let Some(value) = request_headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+    {
+        return value
+            .split(',')
+            .map(str::trim)
+            .any(|candidate| candidate == "*" || candidate == etag);
+    }
+    let Some(modified) = last_modified else {
+        return false;
+    };
+    request_headers
+        .get(header::IF_MODIFIED_SINCE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| httpdate::parse_http_date(value).ok())
+        .is_some_and(|since| {
+            modified
+                .duration_since(since)
+                .map_or(true, |delta| delta < Duration::from_secs(1))
+        })
 }
 
 /// Parse a single HTTP byte range (`bytes=start-end`, `bytes=start-`, or

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use sceneworks_core::jobs_store::JobsStore;
 use sceneworks_core::project_store::ProjectStore;
@@ -272,6 +272,8 @@ pub struct AppState {
     pub(crate) queue_snapshot_lock: Arc<AsyncMutex<()>>,
     pub(crate) event_tickets: Arc<TicketStore>,
     pub(crate) media_tickets: Arc<TicketStore>,
+    /// Bounds CPU and memory consumed by on-demand Library thumbnail backfills.
+    pub(crate) thumbnail_generation_slots: Arc<Semaphore>,
     // sc-8870 (F-068): per-peer-IP failed-token throttle for the auth oracle.
     pub(crate) auth_throttle: Arc<AuthThrottle>,
     pub(crate) manifest_cache: Arc<Mutex<ManifestCache>>,

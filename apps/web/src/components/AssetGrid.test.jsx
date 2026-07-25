@@ -92,6 +92,10 @@ describe("AssetGrid multi-select (sc-6112)", () => {
     expect(container.querySelectorAll("video")).toHaveLength(0);
     // Every tile (1 video poster + 2 image thumbs) paints an <img> thumbnail.
     expect(container.querySelectorAll(".asset-tile img")).toHaveLength(3);
+    for (const image of container.querySelectorAll(".asset-tile img")) {
+      expect(image.getAttribute("loading")).toBe("lazy");
+      expect(new URL(image.src).searchParams.get("thumbnail")).toBe("384");
+    }
     // Clicking the video tile still drives single-select — interactions are preserved.
     await act(async () => tiles()[0].click());
     expect(setSelectedAssetId).toHaveBeenCalledWith("v");
