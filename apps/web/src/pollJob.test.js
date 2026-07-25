@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "./api.js";
-import { pollJobToCompletion } from "./pollJob.js";
+import { abortableDelay, pollJobToCompletion } from "./pollJob.js";
 
 vi.mock("./api.js", () => ({
   apiFetch: vi.fn(),
@@ -190,5 +190,43 @@ describe("pollJobToCompletion (sc-8856)", () => {
 
     expect(settled.ok).toBe(false);
     expect(settled.error.name).toBe("AbortError");
+  });
+});
+
+describe("abortableDelay listener lifecycle", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("removes its abort listener when the timer resolves", async () => {
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, "addEventListener");
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+
+    const promise = abortableDelay(25, controller.signal);
+    await vi.advanceTimersByTimeAsync(25);
+    await promise;
+
+    expect(add).toHaveBeenCalledWith("abort", expect.any(Function), { once: true });
+    const handler = add.mock.calls[0][1];
+    expect(remove).toHaveBeenCalledWith("abort", handler);
+  });
+
+  it("removes its abort listener when abort rejects the delay", async () => {
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, "addEventListener");
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    const promise = abortableDelay(25, controller.signal);
+    const rejected = promise.catch((error) => error);
+
+    controller.abort();
+
+    expect((await rejected).name).toBe("AbortError");
+    const handler = add.mock.calls[0][1];
+    expect(remove).toHaveBeenCalledWith("abort", handler);
   });
 });

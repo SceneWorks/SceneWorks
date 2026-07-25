@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildImageJobRequest } from "./imageJobRequest.js";
+import { buildImageJobRequest, composeImageJobPrompt } from "./imageJobRequest.js";
 import { composeStyledPrompt } from "./styleComposer.js";
 import { styleTextForId } from "./data/styleCatalog.js";
 import {
@@ -97,6 +97,43 @@ function baseState(overrides = {}) {
 const STYLE_TEXT = "A gentle, hand-painted animation illustration style.";
 
 describe("buildImageJobRequest — Style Catalog fold (sc-13130)", () => {
+  it("the prompt-only composer preserves the builder's prose and pass-through semantics", () => {
+    const styled = composeImageJobPrompt({
+      promptToSend: "a fox in the snow",
+      sendStructured: false,
+      styleText: STYLE_TEXT,
+    });
+    expect(styled).toEqual({
+      prompt: composeStyledPrompt({ styleText: STYLE_TEXT, userPrompt: "a fox in the snow" }),
+      styleApplied: true,
+      structuredInjected: false,
+    });
+    expect(composeImageJobPrompt({
+      promptToSend: "a fox in the snow",
+      sendStructured: false,
+      styleText: null,
+    })).toEqual({ prompt: "a fox in the snow", styleApplied: false, structuredInjected: false });
+  });
+
+  it("the prompt-only composer preserves valid and invalid structured-caption semantics", () => {
+    const caption = '{"compositional_deconstruction":{"background":"snow","elements":[]}}';
+    const expected = serializeCaption(
+      injectStyleIntoCaption(parseCaption(caption).caption, STYLE_TEXT),
+    );
+    expect(composeImageJobPrompt({
+      promptToSend: caption,
+      sendStructured: true,
+      styleText: STYLE_TEXT,
+    })).toEqual({ prompt: expected, styleApplied: true, structuredInjected: true });
+
+    const invalidCaption = '{"scene":"snow"}';
+    expect(composeImageJobPrompt({
+      promptToSend: invalidCaption,
+      sendStructured: true,
+      styleText: STYLE_TEXT,
+    })).toEqual({ prompt: invalidCaption, styleApplied: false, structuredInjected: false });
+  });
+
   it("no style selected → prompt is the untouched user prompt (identity)", () => {
     const req = buildImageJobRequest(baseState({ styleText: null }));
     expect(req.prompt).toBe("a fox in the snow");

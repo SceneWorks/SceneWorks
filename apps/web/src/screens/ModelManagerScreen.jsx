@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { terminalStatuses } from "../constants.js";
@@ -111,6 +111,12 @@ const MODEL_TYPE_OPTIONS = [
   { value: "video", label: "Video" },
   { value: "audio", label: "Audio" },
   { value: "utility", label: "Utility" },
+];
+const MODEL_TAB_TYPES = [
+  ["image", "Image Models"],
+  ["video", "Video Models"],
+  ["audio", "Audio Models"],
+  ["utility", "Utility Models"],
 ];
 
 // sc-7081 (epic 7080, P0) originally hid this form on every platform because an imported
@@ -777,7 +783,10 @@ export function ModelManagerScreen() {
     });
   }, [models]);
   const hasGatedModel = models.some((model) => model.gated);
-  const visibleLoras = loras.filter((lora) => matchesFamily(lora, familyFilter));
+  const visibleLoras = useMemo(
+    () => loras.filter((lora) => matchesFamily(lora, familyFilter)),
+    [familyFilter, loras],
+  );
   // Wan A14B MoE paired upload (sc-1991): when the user targets the wan-video
   // family, let them pick the specific base model and (for two-expert A14B models)
   // upload the low-noise expert half alongside the high-noise primary.
@@ -1602,37 +1611,81 @@ export function ModelManagerScreen() {
   // dropdown is built from) and to LoRAs via matchesFamily — so a selected token never hides
   // everything. Search is case-insensitive over name/family/capability labels (models) and
   // name/family (LoRAs).
-  const modelMatchesFamily = (model) => familyFilter === "all" || modelLoraFamilies(model).includes(familyFilter);
-  const modelCapabilityLabels = (model) =>
-    (Array.isArray(model.capabilities) ? model.capabilities : []).map(capabilityLabel);
-  const modelMatchesQuery = (model) =>
-    !hasSearch ||
-    (model.name ?? model.id ?? "").toLowerCase().includes(query) ||
-    (model.family ?? "").toLowerCase().includes(query) ||
-    modelCapabilityLabels(model).some((label) => label.toLowerCase().includes(query));
-  const loraMatchesQuery = (lora) =>
-    !hasSearch ||
-    (lora.name ?? lora.id ?? "").toLowerCase().includes(query) ||
-    (lora.family ?? "").toLowerCase().includes(query);
+  // Derive every model tab, count, and search group in one memoized catalog pass.
+  // Rendering the Recommended band and the full tab panel then shares the same
+  // arrays instead of repeating type/search/family filters for each consumer.
+  const { modelGroupsByType, modelTypeCounts, searchModelMatches } = useMemo(() => {
+    const activeByType = Object.fromEntries(MODEL_TAB_TYPES.map(([type]) => [type, []]));
+    const counts = Object.fromEntries(MODEL_TAB_TYPES.map(([type]) => [type, 0]));
+    const searchMatches = [];
+    for (const model of models) {
+      if (counts[model.type] !== undefined) {
+        counts[model.type] += 1;
+      }
+      const familyMatches =
+        familyFilter === "all" || modelLoraFamilies(model).includes(familyFilter);
+      const queryMatches =
+        !hasSearch ||
+        (model.name ?? model.id ?? "").toLowerCase().includes(query) ||
+        (model.family ?? "").toLowerCase().includes(query) ||
+        (Array.isArray(model.capabilities) ? model.capabilities : [])
+          .map(capabilityLabel)
+          .some((label) => label.toLowerCase().includes(query));
+      if (!familyMatches || !queryMatches) {
+        continue;
+      }
+      searchMatches.push(model);
+      activeByType[model.type]?.push(model);
+    }
 
-  // Cross-type search matches feed the transient Search Results tab + its badge count. LoRAs are
-  // taken from the already family-filtered `visibleLoras`.
-  const searchModelMatches = models.filter(modelMatchesQuery).filter(modelMatchesFamily);
-  const searchLoraMatches = visibleLoras.filter(loraMatchesQuery);
+    const groups = {};
+    for (const [type] of MODEL_TAB_TYPES) {
+      const recommended = [];
+      const others = [];
+      for (const model of activeByType[type]) {
+        (isRecommendedModel(model) ? recommended : others).push(model);
+      }
+      const typeLabel = type;
+      groups[type] = {
+        activeModels: activeByType[type],
+        recommended,
+        others,
+        othersHeading:
+          recommended.length > 0
+            ? `All ${typeLabel} models`
+            : `${typeLabel.charAt(0).toUpperCase()}${typeLabel.slice(1)} models`,
+      };
+    }
+    return {
+      modelGroupsByType: groups,
+      modelTypeCounts: counts,
+      searchModelMatches: searchMatches,
+    };
+  }, [familyFilter, hasSearch, models, query]);
+  const searchLoraMatches = useMemo(
+    () =>
+      visibleLoras.filter(
+        (lora) =>
+          !hasSearch ||
+          (lora.name ?? lora.id ?? "").toLowerCase().includes(query) ||
+          (lora.family ?? "").toLowerCase().includes(query),
+      ),
+    [hasSearch, query, visibleLoras],
+  );
   const searchTotalCount = searchModelMatches.length + searchLoraMatches.length;
 
   // Tab definitions — counts are TOTALS per type (not the filtered view). The transient Search
   // Results tab is appended only while a search is active; its badge is the live match count.
-  const tabDefs = [
-    ["image", "Image Models", models.filter((model) => model.type === "image").length],
-    ["video", "Video Models", models.filter((model) => model.type === "video").length],
-    ["audio", "Audio Models", models.filter((model) => model.type === "audio").length],
-    ["utility", "Utility Models", models.filter((model) => model.type === "utility").length],
-    ["lora", "LoRAs", loras.length],
-  ];
-  if (hasSearch) {
-    tabDefs.push(["search", "⌕ Search Results", searchTotalCount]);
-  }
+  const tabDefs = useMemo(() => {
+    const definitions = [
+      ...MODEL_TAB_TYPES.map(([type, label]) => [type, label, modelTypeCounts[type]]),
+      ["lora", "LoRAs", loras.length],
+    ];
+    if (hasSearch) {
+      definitions.push(["search", "⌕ Search Results", searchTotalCount]);
+    }
+    return definitions;
+  }, [hasSearch, loras.length, modelTypeCounts, searchTotalCount]);
 
   const isSearchTab = effectiveTab === "search";
   const isLoraTab = effectiveTab === "lora";
@@ -1640,26 +1693,11 @@ export function ModelManagerScreen() {
 
   // A model type panel: an accent Recommended band (when any recommended match) over an
   // "All {type} models" grid of the rest. Both filtered by the active search + family.
-  // Filter the catalog for a type by the active search + family, split into the
-  // curated Recommended picks (surfaced in the work-panel) and the rest.
-  function modelTabGroups(type) {
-    const activeModels = models
-      .filter((model) => model.type === type)
-      .filter(modelMatchesQuery)
-      .filter(modelMatchesFamily);
-    const recommended = activeModels.filter(isRecommendedModel);
-    const others = activeModels.filter((model) => !isRecommendedModel(model));
-    const typeLabel = { image: "image", video: "video", audio: "audio", utility: "utility" }[type] ?? type;
-    const othersHeading =
-      recommended.length > 0 ? `All ${typeLabel} models` : `${typeLabel.charAt(0).toUpperCase()}${typeLabel.slice(1)} models`;
-    return { recommended, others, othersHeading };
-  }
-
   // Recommended picks, rendered flush inside the work-panel (Page-Frame standard:
   // curated getting-started content belongs to the action, not floating on the
   // canvas). No accent-band card here — the work-panel is already the one card.
   function renderRecommendedPicks(type) {
-    const { recommended } = modelTabGroups(type);
+    const { recommended } = modelGroupsByType[type];
     if (!recommended.length) {
       return null;
     }
@@ -1816,7 +1854,7 @@ export function ModelManagerScreen() {
   // The catalog grid on the canvas: "All {type} models" (the non-recommended
   // rest). Recommended picks render separately in the work-panel above.
   function renderModelTabPanel(type) {
-    const { recommended, others, othersHeading } = modelTabGroups(type);
+    const { recommended, others, othersHeading } = modelGroupsByType[type];
     return (
       <div className="models-tab-panel">
         {type === "image" ? renderModelImportPanel() : null}
@@ -1839,13 +1877,8 @@ export function ModelManagerScreen() {
   // The transient Search Results tab: cross-type model matches grouped by type, then a LoRA
   // section using the shared row. Only non-empty groups render.
   function renderSearchTabPanel() {
-    const groups = [
-      ["image", "Image Models"],
-      ["video", "Video Models"],
-      ["audio", "Audio Models"],
-      ["utility", "Utility Models"],
-    ]
-      .map(([type, label]) => ({ label, items: searchModelMatches.filter((model) => model.type === type) }))
+    const groups = MODEL_TAB_TYPES
+      .map(([type, label]) => ({ label, items: modelGroupsByType[type].activeModels }))
       .filter((group) => group.items.length > 0);
     const isEmpty = groups.length === 0 && searchLoraMatches.length === 0;
     return (

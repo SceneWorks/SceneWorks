@@ -19,6 +19,28 @@ import { injectStyleIntoCaption, isCaption, parseCaption, serializeCaption } fro
 // This is the single-submit payload verbatim (the correct reference), parameterized only by those
 // overrides. Every omit-when-default and mode gate is preserved; `advanced` is delegated to the
 // already-pure buildImageJobAdvanced so its guards stay in one place.
+export function composeImageJobPrompt({ promptToSend, sendStructured, styleText }) {
+  const hasStyle = typeof styleText === "string" && styleText.trim() !== "";
+  const proseStyleApplied = !sendStructured && hasStyle;
+  const structuredStyleSelected = sendStructured && hasStyle;
+  let prompt = promptToSend;
+  let structuredInjected = false;
+  if (proseStyleApplied) {
+    prompt = composeStyledPrompt({ styleText, userPrompt: promptToSend });
+  } else if (structuredStyleSelected) {
+    const { caption } = parseCaption(promptToSend);
+    if (isCaption(caption)) {
+      prompt = serializeCaption(injectStyleIntoCaption(caption, styleText));
+      structuredInjected = true;
+    }
+  }
+  return {
+    prompt,
+    styleApplied: proseStyleApplied || structuredInjected,
+    structuredInjected,
+  };
+}
+
 export function buildImageJobRequest(state) {
   const {
     // Prompt / resolution overrides — the one legitimate single-vs-batch difference.
@@ -52,6 +74,7 @@ export function buildImageJobRequest(state) {
     characterId,
     characterLookId,
     multiReference,
+    sourceWithMultiReference,
     editSecondPair,
     sourceAssetId,
     controlPreprocessSourceId,
@@ -132,21 +155,11 @@ export function buildImageJobRequest(state) {
   // client never transformed — silently dropping the style. So `structuredInjected` is computed
   // INSIDE the isCaption branch and gates `styleApplied`; a non-caption structured prompt is passed
   // through with no flag/styleId so the server can still handle it.
-  const hasStyle = typeof styleText === "string" && styleText.trim() !== "";
-  const proseStyleApplied = !sendStructured && hasStyle;
-  const structuredStyleSelected = sendStructured && hasStyle;
-  let composedPrompt = promptToSend;
-  let structuredInjected = false;
-  if (proseStyleApplied) {
-    composedPrompt = composeStyledPrompt({ styleText, userPrompt: promptToSend });
-  } else if (structuredStyleSelected) {
-    const { caption } = parseCaption(promptToSend);
-    if (isCaption(caption)) {
-      composedPrompt = serializeCaption(injectStyleIntoCaption(caption, styleText));
-      structuredInjected = true;
-    }
-  }
-  const styleApplied = proseStyleApplied || structuredInjected;
+  const { prompt: composedPrompt, styleApplied, structuredInjected } = composeImageJobPrompt({
+    promptToSend,
+    sendStructured,
+    styleText,
+  });
 
   return {
     mode,
@@ -192,7 +205,9 @@ export function buildImageJobRequest(state) {
     referenceAssetIds:
       mode === "edit_image" && multiReference && referenceAssetIds.length
         ? referenceAssetIds
-        : (editSecondPair ?? undefined),
+        : mode === "edit_image" && sourceWithMultiReference && referenceAssetIds.length
+          ? referenceAssetIds
+          : (editSecondPair ?? undefined),
     // Fit mode applies to edits only; coerced so a stale "outpaint" never reaches a
     // non-inpaint model (epic 2551). Omitted for non-edit modes (worker default crop).
     fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,

@@ -43,7 +43,7 @@ import {
   serializeCaption,
   validateCaption,
 } from "../ideogramCaption.js";
-import { buildImageJobRequest } from "../imageJobRequest.js";
+import { buildImageJobRequest, composeImageJobPrompt } from "../imageJobRequest.js";
 import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
 
 const PROMPT_SUGGESTION_POOL = [
@@ -153,7 +153,12 @@ import {
 import { suggestTier } from "../tierSuggestion.js";
 import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
 import { readLastTier } from "../lastTierStore.js";
-import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
+import {
+  PROMPT_REFINE_MODEL_ID,
+  terminalStatuses,
+  VISION_CAPTION_MODEL_ID,
+  VISION_CAPTION_MODEL_REPO,
+} from "../constants.js";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
 import { finiteRecipeNumber, recipeLoraSelection, recipeResolution } from "../recipeFields.js";
@@ -428,6 +433,7 @@ export function ImageStudio() {
     batchAbortRef, batchPrompts, batchVariables, batchJobCount, handleSaveBatch,
     handleLoadBatch, handleDeleteBatch, handleImportBatch, handleNewBatch,
   } = useBatchPromptState({ saved, createPromptBatch, updatePromptBatch, deletePromptBatch });
+  const batchObservedJobsRef = useRef(new Map());
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? imageModels[0]?.id ?? "z_image_turbo");
   const [seed, setSeed] = useState(saved.seed ?? "");
@@ -895,6 +901,9 @@ export function ImageStudio() {
   // multi-select reference picker (plural `referenceAssetIds`) instead of the single source picker.
   // FLUX.2-dev only (its DiT sequence-gated chunking keeps the multi-reference edit under 96 GB).
   const multiReference = Boolean(selectedModel?.ui?.multiReference);
+  // Mage Edit keeps its required source distinct from its optional ordered reference set. Unlike
+  // `multiReference`, this never replaces `sourceAssetId`; it adds `referenceAssetIds` alongside it.
+  const sourceWithMultiReference = Boolean(selectedModel?.ui?.sourceWithMultiReference);
   // Krea-style two-reference edit (epic 10871 P1.3): a model whose `ui.editReferences` adds an optional
   // SECOND source to the single-source edit — any two images, image 1 (required) + image 2 (optional),
   // fixed order. Only in single-source edit mode (never alongside the flat `multiReference`
@@ -1159,15 +1168,20 @@ export function ImageStudio() {
     const asset = editImageAssets.find((item) => item.id === img2imgReferenceAssetId);
     const src = asset && assetUrl(asset);
     if (!src || typeof Image === "undefined") return;
+    let cancelled = false;
     const probe = new Image();
     probe.onload = () => {
-      if (probe.naturalWidth && probe.naturalHeight) {
+      if (!cancelled && probe.naturalWidth && probe.naturalHeight) {
         onReferenceImageLoaded(probe.naturalWidth, probe.naturalHeight);
       }
     };
     probe.src = src;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [img2imgReferenceAssetId, editImageAssets]);
+    return () => {
+      cancelled = true;
+      probe.onload = null;
+      probe.src = "";
+    };
+  }, [img2imgReferenceAssetId, editImageAssets, onReferenceImageLoaded]);
   // Sampler / scheduler menus declared by the model, gated to the ACTIVE backend
   // (epic 7114 P5): `macGatingActive` is the worker `mlx_required` master switch, so
   // it picks the manifest's `mlx.limits` override on Mac/MLX and the `candle.limits`
@@ -1945,6 +1959,31 @@ export function ImageStudio() {
   // sendStructured / submitCaption / submitBackend / resolutionOverride). This replaced a
   // hand-copied batch twin that had drifted (dropped the img2img reference + pidTarget/img2img
   // advanced knobs), silently ignoring an img2img reference and PiD "2K" tier on batch runs.
+  const activeStyleText = styleTextForId(effectiveStyleId);
+  const composeJobPrompt = useCallback(
+    (overrides = {}) => {
+      const stackActive = generalStack.length > 0;
+      const isStructured = overrides.sendStructured ?? false;
+      const foldPrompt = stackActive && !isStructured;
+      const promptToSend =
+        foldPrompt && overrides.promptToSend != null
+          ? composePreset({
+              base: selectedPreset,
+              generalStack,
+              userText: overrides.promptToSend,
+              resolutionOptions,
+            }).prompt
+          : overrides.promptToSend;
+      const { prompt: composedPrompt } = composeImageJobPrompt({
+        promptToSend,
+        sendStructured: isStructured,
+        styleText: activeStyleText,
+      });
+      return { composedPrompt, foldPrompt, isStructured, promptToSend };
+    },
+    [activeStyleText, generalStack, resolutionOptions, selectedPreset],
+  );
+
   const buildJobRequest = (overrides = {}) => {
     // Fold the general-preset stack (epic 11949) into this request. The prompt is composed per
     // call so it wraps either the single prompt or a per-batch-item prompt; a structured JSON
@@ -1952,13 +1991,7 @@ export function ImageStudio() {
     // negative/aspect/count still apply). When the stack folds the prompt, the client is
     // authoritative — presetPromptResolvedClientSide tells the server to skip its own fold.
     const stackActive = generalStack.length > 0;
-    const isStructured = overrides.sendStructured ?? false;
-    const foldPrompt = stackActive && !isStructured;
-    const promptToSend =
-      foldPrompt && overrides.promptToSend != null
-        ? composePreset({ base: selectedPreset, generalStack, userText: overrides.promptToSend, resolutionOptions })
-            .prompt
-        : overrides.promptToSend;
+    const { foldPrompt, isStructured, promptToSend } = composeJobPrompt(overrides);
     const stackResolution = stackActive && composedStack.resolution ? parseResolution(composedStack.resolution) : null;
     return buildImageJobRequest({
       // Overrides — the one legitimate single-vs-batch difference.
@@ -1986,12 +2019,13 @@ export function ImageStudio() {
       // produced `promptToSend` — so the style's `Style:` block wraps the already-preset-composed
       // user prompt as `Subject:`. Null → pass-through (prompt sent unchanged). Structured
       // caption models ignore it (the builder skips composition when sendStructured is true).
-      styleText: styleTextForId(effectiveStyleId),
+      styleText: activeStyleText,
       // sc-13132: the opaque style id travels with the recipe so replay can re-select the picker.
       styleId: effectiveStyleId,
       characterId,
       characterLookId,
       multiReference,
+      sourceWithMultiReference,
       editSecondPair,
       sourceAssetId,
       controlPreprocessSourceId,
@@ -2094,7 +2128,7 @@ export function ImageStudio() {
       stylePreviewActive && !structuredPromptModel
         ? resolved.map(({ prompt: resolvedPrompt }) => {
             const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
-            return buildBatchJobRequest(cleanPrompt).prompt;
+            return composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt;
           })
         : [],
     );
@@ -2115,6 +2149,7 @@ export function ImageStudio() {
     }
     setBatchConfirmPending(false);
     batchAbortRef.current = false;
+    batchObservedJobsRef.current.clear();
     // Items carry `error` so not-yet-submitted rows read as pending, not failed, while a
     // (possibly slow, structured) enqueue is in flight. Updated after each post so progress
     // ticks up live.
@@ -2169,7 +2204,7 @@ export function ImageStudio() {
       if (!item.jobId) {
         continue;
       }
-      const status = batchItemStatus(item.jobId, jobs);
+      const status = batchItemStatus(item.jobId, jobs, batchObservedJobsRef.current);
       if (status !== "queued" && status !== "running") {
         continue;
       }
@@ -2180,7 +2215,24 @@ export function ImageStudio() {
     }
   }
 
-  const batchRunProgress = batchRun ? summarizeBatchRun(batchRun.items, jobs) : null;
+  const batchRunProgress = batchRun
+    ? summarizeBatchRun(batchRun.items, jobs, batchObservedJobsRef.current)
+    : null;
+  useEffect(() => {
+    if (!batchRun) return;
+    const batchJobIds = new Set(batchRun.items.map((item) => item.jobId).filter(Boolean));
+    for (const job of jobs) {
+      if (batchJobIds.has(job.id)) {
+        const status =
+          job.status === "completed"
+            ? "completed"
+            : terminalStatuses.has(job.status)
+              ? "failed"
+              : "observed";
+        batchObservedJobsRef.current.set(job.id, status);
+      }
+    }
+  }, [batchRun, jobs]);
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
   // Prompt lines whose leading [WxH] directive (sc-10063) is out of the backend 256–4096
@@ -2199,7 +2251,6 @@ export function ImageStudio() {
   // auto-write a caption per resolved prompt (sc-9980).
   const batchStructuredExpandBlocked =
     structuredPromptModel && (magicModelMissing || typeof magicPrompt !== "function");
-  const activeStyleText = styleTextForId(effectiveStyleId);
   const styleSelected = typeof activeStyleText === "string" && activeStyleText.trim() !== "";
   const stylePreviewActive = !structuredPromptModel && styleSelected;
   // sc-13224: structured JSON-caption models apply the Style axis by merging into the caption's
@@ -2236,17 +2287,23 @@ export function ImageStudio() {
     ],
   );
   // sc-13131 / sc-13133: the live composed-prompt preview for the selected Style Catalog entry, and
-  // the budget the composed string spends against the backend cap. ANTI-DRIFT: we do NOT re-derive
-  // the composition here — we run the SAME buildJobRequest the single Generate submit calls (with the
-  // live prompt as promptToSend) and read its `.prompt`, so the previewed/measured string is
-  // byte-for-byte the prompt that will be sent (preset stack folds into the prompt FIRST, the style's
-  // Subject:/Style: wrap is applied LAST — see imageJobRequest.js). It recomputes every render, so
-  // it tracks the prompt text, the selected style, and the active preset stack live. Only active for
+  // the budget the composed string spends against the backend cap. ANTI-DRIFT: composeJobPrompt is
+  // the shared prompt-only primitive used by both this preview and buildJobRequest, so the
+  // previewed/measured string is byte-for-byte the prompt that will be sent without rebuilding the
+  // entire request on every keystroke (preset stack folds into the prompt FIRST, the style's
+  // Subject:/Style: wrap is applied LAST — see imageJobRequest.js). Its memo dependencies track the
+  // prompt text, selected style, and active preset stack. Only active for
   // free-text models with a style actually selected: structured-caption models (Ideogram) merge the
   // style into the caption's `aesthetics` instead (sc-13224), so there's no Subject:/Style: prose
   // to preview, and a null/empty styleText is a pass-through with nothing extra to preview and no
   // style-composition budget to guard.
-  const styledPreviewPrompt = stylePreviewActive ? buildJobRequest({ promptToSend: prompt }).prompt : null;
+  const styledPreviewPrompt = useMemo(
+    () =>
+      stylePreviewActive
+        ? composeJobPrompt({ promptToSend: prompt }).composedPrompt
+        : null,
+    [composeJobPrompt, prompt, stylePreviewActive],
+  );
   const generateDraft = useMemo(
     () => ({
       activeProject,
@@ -2763,6 +2820,18 @@ export function ImageStudio() {
                           <p className="field-hint">{editReferences.secondaryHint}</p>
                         ) : null}
                       </>
+                    ) : null}
+                    {sourceWithMultiReference ? (
+                      <AssetPickerField
+                        assets={editImageAssets}
+                        buttonLabel="Select references"
+                        changeLabel="Edit references"
+                        emptyLabel="No additional references selected (optional)"
+                        label="Additional references (optional)"
+                        multiple
+                        onChange={setReferenceAssetIds}
+                        values={referenceAssetIds}
+                      />
                     ) : null}
                   </>
                 )}
