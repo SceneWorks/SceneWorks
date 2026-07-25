@@ -1,19 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { buildImageJobRequest } from "./imageJobRequest.js";
+import { buildImageJobRequest, composeImageJobPrompt } from "./imageJobRequest.js";
 import { composePreset } from "./presetUtils.js";
 import { composeStyledPrompt } from "./styleComposer.js";
 import { STYLE_GROUPS, styleTextForId } from "./data/styleCatalog.js";
 
 // sc-13131 — CORE DoD guard: the live Style preview must equal the submitted `prompt` BYTE-FOR-BYTE.
 //
-// In ImageStudio the preview value is `buildJobRequest({ promptToSend: prompt }).prompt` — the SAME
-// function the single Generate submit calls — so the preview cannot drift from the payload by
-// construction. `buildJobRequest` folds the general-preset stack into the user text FIRST (via
-// composePreset), then hands that preset-folded prompt to `buildImageJobRequest`, which applies the
-// style wrap LAST (composeStyledPrompt). This suite pins that final `buildImageJobRequest` composition
-// step — the one both the preview and the payload share — against the composer directly, so a change
-// that made the payload compose differently from `composeStyledPrompt` (i.e. from the preview) fails.
+// ImageStudio's preview and full request builder share the prompt-only
+// composeImageJobPrompt primitive. The studio folds the general-preset stack into
+// the user text FIRST (via composePreset), then the primitive applies the style
+// wrap LAST. This suite pins the exact string without rebuilding an entire job
+// request for each preview keystroke or batch-budget prompt.
 
 // A representative studio state for a plain free-text (non-structured) model. Only the fields
 // buildImageJobRequest reads need to be present; arrays are empty and edit/upscale branches are off.
@@ -64,11 +62,11 @@ describe("Style preview ↔ payload prompt parity (sc-13131)", () => {
   // The exact recipe ImageStudio uses to derive the preview / payload prompt from the raw prompt:
   //   1. fold the preset stack into the user text (composePreset) — FIRST,
   //   2. wrap the preset-folded prompt in the selected style (buildImageJobRequest → composeStyledPrompt) — LAST.
-  // Returns { payloadPrompt } exactly as the submit path produces it.
+  // Returns the composed prompt exactly as the preview and submit paths produce it.
   function payloadPromptFor({ prompt, stack = [] }) {
     const foldPrompt = stack.length > 0;
     const promptToSend = foldPrompt ? composePreset({ generalStack: stack, userText: prompt }).prompt : prompt;
-    return buildImageJobRequest(baseState({ promptToSend, styleText })).prompt;
+    return composeImageJobPrompt({ promptToSend, sendStructured: false, styleText }).prompt;
   }
 
   it("plain prompt: payload prompt equals the composer's Subject/Style block", () => {

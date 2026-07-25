@@ -344,20 +344,26 @@ export function DocumentStudio() {
     if (sourceAssetIds.length > 0) {
       advanced.imageGuidanceScale = referenceGuidance;
     }
-    const job = await createInterleaveJob({
-      prompt: prompt.trim(),
-      model: model || undefined,
-      maxImages: clampMaxImages(maxImages),
-      width,
-      height,
-      sourceAssetIds,
-      advanced,
-    });
-    setSubmitting(false);
-    if (job) {
-      // Stack the run in the studio instead of routing to the Queue, so its output
-      // streams in below the prompt as it composes.
-      rememberLocalGenerationJob?.("document", job);
+    try {
+      const job = await createInterleaveJob({
+        prompt: prompt.trim(),
+        model: model || undefined,
+        maxImages: clampMaxImages(maxImages),
+        width,
+        height,
+        sourceAssetIds,
+        advanced,
+      });
+      if (job) {
+        // Stack the run in the studio instead of routing to the Queue, so its output
+        // streams in below the prompt as it composes.
+        rememberLocalGenerationJob?.("document", job);
+      }
+    } catch {
+      // The app-level job creator owns request-error reporting; this screen only
+      // owns restoring its submit affordance when an injected creator rejects.
+    } finally {
+      setSubmitting(false);
     }
   }
 

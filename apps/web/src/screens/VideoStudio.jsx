@@ -969,16 +969,31 @@ export function VideoStudio() {
   // left enabled so a reduced catalog can't strand you on a disabled tab. `macVideoModeBlock` still
   // gates the in-mode model picker + submit (via `modelsForMode` / `supportsMode`).
   const macModeTabBlocked = (value) => macGating && modelsForMode(value).length === 0;
-  const matchingTracks = personTracks.filter((track) => track.sourceAssetId === sourceClipAssetId);
-  const latestDetectionJob = jobs
-    .filter(
-      (job) =>
+  const matchingTracks = useMemo(
+    () =>
+      mode === "replace_person"
+        ? personTracks.filter((track) => track.sourceAssetId === sourceClipAssetId)
+        : [],
+    [mode, personTracks, sourceClipAssetId],
+  );
+  const latestDetectionJob = useMemo(() => {
+    if (mode !== "replace_person" || !activeProject?.id || !sourceClipAssetId) {
+      return null;
+    }
+    let latest = null;
+    for (const job of jobs) {
+      if (
         job.type === "person_detect" &&
         job.status === "completed" &&
-        job.projectId === activeProject?.id &&
-        job.payload?.sourceAssetId === sourceClipAssetId,
-    )
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+        job.projectId === activeProject.id &&
+        job.payload?.sourceAssetId === sourceClipAssetId &&
+        (!latest || job.createdAt.localeCompare(latest.createdAt) > 0)
+      ) {
+        latest = job;
+      }
+    }
+    return latest;
+  }, [activeProject?.id, jobs, mode, sourceClipAssetId]);
   const detectionResult = latestDetectionJob?.result ?? null;
   const representativeFrame = assets.find((asset) => asset.id === detectionResult?.frameAssetId);
   const selectedDetection = detectionResult?.detections?.find((item) => item.id === selectedDetectionId) ?? detectionResult?.detections?.[0];
