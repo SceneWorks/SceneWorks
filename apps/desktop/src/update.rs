@@ -15,6 +15,11 @@
 //! and keep the whole flow out of the webview. The check is fail-soft — offline,
 //! no published release, or a parse error just logs and lets the app start.
 
+use std::{
+    ffi::{OsStr, OsString},
+    path::Path,
+};
+
 use tauri::AppHandle;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -46,7 +51,23 @@ pub fn spawn_startup_check(app: &AppHandle) {
 /// Query the endpoint and, if a newer release exists, prompt the user. Accepting
 /// hands off to [`install_update`]; declining just returns.
 async fn check_and_prompt(app: &AppHandle) -> tauri_plugin_updater::Result<()> {
-    let Some(update) = app.updater()?.check().await? else {
+    let updater = app.updater_builder();
+    #[cfg(target_os = "windows")]
+    let updater = match std::env::current_exe()
+        .ok()
+        .and_then(|current_exe| nsis_install_dir_arg(&current_exe))
+    {
+        Some(install_dir_arg) => {
+            // NSIS only recognizes `/D=<path>` as the final installer argument.
+            // tauri-plugin-updater appends our installer args after its own
+            // `/UPDATE`, `/ARGS`, and relaunch arguments, so this both pre-fills
+            // the directory page and preserves MSI custom locations when the
+            // updater migrates the install to NSIS.
+            updater.installer_arg(install_dir_arg)
+        }
+        None => updater,
+    };
+    let Some(update) = updater.build()?.check().await? else {
         tracing::info!("auto-update: already on the latest release");
         return Ok(());
     };
@@ -96,6 +117,23 @@ async fn check_and_prompt(app: &AppHandle) -> tauri_plugin_updater::Result<()> {
     Ok(())
 }
 
+/// Build NSIS's destination-directory argument from the running executable.
+///
+/// Construct this as an [`OsString`] rather than formatting a display path so
+/// valid non-UTF-8 Windows paths are not changed. NSIS requires `/D=` to be the
+/// final argument; the updater builder preserves insertion order and appends
+/// installer arguments last.
+fn nsis_install_dir_arg(current_exe: &Path) -> Option<OsString> {
+    let install_dir = current_exe.parent()?;
+    if install_dir.as_os_str().is_empty() {
+        return None;
+    }
+
+    let mut arg = OsString::from(OsStr::new("/D="));
+    arg.push(install_dir.as_os_str());
+    Some(arg)
+}
+
 /// Download + install the verified update, then restart into it. `restart()`
 /// diverges (`-> !`), so it is the function's tail and nothing runs after it.
 ///
@@ -143,4 +181,31 @@ async fn install_update(app: &AppHandle, update: Update) -> tauri_plugin_updater
     }
     tracing::info!("auto-update: installed, restarting");
     app.restart()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nsis_install_dir_arg;
+    use std::{ffi::OsString, path::Path};
+
+    #[test]
+    fn nsis_install_dir_uses_current_executable_parent() {
+        assert_eq!(
+            nsis_install_dir_arg(Path::new("/opt/SceneWorks/SceneWorks")),
+            Some(OsString::from("/D=/opt/SceneWorks"))
+        );
+    }
+
+    #[test]
+    fn nsis_install_dir_preserves_spaces() {
+        assert_eq!(
+            nsis_install_dir_arg(Path::new("/opt/Program Files/SceneWorks/SceneWorks")),
+            Some(OsString::from("/D=/opt/Program Files/SceneWorks"))
+        );
+    }
+
+    #[test]
+    fn nsis_install_dir_rejects_parentless_path() {
+        assert_eq!(nsis_install_dir_arg(Path::new("")), None);
+    }
 }

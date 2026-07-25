@@ -155,6 +155,14 @@ test("Linux release update behavior is explicit for each package format", () => 
   assert.match(updaterSource, /var_os\("APPIMAGE"\)\.is_none\(\)/);
 });
 
+test("Windows updates show and prefill the install directory", () => {
+  assert.equal(baseConfig.plugins.updater.windows.installMode, "basicUi");
+  assert.match(updaterSource, /app\.updater_builder\(\)/);
+  assert.match(updaterSource, /std::env::current_exe\(\)/);
+  assert.match(updaterSource, /updater\.installer_arg\(install_dir_arg\)/);
+  assert.match(updaterSource, /OsString::from\(OsStr::new\("\/D="\)\)/);
+});
+
 test("the Linux overlay does not regress macOS or Windows bundle config", () => {
   const linuxConfig = mergeConfig(baseConfig, linuxOverlay);
   const macosConfig = mergeConfig(baseConfig, macosOverlay);
