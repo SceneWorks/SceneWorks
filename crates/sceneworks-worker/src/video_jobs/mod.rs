@@ -35,7 +35,7 @@ use sceneworks_core::video_request::{
 use sceneworks_core::contracts::GenerationMetrics;
 
 use super::*;
-use crate::media_jobs::{run_ffmpeg, FfmpegContext};
+use crate::media_jobs::{run_ffmpeg, run_ffmpeg_with_stdin_chunks, FfmpegContext};
 
 /// Shared worker-level dependencies used by the engine-family modules. Keeping this
 /// list explicit prevents a family from silently inheriting newly imported parent
@@ -1026,7 +1026,7 @@ fn stub_audio_track(frame_count: u32, fps: u32) -> AudioTrack {
 // (heartbeat/cancel), so it is exercisable in tests with a real ffmpeg.
 // ---------------------------------------------------------------------------
 
-/// Write `decoded` to `media_path` as an mp4: frames → libx264, an optional 16-bit
+/// Write `decoded` to `media_path` as an mp4: raw RGB frames streamed to libx264, an optional 16-bit
 /// PCM WAV muxed as AAC (`-shortest`), then a best-effort `+faststart` remux and
 /// `.poster.jpg`. `media_path` is created (atomically renamed from a temp) only on
 /// success; all intermediates are removed regardless of outcome.
@@ -1035,21 +1035,10 @@ async fn encode_media(
     decoded: DecodedVideo,
     ctx: Option<FfmpegContext<'_>>,
 ) -> WorkerResult<()> {
-    let frames_dir = media_path.with_extension("frames");
     let enc_tmp = media_path.with_extension("enc.mp4");
     let wav_tmp = media_path.with_extension("audio.wav");
     let mux_tmp = media_path.with_extension("mux.mp4");
-    let result = encode_inner(
-        media_path,
-        decoded,
-        ctx,
-        &frames_dir,
-        &enc_tmp,
-        &wav_tmp,
-        &mux_tmp,
-    )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&frames_dir).await;
+    let result = encode_inner(media_path, decoded, ctx, &enc_tmp, &wav_tmp, &mux_tmp).await;
     let _ = tokio::fs::remove_file(&enc_tmp).await;
     let _ = tokio::fs::remove_file(&wav_tmp).await;
     let _ = tokio::fs::remove_file(&mux_tmp).await;
@@ -1066,7 +1055,6 @@ async fn encode_inner(
     media_path: &Path,
     decoded: DecodedVideo,
     ctx: Option<FfmpegContext<'_>>,
-    frames_dir: &Path,
     enc_tmp: &Path,
     wav_tmp: &Path,
     mux_tmp: &Path,
@@ -1080,42 +1068,44 @@ async fn encode_inner(
         ));
     }
 
-    // 1. Write the frame sequence (blocking PNG encodes off the async runtime).
-    tokio::fs::create_dir_all(frames_dir).await?;
-    let dir = frames_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || -> WorkerResult<()> {
-        for (index, frame) in frames.into_iter().enumerate() {
-            let RgbFrame {
-                width,
-                height,
-                pixels,
-            } = frame;
-            let image = image::RgbImage::from_raw(width, height, pixels).ok_or_else(|| {
-                WorkerError::InvalidPayload("video frame buffer size mismatch".to_owned())
-            })?;
-            let path = dir.join(format!("frame_{index:05}.png"));
-            image
-                .save_with_format(&path, image::ImageFormat::Png)
-                .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
+    let width = frames[0].width;
+    let height = frames[0].height;
+    let expected_bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| WorkerError::InvalidPayload("video frame dimensions overflow".to_owned()))?;
+    for frame in &frames {
+        if frame.width != width || frame.height != height {
+            return Err(WorkerError::InvalidPayload(
+                "video frames must all have the same dimensions".to_owned(),
+            ));
         }
-        Ok(())
-    })
-    .await
-    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+        if frame.pixels.len() != expected_bytes {
+            return Err(WorkerError::InvalidPayload(
+                "video frame buffer size mismatch".to_owned(),
+            ));
+        }
+    }
 
-    // 2. Frames → mp4 (libx264, yuv420p — request dims are multiples of 32, so even).
-    let pattern = frames_dir.join("frame_%05d.png");
-    run_ffmpeg(
+    // 1. Stream the engine-owned RGB buffers directly into FFmpeg. This moves one existing frame
+    // buffer at a time through the pipe: no per-frame PNG encode, no multi-GB scratch tree, and no
+    // second whole-video concatenation.
+    let chunks = frames.into_iter().map(|frame| frame.pixels).collect();
+    run_ffmpeg_with_stdin_chunks(
         vec![
             "ffmpeg".to_owned(),
             "-nostdin".to_owned(),
             "-y".to_owned(),
+            "-f".to_owned(),
+            "rawvideo".to_owned(),
+            "-pix_fmt".to_owned(),
+            "rgb24".to_owned(),
+            "-video_size".to_owned(),
+            format!("{width}x{height}"),
             "-framerate".to_owned(),
             fps.to_string(),
-            "-start_number".to_owned(),
-            "0".to_owned(),
             "-i".to_owned(),
-            pattern.to_string_lossy().into_owned(),
+            "pipe:0".to_owned(),
             "-c:v".to_owned(),
             "libx264".to_owned(),
             "-pix_fmt".to_owned(),
@@ -1124,11 +1114,12 @@ async fn encode_inner(
             fps.to_string(),
             enc_tmp.to_string_lossy().into_owned(),
         ],
+        chunks,
         ctx,
     )
     .await?;
 
-    // 3. Mux the audio track (LTX) as AAC, else the video-only mp4 is the result.
+    // 2. Mux the audio track (LTX) as AAC, else the video-only mp4 is the result.
     let finished_tmp = if let Some(audio) = audio {
         write_wav_pcm16(&audio, wav_tmp)?;
         run_ffmpeg(
@@ -1155,26 +1146,22 @@ async fn encode_inner(
         enc_tmp
     };
 
-    // 4. Publish atomically, then best-effort faststart + poster (mirrors Python).
+    // 3. Publish atomically, then best-effort faststart + poster (mirrors Python).
     tokio::fs::rename(finished_tmp, media_path).await?;
     faststart_mp4(media_path).await;
     write_poster_frame(media_path).await;
     Ok(())
 }
 
-/// Peak-normalize the f32 PCM to 16-bit and write a canonical WAV. Silence (peak 0)
-/// stays silent rather than dividing by zero. `pub(crate)` so the pure-audio job path reuses it
-/// (sc-13404).
+/// Write f32 PCM to a canonical 16-bit WAV. Signals already within `[-1, 1]` retain their original
+/// amplitude; only over-range input is peak-normalized to prevent clipping. `pub(crate)` so the
+/// pure-audio job path reuses it (sc-13404).
 pub(crate) fn write_wav_pcm16(audio: &AudioTrack, path: &Path) -> WorkerResult<()> {
     let peak = audio
         .samples
         .iter()
         .fold(0.0f32, |max, &sample| max.max(sample.abs()));
-    let scale = if peak > 0.0 {
-        i16::MAX as f32 / peak
-    } else {
-        0.0
-    };
+    let scale = i16::MAX as f32 / peak.max(1.0);
     let mut pcm = Vec::with_capacity(audio.samples.len() * 2);
     for &sample in &audio.samples {
         let value = (sample * scale)
@@ -1775,16 +1762,14 @@ async fn assemble_scail2_animate_conditioning<FR, FD>(
     api: &ApiClient,
     settings: &Settings,
     job_id: &str,
-    reference: Image,
-    driving: Vec<Image>,
     segment_reference: FR,
     segment_driving: FD,
 ) -> WorkerResult<Vec<Conditioning>>
 where
-    FR: FnOnce(gen_core::CancelFlag) -> WorkerResult<Image> + Send + 'static,
-    FD: FnOnce(gen_core::CancelFlag) -> WorkerResult<Vec<Image>> + Send + 'static,
+    FR: FnOnce(gen_core::CancelFlag) -> WorkerResult<(Image, Image)> + Send + 'static,
+    FD: FnOnce(gen_core::CancelFlag) -> WorkerResult<(Vec<Image>, Vec<Image>)> + Send + 'static,
 {
-    let ref_mask = scail2_segment_blocking(
+    let (reference, ref_mask) = scail2_segment_blocking(
         api,
         settings,
         job_id,
@@ -1792,7 +1777,7 @@ where
         segment_reference,
     )
     .await?;
-    let driving_mask = scail2_segment_blocking(
+    let (driving, driving_mask) = scail2_segment_blocking(
         api,
         settings,
         job_id,

@@ -2645,6 +2645,30 @@ fn mochi_available_is_text_to_video_only() {
     std::fs::remove_dir_all(&root).ok();
 }
 
+#[test]
+fn mochi_mode_gate_rejects_every_conditioning_shape() {
+    let mut request = request(json!({
+        "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p"
+    }));
+    assert!(mochi::validate_mochi_mode(&request).is_ok());
+
+    for mode in [
+        "image_to_video",
+        "first_last_frame",
+        "extend_clip",
+        "video_bridge",
+        "replace_person",
+    ] {
+        request.mode = mode.to_owned();
+        let error = mochi::validate_mochi_mode(&request).expect_err("conditioning mode must fail");
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(ref message)
+                if message.contains("text_to_video only") && message.contains(mode)),
+            "unexpected error for {mode}: {error:?}"
+        );
+    }
+}
+
 /// A Mochi t2v job with resolvable weights routes to `VideoRoute::Mochi` — and, critically, a
 /// Mochi job whose weights DON'T resolve must NOT silently become `VideoRoute::Stub` output:
 /// `ensure_video_engine_weights` (the sc-4176 fail-loud gate the Stub arm calls) must error.
@@ -3348,7 +3372,7 @@ fn stub_frames_differ_across_time() {
 }
 
 #[test]
-fn wav_header_is_canonical_and_peak_normalized() {
+fn wav_header_is_canonical_and_preserves_in_range_amplitude() {
     let audio = AudioTrack {
         samples: vec![0.0, 0.5, -0.25, 0.5],
         sample_rate: 48_000,
@@ -3364,13 +3388,111 @@ fn wav_header_is_canonical_and_peak_normalized() {
     assert_eq!(&bytes[36..40], b"data");
     // 4 mono 16-bit samples → 8 bytes of PCM, 44-byte header.
     assert_eq!(bytes.len(), 44 + 8);
-    // Peak (0.5) maps to i16::MAX; the matching trough (-0.25) is half-scale negative.
+    // In-range PCM retains its amplitude rather than being normalized to full scale.
     let first = i16::from_le_bytes([bytes[44], bytes[45]]);
     let peak = i16::from_le_bytes([bytes[46], bytes[47]]);
     let trough = i16::from_le_bytes([bytes[48], bytes[49]]);
     assert_eq!(first, 0);
-    assert_eq!(peak, i16::MAX);
-    assert_eq!(trough, -(i16::MAX / 2) - 1); // -0.25/0.5 * 32767, rounded
+    assert_eq!(peak, 16_384);
+    assert_eq!(trough, -8_192);
+}
+
+#[test]
+fn wav_normalizes_only_over_range_audio() {
+    let audio = AudioTrack {
+        samples: vec![2.0, -1.0],
+        sample_rate: 48_000,
+        channels: 1,
+    };
+    let dir = std::env::temp_dir().join(format!("sw_wav_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("over-range.wav");
+    write_wav_pcm16(&audio, &path).unwrap();
+    let bytes = std::fs::read(path).unwrap();
+    assert_eq!(i16::from_le_bytes([bytes[44], bytes[45]]), i16::MAX);
+    assert_eq!(i16::from_le_bytes([bytes[46], bytes[47]]), -16_384);
+}
+
+#[tokio::test]
+async fn seedvr2_failed_mux_cleanup_removes_silent_and_partial_outputs() {
+    let dir = std::env::temp_dir().join(format!("sw_seedvr2_mux_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let media_path = dir.join("upscaled.mp4");
+    let mux_tmp = dir.join("upscaled.audiomux.mp4");
+    let poster_path = media_path.with_extension("poster.jpg");
+    std::fs::write(&media_path, b"silent output").unwrap();
+    std::fs::write(&mux_tmp, b"partial mux").unwrap();
+    std::fs::write(&poster_path, b"orphaned poster").unwrap();
+
+    cleanup_failed_seedvr2_mux(&media_path, &mux_tmp).await;
+
+    assert!(!media_path.exists());
+    assert!(!mux_tmp.exists());
+    assert!(!poster_path.exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn seedvr2_output_guard_covers_the_full_post_encode_interval() {
+    let dir = std::env::temp_dir().join(format!("sw_seedvr2_guard_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let media_path = dir.join("upscaled.mp4");
+    let mux_tmp = dir.join("upscaled.audiomux.mp4");
+    let poster_path = media_path.with_extension("poster.jpg");
+    std::fs::write(&media_path, b"silent output").unwrap();
+    std::fs::write(&mux_tmp, b"partial mux").unwrap();
+    std::fs::write(&poster_path, b"poster").unwrap();
+
+    {
+        let _guard = Seedvr2OutputGuard::new(&media_path, &mux_tmp);
+        // Simulates any `?` after encode and before the completion update succeeds.
+    }
+
+    assert!(!media_path.exists());
+    assert!(!mux_tmp.exists());
+    assert!(!poster_path.exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn seedvr2_output_guard_preserves_published_outputs_after_disarm() {
+    let dir = std::env::temp_dir().join(format!("sw_seedvr2_guard_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let media_path = dir.join("upscaled.mp4");
+    let mux_tmp = dir.join("upscaled.audiomux.mp4");
+    let poster_path = media_path.with_extension("poster.jpg");
+    std::fs::write(&media_path, b"published output").unwrap();
+    std::fs::write(&mux_tmp, b"completed mux").unwrap();
+    std::fs::write(&poster_path, b"published poster").unwrap();
+
+    {
+        let mut guard = Seedvr2OutputGuard::new(&media_path, &mux_tmp);
+        guard.disarm();
+    }
+
+    assert!(media_path.exists());
+    assert!(mux_tmp.exists());
+    assert!(poster_path.exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn seedvr2_video_upscale_fact_records_lineage_flags() {
+    let source = include_str!("seedvr2.rs");
+    for required in [
+        "\"sourceAssetId\": req.source_asset_id",
+        "\"parents\": [req.source_asset_id]",
+        "\"extra\": {",
+        "\"isUpscaled\": true",
+        "\"upscaledFromAssetId\": req.source_asset_id",
+        "\"factor\": factor",
+        "\"engine\": \"seedvr2\"",
+    ] {
+        assert!(
+            source.contains(required),
+            "video upscale fact must contain {required}"
+        );
+    }
 }
 
 #[test]
@@ -8026,6 +8148,30 @@ async fn encode_stub_to_mp4_with_audio_and_poster() {
     assert!(!media_path.with_extension("enc.mp4").exists());
     assert!(!media_path.with_extension("audio.wav").exists());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
+    let dir = std::env::temp_dir().join(format!("sw_vid_bad_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let media_path = dir.join("clip.mp4");
+    let decoded = DecodedVideo {
+        frames: vec![RgbFrame {
+            width: 4,
+            height: 4,
+            pixels: vec![0; 4 * 4 * 3 - 1],
+        }],
+        fps: 24,
+        audio: None,
+    };
+
+    let error = encode_media(&media_path, decoded, None)
+        .await
+        .expect_err("malformed RGB buffer must be rejected before FFmpeg");
+
+    assert!(error.to_string().contains("frame buffer size mismatch"));
+    assert!(!media_path.exists());
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn ffmpeg_reachable() -> bool {
