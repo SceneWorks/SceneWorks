@@ -626,9 +626,41 @@ pub(crate) async fn update_job_progress(
     })
     .await?;
     let status_changed = accepted.previous_status != accepted.job.status;
+    let terminal_side_effects_pending = accepted.side_effects_pending;
     let mut job = accepted.job;
 
-    if accepted.applied {
+    // Terminal acceptance and the API-owned writes are a durable two-phase
+    // handoff. Serialize processors in this API process, then re-check the DB:
+    // an overlapping retry may have completed and cleared the pending bit while
+    // this request waited. A process restart drops the mutex but preserves the
+    // bit, so the original owning worker's retry can resume safely.
+    let _side_effects_guard = if terminal_side_effects_pending {
+        Some(state.progress_side_effects_lock.lock().await)
+    } else {
+        None
+    };
+    let should_process_side_effects = if terminal_side_effects_pending {
+        let expected_worker_id = job.worker_id.clone();
+        let expected_status = job.status.clone();
+        let (current, pending) = store_call(state.clone(), {
+            let job_id = job_id.clone();
+            move |store, _timeout| match store.pending_terminal_progress_side_effects(
+                &job_id,
+                expected_worker_id.as_deref(),
+                expected_status,
+            )? {
+                Some(job) => Ok((job, true)),
+                None => store.get_job(&job_id).map(|job| (job, false)),
+            }
+        })
+        .await?;
+        job = current;
+        pending
+    } else {
+        accepted.applied
+    };
+
+    if should_process_side_effects {
         // Start from the store's accepted result because it may have merged
         // accumulated training-sample history into the submitted object.
         let accepted_result = job.result.clone();
@@ -647,14 +679,25 @@ pub(crate) async fn update_job_progress(
                 result.extend(status);
             }
         }
+        // Fail after catalog registration but before project persistence/CAS so
+        // the retry regression covers a genuinely partial side-effect run. The
+        // resumed registration must upsert rather than duplicate.
+        #[cfg(test)]
+        if terminal_side_effects_pending
+            && std::mem::take(&mut *state.progress_side_effects_fail_once.lock())
+        {
+            return Err(ApiError::internal(
+                "injected post-acceptance progress side-effect failure",
+            ));
+        }
         // Persist any generated assets the worker reported as `assetWrites` facts and
         // re-inject the built sidecars into the result so the UI keeps streaming them
         // (story 1656 — Rust is the single project-store writer).
         persist_reported_assets(&state, &job_id, &mut result).await?;
 
-        if result != accepted_result {
+        if result != accepted_result || terminal_side_effects_pending {
             let expected_worker_id = job.worker_id.clone();
-            let expected_status = job.status;
+            let expected_status = job.status.clone();
             job = store_call(state.clone(), move |store, _timeout| {
                 store.replace_job_result_after_progress(
                     &job_id,
@@ -662,6 +705,7 @@ pub(crate) async fn update_job_progress(
                     expected_status,
                     &accepted_result,
                     &result,
+                    terminal_side_effects_pending,
                 )
             })
             .await?;

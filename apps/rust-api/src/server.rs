@@ -284,10 +284,18 @@ pub struct AppState {
     pub(crate) external_base_model_cache: Arc<Mutex<ExternalBaseModelCache>>,
     pub(crate) http_client: reqwest::Client,
     pub(crate) interrupted_jobs_on_startup: usize,
+    /// Serializes the durable terminal-progress handoff from the jobs DB to
+    /// idempotent catalog/project writes. A retry re-checks the DB after taking
+    /// this lock, so two overlapping terminal reports cannot duplicate work.
+    pub(crate) progress_side_effects_lock: Arc<AsyncMutex<()>>,
     /// Deterministic race hook for progress acceptance tests. Production builds
     /// contain no hook or synchronization overhead.
     #[cfg(test)]
     pub(crate) progress_before_accept_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    /// One-shot failure after terminal acceptance, used to prove the durable
+    /// pending handoff survives an error and resumes on the owner's retry.
+    #[cfg(test)]
+    pub(crate) progress_side_effects_fail_once: Arc<Mutex<bool>>,
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {

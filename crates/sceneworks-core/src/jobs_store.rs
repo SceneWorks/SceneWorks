@@ -383,6 +383,11 @@ pub struct ProgressUpdateOutcome {
     /// committed the supplied progress. Same-status terminal retries return
     /// the existing job with `applied == false`.
     pub applied: bool,
+    /// A terminal progress report was accepted but its API-owned catalog /
+    /// project side effects have not yet been durably folded into `result_json`.
+    /// The owning worker may resume this idempotent work with a same-terminal
+    /// retry; competing terminal reporters may not.
+    pub side_effects_pending: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -469,6 +474,16 @@ impl JobsStore {
         // remains readable for historical rows. First-non-null wins so the WorkerProgressCard's
         // arch pill stays stable across the run.
         ensure_column(&transaction, "jobs", "backend", "text")?;
+        // Durable handoff between terminal progress acceptance and the API's
+        // idempotent catalog/project writes. The bit is set in the same
+        // transaction as terminal acceptance and cleared only by the guarded
+        // result CAS after those writes succeed.
+        ensure_column(
+            &transaction,
+            "jobs",
+            "progress_side_effects_pending",
+            "integer not null default 0",
+        )?;
         // Soft-hide marker for the "Clear completed" queue action (sc-12231, issue #1556).
         // A cleared job is dropped from the operator's queue list + counts (see
         // `list_jobs` / `queue_summary`) but the row is deliberately kept: the
@@ -1963,14 +1978,27 @@ impl JobsStore {
         job_id: &str,
         update: ProgressUpdate,
     ) -> JobsStoreResult<JobSnapshot> {
-        self.update_job_progress_with_outcome(job_id, update)
+        self.update_job_progress_internal(job_id, update, false)
             .map(|outcome| outcome.job)
     }
 
+    /// Accept progress for the HTTP API, durably marking terminal reports until
+    /// their API-owned catalog/project side effects and result augmentation
+    /// complete. Direct store callers use [`Self::update_job_progress`] and do
+    /// not participate in that API handoff.
     pub fn update_job_progress_with_outcome(
         &self,
         job_id: &str,
         update: ProgressUpdate,
+    ) -> JobsStoreResult<ProgressUpdateOutcome> {
+        self.update_job_progress_internal(job_id, update, true)
+    }
+
+    fn update_job_progress_internal(
+        &self,
+        job_id: &str,
+        update: ProgressUpdate,
+        track_terminal_side_effects: bool,
     ) -> JobsStoreResult<ProgressUpdateOutcome> {
         if !JOB_STATUSES.contains(&update.status.as_str()) {
             return Err(JobsStoreError::InvalidStatus(
@@ -2008,13 +2036,28 @@ impl JobsStore {
         let current = self.get_job_on_connection(&transaction, job_id)?;
         let previous_status = current.status.clone();
         if is_terminal_status(current.status.as_str()) {
+            let side_effects_pending =
+                self.progress_side_effects_pending_on_connection(&transaction, job_id)?;
             // Idempotent re-report of the same terminal status (e.g. a retried
-            // "canceled" POST) succeeds without touching the row.
+            // "canceled" POST) succeeds without touching the row. When the API
+            // still owes post-acceptance side effects, only the original owner
+            // may use that retry to resume them.
             if current.status == update.status {
+                if track_terminal_side_effects && side_effects_pending {
+                    match (update.worker_id.as_deref(), current.worker_id.as_deref()) {
+                        (Some(reporter), Some(owner)) if reporter == owner => {}
+                        _ => {
+                            return Err(JobsStoreError::NotJobOwner {
+                                job_id: job_id.to_owned(),
+                            });
+                        }
+                    }
+                }
                 return Ok(ProgressUpdateOutcome {
                     job: current,
                     previous_status,
                     applied: false,
+                    side_effects_pending,
                 });
             }
             return Err(JobsStoreError::TerminalJobImmutable {
@@ -2033,6 +2076,8 @@ impl JobsStore {
         let now = utc_now();
         let completed_at = is_terminal_status(update.status.as_str()).then_some(now.clone());
         let canceled_at = (update.status == JobStatus::Canceled).then_some(now.clone());
+        let side_effects_pending =
+            track_terminal_side_effects && is_terminal_status(update.status.as_str());
         let progress = update.progress.clamp(0.0, 1.0);
         // Peaks are clamped to 0..100 and persisted as a running max so a stale
         // progress report (lower sample) can't ratchet the peak down (sc-2086).
@@ -2069,8 +2114,9 @@ impl JobsStore {
                        when ?12 is null then peak_gpu_load_pct
                        else max(coalesce(peak_gpu_load_pct, 0), ?12)
                    end,
-                   backend = coalesce(backend, ?13)
-             where id = ?14
+                   backend = coalesce(backend, ?13),
+                   progress_side_effects_pending = ?14
+             where id = ?15
             ",
             params![
                 update.status.as_str(),
@@ -2086,6 +2132,7 @@ impl JobsStore {
                 peak_memory,
                 peak_load,
                 update.backend,
+                side_effects_pending,
                 job_id,
             ],
         )?;
@@ -2103,7 +2150,33 @@ impl JobsStore {
             job,
             previous_status,
             applied: true,
+            side_effects_pending,
         })
+    }
+
+    /// Re-check a durable terminal side-effect handoff immediately before the
+    /// API performs external writes. The API serializes this check + work within
+    /// one process; the database predicate preserves ownership across retries
+    /// and process restarts.
+    pub fn pending_terminal_progress_side_effects(
+        &self,
+        job_id: &str,
+        worker_id: Option<&str>,
+        status: JobStatus,
+    ) -> JobsStoreResult<Option<JobSnapshot>> {
+        let connection = self.open_connection()?;
+        let current = self.get_job_on_connection(&connection, job_id)?;
+        if current.status != status
+            || !self.progress_side_effects_pending_on_connection(&connection, job_id)?
+        {
+            return Ok(None);
+        }
+        match (worker_id, current.worker_id.as_deref()) {
+            (Some(reporter), Some(owner)) if reporter == owner => Ok(Some(current)),
+            _ => Err(JobsStoreError::NotJobOwner {
+                job_id: job_id.to_owned(),
+            }),
+        }
     }
 
     /// Replace an accepted progress report's result with its post-acceptance
@@ -2117,6 +2190,7 @@ impl JobsStore {
         status: JobStatus,
         expected_result: &Map<String, Value>,
         result: &Map<String, Value>,
+        clear_terminal_side_effects: bool,
     ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
@@ -2129,12 +2203,37 @@ impl JobsStore {
             return Ok(current);
         }
         transaction.execute(
-            "update jobs set result_json = ?1, updated_at = ?2 where id = ?3",
-            params![dumps(result)?, utc_now(), job_id],
+            "update jobs
+                set result_json = ?1,
+                    updated_at = ?2,
+                    progress_side_effects_pending =
+                      case when ?3 then 0 else progress_side_effects_pending end
+              where id = ?4",
+            params![
+                dumps(result)?,
+                utc_now(),
+                clear_terminal_side_effects,
+                job_id
+            ],
         )?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
         transaction.commit()?;
         Ok(job)
+    }
+
+    fn progress_side_effects_pending_on_connection(
+        &self,
+        connection: &Connection,
+        job_id: &str,
+    ) -> JobsStoreResult<bool> {
+        connection
+            .query_row(
+                "select progress_side_effects_pending from jobs where id = ?1",
+                params![job_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .ok_or_else(|| JobsStoreError::NotFound(job_id.to_owned()))
     }
 
     pub fn list_workers(&self) -> JobsStoreResult<Vec<WorkerSnapshot>> {

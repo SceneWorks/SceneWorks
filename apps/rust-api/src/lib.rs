@@ -988,8 +988,11 @@ pub(crate) fn create_app_with_state(
         )),
         http_client: reqwest::Client::new(),
         interrupted_jobs_on_startup,
+        progress_side_effects_lock: Arc::new(AsyncMutex::new(())),
         #[cfg(test)]
         progress_before_accept_once: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        progress_side_effects_fail_once: Arc::new(Mutex::new(false)),
     };
     let cors = cors_layer(&state.settings);
     let returned_state = state.clone();

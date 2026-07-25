@@ -5,6 +5,8 @@ use std::time::{Duration, SystemTime};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 
 use parking_lot::{Mutex, ReentrantMutexGuard};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -275,11 +277,16 @@ struct RegistryFingerprint {
     changed_seconds: i64,
     #[cfg(unix)]
     changed_nanoseconds: i64,
-    // Platforms without a stable std change-time expose a content token
-    // instead. The registry is tiny, and correctness beats retaining a stale
-    // cross-process cache entry.
-    #[cfg(not(unix))]
-    content_token: u64,
+    // Stable Windows metadata cannot expose NTFS ChangeTime/file index yet,
+    // but creation time distinguishes atomic replacement while last-write time
+    // + length cover ordinary rewrites without rereading the JSON body on every
+    // cache hit.
+    #[cfg(windows)]
+    creation_time: u64,
+    #[cfg(windows)]
+    last_write_time: u64,
+    #[cfg(windows)]
+    file_attributes: u32,
 }
 
 #[derive(Debug, Default)]
@@ -304,13 +311,12 @@ fn registry_fingerprint(path: &Path) -> ProjectStoreResult<Option<RegistryFinger
             changed_seconds: metadata.ctime(),
             #[cfg(unix)]
             changed_nanoseconds: metadata.ctime_nsec(),
-            #[cfg(not(unix))]
-            content_token: {
-                use std::hash::{DefaultHasher, Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                fs::read(path)?.hash(&mut hasher);
-                hasher.finish()
-            },
+            #[cfg(windows)]
+            creation_time: metadata.creation_time(),
+            #[cfg(windows)]
+            last_write_time: metadata.last_write_time(),
+            #[cfg(windows)]
+            file_attributes: metadata.file_attributes(),
         })),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),

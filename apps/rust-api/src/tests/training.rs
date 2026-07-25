@@ -2179,6 +2179,127 @@ async fn racing_terminal_training_report_loses_before_lora_side_effects() {
     );
 }
 
+/// A terminal row is committed before catalog/project side effects so a losing
+/// report cannot create ghosts. That handoff must also survive an error or
+/// process interruption after acceptance: the original owner retries the same
+/// terminal report, resumes the idempotent work, and clears the durable pending
+/// bit without creating duplicate catalog entries.
+#[tokio::test]
+async fn accepted_terminal_side_effect_failure_resumes_on_owner_retry() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Retry Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (job_id, output_dir, adapter_path) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    stage_trained_adapter(&output_dir, &adapter_path);
+    claim_training_job(&app, &job_id).await;
+
+    let completion = json!({
+        "status": "completed",
+        "stage": "completed",
+        "progress": 1,
+        "message": "Trained LoRA saved.",
+        "workerId": TEST_TRAINING_WORKER_ID,
+        "result": { "outputPath": adapter_path.display().to_string() }
+    });
+    *state.progress_side_effects_fail_once.lock() = true;
+    let (first_status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        completion.clone(),
+    )
+    .await;
+    assert_eq!(
+        first_status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the injected failure must happen after terminal acceptance"
+    );
+
+    let (status, accepted) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(accepted["status"], "completed");
+    assert_eq!(
+        accepted["result"]["loraRegistered"],
+        Value::Null,
+        "failed post-acceptance work must remain pending, not look finalized"
+    );
+    let (status, partially_registered) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        partially_registered
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .filter(|item| item["name"] == json!("Aurora Style"))
+            .count(),
+        1,
+        "the injected interruption occurs after the first idempotent catalog upsert"
+    );
+
+    let (retry_status, retried) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        completion.clone(),
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK);
+    assert_eq!(retried["status"], "completed");
+    assert_eq!(retried["result"]["loraRegistered"], true);
+
+    // A later network retry sees the cleared durable marker and is a pure
+    // idempotent read; the manifest remains a single upserted entry.
+    let (third_status, third) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        completion,
+    )
+    .await;
+    assert_eq!(third_status, StatusCode::OK);
+    assert_eq!(third["result"]["loraRegistered"], true);
+    let (status, loras) = request(
+        app,
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .filter(|item| item["name"] == json!("Aurora Style"))
+            .count(),
+        1,
+        "retry-safe registration must upsert rather than duplicate"
+    );
+}
+
 /// sc-11213 (F-028): a `completed` report from a caller that does not own the job
 /// (here, any report carrying a `workerId` for a job whose owner is unset) must
 /// receive the 409 AND must NOT register a LoRA — the ownership check has to gate

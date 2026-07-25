@@ -6587,6 +6587,113 @@ fn ownerless_progress_is_rejected_for_an_unclaimed_job_without_mutation() {
     assert!(unchanged.result.is_empty());
 }
 
+#[test]
+fn terminal_side_effect_handoff_is_resumable_only_by_the_original_owner() {
+    let store = store("terminal-side-effect-owner");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    let completion = |worker_id: &str| ProgressUpdate {
+        status: JobStatus::Completed,
+        stage: ProgressStage::Completed,
+        progress: 1.0,
+        message: "done".to_owned(),
+        error: None,
+        result: Some(object(json!({ "assetWrites": [] }))),
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: None,
+        worker_id: Some(worker_id.to_owned()),
+    };
+
+    let accepted = store
+        .update_job_progress_with_outcome(&created.id, completion("worker-1"))
+        .expect("terminal progress is accepted");
+    assert!(accepted.applied);
+    assert!(accepted.side_effects_pending);
+
+    let error = store
+        .update_job_progress_with_outcome(&created.id, completion("worker-2"))
+        .expect_err("a stale reporter cannot resume pending side effects");
+    assert!(matches!(error, JobsStoreError::NotJobOwner { .. }));
+    assert!(
+        store
+            .pending_terminal_progress_side_effects(
+                &created.id,
+                Some("worker-1"),
+                JobStatus::Completed,
+            )
+            .expect("pending state reads")
+            .is_some()
+    );
+
+    let retry = store
+        .update_job_progress_with_outcome(&created.id, completion("worker-1"))
+        .expect("the owner may retry the same terminal state");
+    assert!(!retry.applied);
+    assert!(retry.side_effects_pending);
+}
+
+#[test]
+fn post_progress_result_cas_never_overwrites_a_competing_update() {
+    let store = store("progress-result-cas");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    let progress = |result: Value| ProgressUpdate {
+        status: JobStatus::Running,
+        stage: ProgressStage::Running,
+        progress: 0.5,
+        message: "running".to_owned(),
+        error: None,
+        result: Some(object(result)),
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: None,
+        worker_id: Some("worker-1".to_owned()),
+    };
+
+    let accepted = store
+        .update_job_progress_with_outcome(&created.id, progress(json!({ "version": "first" })))
+        .expect("first progress lands");
+    let first_result = accepted.job.result.clone();
+    store
+        .update_job_progress(&created.id, progress(json!({ "version": "competing" })))
+        .expect("competing progress lands");
+
+    let mut augmented = first_result.clone();
+    augmented.insert("sidecar".to_owned(), json!(true));
+    let current = store
+        .replace_job_result_after_progress(
+            &created.id,
+            Some("worker-1"),
+            JobStatus::Running,
+            &first_result,
+            &augmented,
+            false,
+        )
+        .expect("CAS returns the current row");
+    assert_eq!(current.result["version"], "competing");
+    assert_eq!(current.result.get("sidecar"), None);
+    assert_eq!(
+        store.get_job(&created.id).expect("job reloads").result,
+        current.result,
+        "a stale augmentation must not overwrite the competing result"
+    );
+}
+
 /// Regression for the Anima routing gap (epic 10512 / sc-10523): `anima_base`/`anima_aesthetic`/
 /// `anima_turbo` shipped as `mlx_routed = true` rows in `IMAGE_MODEL_CAPS`, but
 /// `image_request_mlx_eligible` had no dispatch arm for them, so they fell through to `_ => false`.
