@@ -208,3 +208,37 @@ fn dispatch_guard_rejects_removed_arm_even_when_a_comment_keeps_the_variant_name
         "a comment containing JobType::PromptRefine must not masquerade as a dispatch arm"
     );
 }
+
+#[test]
+fn real_image_job_modules_import_the_json_macro_they_invoke() {
+    let image_jobs = include_str!("image_jobs.rs");
+    let module_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/image_jobs");
+
+    for module in image_jobs.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("mod ")
+            .and_then(|line| line.strip_suffix(';'))
+    }) {
+        let path = module_dir.join(format!("{module}.rs"));
+        if !path.is_file() {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let code = code_without_comments_or_literals(&source);
+        if !code.contains("json!") {
+            continue;
+        }
+        let imports_json = code.split(';').any(|statement| {
+            statement.trim_start().starts_with("use serde_json")
+                && statement
+                    .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                    .any(|word| word == "json")
+        });
+        assert!(
+            imports_json,
+            "{} invokes json! but does not explicitly import serde_json::json",
+            path.display()
+        );
+    }
+}

@@ -1,3 +1,16 @@
+use super::{advanced, huggingface_snapshot_dir};
+use super::{
+    ensure_hf_cached_file, resolve_app_managed_model_dir, safe_weight_filename, DownloadContext,
+};
+use super::{
+    gate_tier_key, gate_with_evict_reclaim, krea_model_subdir, lora_label, nvfp4_host_eligible,
+    nvfp4_selected, pose_entries, resolve_adapters, resolve_advanced_or_manifest_u32,
+    resolve_text_style_gain, run_candle_strict_control, AdapterSpec, ApiClient, CancelFlag,
+    CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
+    Progress, Settings, Value, WorkerError, WorkerResult,
+};
+use serde_json::json;
+
 // Candle (Windows/CUDA) Krea 2 pose-ControlNet route (sc-8464, epic 8459) — `krea_2_turbo` +
 // `advanced.poses` off-Mac via `runtime_cuda::providers::krea::Krea2Control`. The first Krea backbone control lane and
 // the deployable form of the sc-8460 spike: a trained control-branch overlay loaded on the frozen Krea 2
@@ -7,7 +20,7 @@
 // `control_scale`; `control_scale = 0` is engine-proven byte-identical to base txt2img.
 //
 // **Candle-only.** There is no MLX Krea control twin yet (8459 S5 / sc-8465); this whole file is gated to
-// the Windows/CUDA candle build (the `include!` in image_jobs.rs carries the cfg). It is `include!`d into
+// the Windows/CUDA candle build (the module declaration in image_jobs.rs carries the cfg). It is a child module of
 // the `image_jobs` module, so it shares that module's imports (`parse_poses`/`pose_entries`/`Settings`/
 // `WorkerResult`/`huggingface_snapshot_dir`/`start_gen_stream`/… all in scope unqualified).
 //
@@ -44,7 +57,7 @@ const KREA_CONTROL_DEFAULT_STEPS: u32 = 8;
 const KREA_CONTROL_ENGINE: &str = "candle_krea_control";
 /// The [`STRICT_CONTROL_ENGINES`] catalog id this lane validates `advanced.controlMode` against (the Krea
 /// pose-only row — `{Pose}`).
-const KREA_CONTROL_ENGINE_ID: &str = "krea_2_turbo_control";
+pub(super) const KREA_CONTROL_ENGINE_ID: &str = "krea_2_turbo_control";
 /// Env override pointing directly at a Krea 2 Turbo dense diffusers snapshot dir (validation / bring-your-
 /// own base) — bypasses the HF-cache resolve.
 const KREA_CONTROL_BASE_ENV: &str = "SCENEWORKS_KREA_CONTROL_BASE";
@@ -64,7 +77,7 @@ const KREA_CONTROL_OVERLAY_FILE: &str = "control_step5000.safetensors";
 /// checkpoint we load — mirrors `FLUX2_CONTROL_CANDLE_REVISION` / sc-9879). Applied ONLY to the default
 /// repo; a `controlWeights.repo` override keeps `main`. `ensure_hf_cached_file` still verifies the file's
 /// `lfs.oid` from HF's tree API.
-const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac";
+pub(super) const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac";
 
 /// The Krea control fit-ladder tier for the base directory the resolver will actually load.
 ///
@@ -95,7 +108,7 @@ fn is_krea_control_model(model: &str) -> bool {
 /// `modelPath` (advanced or manifest) → the HF cache snapshot for the manifest `repo` (default
 /// `krea/Krea-2-Turbo`). `None` ⇒ not present locally (the job is not candle-runnable). Mirrors
 /// `resolve_flux2_control_base`.
-fn resolve_krea_control_base(
+pub(super) fn resolve_krea_control_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
@@ -147,7 +160,7 @@ fn resolve_krea_control_base(
 /// `advanced.poses`, not edit mode, whose dense base resolves locally. Mirrors
 /// `jobs_store::krea_control_candle_eligible` so the worker and router agree. The overlay weights are NOT
 /// part of the gate: they are resolved on first use in the stream.
-fn krea_control_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn krea_control_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_krea_control_model(&request.model)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
@@ -193,7 +206,7 @@ fn krea_control_overlay_repo_file(request: &ImageRequest) -> WorkerResult<(Strin
 /// disk (an arbitrary-file-read primitive). Returns `Ok(None)` when the payload carries no path, `Ok(Some)`
 /// for a confined path (whether or not it exists — the caller checks `is_file`), and the same
 /// `InvalidPayload` rejection as the sibling lanes for an out-of-root path. Mirrors the MLX twin.
-fn krea_control_payload_overlay_path(
+pub(super) fn krea_control_payload_overlay_path(
     settings: &Settings,
     request: &ImageRequest,
 ) -> WorkerResult<Option<PathBuf>> {
@@ -419,7 +432,7 @@ impl CandleStrictControl for KreaStrictControl {
 /// the shared [`run_candle_strict_control`] driver (validation against `krea_2_turbo_control`'s
 /// `supported_kinds` = {Pose}, per-pose skeleton rendering, scoring). Krea is CFG-free bf16. The pose path
 /// is byte-preserved; `control_scale = 0` is byte-identical to base.
-async fn generate_candle_krea_control_stream(
+pub(super) async fn generate_candle_krea_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -430,7 +443,9 @@ async fn generate_candle_krea_control_stream(
 ) -> WorkerResult<()> {
     let request = &plan.request;
     let base = resolve_krea_control_base(request, settings)?.ok_or_else(|| {
-        WorkerError::InvalidPayload("Krea 2 Turbo base (krea/Krea-2-Turbo) weights not found".to_owned())
+        WorkerError::InvalidPayload(
+            "Krea 2 Turbo base (krea/Krea-2-Turbo) weights not found".to_owned(),
+        )
     })?;
     let control = ensure_krea_control_weights(api, settings, job, request).await?;
     // User LoRA/LoKr adapters ride additively on the frozen base DiT (sc-11721 / candle-gen sc-11720):
@@ -487,16 +502,20 @@ async fn generate_candle_krea_control_stream(
         nvfp4_selected(request, nvfp4_host_eligible(), Some(&base)),
     );
     // Fit-ladder inputs are budget-independent; resolve them once, then run the two-pass gate below.
-    let peak = crate::krea_control_fit::predicted_control_peak_gb(&request.model_manifest_entry, tier);
+    let peak =
+        crate::krea_control_fit::predicted_control_peak_gb(&request.model_manifest_entry, tier);
     let sequential_peak = crate::krea_control_fit::predicted_control_sequential_peak_gb(
         &request.model_manifest_entry,
         tier,
     );
     let decode_tile_save =
         crate::krea_control_fit::decode_tile_save_gb(&request.model_manifest_entry, tier);
-    let chunk_attn_save = crate::krea_control_fit::chunk_attn_save_gb(&request.model_manifest_entry);
-    let q8_save = crate::krea_control_fit::branch_quant_save_gb(&request.model_manifest_entry, "q8");
-    let q4_save = crate::krea_control_fit::branch_quant_save_gb(&request.model_manifest_entry, "q4");
+    let chunk_attn_save =
+        crate::krea_control_fit::chunk_attn_save_gb(&request.model_manifest_entry);
+    let q8_save =
+        crate::krea_control_fit::branch_quant_save_gb(&request.model_manifest_entry, "q8");
+    let q4_save =
+        crate::krea_control_fit::branch_quant_save_gb(&request.model_manifest_entry, "q4");
     let raw_budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),
@@ -623,6 +642,7 @@ async fn generate_candle_krea_control_stream(
 
 #[cfg(test)]
 mod krea_control_tier_reconcile_tests {
+    use super::super::tier_resolver::NVFP4_TIER;
     use super::*;
     use serde_json::json;
 
@@ -653,11 +673,7 @@ mod krea_control_tier_reconcile_tests {
             "q8"
         );
         assert_eq!(
-            crate::vram_gate::requested_tier_key(
-                &req.advanced,
-                &req.model_manifest_entry,
-                false,
-            ),
+            crate::vram_gate::requested_tier_key(&req.advanced, &req.model_manifest_entry, false,),
             "q4",
             "the request key intentionally differs in this regression"
         );

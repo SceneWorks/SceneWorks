@@ -1,3 +1,17 @@
+#[cfg(test)]
+use super::standard_tier_subdir_gated;
+use super::{
+    consume_gen_events, drive_gen_items, gate_tier_key, gate_with_evict_reclaim,
+    installed_tier_keys, load_reference_image, non_empty, nvfp4_host_eligible, nvfp4_selected,
+    requested_receipt_variant, resolve_adapters, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32_with, resolve_seed, standard_tier_subdir, start_gen_stream,
+    tier_key_from_resolved_dir, vram_reject_tail_for_tier, AdapterKind, AdapterSpec, ApiClient,
+    Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, QwenEdit,
+    QwenEditPaths, QwenEditRequest, Settings, Value, WorkerError, WorkerResult,
+};
+use super::{huggingface_snapshot_dir, resolve_app_managed_model_dir};
+use serde_json::json;
+
 // Candle (Windows/CUDA) Qwen-Image-Edit route (sc-5487, epic 5480) — reference-conditioned image
 // editing on the Qwen-Image-Edit family off-Mac via `runtime_cuda::providers::qwen_image::QwenEdit`. The reference
 // + edit prompt go through the Qwen2.5-VL vision-language encoder, the reference is VAE-encoded into
@@ -5,8 +19,8 @@
 // this an off-Mac `edit_image` job on a Qwen-Image-Edit model fell back to the Python torch worker.
 //
 // **Candle-only.** macOS keeps the MLX `qwen_image_edit` registry path (qwen.rs). The candle `QwenEdit`
-// is a bespoke provider, so this whole file is gated to the Windows/CUDA candle build (the `include!`
-// in image_jobs.rs carries the cfg). It is `include!`d into the `image_jobs` module, so it shares that
+// is a bespoke provider, so this whole file is gated to the Windows/CUDA candle build (the module
+// declaration in image_jobs.rs carries the cfg). It is a child module of the `image_jobs` module, so it shares that
 // module's imports (ImageRequest/Settings/WorkerResult/`load_reference_image`/`huggingface_snapshot_dir`/
 // `resolve_app_managed_model_dir`/`resolve_seed`/`start_gen_stream`/`drive_gen_items`/
 // `consume_gen_events`/`non_empty`/`gen_core`/… all in scope).
@@ -43,7 +57,8 @@ const QWEN_EDIT_CANDLE_LIGHTNING_LORA_FILE: &str =
 /// stack at load; pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682).
 /// `HuggingFaceSnapshot::resolve` still verifies each file's `lfs.oid` sha256. Applied ONLY to the
 /// default repo — a non-default repo keeps `main`. Matches the MLX `QWEN_LIGHTNING_LORA_REVISION`.
-const QWEN_EDIT_CANDLE_LIGHTNING_LORA_REVISION: &str = "d74eba145674fd7e31b949324e148e21e7118abd";
+pub(super) const QWEN_EDIT_CANDLE_LIGHTNING_LORA_REVISION: &str =
+    "d74eba145674fd7e31b949324e148e21e7118abd";
 
 /// Qwen-Image-Edit model ids the candle edit route accepts. The base variants map to the single edit
 /// engine (the architecture is identical; `-2511` only flips `zero_cond_t`, which `QwenEdit` auto-detects
@@ -203,7 +218,7 @@ fn qwen_edit_candle_base_dir(
 /// True when this is a candle-eligible Qwen edit job (a Qwen-Image-Edit `edit_image` job with a source)
 /// whose base resolves locally. Mirrors `jobs_store::qwen_edit_candle_eligible` (minus the weight-
 /// resolve check).
-fn qwen_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn qwen_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_qwen_edit_candle_model(&request.model)
         && qwen_edit_candle_mode(request)
         && matches!(
@@ -298,7 +313,7 @@ fn load_qwen_edit_source(
 /// hub cache, returning its absolute path (sc-6220). Fast-paths when already cached; else fetches just
 /// that one file into the standard `models--<org>--<name>` layout (deduping with the Python loader +
 /// other tools, sc-1904). The candle off-Mac twin of the MLX `qwen.rs::ensure_distill_lora_cached`
-/// (sc-3398) — fully qualified because this file is `include!`d into the candle `image_jobs` build,
+/// (sc-3398) — fully qualified because this file is a child module of the candle `image_jobs` build,
 /// which does not import the MLX download helpers.
 async fn ensure_qwen_lightning_lora_cached(
     api: &ApiClient,
@@ -384,7 +399,7 @@ async fn ensure_qwen_lightning_lora_cached(
 /// reference internally, so the source is passed as-is (no render-size pre-fit). `request.count` edits
 /// of the same source, each its own seed. `generate` takes `&self`, so the per-item closure needs no
 /// `mut`. Reuses [`consume_gen_events`].
-async fn generate_candle_qwen_edit_stream(
+pub(super) async fn generate_candle_qwen_edit_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -534,8 +549,7 @@ async fn generate_candle_qwen_edit_stream(
         // sc-13619: the quant picker is hidden when no alternative tier is installed. Derive advice
         // from the same forced-tier probes as the main candle lane so both reject arms name only
         // smaller tiers this installation can really load.
-        let reject_tail =
-            vram_reject_tail_for_tier(installed_tier_keys(request, settings), tier);
+        let reject_tail = vram_reject_tail_for_tier(installed_tier_keys(request, settings), tier);
         match plan {
             crate::vram_gate::LoadPlan::Sequential => {
                 tracing::info!(
@@ -689,7 +703,11 @@ mod qwen_edit_tier_reconcile_tests {
     const UPSTREAM_ORIGINAL: &str = "Qwen/Qwen-Image-Edit";
     const UPSTREAM_2511: &str = "Qwen/Qwen-Image-Edit-2511";
 
-    fn request(model: &str, manifest: serde_json::Value, advanced: serde_json::Value) -> ImageRequest {
+    fn request(
+        model: &str,
+        manifest: serde_json::Value,
+        advanced: serde_json::Value,
+    ) -> ImageRequest {
         ImageRequest::from_payload(
             json!({
                 "model": model,
@@ -747,8 +765,14 @@ mod qwen_edit_tier_reconcile_tests {
                 repo, QWEN_EDIT_CANDLE_TURNKEY_REPO,
                 "{model} must load the turnkey its downloads provision"
             );
-            assert_ne!(repo, UPSTREAM_ORIGINAL, "{model} regressed to the ORIGINAL upstream weights");
-            assert_ne!(repo, UPSTREAM_2511, "{model} regressed to an upstream snapshot nothing downloads");
+            assert_ne!(
+                repo, UPSTREAM_ORIGINAL,
+                "{model} regressed to the ORIGINAL upstream weights"
+            );
+            assert_ne!(
+                repo, UPSTREAM_2511,
+                "{model} regressed to an upstream snapshot nothing downloads"
+            );
         }
     }
 
@@ -841,7 +865,11 @@ mod qwen_edit_tier_reconcile_tests {
     #[test]
     fn the_gate_budgets_the_resolved_tier_not_the_requested_bits() {
         let manifest = live_manifest();
-        let req = request("qwen_image_edit_2511", manifest.clone(), json!({ "mlxQuantize": 4 }));
+        let req = request(
+            "qwen_image_edit_2511",
+            manifest.clone(),
+            json!({ "mlxQuantize": 4 }),
+        );
         let entry = &req.model_manifest_entry;
 
         // Only q8 installed: the q4 REQUEST resolves q8 on disk, so the gate must size q8.
@@ -849,7 +877,10 @@ mod qwen_edit_tier_reconcile_tests {
         let resolved = standard_tier_subdir_gated(partial.path(), &req, false);
         assert_eq!(resolved, partial.path().join("q8"));
         let tier = gate_tier_key(false, &resolved, &req.advanced, entry, false);
-        assert_eq!(tier, "q8", "a q4 request that loaded q8 must be budgeted as q8");
+        assert_eq!(
+            tier, "q8",
+            "a q4 request that loaded q8 must be budgeted as q8"
+        );
         assert_eq!(
             crate::vram_gate::predicted_peak_gb(entry, tier),
             Some(69.0 + 2.0),
@@ -900,7 +931,13 @@ mod qwen_edit_tier_reconcile_tests {
             .expect("the stock turnkey resolves");
         assert_eq!(resolved, stock.path().join("q4"));
 
-        let tier = gate_tier_key(false, &resolved, &req.advanced, &req.model_manifest_entry, false);
+        let tier = gate_tier_key(
+            false,
+            &resolved,
+            &req.advanced,
+            &req.model_manifest_entry,
+            false,
+        );
         assert_eq!(tier, "q4");
         assert_eq!(
             crate::vram_gate::predicted_peak_gb(&req.model_manifest_entry, tier),
@@ -942,7 +979,13 @@ mod qwen_edit_tier_reconcile_tests {
         assert_eq!(resolved, receipt);
 
         // Gate and load still agree, now on the DECLARED tier rather than the app-wide default.
-        let tier = gate_tier_key(false, &resolved, &req.advanced, &req.model_manifest_entry, false);
+        let tier = gate_tier_key(
+            false,
+            &resolved,
+            &req.advanced,
+            &req.model_manifest_entry,
+            false,
+        );
         assert_eq!(tier, "q4");
         assert_eq!(
             crate::vram_gate::predicted_peak_gb(&req.model_manifest_entry, tier),
@@ -952,8 +995,9 @@ mod qwen_edit_tier_reconcile_tests {
         // Without a receipt the descent takes the app-wide q8 default (sc-10726) — the residual
         // `mlx.quantize` vs `standard_tier_subdir` asymmetry tracked in sc-13542. Not an
         // under-prediction: the gate follows the load either way, asserted here so that stays true.
-        let no_receipt = qwen_edit_candle_base_dir(None, Some(all_tiers.path().to_path_buf()), &req)
-            .expect("the turnkey resolves");
+        let no_receipt =
+            qwen_edit_candle_base_dir(None, Some(all_tiers.path().to_path_buf()), &req)
+                .expect("the turnkey resolves");
         assert_eq!(no_receipt, all_tiers.path().join("q8"));
         let fallback_tier = gate_tier_key(
             false,

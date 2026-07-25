@@ -256,8 +256,19 @@ log "API healthy; starting candle GPU and utility workers"
 # visible GPU plus a CPU-only child. child_environment() sets
 # SCENEWORKS_UTILITY_JOBS=0 for GPU children and =1 for the CPU child, which is
 # the capability-routing boundary this combined image relies on.
+#
+# RunPod can start PID 1 with NVIDIA_VISIBLE_DEVICES=void while the NVIDIA
+# container runtime is still attaching the pod's configured GPU, even though
+# later sessions report `all` and nvidia-smi succeeds. `void` is normally an
+# intentional hard disable, so the Rust supervisor correctly refuses to probe
+# it. This combined image is explicitly the automatic GPU deployment path:
+# normalize visibility only for its auto-supervisor child so the supervisor's
+# bounded nvidia-smi retry can observe the device once initialization completes.
+# Explicit `SCENEWORKS_GPU_ID=cpu` workers launched outside this entrypoint keep
+# their original visibility and CPU-only behavior.
 SCENEWORKS_API_URL="${api_url}" \
 SCENEWORKS_GPU_ID=auto \
+NVIDIA_VISIBLE_DEVICES=all \
 SCENEWORKS_ACCESS_TOKEN="${SCENEWORKS_ACCESS_TOKEN:-}" \
 "${worker_bin}" &
 worker_pid=$!

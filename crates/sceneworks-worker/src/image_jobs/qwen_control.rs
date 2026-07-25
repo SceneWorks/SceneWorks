@@ -1,3 +1,16 @@
+use super::advanced;
+use super::{
+    ensure_hf_cached_file, huggingface_snapshot_dir, resolve_app_managed_model_dir,
+    safe_weight_filename, DownloadContext,
+};
+use super::{
+    pose_entries, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    run_candle_strict_control, ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan,
+    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, QwenFunControl,
+    QwenFunControlPaths, QwenFunControlRequest, Settings, Value, WorkerError, WorkerResult,
+};
+use serde_json::json;
+
 // Candle (Windows/CUDA) Qwen-Image 2512-Fun-Controlnet-Union (strict control) route (sc-5489 origin /
 // sc-8350 repoint, epic 8236) — `qwen_image` + `advanced.poses` off-Mac via
 // `runtime_cuda::providers::qwen_image::QwenFunControl`. The candle sibling of the MLX Qwen 2512-Fun strict-control path
@@ -15,8 +28,9 @@
 // worker.
 //
 // **Candle-only.** macOS keeps the MLX `qwen_image_control` registry generator; the candle `QwenFunControl`
-// is a bespoke provider, so this whole file is gated to the Windows/CUDA candle build (the `include!` in
-// image_jobs.rs carries the cfg). It is `include!`d into the `image_jobs` module, so it shares that
+// is a bespoke provider, so this whole file is gated to the Windows/CUDA candle build (the module
+// declaration in image_jobs.rs carries the cfg). It is a child module of the `image_jobs` module, so it
+// shares that
 // module's imports (`parse_poses`/`Settings`/`WorkerResult`/`huggingface_snapshot_dir`/
 // `ensure_hf_cached_file`/`start_gen_stream`/… all in scope unqualified).
 
@@ -35,28 +49,28 @@ const QWEN_CONTROL_REPO: &str = "SceneWorks/qwen-image-2512-fun-controlnet-union
 /// `controlWeights.repo` override keeps `main`. The pin is the packed-tier repo's `main` HEAD as of the
 /// sc-9870 repoint. HF's tree API still reports each tier file's `lfs.oid`, which `ensure_hf_cached_file`
 /// verifies against.
-const QWEN_CONTROL_REVISION: &str = "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca";
+pub(super) const QWEN_CONTROL_REVISION: &str = "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca";
 /// The single packed control file inside each tier subdir (`q4/`, `q8/`, `bf16/`). Deterministic —
 /// the packed tier ships exactly one `model.safetensors` per subdir, so the sc-8350 two-overlay
 /// ambiguity is naturally resolved.
-const QWEN_CONTROL_FILE: &str = "model.safetensors";
+pub(super) const QWEN_CONTROL_FILE: &str = "model.safetensors";
 /// The Qwen-Image-2512 base diffusers repo when the manifest omits `repo` (the 2512-Fun base, sc-8350).
-const QWEN_CONTROL_DEFAULT_REPO: &str = "Qwen/Qwen-Image-2512";
+pub(super) const QWEN_CONTROL_DEFAULT_REPO: &str = "Qwen/Qwen-Image-2512";
 /// ControlNet conditioning-scale default (the strict-pose tier).
-const QWEN_CONTROL_DEFAULT_SCALE: f32 = 1.0;
+pub(super) const QWEN_CONTROL_DEFAULT_SCALE: f32 = 1.0;
 /// Denoise-steps default (Qwen-Image production).
 const QWEN_CONTROL_DEFAULT_STEPS: u32 = 30;
 /// CFG default.
 const QWEN_CONTROL_DEFAULT_GUIDANCE: f32 = 4.0;
 /// The adapter/engine id recorded on candle Qwen control assets (distinct from the txt2img
 /// `candle_qwen` lane).
-const QWEN_CONTROL_ENGINE: &str = "candle_qwen_control";
+pub(super) const QWEN_CONTROL_ENGINE: &str = "candle_qwen_control";
 /// The [`STRICT_CONTROL_ENGINES`] catalog id this candle lane validates `advanced.controlMode` against
 /// (the `qwen_image_control` row — `{Pose, Canny, Depth}`). As of sc-8350 the candle lane loads the
 /// 2512-Fun-Controlnet-Union checkpoint on the Qwen-Image-2512 base (`QwenFunControl`); sc-9870 repoints
 /// the control overlay at the packed tier, matching the table's `qwen_image_control` repo
 /// (`SceneWorks/qwen-image-2512-fun-controlnet-union`) exactly — consistent with the MLX `qwen.rs` lane.
-const QWEN_CONTROL_ENGINE_ID: &str = "qwen_image_control";
+pub(super) const QWEN_CONTROL_ENGINE_ID: &str = "qwen_image_control";
 
 /// Model ids the candle Qwen ControlNet route accepts.
 fn is_qwen_control_model(model: &str) -> bool {
@@ -95,7 +109,7 @@ fn resolve_qwen_control_base(
 /// True when this is a candle-eligible Qwen strict-pose job: `qwen_image` with a non-empty
 /// `advanced.poses`, not edit mode, whose base resolves locally. Mirrors
 /// `jobs_store::qwen_control_candle_eligible` so the worker and router agree.
-fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_qwen_control_model(&request.model)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
@@ -177,11 +191,14 @@ fn qwen_control_installed_default_tier(snapshot: Option<&Path>) -> &'static str 
 /// Override: `advanced.controlWeights.{repo,filename}` still points at a flat repo with a plain-component
 /// weight file (sc-8821 / F-019 — the filename must have no path separators). When a `filename` override
 /// is present the tier subdir is NOT applied (the override addresses a specific file directly).
-fn qwen_control_repo_file(
+pub(super) fn qwen_control_repo_file(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<(String, String)> {
-    let cw = request.advanced.get("controlWeights").and_then(Value::as_object);
+    let cw = request
+        .advanced
+        .get("controlWeights")
+        .and_then(Value::as_object);
     let pick = |key: &str| {
         cw.and_then(|m| m.get(key))
             .and_then(Value::as_str)
@@ -259,7 +276,7 @@ async fn ensure_qwen_control_weights(
 }
 
 /// Flat telemetry recorded on candle Qwen control assets.
-fn qwen_control_raw_settings(
+pub(super) fn qwen_control_raw_settings(
     request: &ImageRequest,
     repo: &str,
     steps: u32,
@@ -285,7 +302,7 @@ fn qwen_control_raw_settings(
 /// sc-8350): the resolved base + 2512-Fun-Union control weight paths + the request numerics. Qwen runs
 /// true CFG, so it carries a negative prompt + guidance. Moved onto the blocking thread, loaded once,
 /// drives every pose.
-struct QwenStrictControl {
+pub(super) struct QwenStrictControl {
     qwen_base: PathBuf,
     controlnet: PathBuf,
     prompt: String,
@@ -295,6 +312,21 @@ struct QwenStrictControl {
     steps: u32,
     guidance: f32,
     control_scale: f32,
+}
+
+#[cfg(test)]
+pub(super) fn qwen_strict_control_test_fixture(path: PathBuf) -> QwenStrictControl {
+    QwenStrictControl {
+        qwen_base: path.clone(),
+        controlnet: path,
+        prompt: "p".to_owned(),
+        negative: "n".to_owned(),
+        width: 512,
+        height: 512,
+        steps: 30,
+        guidance: 4.0,
+        control_scale: 1.0,
+    }
 }
 
 impl CandleStrictControl for QwenStrictControl {
@@ -350,7 +382,9 @@ impl CandleStrictControl for QwenStrictControl {
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
-            WorkerError::Engine(format!("Qwen 2512-Fun strict-control generation failed: {error}"))
+            WorkerError::Engine(format!(
+                "Qwen 2512-Fun strict-control generation failed: {error}"
+            ))
         })
     }
 }
@@ -361,7 +395,7 @@ impl CandleStrictControl for QwenStrictControl {
 /// `qwen_image_control`'s `supported_kinds`, per-pose preprocessing, scoring). `generate` takes the
 /// per-job `CancelFlag` + a `Progress` callback (per-step streaming + mid-denoise cancel). The pose path
 /// is byte-preserved.
-async fn generate_candle_qwen_control_stream(
+pub(super) async fn generate_candle_qwen_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -371,8 +405,9 @@ async fn generate_candle_qwen_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    let qwen_base = resolve_qwen_control_base(request, settings)?
-        .ok_or_else(|| WorkerError::InvalidPayload("Qwen-Image base weights not found".to_owned()))?;
+    let qwen_base = resolve_qwen_control_base(request, settings)?.ok_or_else(|| {
+        WorkerError::InvalidPayload("Qwen-Image base weights not found".to_owned())
+    })?;
     let controlnet = ensure_qwen_control_weights(api, settings, job, request).await?;
 
     let steps = qwen_control_steps(request);
@@ -454,7 +489,10 @@ mod qwen_control_tier_tests {
         seed_tier(root, "q8");
         seed_tier(root, "bf16");
 
-        assert_eq!(qwen_control_tier_subdir(&request(json!({})), Some(root)), "q8");
+        assert_eq!(
+            qwen_control_tier_subdir(&request(json!({})), Some(root)),
+            "q8"
+        );
         assert_eq!(
             qwen_control_tier_subdir(&request(json!({ "mlxQuantize": 4 })), Some(root)),
             "q4"
@@ -482,7 +520,10 @@ mod qwen_control_tier_tests {
         let root = tmp.path();
         seed_tier(root, "q4");
 
-        assert_eq!(qwen_control_tier_subdir(&request(json!({})), Some(root)), "q4");
+        assert_eq!(
+            qwen_control_tier_subdir(&request(json!({})), Some(root)),
+            "q4"
+        );
         seed_tier(root, "bf16");
         assert_eq!(
             qwen_control_tier_subdir(&request(json!({})), Some(root)),

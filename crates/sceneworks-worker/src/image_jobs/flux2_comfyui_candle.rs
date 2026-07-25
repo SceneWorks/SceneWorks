@@ -1,3 +1,12 @@
+use super::huggingface_snapshot_dir;
+use super::{
+    consume_gen_events, drive_gen_items, pose_entries, resolve_advanced_or_manifest_u32,
+    resolve_seed, start_gen_stream, ApiClient, GenerationOutput, GenerationRequest, ImagePlan,
+    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Quant, Settings, Value, WorkerError,
+    WorkerResult,
+};
+use serde_json::json;
+
 // Candle (Windows/CUDA) in-place ComfyUI FLUX.2-dev txt2img route (epic 10451 Phase 2e, sc-10680).
 // Renders a user's existing ComfyUI FLUX.2-dev fp8-mixed DiT — read in place, no copy, no re-download —
 // via `runtime_cuda::providers::flux2::load_from_comfyui_dit`, which dequants the inline-scale fp8 MLPs
@@ -13,7 +22,7 @@
 //
 // **Candle-only**, and a **bespoke provider** (like the Qwen-Image comfyui lane): the loaded generator
 // is not registry-resolvable (its DiT is a single in-place file, not a diffusers snapshot dir), so it is
-// loaded fresh per job through `start_gen_stream`. This file is `include!`d into the `image_jobs`
+// loaded fresh per job through `start_gen_stream`. This file is a child module of the `image_jobs`
 // module, sharing its imports.
 
 /// The adapter/engine id recorded on candle ComfyUI FLUX.2-dev assets + telemetry (distinct from the
@@ -34,13 +43,13 @@ const FLUX2_COMFYUI_SNAPSHOT_REPO: &str = "SceneWorks/flux2-dev-mlx";
 /// **dense** diffusers tree the candle loader reads directly; the packed q8/q4 tiers are the fallback
 /// (the candle loader's packed path consumes them). The first fully-present tree wins, so a
 /// partially-downloaded tier does not block the lane.
-const FLUX2_COMFYUI_SNAPSHOT_TIERS: &[&str] = &["bf16", "q8", "q4"];
+pub(super) const FLUX2_COMFYUI_SNAPSHOT_TIERS: &[&str] = &["bf16", "q8", "q4"];
 
 /// The compute quant the dequanted DiT (and the snapshot Mistral TE) are folded onto the GPU at. The 32B
 /// dev does not fit the GPU dense after the fp8→f32 dequant, so a quant is required; Q8 preserves the
 /// ~8-bit fp8 source and fits a 96 GB card (~24 GB TE + ~32 GB DiT + VAE). An `advanced.quant` of `q4`
 /// selects the smaller/faster tier for tighter cards.
-const FLUX2_COMFYUI_DEFAULT_QUANT: Quant = Quant::Q8;
+pub(super) const FLUX2_COMFYUI_DEFAULT_QUANT: Quant = Quant::Q8;
 
 /// The in-place ComfyUI DiT file + the resident snapshot tier dir supplying the other components.
 struct ComfyuiFlux2Paths {
@@ -113,7 +122,7 @@ fn resolve_flux2_comfyui_paths(
 /// True when this is a candle-runnable in-place ComfyUI FLUX.2-dev txt2img job: an `external_base_*`
 /// model whose forwarded row is a usable flux2 with a transformer component + a resident snapshot, no
 /// source image / pose (txt2img only). Mirrors the Qwen-Image comfyui availability predicate.
-fn flux2_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn flux2_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model.starts_with("external_base_")
         && request.mode != "edit_image"
         && pose_entries(request).is_empty()
@@ -147,7 +156,7 @@ fn flux2_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool 
 /// precisely because `mlxQuantize` is bits-valued and no integer is honest for NVFP4 (see
 /// [`flux2_comfyui_raw_settings`]); that identity simply has no servable target on this lane. Pinned by
 /// `flux2_comfyui_never_selects_nvfp4`.
-fn flux2_comfyui_quant(request: &ImageRequest) -> Quant {
+pub(super) fn flux2_comfyui_quant(request: &ImageRequest) -> Quant {
     match request
         .advanced
         .get("quant")
@@ -257,7 +266,7 @@ fn flux2_comfyui_raw_settings(
 /// on the blocking thread. `request.count` images, each its own seed. FLUX.2-dev is guidance-distilled
 /// (embedded scalar, single forward — NO negative prompt / true-CFG pass). The loaded `Box<dyn
 /// Generator>` is bespoke (not registry-cached), driven like the Qwen-Image comfyui lane.
-async fn generate_candle_flux2_comfyui_stream(
+pub(super) async fn generate_candle_flux2_comfyui_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -296,11 +305,14 @@ async fn generate_candle_flux2_comfyui_stream(
                 transformer,
                 snapshot_dir,
             } = paths;
-            let model =
-                runtime_cuda::providers::flux2::load_from_comfyui_dit(transformer, snapshot_dir, Some(quant))
-                    .map_err(|error| {
-                        WorkerError::Engine(format!("ComfyUI FLUX.2-dev load failed: {error}"))
-                    })?;
+            let model = runtime_cuda::providers::flux2::load_from_comfyui_dit(
+                transformer,
+                snapshot_dir,
+                Some(quant),
+            )
+            .map_err(|error| {
+                WorkerError::Engine(format!("ComfyUI FLUX.2-dev load failed: {error}"))
+            })?;
             Ok(model)
         },
         move |model, tx, cancel| {

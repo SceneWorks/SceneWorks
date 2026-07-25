@@ -1,3 +1,14 @@
+use super::{advanced, huggingface_snapshot_dir, resolve_app_managed_model_dir};
+use super::{
+    consume_gen_events, dense_tier_subdir, drive_gen_items, fit_engine_image, load_reference_image,
+    non_empty, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_sdxl_components, resolve_seed,
+    standard_tier_subdir, start_gen_stream, uses_standard_tier_layout, ApiClient, Image, ImagePlan,
+    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, SdxlEdit, SdxlEditPaths, SdxlEditRequest,
+    Settings, Value, WorkerError, WorkerResult,
+};
+use serde_json::json;
+
 // Candle (Windows/CUDA) SDXL img2img / inpaint / outpaint edit route (sc-5487, epic 5480) — pixel-
 // conditioned editing on SDXL/RealVisXL off-Mac via `runtime_cuda::providers::sdxl::SdxlEdit`. The edit sibling of the
 // candle SDXL IP-Adapter lane (sdxl_ipadapter.rs): the same SDXL base resolution + stream plumbing, but
@@ -5,7 +16,7 @@
 //
 // **Candle-only.** macOS keeps the MLX SDXL advanced path (sdxl.rs `SdxlSubMode::{Edit,Inpaint,Outpaint}`);
 // the candle `SdxlEdit` is a bespoke provider, so this whole file is gated to the Windows/CUDA candle
-// build (the `include!` in image_jobs.rs carries the cfg). It is `include!`d into the `image_jobs`
+// build (the module declaration in image_jobs.rs carries the cfg). It is a child module of the `image_jobs`
 // module, so it shares that module's imports (ImageRequest/Settings/WorkerResult/`advanced`/
 // `load_reference_image`/`huggingface_snapshot_dir`/`resolve_app_managed_model_dir`/`resolve_seed`/
 // `start_gen_stream`/`drive_gen_items`/`consume_gen_events`/`non_empty`/`gen_core`/… all in scope).
@@ -109,19 +120,21 @@ fn resolve_sdxl_edit_candle_base(
     // packed-detects the tier. A flat upstream diffusers snapshot (no q4/q8/bf16 subdirs) has no present
     // tier, so `standard_tier_subdir` returns its root untouched; a NON-standard tiered turnkey keeps the
     // dense `bf16/` descent (sc-10614). Both fall through `dense_tier_subdir` on the non-standard branch.
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo).map(|root| {
-        if uses_standard_tier_layout(request) {
-            standard_tier_subdir(&root, request)
-        } else {
-            dense_tier_subdir(root)
-        }
-    }))
+    Ok(
+        huggingface_snapshot_dir(&settings.data_dir, repo).map(|root| {
+            if uses_standard_tier_layout(request) {
+                standard_tier_subdir(&root, request)
+            } else {
+                dense_tier_subdir(root)
+            }
+        }),
+    )
 }
 
 /// True when this is a candle-eligible SDXL edit job: an sdxl-family `edit_image` job with a source (an
 /// img2img / inpaint / outpaint shape, NOT a pure reference — that is the sdxl_ipadapter lane) whose base
 /// resolves locally. Mirrors `jobs_store::sdxl_edit_candle_eligible` so the worker and router agree.
-fn sdxl_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn sdxl_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_sdxl_edit_candle_model(&request.model)
         && sdxl_edit_candle_mode(request).is_some()
         && matches!(
@@ -203,7 +216,7 @@ fn load_sdxl_edit_source(
 /// padded canvas + the border mask, unioned with any user mask), then load `SdxlEdit` once + generate
 /// each image on the blocking thread. `request.count` images, each its own seed. `generate` takes `&self`
 /// (no per-call UNet mutation), so the per-item closure needs no `mut`. Reuses [`consume_gen_events`].
-async fn generate_candle_sdxl_edit_stream(
+pub(super) async fn generate_candle_sdxl_edit_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -226,8 +239,12 @@ async fn generate_candle_sdxl_edit_stream(
     // base (source, mask, and latent stay aligned). `use_pid`/`with_pid` stay paired at the load below.
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
     let use_pid = pid_weights.is_some();
-    let (width, height) =
-        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    let (width, height) = pid_effective_dims(
+        request.width,
+        request.height,
+        use_pid,
+        pid_output_tier(request),
+    );
     let source = load_sdxl_edit_source(request, project_path, settings)?;
 
     let is_inpaint = matches!(

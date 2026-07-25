@@ -1,3 +1,12 @@
+use super::huggingface_snapshot_dir;
+use super::{
+    consume_gen_events, drive_gen_items, pose_entries, resolve_advanced_or_manifest_u32,
+    resolve_seed, start_gen_stream, ApiClient, GenerationOutput, GenerationRequest, ImagePlan,
+    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
+    WorkerResult,
+};
+use serde_json::json;
+
 // Candle (Windows/CUDA) in-place ComfyUI Qwen-Image txt2img route (epic 10451 Phase 2b, sc-10670 +
 // sc-10830). Renders a user's existing ComfyUI Qwen-Image DiT — read in place, no copy, no
 // re-download — via `runtime_cuda::providers::qwen_image::load_from_comfyui_dit`, which strips the
@@ -15,7 +24,7 @@
 //
 // **Candle-only**, and a **bespoke provider** (like the Z-Image comfyui lane): the loaded generator is
 // not registry-resolvable (its DiT is a single in-place file, not a diffusers snapshot dir), so it is
-// loaded fresh per job through `start_gen_stream`. This file is `include!`d into the `image_jobs`
+// loaded fresh per job through `start_gen_stream`. This file is a child module of the `image_jobs`
 // module, sharing its imports.
 
 /// The adapter/engine id recorded on candle ComfyUI Qwen-Image assets + telemetry (distinct from the
@@ -133,7 +142,7 @@ fn resolve_qwen_comfyui_paths(
 /// True when this is a candle-runnable in-place ComfyUI Qwen-Image txt2img job: an `external_base_*`
 /// model whose forwarded row is a usable qwen-image with a transformer component + a resident snapshot,
 /// no source image / pose (txt2img only). Mirrors the Z-Image comfyui availability predicate.
-fn qwen_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn qwen_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model.starts_with("external_base_")
         && request.mode != "edit_image"
         && pose_entries(request).is_empty()
@@ -142,7 +151,11 @@ fn qwen_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool {
 
 /// Flat telemetry recorded on candle ComfyUI Qwen-Image assets. Qwen-Image base is non-distilled, so
 /// unlike the Z-Image comfyui lane it records true-CFG guidance.
-fn qwen_comfyui_raw_settings(request: &ImageRequest, steps: u32, guidance: Option<f32>) -> JsonObject {
+fn qwen_comfyui_raw_settings(
+    request: &ImageRequest,
+    steps: u32,
+    guidance: Option<f32>,
+) -> JsonObject {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -182,7 +195,7 @@ fn qwen_comfyui_guidance(request: &ImageRequest) -> Option<f32> {
 /// on the blocking thread. `request.count` images, each its own seed. Qwen-Image base is non-distilled,
 /// so guidance (true CFG) + negative prompt are threaded through. The loaded `Box<dyn Generator>` is
 /// bespoke (not registry-cached), driven like the Z-Image comfyui lane.
-async fn generate_candle_qwen_comfyui_stream(
+pub(super) async fn generate_candle_qwen_comfyui_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -225,11 +238,14 @@ async fn generate_candle_qwen_comfyui_stream(
                 snapshot_dir,
                 vae,
             } = paths;
-            let model =
-                runtime_cuda::providers::qwen_image::load_from_comfyui_dit(transformer, snapshot_dir, vae)
-                    .map_err(|error| {
-                        WorkerError::Engine(format!("ComfyUI Qwen-Image load failed: {error}"))
-                    })?;
+            let model = runtime_cuda::providers::qwen_image::load_from_comfyui_dit(
+                transformer,
+                snapshot_dir,
+                vae,
+            )
+            .map_err(|error| {
+                WorkerError::Engine(format!("ComfyUI Qwen-Image load failed: {error}"))
+            })?;
             Ok(model)
         },
         move |model, tx, cancel| {

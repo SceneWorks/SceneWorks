@@ -8,29 +8,25 @@ MOSS-SFX runs natively (Candle) on every platform. Install it once from the **Mo
 
 ## Writing the prompt
 
-- Describe the source **and its character** — setting, material, and distance all condition the result: "heavy rain on a tin roof", "a distant thunderclap rolling over a valley", "footsteps on wet gravel". A bare noun phrase like "glass breaking" gives the model much less to work with than "glass shattering on a stone floor".
+- Describe the source and its character: "heavy rain on a tin roof", "a distant thunderclap", "footsteps on gravel".
+- Add audible context when it matters: action, material, distance, intensity, environment, and acoustic space.
 - Bilingual prompts (English / Chinese) are supported; the language is advisory, not a mode switch.
-- A negative prompt steers the model away from unwanted qualities.
+- Leave **Guidance** and **Steps** blank unless you have a specific reason. Blank uses the values the model's authors published (CFG 4.0, 100 steps), which are what it was tuned for — more steps is not a quality dial to turn up.
 
-## Leave the sampling knobs alone unless you have a reason
+Example:
 
-The advanced panel exposes **guidance (CFG)** and **solver steps**. Both defaults are the values the model's authors published, and they are what the model was tuned for:
+> A heavy wooden cellar door creaks open slowly, rusty hinges grinding, close perspective in a damp stone room with a short dark echo; no speech or music.
 
-- **Steps — leave blank.** Blank resolves to the reference default of 100. More steps is not a quality dial to turn up, and fewer is not a safe speed trade.
-- **Guidance — leave blank.** Blank resolves to the reference default of 4.0. 1.0 disables guidance entirely.
+**Refine my prompt** rewrites this sound description only. It does not change length, language, guidance, steps, or seed. Audio Studio does not expose a negative-prompt field for this model.
 
-## Duration and render cost
+## Duration
 
-Output is 48 kHz mono, up to **30 seconds**, with 0.1-second-granular duration control. Ask for the length you need directly.
+Output is 48 kHz mono, up to **30 seconds**, with whole-second duration control. Ask for the length you need directly.
 
-One thing that is easy to get wrong: **a short clip does not render faster.** The model always denoises a full 30-second internal window and then crops to your requested length — that is how it was trained, and shortening the window degrades quality badly. A 3-second effect therefore costs the same as a 30-second one.
-
-Because the cost is fixed, prefer **asking for the longer clip and trimming in the timeline** over rendering several short ones.
-
-## Performance
-
-SFX generation is a diffusion process over a long sequence, and attention cost grows with the square of that length. On CPU a single render takes many minutes; on Apple GPU (Metal) it is a couple of minutes. If SFX feels unusably slow, check that the GPU audio path is enabled for your build.
+One thing that is easy to get wrong: **a short clip does not render faster.** The model always denoises a full 30-second internal window and then crops to your requested length — that is how it was trained, and shortening the window degrades quality badly. A 3-second effect therefore costs the same as a 30-second one, so prefer asking for the longer clip and trimming in the timeline over rendering several short ones.
 
 ## Practical notes
+
+SFX generation is a diffusion process over a long sequence, and attention cost grows with the square of that length. On CPU a single render takes many minutes; on Apple GPU (Metal) it is a couple of minutes. If SFX feels unusably slow, check that the GPU audio path is enabled for your build.
 
 Layer several clips in the timeline to build a richer ambience rather than asking for one long busy clip — the model renders a single coherent event far better than a crowded scene.

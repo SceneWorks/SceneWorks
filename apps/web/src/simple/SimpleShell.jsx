@@ -3,6 +3,7 @@ import { Icon } from "../components/Icons.jsx";
 import { Logo } from "../components/Logo.jsx";
 import { ConfirmHost } from "../appConfirm.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { assetCanRenderAsAudio } from "../components/assetMedia.jsx";
 import { terminalStatuses } from "../constants.js";
 import { breakpointFor, contentMaxWidth } from "./breakpoint.js";
 import { ADVANCED_MODE } from "./uiMode.js";
@@ -73,6 +74,7 @@ export function SimpleShell({
     updateAssetStatus,
     setSelectedAssetId,
     setActiveView,
+    sendAssetToVideo,
   } = useAppContext();
 
   const [rootRef, width] = useContainerWidth();
@@ -84,6 +86,12 @@ export function SimpleShell({
   const [sheet, setSheet] = useState(null);
   const [guideOpen, setGuideOpen] = useState(false);
   const [preview, setPreview] = useState(null);
+  // Which audio asset the Assets viewer holds (epic 14361 / sc-14366). It lives HERE, beside
+  // `preview`, so the grid and the viewer agree on which clip is loaded — the grid rings the
+  // loaded tile while the viewer IS that clip's play deck. Only the ID is shell state: the
+  // transport itself lives in the viewer, so a `timeupdate` can't re-render every screen.
+  const [loadedTakeId, setLoadedTakeId] = useState(null);
+  const [audioAutoPlay, setAudioAutoPlay] = useState(false);
   const [toastText, setToastText] = useState(null);
   // The reference an asset preview hands to the Image Studio. Held here (not in the
   // studio) so "Use as reference" works from Assets, which is a different screen.
@@ -99,6 +107,22 @@ export function SimpleShell({
   const toastTimer = useRef(null);
 
   useEffect(() => () => clearTimeout(toastTimer.current), []);
+
+  // Opening an asset. An audio asset also becomes the loaded take, so the grid rings it and
+  // the viewer opens on its deck; `play` (the tile's play button) starts it immediately.
+  const openPreview = useCallback((asset, options = {}) => {
+    if (!asset) {
+      setPreview(null);
+      return;
+    }
+    if (assetCanRenderAsAudio(asset)) {
+      setLoadedTakeId(asset.id);
+      setAudioAutoPlay(Boolean(options.play));
+    } else {
+      setAudioAutoPlay(false);
+    }
+    setPreview(asset);
+  }, []);
 
   const toast = useCallback((message) => {
     setToastText(message);
@@ -139,7 +163,8 @@ export function SimpleShell({
       openSheet: setSheet,
       closeSheet: () => setSheet(null),
       openGuide: () => setGuideOpen(true),
-      openPreview: setPreview,
+      openPreview,
+      loadedTakeId,
       openInAdvanced,
       uiLocked: lockedToSimple,
       toast,
@@ -148,7 +173,18 @@ export function SimpleShell({
       dismissedJobIds,
       dismissJob,
     }),
-    [breakpoint, goTo, toast, referenceRequest, openInAdvanced, lockedToSimple, dismissedJobIds, dismissJob],
+    [
+      breakpoint,
+      goTo,
+      toast,
+      referenceRequest,
+      openInAdvanced,
+      lockedToSimple,
+      dismissedJobIds,
+      dismissJob,
+      openPreview,
+      loadedTakeId,
+    ],
   );
 
   const active = SCREEN_BY_ID.get(screen) ?? SCREEN_BY_ID.get("image");
@@ -277,7 +313,18 @@ export function SimpleShell({
         {previewAsset ? (
           <SimplePreview
             asset={previewAsset}
+            audioAutoPlay={audioAutoPlay}
+            breakpoint={breakpoint}
             onClose={() => setPreview(null)}
+            onSendToVideo={
+              sendAssetToVideo
+                ? (asset) => {
+                    if (openInAdvanced("Video")) {
+                      sendAssetToVideo(asset);
+                    }
+                  }
+                : null
+            }
             onDelete={async (asset) => {
               setPreview(null);
               await deleteAsset(asset);

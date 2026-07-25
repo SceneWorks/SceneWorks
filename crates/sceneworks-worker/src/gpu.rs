@@ -225,17 +225,95 @@ fn with_candle_capabilities(
 }
 
 pub(crate) async fn discover_gpus() -> Vec<DiscoveredGpu> {
+    discover_gpus_attempt().await.gpus
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum GpuDiscoveryFailure {
+    ExplicitlyDisabled,
+    Timeout,
+    CommandNotFound,
+    LaunchFailed,
+    NonZeroExit,
+    NoGpusReported,
+}
+
+impl GpuDiscoveryFailure {
+    pub(crate) fn event_reason(self) -> &'static str {
+        match self {
+            Self::ExplicitlyDisabled => "explicitly_disabled",
+            Self::Timeout => "timeout",
+            Self::CommandNotFound => "command_not_found",
+            Self::LaunchFailed => "launch_failed",
+            Self::NonZeroExit => "nonzero_exit",
+            Self::NoGpusReported => "no_gpus_reported",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GpuDiscoveryAttempt {
+    pub(crate) gpus: Vec<DiscoveredGpu>,
+    pub(crate) failure: Option<GpuDiscoveryFailure>,
+    pub(crate) retryable: bool,
+}
+
+impl GpuDiscoveryAttempt {
+    pub(crate) fn success(gpus: Vec<DiscoveredGpu>) -> Self {
+        Self {
+            gpus,
+            failure: None,
+            retryable: false,
+        }
+    }
+
+    pub(crate) fn retryable_failure(failure: GpuDiscoveryFailure) -> Self {
+        Self {
+            gpus: Vec::new(),
+            failure: Some(failure),
+            retryable: true,
+        }
+    }
+
+    pub(crate) fn configured_ids(gpus: Vec<DiscoveredGpu>, failure: GpuDiscoveryFailure) -> Self {
+        Self {
+            gpus,
+            failure: Some(failure),
+            retryable: false,
+        }
+    }
+
+    fn final_failure(failure: GpuDiscoveryFailure) -> Self {
+        Self {
+            gpus: Vec::new(),
+            failure: Some(failure),
+            retryable: false,
+        }
+    }
+}
+
+pub(crate) async fn discover_gpus_attempt() -> GpuDiscoveryAttempt {
     let visible_ids = visible_gpu_ids_from_env();
     if visible_ids.as_ref().is_some_and(Vec::is_empty) {
-        return Vec::new();
+        return GpuDiscoveryAttempt::final_failure(GpuDiscoveryFailure::ExplicitlyDisabled);
     }
-    let gpus = query_nvidia_gpus().await;
-    if let Some(ids) = visible_ids {
-        let by_id = gpus
+
+    let query = query_nvidia_gpus_attempt().await;
+    if let Some(ids) = visible_ids.filter(|ids| !ids.is_empty()) {
+        // An explicit NVIDIA_VISIBLE_DEVICES list is itself a positive GPU
+        // configuration signal. Preserve the long-standing fallback descriptors
+        // when nvidia-smi is still initializing so the supervisor selects GPU
+        // children immediately for those configured ids.
+        let (discovered, failure) = match query {
+            Ok(gpus) if gpus.is_empty() => (gpus, Some(GpuDiscoveryFailure::NoGpusReported)),
+            Ok(gpus) => (gpus, None),
+            Err(failure) => (Vec::new(), Some(failure)),
+        };
+        let by_id = discovered
             .into_iter()
             .map(|gpu| (gpu.id.clone(), gpu))
             .collect::<BTreeMap<_, _>>();
-        return ids
+        let gpus = ids
             .into_iter()
             .map(|gpu_id| {
                 by_id
@@ -244,26 +322,64 @@ pub(crate) async fn discover_gpus() -> Vec<DiscoveredGpu> {
                     .unwrap_or_else(|| fallback_gpu(&gpu_id))
             })
             .collect();
+        return match failure {
+            Some(failure) => GpuDiscoveryAttempt::configured_ids(gpus, failure),
+            None => GpuDiscoveryAttempt::success(gpus),
+        };
     }
-    gpus
+
+    match query {
+        Ok(gpus) if !gpus.is_empty() => GpuDiscoveryAttempt::success(gpus),
+        Ok(_) => GpuDiscoveryAttempt::retryable_failure(GpuDiscoveryFailure::NoGpusReported),
+        Err(failure) => {
+            // Missing nvidia-smi on a host with no NVIDIA container configuration
+            // is a genuine CPU-only host, so it falls back immediately. A timeout,
+            // non-zero driver response, empty output, or other launch failure means
+            // the NVIDIA runtime may be present but not ready yet and merits the
+            // supervisor's bounded startup retries.
+            let configured = nvidia_runtime_configured_from_env();
+            if configured || failure != GpuDiscoveryFailure::CommandNotFound {
+                GpuDiscoveryAttempt::retryable_failure(failure)
+            } else {
+                GpuDiscoveryAttempt::final_failure(failure)
+            }
+        }
+    }
 }
 
 pub(crate) async fn query_nvidia_gpus() -> Vec<DiscoveredGpu> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(3),
-        Command::new("nvidia-smi")
-            .args([
-                "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu",
-                "--format=csv,noheader,nounits",
-            ])
-            .output(),
-    )
-    .await;
-    match output {
-        Ok(Ok(output)) if output.status.success() => {
-            parse_nvidia_smi_gpus(&String::from_utf8_lossy(&output.stdout))
+    query_nvidia_gpus_attempt().await.unwrap_or_default()
+}
+
+async fn query_nvidia_gpus_attempt() -> Result<Vec<DiscoveredGpu>, GpuDiscoveryFailure> {
+    let mut command = Command::new("nvidia-smi");
+    command.args([
+        "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu",
+        "--format=csv,noheader,nounits",
+    ]);
+    let output = run_bounded_command(command, Duration::from_secs(3)).await?;
+    Ok(parse_nvidia_smi_gpus(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+pub(crate) async fn run_bounded_command(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<std::process::Output, GpuDiscoveryFailure> {
+    // Tokio leaves a spawned child running when its future is dropped unless
+    // kill-on-drop is explicit. Discovery is raced against both a timeout and
+    // supervisor shutdown, so make either cancellation path reap the in-flight
+    // nvidia-smi instead of leaking one process per retry.
+    command.kill_on_drop(true);
+    match tokio::time::timeout(timeout, command.output()).await {
+        Ok(Ok(output)) if output.status.success() => Ok(output),
+        Ok(Ok(_)) => Err(GpuDiscoveryFailure::NonZeroExit),
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(GpuDiscoveryFailure::CommandNotFound)
         }
-        _ => Vec::new(),
+        Ok(Err(_)) => Err(GpuDiscoveryFailure::LaunchFailed),
+        Err(_) => Err(GpuDiscoveryFailure::Timeout),
     }
 }
 
@@ -689,6 +805,13 @@ fn mlx_utilization_from(
 
 pub(crate) fn visible_gpu_ids_from_env() -> Option<Vec<String>> {
     visible_gpu_ids(std::env::var("NVIDIA_VISIBLE_DEVICES").ok().as_deref())
+}
+
+fn nvidia_runtime_configured_from_env() -> bool {
+    std::env::var("NVIDIA_VISIBLE_DEVICES")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .is_some_and(|value| !value.is_empty() && !matches!(value.as_str(), "void" | "none"))
 }
 
 pub(crate) fn visible_gpu_ids(value: Option<&str>) -> Option<Vec<String>> {

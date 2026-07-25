@@ -1434,9 +1434,11 @@ async fn run_utility_job(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
             ))]
-            JobType::VideoUpscale => run_video_upscale_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Video upscale failed.", error)),
+            JobType::VideoUpscale => {
+                video_jobs::seedvr2::run_video_upscale_job(api, settings, &job)
+                    .await
+                    .map_err(|error| ("Video upscale failed.", error))
+            }
             JobType::PersonTrack => run_person_track_job(api, settings, http_client, &job)
                 .await
                 .map_err(|error| ("Person tracking failed.", error)),

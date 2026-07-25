@@ -912,6 +912,14 @@ pub(crate) fn create_app_with_state(
     warn_on_sweep_err("asset", sweep_stale_asset_uploads(&settings.data_dir));
     let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
     jobs_store.initialize()?;
+    let purged_terminal_jobs =
+        jobs_store.purge_terminal_jobs_older_than(settings.jobs_retention_days)?;
+    tracing::info!(
+        event = "terminal_job_retention",
+        retention_days = settings.jobs_retention_days,
+        purged_terminal_jobs,
+        "applied terminal job retention"
+    );
     let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
     let project_store = Arc::new(ProjectStore::new(
         settings.data_dir.clone(),

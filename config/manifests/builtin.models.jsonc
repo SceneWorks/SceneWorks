@@ -9215,6 +9215,10 @@
             {
               "label": "ACE-Step v1.5 XL Turbo (Hugging Face)",
               "url": "https://huggingface.co/ACE-Step/acestep-v15-xl-turbo-diffusers"
+            },
+            {
+              "label": "ACE-Step 1.5 Musician's Guide",
+              "url": "https://github.com/ace-step/ACE-Step-1.5/blob/main/docs/en/ace_step_musicians_guide.md"
             }
           ]
         }
