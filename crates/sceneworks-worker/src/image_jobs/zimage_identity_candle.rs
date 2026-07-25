@@ -190,7 +190,10 @@ pub(super) async fn generate_candle_zimage_identity_stream(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(ZIMAGE_EDIT_CANDLE_DEFAULT_REPO)
+        .unwrap_or_else(|| {
+            crate::engines::default_repo_for(&request.model)
+                .unwrap_or(ZIMAGE_EDIT_CANDLE_DEFAULT_REPO)
+        })
         .to_owned();
     let raw_settings = zimage_identity_candle_raw_settings(request, &repo, steps, strength);
 

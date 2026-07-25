@@ -1,4 +1,6 @@
-use super::{advanced, huggingface_snapshot_dir, resolve_app_managed_model_dir};
+use super::{
+    advanced, huggingface_snapshot_dir, resolve_app_managed_model_dir, standard_tier_subdir,
+};
 use super::{
     consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, non_empty,
     resolve_advanced_or_manifest_u32, resolve_seed, start_gen_stream, ApiClient, Image, ImagePlan,
@@ -63,8 +65,12 @@ pub(super) fn resolve_zimage_edit_candle_base(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(ZIMAGE_EDIT_CANDLE_DEFAULT_REPO);
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+        .unwrap_or_else(|| {
+            crate::engines::default_repo_for(&request.model)
+                .unwrap_or(ZIMAGE_EDIT_CANDLE_DEFAULT_REPO)
+        });
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
+        .map(|root| standard_tier_subdir(&root, request)))
 }
 
 /// True when this is a candle-eligible Z-Image edit job: a z-image-family `edit_image` job with a source
@@ -166,7 +172,10 @@ pub(super) async fn generate_candle_zimage_edit_stream(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(ZIMAGE_EDIT_CANDLE_DEFAULT_REPO)
+        .unwrap_or_else(|| {
+            crate::engines::default_repo_for(&request.model)
+                .unwrap_or(ZIMAGE_EDIT_CANDLE_DEFAULT_REPO)
+        })
         .to_owned();
     let raw_settings = zimage_edit_candle_raw_settings(request, &repo, steps, strength);
 

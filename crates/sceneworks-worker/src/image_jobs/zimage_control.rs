@@ -6,7 +6,9 @@ use super::{
     JsonObject, Path, PathBuf, Progress, Settings, Value, WorkerError, WorkerResult, ZImageControl,
     ZImageControlPaths, ZImageControlRequest,
 };
-use super::{resolve_app_managed_model_dir, safe_weight_filename, DownloadContext};
+use super::{
+    resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
+};
 use serde_json::json;
 
 // Candle (Windows/CUDA) Z-Image Fun-ControlNet (strict pose) route (sc-5489, epic 5480) —
@@ -88,11 +90,13 @@ pub(super) fn is_zimage_base_model(model: &str) -> bool {
 /// The default base diffusers repo for this control job's model — Turbo (`Tongyi-MAI/Z-Image-Turbo`) or
 /// the base undistilled `Tongyi-MAI/Z-Image` (sc-8379), selected by the request model id.
 pub(super) fn zimage_control_base_default_repo(model: &str) -> &'static str {
-    if is_zimage_base_model(model) {
-        ZIMAGE_CTRL_BASE_DEFAULT_REPO
-    } else {
-        ZIMAGE_CTRL_DEFAULT_REPO
-    }
+    crate::engines::default_repo_for(model).unwrap_or_else(|| {
+        if is_zimage_base_model(model) {
+            ZIMAGE_CTRL_BASE_DEFAULT_REPO
+        } else {
+            ZIMAGE_CTRL_DEFAULT_REPO
+        }
+    })
 }
 
 /// Resolve the Z-Image base (diffusers) snapshot: an explicit `modelPath` (advanced or manifest) → the
@@ -122,7 +126,8 @@ pub(super) fn resolve_zimage_control_base(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| zimage_control_base_default_repo(&request.model));
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
+        .map(|root| standard_tier_subdir(&root, request)))
 }
 
 /// True when this is a candle-eligible Z-Image strict-control job: `z_image_turbo` or the base `z_image`

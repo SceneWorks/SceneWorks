@@ -8,7 +8,7 @@ use super::{
     IpAdapterKolorsRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
     WorkerResult,
 };
-use super::{resolve_app_managed_model_dir, DownloadContext};
+use super::{resolve_app_managed_model_dir, standard_tier_subdir, DownloadContext};
 use serde_json::json;
 
 // Candle (Windows/CUDA) Kolors IP-Adapter-Plus reference route (sc-5488, epic 5480) — reference-image
@@ -84,8 +84,12 @@ fn resolve_kolors_ipadapter_base(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(KOLORS_IPADAPTER_DEFAULT_REPO);
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+        .unwrap_or_else(|| {
+            crate::engines::default_repo_for(&request.model)
+                .unwrap_or(KOLORS_IPADAPTER_DEFAULT_REPO)
+        });
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
+        .map(|root| standard_tier_subdir(&root, request)))
 }
 
 /// True when this is a candle-eligible Kolors IP-Adapter job: the `kolors` model with a reference image
@@ -296,7 +300,10 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(KOLORS_IPADAPTER_DEFAULT_REPO)
+        .unwrap_or_else(|| {
+            crate::engines::default_repo_for(&request.model)
+                .unwrap_or(KOLORS_IPADAPTER_DEFAULT_REPO)
+        })
         .to_owned();
     let raw_settings = kolors_ipadapter_raw_settings(request, &repo, steps, guidance, ip_scale);
 

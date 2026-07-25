@@ -7,7 +7,7 @@ use super::{
     IpAdapterFluxRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
     WorkerResult,
 };
-use super::{resolve_app_managed_model_dir, DownloadContext};
+use super::{resolve_app_managed_model_dir, standard_tier_subdir, DownloadContext};
 use serde_json::json;
 
 // Candle (Windows/CUDA) FLUX XLabs IP-Adapter reference route (sc-5872, epic 5480) — reference-image
@@ -53,12 +53,9 @@ fn is_flux_ipadapter_model(model: &str) -> bool {
     matches!(model, "flux_dev" | "flux_schnell")
 }
 
-/// The black-forest-labs base repo when the manifest omits `repo` (variant-keyed).
+/// The installed base repo when the manifest omits `repo` (variant-keyed).
 fn flux_ipadapter_default_repo(model: &str) -> &'static str {
-    match model {
-        "flux_schnell" => "black-forest-labs/FLUX.1-schnell",
-        _ => "black-forest-labs/FLUX.1-dev",
-    }
+    crate::engines::default_repo_for(model).unwrap_or("SceneWorks/flux1-dev-mlx")
 }
 
 /// Distilled default step count (FLUX parity): schnell 4, dev 25.
@@ -78,8 +75,8 @@ fn flux_ipadapter_default_guidance(model: &str) -> f32 {
 }
 
 /// Resolve the FLUX base (BFL snapshot) for the IP-Adapter route: an explicit `modelPath` dir
-/// (advanced or manifest) wins, else the HF cache snapshot for the manifest `repo` (default
-/// `black-forest-labs/FLUX.1-{dev,schnell}` by variant). `None` means the base is not present locally,
+/// (advanced or manifest) wins, else the HF cache snapshot for the manifest `repo` (the installed
+/// `MODEL_TABLE` turnkey by variant). `None` means the base is not present locally,
 /// so the job is not candle-runnable (falls through to torch). Mirrors `resolve_kolors_ipadapter_base`.
 fn resolve_flux_ipadapter_base(
     request: &ImageRequest,
@@ -104,7 +101,8 @@ fn resolve_flux_ipadapter_base(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| flux_ipadapter_default_repo(&request.model));
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
+        .map(|root| standard_tier_subdir(&root, request)))
 }
 
 /// True when this is a candle-eligible FLUX IP-Adapter job: a `flux_dev`/`flux_schnell` model with a

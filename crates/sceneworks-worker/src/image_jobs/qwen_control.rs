@@ -1,7 +1,7 @@
 use super::advanced;
 use super::{
     ensure_hf_cached_file, huggingface_snapshot_dir, resolve_app_managed_model_dir,
-    safe_weight_filename, DownloadContext,
+    safe_weight_filename, standard_tier_subdir, DownloadContext,
 };
 use super::{
     pose_entries, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
@@ -102,8 +102,11 @@ fn resolve_qwen_control_base(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(QWEN_CONTROL_DEFAULT_REPO);
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+        .unwrap_or_else(|| {
+            crate::engines::default_repo_for(&request.model).unwrap_or(QWEN_CONTROL_DEFAULT_REPO)
+        });
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
+        .map(|root| standard_tier_subdir(&root, request)))
 }
 
 /// True when this is a candle-eligible Qwen strict-pose job: `qwen_image` with a non-empty
@@ -424,7 +427,9 @@ pub(super) async fn generate_candle_qwen_control_stream(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(QWEN_CONTROL_DEFAULT_REPO)
+        .unwrap_or_else(|| {
+            crate::engines::default_repo_for(&request.model).unwrap_or(QWEN_CONTROL_DEFAULT_REPO)
+        })
         .to_owned();
 
     let pose_count = pose_entries(request).len();

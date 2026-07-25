@@ -6,7 +6,9 @@ use super::{
     Flux2ControlPaths, Flux2ControlRequest, Image, ImagePlan, ImageRequest, JobSnapshot,
     JsonObject, Path, PathBuf, Progress, Quant, Settings, Value, WorkerError, WorkerResult,
 };
-use super::{resolve_app_managed_model_dir, safe_weight_filename, DownloadContext};
+use super::{
+    resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
+};
 use serde_json::json;
 
 // Candle (Windows/CUDA) FLUX.2-dev strict-pose Fun-Controlnet-Union route (sc-7736, epic 6564) —
@@ -88,8 +90,12 @@ fn resolve_flux2_control_base(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(FLUX2_CONTROL_CANDLE_BASE_REPO);
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+        .unwrap_or_else(|| {
+            crate::engines::default_repo_for(&request.model)
+                .unwrap_or(FLUX2_CONTROL_CANDLE_BASE_REPO)
+        });
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
+        .map(|root| standard_tier_subdir(&root, request)))
 }
 
 /// True when this is a candle-eligible FLUX.2-dev strict-pose job: `flux2_dev` with a non-empty
@@ -371,7 +377,10 @@ pub(super) async fn generate_candle_flux2_control_stream(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(FLUX2_CONTROL_CANDLE_BASE_REPO)
+        .unwrap_or_else(|| {
+            crate::engines::default_repo_for(&request.model)
+                .unwrap_or(FLUX2_CONTROL_CANDLE_BASE_REPO)
+        })
         .to_owned();
 
     let pose_count = pose_entries(request).len();
