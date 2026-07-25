@@ -107,7 +107,6 @@ def test_mage_flow_generation_family_is_pinned_and_complete():
         "model_index.json",
         "scheduler/*",
         "text_encoder/*",
-        "tokenizer/*",
         "transformer/*",
         "vae/*",
     }
@@ -125,6 +124,41 @@ def test_mage_flow_generation_family_is_pinned_and_complete():
             assert entry["revision"] == revision
             # These are load-time quant choices over one dense mirror, so every logical tier
             # uses the same full-snapshot predicate. Physical tier provisioning belongs to sc-14059.
+            assert set(entry["files"]) == complete_snapshot
+        assert model["paths"]["model"] == f"${{HF_CACHE}}/{repo}"
+
+
+def test_mage_flow_edit_family_is_pinned_complete_and_source_gated():
+    """sc-14050: every edit variant is a complete shared-component snapshot."""
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+    expected = {
+        "mage_flow_edit_base": ("SceneWorks/Mage-Flow-Edit-Base", "5345fa8b0d41bdd612351f0933ef4cc9021281ab", 17495714677, 30, 5),
+        "mage_flow_edit": ("SceneWorks/Mage-Flow-Edit", "d668ecc8ce5addcb3c0bbe268227eb17f832aa9f", 17495714677, 30, 5),
+        "mage_flow_edit_turbo": ("SceneWorks/Mage-Flow-Edit-Turbo", "3e5ae67807083a25f3d344bc2c5ff16276415a14", 17495714653, 4, 1),
+    }
+    complete_snapshot = {
+        "model_index.json",
+        "scheduler/*",
+        "text_encoder/*",
+        "transformer/*",
+        "vae/*",
+    }
+    for model_id, (repo, revision, size, steps, guidance) in expected.items():
+        model = models[model_id]
+        assert model["family"] == "mage-flow"
+        assert model["adapter"] == "mlx_mage"
+        assert model["capabilities"] == ["edit_image"]
+        assert model["macOnly"] is True
+        assert model["defaults"]["steps"] == steps
+        assert model["defaults"]["guidanceScale"] == guidance
+        assert model["ui"]["sourceWithMultiReference"] is True
+        assert model["ui"]["recommendedFor"] == ["edit_image"]
+        assert [entry["variant"] for entry in model["downloads"]] == ["q4", "q8", "bf16"]
+        assert sum(entry.get("default") is True for entry in model["downloads"]) == 1
+        for entry in model["downloads"]:
+            assert entry["repo"] == repo
+            assert entry["revision"] == revision
+            assert entry["estimatedSizeBytes"] == size
             assert set(entry["files"]) == complete_snapshot
         assert model["paths"]["model"] == f"${{HF_CACHE}}/{repo}"
 

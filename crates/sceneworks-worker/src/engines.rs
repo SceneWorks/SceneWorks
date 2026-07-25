@@ -63,6 +63,30 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         adapter_label: "mlx_mage",
     },
     ModelRow {
+        sceneworks_id: "mage_flow_edit_base",
+        engine_id: "mage_flow_edit_base",
+        default_repo: "SceneWorks/Mage-Flow-Edit-Base",
+        default_steps: 30,
+        default_guidance: 5.0,
+        adapter_label: "mlx_mage",
+    },
+    ModelRow {
+        sceneworks_id: "mage_flow_edit",
+        engine_id: "mage_flow_edit",
+        default_repo: "SceneWorks/Mage-Flow-Edit",
+        default_steps: 30,
+        default_guidance: 5.0,
+        adapter_label: "mlx_mage",
+    },
+    ModelRow {
+        sceneworks_id: "mage_flow_edit_turbo",
+        engine_id: "mage_flow_edit_turbo",
+        default_repo: "SceneWorks/Mage-Flow-Edit-Turbo",
+        default_steps: 4,
+        default_guidance: 1.0,
+        adapter_label: "mlx_mage",
+    },
+    ModelRow {
         sceneworks_id: "z_image_turbo",
         engine_id: "z_image_turbo",
         // SceneWorks pre-built quant-matrix turnkey (sc-8670, epic 8506): q4/ (default) + q8/ + bf16/
@@ -1552,6 +1576,9 @@ mod tests {
         "mage_flow_base",
         "mage_flow",
         "mage_flow_turbo",
+        "mage_flow_edit_base",
+        "mage_flow_edit",
+        "mage_flow_edit_turbo",
         "z_image_turbo",
         "z_image",
         "z_image_edit",
@@ -1653,7 +1680,12 @@ mod tests {
             "krea_2_turbo" | "krea_2_raw" => p::krea::RES_MULTIPLE,
             // Mage's provider currently keeps SIZE_MULTIPLE private; the descriptor validates the
             // same VAE-derived ÷16 lattice, pinned here until the const is re-exported.
-            "mage_flow_base" | "mage_flow" | "mage_flow_turbo" => 16,
+            "mage_flow_base"
+            | "mage_flow"
+            | "mage_flow_turbo"
+            | "mage_flow_edit_base"
+            | "mage_flow_edit"
+            | "mage_flow_edit_turbo" => 16,
             "lens" | "lens_turbo" => p::lens::VAE_SCALE_FACTOR,
             "qwen_image" | "qwen_image_edit" => p::qwen_image::SIZE_MULTIPLE,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
@@ -1681,7 +1713,12 @@ mod tests {
             "krea_2_turbo" | "krea_2_raw" => p::krea::SIZE_MULTIPLE,
             // Mage is macOS-only; keep the all-target MODEL_TABLE lattice tied to the same ÷16
             // contract on candle CI even though runtime-cuda intentionally has no Mage provider.
-            "mage_flow_base" | "mage_flow" | "mage_flow_turbo" => 16,
+            "mage_flow_base"
+            | "mage_flow"
+            | "mage_flow_turbo"
+            | "mage_flow_edit_base"
+            | "mage_flow_edit"
+            | "mage_flow_edit_turbo" => 16,
             "lens" | "lens_turbo" => p::lens::VAE_SCALE_FACTOR,
             "qwen_image" | "qwen_image_edit" => p::qwen_image::SIZE_MULTIPLE,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
@@ -1827,6 +1864,59 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mage_edit_exposes_output_max_size_without_exposing_vision_preprocess_size() {
+        for id in [
+            "mage_flow_edit_base",
+            "mage_flow_edit",
+            "mage_flow_edit_turbo",
+        ] {
+            let caps = &mlx_model(id)
+                .expect("Mage Edit engine registration")
+                .descriptor
+                .capabilities;
+            assert_eq!(caps.max_size, 2048, "{id}: longest output side");
+            assert!(
+                caps.conditioning
+                    .contains(&gen_core::ConditioningKind::Reference)
+                    && caps
+                        .conditioning
+                        .contains(&gen_core::ConditioningKind::MultiReference),
+                "{id}: source and ordered multi-reference conditioning"
+            );
+        }
+        // The Qwen3-VL 384px conditioning edge is intentionally an engine-internal preprocessing
+        // constant, not a manifest request limit or Studio control.
+        assert!(
+            !include_str!("../../../config/manifests/builtin.models.jsonc")
+                .contains("vl_cond_long_edge")
+        );
+    }
+
+    #[test]
+    fn mage_rows_match_pinned_variant_defaults() {
+        let expected = [
+            ("mage_flow_base", 30, 5.0),
+            ("mage_flow", 20, 5.0),
+            ("mage_flow_turbo", 4, 1.0),
+            ("mage_flow_edit_base", 30, 5.0),
+            ("mage_flow_edit", 30, 5.0),
+            ("mage_flow_edit_turbo", 4, 1.0),
+        ];
+        for (id, steps, guidance) in expected {
+            let row = MODEL_TABLE
+                .iter()
+                .find(|row| row.sceneworks_id == id)
+                .unwrap_or_else(|| panic!("{id}: MODEL_TABLE registration"));
+            assert_eq!(row.default_steps, steps, "{id}: pinned MageVariant default");
+            assert_eq!(
+                row.default_guidance, guidance,
+                "{id}: pinned MageVariant CFG default"
+            );
+        }
+    }
+
     /// sc-12612: the mutation guard for [`pinned_image_stride`] and the on-stride assert in
     /// [`shipped_image_geometry_is_within_the_pinned_engine_envelope`]. That loop can only go RED when
     /// a SHIPPED bucket drifts off-lattice; this pins the lattice VALUES themselves, so a wrong mapping
@@ -1857,6 +1947,7 @@ mod tests {
             ("boogu_image", 16),
             ("krea_2_turbo", 16),
             ("mage_flow_base", 16),
+            ("mage_flow_edit_base", 16),
             ("lens", 16),
             ("qwen_image", 16),
             ("z_image_turbo", 16),

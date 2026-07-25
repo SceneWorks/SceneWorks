@@ -52,6 +52,7 @@ export function buildImageJobRequest(state) {
     characterId,
     characterLookId,
     multiReference,
+    sourceWithMultiReference,
     editSecondPair,
     sourceAssetId,
     controlPreprocessSourceId,
@@ -192,7 +193,9 @@ export function buildImageJobRequest(state) {
     referenceAssetIds:
       mode === "edit_image" && multiReference && referenceAssetIds.length
         ? referenceAssetIds
-        : (editSecondPair ?? undefined),
+        : mode === "edit_image" && sourceWithMultiReference && referenceAssetIds.length
+          ? referenceAssetIds
+          : (editSecondPair ?? undefined),
     // Fit mode applies to edits only; coerced so a stale "outpaint" never reaches a
     // non-inpaint model (epic 2551). Omitted for non-edit modes (worker default crop).
     fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,

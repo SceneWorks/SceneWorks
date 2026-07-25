@@ -94,6 +94,9 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "sana_1600m" | "sana_sprint_1600m" => sana_mlx_eligible(payload),
         "anima_base" | "anima_aesthetic" | "anima_turbo" => anima_mlx_eligible(payload),
         "mage_flow_base" | "mage_flow" | "mage_flow_turbo" => mage_flow_mlx_eligible(payload),
+        "mage_flow_edit_base" | "mage_flow_edit" | "mage_flow_edit_turbo" => {
+            mage_flow_edit_mlx_eligible(payload)
+        }
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
         _ => false,
@@ -347,6 +350,40 @@ pub(crate) fn mage_flow_mlx_eligible(payload: &Map<String, Value>) -> bool {
         || has_nonempty_array("controls")
         || has_nonempty_array("controlnets")
         || has_control)
+}
+
+/// Mage-Flow Edit requires a real primary source image. Optional plural references augment that
+/// source in their submitted order; they never make a source-less request eligible.
+pub(crate) fn mage_flow_edit_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+        return false;
+    }
+    let has_nonempty_string = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    let has_nonempty_array = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+    };
+    let has_control = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty());
+
+    has_nonempty_string("sourceAssetId")
+        && !has_nonempty_string("referenceAssetId")
+        && !has_nonempty_string("maskAssetId")
+        && !has_nonempty_array("loras")
+        && !has_nonempty_array("controls")
+        && !has_nonempty_array("controlnets")
+        && !has_control
 }
 
 /// Z-Image (sc-3022) MLX-routing conditions, ported from
@@ -952,6 +989,42 @@ mod tests {
                     ),
                     "{model} must fail closed for its unsupported request shape: {payload}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn mage_flow_edit_requires_source_and_preserves_optional_reference_shape() {
+        let models = [
+            "mage_flow_edit_base",
+            "mage_flow_edit",
+            "mage_flow_edit_turbo",
+        ];
+        for model in models {
+            for eligible in [
+                json!({ "mode": "edit_image", "sourceAssetId": "source" }),
+                json!({
+                    "mode": "edit_image",
+                    "sourceAssetId": "source",
+                    "referenceAssetIds": ["ref-b", "ref-a"]
+                }),
+            ] {
+                assert!(image_request_mlx_eligible(
+                    model,
+                    eligible.as_object().unwrap()
+                ));
+            }
+            for rejected in [
+                json!({ "mode": "edit_image", "referenceAssetIds": ["ref"] }),
+                json!({ "mode": "edit_image", "sourceAssetId": "   " }),
+                json!({ "mode": "text_to_image", "sourceAssetId": "source" }),
+                json!({ "mode": "edit_image", "sourceAssetId": "source", "maskAssetId": "mask" }),
+                json!({ "mode": "edit_image", "sourceAssetId": "source", "loras": [{"id":"x"}] }),
+            ] {
+                assert!(!image_request_mlx_eligible(
+                    model,
+                    rejected.as_object().unwrap()
+                ));
             }
         }
     }

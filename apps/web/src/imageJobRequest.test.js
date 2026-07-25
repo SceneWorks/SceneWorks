@@ -37,6 +37,7 @@ function img2imgPidState(overrides = {}) {
     characterId: null,
     characterLookId: null,
     multiReference: false,
+    sourceWithMultiReference: false,
     editSecondPair: null,
     sourceAssetId: null,
     controlPreprocessSourceId: null,
@@ -89,6 +90,20 @@ function img2imgPidState(overrides = {}) {
 }
 
 describe("buildImageJobRequest", () => {
+  it("keeps Mage Edit's required source separate from its ordered optional references", () => {
+    const request = buildImageJobRequest(
+      img2imgPidState({
+        mode: "edit_image",
+        model: "mage_flow_edit",
+        sourceWithMultiReference: true,
+        sourceAssetId: "source",
+        referenceAssetIds: ["reference-b", "reference-a"],
+      }),
+    );
+    expect(request.sourceAssetId).toBe("source");
+    expect(request.referenceAssetIds).toEqual(["reference-b", "reference-a"]);
+  });
+
   it("routes the img2img reference to the top-level referenceAssetId on an img2img model", () => {
     // The branch the drifted batch copy dropped (it hardcoded character-only referenceAssetId).
     const request = buildImageJobRequest(img2imgPidState());
