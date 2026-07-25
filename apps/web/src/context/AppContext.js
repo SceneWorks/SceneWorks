@@ -21,21 +21,6 @@ import { createContext, useContext, useMemo } from "react";
 // keep working: each hook below falls back to the legacy combined value when its split
 // context is absent. This is what makes the split backward compatible.
 
-// The keys carried by the high-churn (live) context. Derived from the SSE-updated
-// `jobs`/`workers` state, so they change identity on virtually every tick. Kept here so
-// App can build the two value objects from one source of truth.
-export const LIVE_CONTEXT_KEYS = Object.freeze([
-  "jobs",
-  "filteredJobs",
-  "imageLocalJobs",
-  "videoLocalJobs",
-  "documentLocalJobs",
-  "visibleWorkers",
-  "workersById",
-  "personReadiness",
-  "gpuOptions",
-]);
-
 export const AppStaticContext = createContext(null);
 export const AppLiveContext = createContext(null);
 

@@ -1,6 +1,7 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { apiFetch } from "./api.js";
 import { batchEligibleAssets, batchItemStatus, buildBatchJob, summarizeBatchProgress } from "./batchOps.js";
+import { terminalStatuses } from "./constants.js";
 import { upscaledFromAssetId } from "./assetVariants.js";
 import { assetSupportsCharacterLink } from "./components/assetPanels.jsx";
 import { assetUrl } from "./components/assetMedia.jsx";
@@ -45,6 +46,7 @@ export function useAssetBatch() {
   const [batchOpen, setBatchOpen] = useState(false);
   // While/after a batch runs: { op, items: [{ asset, jobId }], submitting }.
   const [batch, setBatch] = useState(null);
+  const batchObservedJobsRef = useRef(new Map());
   // Bulk Discard / Move-to-character on the current selection. `bulkAction` gates the
   // buttons while a fan-out is in flight; `moveOpen` reveals the inline character picker.
   const [bulkAction, setBulkAction] = useState(null);
@@ -69,9 +71,29 @@ export function useAssetBatch() {
 
   // Per-item + aggregate progress for an in-flight/just-finished batch, read off the jobs feed.
   const batchItems = batch
-    ? batch.items.map((item) => ({ asset: item.asset, status: batchItemStatus(item.jobId, jobs) }))
+    ? batch.items.map((item) => ({
+        asset: item.asset,
+        status: batchItemStatus(item.jobId, jobs, batchObservedJobsRef.current),
+      }))
     : null;
-  const batchProgress = batch ? summarizeBatchProgress(batch.items, jobs) : null;
+  const batchProgress = batch
+    ? summarizeBatchProgress(batch.items, jobs, batchObservedJobsRef.current)
+    : null;
+  useEffect(() => {
+    if (!batch) return;
+    const batchJobIds = new Set(batch.items.map((item) => item.jobId).filter(Boolean));
+    for (const job of jobs) {
+      if (batchJobIds.has(job.id)) {
+        const status =
+          job.status === "completed"
+            ? "completed"
+            : terminalStatuses.has(job.status)
+              ? "failed"
+              : "observed";
+        batchObservedJobsRef.current.set(job.id, status);
+      }
+    }
+  }, [batch, jobs]);
 
   const toggleSelect = (id) =>
     setSelectedAssetIds((prev) => {
@@ -108,6 +130,7 @@ export function useAssetBatch() {
   // the worker processes them serially with its between-item cache release (sc-5567).
   async function runBatch(op, params) {
     if (!activeProject || !eligibleSelected.length) return;
+    batchObservedJobsRef.current.clear();
     const targets = eligibleSelected;
     setBatch({ op, submitting: true, items: targets.map((asset) => ({ asset, jobId: null })) });
     const items = [];

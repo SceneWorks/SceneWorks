@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "./api.js";
+import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "./createJob.js";
 import { pollJobToCompletion } from "./pollJob.js";
 import { AccentPicker } from "./components/AccentPicker.jsx";
 import { Icon } from "./components/Icons.jsx";
@@ -578,6 +579,7 @@ export function App() {
   const generatedAssetRefreshesRef = useRef(new Map());
   const refreshDataRef = useRef(null);
   const refreshAssetsRef = useRef(null);
+  const healthRequestRef = useRef(null);
   // Latest purgeAsset, held in a ref so the App-level scratch-op survivor (sc-8850) can
   // purge orphaned scratch/result assets from the SSE handler without re-subscribing.
   const purgeAssetRef = useRef(null);
@@ -692,66 +694,39 @@ export function App() {
 
   // sc-4194: defined here (above the data hooks) because useTimelines takes it as a
   // dependency; a stable identity keeps the timeline hook's queue action stable too.
-  const createVideoJob = useCallback(
-    async (payload, options = {}) => {
-      const { navigateToQueue = false } = options;
-      if (!activeProject) {
-        setError("Create or open a project first.");
-        return null;
-      }
-      try {
-        const job = await apiFetch("/api/v1/video/jobs", token, {
-          method: "POST",
-          body: JSON.stringify({
-            ...payload,
-            projectId: activeProject.id,
-            projectName: activeProject.name,
-            requestedGpu,
-          }),
-        });
-        if (navigateToQueue) {
-          setActiveView("Queue");
-        }
-        setJobs((items) => upsertJobNewest(items, job));
-        setError("");
-        return job;
-      } catch (err) {
-        setError(err.message);
-        return null;
-      }
-    },
-    [token, activeProject, requestedGpu],
+  const createVideoJob = useMemo(
+    () =>
+      makeCreateJob({
+        definition: CREATE_JOB_DEFINITIONS.video,
+        token,
+        project: activeProject,
+        requestedGpu,
+        setJobs,
+        setError,
+        afterCreate: (_job, _payload, { navigateToQueue = false } = {}) => {
+          if (navigateToQueue) {
+            setActiveView("Queue");
+          }
+        },
+      }),
+    [token, activeProject, requestedGpu, setError],
   );
 
   // SceneWorks Audio Studio (epic 13400 / sc-13404): the audio analogue of createVideoJob. POSTs to
   // the typed /api/v1/audio/jobs endpoint, which resolves + injects the model's manifest entry and
   // enqueues an `audio_generate` job the worker routes to the candle audio lane. `payload` carries
   // { modelId → model, prompt, voice, language, targetDurationSecs, seed }.
-  const createAudioJob = useCallback(
-    async (payload) => {
-      if (!activeProject) {
-        setError("Create or open a project first.");
-        return null;
-      }
-      try {
-        const job = await apiFetch("/api/v1/audio/jobs", token, {
-          method: "POST",
-          body: JSON.stringify({
-            ...payload,
-            projectId: activeProject.id,
-            projectName: activeProject.name,
-            requestedGpu,
-          }),
-        });
-        setJobs((items) => upsertJobNewest(items, job));
-        setError("");
-        return job;
-      } catch (err) {
-        setError(err.message);
-        return null;
-      }
-    },
-    [token, activeProject, requestedGpu],
+  const createAudioJob = useMemo(
+    () =>
+      makeCreateJob({
+        definition: CREATE_JOB_DEFINITIONS.audio,
+        token,
+        project: activeProject,
+        requestedGpu,
+        setJobs,
+        setError,
+      }),
+    [token, activeProject, requestedGpu, setError],
   );
 
   const {
@@ -1171,12 +1146,29 @@ export function App() {
     };
   }, []);
 
+  const refreshHealth = useCallback(() => {
+    healthRequestRef.current?.abort();
+    const controller = new AbortController();
+    healthRequestRef.current = controller;
+    return apiFetch("/api/v1/health", "", { signal: controller.signal })
+      .then((nextHealth) => {
+        if (healthRequestRef.current === controller) {
+          setHealth(nextHealth);
+        }
+      })
+      .catch((err) => {
+        if (!isAbortError(err) && healthRequestRef.current === controller) {
+          setHealth(null);
+          setError(err.message);
+        }
+      });
+  }, [setError]);
+
   useEffect(() => {
-    apiFetch("/api/v1/health", "")
-      .then(setHealth)
-      .catch((err) => setError(err.message));
+    refreshHealth();
     // The /api/v1/access probe (+ accessResolved release) lives in useAccessGate now (sc-9750).
-  }, []);
+    return () => healthRequestRef.current?.abort();
+  }, [refreshHealth]);
 
   useEffect(() => {
     if (!isDesktopShell) {
@@ -1371,6 +1363,7 @@ export function App() {
     activeProjectRef,
     enqueueTimelineGenerationApply,
     hasVisibleLocalFailure,
+    refreshHealth,
   });
 
   // Survivor sweep for orphaned Image-Editor scratch ops (sc-8850). Runs on every `jobs`
@@ -1451,6 +1444,11 @@ export function App() {
 
   async function refreshAssets(projectId = activeProject?.id, { signal } = {}) {
     if (!projectId) {
+      return;
+    }
+    // SSE job events may describe a background project. Do not pay for that
+    // project's full asset listing when its result would be discarded anyway.
+    if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
       return;
     }
     try {
@@ -1572,62 +1570,33 @@ export function App() {
     [token, activeProject, requestedGpu],
   );
 
-  const createImageJob = useCallback(
-    async (payload) => {
-      if (!activeProject) {
-        setError("Create or open a project first.");
-        return null;
-      }
-      try {
-        const job = await apiFetch("/api/v1/image/jobs", token, {
-          method: "POST",
-          body: JSON.stringify({
-            ...payload,
-            projectId: activeProject.id,
-            projectName: activeProject.name,
-            requestedGpu,
-          }),
-        });
-        setJobs((items) => upsertJobNewest(items, job));
-        setError("");
-        return job;
-      } catch (err) {
-        setError(err.message);
-        return null;
-      }
-    },
-    [token, activeProject, requestedGpu],
+  const createImageJob = useMemo(
+    () =>
+      makeCreateJob({
+        definition: CREATE_JOB_DEFINITIONS.image,
+        token,
+        project: activeProject,
+        requestedGpu,
+        setJobs,
+        setError,
+      }),
+    [token, activeProject, requestedGpu, setError],
   );
 
   // Standalone video upscale (epic 4811 / sc-4816): the net-new `video_upscale` job runs
   // on the generic /api/v1/jobs endpoint (like image_upscale), not the generation video
   // endpoint. `payload` carries { sourceAssetId, factor, engine, softness, model, displayName }.
-  const createVideoUpscaleJob = useCallback(
-    async (payload) => {
-      if (!activeProject) {
-        setError("Create or open a project first.");
-        return null;
-      }
-      try {
-        const job = await apiFetch("/api/v1/jobs", token, {
-          method: "POST",
-          body: JSON.stringify({
-            type: "video_upscale",
-            projectId: activeProject.id,
-            projectName: activeProject.name,
-            requestedGpu,
-            payload: { ...payload, projectId: activeProject.id },
-          }),
-        });
-        setJobs((items) => upsertJobNewest(items, job));
-        setError("");
-        return job;
-      } catch (err) {
-        setError(err.message);
-        return null;
-      }
-    },
-    [token, activeProject, requestedGpu],
+  const createVideoUpscaleJob = useMemo(
+    () =>
+      makeCreateJob({
+        definition: CREATE_JOB_DEFINITIONS.videoUpscale,
+        token,
+        project: activeProject,
+        requestedGpu,
+        setJobs,
+        setError,
+      }),
+    [token, activeProject, requestedGpu, setError],
   );
 
   // Refine a prompt via the prompt_refine worker job: POST creates the job, then
@@ -1773,60 +1742,30 @@ export function App() {
     [token],
   );
 
-  const createVqaJob = useCallback(
-    async (asset, question, maxNewTokens) => {
-      if (!activeProject) {
-        setError("Create or open a project first.");
-        return null;
-      }
-      try {
-        const job = await apiFetch("/api/v1/image/vqa/jobs", token, {
-          method: "POST",
-          body: JSON.stringify({
-            projectId: activeProject.id,
-            projectName: activeProject.name,
-            sourceAssetId: asset.id,
-            question,
-            maxNewTokens,
-            requestedGpu,
-          }),
-        });
-        setJobs((items) => upsertJobNewest(items, job));
-        setError("");
-        return job;
-      } catch (err) {
-        setError(err.message);
-        return null;
-      }
-    },
-    [token, activeProject, requestedGpu],
+  const createVqaJob = useMemo(
+    () =>
+      makeCreateJob({
+        definition: CREATE_JOB_DEFINITIONS.vqa,
+        token,
+        project: activeProject,
+        requestedGpu,
+        setJobs,
+        setError,
+      }),
+    [token, activeProject, requestedGpu, setError],
   );
 
-  const createInterleaveJob = useCallback(
-    async (payload) => {
-      if (!activeProject) {
-        setError("Create or open a project first.");
-        return null;
-      }
-      try {
-        const job = await apiFetch("/api/v1/image/interleave/jobs", token, {
-          method: "POST",
-          body: JSON.stringify({
-            ...payload,
-            projectId: activeProject.id,
-            projectName: activeProject.name,
-            requestedGpu,
-          }),
-        });
-        setJobs((items) => upsertJobNewest(items, job));
-        setError("");
-        return job;
-      } catch (err) {
-        setError(err.message);
-        return null;
-      }
-    },
-    [token, activeProject, requestedGpu],
+  const createInterleaveJob = useMemo(
+    () =>
+      makeCreateJob({
+        definition: CREATE_JOB_DEFINITIONS.interleave,
+        token,
+        project: activeProject,
+        requestedGpu,
+        setJobs,
+        setError,
+      }),
+    [token, activeProject, requestedGpu, setError],
   );
 
   const rememberLocalGenerationJob = useCallback((kind, job) => {

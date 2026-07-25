@@ -9,15 +9,17 @@ export function abortableDelay(ms, signal) {
     return Promise.reject(new DOMException("Aborted", "AbortError"));
   }
   return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        window.clearTimeout(timer);
-        reject(new DOMException("Aborted", "AbortError"));
-      },
-      { once: true },
-    );
+    const cleanup = () => signal?.removeEventListener("abort", onAbort);
+    const timer = window.setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    function onAbort() {
+      window.clearTimeout(timer);
+      cleanup();
+      reject(new DOMException("Aborted", "AbortError"));
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

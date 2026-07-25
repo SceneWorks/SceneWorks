@@ -30,11 +30,19 @@ export async function apiFetch(path, token, options = {}) {
   }
 
   const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
+  const payload =
+    response.status === 204 ? null : await response.json().catch(() => null);
   if (!response.ok) {
-    const detail = await response.json().catch(() => ({}));
-    throw new Error(detail.detail ?? `Request failed with ${response.status}`);
+    const detail = payload?.detail;
+    const message =
+      typeof detail === "string"
+        ? detail
+        : detail === undefined || detail === null
+          ? `Request failed with ${response.status}`
+          : JSON.stringify(detail);
+    throw new Error(message);
   }
-  return response.json();
+  return payload;
 }
 
 export function eventUrl(path, ticket) {

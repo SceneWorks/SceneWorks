@@ -100,6 +100,20 @@ describe("batch ops (sc-6112)", () => {
     expect(batchItemStatus(null, jobs)).toBe("queued");
   });
 
+  it("treats a previously observed job as done after terminal-history eviction", () => {
+    const observed = new Map();
+    expect(batchItemStatus("new-job", [], observed)).toBe("queued");
+
+    observed.set("evicted-job", "observed");
+    expect(batchItemStatus("evicted-job", [], observed)).toBe("completed");
+    expect(
+      summarizeBatchProgress([{ jobId: "evicted-job" }], [], observed),
+    ).toMatchObject({ queued: 0, completed: 1, done: 1, allDone: true });
+
+    observed.set("failed-job", "failed");
+    expect(batchItemStatus("failed-job", [], observed)).toBe("failed");
+  });
+
   it("returns a completed item's result asset, else null", () => {
     const jobs = [
       { id: "j1", status: "completed", result: { assets: [{ id: "out_1" }] } },

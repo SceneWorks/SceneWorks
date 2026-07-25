@@ -420,6 +420,70 @@ describe("SceneWorks app shell", () => {
     expect(queueChip()?.textContent).toContain("Queue 2");
   });
 
+  it("re-probes health on SSE open and error transitions", async () => {
+    let healthOnline = true;
+    let healthRequests = 0;
+    global.fetch = vi.fn((url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        healthRequests += 1;
+        return healthOnline
+          ? Promise.resolve(response({ status: "ok", authRequired: false }))
+          : Promise.reject(new Error("health offline"));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+      }
+      return Promise.resolve(response([]));
+    });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+    expect(container.textContent).toContain("Ready");
+    const initialRequests = healthRequests;
+
+    await act(async () => {
+      FakeEventSource.instances[0].onopen();
+    });
+    await settle();
+    expect(healthRequests).toBe(initialRequests + 1);
+    expect(container.textContent).toContain("Ready");
+
+    healthOnline = false;
+    await act(async () => {
+      FakeEventSource.instances[0].onerror();
+    });
+    await settle();
+    expect(healthRequests).toBe(initialRequests + 2);
+    expect(container.textContent).toContain("API offline");
+  });
+
+  it("keeps audioLocalJobs in the live context without a second key registry", async () => {
+    const liveValues = [];
+    const OriginalLive = AppLiveContext.Provider;
+    AppLiveContext.Provider = function RecordingLive({ value, children }) {
+      liveValues.push(value);
+      return <OriginalLive value={value}>{children}</OriginalLive>;
+    };
+    try {
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<App />);
+      });
+      await settle();
+
+      expect(liveValues.at(-1)).toHaveProperty("audioLocalJobs");
+      expect(Array.isArray(liveValues.at(-1).audioLocalJobs)).toBe(true);
+    } finally {
+      AppLiveContext.Provider = OriginalLive;
+    }
+  });
+
   // sc-8811 regression (F-009): the STATIC context value must keep its identity across an
   // App re-render that touches none of its entries. Before the fix, refreshData /
   // refreshDataWithLoraOverlay were plain per-render declarations passed into

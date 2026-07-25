@@ -153,7 +153,12 @@ import {
 import { suggestTier } from "../tierSuggestion.js";
 import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
 import { readLastTier } from "../lastTierStore.js";
-import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
+import {
+  PROMPT_REFINE_MODEL_ID,
+  terminalStatuses,
+  VISION_CAPTION_MODEL_ID,
+  VISION_CAPTION_MODEL_REPO,
+} from "../constants.js";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
 import { finiteRecipeNumber, recipeLoraSelection, recipeResolution } from "../recipeFields.js";
@@ -428,6 +433,7 @@ export function ImageStudio() {
     batchAbortRef, batchPrompts, batchVariables, batchJobCount, handleSaveBatch,
     handleLoadBatch, handleDeleteBatch, handleImportBatch, handleNewBatch,
   } = useBatchPromptState({ saved, createPromptBatch, updatePromptBatch, deletePromptBatch });
+  const batchObservedJobsRef = useRef(new Map());
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? imageModels[0]?.id ?? "z_image_turbo");
   const [seed, setSeed] = useState(saved.seed ?? "");
@@ -2115,6 +2121,7 @@ export function ImageStudio() {
     }
     setBatchConfirmPending(false);
     batchAbortRef.current = false;
+    batchObservedJobsRef.current.clear();
     // Items carry `error` so not-yet-submitted rows read as pending, not failed, while a
     // (possibly slow, structured) enqueue is in flight. Updated after each post so progress
     // ticks up live.
@@ -2169,7 +2176,7 @@ export function ImageStudio() {
       if (!item.jobId) {
         continue;
       }
-      const status = batchItemStatus(item.jobId, jobs);
+      const status = batchItemStatus(item.jobId, jobs, batchObservedJobsRef.current);
       if (status !== "queued" && status !== "running") {
         continue;
       }
@@ -2180,7 +2187,24 @@ export function ImageStudio() {
     }
   }
 
-  const batchRunProgress = batchRun ? summarizeBatchRun(batchRun.items, jobs) : null;
+  const batchRunProgress = batchRun
+    ? summarizeBatchRun(batchRun.items, jobs, batchObservedJobsRef.current)
+    : null;
+  useEffect(() => {
+    if (!batchRun) return;
+    const batchJobIds = new Set(batchRun.items.map((item) => item.jobId).filter(Boolean));
+    for (const job of jobs) {
+      if (batchJobIds.has(job.id)) {
+        const status =
+          job.status === "completed"
+            ? "completed"
+            : terminalStatuses.has(job.status)
+              ? "failed"
+              : "observed";
+        batchObservedJobsRef.current.set(job.id, status);
+      }
+    }
+  }, [batchRun, jobs]);
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
   // Prompt lines whose leading [WxH] directive (sc-10063) is out of the backend 256–4096
