@@ -162,14 +162,14 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          changed="$(gh pr view "${{ github.event.pull_request.number }}" --json files --jq '.files[].path')"
-          if printf '%s\n' "$changed" | grep -qE '^(docker/|config/|docker-compose\.yml|Cargo\.lock|\.github/workflows/check\.yml|scripts/check-(docker-api-runtime|compose-config)\.mjs)'; then
-            echo "Docker-relevant files changed; running the Docker runtime smoke."
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No Docker-relevant changes; skipping the Docker runtime smoke (sc-10823)."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
+          pr="${{ github.event.pull_request.number }}"
+          changed_file_count="$(gh api "repos/${GH_REPO}/pulls/${pr}" --jq '.changed_files')"
+          # The files endpoint pages at 100 and caps very large PRs at 3,000. The helper
+          # compares the returned count with `changed_files`; any truncation runs the
+          # smoke conservatively instead of treating an unseen Docker input as irrelevant.
+          gh api --paginate "repos/${GH_REPO}/pulls/${pr}/files?per_page=100" \
+            --jq '.[].filename' |
+            node scripts/docker-smoke-relevance.mjs --expected-count "$changed_file_count"
       - name: Smoke default Rust API Docker runtime
         if: steps.docker_smoke_gate.outputs.run == 'true'
         env:

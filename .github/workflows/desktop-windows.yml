@@ -53,6 +53,7 @@ on:
       - "Cargo.lock"
       # Root build script (api:build:embedded:candle) driven by build-sidecar.mjs.
       - "package.json"
+      - ".github/actions/prepare-rust-runner/**"
       - ".github/workflows/desktop-windows.yml"
   push:
     branches:

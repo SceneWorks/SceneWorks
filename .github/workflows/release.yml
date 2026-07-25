@@ -54,7 +54,7 @@ concurrency:
 jobs:
   macos:
     # Self-hosted macOS 26.2 runner; same-repo only — never run fork code.
-    if: ${{ github.repository == 'SceneWorks/SceneWorks' }}
+    if: ${{ github.repository == 'SceneWorks/SceneWorks' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: [self-hosted, macOS, ARM64, nax]
     env:
       CARGO_NET_OFFLINE: "true"
@@ -202,7 +202,9 @@ jobs:
             '## Linux x86_64 (CUDA GPU)' \
             'Run the AppImage or install the .deb on Ubuntu 22.04/24.04. Requires an NVIDIA GPU; the CUDA/cuDNN runtime is downloaded on first launch.')
           args=(--draft --generate-notes --title "SceneWorks $TAG" --notes "$notes")
-          case "$TAG" in *-*) args+=(--prerelease) ;; esac
+          if [[ "${TAG#v}" == *-* ]]; then
+            args+=(--prerelease)
+          fi
           # Attach the DMG (fresh install) + the updater tarball (in-app update payload).
           gh release create "$TAG" "${args[@]}" "${dmgs[0]}" "${tarballs[0]}"
 
@@ -226,7 +228,7 @@ jobs:
     # build-windows job — keep them in sync. This is the heavy candle CUDA release
     # build (the SHIPPED artifacts), so it needs the CUDA Toolkit + MSVC toolset.
     needs: macos
-    if: ${{ github.repository == 'SceneWorks/SceneWorks' }}
+    if: ${{ github.repository == 'SceneWorks/SceneWorks' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: windows-2022
     env:
       # compute_80 PTX the driver JITs forward to sm_120 — one binary covers
@@ -374,7 +376,7 @@ jobs:
     # Serializing the latest.json read/modify/write prevents platform entries
     # from clobbering one another. Build steps mirror desktop-linux.yml.
     needs: windows
-    if: ${{ github.repository == 'SceneWorks/SceneWorks' }}
+    if: ${{ github.repository == 'SceneWorks/SceneWorks' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-22.04
     env:
       # Build-side constant, not a secret. Keep this and the CUDA pin aligned
