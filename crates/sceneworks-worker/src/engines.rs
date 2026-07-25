@@ -850,6 +850,28 @@ pub(crate) fn mlx_model(sceneworks_id: &str) -> Option<ResolvedModel> {
     Some(ResolvedModel { row, descriptor })
 }
 
+/// The default weights repo for a SceneWorks model id straight off its [`MODEL_TABLE`] row.
+///
+/// Unlike [`mlx_model`] this needs NO linked gen_core descriptor, so it answers on any backend and
+/// in unit tests that never build the registry. It exists so the conditioning lanes (candle SDXL
+/// edit / IP-Adapter) resolve the SAME repo the txt2img lane does instead of each carrying a private
+/// copy of the mapping (sc-14463).
+///
+/// That drift was a real defect, not a hypothetical: those lanes kept pointing at the flat upstream
+/// repos (`SG161222/RealVisXL_V5.0`, `stabilityai/stable-diffusion-xl-base-1.0`) after the Group-B
+/// cutover (sc-8746) repointed the manifest downloads at the SceneWorks turnkeys, so on a clean
+/// install `huggingface_snapshot_dir` — a cache lookup, NOT a fetch — returned `None` and the lanes
+/// silently declined every job to torch. One lookup site now, so the next repo move cannot desync.
+/// Only the candle-gated conditioning lanes call this, so on macOS it has no callers outside the
+/// test module — same shape as `image_jobs::base::dense_tier_subdir` (sc-10614).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn default_repo_for(sceneworks_id: &str) -> Option<&'static str> {
+    MODEL_TABLE
+        .iter()
+        .find(|row| row.sceneworks_id == sceneworks_id)
+        .map(|row| row.default_repo)
+}
+
 /// The registry-DERIVED subset of the MLX worker's capabilities (sc-3723): exactly the
 /// capabilities backed by a linked generator/trainer/captioner descriptor whose backend is
 /// enabled in `settings`. Off-macOS the provider crates aren't linked, so the registry is
@@ -2089,6 +2111,34 @@ mod tests {
         assert_ne!(base.default_repo, turbo.default_repo);
         assert_ne!(base.default_steps, turbo.default_steps);
         assert_ne!(base.default_guidance, turbo.default_guidance);
+    }
+
+    /// sc-14463: `default_repo_for` is the ONE lookup the candle conditioning lanes share with the
+    /// txt2img lane. Those lanes are `not(target_os = "macos")`-gated, so their own tests never run
+    /// here — this asserts the shared helper on every platform, and names the pre-fix upstream repos
+    /// so it discriminates rather than restating whatever the table happens to hold.
+    #[test]
+    fn default_repo_for_resolves_sdxl_family_to_installed_turnkeys() {
+        for (id, turnkey) in [
+            ("sdxl", "SceneWorks/sdxl-base-mlx"),
+            ("realvisxl", "SceneWorks/realvisxl-mlx"),
+            ("illustrious_xl_v1", "SceneWorks/illustrious-xl-v1-mlx"),
+            ("illustrious_xl_v2", "SceneWorks/illustrious-xl-v2-mlx"),
+        ] {
+            assert_eq!(default_repo_for(id), Some(turnkey), "{id} default repo");
+        }
+        // The exact repos the conditioning lanes used to hardcode. Nothing in any manifest
+        // `downloads` block stages either one, so resolving to them means resolving to nothing.
+        for stale in [
+            "SG161222/RealVisXL_V5.0",
+            "stabilityai/stable-diffusion-xl-base-1.0",
+        ] {
+            assert!(
+                !MODEL_TABLE.iter().any(|row| row.default_repo == stale),
+                "{stale} is not installed by any manifest download — no row may name it"
+            );
+        }
+        assert_eq!(default_repo_for("not_a_model"), None);
     }
 
     // sc-8746 (epic 8506, Group-B): the SDXL-family rows point at the SceneWorks pre-built

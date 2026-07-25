@@ -43,21 +43,13 @@ fn is_sdxl_edit_candle_model(model: &str) -> bool {
     )
 }
 
-/// Default SDXL base repo for a model id when the manifest omits `repo`.
-///
-/// `sdxl` and `realvisxl` name FLAT upstream diffusers snapshots (the conditioning fallback when the
-/// manifest omits `repo`, per sc-10614). Illustrious has no such upstream — OnomaAI ship a single-file
-/// LDM checkpoint — so it names its tiered turnkey. In practice the built-in SDXL family points `repo`
-/// at the SceneWorks quant-matrix turnkey (`mlx.standardTierLayout`), and — as of sc-10813 — this edit
-/// lane packed-detects + serves the request's q4/q8 tier through `standard_tier_subdir`, exactly like
-/// the txt2img lane (sc-10767); this default is only the flat-repo fallback.
+/// Default SDXL base repo for a model id when the manifest omits `repo` — which, in production, is
+/// ALWAYS (sc-14463). The edit-lane twin of `sdxl_ipadapter_default_repo`; see that fn for why the
+/// old hardcoded upstream repos were a live defect rather than a fallback.
 fn sdxl_edit_candle_default_repo(model: &str) -> &'static str {
-    match model {
-        "realvisxl" => "SG161222/RealVisXL_V5.0",
-        "illustrious_xl_v1" => "SceneWorks/illustrious-xl-v1-mlx",
-        "illustrious_xl_v2" => "SceneWorks/illustrious-xl-v2-mlx",
-        _ => "stabilityai/stable-diffusion-xl-base-1.0",
-    }
+    // Every id `is_sdxl_edit_candle_model` admits has a MODEL_TABLE row; the SDXL base turnkey is a
+    // defensive floor rather than a reachable case.
+    crate::engines::default_repo_for(model).unwrap_or("SceneWorks/sdxl-base-mlx")
 }
 
 /// Which SDXL edit sub-mode a request maps onto — the candle subset of the macOS `sdxl_sub_mode` (the
@@ -427,4 +419,59 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod sdxl_edit_candle_repo_tests {
+    use super::*;
+
+    /// sc-14463 regression guard — the edit-lane twin of the IP-Adapter test. Same reasoning: the
+    /// `assert_ne!`s name the pre-fix constants so this FAILS against the old code.
+    #[test]
+    fn edit_default_repo_is_the_installed_turnkey_not_the_upstream_source() {
+        assert_eq!(
+            sdxl_edit_candle_default_repo("realvisxl"),
+            "SceneWorks/realvisxl-mlx"
+        );
+        assert_ne!(
+            sdxl_edit_candle_default_repo("realvisxl"),
+            "SG161222/RealVisXL_V5.0",
+            "the installer has not staged the flat upstream since the Group-B cutover (sc-8746)"
+        );
+        assert_eq!(
+            sdxl_edit_candle_default_repo("sdxl"),
+            "SceneWorks/sdxl-base-mlx"
+        );
+        assert_ne!(
+            sdxl_edit_candle_default_repo("sdxl"),
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            "same cutover moved the SDXL base to its turnkey"
+        );
+        assert_eq!(
+            sdxl_edit_candle_default_repo("illustrious_xl_v1"),
+            "SceneWorks/illustrious-xl-v1-mlx"
+        );
+        assert_eq!(
+            sdxl_edit_candle_default_repo("illustrious_xl_v2"),
+            "SceneWorks/illustrious-xl-v2-mlx"
+        );
+    }
+
+    /// The two conditioning lanes must not drift from each other again — they load the same backbone
+    /// for the same id, and a divergence is exactly the defect sc-14463 fixed.
+    #[test]
+    fn edit_and_ipadapter_lanes_agree_on_the_backbone() {
+        for model in [
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ] {
+            assert_eq!(
+                sdxl_edit_candle_default_repo(model),
+                crate::image_jobs::sdxl_ipadapter::sdxl_ipadapter_default_repo(model),
+                "{model}: edit and IP-Adapter lanes must resolve one backbone"
+            );
+        }
+    }
 }
