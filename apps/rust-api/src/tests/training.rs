@@ -2180,12 +2180,12 @@ async fn racing_terminal_training_report_loses_before_lora_side_effects() {
 }
 
 /// A terminal row is committed before catalog/project side effects so a losing
-/// report cannot create ghosts. That handoff must also survive an error or
-/// process interruption after acceptance: the original owner retries the same
-/// terminal report, resumes the idempotent work, and clears the durable pending
-/// bit without creating duplicate catalog entries.
+/// report cannot create ghosts. A production worker does not repeat terminal
+/// progress after the API has already committed `completed`: its subsequent job
+/// retry observes a terminal conflict and it idles. Recovery therefore must be
+/// API-driven across restart, with no second worker progress request.
 #[tokio::test]
-async fn accepted_terminal_side_effect_failure_resumes_on_owner_retry() {
+async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_worker_retry() {
     let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
@@ -2258,30 +2258,48 @@ async fn accepted_terminal_side_effect_failure_resumes_on_owner_retry() {
         "the injected interruption occurs after the first idempotent catalog upsert"
     );
 
-    let (retry_status, retried) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/jobs/{job_id}/progress"),
-        completion.clone(),
-    )
-    .await;
-    assert_eq!(retry_status, StatusCode::OK);
-    assert_eq!(retried["status"], "completed");
-    assert_eq!(retried["result"]["loraRegistered"], true);
+    // Drop every clone of the first process's router/state and reconstruct the
+    // application from the same durable data. The production lifecycle task
+    // invokes this drain immediately at startup and once per second thereafter;
+    // call one cycle directly so the regression is deterministic and does not
+    // substitute a manual terminal progress retry.
+    drop(app);
+    drop(state);
+    let (restarted_app, restarted_state) =
+        create_app_with_state(settings).expect("restarted app and state create");
+    let recovery_task =
+        crate::jobs::spawn_terminal_progress_side_effect_recovery(restarted_state.clone());
+    let recovered = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let (status, job) = request(
+                restarted_app.clone(),
+                "GET",
+                &format!("/api/v1/jobs/{job_id}"),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            if job["result"]["loraRegistered"] == json!(true) {
+                break job;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("production startup recovery must finalize the durable pending row");
+    recovery_task.abort();
+    assert_eq!(recovered["status"], "completed");
+    assert_eq!(recovered["result"]["loraRegistered"], true);
 
-    // A later network retry sees the cleared durable marker and is a pure
-    // idempotent read; the manifest remains a single upserted entry.
-    let (third_status, third) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/jobs/{job_id}/progress"),
-        completion,
-    )
-    .await;
-    assert_eq!(third_status, StatusCode::OK);
-    assert_eq!(third["result"]["loraRegistered"], true);
+    assert_eq!(
+        crate::jobs::recover_pending_terminal_progress_side_effects_once(&restarted_state)
+            .await
+            .expect("second recovery scans"),
+        0,
+        "a cleared handoff must not be processed twice"
+    );
     let (status, loras) = request(
-        app,
+        restarted_app,
         "GET",
         &format!("/api/v1/loras?projectId={project_id}"),
         Value::Null,
@@ -2297,6 +2315,128 @@ async fn accepted_terminal_side_effect_failure_resumes_on_owner_retry() {
             .count(),
         1,
         "retry-safe registration must upsert rather than duplicate"
+    );
+}
+
+/// A fixed oldest-first batch must not let persistent failures monopolize the
+/// recovery queue. The first pass poisons a full production-sized batch; the
+/// durable retry schedule must rotate all of them out so the newer healthy row
+/// completes on the next pass, without retrying the poison rows every second.
+#[tokio::test]
+async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation() {
+    use sceneworks_core::contracts::{JobStatus, JobType, ProgressStage};
+    use sceneworks_core::jobs_store::{CreateJob, ProgressUpdate, RegisterWorker};
+
+    const BATCH: usize = crate::jobs::PROGRESS_SIDE_EFFECT_RECOVERY_BATCH;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let (_, state) = create_app_with_state(settings.clone()).expect("app and state create");
+    state
+        .jobs_store
+        .register_worker(RegisterWorker {
+            worker_id: "recovery-fairness-worker".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: Some("Test GPU".to_owned()),
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("worker registers");
+
+    for _ in 0..=BATCH {
+        state
+            .jobs_store
+            .create_job(CreateJob {
+                job_type: JobType::ImageGenerate,
+                project_id: None,
+                project_name: None,
+                payload: serde_json::Map::new(),
+                requested_gpu: "auto".to_owned(),
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            })
+            .expect("recovery fixture job creates");
+        let claimed = state
+            .jobs_store
+            .claim_next_job("recovery-fairness-worker")
+            .expect("fixture claim succeeds")
+            .expect("fixture job is claimable");
+        state
+            .jobs_store
+            .update_job_progress_with_outcome(
+                &claimed.id,
+                ProgressUpdate {
+                    status: JobStatus::Failed,
+                    stage: ProgressStage::Failed,
+                    progress: 1.0,
+                    message: "terminal fixture".to_owned(),
+                    error: Some("fixture failure".to_owned()),
+                    result: Some(serde_json::Map::new()),
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                    worker_id: Some("recovery-fairness-worker".to_owned()),
+                },
+            )
+            .expect("terminal fixture is accepted");
+    }
+
+    let poison_ids = state
+        .jobs_store
+        .pending_terminal_progress_side_effect_job_ids(BATCH)
+        .expect("initial recovery batch enumerates");
+    assert_eq!(
+        poison_ids.len(),
+        BATCH,
+        "fixture must poison one complete production batch"
+    );
+    state
+        .progress_side_effects_fail_job_ids
+        .lock()
+        .extend(poison_ids.iter().cloned());
+
+    assert_eq!(
+        crate::jobs::recover_pending_terminal_progress_side_effects_once(&state)
+            .await
+            .expect("poison batch recovery returns"),
+        0
+    );
+    let first_attempts = state.progress_side_effects_attempts.lock().clone();
+    assert!(
+        poison_ids
+            .iter()
+            .all(|job_id| first_attempts.get(job_id) == Some(&1)),
+        "every poison row must be attempted exactly once in the first pass"
+    );
+
+    drop(state);
+    let (_, restarted_state) =
+        create_app_with_state(settings).expect("restarted app and state create");
+    restarted_state
+        .progress_side_effects_fail_job_ids
+        .lock()
+        .extend(poison_ids);
+    assert_eq!(
+        crate::jobs::recover_pending_terminal_progress_side_effects_once(&restarted_state)
+            .await
+            .expect("healthy recovery returns"),
+        1,
+        "durably deferred poison rows must not starve the newer healthy handoff after restart"
+    );
+    assert_eq!(
+        crate::jobs::recover_pending_terminal_progress_side_effects_once(&restarted_state)
+            .await
+            .expect("bounded retry scan returns"),
+        0
+    );
+    assert_eq!(
+        *restarted_state.progress_side_effects_attempts.lock(),
+        std::collections::HashMap::new(),
+        "poison rows must stay out of the due set across restart until durable backoff expires"
     );
 }
 

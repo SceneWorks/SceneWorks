@@ -629,87 +629,23 @@ pub(crate) async fn update_job_progress(
     let terminal_side_effects_pending = accepted.side_effects_pending;
     let mut job = accepted.job;
 
-    // Terminal acceptance and the API-owned writes are a durable two-phase
-    // handoff. Serialize processors in this API process, then re-check the DB:
-    // an overlapping retry may have completed and cleared the pending bit while
-    // this request waited. A process restart drops the mutex but preserves the
-    // bit, so the original owning worker's retry can resume safely.
-    let _side_effects_guard = if terminal_side_effects_pending {
-        Some(state.progress_side_effects_lock.lock().await)
-    } else {
-        None
-    };
-    let should_process_side_effects = if terminal_side_effects_pending {
-        let expected_worker_id = job.worker_id.clone();
-        let expected_status = job.status.clone();
-        let (current, pending) = store_call(state.clone(), {
-            let job_id = job_id.clone();
-            move |store, _timeout| match store.pending_terminal_progress_side_effects(
-                &job_id,
-                expected_worker_id.as_deref(),
-                expected_status,
-            )? {
-                Some(job) => Ok((job, true)),
-                None => store.get_job(&job_id).map(|job| (job, false)),
+    if terminal_side_effects_pending {
+        // The request that accepted the terminal state gets the first chance to
+        // drain its durable handoff. If it errors or the process dies, the
+        // production recovery loop below discovers the same pending row without
+        // depending on a worker retry.
+        job = match process_pending_terminal_progress_side_effects(&state, &job_id).await? {
+            Some(job) => job,
+            None => {
+                store_call(state.clone(), {
+                    let job_id = job_id.clone();
+                    move |store, _timeout| store.get_job(&job_id)
+                })
+                .await?
             }
-        })
-        .await?;
-        job = current;
-        pending
-    } else {
-        accepted.applied
-    };
-
-    if should_process_side_effects {
-        // Start from the store's accepted result because it may have merged
-        // accumulated training-sample history into the submitted object.
-        let accepted_result = job.result.clone();
-        let mut result = accepted_result.clone();
-        // On a completing real training run, register the produced adapter as a
-        // SceneWorks LoRA after authoritative completion acceptance, then fold
-        // the registration outcome into the persisted result (story 1418).
-        if matches!(payload.status, JobStatus::Completed) {
-            if let Some(status) = register_completed_training_lora(&state, &job_id).await {
-                result.extend(status);
-            }
-            // A completing ControlTraining run registers its trained overlay into the control-overlay
-            // manifest so it is selectable + runnable in generation (sc-10165, B4). Gates on
-            // `JobType::ControlTraining`, so exactly one of these two fires per job.
-            if let Some(status) = register_completed_control_overlay(&state, &job_id).await {
-                result.extend(status);
-            }
-        }
-        // Fail after catalog registration but before project persistence/CAS so
-        // the retry regression covers a genuinely partial side-effect run. The
-        // resumed registration must upsert rather than duplicate.
-        #[cfg(test)]
-        if terminal_side_effects_pending
-            && std::mem::take(&mut *state.progress_side_effects_fail_once.lock())
-        {
-            return Err(ApiError::internal(
-                "injected post-acceptance progress side-effect failure",
-            ));
-        }
-        // Persist any generated assets the worker reported as `assetWrites` facts and
-        // re-inject the built sidecars into the result so the UI keeps streaming them
-        // (story 1656 — Rust is the single project-store writer).
-        persist_reported_assets(&state, &job_id, &mut result).await?;
-
-        if result != accepted_result || terminal_side_effects_pending {
-            let expected_worker_id = job.worker_id.clone();
-            let expected_status = job.status.clone();
-            job = store_call(state.clone(), move |store, _timeout| {
-                store.replace_job_result_after_progress(
-                    &job_id,
-                    expected_worker_id.as_deref(),
-                    expected_status,
-                    &accepted_result,
-                    &result,
-                    terminal_side_effects_pending,
-                )
-            })
-            .await?;
-        }
+        };
+    } else if accepted.applied {
+        job = apply_progress_side_effects(&state, job, false).await?;
     }
     publish(&state, "job.updated", &job);
     // sc-4203 (F-API-5): workers POST progress per inference step. The queue summary
@@ -722,6 +658,185 @@ pub(crate) async fn update_job_progress(
         publish_queue(&state).await?;
     }
     Ok(Json(job))
+}
+
+pub(crate) const PROGRESS_SIDE_EFFECT_RECOVERY_BATCH: usize = 128;
+const PROGRESS_SIDE_EFFECT_RECOVERY_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Apply the API-owned writes for one accepted progress snapshot, then fold the
+/// derived result back through the store's ownership/status/result CAS.
+async fn apply_progress_side_effects(
+    state: &AppState,
+    job: JobSnapshot,
+    clear_terminal_side_effects: bool,
+) -> Result<JobSnapshot, ApiError> {
+    let job_id = job.id.clone();
+    // Start from the store's accepted result because it may have merged
+    // accumulated training-sample history into the submitted object.
+    let accepted_result = job.result.clone();
+    let mut result = accepted_result.clone();
+    // On a completing real training run, register the produced adapter as a
+    // SceneWorks LoRA after authoritative completion acceptance, then fold the
+    // registration outcome into the persisted result (story 1418).
+    if matches!(job.status, JobStatus::Completed) {
+        if let Some(status) = register_completed_training_lora(state, &job_id).await {
+            result.extend(status);
+        }
+        // A completing ControlTraining run registers its trained overlay into the control-overlay
+        // manifest so it is selectable + runnable in generation (sc-10165, B4). Gates on
+        // `JobType::ControlTraining`, so exactly one of these two fires per job.
+        if let Some(status) = register_completed_control_overlay(state, &job_id).await {
+            result.extend(status);
+        }
+    }
+    // Fail after catalog registration but before project persistence/CAS so
+    // the recovery regression covers a genuinely partial side-effect run. The
+    // resumed registration must upsert rather than duplicate.
+    #[cfg(test)]
+    if clear_terminal_side_effects
+        && std::mem::take(&mut *state.progress_side_effects_fail_once.lock())
+    {
+        return Err(ApiError::internal(
+            "injected post-acceptance progress side-effect failure",
+        ));
+    }
+    #[cfg(test)]
+    if clear_terminal_side_effects
+        && state
+            .progress_side_effects_fail_job_ids
+            .lock()
+            .contains(&job_id)
+    {
+        *state
+            .progress_side_effects_attempts
+            .lock()
+            .entry(job_id.clone())
+            .or_default() += 1;
+        return Err(ApiError::internal(
+            "injected persistent progress side-effect failure",
+        ));
+    }
+    // Persist any generated assets the worker reported as `assetWrites` facts and
+    // re-inject the built sidecars into the result so the UI keeps streaming them
+    // (story 1656 — Rust is the single project-store writer).
+    persist_reported_assets(state, &job_id, &mut result).await?;
+
+    if result == accepted_result && !clear_terminal_side_effects {
+        return Ok(job);
+    }
+    let expected_worker_id = job.worker_id.clone();
+    let expected_status = job.status.clone();
+    store_call(state.clone(), move |store, _timeout| {
+        store.replace_job_result_after_progress(
+            &job_id,
+            expected_worker_id.as_deref(),
+            expected_status,
+            &accepted_result,
+            &result,
+            clear_terminal_side_effects,
+        )
+    })
+    .await
+}
+
+/// Claim one durable terminal handoff under the process-wide serializer,
+/// re-checking status and owner after taking the lock. The same function serves
+/// the accepting request, live background recovery, and startup recovery.
+async fn process_pending_terminal_progress_side_effects(
+    state: &AppState,
+    job_id: &str,
+) -> Result<Option<JobSnapshot>, ApiError> {
+    let _guard = state.progress_side_effects_lock.lock().await;
+    let job = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| {
+            let current = store.get_job(&job_id)?;
+            store.pending_terminal_progress_side_effects(
+                &job_id,
+                current.worker_id.as_deref(),
+                current.status,
+            )
+        }
+    })
+    .await?;
+    let Some(job) = job else {
+        return Ok(None);
+    };
+    apply_progress_side_effects(state, job, true)
+        .await
+        .map(Some)
+}
+
+/// Drain one bounded batch of durable terminal handoffs. Per-job failures are
+/// isolated and remain pending for the next cadence; a DB enumeration failure
+/// is returned so the lifecycle loop can report it without exiting.
+pub(crate) async fn recover_pending_terminal_progress_side_effects_once(
+    state: &AppState,
+) -> Result<usize, ApiError> {
+    let ids = store_call(state.clone(), move |store, _timeout| {
+        store.pending_terminal_progress_side_effect_job_ids(PROGRESS_SIDE_EFFECT_RECOVERY_BATCH)
+    })
+    .await?;
+    let mut recovered = 0;
+    for job_id in ids {
+        match process_pending_terminal_progress_side_effects(state, &job_id).await {
+            Ok(Some(job)) => {
+                publish(state, "job.updated", &job);
+                recovered += 1;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let deferred = store_call(state.clone(), {
+                    let job_id = job_id.clone();
+                    move |store, _timeout| {
+                        store.defer_pending_terminal_progress_side_effects(&job_id)
+                    }
+                })
+                .await;
+                match deferred {
+                    Ok(retry_deferred) => tracing::warn!(
+                        event = "terminal_progress_side_effect_recovery_failed",
+                        job_id,
+                        status = error.status.as_u16(),
+                        detail = %error.detail,
+                        retry_deferred,
+                        "terminal progress side-effect recovery remains pending"
+                    ),
+                    Err(defer_error) => tracing::error!(
+                        event = "terminal_progress_side_effect_retry_schedule_failed",
+                        job_id,
+                        status = error.status.as_u16(),
+                        detail = %error.detail,
+                        defer_status = defer_error.status.as_u16(),
+                        defer_detail = %defer_error.detail,
+                        "terminal progress side-effect failed and its retry could not be scheduled"
+                    ),
+                }
+            }
+        }
+    }
+    Ok(recovered)
+}
+
+/// Production lifecycle task: run immediately on API startup, then continue at
+/// a short cadence so a post-acceptance 500 recovers even while the process and
+/// worker remain alive. The durable DB bit survives a crash/restart.
+pub(crate) fn spawn_terminal_progress_side_effect_recovery(
+    state: AppState,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            if let Err(error) = recover_pending_terminal_progress_side_effects_once(&state).await {
+                tracing::warn!(
+                    event = "terminal_progress_side_effect_recovery_scan_failed",
+                    status = error.status.as_u16(),
+                    detail = %error.detail,
+                    "could not scan pending terminal progress side effects"
+                );
+            }
+            tokio::time::sleep(PROGRESS_SIDE_EFFECT_RECOVERY_INTERVAL).await;
+        }
+    })
 }
 
 /// Persist the generated assets a worker reports as `assetWrites` facts in its

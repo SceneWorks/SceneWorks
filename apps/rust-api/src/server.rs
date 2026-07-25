@@ -34,7 +34,7 @@ use crate::manifest::ManifestCache;
 use crate::models::ModelSizeCache;
 use crate::tickets::TicketStore;
 use crate::{
-    create_app, env_path_or, env_string, open_bind_override_enabled, parent_death,
+    create_app_with_state, env_path_or, env_string, open_bind_override_enabled, parent_death,
     parent_pid_to_watch, seed_mode_for_config_dir, should_warn_open_bind, shutdown_signal,
     spawn_inprocess_utility_worker, DEFAULT_API_HOST, DEFAULT_CORS_ORIGINS,
 };
@@ -296,6 +296,12 @@ pub struct AppState {
     /// pending handoff survives an error and resumes on the owner's retry.
     #[cfg(test)]
     pub(crate) progress_side_effects_fail_once: Arc<Mutex<bool>>,
+    /// Persistent per-job failures and attempt counts for recovery fairness
+    /// tests. Production builds contain neither field.
+    #[cfg(test)]
+    pub(crate) progress_side_effects_fail_job_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+    #[cfg(test)]
+    pub(crate) progress_side_effects_attempts: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -386,8 +392,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let run_utility_inprocess = settings.run_utility_inprocess;
     let utility_data_dir = settings.data_dir.clone();
-    let app = create_app(settings)?;
+    let (app, state) = create_app_with_state(settings)?;
     let listener = tokio::net::TcpListener::bind(address).await?;
+    let progress_side_effect_recovery =
+        crate::jobs::spawn_terminal_progress_side_effect_recovery(state);
     // Use the actual bound address so port 0 (OS-assigned) is reported and the
     // in-process worker connects to the real port.
     let bound = listener.local_addr()?;
@@ -407,12 +415,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // `into_make_service_with_connect_info` exposes the peer `SocketAddr` to the auth
     // middleware so loopback callers can be trusted (epic 4484: keep the local desktop UI
     // and worker password-free while LAN clients stay gated).
-    axum::serve(
+    let serve_result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    .await;
+    progress_side_effect_recovery.abort();
+    serve_result?;
 
     if let Some(worker) = utility_worker {
         worker.shutdown().await;

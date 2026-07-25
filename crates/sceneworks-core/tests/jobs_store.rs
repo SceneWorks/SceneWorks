@@ -6617,6 +6617,13 @@ fn terminal_side_effect_handoff_is_resumable_only_by_the_original_owner() {
         .expect("terminal progress is accepted");
     assert!(accepted.applied);
     assert!(accepted.side_effects_pending);
+    assert_eq!(
+        store
+            .pending_terminal_progress_side_effect_job_ids(128)
+            .expect("recovery queue scans"),
+        vec![created.id.clone()],
+        "the production recovery drain must discover the accepted handoff"
+    );
 
     let error = store
         .update_job_progress_with_outcome(&created.id, completion("worker-2"))

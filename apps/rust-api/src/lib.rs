@@ -993,6 +993,10 @@ pub(crate) fn create_app_with_state(
         progress_before_accept_once: Arc::new(Mutex::new(None)),
         #[cfg(test)]
         progress_side_effects_fail_once: Arc::new(Mutex::new(false)),
+        #[cfg(test)]
+        progress_side_effects_fail_job_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        #[cfg(test)]
+        progress_side_effects_attempts: Arc::new(Mutex::new(HashMap::new())),
     };
     let cors = cors_layer(&state.settings);
     let returned_state = state.clone();

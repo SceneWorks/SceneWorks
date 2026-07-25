@@ -49,6 +49,9 @@ pub const ACTIVE_STATUSES: &[&str] = &[
     "running",
     "saving",
 ];
+
+const PROGRESS_SIDE_EFFECT_RETRY_BASE_SECONDS: i64 = 5;
+const PROGRESS_SIDE_EFFECT_RETRY_MAX_SECONDS: i64 = 5 * 60;
 pub const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "canceled", "interrupted"];
 /// Pending (accepted-but-not-yet-worker-owned) statuses: a job in one of these is
 /// waiting in the queue with no worker to acknowledge a cancel, so it can be
@@ -483,6 +486,30 @@ impl JobsStore {
             "jobs",
             "progress_side_effects_pending",
             "integer not null default 0",
+        )?;
+        // Persist retry scheduling with the handoff itself. Failed side effects
+        // leave the due set until their backoff expires, preventing a fixed
+        // oldest-first batch from hot-looping poison rows and starving newer
+        // handoffs after an API restart.
+        ensure_column(
+            &transaction,
+            "jobs",
+            "progress_side_effects_retry_count",
+            "integer not null default 0",
+        )?;
+        ensure_column(
+            &transaction,
+            "jobs",
+            "progress_side_effects_retry_at",
+            "integer not null default 0",
+        )?;
+        transaction.execute_batch(
+            "
+            create index if not exists idx_jobs_pending_side_effect_retry
+              on jobs(progress_side_effects_retry_at, updated_at, id)
+             where progress_side_effects_pending = 1
+               and status in ('completed', 'failed', 'canceled', 'interrupted');
+            ",
         )?;
         // Soft-hide marker for the "Clear completed" queue action (sc-12231, issue #1556).
         // A cleared job is dropped from the operator's queue list + counts (see
@@ -2115,7 +2142,9 @@ impl JobsStore {
                        else max(coalesce(peak_gpu_load_pct, 0), ?12)
                    end,
                    backend = coalesce(backend, ?13),
-                   progress_side_effects_pending = ?14
+                   progress_side_effects_pending = ?14,
+                   progress_side_effects_retry_count = 0,
+                   progress_side_effects_retry_at = 0
              where id = ?15
             ",
             params![
@@ -2179,6 +2208,76 @@ impl JobsStore {
         }
     }
 
+    /// Return a bounded batch of terminal jobs whose API-owned side effects
+    /// still need recovery. The API drains this durable queue at startup and on
+    /// a background cadence, so recovery does not depend on a worker repeating
+    /// a terminal progress report after it already observed the committed
+    /// terminal state.
+    pub fn pending_terminal_progress_side_effect_job_ids(
+        &self,
+        limit: usize,
+    ) -> JobsStoreResult<Vec<String>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection.prepare(
+            "select id
+               from jobs
+              where progress_side_effects_pending = 1
+                and status in ('completed', 'failed', 'canceled', 'interrupted')
+                and progress_side_effects_retry_at <= ?1
+              order by progress_side_effects_retry_at asc, updated_at asc, id asc
+              limit ?2",
+        )?;
+        let ids = statement
+            .query_map(
+                params![now_unix_seconds(), i64::try_from(limit).unwrap_or(i64::MAX)],
+                |row| row.get(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
+    /// Persist a bounded retry after one terminal side-effect attempt fails.
+    /// Moving the row's due time forward rotates it out of the current batch,
+    /// while the durable count makes the exponential backoff survive restart.
+    pub fn defer_pending_terminal_progress_side_effects(
+        &self,
+        job_id: &str,
+    ) -> JobsStoreResult<bool> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let retry_count = transaction
+            .query_row(
+                "select progress_side_effects_retry_count
+                   from jobs
+                  where id = ?1 and progress_side_effects_pending = 1",
+                params![job_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(retry_count) = retry_count else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        let next_retry_count = retry_count.max(0).saturating_add(1);
+        let exponent = u32::try_from(next_retry_count.saturating_sub(1))
+            .unwrap_or(u32::MAX)
+            .min(16);
+        let delay = PROGRESS_SIDE_EFFECT_RETRY_BASE_SECONDS
+            .saturating_mul(1_i64.checked_shl(exponent).unwrap_or(i64::MAX))
+            .min(PROGRESS_SIDE_EFFECT_RETRY_MAX_SECONDS);
+        let retry_at = now_unix_seconds().saturating_add(delay);
+        let changed = transaction.execute(
+            "update jobs
+                set progress_side_effects_retry_count = ?1,
+                    progress_side_effects_retry_at = ?2
+              where id = ?3 and progress_side_effects_pending = 1",
+            params![next_retry_count, retry_at, job_id],
+        )?;
+        transaction.commit()?;
+        Ok(changed == 1)
+    }
+
     /// Replace an accepted progress report's result with its post-acceptance
     /// augmentation (catalog registration / persisted asset sidecars). The
     /// compare-and-swap guards prevent a slower request from overwriting a
@@ -2207,7 +2306,11 @@ impl JobsStore {
                 set result_json = ?1,
                     updated_at = ?2,
                     progress_side_effects_pending =
-                      case when ?3 then 0 else progress_side_effects_pending end
+                      case when ?3 then 0 else progress_side_effects_pending end,
+                    progress_side_effects_retry_count =
+                      case when ?3 then 0 else progress_side_effects_retry_count end,
+                    progress_side_effects_retry_at =
+                      case when ?3 then 0 else progress_side_effects_retry_at end
               where id = ?4",
             params![
                 dumps(result)?,

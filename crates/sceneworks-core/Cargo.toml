@@ -28,6 +28,14 @@ tracing-subscriber = { workspace = true }
 # Purge sends asset media/sidecars to the OS trash (recoverable) instead of unlinking.
 trash = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# Safe wrapper around GetFileInformationByHandle. The recent-project registry
+# cache uses volume + file index to distinguish atomic replacement.
+winapi-util = "0.1"
+# FILE_BASIC_INFO.ChangeTime is the Windows filesystem change revision. Unlike
+# last-write time, ordinary callers cannot restore it after an in-place edit.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tempfile = "3.13"
 
