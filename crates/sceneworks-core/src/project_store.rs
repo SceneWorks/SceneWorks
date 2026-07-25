@@ -1,16 +1,12 @@
 use std::collections::BTreeSet;
 use std::fs;
-#[cfg(any(windows, test))]
-use std::hash::{DefaultHasher, Hash, Hasher};
-#[cfg(any(windows, test))]
-use std::io::{Read, Seek, SeekFrom};
+#[cfg(windows)]
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-#[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
 
 use parking_lot::{Mutex, ReentrantMutexGuard};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -266,7 +262,7 @@ struct RegistryItem {
     extra: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RegistryFingerprint {
     modified: SystemTime,
     len: u64,
@@ -281,18 +277,18 @@ struct RegistryFingerprint {
     changed_seconds: i64,
     #[cfg(unix)]
     changed_nanoseconds: i64,
-    // Windows std metadata omits the filesystem ChangeTime. Query it from the
-    // open handle as the correctness signal for same-file rewrites whose
-    // last-write time is restored. File identity covers atomic replacement;
-    // the bounded token is a cheap defense-in-depth content signal.
+    // Stable Rust does not expose the filesystem ChangeTime on Windows, and
+    // this workspace forbids unsafe Win32 calls. File identity covers atomic
+    // replacement; retaining the exact bytes from the same open handle covers
+    // every in-place rewrite even when length and last-write time are restored.
+    // recent-projects.json is a small registry, so this correctness-first
+    // fallback is preferable to a bounded sample that can miss an edit.
     #[cfg(windows)]
     volume_serial_number: u64,
     #[cfg(windows)]
     file_index: u64,
     #[cfg(windows)]
-    changed: i64,
-    #[cfg(windows)]
-    content_token: u64,
+    content: Vec<u8>,
 }
 
 #[derive(Debug, Default)]
@@ -304,71 +300,6 @@ struct RegistryCache {
     disk_reads: usize,
 }
 
-#[cfg(any(windows, test))]
-const REGISTRY_TOKEN_WINDOWS: u64 = 8;
-#[cfg(any(windows, test))]
-const REGISTRY_TOKEN_WINDOW_BYTES: u64 = 32;
-
-/// Hash evenly spaced windows from a seekable registry file. Work is capped at
-/// 256 bytes regardless of registry size, while including both endpoints and
-/// interior strata so ordinary JSON entry rewrites change the token. Returning
-/// the byte count makes the bounded-I/O contract testable on every platform.
-#[cfg(any(windows, test))]
-fn bounded_registry_content_token<R: Read + Seek>(
-    reader: &mut R,
-    len: u64,
-) -> std::io::Result<(u64, usize)> {
-    let mut hasher = DefaultHasher::new();
-    len.hash(&mut hasher);
-    if len == 0 {
-        return Ok((hasher.finish(), 0));
-    }
-    let window_len = len.min(REGISTRY_TOKEN_WINDOW_BYTES);
-    let max_start = len - window_len;
-    let mut starts = BTreeSet::new();
-    for index in 0..REGISTRY_TOKEN_WINDOWS {
-        let denominator = REGISTRY_TOKEN_WINDOWS - 1;
-        starts.insert(max_start.saturating_mul(index) / denominator);
-    }
-    let mut bytes_read = 0;
-    let mut buffer =
-        vec![0_u8; usize::try_from(window_len).expect("registry token window fits usize")];
-    for start in starts {
-        reader.seek(SeekFrom::Start(start))?;
-        reader.read_exact(&mut buffer)?;
-        start.hash(&mut hasher);
-        buffer.hash(&mut hasher);
-        bytes_read += buffer.len();
-    }
-    Ok((hasher.finish(), bytes_read))
-}
-
-#[cfg(windows)]
-fn windows_file_change_time(file: &fs::File) -> std::io::Result<i64> {
-    use std::mem::{size_of, MaybeUninit};
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
-    };
-
-    let mut basic_info = MaybeUninit::<FILE_BASIC_INFO>::uninit();
-    // SAFETY: `file` owns a valid handle for the duration of the call,
-    // `basic_info` points to writable storage of exactly the advertised size,
-    // and the buffer is read only after Windows reports success.
-    let succeeded = unsafe {
-        GetFileInformationByHandleEx(
-            file.as_raw_handle(),
-            FileBasicInfo,
-            basic_info.as_mut_ptr().cast(),
-            u32::try_from(size_of::<FILE_BASIC_INFO>()).expect("FILE_BASIC_INFO size fits u32"),
-        )
-    };
-    if succeeded == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: the successful API call initialized the complete FILE_BASIC_INFO.
-    Ok(unsafe { basic_info.assume_init() }.ChangeTime)
-}
-
 fn registry_fingerprint(path: &Path) -> ProjectStoreResult<Option<RegistryFingerprint>> {
     match fs::File::open(path) {
         Ok(file) => {
@@ -378,9 +309,9 @@ fn registry_fingerprint(path: &Path) -> ProjectStoreResult<Option<RegistryFinger
             #[cfg(windows)]
             let file_information = winapi_util::file::information(&file)?;
             #[cfg(windows)]
-            let changed = windows_file_change_time(&file)?;
+            let mut content = Vec::new();
             #[cfg(windows)]
-            let content_token = bounded_registry_content_token(&mut file, metadata.len())?.0;
+            file.read_to_end(&mut content)?;
             Ok(Some(RegistryFingerprint {
                 modified: metadata.modified()?,
                 len: metadata.len(),
@@ -397,9 +328,7 @@ fn registry_fingerprint(path: &Path) -> ProjectStoreResult<Option<RegistryFinger
                 #[cfg(windows)]
                 file_index: file_information.file_index(),
                 #[cfg(windows)]
-                changed,
-                #[cfg(windows)]
-                content_token,
+                content,
             }))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -4964,14 +4893,14 @@ fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_project_migrations, backfill_upscale_variant_lineage, bounded_registry_content_token,
-        build_generated_asset_sidecar, connect_project_db, ensure_project_db_ready,
-        find_timeline_file, guess_mime_from_filename, index_timeline, is_safe_relative_path,
-        is_safe_upload_extension, normalize_asset_tags, read_json, sniff_image_format,
-        upload_extension, upscale_lineage_group, AssetScope, CharacterCreateInput,
-        CharacterLookInput, CharacterReferenceInput, ProjectStore, ProjectStoreError, UploadAsset,
-        ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID,
-        PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS, UPSCALE_LINEAGE_QUERY,
+        apply_project_migrations, backfill_upscale_variant_lineage, build_generated_asset_sidecar,
+        connect_project_db, ensure_project_db_ready, find_timeline_file, guess_mime_from_filename,
+        index_timeline, is_safe_relative_path, is_safe_upload_extension, normalize_asset_tags,
+        read_json, sniff_image_format, upload_extension, upscale_lineage_group, AssetScope,
+        CharacterCreateInput, CharacterLookInput, CharacterReferenceInput, ProjectStore,
+        ProjectStoreError, UploadAsset, ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID,
+        GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
+        UPSCALE_LINEAGE_QUERY,
     };
     use rusqlite::{params, Connection, OptionalExtension};
     use serde_json::{json, Value};
@@ -5071,45 +5000,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn windows_registry_content_token_detects_same_length_mutation_with_bounded_io() {
-        use std::io::Cursor;
-
-        // The Windows fingerprint uses this platform-independent helper in
-        // production because std does not expose NTFS ChangeTime. Exercise it
-        // on every CI host so the mutation guarantee does not depend on running
-        // a Windows test binary.
-        let original = vec![b'a'; 16 * 1024];
-        let mut mutated = original.clone();
-        mutated[0] = b'b';
-        let original_len = original.len() as u64;
-        let (before, before_bytes) =
-            bounded_registry_content_token(&mut Cursor::new(original), original_len)
-                .expect("original token");
-        let (after, after_bytes) =
-            bounded_registry_content_token(&mut Cursor::new(mutated), original_len)
-                .expect("mutated token");
-
-        assert_ne!(
-            before, after,
-            "same-length same-mtime content mutation must change the Windows token"
-        );
-        assert_eq!(before_bytes, after_bytes);
-        assert!(
-            before_bytes <= 8 * 32,
-            "fingerprinting must read at most the fixed 256-byte sample, read {before_bytes}"
-        );
-        assert!(
-            before_bytes < usize::try_from(original_len).expect("fixture length fits usize"),
-            "large registries must not be reread in full on cache hits"
-        );
-    }
-
     #[cfg(windows)]
     #[test]
     fn windows_registry_cache_detects_between_window_rewrite_with_restored_mtime() {
         use std::fs::{FileTimes, OpenOptions};
-        use std::io::Cursor;
 
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let data_dir = temp_dir.path().join("data");
@@ -5117,8 +5011,8 @@ mod tests {
         let created = writer.create_project("Cached").expect("project creates");
         let registry_path = writer.registry_path();
 
-        // Trailing JSON whitespace makes the registry large enough to have
-        // unsampled interior bytes without changing its parsed contents.
+        // Trailing JSON whitespace makes the registry large enough for a
+        // localized interior rewrite without changing its parsed contents.
         let mut original = std::fs::read(&registry_path).expect("registry reads");
         let json_len = original.len();
         original.resize(16 * 1024, b' ');
@@ -5132,36 +5026,11 @@ mod tests {
         assert_eq!(reader.lock.lock().disk_reads, 1);
         let metadata = std::fs::metadata(&registry_path).expect("registry metadata");
 
-        let len = original.len() as u64;
-        let window_len = len.min(REGISTRY_TOKEN_WINDOW_BYTES);
-        let max_start = len - window_len;
-        let sampled_starts = (0..REGISTRY_TOKEN_WINDOWS)
-            .map(|index| max_start * index / (REGISTRY_TOKEN_WINDOWS - 1))
-            .collect::<Vec<_>>();
-        let mutation_index = (json_len as u64..len)
-            .find(|candidate| {
-                sampled_starts
-                    .iter()
-                    .all(|start| *candidate < *start || *candidate >= *start + window_len)
-            })
-            .expect("padded registry has an unsampled byte");
+        let mutation_index = json_len + (original.len() - json_len) / 2;
         let mut rewritten = original.clone();
-        let mutation_index = usize::try_from(mutation_index).expect("fixture index fits usize");
         assert_eq!(rewritten[mutation_index], b' ');
         rewritten[mutation_index] = b'\n';
-
-        let (before_token, before_bytes) =
-            bounded_registry_content_token(&mut Cursor::new(&original), len)
-                .expect("original token");
-        let (after_token, after_bytes) =
-            bounded_registry_content_token(&mut Cursor::new(&rewritten), len)
-                .expect("rewritten token");
-        assert_eq!(
-            before_token, after_token,
-            "fixture mutation must be outside every bounded content window"
-        );
-        assert_eq!(before_bytes, after_bytes);
-        assert!(before_bytes <= 8 * 32);
+        assert_eq!(rewritten.len(), original.len());
 
         std::fs::write(&registry_path, rewritten).expect("same-size registry rewrite");
         OpenOptions::new()
@@ -5190,8 +5059,8 @@ mod tests {
         assert_eq!(
             reader.lock.lock().disk_reads,
             2,
-            "Windows ChangeTime must invalidate a same-size restored-mtime edit \
-             even when the bounded token misses it"
+            "the exact Windows content fingerprint must invalidate a same-size \
+             restored-mtime edit at any byte"
         );
     }
 
