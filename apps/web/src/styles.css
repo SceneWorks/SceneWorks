@@ -13361,78 +13361,468 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--text-muted);
 }
 
-/* Settings screen (sc-1350) */
+/* ---------- Settings screen (sc-1350; redesigned per the Settings-page handoff) ----------
+   One work-panel on the Page-Frame standard, split into four tabs (Appearance · Settings ·
+   Device · Server) that share the group / row / control vocabulary below. It mirrors the
+   Simple-mode Settings treatment (simple/simple.css `.su-*`) at the values this design
+   specifies; the classes are settings-scoped rather than shared so restyling one screen
+   can't silently restyle the other across the advanced/Simple shell boundary. */
 .settings-screen {
+  max-width: 780px;
+}
+
+/* A tab's body. Group titles, rows and dividers are all siblings on one 14px rhythm. */
+.settings-tab-body {
   display: flex;
   flex-direction: column;
-  gap: var(--gap-md, 1rem);
-  max-width: 44rem;
+  gap: var(--gap-3);
 }
 
-.settings-card {
-  background: var(--surface, #fff);
-  border: 1px solid var(--border, #e2e2e2);
-  border-radius: var(--r-lg, 12px);
-  padding: var(--pad-panel, 1rem 1.25rem);
+.settings-group-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-faint);
 }
 
-.settings-card h3 {
-  margin: 0 0 0.5rem;
-  font-size: 1rem;
-}
-
-.settings-value {
-  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
-  font-size: 0.85rem;
-  word-break: break-all;
-}
-
-.settings-actions {
+.settings-row {
   display: flex;
-  gap: 0.5rem;
   align-items: center;
-  margin-top: 0.5rem;
-  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.settings-actions input {
-  flex: 1 1 12rem;
-  min-width: 12rem;
-  padding: 0.4rem 0.6rem;
-  border: 1px solid var(--border, #e2e2e2);
-  border-radius: var(--r-md, 8px);
-  background: var(--surface-2, #f7f7f8);
-  color: var(--text, inherit);
+.settings-row--top {
+  align-items: flex-start;
 }
 
-.settings-muted {
-  color: var(--text-muted, #6b7280);
-  font-size: 0.85rem;
+.settings-row--baseline {
+  align-items: baseline;
 }
 
-.settings-help {
-  font-size: 0.8rem;
-  color: var(--text-muted, #6b7280);
-  margin-top: 0.5rem;
+.settings-row-title {
+  font-size: 14px;
+  font-weight: 500;
 }
 
-.settings-help code {
-  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
-  background: var(--surface-2, rgba(127, 127, 127, 0.15));
-  padding: 0.1rem 0.35rem;
-  border-radius: var(--r-sm, 4px);
+.settings-row-sub {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--text-muted);
 }
 
-.settings-list {
+.settings-note {
   margin: 0;
-  padding-left: 1.2rem;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
 }
 
+.settings-note--spaced {
+  margin-top: 9px;
+}
+
+.settings-note strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.settings-note code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--surface-2);
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+}
+
+/* Live status of the last action (a save, a commit, or an error). One line under the tab
+   row — deliberately not the full-width band that used to sit above the panel. */
 .settings-status {
-  padding: 0.5rem 0.75rem;
-  background: var(--accent-soft, rgba(108, 140, 255, 0.12));
-  border-radius: var(--r-md, 8px);
-  font-size: 0.85rem;
+  margin: 0;
+  padding: 8px 11px;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.settings-kv-list {
+  display: grid;
+  gap: 9px;
+}
+
+.settings-kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.settings-kv > span:first-child {
+  color: var(--text-muted);
+}
+
+.settings-kv > span:last-child {
+  font-weight: 500;
+  text-align: right;
+}
+
+.settings-mono {
+  font-family: var(--font-mono);
+}
+
+/* Inset block for a sub-form / read-only readout inside a tab (Add a token, Access, Live
+   MLX memory). */
+.settings-inset {
+  display: grid;
+  gap: 9px;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.settings-inset--spaced {
+  margin-top: 11px;
+}
+
+.settings-inset-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.settings-path {
+  margin-top: 9px;
+  padding: 9px 11px;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.settings-button-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.settings-field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-field-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+/* The field that takes the slack in a .settings-field-row (inputs are width:100% globally). */
+.settings-grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-port {
+  width: 96px;
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+}
+
+.settings-url {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Settings controls --- */
+
+/* Segmented control (Light / Dark). */
+.settings-segment {
+  display: inline-flex;
+  gap: 2px;
+  flex: 0 0 auto;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+}
+
+.settings-segment button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.settings-segment button.active {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 700;
+  box-shadow: var(--shadow-sm);
+}
+
+.settings-accents {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 11px;
+  flex: 0 1 auto;
+}
+
+.settings-accent-swatch {
+  width: 30px;
+  height: 30px;
+  border: 2px solid var(--border);
+  border-radius: 9px;
+}
+
+.settings-accent-swatch.active {
+  border-color: transparent;
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 35%, transparent);
+}
+
+.settings-chips {
+  display: flex;
+  gap: 6px;
+  max-width: 320px;
+  margin-top: 9px;
+}
+
+/* The scheme selector sits inside an inset that already owns its own 9px stack gap. */
+.settings-chips--narrow {
+  max-width: 280px;
+  margin-top: 0;
+}
+
+.settings-chip {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  place-items: center;
+  height: 34px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  /* Fixed height ⇒ a wrapping label would spill out of the chip. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settings-chip.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+/* The line spelling out the selected chip sits a touch further from the row than a
+   title's own sub-line does. */
+.settings-chips + .settings-row-sub {
+  margin-top: 8px;
+}
+
+.settings-toggle {
+  position: relative;
+  width: 46px;
+  height: 27px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--border-strong);
+  transition: background var(--t-fast) var(--ease-out);
+}
+
+.settings-toggle.on {
+  background: var(--accent);
+}
+
+.settings-toggle > span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 21px;
+  height: 21px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: var(--shadow-sm);
+  transition: left var(--t-fast) var(--ease-out);
+}
+
+.settings-toggle.on > span {
+  left: 22px;
+}
+
+/* Secondary button. The global reset strips background/border/padding from <button>, so
+   every button on this screen carries a class. */
+.settings-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  transition: background var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+
+.settings-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.settings-btn--compact {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+/* Removes / clears — a secondary button that warns on hover rather than shouting by default. */
+.settings-btn--quiet {
+  color: var(--text-muted);
+}
+
+.settings-btn--quiet:hover:not(:disabled) {
+  background: var(--surface);
+  border-color: color-mix(in oklch, var(--danger) 45%, var(--border));
+  color: color-mix(in oklch, var(--danger) 75%, var(--text));
+}
+
+.settings-btn--primary {
+  min-height: 38px;
+  padding: 0 15px;
+  border: 0;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 13px;
+}
+
+.settings-btn--primary:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+/* The global input chrome (border, surface, --control-h) would paint a box around the
+   native track; a range renders its own control. */
+.settings-range {
+  width: 100%;
+  margin-top: 11px;
+  padding: 0;
+  border: 0;
+  background: none;
+  accent-color: var(--accent);
+}
+
+.settings-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.settings-credential-list {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-credential {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.settings-credential-glyph {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+/* A credential the app has recorded but whose token is gone from the keychain. */
+.settings-credential-glyph.missing {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.settings-credential-text {
+  display: block;
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-credential-host {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-credential-meta {
+  display: block;
+  margin-top: 1px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.settings-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in oklch, var(--warn) 40%, var(--border));
+  border-radius: var(--r-md);
+  background: var(--warn-soft);
+}
+
+.settings-notice svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--warn);
+}
+
+.settings-notice span {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
 }
 
 /*

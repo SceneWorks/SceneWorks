@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   SCHEME_LABELS,
   loadCredentials,
@@ -12,9 +12,16 @@ import {
   GENERATION_QUALITY_OPTIONS,
   generationQualityLabel,
   readDefaultGenerationQuality,
+  shortQualityLabel,
   writeDefaultGenerationQuality,
 } from "../generationQuality.js";
 import { writeClipboardText } from "../clipboard.js";
+import { WorkPanel } from "../components/WorkPanel.jsx";
+import { Icon } from "../components/Icons.jsx";
+import { ModeTabs } from "./generationStudio.jsx";
+import { ACCENTS } from "../accents.js";
+import { describeDevice } from "../deviceSummary.js";
+import { useAppContext } from "../context/AppContext.js";
 
 // The data-dir / GPU / worker / wizard / remote-access controls are desktop-only
 // (backed by Tauri commands in the shell) and are gated behind `isDesktop` so a
@@ -23,6 +30,14 @@ import { writeClipboardText } from "../clipboard.js";
 // shared ../credentials.js transport (keychain on desktop, authed REST on the
 // server / remote browser). `isDesktop`/`invoke` come from the unified runtime
 // helper (story 6).
+//
+// Settings-page redesign handoff: the screen is the Page-Frame standard (page-frame →
+// WorkPanel → .prompt-hero-top → ModeTabs, the same arrangement as Image Studio), split
+// into four tabs so it stops being one long scroll. Theme, accent, the Simple-mode
+// default and the engine/GPU readout — which previously only existed in Simple mode —
+// are surfaced here too, wired to the SAME durable stores (`PUT /api/v1/ui-preferences`
+// via App.jsx's changeTheme/changeAccent/changeSimpleUiDefault), so a change made in
+// either screen is the same change.
 
 // GPU memory cap (epic 7819). The persisted value is a fraction (0.1–0.99) of total unified
 // memory, or null/absent for "no limit". The slider works in whole percent; 100% means Off.
@@ -38,7 +53,22 @@ function bytesToGb(bytes) {
   return bytes / (1024 * 1024 * 1024);
 }
 
-export function SettingsScreen() {
+const SCHEME_OPTIONS = [
+  ["bearer", "Bearer header"],
+  ["query", "Query token"],
+];
+
+export function SettingsScreen({
+  accent,
+  onAccentChange,
+  simpleDefault = false,
+  onSimpleDefaultChange,
+  lockedToSimple = false,
+}) {
+  // theme/changeTheme and the worker registry come from the app context (the same values the
+  // topbar toggle and Simple Settings read); accent + the Simple-mode default are drilled from
+  // App.jsx, which owns them alongside the sidebar's mode switch.
+  const { theme, changeTheme, visibleWorkers = [], macCapabilities } = useAppContext();
   const [settings, setSettings] = useState(null);
   const [gpu, setGpu] = useState(null);
   const [credentials, setCredentials] = useState([]);
@@ -47,6 +77,8 @@ export function SettingsScreen() {
   const [newScheme, setNewScheme] = useState("bearer");
   const [newToken, setNewToken] = useState("");
   const [status, setStatus] = useState("");
+  // Which tab is showing. Not persisted — the screen is short-lived.
+  const [tab, setTab] = useState("appearance");
   // LAN remote access (epic 4484 stories 4/11). `remote` is the RemoteAccessStatus
   // snapshot from the shell; only fetched/rendered on desktop.
   const [remote, setRemote] = useState(null);
@@ -293,329 +325,522 @@ export function SettingsScreen() {
 
   const canSaveCredential = newHost.trim() && newToken.trim();
 
+  // Engine / GPU are read off the live worker registry — the one signal available in every
+  // deployment (desktop, Docker, remote browser), so "This machine" renders in both.
+  const device = useMemo(
+    () => describeDevice(visibleWorkers, macCapabilities),
+    [visibleWorkers, macCapabilities],
+  );
+
+  // The Server tab exists only where remote access does (the same condition that gated the old
+  // Remote-access card). When it disappears under a selected "server" tab, fall back to Appearance
+  // rather than rendering an empty panel.
+  const serverTabAvailable = Boolean(isDesktop && remote);
+  const activeTab = tab === "server" && !serverTabAvailable ? "appearance" : tab;
+  const tabOptions = [
+    ["appearance", "Appearance"],
+    ["settings", "Settings"],
+    ["device", "Device"],
+    ...(serverTabAvailable ? [["server", "Server"]] : []),
+  ];
+
+  const macGpuMemory = gpu?.platform === "macos" && Boolean(gpu?.unifiedMemoryMb);
+  const unifiedGb = macGpuMemory ? Math.round(gpu.unifiedMemoryMb / 1024) : 0;
+  const gpuTargetLabel =
+    gpuLimitPercent >= 100
+      ? "Use all available"
+      : `~${Math.round(unifiedGb * (gpuLimitPercent / 100))} GB of ${unifiedGb} GB (${gpuLimitPercent}%)`;
+
   return (
-    <div className="settings-screen">
-      {status ? <p className="settings-status">{status}</p> : null}
-
-      <section className="settings-card">
-        <h3>Generation quality</h3>
-        <p className="settings-muted">
-          The default quality tier new generations use for a model you haven’t picked a
-          tier for yet. <strong>Auto</strong> picks the highest-fidelity tier that fits this
-          machine’s memory for each model — so a small model runs at full precision and a
-          heavy one steps down to what fits. You can still pin a fixed tier here, or override
-          per model in the studio; your per-model picks are remembered.
-        </p>
-        <div className="settings-actions">
-          <label htmlFor="default-generation-quality">Default quality</label>
-          <select
-            id="default-generation-quality"
-            value={defaultQuality}
-            onChange={(event) => changeDefaultQuality(event.target.value)}
-            aria-label="Default generation quality"
-          >
-            {GENERATION_QUALITY_OPTIONS.map((value) => (
-              <option key={value} value={value}>
-                {generationQualityLabel(value)}
-              </option>
-            ))}
-          </select>
+    <section className="page-frame settings-screen">
+      <WorkPanel className="settings-work-panel">
+        <div className="prompt-hero-top">
+          <ModeTabs
+            label="Settings section"
+            options={tabOptions}
+            mode={activeTab}
+            onChange={setTab}
+          />
         </div>
-      </section>
 
-      {isDesktop ? (
-        <section className="settings-card">
-          <h3>Data directory</h3>
-          <p className="settings-value">{dataDirLabel}</p>
-          <div className="settings-actions">
-            <button type="button" onClick={changeDataDir}>
-              Change…
-            </button>
-            <button type="button" onClick={revealDataDir} disabled={!settings?.dataDir}>
-              Reveal in {gpu?.platform === "windows" ? "Explorer" : "Finder"}
-            </button>
-          </div>
-        </section>
-      ) : null}
+        {/* One status line under the tab row — the old full-width band above the panel is gone. */}
+        {status ? <p className="settings-status">{status}</p> : null}
 
-      {isDesktop && remote ? (
-        <section className="settings-card">
-          <h3>Remote access (LAN)</h3>
-          <p className="settings-muted">
-            Let another device on your local network use SceneWorks in a browser, with
-            generation running on this computer. Off by default; protected by a password
-            you set.
-          </p>
-          <p className="settings-value">
-            {remote.enabled ? "Enabled" : "Disabled"}
-            {remote.enabled && remote.url ? ` · ${remote.url}` : ""}
-          </p>
-
-          <div className="settings-actions settings-credential-form">
-            <input
-              type="password"
-              placeholder={remote.passwordSet ? "Change password" : "Set a password"}
-              value={remotePassword}
-              onChange={(event) => setRemotePassword(event.target.value)}
-              aria-label="Remote access password"
-            />
-            <button
-              type="button"
-              onClick={saveRemotePassword}
-              disabled={!remotePassword.trim()}
-            >
-              {remote.passwordSet ? "Change password" : "Set password"}
-            </button>
-            {remote.passwordSet ? (
-              <button type="button" onClick={clearRemotePassword}>
-                Clear password
-              </button>
-            ) : null}
-          </div>
-          <p className="settings-muted">
-            {remote.passwordSet
-              ? "A password is set. Remote browsers must enter it to connect."
-              : "Set a password before enabling remote access."}
-          </p>
-
-          <div className="settings-actions">
-            <label htmlFor="remote-port">Port</label>
-            <input
-              id="remote-port"
-              type="number"
-              min="1024"
-              max="65535"
-              value={remotePort}
-              onChange={(event) => setRemotePort(event.target.value)}
-              aria-label="Remote access port"
-            />
-            {remote.enabled ? (
-              <button type="button" onClick={() => applyRemoteAccess(false)}>
-                Disable remote access
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => applyRemoteAccess(true)}
-                disabled={!remote.passwordSet}
-              >
-                Enable remote access
-              </button>
-            )}
-            {remote.url ? (
-              <button type="button" onClick={copyRemoteUrl}>
-                Copy URL
-              </button>
-            ) : null}
-          </div>
-
-          {remote.url ? (
-            <p className="settings-muted">
-              Open <code>{remote.url}</code> on another device on this network.
-              {remote.lanCandidates && remote.lanCandidates.length > 1
-                ? ` Other addresses: ${remote.lanCandidates.slice(1).join(", ")}.`
-                : ""}
-            </p>
-          ) : (
-            <p className="settings-muted">
-              Couldn’t determine this computer’s LAN address — check your network
-              connection.
-            </p>
-          )}
-
-          {/* Security note + platform firewall guidance (story 11). */}
-          <p className="settings-help">
-            Trusted local networks only. Traffic uses plain HTTP, so the password and
-            your content travel unencrypted on the LAN — do not port-forward this or
-            expose it to the public internet. The URL only works for devices on the same
-            network.
-          </p>
-          {remote.enabled ? (
-            remote.platform === "windows" ? (
-              <p className="settings-help">
-                The first time SceneWorks binds the network port, Windows shows a
-                “Windows Security Alert”. Allow SceneWorks on <strong>Private</strong>{" "}
-                networks (not Public), or remote devices can’t connect. To change it
-                later: Windows Security → Firewall &amp; network protection → Allow an
-                app through firewall.
-              </p>
-            ) : (
-              <p className="settings-help">
-                The first time SceneWorks binds the network port, macOS may ask to
-                “allow incoming connections” — click Allow. To change it later: System
-                Settings → Network → Firewall.
-              </p>
-            )
-          ) : null}
-          <p className="settings-muted">
-            Changing these settings takes effect after you restart SceneWorks.
-          </p>
-        </section>
-      ) : null}
-
-      <section className="settings-card">
-        <h3>Service credentials</h3>
-        <p className="settings-muted">
-          API tokens for model &amp; LoRA downloads (Hugging Face, Civit.ai, and any
-          other authenticated source). Stored in {credentialLocation}; tokens are
-          never displayed again after saving. Changing a credential takes effect on
-          the next worker restart.
-        </p>
-        {credentials.length ? (
-          <ul className="settings-list">
-            {credentials.map((credential) => (
-              <li key={credential.host} className="settings-credential">
-                <span className="settings-value">
-                  {credential.label ? `${credential.label} — ` : ""}
-                  <code>{credential.host}</code>{" "}
-                  <span className="settings-muted">
-                    ({SCHEME_LABELS[credential.scheme] ?? credential.scheme}
-                    {credential.present ? "" : " · token missing"})
-                  </span>
-                </span>
-                <button type="button" onClick={() => removeCredential(credential.host)}>
-                  Remove
+        {activeTab === "appearance" ? (
+          <div className="settings-tab-body">
+            <div className="settings-group-title">Theme</div>
+            <div className="settings-row">
+              <span className="settings-row-title">Mode</span>
+              <div className="settings-segment" role="radiogroup" aria-label="Theme">
+                <button
+                  aria-checked={theme === "light"}
+                  className={theme === "light" ? "active" : ""}
+                  onClick={() => changeTheme("light")}
+                  role="radio"
+                  type="button"
+                >
+                  <Icon.Sun size={14} />
+                  Light
                 </button>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="settings-muted">No credentials saved.</p>
-        )}
-        <div className="settings-actions settings-credential-form">
-          <input
-            type="text"
-            placeholder="Host (e.g. huggingface.co)"
-            value={newHost}
-            onChange={(event) => setNewHost(event.target.value)}
-            aria-label="Credential host"
-          />
-          <input
-            type="text"
-            placeholder="Label (optional)"
-            value={newLabel}
-            onChange={(event) => setNewLabel(event.target.value)}
-            aria-label="Credential label"
-          />
-          <select
-            value={newScheme}
-            onChange={(event) => setNewScheme(event.target.value)}
-            aria-label="Authentication scheme"
-          >
-            <option value="bearer">Bearer header</option>
-            <option value="query">Query token</option>
-          </select>
-          <input
-            type="password"
-            placeholder="Token"
-            value={newToken}
-            onChange={(event) => setNewToken(event.target.value)}
-            aria-label="Credential token"
-          />
-          <button type="button" onClick={addCredential} disabled={!canSaveCredential}>
-            Save token
-          </button>
-        </div>
-      </section>
+                <button
+                  aria-checked={theme === "dark"}
+                  className={theme === "dark" ? "active" : ""}
+                  onClick={() => changeTheme("dark")}
+                  role="radio"
+                  type="button"
+                >
+                  <Icon.Moon size={14} />
+                  Dark
+                </button>
+              </div>
+            </div>
+            <div className="settings-row settings-row--top">
+              <div>
+                <div className="settings-row-title">Accent</div>
+                <div className="settings-row-sub">Recolors the whole app — chips, buttons, the mark.</div>
+              </div>
+              <div className="settings-accents" role="radiogroup" aria-label="Accent">
+                {ACCENTS.map((entry) => (
+                  <button
+                    aria-checked={accent === entry.id}
+                    aria-label={entry.name}
+                    className={
+                      accent === entry.id ? "settings-accent-swatch active" : "settings-accent-swatch"
+                    }
+                    key={entry.id}
+                    onClick={() => onAccentChange?.(entry.id)}
+                    role="radio"
+                    style={{ background: entry.swatch }}
+                    type="button"
+                  />
+                ))}
+              </div>
+            </div>
 
-      {isDesktop ? (
-        <section className="settings-card">
-          <h3>Detected GPU</h3>
-          {gpu?.devices?.length ? (
-            <ul className="settings-list">
-              {gpu.devices.map((device) => (
-                <li key={device}>{device}</li>
-              ))}
-            </ul>
-          ) : (
-            <p className="settings-muted">No accelerated GPU detected.</p>
-          )}
-          {gpu?.unifiedMemoryMb ? (
-            <p className="settings-muted">
-              Unified memory: {Math.round(gpu.unifiedMemoryMb / 1024)} GB
-              {typeof gpu.wiredLimitMb === "number"
-                ? ` · GPU cap: ${Math.round(gpu.wiredLimitMb / 1024)} GB`
-                : ""}
-            </p>
-          ) : null}
-          {gpu?.platform === "macos" && gpu?.unifiedMemoryMb ? (
-            <div className="settings-gpu-cap">
-              <label htmlFor="gpu-memory-cap">
-                GPU memory for SceneWorks:{" "}
-                {gpuLimitPercent >= 100
-                  ? "Use all available"
-                  : `~${Math.round((gpu.unifiedMemoryMb / 1024) * (gpuLimitPercent / 100))} GB of ` +
-                    `${Math.round(gpu.unifiedMemoryMb / 1024)} GB (${gpuLimitPercent}%)`}
-              </label>
-              <input
-                id="gpu-memory-cap"
-                type="range"
-                min={GPU_LIMIT_MIN_PERCENT}
-                max={100}
-                step={5}
-                value={gpuLimitPercent}
-                aria-label="GPU memory target for SceneWorks (percent of unified memory)"
-                onChange={(event) => setGpuLimitPercent(Number(event.target.value))}
-                onMouseUp={(event) => commitGpuMemoryLimit(Number(event.target.value))}
-                onKeyUp={(event) => commitGpuMemoryLimit(Number(event.target.value))}
-                onTouchEnd={(event) => commitGpuMemoryLimit(Number(event.target.value))}
-              />
-              <p className="settings-help">
-                A soft target for how much unified memory SceneWorks holds, so more stays free for the
-                rest of your system. It is not a hard limit — large models can still use more when they
-                need it. Changes apply within a couple of seconds — no restart needed.
+            <div className="work-panel-divider" />
+            <div className="settings-group-title">Simple mode</div>
+            <div className="settings-row">
+              <div>
+                <div className="settings-row-title">Use Simple mode by default</div>
+                <div className="settings-row-sub">
+                  {lockedToSimple
+                    ? "Phones always use it."
+                    : "Phones always use it; the sidebar switch overrides it for this session."}
+                </div>
+              </div>
+              <button
+                aria-checked={simpleDefault}
+                aria-label="Use Simple mode by default"
+                className={simpleDefault ? "settings-toggle on" : "settings-toggle"}
+                onClick={() => onSimpleDefaultChange?.(!simpleDefault)}
+                role="switch"
+                type="button"
+              >
+                <span />
+              </button>
+            </div>
+
+            <div className="work-panel-divider" />
+            <div className="settings-group-title">Generation</div>
+            <div>
+              <div className="settings-row-title">Default quality</div>
+              {/* SHORT labels (the tier keys) — the descriptive wording ("Auto (best that fits this
+                  Mac)") doesn't fit a 34px chip, so it rides the title attribute and the line below. */}
+              <div className="settings-chips" role="radiogroup" aria-label="Default generation quality">
+                {GENERATION_QUALITY_OPTIONS.map((value) => (
+                  <button
+                    aria-checked={defaultQuality === value}
+                    className={defaultQuality === value ? "settings-chip active" : "settings-chip"}
+                    key={value}
+                    onClick={() => changeDefaultQuality(value)}
+                    role="radio"
+                    title={generationQualityLabel(value)}
+                    type="button"
+                  >
+                    {shortQualityLabel(value)}
+                  </button>
+                ))}
+              </div>
+              <div className="settings-row-sub">{generationQualityLabel(defaultQuality)}</div>
+              <p className="settings-note settings-note--spaced">
+                The tier new generations use for a model you haven’t picked one for yet.{" "}
+                <strong>Auto</strong> takes the highest-fidelity tier that fits this machine for each
+                model. Per-model picks in a studio always win, and are remembered.
               </p>
-              {gpuTelemetry ? (
-                <p className="settings-muted">
-                  MLX memory — Active: {bytesToGb(gpuTelemetry.activeBytes).toFixed(1)} GB · Peak:{" "}
-                  {bytesToGb(gpuTelemetry.peakBytes).toFixed(1)} GB
-                  {gpuTelemetry.limitBytes
-                    ? ` · Limit: ${Math.round(bytesToGb(gpuTelemetry.limitBytes))} GB`
-                    : ""}
-                </p>
+            </div>
+          </div>
+        ) : null}
+
+        {activeTab === "settings" ? (
+          <div className="settings-tab-body">
+            {isDesktop ? (
+              <>
+                <div className="settings-group-title">Storage</div>
+                <div>
+                  <div className="settings-row-title">Data directory</div>
+                  <div className="settings-row-sub">
+                    Projects, generated assets, models and LoRAs. Moving it needs a restart.
+                  </div>
+                  <div className="settings-path">{dataDirLabel}</div>
+                  <div className="settings-button-row">
+                    <button className="settings-btn" type="button" onClick={changeDataDir}>
+                      Change…
+                    </button>
+                    <button
+                      className="settings-btn"
+                      type="button"
+                      onClick={revealDataDir}
+                      disabled={!settings?.dataDir}
+                    >
+                      Reveal in {gpu?.platform === "windows" ? "Explorer" : "Finder"}
+                    </button>
+                  </div>
+                </div>
+                <div className="work-panel-divider" />
+              </>
+            ) : null}
+
+            <div className="settings-group-title">Service credentials</div>
+            <p className="settings-note">
+              API tokens for model &amp; LoRA downloads — Hugging Face, Civit.ai, any authenticated
+              source. Stored in {credentialLocation}. Tokens are write-only: never shown again after
+              saving, and a change takes effect on the next worker restart.
+            </p>
+            {credentials.length ? (
+              <div className="settings-credential-list">
+                {credentials.map((credential) => (
+                  <div className="settings-credential" key={credential.host}>
+                    <span
+                      className={
+                        credential.present === false
+                          ? "settings-credential-glyph missing"
+                          : "settings-credential-glyph"
+                      }
+                    >
+                      {credential.present === false ? (
+                        <Icon.Warning size={18} />
+                      ) : (
+                        <Icon.Model size={18} />
+                      )}
+                    </span>
+                    <span className="settings-credential-text">
+                      <span className="settings-credential-host">{credential.host}</span>
+                      <span className="settings-credential-meta">
+                        {credential.label ? `${credential.label} · ` : ""}
+                        {SCHEME_LABELS[credential.scheme] ?? credential.scheme}
+                        {credential.present === false ? " · token missing" : " · token saved"}
+                      </span>
+                    </span>
+                    <button
+                      className="settings-btn settings-btn--quiet settings-btn--compact"
+                      type="button"
+                      onClick={() => removeCredential(credential.host)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="settings-note">No credentials saved.</p>
+            )}
+            <div className="settings-inset settings-credential-form">
+              <div className="settings-inset-title">Add a token</div>
+              <div className="settings-field-pair">
+                <input
+                  type="text"
+                  placeholder="huggingface.co"
+                  value={newHost}
+                  onChange={(event) => setNewHost(event.target.value)}
+                  aria-label="Credential host"
+                />
+                <input
+                  type="text"
+                  placeholder="Label (optional)"
+                  value={newLabel}
+                  onChange={(event) => setNewLabel(event.target.value)}
+                  aria-label="Credential label"
+                />
+              </div>
+              <div
+                className="settings-chips settings-chips--narrow"
+                role="radiogroup"
+                aria-label="Authentication scheme"
+              >
+                {SCHEME_OPTIONS.map(([value, label]) => (
+                  <button
+                    aria-checked={newScheme === value}
+                    className={newScheme === value ? "settings-chip active" : "settings-chip"}
+                    key={value}
+                    onClick={() => setNewScheme(value)}
+                    role="radio"
+                    type="button"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="settings-field-row">
+                <input
+                  className="settings-grow"
+                  type="password"
+                  placeholder="Access token"
+                  value={newToken}
+                  onChange={(event) => setNewToken(event.target.value)}
+                  aria-label="Credential token"
+                />
+                <button
+                  className="settings-btn settings-btn--primary"
+                  type="button"
+                  onClick={addCredential}
+                  disabled={!canSaveCredential}
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {activeTab === "device" ? (
+          <div className="settings-tab-body">
+            <div className="settings-group-title">This machine</div>
+            <div className="settings-kv-list">
+              <div className="settings-kv">
+                <span>Engine</span>
+                <span>{device.engine}</span>
+              </div>
+              <div className="settings-kv">
+                <span>GPU</span>
+                <span>{device.gpu}</span>
+              </div>
+              {macGpuMemory ? (
+                <div className="settings-kv">
+                  <span>Unified memory</span>
+                  <span>
+                    {unifiedGb} GB
+                    {typeof gpu.wiredLimitMb === "number"
+                      ? ` · system cap ${Math.round(gpu.wiredLimitMb / 1024)} GB`
+                      : ""}
+                  </span>
+                </div>
               ) : null}
             </div>
-          ) : null}
-          {gpu?.platform === "macos" ? (
-            <p className="settings-help">
-              On 96/128 GB Macs you can raise the GPU memory cap:{" "}
-              <code>sudo sysctl iogpu.wired_limit_mb=&lt;bytes&gt;</code>
-            </p>
-          ) : null}
-          {gpu?.platform === "windows" || gpu?.platform === "linux" ? (
-            <p className="settings-help">
-              Requires current NVIDIA drivers with CUDA support. The GPU memory target is
-              macOS-only — a discrete GPU has no per-process memory cap, so generations use
-              whatever VRAM they need.
-            </p>
-          ) : null}
-        </section>
-      ) : null}
 
-      {/* Available in both modes: desktop restarts via Tauri, a remote admin via REST
-          (epic 4484 story 12). */}
-      <section className="settings-card">
-        <h3>Inference worker</h3>
-        <div className="settings-actions">
-          <button type="button" onClick={restartWorker}>
-            Restart worker
-          </button>
-        </div>
-      </section>
+            {macGpuMemory ? (
+              <>
+                <div className="work-panel-divider" />
+                <div className="settings-group-title">GPU memory</div>
+                <div>
+                  <div className="settings-row settings-row--baseline">
+                    <div className="settings-row-title">Memory target</div>
+                    <div className="settings-readout">{gpuTargetLabel}</div>
+                  </div>
+                  <input
+                    className="settings-range"
+                    type="range"
+                    min={GPU_LIMIT_MIN_PERCENT}
+                    max={100}
+                    step={5}
+                    value={gpuLimitPercent}
+                    aria-label="GPU memory target for SceneWorks (percent of unified memory)"
+                    onChange={(event) => setGpuLimitPercent(Number(event.target.value))}
+                    onMouseUp={(event) => commitGpuMemoryLimit(Number(event.target.value))}
+                    onKeyUp={(event) => commitGpuMemoryLimit(Number(event.target.value))}
+                    onTouchEnd={(event) => commitGpuMemoryLimit(Number(event.target.value))}
+                  />
+                  <div className="settings-scale">
+                    <span>{GPU_LIMIT_MIN_PERCENT}%</span>
+                    <span>Use all available</span>
+                  </div>
+                  <p className="settings-note settings-note--spaced">
+                    A soft target for how much unified memory SceneWorks holds, so more stays free
+                    for the rest of your system. Not a hard limit — large models can still exceed it.
+                    Applies within a couple of seconds, no restart.{" "}
+                    <code>sudo sysctl iogpu.wired_limit_mb=&lt;bytes&gt;</code> raises the system cap
+                    on 96/128 GB Macs.
+                  </p>
+                  {gpuTelemetry ? (
+                    <div className="settings-inset settings-inset--spaced">
+                      <div className="settings-inset-title">Live MLX memory</div>
+                      <div className="settings-kv">
+                        <span>Active</span>
+                        <span className="settings-mono">
+                          {bytesToGb(gpuTelemetry.activeBytes).toFixed(1)} GB
+                        </span>
+                      </div>
+                      <div className="settings-kv">
+                        <span>Peak</span>
+                        <span className="settings-mono">
+                          {bytesToGb(gpuTelemetry.peakBytes).toFixed(1)} GB
+                        </span>
+                      </div>
+                      {gpuTelemetry.limitBytes ? (
+                        <div className="settings-kv">
+                          <span>Limit</span>
+                          <span className="settings-mono">
+                            {Math.round(bytesToGb(gpuTelemetry.limitBytes))} GB
+                          </span>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              </>
+            ) : null}
 
-      {isDesktop ? (
-        <section className="settings-card">
-          <h3>Setup wizard</h3>
-          <p className="settings-muted">
-            Re-open the guided setup to download more models or create another project.
-          </p>
-          <div className="settings-actions">
-            <button type="button" onClick={rerunSetupWizard}>
-              Re-run setup wizard
-            </button>
+            {gpu?.platform === "windows" || gpu?.platform === "linux" ? (
+              <p className="settings-note">
+                Requires current NVIDIA drivers with CUDA support. The GPU memory target is
+                macOS-only — a discrete GPU has no per-process memory cap, so generations use
+                whatever VRAM they need.
+              </p>
+            ) : null}
+
+            <div className="work-panel-divider" />
+            <div className="settings-group-title">Maintenance</div>
+            {/* Available in both modes: desktop restarts via Tauri, a remote admin via REST
+                (epic 4484 story 12). */}
+            <div className="settings-row">
+              <div>
+                <div className="settings-row-title">Inference worker</div>
+                <div className="settings-row-sub">
+                  Restart to pick up credential changes or clear a stuck job.
+                </div>
+              </div>
+              <button className="settings-btn" type="button" onClick={restartWorker}>
+                Restart
+              </button>
+            </div>
+            {isDesktop ? (
+              <div className="settings-row">
+                <div>
+                  <div className="settings-row-title">Setup wizard</div>
+                  <div className="settings-row-sub">
+                    Re-open the guided setup to download more models or create a project.
+                  </div>
+                </div>
+                <button className="settings-btn" type="button" onClick={rerunSetupWizard}>
+                  Re-run
+                </button>
+              </div>
+            ) : null}
           </div>
-        </section>
-      ) : null}
-    </div>
+        ) : null}
+
+        {activeTab === "server" && serverTabAvailable ? (
+          <div className="settings-tab-body">
+            <div className="settings-group-title">Remote access (LAN)</div>
+            <div className="settings-row">
+              <div>
+                <div className="settings-row-title">Let other devices on this network in</div>
+                <div className="settings-row-sub">
+                  Generation still runs on this computer. Takes effect after a restart.
+                </div>
+              </div>
+              <button
+                aria-checked={Boolean(remote.enabled)}
+                aria-label="Remote access"
+                className={remote.enabled ? "settings-toggle on" : "settings-toggle"}
+                disabled={!remote.passwordSet && !remote.enabled}
+                onClick={() => applyRemoteAccess(!remote.enabled)}
+                role="switch"
+                type="button"
+              >
+                <span />
+              </button>
+            </div>
+
+            {remote.url ? (
+              <>
+                <div className="settings-field-row">
+                  <span className="settings-url">{remote.url}</span>
+                  <button
+                    className="settings-btn settings-btn--compact"
+                    type="button"
+                    onClick={copyRemoteUrl}
+                  >
+                    <Icon.Duplicate size={14} />
+                    Copy
+                  </button>
+                </div>
+                {remote.lanCandidates && remote.lanCandidates.length > 1 ? (
+                  <div className="settings-note">
+                    Also reachable at {remote.lanCandidates.slice(1).join(", ")}
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <p className="settings-note">
+                Couldn’t determine this computer’s LAN address — check your network connection.
+              </p>
+            )}
+
+            <div className="settings-inset">
+              <div className="settings-inset-title">Access</div>
+              <div className="settings-field-row">
+                <input
+                  className="settings-grow"
+                  type="password"
+                  placeholder={remote.passwordSet ? "Change password" : "Set a password"}
+                  value={remotePassword}
+                  onChange={(event) => setRemotePassword(event.target.value)}
+                  aria-label="Remote access password"
+                />
+                <button
+                  className="settings-btn"
+                  type="button"
+                  onClick={saveRemotePassword}
+                  disabled={!remotePassword.trim()}
+                >
+                  Save
+                </button>
+                {remote.passwordSet ? (
+                  <button
+                    className="settings-btn settings-btn--quiet"
+                    type="button"
+                    onClick={clearRemotePassword}
+                  >
+                    Clear
+                  </button>
+                ) : null}
+              </div>
+              <div className="settings-field-row">
+                <span className="settings-note settings-grow">
+                  {remote.passwordSet
+                    ? "A password is set — remote browsers must enter it."
+                    : "Set a password before enabling remote access."}
+                </span>
+                <label className="settings-note" htmlFor="remote-port">
+                  Port
+                </label>
+                <input
+                  className="settings-port"
+                  id="remote-port"
+                  type="number"
+                  min="1024"
+                  max="65535"
+                  value={remotePort}
+                  onChange={(event) => setRemotePort(event.target.value)}
+                  aria-label="Remote access port"
+                />
+              </div>
+            </div>
+
+            {/* Security note + platform firewall guidance (story 11), consolidated into one notice. */}
+            <div className="settings-notice">
+              <Icon.Warning size={16} />
+              <span>
+                Trusted local networks only. Traffic is plain HTTP, so the password and your content
+                travel unencrypted — never port-forward this or expose it to the internet.{" "}
+                {remote.platform === "windows"
+                  ? "The first time SceneWorks binds the port, allow it on Private networks in the Windows Security prompt."
+                  : "The first time SceneWorks binds the port, macOS may ask to allow incoming connections — click Allow."}
+              </span>
+            </div>
+          </div>
+        ) : null}
+      </WorkPanel>
+    </section>
   );
 }

@@ -5,6 +5,38 @@ import { click } from "../testUtils/dom.js";
 
 // SettingsScreen computes `isDesktop` from window.__TAURI__ at module load, so we
 // set the Tauri bridge and re-import the module fresh in each test.
+//
+// The redesigned screen (Settings-page handoff) reads theme + the worker registry off the
+// app context and splits its content across four tabs, so every test mounts it inside a
+// legacy combined <AppContext.Provider> and clicks through to the tab under test.
+const APP_CONTEXT = { theme: "light", changeTheme: vi.fn(), visibleWorkers: [], macCapabilities: {} };
+
+// AppContext has to be re-imported alongside the screen after vi.resetModules(): a statically
+// imported context object is a DIFFERENT module instance from the one the freshly-imported
+// screen consumes, so its Provider wouldn't be seen and useAppContext() would throw.
+let AppContext;
+
+// Sequential on purpose: AppContext.js is a dependency of the screen, and importing both
+// concurrently races the freshly-reset module registry — the screen can end up bound to the
+// real ../api.js instead of the test's vi.doMock'd one.
+async function loadScreen() {
+  const { SettingsScreen } = await import("./SettingsScreen.jsx");
+  ({ AppContext } = await import("../context/AppContext.js"));
+  return SettingsScreen;
+}
+
+// Mount the screen inside the app context and flush the initial refresh().
+async function renderScreen(root, SettingsScreen, props = {}, context = APP_CONTEXT) {
+  await act(async () => {
+    root.render(
+      <AppContext.Provider value={context}>
+        <SettingsScreen {...props} />
+      </AppContext.Provider>,
+    );
+  });
+  await act(async () => {});
+}
+
 async function changeField(input, value) {
   await act(async () => {
     const setter = Object.getOwnPropertyDescriptor(input.constructor.prototype, "value")?.set;
@@ -14,6 +46,18 @@ async function changeField(input, value) {
     );
   });
 }
+
+// Click the tab whose label matches, so the assertions below run against its body.
+async function openTab(container, label) {
+  const tab = [...container.querySelectorAll(".mode-tab")].find(
+    (button) => button.textContent.trim() === label,
+  );
+  expect(tab, `tab "${label}"`).toBeTruthy();
+  await click(tab);
+}
+
+const buttonByText = (container, label) =>
+  [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === label);
 
 describe("SettingsScreen service credentials", () => {
   let container;
@@ -52,7 +96,7 @@ describe("SettingsScreen service credentials", () => {
     });
     window.__TAURI__ = { core: { invoke } };
     vi.resetModules();
-    ({ SettingsScreen } = await import("./SettingsScreen.jsx"));
+    SettingsScreen = await loadScreen();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -67,12 +111,10 @@ describe("SettingsScreen service credentials", () => {
     vi.restoreAllMocks();
   });
 
+  // Credentials live on the Settings tab.
   async function render() {
-    await act(async () => {
-      root.render(<SettingsScreen />);
-    });
-    // Flush the initial refresh() Promise.all.
-    await act(async () => {});
+    await renderScreen(root, SettingsScreen);
+    await openTab(container, "Settings");
   }
 
   it("lists a stored credential by host without exposing the token", async () => {
@@ -93,9 +135,14 @@ describe("SettingsScreen service credentials", () => {
     await render();
     await changeField(container.querySelector('[aria-label="Credential host"]'), "https://Civitai.com");
     await changeField(container.querySelector('[aria-label="Credential label"]'), "Civit.ai");
-    await changeField(container.querySelector('[aria-label="Authentication scheme"]'), "query");
+    // The scheme <select> is now a two-chip radiogroup.
+    await click(
+      [...container.querySelectorAll('[aria-label="Authentication scheme"] button')].find(
+        (chip) => chip.textContent.trim() === "Query token",
+      ),
+    );
     await changeField(container.querySelector('[aria-label="Credential token"]'), "key123");
-    await click(container.querySelector(".settings-credential-form button"));
+    await click(buttonByText(container, "Add"));
     expect(invoke).toHaveBeenCalledWith("set_credential", {
       host: "https://Civitai.com",
       label: "Civit.ai",
@@ -125,7 +172,7 @@ describe("SettingsScreen service credentials", () => {
 
     await changeField(container.querySelector('[aria-label="Credential host"]'), "huggingface.co");
     await changeField(container.querySelector('[aria-label="Credential token"]'), "hf_secret");
-    await click(container.querySelector(".settings-credential-form button"));
+    await click(buttonByText(container, "Add"));
 
     expect(container.querySelector(".settings-status").textContent).toContain(
       "Start and unlock GNOME Keyring or KWallet",
@@ -167,7 +214,7 @@ describe("SettingsScreen server (REST) mode", () => {
       API_BASE_URL: "",
       eventUrl: () => "",
     }));
-    ({ SettingsScreen } = await import("./SettingsScreen.jsx"));
+    SettingsScreen = await loadScreen();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -183,25 +230,25 @@ describe("SettingsScreen server (REST) mode", () => {
   });
 
   async function render() {
-    await act(async () => {
-      root.render(<SettingsScreen />);
-    });
-    await act(async () => {});
+    await renderScreen(root, SettingsScreen);
   }
 
-  it("lists credentials over REST and hides the desktop-only cards", async () => {
+  it("lists credentials over REST and hides the desktop-only groups", async () => {
     await render();
+    await openTab(container, "Settings");
     expect(apiFetch).toHaveBeenCalledWith("/api/v1/credentials", expect.anything());
     expect(container.textContent).toContain("huggingface.co");
     expect(container.textContent).not.toContain("Data directory");
-    expect(container.textContent).not.toContain("Detected GPU");
+    await openTab(container, "Device");
+    expect(container.textContent).not.toContain("GPU memory");
   });
 
   it("saves a credential via PUT to the API", async () => {
     await render();
+    await openTab(container, "Settings");
     await changeField(container.querySelector('[aria-label="Credential host"]'), "civitai.com");
     await changeField(container.querySelector('[aria-label="Credential token"]'), "key123");
-    await click(container.querySelector(".settings-credential-form button"));
+    await click(buttonByText(container, "Add"));
     expect(apiFetch).toHaveBeenCalledWith(
       "/api/v1/credentials",
       expect.anything(),
@@ -209,21 +256,20 @@ describe("SettingsScreen server (REST) mode", () => {
     );
   });
 
-  // epic 4484 stories 10/12: a remote browser hides the Tauri-only cards (including
-  // the desktop-only Remote Access controls) but keeps the inference-worker restart,
-  // which routes over REST instead of the Tauri command.
-  it("hides desktop-only cards and restarts the worker over REST", async () => {
+  // epic 4484 stories 10/12: a remote browser hides the Tauri-only groups (including
+  // the desktop-only Remote Access controls, whose whole tab disappears) but keeps the
+  // inference-worker restart, which routes over REST instead of the Tauri command.
+  it("hides desktop-only groups and restarts the worker over REST", async () => {
     await render();
-    expect(container.textContent).not.toContain("Remote access (LAN)");
+    expect(
+      [...container.querySelectorAll(".mode-tab")].map((tab) => tab.textContent.trim()),
+    ).toEqual(["Appearance", "Settings", "Device"]);
+    await openTab(container, "Settings");
     expect(container.textContent).not.toContain("Data directory");
-    expect(container.textContent).not.toContain("Detected GPU");
+    await openTab(container, "Device");
     expect(container.textContent).not.toContain("Setup wizard");
     expect(container.textContent).toContain("Inference worker");
-    const restartButton = [...container.querySelectorAll("button")].find(
-      (button) => button.textContent.trim() === "Restart worker",
-    );
-    expect(restartButton).toBeTruthy();
-    await click(restartButton);
+    await click(buttonByText(container, "Restart"));
     expect(apiFetch).toHaveBeenCalledWith(
       "/api/v1/worker/restart",
       expect.anything(),
@@ -276,7 +322,7 @@ describe("SettingsScreen remote access (desktop)", () => {
     });
     window.__TAURI__ = { core: { invoke } };
     vi.resetModules();
-    ({ SettingsScreen } = await import("./SettingsScreen.jsx"));
+    SettingsScreen = await loadScreen();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -292,20 +338,17 @@ describe("SettingsScreen remote access (desktop)", () => {
   });
 
   async function render() {
-    await act(async () => {
-      root.render(<SettingsScreen />);
-    });
-    await act(async () => {});
+    await renderScreen(root, SettingsScreen);
+    await openTab(container, "Server");
   }
 
-  const button = (label) =>
-    [...container.querySelectorAll("button")].find((b) => b.textContent.trim() === label);
+  const remoteToggle = () => container.querySelector('[aria-label="Remote access"]');
 
   it("shows the section, the LAN URL, and blocks enabling without a password", async () => {
     await render();
     expect(container.textContent).toContain("Remote access (LAN)");
     expect(container.textContent).toContain("http://192.168.1.50:8787");
-    expect(button("Enable remote access").disabled).toBe(true);
+    expect(remoteToggle().disabled).toBe(true);
   });
 
   it("sets a password, then can enable remote access on the chosen port", async () => {
@@ -314,12 +357,15 @@ describe("SettingsScreen remote access (desktop)", () => {
       container.querySelector('[aria-label="Remote access password"]'),
       "lan-pass",
     );
-    await click(button("Set password"));
+    await click(buttonByText(container, "Save"));
     expect(invoke).toHaveBeenCalledWith("set_remote_access_password", { password: "lan-pass" });
-    // Re-rendered with passwordSet → the enable button is now allowed.
-    expect(button("Enable remote access").disabled).toBe(false);
-    await click(button("Enable remote access"));
+    // Re-rendered with passwordSet → the toggle is now allowed.
+    expect(remoteToggle().disabled).toBe(false);
+    await click(remoteToggle());
     expect(invoke).toHaveBeenCalledWith("set_remote_access", { enabled: true, port: 8787 });
+    // …and flipping it back disables it.
+    await click(remoteToggle());
+    expect(invoke).toHaveBeenCalledWith("set_remote_access", { enabled: false, port: 8787 });
   });
 });
 
@@ -354,7 +400,7 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
     });
     window.__TAURI__ = { core: { invoke } };
     vi.resetModules();
-    ({ SettingsScreen } = await import("./SettingsScreen.jsx"));
+    SettingsScreen = await loadScreen();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -369,11 +415,10 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
     vi.restoreAllMocks();
   });
 
+  // The GPU controls live on the Device tab.
   async function render() {
-    await act(async () => {
-      root.render(<SettingsScreen />);
-    });
-    await act(async () => {});
+    await renderScreen(root, SettingsScreen);
+    await openTab(container, "Device");
   }
 
   const slider = () =>
@@ -384,10 +429,17 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
   it("shows live MLX memory telemetry from the worker", async () => {
     await render();
     expect(invoke).toHaveBeenCalledWith("get_gpu_telemetry", undefined);
-    expect(container.textContent).toContain("MLX memory");
-    expect(container.textContent).toContain("Active: 20.0 GB");
-    expect(container.textContent).toContain("Peak: 40.0 GB");
-    expect(container.textContent).toContain("Limit: 64 GB");
+    expect(container.textContent).toContain("Live MLX memory");
+    expect(container.textContent).toContain("20.0 GB");
+    expect(container.textContent).toContain("40.0 GB");
+    expect(container.textContent).toContain("64 GB");
+  });
+
+  it("summarises this machine from the detected GPU and the worker registry", async () => {
+    await render();
+    expect(container.textContent).toContain("Engine");
+    expect(container.textContent).toContain("Unified memory");
+    expect(container.textContent).toContain("128 GB");
   });
 
   it("applies the GPU memory target live, without restarting the worker", async () => {
@@ -428,7 +480,7 @@ describe("SettingsScreen default generation quality (sc-10728)", () => {
       API_BASE_URL: "",
       eventUrl: () => "",
     }));
-    ({ SettingsScreen } = await import("./SettingsScreen.jsx"));
+    SettingsScreen = await loadScreen();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -444,32 +496,36 @@ describe("SettingsScreen default generation quality (sc-10728)", () => {
     vi.restoreAllMocks();
   });
 
+  // Default quality lives on the Appearance tab, which is the landing tab.
   async function render() {
-    await act(async () => {
-      root.render(<SettingsScreen />);
-    });
-    await act(async () => {});
+    await renderScreen(root, SettingsScreen);
   }
 
-  const qualitySelect = () =>
-    container.querySelector('[aria-label="Default generation quality"]');
+  const qualityChips = () =>
+    [...container.querySelectorAll('[aria-label="Default generation quality"] button')];
+  const selectedQuality = () =>
+    qualityChips().find((chip) => chip.getAttribute("aria-checked") === "true");
+  const chooseQuality = async (label) =>
+    click(qualityChips().find((chip) => chip.textContent.trim() === label));
 
   it("renders the control defaulting to Auto when nothing is stored (epic 10721 R3)", async () => {
     await render();
-    expect(container.textContent).toContain("Generation quality");
-    const select = qualitySelect();
-    expect(select).toBeTruthy();
-    expect(select.value).toBe("auto");
-    // Auto is offered as the first option, alongside the explicit tiers.
-    const optionValues = [...select.options].map((option) => option.value);
-    expect(optionValues).toEqual(["auto", "bf16", "q8", "q4"]);
+    expect(container.textContent).toContain("Default quality");
+    // Auto leads the row, alongside the explicit tiers.
+    expect(qualityChips().map((chip) => chip.textContent.trim())).toEqual([
+      "Auto",
+      "bf16",
+      "Q8",
+      "Q4",
+    ]);
+    expect(selectedQuality().textContent.trim()).toBe("Auto");
   });
 
   it("writes a change to the localStorage instant-paint cache and confirms it in the status line (cache path)", async () => {
     await render();
-    await changeField(qualitySelect(), "bf16");
+    await chooseQuality("bf16");
     expect(window.localStorage.getItem(STORAGE_KEY)).toBe("bf16");
-    expect(qualitySelect().value).toBe("bf16");
+    expect(selectedQuality().textContent.trim()).toBe("bf16");
     expect(container.textContent).toContain("High fidelity (bf16)");
   });
 
@@ -479,7 +535,7 @@ describe("SettingsScreen default generation quality (sc-10728)", () => {
     // durable ui-preferences store — same contract as theme/accent in App.jsx. Sending only this field
     // relies on the endpoint MERGING, so theme/accent can't be clobbered.
     await render();
-    await changeField(qualitySelect(), "q4");
+    await chooseQuality("Q4");
     expect(apiFetch).toHaveBeenCalledWith(
       "/api/v1/ui-preferences",
       "",
@@ -495,6 +551,84 @@ describe("SettingsScreen default generation quality (sc-10728)", () => {
     // here we assert the control reflects whatever the cache holds on mount.
     window.localStorage.setItem(STORAGE_KEY, "q4");
     await render();
-    expect(qualitySelect().value).toBe("q4");
+    expect(selectedQuality().textContent.trim()).toBe("Q4");
+  });
+});
+
+// The settings brought over from Simple mode (Settings-page handoff): theme, accent and the
+// Simple-mode default all write through to the SAME stores their Simple-mode counterparts use.
+describe("SettingsScreen appearance settings", () => {
+  let container;
+  let root;
+  let SettingsScreen;
+  let changeTheme;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    delete window.__TAURI__;
+    vi.resetModules();
+    vi.doMock("../api.js", () => ({
+      apiFetch: vi.fn(async () => []),
+      isAbortError: () => false,
+      API_BASE_URL: "",
+      eventUrl: () => "",
+    }));
+    SettingsScreen = await loadScreen();
+    changeTheme = vi.fn();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    vi.doUnmock("../api.js");
+    vi.restoreAllMocks();
+  });
+
+  async function render(props) {
+    await renderScreen(root, SettingsScreen, props, {
+      theme: "light",
+      changeTheme,
+      visibleWorkers: [],
+      macCapabilities: {},
+    });
+  }
+
+  it("drives the app-wide theme through changeTheme", async () => {
+    await render({});
+    const dark = [...container.querySelectorAll('[aria-label="Theme"] button')].find(
+      (button) => button.textContent.trim() === "Dark",
+    );
+    await click(dark);
+    expect(changeTheme).toHaveBeenCalledWith("dark");
+  });
+
+  it("reports the selected accent and forwards a change", async () => {
+    const onAccentChange = vi.fn();
+    await render({ accent: "coral", onAccentChange });
+    const swatches = container.querySelectorAll('[aria-label="Accent"] button');
+    expect(swatches).toHaveLength(7);
+    expect(container.querySelector('[aria-label="Coral"]').getAttribute("aria-checked")).toBe("true");
+    await click(container.querySelector('[aria-label="Violet"]'));
+    expect(onAccentChange).toHaveBeenCalledWith("violet");
+  });
+
+  it("toggles the Simple-mode default", async () => {
+    const onSimpleDefaultChange = vi.fn();
+    await render({ simpleDefault: false, onSimpleDefaultChange });
+    const toggle = container.querySelector('[aria-label="Use Simple mode by default"]');
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    await click(toggle);
+    expect(onSimpleDefaultChange).toHaveBeenCalledWith(true);
+  });
+
+  it("drops the sidebar-switch sentence when the viewport locks the app to Simple", async () => {
+    await render({ lockedToSimple: true });
+    expect(container.textContent).toContain("Phones always use it.");
+    expect(container.textContent).not.toContain("the sidebar switch overrides it");
   });
 });
