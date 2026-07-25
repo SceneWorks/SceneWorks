@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use crate::asset_index::{
     GenerationSetCache,
 };
 use crate::contracts;
-use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
+use crate::project_store::{connect_project_db_migrated, ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
     atomic_write, is_safe_id, optional_bool, optional_f64, optional_str, random_hex, read_json,
     relative_string, write_json,
@@ -115,7 +115,7 @@ impl<'a> CharacterStore<'a> {
         include_archived: bool,
     ) -> ProjectStoreResult<Vec<Value>> {
         ensure_character_index(&self.project_path)?;
-        let connection = connect_project_db(&self.project_path)?;
+        let connection = connect_project_db_migrated(&self.project_path)?;
         let mut statement = connection.prepare("select sidecar_path from characters")?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -194,7 +194,7 @@ impl<'a> CharacterStore<'a> {
             "loras": [],
             "trainedLoras": []
         });
-        let mut connection = connect_project_db(&self.project_path)?;
+        let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         write_character(&self.project_path, &mut character, false)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
@@ -238,7 +238,7 @@ impl<'a> CharacterStore<'a> {
                 .insert("archived".to_owned(), Value::Bool(archived));
         }
 
-        let mut connection = connect_project_db(&self.project_path)?;
+        let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
@@ -262,7 +262,7 @@ impl<'a> CharacterStore<'a> {
             })?
             .insert("archived".to_owned(), Value::Bool(true));
 
-        let mut connection = connect_project_db(&self.project_path)?;
+        let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
@@ -280,7 +280,7 @@ impl<'a> CharacterStore<'a> {
         character_id: &str,
     ) -> ProjectStoreResult<CharacterMutationResult> {
         let path = find_character_file(&self.project_path, character_id)?;
-        let mut connection = connect_project_db(&self.project_path)?;
+        let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         purge_character_on_connection(&transaction, character_id)?;
         fs::remove_file(path)?;
@@ -313,7 +313,7 @@ impl<'a> CharacterStore<'a> {
             "approvedAt": if input.approved { Value::String(now) } else { Value::Null }
         });
 
-        let mut connection = connect_project_db(&self.project_path)?;
+        let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         update_asset_character_link(
             &transaction,
@@ -391,7 +391,7 @@ impl<'a> CharacterStore<'a> {
                 .insert("notes".to_owned(), Value::String(notes));
         }
 
-        let mut connection = connect_project_db(&self.project_path)?;
+        let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         update_asset_character_link(
             &transaction,
@@ -425,7 +425,7 @@ impl<'a> CharacterStore<'a> {
             .find(|item| item.get("assetId").and_then(Value::as_str) == Some(asset_id))
             .ok_or_else(|| ProjectStoreError::NotFound("Reference not found".to_owned()))?;
 
-        let mut connection = connect_project_db(&self.project_path)?;
+        let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         update_asset_character_link(
             &transaction,
@@ -453,7 +453,7 @@ impl<'a> CharacterStore<'a> {
 
     pub fn remove_asset_references(&self, asset_id: &str) -> ProjectStoreResult<u32> {
         validate_required_text(asset_id, "assetId")?;
-        let mut connection = connect_project_db(&self.project_path)?;
+        let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         let mut changed_count = 0;
 
@@ -504,7 +504,7 @@ impl<'a> CharacterStore<'a> {
         });
         prepend_array_field(&mut character, "looks", look)?;
 
-        let mut connection = connect_project_db(&self.project_path)?;
+        let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
@@ -555,7 +555,7 @@ impl<'a> CharacterStore<'a> {
         }
         object.insert("updatedAt".to_owned(), Value::String(utc_now()));
 
-        let mut connection = connect_project_db(&self.project_path)?;
+        let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
@@ -587,7 +587,7 @@ impl<'a> CharacterStore<'a> {
             ),
         );
 
-        let mut connection = connect_project_db(&self.project_path)?;
+        let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
@@ -631,7 +631,7 @@ impl<'a> CharacterStore<'a> {
         });
         prepend_array_field(&mut character, "loras", link)?;
 
-        let mut connection = connect_project_db(&self.project_path)?;
+        let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
@@ -680,7 +680,7 @@ impl<'a> CharacterStore<'a> {
         }
         object.insert("updatedAt".to_owned(), Value::String(utc_now()));
 
-        let mut connection = connect_project_db(&self.project_path)?;
+        let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
@@ -712,7 +712,7 @@ impl<'a> CharacterStore<'a> {
             ),
         );
 
-        let mut connection = connect_project_db(&self.project_path)?;
+        let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
@@ -824,7 +824,7 @@ pub fn write_character_sidecar(project_path: &Path, character: &Value) -> Projec
 
 fn ensure_character_index(project_path: &Path) -> ProjectStoreResult<()> {
     let (fingerprint, sidecar_count) = character_index_fingerprint(project_path)?;
-    let mut connection = connect_project_db(project_path)?;
+    let mut connection = connect_project_db_migrated(project_path)?;
     let indexed_count = connection.query_row("select count(*) from characters", [], |row| {
         row.get::<_, u64>(0)
     })?;
@@ -1033,14 +1033,6 @@ fn purge_character_on_connection(
     Ok(())
 }
 
-fn connect_project_db(project_path: &Path) -> ProjectStoreResult<Connection> {
-    fs::create_dir_all(project_path)?;
-    let connection = Connection::open(project_path.join("project.db"))?;
-    connection.busy_timeout(Duration::from_millis(5000))?;
-    apply_project_migrations(&connection)?;
-    Ok(connection)
-}
-
 fn character_sidecars(project_path: &Path) -> ProjectStoreResult<Vec<PathBuf>> {
     let character_dir = project_path.join("characters");
     let mut sidecars = Vec::new();
@@ -1136,7 +1128,7 @@ struct CharacterHydrationCache {
 impl CharacterHydrationCache {
     fn new(project_path: &Path) -> ProjectStoreResult<Self> {
         Ok(Self {
-            connection: connect_project_db(project_path)?,
+            connection: connect_project_db_migrated(project_path)?,
             generation_sets: GenerationSetCache::default(),
             asset_summaries: HashMap::new(),
         })

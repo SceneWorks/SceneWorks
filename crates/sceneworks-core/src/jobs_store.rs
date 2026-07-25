@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -365,11 +366,12 @@ pub struct ProgressUpdate {
     /// progress updates can't accidentally clear it. Drives the
     /// WorkerProgressCard arch pill.
     pub backend: Option<String>,
-    /// Id of the worker reporting this progress. When set, the store rejects
-    /// the update unless the job's `worker_id` still matches — a zombie worker
+    /// Id of the worker reporting this progress. The store rejects the update
+    /// unless this value and the job's `worker_id` are both present and match — a zombie worker
     /// whose job was swept to `interrupted` (worker_id cleared) or reclaimed by
     /// another worker can no longer resurrect or corrupt it (sc-4172). `None`
-    /// keeps legacy trusted-caller behavior.
+    /// is retained on the internal type so the wire contract can return the
+    /// ownership 409 instead of failing JSON deserialization.
     pub worker_id: Option<String>,
 }
 
@@ -631,11 +633,12 @@ impl JobsStore {
             "update workers set status = 'offline', current_job_id = null where status != 'offline'",
             [],
         )?;
-        let updated_jobs = interrupted_ids
+        let updated_ids = interrupted_ids
             .iter()
             .chain(stranded_pending_ids.iter())
-            .map(|job_id| self.get_job_on_connection(&transaction, job_id))
-            .collect::<JobsStoreResult<Vec<_>>>()?;
+            .cloned()
+            .collect::<Vec<_>>();
+        let updated_jobs = self.jobs_by_ids(&transaction, &updated_ids)?;
         transaction.commit()?;
         Ok(updated_jobs)
     }
@@ -1096,10 +1099,7 @@ impl JobsStore {
 
         // Re-read the updated snapshots (newest first) so callers broadcast the real
         // post-cancel state, not the stale pre-update rows.
-        let mut canceled = Vec::with_capacity(pending_ids.len());
-        for id in &pending_ids {
-            canceled.push(self.get_job_on_connection(&transaction, id)?);
-        }
+        let canceled = self.jobs_by_ids(&transaction, &pending_ids)?;
         transaction.commit()?;
         Ok(canceled)
     }
@@ -1441,10 +1441,11 @@ impl JobsStore {
         )?;
 
         let updated_workers = self.workers_by_ids(&transaction, &worker_ids)?;
-        let updated_jobs = active_jobs
+        let active_job_ids = active_jobs
             .iter()
-            .map(|job| self.get_job_on_connection(&transaction, &job.id))
-            .collect::<JobsStoreResult<Vec<_>>>()?;
+            .map(|job| job.id.clone())
+            .collect::<Vec<_>>();
+        let updated_jobs = self.jobs_by_ids(&transaction, &active_job_ids)?;
         transaction.commit()?;
         Ok(StaleSweep {
             workers: updated_workers,
@@ -1612,10 +1613,7 @@ impl JobsStore {
             )?;
             failed_ids.push(job.id.clone());
         }
-        let failed = failed_ids
-            .iter()
-            .map(|id| self.get_job_on_connection(&transaction, id))
-            .collect::<JobsStoreResult<Vec<_>>>()?;
+        let failed = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
         Ok(failed)
     }
@@ -1670,11 +1668,18 @@ impl JobsStore {
                 ",
                 params![now_text, reason.error_message(), job.id],
             )?;
-            let updated = self.get_job_on_connection(&transaction, &job.id)?;
-            failed.push((updated, reason));
+            failed.push((job.id, reason));
         }
+        let failed_ids = failed
+            .iter()
+            .map(|(job_id, _reason)| job_id.clone())
+            .collect::<Vec<_>>();
+        let updated_jobs = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
-        Ok(failed)
+        Ok(updated_jobs
+            .into_iter()
+            .zip(failed.into_iter().map(|(_job_id, reason)| reason))
+            .collect())
     }
 
     /// Off-Mac candle grace sweep (sc-5502, epic 5483) — the Windows/Linux twin of
@@ -1764,10 +1769,7 @@ impl JobsStore {
             )?;
             failed_ids.push(job.id.clone());
         }
-        let failed = failed_ids
-            .iter()
-            .map(|id| self.get_job_on_connection(&transaction, id))
-            .collect::<JobsStoreResult<Vec<_>>>()?;
+        let failed = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
         Ok(failed)
     }
@@ -1823,11 +1825,18 @@ impl JobsStore {
                 ",
                 params![now_text, reason.candle_error_message(), job.id],
             )?;
-            let updated = self.get_job_on_connection(&transaction, &job.id)?;
-            failed.push((updated, reason));
+            failed.push((job.id, reason));
         }
+        let failed_ids = failed
+            .iter()
+            .map(|(job_id, _reason)| job_id.clone())
+            .collect::<Vec<_>>();
+        let updated_jobs = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
-        Ok(failed)
+        Ok(updated_jobs
+            .into_iter()
+            .zip(failed.into_iter().map(|(_job_id, reason)| reason))
+            .collect())
     }
 
     pub fn claim_next_job(&self, worker_id: &str) -> JobsStoreResult<Option<JobSnapshot>> {
@@ -1991,7 +2000,6 @@ impl JobsStore {
         }
         match (update.worker_id.as_deref(), current.worker_id.as_deref()) {
             (Some(reporter), Some(owner)) if reporter == owner => {}
-            (None, None) => {}
             _ => {
                 return Err(JobsStoreError::NotJobOwner {
                     job_id: job_id.to_owned(),
@@ -2336,6 +2344,39 @@ impl JobsStore {
         Ok(workers)
     }
 
+    /// Load a batch of jobs with one `IN` query, then restore the caller's id
+    /// ordering. Bulk transitions build ids in their externally visible order
+    /// (queue order, active-worker order, or candidate order), which SQL `IN`
+    /// does not preserve on its own.
+    fn jobs_by_ids(
+        &self,
+        connection: &Connection,
+        job_ids: &[String],
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        if job_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = placeholders_from(1, job_ids.len());
+        let mut statement =
+            connection.prepare(&format!("select * from jobs where id in ({placeholders})"))?;
+        let jobs = collect_jobs(statement.query_map(
+            params_from_iter(job_ids.iter().map(String::as_str)),
+            row_to_job,
+        )?)?;
+        let mut by_id = jobs
+            .into_iter()
+            .map(|job| (job.id.clone(), job))
+            .collect::<HashMap<_, _>>();
+        job_ids
+            .iter()
+            .map(|job_id| {
+                by_id
+                    .remove(job_id)
+                    .ok_or_else(|| JobsStoreError::NotFound(job_id.clone()))
+            })
+            .collect()
+    }
+
     fn get_job_on_connection(
         &self,
         connection: &Connection,
@@ -2667,8 +2708,11 @@ where
 }
 
 fn dumps<T: serde::Serialize>(value: &T) -> JobsStoreResult<String> {
-    let mut value = serde_json::to_value(value)?;
-    sort_json_value(&mut value);
+    // `serde_json::Map` is a BTreeMap unless the optional `preserve_order`
+    // feature is enabled (it is not in this crate), so materializing through
+    // `Value` already gives stable recursive key order. Do not recursively
+    // clone every map just to sort it a second time.
+    let value = serde_json::to_value(value)?;
     serde_json::to_string(&value).map_err(Into::into)
 }
 
@@ -3608,29 +3652,6 @@ fn placeholders_from(start: usize, count: usize) -> String {
         .map(|index| format!("?{index}"))
         .collect::<Vec<_>>()
         .join(",")
-}
-
-fn sort_json_value(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            let mut entries = map
-                .iter_mut()
-                .map(|(key, value)| {
-                    sort_json_value(value);
-                    (key.clone(), value.clone())
-                })
-                .collect::<Vec<_>>();
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
-            map.clear();
-            map.extend(entries);
-        }
-        Value::Array(items) => {
-            for item in items {
-                sort_json_value(item);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-    }
 }
 
 #[cfg(test)]

@@ -605,7 +605,7 @@ pub(crate) async fn wait_for_prompt_refine_job_excluding(
         if let Some(id) = jobs.as_array().and_then(|items| {
             items
                 .iter()
-                .filter(|job| job["type"] == "prompt_refine")
+                .filter(|job| job["type"] == "prompt_refine" && job["status"] == "queued")
                 .find_map(|job| job["id"].as_str().filter(|id| Some(*id) != exclude))
         }) {
             return id.to_owned();
@@ -620,9 +620,56 @@ pub(crate) async fn wait_for_prompt_refine_job(app: &axum::Router) -> String {
     wait_for_prompt_refine_job_excluding(app, None).await
 }
 
-/// Complete a queued (unclaimed) magic-prompt job. The job has no owner, so the progress report omits
-/// a workerId (matching the store's `(None, None)` ownership rule); `result` carries the model reply.
+/// Register a production-shaped worker, claim the next compatible job, and
+/// assert that it is the target the test intends to drive.
+pub(crate) async fn claim_job_as_worker(
+    app: &axum::Router,
+    job_id: &str,
+    worker_id: &str,
+    capabilities: &[&str],
+) {
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": worker_id,
+            "gpuId": "test-gpu",
+            "gpuName": "Test GPU",
+            "capabilities": capabilities,
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": worker_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claimed["job"]["id"], job_id);
+}
+
+pub(crate) const TEST_TRAINING_WORKER_ID: &str = "test-training-worker";
+
+pub(crate) async fn claim_training_job(app: &axum::Router, job_id: &str) {
+    claim_job_as_worker(
+        app,
+        job_id,
+        TEST_TRAINING_WORKER_ID,
+        &["gpu", "lora_train", "lora_train_execute"],
+    )
+    .await;
+}
+
+/// Complete a magic-prompt job through the same claim + worker-owned progress
+/// shape production uses; `result` carries the model reply.
 pub(crate) async fn complete_prompt_refine_job(app: &axum::Router, job_id: &str, result: Value) {
+    const WORKER_ID: &str = "test-prompt-refine-worker";
+    claim_job_as_worker(app, job_id, WORKER_ID, &["gpu", "prompt_refine"]).await;
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -632,6 +679,7 @@ pub(crate) async fn complete_prompt_refine_job(app: &axum::Router, job_id: &str,
             "stage": "completed",
             "progress": 1,
             "message": "Caption ready.",
+            "workerId": WORKER_ID,
             "result": result
         }),
     )
@@ -666,7 +714,7 @@ pub(crate) async fn wait_for_job_out_of_pending_caption_or_refine(
         }
         if let Some(id) = items
             .iter()
-            .filter(|job| job["type"] == "prompt_refine")
+            .filter(|job| job["type"] == "prompt_refine" && job["status"] == "queued")
             .find_map(|job| job["id"].as_str().filter(|id| Some(*id) != exclude_refine))
         {
             return PendingOrRefine::Refine(id.to_owned());

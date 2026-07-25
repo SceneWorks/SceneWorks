@@ -1451,6 +1451,68 @@ async fn worker_can_register_claim_and_complete_job_through_http() {
 }
 
 #[tokio::test]
+async fn authenticated_lan_caller_cannot_mutate_an_unclaimed_job_without_worker_id() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let auth = [("x-sceneworks-token", "secret-token")];
+    let peer = "192.168.1.44:50123";
+
+    let (status, created) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "mist" },
+            "requestedGpu": "auto"
+        }),
+        peer,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = created["id"].as_str().expect("job id");
+
+    let (status, rejected) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "ownerless completion"
+        }),
+        peer,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(rejected["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("no longer owns")));
+
+    let (status, unchanged) = request_with_peer_headers(
+        app,
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+        peer,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unchanged["status"], "queued");
+    assert!(unchanged["result"]
+        .as_object()
+        .is_some_and(serde_json::Map::is_empty));
+}
+
+#[tokio::test]
 async fn progress_ticks_only_republish_queue_on_status_change() {
     // sc-4203 (F-API-5): a pure progress tick (status unchanged) must not trigger the
     // full queue-summary recompute + queue.updated broadcast; a status transition must.
@@ -2133,8 +2195,7 @@ async fn ideogram_plain_text_job_returns_immediately_in_pending_caption() {
     );
     assert_eq!(refine_job["payload"]["aspectRatio"], "1:1");
 
-    // Complete the expansion with a rich caption. The unclaimed job has no owner, so the progress
-    // report omits a workerId (matching the store's `(None, None)` ownership rule).
+    // Complete the expansion with a rich caption through a real worker claim.
     let caption = r#"{"high_level_description": "a red fox", "compositional_deconstruction": {"background": "a snowy forest at golden hour", "elements": []}}"#;
     complete_prompt_refine_job(&app, &refine_id, json!({ "refinedPrompt": caption })).await;
 
@@ -2172,6 +2233,8 @@ async fn ideogram_plain_text_job_degrades_to_original_prompt_when_expansion_fail
     let image_job_id = image_job["id"].as_str().expect("job id").to_owned();
 
     let refine_id = wait_for_prompt_refine_job(&app).await;
+    const WORKER_ID: &str = "test-prompt-refine-worker";
+    claim_job_as_worker(&app, &refine_id, WORKER_ID, &["gpu", "prompt_refine"]).await;
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -2181,7 +2244,8 @@ async fn ideogram_plain_text_job_degrades_to_original_prompt_when_expansion_fail
             "stage": "failed",
             "progress": 0,
             "message": "Expansion failed.",
-            "error": "prompt-refine model not staged"
+            "error": "prompt-refine model not staged",
+            "workerId": WORKER_ID
         }),
     )
     .await;

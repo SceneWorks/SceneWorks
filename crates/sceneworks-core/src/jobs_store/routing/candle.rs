@@ -14,6 +14,9 @@ use crate::jobs_store::routing::mlx::{
     instantid_mlx_eligible, pulid_flux_mlx_eligible, upscale_job_is_mlx_eligible,
     video_upscale_job_is_mlx_eligible,
 };
+use crate::jobs_store::routing::{
+    has_nonempty_array, has_nonempty_string, has_nonempty_string_array,
+};
 
 /// Candle video models whose provider descriptor advertises user-LoRA inference, so a video job
 /// carrying `request.loras` stays on the candle lane instead of being refused. Today only the Wan-14B
@@ -273,18 +276,12 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    let has_nonempty_id = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
     // Any conditioning asset (img2img source, IP-Adapter reference, or inpaint mask) is refused by
     // this base lane. Applies to EVERY candle family including Lens (pure T2I — no conditioning
     // shapes in the Lens port).
-    if has_nonempty_id("sourceAssetId")
-        || has_nonempty_id("referenceAssetId")
-        || has_nonempty_id("maskAssetId")
+    if has_nonempty_string(payload, "sourceAssetId")
+        || has_nonempty_string(payload, "referenceAssetId")
+        || has_nonempty_string(payload, "maskAssetId")
     {
         return false;
     }
@@ -394,19 +391,13 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     if !CANDLE_VIDEO_ROUTED_MODELS.contains(&model) {
         return false;
     }
-    let has_nonempty_id = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
     if CANDLE_VIDEO_I2V_ROUTED_MODELS.contains(&model) {
         // Wan 14B I2V is image→video ONLY (sc-5175): require the `image_to_video` mode + a source
         // image. A txt2video shape (no source) is rejected and remains queued.
         if payload.get("mode").and_then(Value::as_str) != Some("image_to_video") {
             return false;
         }
-        if !has_nonempty_id("sourceAssetId") {
+        if !has_nonempty_string(payload, "sourceAssetId") {
             return false;
         }
     } else {
@@ -416,13 +407,15 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
         if payload.get("mode").and_then(Value::as_str) != Some("text_to_video") {
             return false;
         }
-        if has_nonempty_id("sourceAssetId") {
+        if has_nonempty_string(payload, "sourceAssetId") {
             return false;
         }
     }
     // Reference / inpaint-mask conditioning is never in the candle video lane (i2v needs only the
     // single source image; reference + mask are unsupported character / inpaint shapes).
-    if has_nonempty_id("referenceAssetId") || has_nonempty_id("maskAssetId") {
+    if has_nonempty_string(payload, "referenceAssetId")
+        || has_nonempty_string(payload, "maskAssetId")
+    {
         return false;
     }
     // User LoRAs on the candle video lane are gated by the provider descriptor: the Wan-14B MoE
@@ -458,42 +451,34 @@ pub(crate) fn video_request_candle_vace_eligible(
     if !CANDLE_VIDEO_VACE_MODELS.contains(&model) {
         return false;
     }
-    let has_nonempty_id = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
     match job_type {
         // replace_person: the source control clip + the tracked person + the character references.
         JobType::PersonReplace => {
-            if !has_nonempty_id("sourceClipAssetId")
-                || !has_nonempty_id("personTrackId")
-                || !has_nonempty_id("characterId")
+            if !has_nonempty_string(payload, "sourceClipAssetId")
+                || !has_nonempty_string(payload, "personTrackId")
+                || !has_nonempty_string(payload, "characterId")
             {
                 return false;
             }
         }
         // extend_clip: the source clip whose tail anchors the continuation.
         JobType::VideoExtend => {
-            if !has_nonempty_id("sourceClipAssetId") {
+            if !has_nonempty_string(payload, "sourceClipAssetId") {
                 return false;
             }
         }
         // video_bridge: both clips (the left tail + the right head) are pinned around the gap.
         JobType::VideoBridge => {
-            if !has_nonempty_id("sourceClipAssetId") || !has_nonempty_id("bridgeRightClipAssetId") {
+            if !has_nonempty_string(payload, "sourceClipAssetId")
+                || !has_nonempty_string(payload, "bridgeRightClipAssetId")
+            {
                 return false;
             }
         }
         _ => return false,
     }
     // LoRAs / on-the-fly quant are not in the candle video lane (the VACE provider rejects them).
-    if payload
-        .get("loras")
-        .and_then(Value::as_array)
-        .is_some_and(|loras| !loras.is_empty())
-    {
+    if has_nonempty_array(payload, "loras") {
         return false;
     }
     if candle_request_wants_quant(payload) {
@@ -518,25 +503,13 @@ pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, 
     if payload.get("mode").and_then(Value::as_str) != Some("animate_character") {
         return false;
     }
-    let has_nonempty_id = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    let has_reference = has_nonempty_id("referenceAssetId")
-        || has_nonempty_id("sourceAssetId")
-        || payload
-            .get("referenceAssetIds")
-            .and_then(Value::as_array)
-            .is_some_and(|ids| {
-                ids.iter()
-                    .any(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
-            });
+    let has_reference = has_nonempty_string(payload, "referenceAssetId")
+        || has_nonempty_string(payload, "sourceAssetId")
+        || has_nonempty_string_array(payload, "referenceAssetIds");
     if !has_reference {
         return false;
     }
-    if !has_nonempty_id("sourceClipAssetId") {
+    if !has_nonempty_string(payload, "sourceClipAssetId") {
         return false;
     }
     // Inference LoRA (DPO / lightning / user adapter) merges into the candle DiT (sc-6838), so a
@@ -556,15 +529,9 @@ pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, 
     if model != "scail2_14b" {
         return false;
     }
-    let has_nonempty_id = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    if !has_nonempty_id("sourceClipAssetId")
-        || !has_nonempty_id("personTrackId")
-        || !has_nonempty_id("characterId")
+    if !has_nonempty_string(payload, "sourceClipAssetId")
+        || !has_nonempty_string(payload, "personTrackId")
+        || !has_nonempty_string(payload, "characterId")
     {
         return false;
     }
@@ -1149,11 +1116,17 @@ pub(crate) fn krea_control_candle_eligible(payload: &Map<String, Value>) -> bool
 /// Candle-routed image models that HAVE a candle strict-control lane (sc-5489; flux2_dev sc-7736; base
 /// z_image + flux_dev sc-8379 / sc-8412). A `advanced.poses` job on any OTHER candle-routed model has no
 /// pose path on candle (plain-SDXL pose ships via InstantID, `instantid_realvisxl`, not `sdxl`).
+pub(crate) const CANDLE_POSE_MODELS: &[&str] = &[
+    "qwen_image",
+    "kolors",
+    "z_image_turbo",
+    "z_image",
+    "flux2_dev",
+    "flux_dev",
+];
+
 pub(crate) fn model_has_candle_pose_lane(model: &str) -> bool {
-    matches!(
-        model,
-        "qwen_image" | "kolors" | "z_image_turbo" | "z_image" | "flux2_dev" | "flux_dev"
-    )
+    CANDLE_POSE_MODELS.contains(&model)
 }
 
 /// A strict-pose (`advanced.poses`) job on a **candle-routed model with no candle pose lane** —

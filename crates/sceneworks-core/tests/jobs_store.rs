@@ -667,6 +667,42 @@ fn cancel_pending_jobs_scopes_to_one_project() {
     assert!(!b_after.cancel_requested);
 }
 
+#[test]
+fn cancel_pending_jobs_preserves_the_selected_newest_first_order() {
+    let store = store("cancel-pending-order");
+    let oldest = store
+        .create_job(image_job(object(json!({ "prompt": "oldest" }))))
+        .expect("oldest creates");
+    let middle = store
+        .create_job(image_job(object(json!({ "prompt": "middle" }))))
+        .expect("middle creates");
+    let newest = store
+        .create_job(image_job(object(json!({ "prompt": "newest" }))))
+        .expect("newest creates");
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    for (job_id, created_at) in [
+        (&oldest.id, "2026-01-01T00:00:00Z"),
+        (&middle.id, "2026-01-02T00:00:00Z"),
+        (&newest.id, "2026-01-03T00:00:00Z"),
+    ] {
+        connection
+            .execute(
+                "update jobs set created_at = ?2, updated_at = ?2 where id = ?1",
+                params![job_id, created_at],
+            )
+            .expect("timestamps update");
+    }
+    drop(connection);
+
+    let canceled_ids: Vec<String> = store
+        .cancel_pending_jobs(None)
+        .expect("pending jobs cancel")
+        .into_iter()
+        .map(|job| job.id)
+        .collect();
+    assert_eq!(canceled_ids, vec![newest.id, middle.id, oldest.id]);
+}
+
 /// An Ideogram auto-caption image job (sc-9120). Created NON-claimable in `pending_caption`.
 fn pending_caption_job(payload: Value) -> CreateJob {
     CreateJob {
@@ -1451,9 +1487,18 @@ fn dry_run_lora_train_does_not_require_execute_capability() {
 #[test]
 fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
     let store = store("training-progress-stages");
+    register_gpu_worker(&store, "trainer", "gpu-0", training_caps());
     let job = store
         .create_job(lora_train_job("auto", false))
         .expect("training job creates");
+    assert_eq!(
+        store
+            .claim_next_job("trainer")
+            .expect("claim succeeds")
+            .expect("training job is claimable")
+            .id,
+        job.id
+    );
 
     // The trainer reports caching/training/checkpointing stages under the running
     // status; all must be accepted and persisted, not rejected as invalid.
@@ -1476,7 +1521,7 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
-                    worker_id: None,
+                    worker_id: Some("trainer".to_owned()),
                 },
             )
             .expect("running status with a training stage is accepted");
@@ -1500,7 +1545,7 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
                 backend: None,
-                worker_id: None,
+                worker_id: Some("trainer".to_owned()),
             },
         )
         .expect_err("an unknown status is rejected");
@@ -1510,9 +1555,18 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
 #[test]
 fn training_progress_merges_latest_sample_batches_into_history() {
     let store = store("training-sample-history");
+    register_gpu_worker(&store, "trainer", "gpu-0", training_caps());
     let job = store
         .create_job(lora_train_job("auto", false))
         .expect("training job creates");
+    assert_eq!(
+        store
+            .claim_next_job("trainer")
+            .expect("claim succeeds")
+            .expect("training job is claimable")
+            .id,
+        job.id
+    );
 
     for (step, path) in [
         (250, "training/job-1/samples/step-000250/front.png"),
@@ -1538,7 +1592,7 @@ fn training_progress_merges_latest_sample_batches_into_history() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
-                    worker_id: None,
+                    worker_id: Some("trainer".to_owned()),
                 },
             )
             .expect("sample progress updates");
@@ -3079,6 +3133,49 @@ fn candle_supported_rejects_unsupported_strict_pose() {
     assert!(reason
         .candle_error_message()
         .starts_with("candle_unsupported:"));
+    let message = reason.candle_error_message();
+    for model in [
+        "qwen_image",
+        "kolors",
+        "z_image_turbo",
+        "z_image",
+        "flux2_dev",
+        "flux_dev",
+    ] {
+        assert!(
+            message.contains(model),
+            "strict-pose gap should name supported Candle family {model}: {message}"
+        );
+    }
+}
+
+#[test]
+fn mac_rust_supported_classifies_every_sensenova_id_as_the_same_strict_pose_gap() {
+    for model in [
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3_fast",
+    ] {
+        let store = store(&format!("sensenova-strict-pose-{model}"));
+        let job = job_of(
+            &store,
+            JobType::ImageGenerate,
+            json!({
+                "model": model,
+                "prompt": "p",
+                "advanced": { "poses": [{ "id": "pose-1" }] }
+            }),
+        );
+        let reason = mac_rust_supported(&job).expect_err("strict pose is not MLX-supported");
+        assert_eq!(reason.model.as_deref(), Some(model));
+        assert_eq!(
+            reason.feature, "strict pose (ControlNet)",
+            "{model} should hit the strict-pose gap, not a generic model gap"
+        );
+    }
 }
 
 #[test]
@@ -6447,6 +6544,39 @@ fn progress_from_non_owner_worker_is_rejected() {
         .update_job_progress(&created.id, running(None))
         .expect_err("ownerless report on an owned job is rejected");
     assert!(matches!(error, JobsStoreError::NotJobOwner { .. }));
+}
+
+#[test]
+fn ownerless_progress_is_rejected_for_an_unclaimed_job_without_mutation() {
+    let store = store("ownerless-unclaimed-progress");
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+
+    let error = store
+        .update_job_progress(
+            &created.id,
+            ProgressUpdate {
+                status: JobStatus::Completed,
+                stage: ProgressStage::Completed,
+                progress: 1.0,
+                message: "completed without a claim".to_owned(),
+                error: None,
+                result: Some(object(json!({ "assetId": "must-not-land" }))),
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: None,
+                worker_id: None,
+            },
+        )
+        .expect_err("an ownerless report cannot mutate an unclaimed job");
+    assert!(matches!(error, JobsStoreError::NotJobOwner { .. }));
+
+    let unchanged = store.get_job(&created.id).expect("job reloads");
+    assert_eq!(unchanged.status, JobStatus::Queued);
+    assert_eq!(unchanged.stage, ProgressStage::Queued);
+    assert!(unchanged.result.is_empty());
 }
 
 /// Regression for the Anima routing gap (epic 10512 / sc-10523): `anima_base`/`anima_aesthetic`/

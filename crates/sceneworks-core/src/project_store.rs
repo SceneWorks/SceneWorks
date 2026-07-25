@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use parking_lot::{Mutex, ReentrantMutexGuard};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -248,7 +248,7 @@ pub struct ProjectFile {
     pub content_type: String,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct RegistryItem {
     id: Option<String>,
     name: Option<String>,
@@ -257,13 +257,39 @@ struct RegistryItem {
     extra: Map<String, Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RegistryFingerprint {
+    modified: SystemTime,
+    len: u64,
+}
+
+#[derive(Debug, Default)]
+struct RegistryCache {
+    fingerprint: Option<RegistryFingerprint>,
+    items: Vec<RegistryItem>,
+    loaded: bool,
+    #[cfg(test)]
+    disk_reads: usize,
+}
+
+fn registry_fingerprint(path: &Path) -> ProjectStoreResult<Option<RegistryFingerprint>> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(RegistryFingerprint {
+            modified: metadata.modified()?,
+            len: metadata.len(),
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[derive(Debug)]
 pub struct ProjectStore {
     data_dir: PathBuf,
     app_version: String,
     /// Guards recent-project registry reads/writes only; project DB and project-file mutations
     /// rely on SQLite transactions and filesystem operations for their own serialization.
-    lock: Mutex<()>,
+    lock: Mutex<RegistryCache>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,7 +304,7 @@ impl ProjectStore {
         Self {
             data_dir: data_dir.into(),
             app_version: app_version.into(),
-            lock: Mutex::new(()),
+            lock: Mutex::new(RegistryCache::default()),
         }
     }
 
@@ -291,10 +317,10 @@ impl ProjectStore {
     }
 
     pub fn list_projects(&self) -> ProjectStoreResult<Vec<ProjectSummary>> {
-        let _guard = self.lock.lock();
+        let mut registry_cache = self.lock.lock();
         self.ensure_data_dirs()?;
         let mut projects = Vec::new();
-        for item in self.load_registry()? {
+        for item in self.load_registry(&mut registry_cache)? {
             // The reserved global pose + keypoint libraries are addressable by id but
             // hidden from the project switcher (epic 2282 / epic 4422).
             if matches!(
@@ -339,7 +365,7 @@ impl ProjectStore {
             ));
         }
 
-        let _guard = self.lock.lock();
+        let mut registry_cache = self.lock.lock();
         self.ensure_data_dirs()?;
         // Fail fast with an actionable error if the workspace folder rejects writes,
         // rather than surfacing an opaque SQLITE_READONLY from deep in provisioning
@@ -362,7 +388,7 @@ impl ProjectStore {
                 .join(format!("{slug}-{suffix}.sceneworks"));
         }
 
-        self.provision_project_locked(&project_id, name, &project_path)
+        self.provision_project_locked(&project_id, name, &project_path, &mut registry_cache)
     }
 
     /// Provision a project directory (folders + project file + db + registry entry)
@@ -373,6 +399,7 @@ impl ProjectStore {
         project_id: &str,
         name: &str,
         project_path: &Path,
+        registry_cache: &mut RegistryCache,
     ) -> ProjectStoreResult<ProjectSummary> {
         fs::create_dir_all(project_path)?;
         for folder in PROJECT_FOLDERS {
@@ -404,7 +431,7 @@ impl ProjectStore {
         }
 
         let mut registry = self
-            .load_registry()?
+            .load_registry(registry_cache)?
             .into_iter()
             .filter(|item| item.id.as_deref() != Some(project_id))
             .collect::<Vec<_>>();
@@ -417,7 +444,7 @@ impl ProjectStore {
                 extra: Map::new(),
             },
         );
-        self.save_registry(&registry)?;
+        self.save_registry(&registry, registry_cache)?;
 
         read_project_summary(project_path)
     }
@@ -425,7 +452,7 @@ impl ProjectStore {
     /// Ensure the reserved global pose library project exists (idempotent), returning
     /// its summary. Created lazily on first pose write/list (epic 2282, sc-2284).
     pub fn ensure_global_poses_project(&self) -> ProjectStoreResult<ProjectSummary> {
-        let _guard = self.lock.lock();
+        let mut registry_cache = self.lock.lock();
         self.ensure_data_dirs()?;
         let project_path = self.projects_dir().join("global-poses.sceneworks");
         if project_path.exists() {
@@ -435,13 +462,14 @@ impl ProjectStore {
             GLOBAL_POSES_PROJECT_ID,
             GLOBAL_POSES_PROJECT_NAME,
             &project_path,
+            &mut registry_cache,
         )
     }
 
     /// Ensure the reserved global Key Point Library project exists (idempotent), returning its
     /// summary. Created lazily on first preset/collection write (epic 4422, sc-4434).
     pub fn ensure_global_keypoints_project(&self) -> ProjectStoreResult<ProjectSummary> {
-        let _guard = self.lock.lock();
+        let mut registry_cache = self.lock.lock();
         self.ensure_data_dirs()?;
         let project_path = self.projects_dir().join("global-keypoints.sceneworks");
         if project_path.exists() {
@@ -451,6 +479,7 @@ impl ProjectStore {
             GLOBAL_KEYPOINTS_PROJECT_ID,
             GLOBAL_KEYPOINTS_PROJECT_NAME,
             &project_path,
+            &mut registry_cache,
         )
     }
 
@@ -793,8 +822,8 @@ impl ProjectStore {
     /// total number of rows pruned across all projects.
     pub fn prune_all_orphaned_assets(&self) -> ProjectStoreResult<usize> {
         let project_paths: Vec<PathBuf> = {
-            let _guard = self.lock.lock();
-            self.load_registry()?
+            let mut registry_cache = self.lock.lock();
+            self.load_registry(&mut registry_cache)?
                 .into_iter()
                 .filter_map(|item| item.path.map(PathBuf::from))
                 // Only touch projects that have been opened at least once (a DB
@@ -2736,20 +2765,45 @@ impl ProjectStore {
         Ok(())
     }
 
-    fn load_registry(&self) -> ProjectStoreResult<Vec<RegistryItem>> {
+    fn load_registry(
+        &self,
+        registry_cache: &mut RegistryCache,
+    ) -> ProjectStoreResult<Vec<RegistryItem>> {
         let registry_path = self.registry_path();
-        if !registry_path.exists() {
-            return Ok(Vec::new());
+        let fingerprint = registry_fingerprint(&registry_path)?;
+        if registry_cache.loaded && registry_cache.fingerprint == fingerprint {
+            return Ok(registry_cache.items.clone());
         }
-        let payload = fs::read_to_string(registry_path)?;
-        Ok(serde_json::from_str(&payload)?)
+        let items = if fingerprint.is_some() {
+            #[cfg(test)]
+            {
+                registry_cache.disk_reads += 1;
+            }
+            let payload = fs::read_to_string(&registry_path)?;
+            serde_json::from_str(&payload)?
+        } else {
+            Vec::new()
+        };
+        registry_cache.fingerprint = fingerprint;
+        registry_cache.items = items.clone();
+        registry_cache.loaded = true;
+        Ok(items)
     }
 
-    fn save_registry(&self, projects: &[RegistryItem]) -> ProjectStoreResult<()> {
+    fn save_registry(
+        &self,
+        projects: &[RegistryItem],
+        registry_cache: &mut RegistryCache,
+    ) -> ProjectStoreResult<()> {
         fs::create_dir_all(&self.data_dir)?;
         // `write_json` stages to a unique temp and renames atomically (sc-1633),
         // so the registry write no longer needs its own intermediate temp file.
-        write_json(&self.registry_path(), &serde_json::to_value(projects)?)
+        let registry_path = self.registry_path();
+        write_json(&registry_path, &serde_json::to_value(projects)?)?;
+        registry_cache.fingerprint = registry_fingerprint(&registry_path)?;
+        registry_cache.items = projects.to_vec();
+        registry_cache.loaded = true;
+        Ok(())
     }
 
     /// Resolves the project path and acquires the per-project file lock, so the
@@ -2766,8 +2820,8 @@ impl ProjectStore {
     }
 
     fn find_project_path(&self, project_id: &str) -> ProjectStoreResult<PathBuf> {
-        let _guard = self.lock.lock();
-        for item in self.load_registry()? {
+        let mut registry_cache = self.lock.lock();
+        for item in self.load_registry(&mut registry_cache)? {
             if item.id.as_deref() == Some(project_id) {
                 let Some(path) = item.path else {
                     break;
@@ -4798,6 +4852,71 @@ mod tests {
     use rusqlite::{params, Connection, OptionalExtension};
     use serde_json::{json, Value};
     use std::sync::Arc;
+
+    #[test]
+    fn recent_project_registry_cache_reuses_reads_and_invalidates_on_external_change() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let writer = ProjectStore::new(&data_dir, "test-version");
+        let created = writer.create_project("Cached").expect("project creates");
+
+        let reader = ProjectStore::new(&data_dir, "test-version");
+        assert_eq!(
+            reader.list_projects().expect("first list"),
+            vec![created.clone()]
+        );
+        assert_eq!(reader.lock.lock().disk_reads, 1);
+        assert_eq!(
+            reader.list_projects().expect("cached list"),
+            vec![created.clone()]
+        );
+        assert_eq!(
+            reader.lock.lock().disk_reads,
+            1,
+            "an unchanged registry should not be reread"
+        );
+
+        let registry_path = reader.registry_path();
+        let mut registry = std::fs::read(&registry_path).expect("registry reads");
+        registry.push(b'\n');
+        std::fs::write(&registry_path, registry).expect("external registry change writes");
+
+        assert_eq!(
+            reader.list_projects().expect("invalidated list"),
+            vec![created]
+        );
+        assert_eq!(
+            reader.lock.lock().disk_reads,
+            2,
+            "a changed registry fingerprint must invalidate the cache"
+        );
+    }
+
+    #[test]
+    fn recent_project_registry_cache_serializes_concurrent_initial_reads() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let writer = ProjectStore::new(&data_dir, "test-version");
+        let created = writer
+            .create_project("Concurrent")
+            .expect("project creates");
+        let reader = Arc::new(ProjectStore::new(&data_dir, "test-version"));
+
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let reader = Arc::clone(&reader);
+                std::thread::spawn(move || reader.list_projects().expect("project list"))
+            })
+            .collect();
+        for thread in threads {
+            assert_eq!(thread.join().expect("thread joins"), vec![created.clone()]);
+        }
+        assert_eq!(
+            reader.lock.lock().disk_reads,
+            1,
+            "the synchronized cache should perform one disk read"
+        );
+    }
 
     /// sc-2022 added `training_datasets.character_id` to the migration without
     /// bumping `PROJECT_SCHEMA_VERSION`, so DBs already stamped at the prior

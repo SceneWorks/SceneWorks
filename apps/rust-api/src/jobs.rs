@@ -600,7 +600,6 @@ pub(crate) async fn update_job_progress(
     .await?;
     let reporter_owns_job = match (payload.worker_id.as_deref(), snapshot.worker_id.as_deref()) {
         (Some(reporter), Some(owner)) => reporter == owner,
-        (None, None) => true,
         _ => false,
     };
     let job_is_terminal = TERMINAL_STATUSES.contains(&snapshot.status.as_str());

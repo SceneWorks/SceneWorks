@@ -1831,6 +1831,7 @@ async fn completed_training_job_registers_lora_with_provenance() {
 
     let (job_id, output_dir, adapter_path) =
         submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job(&app, &job_id).await;
 
     // The worker writes the final adapter into the resolved output dir before
     // it reports completion, alongside step checkpoints it does not clean up.
@@ -1857,6 +1858,7 @@ async fn completed_training_job_registers_lora_with_provenance() {
             "stage": "completed",
             "progress": 1,
             "message": "Trained LoRA saved.",
+            "workerId": TEST_TRAINING_WORKER_ID,
             "result": { "outputPath": adapter_path.display().to_string() }
         }),
     )
@@ -1946,6 +1948,7 @@ async fn failed_or_unwritten_training_job_registers_no_lora() {
     // A failed job never registers, even though a manifest entry was staged.
     let (failed_job_id, _output_dir, _adapter_path) =
         submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job(&app, &failed_job_id).await;
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -1955,6 +1958,7 @@ async fn failed_or_unwritten_training_job_registers_no_lora() {
             "stage": "failed",
             "progress": 1,
             "message": "Training failed.",
+            "workerId": TEST_TRAINING_WORKER_ID,
             "error": "CUDA out of memory"
         }),
     )
@@ -1965,6 +1969,7 @@ async fn failed_or_unwritten_training_job_registers_no_lora() {
     // broken registry entry either, and the failure is surfaced in the result.
     let (completed_no_weights_id, _, _) =
         submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job(&app, &completed_no_weights_id).await;
     let (status, completed) = request(
         app.clone(),
         "POST",
@@ -1973,7 +1978,8 @@ async fn failed_or_unwritten_training_job_registers_no_lora() {
             "status": "completed",
             "stage": "completed",
             "progress": 1,
-            "message": "Reported complete without weights."
+            "message": "Reported complete without weights.",
+            "workerId": TEST_TRAINING_WORKER_ID
         }),
     )
     .await;
@@ -2119,6 +2125,36 @@ async fn non_owner_completed_report_registers_no_lora_and_409s() {
         "a completed report from a non-owner must 409"
     );
 
+    // Omitting workerId is not a privileged/internal path: the same unclaimed
+    // job must reject the report before registration side effects.
+    let (status, _rejected) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Ownerless completion.",
+            "result": { "outputPath": adapter_path.display().to_string() }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "an ownerless completed report must 409"
+    );
+    let (status, unchanged) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unchanged["status"], "queued");
+
     // No catalog entry: a non-owned report must not register a LoRA.
     let (status, loras) = request(
         app,
@@ -2159,9 +2195,9 @@ async fn winning_completed_report_still_registers_lora() {
     let (job_id, output_dir, adapter_path) =
         submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
     stage_trained_adapter(&output_dir, &adapter_path);
+    claim_training_job(&app, &job_id).await;
 
-    // A trusted (owner-equivalent, worker_id unset both sides) report against the
-    // still-non-terminal job wins the race and registers normally.
+    // The claimed worker's completion wins the race and registers normally.
     let (status, completed) = request(
         app.clone(),
         "POST",
@@ -2171,6 +2207,7 @@ async fn winning_completed_report_still_registers_lora() {
             "stage": "completed",
             "progress": 1,
             "message": "Trained LoRA saved.",
+            "workerId": TEST_TRAINING_WORKER_ID,
             "result": { "outputPath": adapter_path.display().to_string() }
         }),
     )
@@ -2249,6 +2286,7 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let job_id = job["id"].as_str().expect("job id").to_owned();
+    claim_training_job(&app, &job_id).await;
 
     let (status, completed) = request(
         app.clone(),
@@ -2258,7 +2296,8 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
             "status": "completed",
             "stage": "completed",
             "progress": 1,
-            "message": "Crafted completion."
+            "message": "Crafted completion.",
+            "workerId": TEST_TRAINING_WORKER_ID
         }),
     )
     .await;
@@ -2330,6 +2369,7 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
     )
     .await;
     let evil_job_id = evil_job["id"].as_str().expect("job id").to_owned();
+    claim_training_job(&app, &evil_job_id).await;
     let (status, completed) = request(
         app.clone(),
         "POST",
@@ -2338,7 +2378,8 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
             "status": "completed",
             "stage": "completed",
             "progress": 1,
-            "message": "Traversal completion."
+            "message": "Traversal completion.",
+            "workerId": TEST_TRAINING_WORKER_ID
         }),
     )
     .await;
@@ -2376,6 +2417,7 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
     )
     .await;
     let files_job_id = files_job["id"].as_str().expect("job id").to_owned();
+    claim_training_job(&app, &files_job_id).await;
     let (status, completed) = request(
         app.clone(),
         "POST",
@@ -2384,7 +2426,8 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
             "status": "completed",
             "stage": "completed",
             "progress": 1,
-            "message": "Files traversal completion."
+            "message": "Files traversal completion.",
+            "workerId": TEST_TRAINING_WORKER_ID
         }),
     )
     .await;
