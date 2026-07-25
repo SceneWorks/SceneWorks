@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiFetch, setMediaTicket } from "../api.js";
 import { isDesktop as isDesktopShell } from "../runtime.js";
 import { readAccessToken, storeAccessToken, clearAccessToken } from "../accessToken.js";
+import { recordStartupMark } from "../startupTiming.js";
 
 // Owns the remote-access gate (epic 4484): the /api/v1/access probe, the host
 // password (= API token), the login-gate draft/error, and the media-ticket mint
@@ -71,6 +72,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
     }
     if (!access.authRequired) {
       setMediaTicket("");
+      recordStartupMark("media-authorization-settled");
       setMediaReady(true);
       return undefined;
     }
@@ -87,6 +89,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
           return;
         }
         setMediaTicket(response.ticket);
+        recordStartupMark("media-authorization-settled");
         setMediaReady(true);
         setMediaTicketFailed(false);
         dismissNoticeKind("media-ticket");
@@ -97,6 +100,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
         if (closed) {
           return;
         }
+        recordStartupMark("media-authorization-settled");
         setMediaTicketFailed(true);
         pushNotice(
           "media-ticket",
@@ -140,6 +144,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
           return;
         }
         setAccess(result);
+        recordStartupMark("access-resolved");
         setAccessResolved(true);
         dismissNoticeKind("access-probe");
       } catch (err) {

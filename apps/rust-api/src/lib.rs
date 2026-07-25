@@ -9,7 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::body::{to_bytes, Body};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{
-    DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request as AxumRequest, State,
+    DefaultBodyLimit, FromRequest, MatchedPath, Multipart, Path, Query, Request as AxumRequest,
+    State,
 };
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
@@ -889,6 +890,92 @@ fn warn_on_sweep_err(kind: &str, result: std::io::Result<usize>) {
     }
 }
 
+/// One-shot pre-bind phase timer. Startup has only four of these, and `Drop`
+/// ensures a failing phase is still visible without changing the existing error
+/// propagation.
+struct StartupPhaseTimer {
+    phase: &'static str,
+    started: Instant,
+}
+
+impl StartupPhaseTimer {
+    fn start(phase: &'static str) -> Self {
+        Self {
+            phase,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for StartupPhaseTimer {
+    fn drop(&mut self) {
+        tracing::info!(
+            event = "startup_phase_duration",
+            phase = self.phase,
+            duration_ms = self.started.elapsed().as_secs_f64() * 1000.0,
+            "SceneWorks API pre-bind startup phase completed"
+        );
+    }
+}
+
+/// Return only bounded, source-owned route labels. Axum's matched path contains
+/// route parameter *names* (`:project_id`), never their values. Unknown API and
+/// MCP paths deliberately collapse to one label rather than copying a raw URI
+/// that could contain IDs, filesystem-shaped path tails, or secret-bearing query
+/// values.
+fn normalized_api_route(path: &str, matched_path: Option<&str>) -> Option<String> {
+    if path == "/mcp" || path.starts_with("/mcp/") {
+        return Some(
+            matched_path
+                .filter(|route| route.starts_with("/mcp"))
+                .unwrap_or("/mcp/<unmatched>")
+                .to_owned(),
+        );
+    }
+    if path == "/api" || path.starts_with("/api/") {
+        return Some(
+            matched_path
+                .filter(|route| route.starts_with("/api/"))
+                .unwrap_or("/api/<unmatched>")
+                .to_owned(),
+        );
+    }
+    None
+}
+
+async fn api_request_timing(request: AxumRequest, next: Next) -> Response {
+    let method = request.method().clone();
+    // `Uri::path()` excludes the query by contract. Retain it only long enough
+    // to classify API versus frontend traffic; it is never emitted.
+    let path = request.uri().path().to_owned();
+    let matched_path = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|matched| matched.as_str().to_owned());
+    let started = Instant::now();
+    let mut response = next.run(request).await;
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+    if let Some(route) = normalized_api_route(&path, matched_path.as_deref()) {
+        let server_timing = format!("app;dur={elapsed_ms:.3}");
+        if let Ok(value) = HeaderValue::from_str(&server_timing) {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static("server-timing"), value);
+        }
+        tracing::info!(
+            event = "api_request_duration",
+            method = %method,
+            route,
+            status = response.status().as_u16(),
+            duration_ms = elapsed_ms,
+            "SceneWorks API response completed"
+        );
+    }
+
+    response
+}
+
 pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
     Ok(create_app_with_state(settings)?.0)
 }
@@ -922,45 +1009,55 @@ pub(crate) fn create_app_with_state(
             std::fs::create_dir_all(jobs_db_parent),
         );
     }
-    // sc-8882 (F-080): a failed sweep leaves leaked multi-GB upload temps unreclaimed
-    // and was previously silent. WARN (never fatal) so the operator can investigate.
-    warn_on_sweep_err("lora", sweep_stale_lora_uploads(&settings.data_dir));
-    warn_on_sweep_err("pose", sweep_stale_pose_uploads(&settings.data_dir));
-    warn_on_sweep_err("keypoint", sweep_stale_keypoint_uploads(&settings.data_dir));
-    // sc-4204 (F-API-6): asset-import temp files (cache/uploads) had no startup sweep.
-    warn_on_sweep_err("asset", sweep_stale_asset_uploads(&settings.data_dir));
-    let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
-    jobs_store.initialize()?;
-    let purged_terminal_jobs =
-        jobs_store.purge_terminal_jobs_older_than(settings.jobs_retention_days)?;
-    tracing::info!(
-        event = "terminal_job_retention",
-        retention_days = settings.jobs_retention_days,
-        purged_terminal_jobs,
-        "applied terminal job retention"
-    );
-    let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
+    {
+        let _phase = StartupPhaseTimer::start("upload_sweeps");
+        // sc-8882 (F-080): a failed sweep leaves leaked multi-GB upload temps unreclaimed
+        // and was previously silent. WARN (never fatal) so the operator can investigate.
+        warn_on_sweep_err("lora", sweep_stale_lora_uploads(&settings.data_dir));
+        warn_on_sweep_err("pose", sweep_stale_pose_uploads(&settings.data_dir));
+        warn_on_sweep_err("keypoint", sweep_stale_keypoint_uploads(&settings.data_dir));
+        // sc-4204 (F-API-6): asset-import temp files (cache/uploads) had no startup sweep.
+        warn_on_sweep_err("asset", sweep_stale_asset_uploads(&settings.data_dir));
+    }
+    let (jobs_store, interrupted_jobs_on_startup) = {
+        let _phase = StartupPhaseTimer::start("jobs_retention_recovery");
+        let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
+        jobs_store.initialize()?;
+        let purged_terminal_jobs =
+            jobs_store.purge_terminal_jobs_older_than(settings.jobs_retention_days)?;
+        tracing::info!(
+            event = "terminal_job_retention",
+            retention_days = settings.jobs_retention_days,
+            purged_terminal_jobs,
+            "applied terminal job retention"
+        );
+        let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
+        (jobs_store, interrupted_jobs_on_startup)
+    };
     let project_store = Arc::new(ProjectStore::new(
         settings.data_dir.clone(),
         settings.app_version.clone(),
     ));
-    // Reserved global pose library (epic 2282): created up front so its assets
-    // endpoint returns [] (not 404) before any pose is saved. Best-effort.
-    if let Err(error) = project_store.ensure_global_poses_project() {
-        tracing::error!(
-            event = "ensure_global_poses_project_failed",
-            error = %error,
-            "could not ensure global pose library project"
-        );
-    }
-    // Reserved global Key Point Library (epic 4422): created up front so its assets +
-    // collections endpoints return seeded data before any preset is saved. Best-effort.
-    if let Err(error) = project_store.ensure_global_keypoints_project() {
-        tracing::error!(
-            event = "ensure_global_keypoints_project_failed",
-            error = %error,
-            "could not ensure global keypoint library project"
-        );
+    {
+        let _phase = StartupPhaseTimer::start("reserved_project_initialization");
+        // Reserved global pose library (epic 2282): created up front so its assets
+        // endpoint returns [] (not 404) before any pose is saved. Best-effort.
+        if let Err(error) = project_store.ensure_global_poses_project() {
+            tracing::error!(
+                event = "ensure_global_poses_project_failed",
+                error = %error,
+                "could not ensure global pose library project"
+            );
+        }
+        // Reserved global Key Point Library (epic 4422): created up front so its assets +
+        // collections endpoints return seeded data before any preset is saved. Best-effort.
+        if let Err(error) = project_store.ensure_global_keypoints_project() {
+            tracing::error!(
+                event = "ensure_global_keypoints_project_failed",
+                error = %error,
+                "could not ensure global keypoint library project"
+            );
+        }
     }
     // Startup data-integrity pass: drop index rows for assets whose media was
     // purged from disk but whose row/sidecar lingered, so the Library never fetches
@@ -968,18 +1065,21 @@ pub(crate) fn create_app_with_state(
     // Runs before the server binds, so the first `list_assets` is already clean.
     // Best-effort and non-fatal — a failure just leaves the stale rows for next
     // startup; the sidecars are untouched, so nothing is lost.
-    match project_store.prune_all_orphaned_assets() {
-        Ok(0) => {}
-        Ok(pruned) => tracing::info!(
-            event = "orphaned_assets_pruned",
-            count = pruned,
-            "pruned purged-but-referenced assets from project registries at startup"
-        ),
-        Err(error) => tracing::warn!(
-            event = "orphaned_assets_prune_failed",
-            error = %error,
-            "startup orphaned-asset prune failed; the Library may still request purged media"
-        ),
+    {
+        let _phase = StartupPhaseTimer::start("orphaned_asset_maintenance");
+        match project_store.prune_all_orphaned_assets() {
+            Ok(0) => {}
+            Ok(pruned) => tracing::info!(
+                event = "orphaned_assets_pruned",
+                count = pruned,
+                "pruned purged-but-referenced assets from project registries at startup"
+            ),
+            Err(error) => tracing::warn!(
+                event = "orphaned_assets_prune_failed",
+                error = %error,
+                "startup orphaned-asset prune failed; the Library may still request purged media"
+            ),
+        }
     }
     let state = AppState {
         settings,
@@ -1445,7 +1545,10 @@ pub(crate) fn create_app_with_state(
         // model/lora import routes above).
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(middleware::from_fn_with_state(state, access_control))
-        .layer(cors);
+        .layer(cors)
+        // Outermost so auth failures, CORS responses, and handler responses are
+        // all timed. Non-API frontend traffic is ignored by the middleware.
+        .layer(middleware::from_fn(api_request_timing));
     Ok((router, returned_state))
 }
 

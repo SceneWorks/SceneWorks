@@ -392,6 +392,10 @@ take well over an hour on a cold hosted runner.
 
 ## Optional: validate the RunPod proxy
 
+For a page-load performance capture that separates API server work, proxy/body
+transfer, and client readiness without recording secrets, follow the
+[startup and page-load timing procedure](startup-performance-capture.md).
+
 The repository probe checks authenticated job events, SSE heartbeats, and a
 large multipart upload through the real RunPod HTTPS proxy. Keep a representative
 image or video of at least 100 MiB available.

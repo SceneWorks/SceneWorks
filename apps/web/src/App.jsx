@@ -1,5 +1,10 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "./api.js";
+import {
+  beginAssetRequest,
+  recordStartupMark,
+  settleAssetRequest,
+} from "./startupTiming.js";
 import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "./createJob.js";
 import { pollJobToCompletion } from "./pollJob.js";
 import { AccentPicker } from "./components/AccentPicker.jsx";
@@ -1075,9 +1080,34 @@ export function App() {
     setVisitedKeepAliveViews((prev) => (prev.has(activeView) ? prev : new Set(prev).add(activeView)));
   }, [activeView]);
 
+  // Passive effects run after React commits the state batch from refreshData.
+  // Keep this before the active-project effect so the marks reflect the commit
+  // order that unlocks the project-scoped catalog request below.
+  useEffect(() => {
+    if (projectsLoaded) {
+      recordStartupMark("projects-committed");
+    }
+  }, [projectsLoaded, projects]);
+
   useEffect(() => {
     activeProjectRef.current = activeProject;
+    if (activeProject) {
+      recordStartupMark("active-project-selected");
+    }
   }, [activeProject]);
+
+  // The request settle mark is recorded before its state update; this layout
+  // effect then runs on the resulting commit, identifying the first render in
+  // which the Assets surface can consume the selected project's catalog.
+  useLayoutEffect(() => {
+    if (
+      activeView === "Library" &&
+      activeProject &&
+      loadedAssetsProjectId === activeProject.id
+    ) {
+      recordStartupMark("assets-ready-render");
+    }
+  }, [activeProject, activeView, loadedAssetsProjectId]);
 
   useEffect(() => {
     localGenerationJobIdsRef.current = localGenerationJobIds;
@@ -1457,6 +1487,7 @@ export function App() {
     if (!isCurrentProjectRequest(activeProject?.id ?? null, projectId)) {
       return;
     }
+    const timingStartedAt = beginAssetRequest();
     try {
       const items = await apiFetch(`/api/v1/projects/${projectId}/assets?includeRejected=true&includeTrashed=true`, token, { signal });
       // sc-8858: an SSE-triggered refresh for the just-active project can resolve
@@ -1473,6 +1504,8 @@ export function App() {
     } catch (err) {
       if (isAbortError(err)) return;
       setError(err.message);
+    } finally {
+      settleAssetRequest(timingStartedAt);
     }
   }
 
