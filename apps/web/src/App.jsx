@@ -1446,9 +1446,11 @@ export function App() {
     if (!projectId) {
       return;
     }
-    // SSE job events may describe a background project. Do not pay for that
-    // project's full asset listing when its result would be discarded anyway.
-    if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
+    // SSE job events may describe a background project. Use this render's
+    // project, not activeProjectRef: that ref advances in a passive effect while
+    // this closure is published from a layout effect. During A→B, the published
+    // B closure must reject an A refresh before the passive ref catches up.
+    if (!isCurrentProjectRequest(activeProject?.id ?? null, projectId)) {
       return;
     }
     try {

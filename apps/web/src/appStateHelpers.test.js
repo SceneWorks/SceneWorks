@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import appSource from "./App.jsx?raw";
 import {
   hasVisibleLocalFailureForView,
   isCurrentProjectRequest,
@@ -64,5 +65,26 @@ describe("isCurrentProjectRequest", () => {
   it("accepts only the exact currently active project", () => {
     expect(isCurrentProjectRequest("project-a", "project-a")).toBe(true);
     expect(isCurrentProjectRequest("project-b", "project-a")).toBe(false);
+  });
+
+  it("rejects the previous project during the layout-to-passive switch window", () => {
+    // Model the App commit window directly: refreshAssets already closes over B,
+    // while activeProjectRef still says A until its passive effect runs. The
+    // pre-fetch decision must use the render-current B id.
+    const renderCurrentProjectId = "project-b";
+    const passiveRefProjectId = "project-a";
+    const sseProjectId = "project-a";
+
+    expect(passiveRefProjectId).toBe(sseProjectId);
+    expect(isCurrentProjectRequest(renderCurrentProjectId, sseProjectId)).toBe(false);
+
+    const refreshStart = appSource.slice(
+      appSource.indexOf("async function refreshAssets"),
+      appSource.indexOf("try {", appSource.indexOf("async function refreshAssets")),
+    );
+    expect(refreshStart).toContain(
+      "isCurrentProjectRequest(activeProject?.id ?? null, projectId)",
+    );
+    expect(refreshStart).not.toContain("activeProjectRef.current");
   });
 });
