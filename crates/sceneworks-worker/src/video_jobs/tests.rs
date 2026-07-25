@@ -6986,23 +6986,22 @@ fn candle_sequential_video_engines_offload_others_resident() {
         );
     }
     // LTX carries no offload lifecycle — forcing it sequential would be a no-op that misleads.
-    for id in ["ltx_2_3_distilled"] {
-        assert_eq!(
-            candle_video_offload_policy(id),
-            OffloadPolicy::Resident,
-            "{id} must stay resident"
-        );
-        let input = VideoGenInput {
-            engine_id: id,
-            offload_policy: candle_video_offload_policy(id),
-            ..VideoGenInput::default()
-        };
-        assert_eq!(
-            video_load_spec(&input).offload_policy,
-            OffloadPolicy::Resident,
-            "{id}: video_load_spec must keep Resident"
-        );
-    }
+    let id = "ltx_2_3_distilled";
+    assert_eq!(
+        candle_video_offload_policy(id),
+        OffloadPolicy::Resident,
+        "{id} must stay resident"
+    );
+    let input = VideoGenInput {
+        engine_id: id,
+        offload_policy: candle_video_offload_policy(id),
+        ..VideoGenInput::default()
+    };
+    assert_eq!(
+        video_load_spec(&input).offload_policy,
+        OffloadPolicy::Resident,
+        "{id}: video_load_spec must keep Resident"
+    );
 }
 
 /// The SVD production arm returns before the generic Wan/LTX input builder. Exercise the exact
