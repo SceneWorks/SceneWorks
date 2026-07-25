@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 
-export const REVISION = "8b0534512add4007cf6034f5d200e5649ed9b5f0";
+export const REVISION = "56712e6b94f3f68b2e15848c3d425fd58d4fea2b";
 export const MARKER =
   /\b(?:faithful(?:\s+\w+){0,3}\s+ports?|ported\s+from|ports?\s+of|vendors?|vendored|transcribed|copied(?:\s+\w+){0,3}\s+verbatim|adapted\s+from)\b/giu;
 
@@ -19,6 +19,11 @@ const SPECIAL_AREAS = new Map([
   ["crates/audio/candle-audio-acestep/src/vae.rs", "diffusers-source"],
   ["crates/contracts/gen-core/src/sampling/solvers.rs", "comfy-kdiffusion-solvers"],
   ["crates/contracts/gen-core/src/sampling/cfgpp.rs", "cfgpp-formula"],
+  // The Mage latent module transcribes Cephes (ndtri/erf/erfc) under BSD-3 — a distinct third-party
+  // source obligation from the surrounding architecture port (sc-14432). Route it to its own
+  // `cephes-source` area (component `cephes`) so the notice is attributed, not folded into the
+  // `mlx-gen-mage` architecture prefix.
+  ["crates/media/mlx-gen/mlx-gen-mage/src/latent.rs", "cephes-source"],
 ]);
 
 function sha256(text) {
