@@ -893,10 +893,10 @@ describe("SceneWorks app shell", () => {
     // defaultChipLabel ("rendering" -> "Rendering"); same content, different style.
     expect(container.textContent).toContain("Rendering");
     expect([...document.body.querySelectorAll(".worker-progress-card__thumb-media")].map((image) => image.src)).toEqual([
-      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-1.png",
-      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-2.png",
-      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-3.png",
-      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-4.png",
+      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-1.png?thumbnail=384",
+      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-2.png?thumbnail=384",
+      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-3.png?thumbnail=384",
+      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-4.png?thumbnail=384",
     ]);
   });
 

@@ -46,6 +46,14 @@ async fn project_file_route_serves_files_and_rejects_traversal() {
             .and_then(|value| value.to_str().ok()),
         Some("nosniff")
     );
+    assert_eq!(
+        headers
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("private, max-age=31536000, immutable")
+    );
+    assert!(headers.get("etag").is_some());
+    assert!(headers.get("last-modified").is_some());
 
     let (status, _, bytes) = request_raw(
         app.clone(),
@@ -70,6 +78,103 @@ async fn project_file_route_serves_files_and_rejects_traversal() {
     let error: Value = serde_json::from_slice(&bytes).expect("json error parses");
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(error["detail"], "Invalid project file path");
+}
+
+#[tokio::test]
+async fn project_file_route_backfills_and_reuses_bounded_thumbnails() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    let app = create_app(settings).expect("app creates");
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Thumbnail backfill" }),
+    )
+    .await;
+    let project_id = created["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
+    let media_path = project_path.join("assets/images/large.png");
+    let original = image::RgbImage::from_fn(1_280, 720, |x, y| {
+        image::Rgb([
+            ((x * 17 + y * 7) % 256) as u8,
+            ((x * 5 + y * 19) % 256) as u8,
+            ((x * 13 + y * 3) % 256) as u8,
+        ])
+    });
+    original.save(&media_path).expect("original writes");
+    let original_bytes = std::fs::read(&media_path).expect("original reads");
+    let uri = format!("/api/v1/projects/{project_id}/files/assets/images/large.png?thumbnail=384");
+
+    let (status, headers, first_bytes) =
+        request_raw(app.clone(), "GET", &uri, Body::empty(), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("image/png")
+    );
+    let decoded = image::load_from_memory(&first_bytes).expect("thumbnail decodes");
+    assert_eq!((decoded.width(), decoded.height()), (384, 216));
+    assert!(
+        first_bytes.len() < original_bytes.len(),
+        "thumbnail should transfer fewer bytes than its full-resolution source"
+    );
+
+    let cache_root = data_dir.join("cache/media-thumbnails/v1");
+    assert_eq!(
+        std::fs::read_dir(&cache_root)
+            .expect("thumbnail cache exists")
+            .count(),
+        1,
+        "first request backfills exactly one derivative"
+    );
+    let (_, second_headers, second_bytes) =
+        request_raw(app.clone(), "GET", &uri, Body::empty(), &[]).await;
+    assert_eq!(second_bytes, first_bytes);
+    assert_eq!(second_headers.get("etag"), headers.get("etag"));
+    assert_eq!(
+        std::fs::read_dir(&cache_root)
+            .expect("thumbnail cache exists")
+            .count(),
+        1,
+        "warm request reuses the on-disk derivative"
+    );
+
+    let etag = headers
+        .get("etag")
+        .and_then(|value| value.to_str().ok())
+        .expect("etag");
+    let (status, conditional_headers, bytes) = request_raw(
+        app.clone(),
+        "GET",
+        &uri,
+        Body::empty(),
+        &[("if-none-match", etag)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert!(bytes.is_empty());
+    assert_eq!(conditional_headers.get("etag"), headers.get("etag"));
+    assert_eq!(
+        conditional_headers
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+
+    let (status, _, original_response) = request_raw(
+        app,
+        "GET",
+        &format!("/api/v1/projects/{project_id}/files/assets/images/large.png"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(original_response, original_bytes);
 }
 
 #[tokio::test]
@@ -123,6 +228,13 @@ async fn project_file_route_serves_byte_ranges() {
             .get("x-content-type-options")
             .and_then(|v| v.to_str().ok()),
         Some("nosniff")
+    );
+    assert!(headers.get("etag").is_some());
+    assert_eq!(
+        headers
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("private, max-age=31536000, immutable")
     );
 
     // An open-ended range serves to EOF (this is how WebKit fetches the
@@ -715,6 +827,11 @@ async fn media_tickets_authenticate_project_file_urls() {
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     std::fs::write(project_path.join("assets/images/image.png"), b"image-bytes")
         .expect("media writes");
+    std::fs::write(
+        project_path.join("assets/images/thumbnail-source.png"),
+        PNG_32X32,
+    )
+    .expect("thumbnail source writes");
     let file_uri = format!("/api/v1/projects/{project_id}/files/assets/images/image.png");
 
     // Minting a media ticket itself requires authentication.
@@ -763,6 +880,19 @@ async fn media_tickets_authenticate_project_file_urls() {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(bytes, b"image-bytes");
     }
+    let thumbnail_uri = format!(
+        "/api/v1/projects/{project_id}/files/assets/images/thumbnail-source.png?thumbnail=384&ticket={ticket_value}"
+    );
+    let (status, headers, bytes) =
+        request_raw(app.clone(), "GET", &thumbnail_uri, Body::empty(), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("image/png")
+    );
+    assert!(!bytes.is_empty());
 
     // A garbage ticket stays locked out.
     let (status, _) = request(
