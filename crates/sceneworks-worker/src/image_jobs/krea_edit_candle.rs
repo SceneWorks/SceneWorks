@@ -244,7 +244,9 @@ pub(super) async fn generate_candle_krea_edit_stream(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("SceneWorks/krea-2-raw-mlx")
+        .unwrap_or_else(|| {
+            crate::engines::default_repo_for(&request.model).unwrap_or("SceneWorks/krea-2-raw-mlx")
+        })
         .to_owned();
 
     let (width, height) = (request.width, request.height);

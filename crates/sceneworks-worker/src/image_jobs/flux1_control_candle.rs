@@ -6,7 +6,9 @@ use super::{
     ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Settings, Value, WorkerError,
     WorkerResult,
 };
-use super::{resolve_app_managed_model_dir, safe_weight_filename, DownloadContext};
+use super::{
+    resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
+};
 use serde_json::json;
 
 // Candle (Windows/CUDA) FLUX.1-dev strict-control Fun-Controlnet-Union route (sc-8412, epic 8236) —
@@ -64,9 +66,10 @@ pub(super) fn is_flux1_control_model(model: &str) -> bool {
     model == "flux_dev"
 }
 
-/// Resolve the FLUX.1-dev base (diffusers) snapshot: an explicit `modelPath` (advanced or manifest) → the
-/// HF cache snapshot for the manifest `repo` (default `black-forest-labs/FLUX.1-dev`). `None` ⇒ not
-/// present locally (the job is not candle-runnable). Mirrors `resolve_flux2_control_base`.
+/// Resolve the FLUX.1-dev base (diffusers) snapshot: an explicit `modelPath` (advanced or manifest) →
+/// the HF cache snapshot for the manifest `repo`, otherwise the installed [`MODEL_TABLE`] repo.
+/// `None` ⇒ not present locally (the job is not candle-runnable). Mirrors
+/// `resolve_flux2_control_base`.
 fn resolve_flux1_control_base(
     request: &ImageRequest,
     settings: &Settings,
@@ -89,8 +92,12 @@ fn resolve_flux1_control_base(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(FLUX1_CONTROL_CANDLE_BASE_REPO);
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+        .unwrap_or_else(|| {
+            crate::engines::default_repo_for(&request.model)
+                .unwrap_or(FLUX1_CONTROL_CANDLE_BASE_REPO)
+        });
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
+        .map(|root| standard_tier_subdir(&root, request)))
 }
 
 /// True when this is a candle-eligible FLUX.1-dev strict-control job: `flux_dev` with a non-empty
@@ -361,7 +368,10 @@ pub(super) async fn generate_candle_flux1_control_stream(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(FLUX1_CONTROL_CANDLE_BASE_REPO)
+        .unwrap_or_else(|| {
+            crate::engines::default_repo_for(&request.model)
+                .unwrap_or(FLUX1_CONTROL_CANDLE_BASE_REPO)
+        })
         .to_owned();
 
     let pose_count = pose_entries(request).len();

@@ -42,6 +42,8 @@ import jsonschema
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "config" / "manifests" / "builtin.models.jsonc"
 SCHEMA_PATH = ROOT / "packages" / "schemas" / "model-manifest.schema.json"
+ENGINE_TABLE_PATH = ROOT / "crates" / "sceneworks-worker" / "src" / "engines.rs"
+WORKER_SOURCE_PATH = ROOT / "crates" / "sceneworks-worker" / "src"
 
 
 def _strip_jsonc_comments(body: str) -> str:
@@ -91,6 +93,168 @@ def _strip_jsonc_comments(body: str) -> str:
 def _load_builtin_models_manifest() -> dict:
     raw = MANIFEST_PATH.read_text(encoding="utf-8")
     return json.loads(_strip_jsonc_comments(raw))
+
+
+def _model_table_default_repos() -> dict[str, str]:
+    """Read the worker's pure-data ``MODEL_TABLE`` without importing Rust.
+
+    Each row is deliberately flat, so anchoring the two string fields inside a
+    ``ModelRow`` block is sufficient and keeps this catalog audit independent of
+    target-specific worker compilation.
+    """
+    source = ENGINE_TABLE_PATH.read_text(encoding="utf-8")
+    table = source.split("pub(crate) const MODEL_TABLE", maxsplit=1)[1].split("];", maxsplit=1)[0]
+    rows: dict[str, str] = {}
+    for block in re.findall(r"ModelRow\s*\{(.*?)\n\s*\},", table, flags=re.DOTALL):
+        model_id = re.search(r'sceneworks_id:\s*"([^"]+)"', block)
+        default_repo = re.search(r'default_repo:\s*"([^"]+)"', block)
+        assert model_id and default_repo, f"unparseable MODEL_TABLE row:\n{block}"
+        assert model_id.group(1) not in rows, f"duplicate MODEL_TABLE id: {model_id.group(1)}"
+        rows[model_id.group(1)] = default_repo.group(1)
+    assert rows, "MODEL_TABLE parser found no rows"
+    return rows
+
+
+def test_every_model_table_default_repo_is_installed_by_a_builtin_model():
+    """sc-14476: a worker fallback may only name a repo the model installer stages.
+
+    Built-ins intentionally have no top-level ``repo``; the worker lanes therefore
+    resolve through ``MODEL_TABLE.default_repo``. Keep the assertion direction
+    table -> downloads: co-requisites and shared components legitimately add extra
+    download repos that need no table row.
+    """
+    manifest = _load_builtin_models_manifest()
+    downloads_by_id = {
+        model["id"]: {
+            download["repo"]
+            for download in model.get("downloads", [])
+            if download.get("provider", "huggingface") == "huggingface" and download.get("repo")
+        }
+        for model in manifest["models"]
+    }
+    installed_repos = set().union(*downloads_by_id.values())
+    mismatches = {
+        model_id: {
+            "default_repo": default_repo,
+            "installed_repos": sorted(downloads_by_id.get(model_id, set())),
+        }
+        for model_id, default_repo in _model_table_default_repos().items()
+        # Legacy request aliases may retain MODEL_TABLE rows after their standalone
+        # manifest entries are collapsed (qwen_image_edit / _2509 -> _2511).
+        # They are safe only while another built-in stages the identical repo.
+        if default_repo not in installed_repos
+    }
+    assert not mismatches, (
+        "MODEL_TABLE defaults must be staged by a builtin model download; "
+        f"unstaged defaults: {mismatches}"
+    )
+
+
+def test_builtin_models_do_not_declare_a_top_level_repo():
+    """Document the contract that makes each lane's catalog default authoritative."""
+    offenders = [
+        model["id"]
+        for model in _load_builtin_models_manifest()["models"]
+        if model.get("repo")
+    ]
+    assert not offenders, (
+        "built-in repo ownership lives under downloads[]; top-level repo readers must retain an "
+        f"installed fallback. Unexpected declarations: {offenders}"
+    )
+
+
+def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback():
+    """sc-14476 lane inventory and regression guard.
+
+    The marker names the effective resolution source in each lane. Explicit
+    constants below are justified because their repo is staged as a co-requisite
+    of a different model (InstantID/PuLID), while video resolves Wan tiers from
+    the request's own downloads. Any new reader must be consciously added here.
+    """
+    audited_lanes = {
+        "image_jobs/base.rs": "model.default_repo()",
+        "image_jobs/flux1_control_candle.rs": "default_repo_for(&request.model)",
+        "image_jobs/flux2_control_candle.rs": "default_repo_for(&request.model)",
+        "image_jobs/flux_ipadapter.rs": "flux_ipadapter_default_repo(&request.model)",
+        "image_jobs/instantid.rs": "INSTANTID_SDXL_REPO",
+        "image_jobs/kolors_control.rs": "default_repo_for(&request.model)",
+        "image_jobs/kolors_ipadapter.rs": "default_repo_for(&request.model)",
+        "image_jobs/krea_control.rs": "strict_control_default_repo(KREA_CONTROL_ENGINE_ID)",
+        "image_jobs/krea_control_candle.rs": "default_repo_for(&request.model)",
+        "image_jobs/krea_edit_candle.rs": "default_repo_for(&request.model)",
+        "image_jobs/pulid.rs": "PULID_FLUX_REPO",
+        "image_jobs/pulid_candle.rs": "PULID_CANDLE_FLUX_REPO",
+        "image_jobs/qwen_control.rs": "default_repo_for(&request.model)",
+        "image_jobs/qwen_edit_candle.rs": "crate::engines::MODEL_TABLE",
+        "image_jobs/sdxl_edit_candle.rs": "sdxl_edit_candle_default_repo(&request.model)",
+        "image_jobs/sdxl_ipadapter.rs": "sdxl_ipadapter_default_repo(&request.model)",
+        "image_jobs/zimage_control.rs": "zimage_control_base_default_repo(&request.model)",
+        "image_jobs/zimage_edit_candle.rs": "default_repo_for(&request.model)",
+        "image_jobs/zimage_identity_candle.rs": "default_repo_for(&request.model)",
+        "sensenova_jobs.rs": "default_repo_for(&request.model)",
+        "video_jobs/candle.rs": "candle_wan_tier_repo_from_downloads(request, engine_id)",
+    }
+    actual_lanes: set[str] = set()
+    for path in WORKER_SOURCE_PATH.rglob("*.rs"):
+        source = path.read_text(encoding="utf-8").split("\n#[cfg(test)]", maxsplit=1)[0]
+        if re.search(r"\.model_manifest_entry\s*\.get\(\"repo\"\)", source):
+            actual_lanes.add(path.relative_to(WORKER_SOURCE_PATH).as_posix())
+
+    assert actual_lanes == set(audited_lanes), (
+        "top-level model_manifest_entry.repo lane inventory changed; audit every added/removed lane: "
+        f"added={sorted(actual_lanes - set(audited_lanes))}, "
+        f"removed={sorted(set(audited_lanes) - actual_lanes)}"
+    )
+    for relative_path, fallback_marker in audited_lanes.items():
+        source = (
+            (WORKER_SOURCE_PATH / relative_path)
+            .read_text(encoding="utf-8")
+            .split("\n#[cfg(test)]", maxsplit=1)[0]
+        )
+        reads = list(re.finditer(r"\.model_manifest_entry\s*\.get\(\"repo\"\)", source))
+        assert reads, f"{relative_path}: inventoried lane no longer contains a top-level repo read"
+        for read in reads:
+            resolution = source[read.end() : read.end() + 900]
+            assert fallback_marker in resolution, (
+                f"{relative_path}: top-level repo read no longer resolves through audited source "
+                f"{fallback_marker!r}"
+            )
+    for relative_path in (
+        "image_jobs/flux_ipadapter.rs",
+        "image_jobs/sdxl_edit_candle.rs",
+        "image_jobs/sdxl_ipadapter.rs",
+        "image_jobs/zimage_control.rs",
+    ):
+        source = (WORKER_SOURCE_PATH / relative_path).read_text(encoding="utf-8")
+        assert "default_repo_for(model)" in source, (
+            f"{relative_path}: per-family fallback no longer delegates to MODEL_TABLE"
+        )
+
+
+def test_manifest_model_path_is_only_an_optional_override():
+    """sc-14476: converted installs may inject ``modelPath``; normal installs do not.
+
+    Every production reader must therefore inspect it inside an optional branch
+    and continue to repo resolution (or decline an imported-only lane) when it
+    is absent.
+    """
+    readers = 0
+    for path in WORKER_SOURCE_PATH.rglob("*.rs"):
+        source = path.read_text(encoding="utf-8").split("\n#[cfg(test)]", maxsplit=1)[0]
+        for match in re.finditer(
+            r'request\.model_manifest_entry\.get\("modelPath"\)',
+            source,
+        ):
+            readers += 1
+            prefix = source[max(0, match.start() - 500) : match.start()]
+            assert "if let Some(path) = request" in prefix or "let Some(raw_path) = request" in prefix, (
+                f"{path.relative_to(WORKER_SOURCE_PATH)}: modelPath is no longer read through an "
+                "optional branch"
+            )
+    assert readers == 19, (
+        "modelPath reader inventory changed; audit every new reader for an absence fallback "
+        f"(expected 19, found {readers})"
+    )
 
 
 def test_builtin_models_manifest_satisfies_authoring_schema():

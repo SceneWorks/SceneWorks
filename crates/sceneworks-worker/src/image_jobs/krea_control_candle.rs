@@ -135,11 +135,19 @@ pub(super) fn resolve_krea_control_base(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(KREA_CONTROL_BASE_REPO);
-    // Legacy / bring-your-own dense diffusers base (`krea/Krea-2-Turbo`), if separately cached — keeps
-    // existing dense-install behavior byte-identical.
-    if let Some(dense) = huggingface_snapshot_dir(&settings.data_dir, repo) {
-        return Ok(Some(dense));
+        .unwrap_or_else(|| {
+            crate::engines::default_repo_for(&request.model).unwrap_or(KREA_CONTROL_BASE_REPO)
+        });
+    if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, repo) {
+        if repo == KREA_CONTROL_MLX_REPO {
+            let tier = krea_model_subdir(&root, request);
+            if tier.join("transformer").is_dir() {
+                return Ok(Some(tier));
+            }
+        } else {
+            // Explicit legacy / bring-your-own dense diffusers base.
+            return Ok(Some(root));
+        }
     }
     // The installed `SceneWorks/krea-2-turbo-mlx` tier the user actually has (q8 default / q4 / bf16),
     // resolved EXACTLY like the txt2img lane (`krea_model_subdir` honours `advanced.mlxQuantize` and falls
@@ -466,7 +474,9 @@ pub(super) async fn generate_candle_krea_control_stream(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(KREA_CONTROL_BASE_REPO)
+        .unwrap_or_else(|| {
+            crate::engines::default_repo_for(&request.model).unwrap_or(KREA_CONTROL_BASE_REPO)
+        })
         .to_owned();
 
     let pose_count = pose_entries(request).len();

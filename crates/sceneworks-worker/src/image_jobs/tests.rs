@@ -10200,8 +10200,9 @@ fn candle_control_providers_resolve_models_and_repos() {
         "bf16/model.safetensors"
     );
 
-    // sc-8379 — z-image base: both Turbo and base are recognized; the base selects the base repos + the
-    // ~50-step default + the `z_image_control` engine-id row.
+    // sc-8379 — z-image base: both Turbo and base are recognized; the base selects the installed
+    // turnkey repos + the ~50-step default + the `z_image_control` engine-id row. sc-14476 — these
+    // assertions deliberately guard the effective repo fallback rather than the legacy manifest alias.
     assert!(is_zimage_control_model("z_image_turbo"));
     assert!(is_zimage_control_model("z_image"));
     assert!(!is_zimage_base_model("z_image_turbo"));
@@ -10210,11 +10211,11 @@ fn candle_control_providers_resolve_models_and_repos() {
     let base = request(json!({ "projectId": "p", "model": "z_image" }));
     assert_eq!(
         zimage_control_base_default_repo(&turbo.model),
-        "Tongyi-MAI/Z-Image-Turbo"
+        "SceneWorks/z-image-turbo-mlx"
     );
     assert_eq!(
         zimage_control_base_default_repo(&base.model),
-        "Tongyi-MAI/Z-Image"
+        "SceneWorks/z-image-mlx"
     );
     let (turbo_ctrl_repo, _) = zimage_control_repo_file(&turbo).expect("defaults resolve");
     let (base_ctrl_repo, _) = zimage_control_repo_file(&base).expect("defaults resolve");
