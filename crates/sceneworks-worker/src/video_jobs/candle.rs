@@ -440,6 +440,45 @@ pub(super) fn svd_vram_preflight(
     }
 }
 
+/// Build the exact SVD input consumed by the production arm after admission. Keeping this in one
+/// helper makes the measured fit gate inseparable from the sequential residency policy it was
+/// measured under; the SVD arm returns before the generic Wan/LTX input builder below.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn candle_svd_input(
+    engine_id: &'static str,
+    model_dir: PathBuf,
+    conditioning: Vec<Conditioning>,
+    request: &VideoRequest,
+    preflight: SvdVramPreflight,
+) -> VideoGenInput {
+    VideoGenInput {
+        sampler: None,
+        scheduler: None,
+        engine_id,
+        model_dir,
+        conditioning,
+        width: request.width,
+        height: request.height,
+        frames: preflight.frames,
+        fps: request.fps,
+        steps: Some(preflight.steps),
+        seed: resolve_video_seed(request) as u64,
+        motion_bucket_id: Some(
+            svd_i32(request, "motionBucketId", "motionBucketId", 127, 1, 255) as f32,
+        ),
+        noise_aug_strength: Some(svd_f32(
+            request,
+            "noiseAugStrength",
+            "noiseAugStrength",
+            0.02,
+        )),
+        decode_chunk_size: Some(preflight.decode_chunk_size),
+        conditioning_fps: Some(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32),
+        offload_policy: candle_video_offload_policy(engine_id),
+        ..VideoGenInput::default()
+    }
+}
+
 /// The candle Mochi pre-flight's gated result (sc-12306): the tier's baked-in quant marker, obtainable
 /// ONLY by passing the VRAM fit gate.
 ///
@@ -789,36 +828,13 @@ pub(super) async fn generate_candle_video_using(
     // conditioning_fps). Mirrors the MLX `generate_svd`; the conditioning is the source `Reference`
     // resolved above.
     if engine_id == "svd_xt" {
-        let SvdVramPreflight {
-            frames,
-            decode_chunk_size,
-            steps,
-        } = svd_preflight.expect("svd_xt must pass its VRAM preflight before model resolution");
-        let input = VideoGenInput {
-            sampler: None,
-            scheduler: None,
+        let input = candle_svd_input(
             engine_id,
             model_dir,
             conditioning,
-            width: request.width,
-            height: request.height,
-            frames,
-            fps: request.fps,
-            steps: Some(steps),
-            seed: resolve_video_seed(request) as u64,
-            motion_bucket_id: Some(
-                svd_i32(request, "motionBucketId", "motionBucketId", 127, 1, 255) as f32,
-            ),
-            noise_aug_strength: Some(svd_f32(
-                request,
-                "noiseAugStrength",
-                "noiseAugStrength",
-                0.02,
-            )),
-            decode_chunk_size: Some(decode_chunk_size),
-            conditioning_fps: Some(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32),
-            ..VideoGenInput::default()
-        };
+            request,
+            svd_preflight.expect("svd_xt must pass its VRAM preflight before model resolution"),
+        );
         let mut raw_settings = svd_raw_settings(request);
         if let Value::Object(map) = &mut raw_settings {
             map.insert("repo".to_owned(), Value::String(repo.clone()));

@@ -443,18 +443,21 @@ pub(crate) fn svd_fit_error(
     }
     Some(WorkerError::InvalidPayload(format!(
         "Stable Video Diffusion's {frames}-frame, decode-chunk-{decode_chunk_size}, {steps}-step \
-         {width}x{height} CUDA profile exceeds the measured boundary on \
+         {width}x{height} CUDA profile is outside the measured admission envelope on \
          GPU {gpu_id}'s {total} GB VRAM class. A real 32 GB RTX PRO 4500 completed up to \
          {validated_width}x{validated_height}, {validated_frames} frames, \
-         decodeChunkSize={validated_chunk}, and {validated_steps} steps. Use that complete measured \
-         profile (or lower settings), or choose a larger GPU for this unvalidated recipe. The job was \
-         rejected before model load.",
+         decodeChunkSize={validated_chunk}, and {validated_steps} steps at a 17.521 GiB peak, so \
+         even that bounded profile requires at least an {minimum} GB physical-card class. Requests \
+         beyond any measured dimension remain unvalidated through 32 GB. Use a card and recipe \
+         inside that measured envelope, or choose a larger GPU. The job was rejected before model \
+         load.",
         total = budget.total_gb.round() as i64,
         validated_width = crate::fit_gate::SVD_32GB_VALIDATED_MAX_WIDTH,
         validated_height = crate::fit_gate::SVD_32GB_VALIDATED_MAX_HEIGHT,
         validated_frames = crate::fit_gate::SVD_32GB_VALIDATED_MAX_FRAMES,
         validated_chunk = crate::fit_gate::SVD_32GB_VALIDATED_MAX_DECODE_CHUNK,
         validated_steps = crate::fit_gate::SVD_32GB_VALIDATED_MAX_STEPS,
+        minimum = crate::fit_gate::SVD_VALIDATED_PROFILE_MIN_VRAM_GB.round() as i64,
     )))
 }
 
@@ -833,6 +836,12 @@ mod tests {
         assert!(
             svd_fit_error(25, 8, 25, 1024, 576, "0", card_32).is_none(),
             "the real-hardware-validated default profile must be admitted on 32 GB"
+        );
+        let too_small = svd_fit_error(25, 8, 25, 1024, 576, "0", apply_vram_cap(None, Some(16.0)))
+            .expect("the 17.521 GiB measured peak cannot be admitted on a 16 GB card");
+        assert!(
+            too_small.to_string().contains("at least an 18 GB"),
+            "the rejection must explain the measured minimum: {too_small}"
         );
         let over = svd_fit_error(26, 8, 25, 1024, 576, "0", card_32)
             .expect("a recipe beyond the measured frame boundary must still reject on 32 GB");

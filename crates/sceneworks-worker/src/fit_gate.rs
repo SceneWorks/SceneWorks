@@ -190,6 +190,14 @@ pub(crate) const SVD_32GB_VALIDATED_MAX_HEIGHT: u32 = 576;
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 pub(crate) const SVD_VALIDATED_VRAM_GB: f64 = 32.0;
 
+/// Smallest physical-card class that can contain the measured default-profile high-water mark.
+///
+/// The real run reached 17.521 GiB in the UNet stage. Rounding that observation up to 18 GB avoids
+/// claiming the validated tuple can run on a 16 GB card while leaving room for cards between the
+/// measured peak and the 32 GB validation card.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) const SVD_VALIDATED_PROFILE_MIN_VRAM_GB: f64 = 18.0;
+
 /// Whether a request on a 32 GB-or-smaller card crosses the real-hardware boundary established by
 /// sc-14625: 1024x576, 25 frames, decode chunk 8, and 25 steps.
 ///
@@ -212,7 +220,9 @@ pub(crate) fn svd_profile_needs_larger_card(
         || steps > SVD_32GB_VALIDATED_MAX_STEPS
         || width > SVD_32GB_VALIDATED_MAX_WIDTH
         || height > SVD_32GB_VALIDATED_MAX_HEIGHT;
-    exceeds_validated_profile && total_vram_gb.round() <= SVD_VALIDATED_VRAM_GB + f64::EPSILON
+    let physical_card_gb = total_vram_gb.round();
+    physical_card_gb + f64::EPSILON < SVD_VALIDATED_PROFILE_MIN_VRAM_GB
+        || (exceeds_validated_profile && physical_card_gb <= SVD_VALIDATED_VRAM_GB + f64::EPSILON)
 }
 
 #[cfg(test)]
@@ -308,6 +318,8 @@ mod tests {
     #[test]
     fn svd_cuda_boundary_requires_the_complete_validated_32gb_profile() {
         assert!(!svd_profile_needs_larger_card(25, 8, 25, 1024, 576, 32.0));
+        assert!(svd_profile_needs_larger_card(25, 8, 25, 1024, 576, 16.0));
+        assert!(!svd_profile_needs_larger_card(25, 8, 25, 1024, 576, 24.0));
         assert!(svd_profile_needs_larger_card(26, 8, 25, 1024, 576, 32.0));
         assert!(svd_profile_needs_larger_card(25, 9, 25, 1024, 576, 32.0));
         assert!(svd_profile_needs_larger_card(25, 8, 26, 1024, 576, 32.0));

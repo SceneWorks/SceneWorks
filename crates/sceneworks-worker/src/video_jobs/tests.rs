@@ -6883,6 +6883,41 @@ fn candle_sequential_video_engines_offload_others_resident() {
     }
 }
 
+/// The SVD production arm returns before the generic Wan/LTX input builder. Exercise the exact
+/// builder that arm calls so moving Sequential only onto the later generic input cannot silently
+/// restore the resident/OOM path.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_svd_production_input_threads_sequential_into_load_spec() {
+    let request = request(json!({
+        "projectId": "p",
+        "model": "svd",
+        "mode": "image_to_video",
+        "width": 1024,
+        "height": 576,
+        "fps": 7,
+        "seed": 42,
+        "advanced": { "numFrames": 25, "decodeChunkSize": 8, "steps": 25 }
+    }));
+    let input = candle_svd_input(
+        "svd_xt",
+        PathBuf::from("/models/svd"),
+        Vec::new(),
+        &request,
+        SvdVramPreflight {
+            frames: 25,
+            decode_chunk_size: 8,
+            steps: 25,
+        },
+    );
+    assert_eq!(input.offload_policy, OffloadPolicy::Sequential);
+    assert_eq!(
+        video_load_spec(&input).offload_policy,
+        OffloadPolicy::Sequential,
+        "the exact production SVD input must load the measured sequential lifecycle"
+    );
+}
+
 /// Q8 opt-in detection (sc-5679): `advanced.mlxQuantize: 8` (int or string) → true; absent / Q4
 /// → false. Drives both the resolve quant preference and the on-demand q8 fetch.
 #[cfg(target_os = "macos")]
@@ -8410,7 +8445,7 @@ mod candle_video_label_tests {
             "quality": "fast",
             "width": 1024,
             "height": 576,
-            "advanced": { "numFrames": 26, "decodeChunkSize": 8, "steps": 25 }
+            "advanced": { "numFrames": 25, "decodeChunkSize": 9, "steps": 25 }
         }));
         let settings = offline_settings();
         let job = mochi_job_snapshot();
@@ -8437,6 +8472,7 @@ mod candle_video_label_tests {
             .to_string();
         assert!(
             message.contains("rejected before model load")
+                && message.contains("decode-chunk-9")
                 && message.contains("decodeChunkSize=8")
                 && message.contains("25 steps"),
             "the production arm must surface the measured SVD boundary: {message}"
