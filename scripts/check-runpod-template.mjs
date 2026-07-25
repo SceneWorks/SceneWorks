@@ -13,9 +13,10 @@ const [templateText, doc, workflow, readme, dockerfile] = await Promise.all([
 
 const template = JSON.parse(templateText);
 const validationDigest =
-  "sha256:fdd60e35655708915ea046a9db86093360a81c2946f08fe63cef58f59f9ab065";
+  "sha256:376182ddbdf4c78d2a6f66a1e3ce66c573145b4c21b99300e42aeefba9f710ab";
 const releaseRepository = "ghcr.io/sceneworks/sceneworks-runpod";
-const validationTag = "manual-sc10367-2c4dd777560a";
+const validationTag = "manual-sc14427-4fe122b7dba3";
+const staleValidationTag = "manual-sc10367-2c4dd777560a";
 const accessSecret = "{{ RUNPOD_SECRET_sceneworks_access_token }}";
 
 function validateTemplate(candidate) {
@@ -57,6 +58,11 @@ function validateTemplate(candidate) {
 }
 
 validateTemplate(template);
+assert.equal(
+  template.imageName,
+  `${releaseRepository}:${validationTag}`,
+  "checked-in template must pin the E2E-validated image",
+);
 
 // Mutation checks prove the validator rejects the security-sensitive non-defaults
 // that this contract is intended to prevent.
@@ -64,9 +70,19 @@ for (const mutation of [
   { ...template, ports: ["8010/tcp"] },
   { ...template, env: { ...template.env, SCENEWORKS_ACCESS_TOKEN: "" } },
   { ...template, imageName: `${releaseRepository}:latest` },
+  { ...template, imageName: `${releaseRepository}:${staleValidationTag}` },
 ]) {
   assert.throws(() => validateTemplate(mutation));
 }
+
+assert.ok(
+  !templateText.includes(staleValidationTag),
+  "template must not regress to the pre-sc-14427 validation image",
+);
+assert.ok(
+  !doc.includes(staleValidationTag),
+  "deployment guide must not recommend the pre-sc-14427 validation image",
+);
 
 for (const contract of [
   releaseRepository,

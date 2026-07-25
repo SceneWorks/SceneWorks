@@ -1,7 +1,7 @@
 {
   "name": "SceneWorks GPU",
   "category": "NVIDIA",
-  "imageName": "ghcr.io/sceneworks/sceneworks-runpod:manual-sc10367-2c4dd777560a",
+  "imageName": "ghcr.io/sceneworks/sceneworks-runpod:manual-sc14427-4fe122b7dba3",
   "containerDiskInGb": 50,
   "volumeInGb": 20,
   "volumeMountPath": "/workspace",
