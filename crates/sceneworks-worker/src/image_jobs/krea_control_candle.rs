@@ -54,7 +54,7 @@ const KREA_CONTROL_SCALE_CAP: f32 = 0.85;
 const KREA_CONTROL_DEFAULT_STEPS: u32 = 8;
 /// The adapter/engine id recorded on candle Krea control assets (distinct from the `candle_krea` txt2img
 /// lane).
-const KREA_CONTROL_ENGINE: &str = "candle_krea_control";
+pub(super) const KREA_CONTROL_ENGINE: &str = "candle_krea_control";
 /// The [`STRICT_CONTROL_ENGINES`] catalog id this lane validates `advanced.controlMode` against (the Krea
 /// pose-only row — `{Pose}`).
 pub(super) const KREA_CONTROL_ENGINE_ID: &str = "krea_2_turbo_control";

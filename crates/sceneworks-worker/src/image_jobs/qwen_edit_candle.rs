@@ -38,7 +38,7 @@ const QWEN_EDIT_CANDLE_LIGHTNING_STEPS: u32 = 4;
 /// True-CFG guidance default.
 const QWEN_EDIT_CANDLE_DEFAULT_GUIDANCE: f32 = 4.0;
 /// The adapter/engine id recorded on candle Qwen-Image-Edit assets + telemetry.
-const QWEN_EDIT_CANDLE_ENGINE: &str = "candle_qwen_edit";
+pub(super) const QWEN_EDIT_CANDLE_ENGINE: &str = "candle_qwen_edit";
 /// The SceneWorks pre-packed Qwen-Image-Edit-2511 quant-matrix turnkey (sc-8669, epic 8506): self-
 /// contained `q4/` (manifest default) + `q8/` + `bf16/` subdirs, only the transformer packed (the
 /// Qwen2.5-VL TE + VAE stay dense bf16 in every tier). Shared by all four edit ids + the Lightning
@@ -449,6 +449,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     // This closes the candle edit-LoRA gap for the Qwen-Image-Edit family; the SDXL / FLUX.2 /
     // Z-Image candle edit engines still need an `adapters` field in candle-gen (tracked).
     adapters.extend(resolve_adapters(request, settings)?);
+    let adapter_count = adapters.len();
     let mut raw_settings =
         qwen_edit_candle_raw_settings(request, &repo, &qwen_base, steps, guidance);
     // Record the Lightning recipe for telemetry / A-B parity (matches the MLX `distillLora` key format).
@@ -549,7 +550,6 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         // sc-13619: the quant picker is hidden when no alternative tier is installed. Derive advice
         // from the same forced-tier probes as the main candle lane so both reject arms name only
         // smaller tiers this installation can really load.
-        let reject_tail = vram_reject_tail_for_tier(installed_tier_keys(request, settings), tier);
         match plan {
             crate::vram_gate::LoadPlan::Sequential => {
                 tracing::info!(
@@ -570,6 +570,8 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                 true
             }
             crate::vram_gate::LoadPlan::Reject => {
+                let reject_tail =
+                    vram_reject_tail_for_tier(installed_tier_keys(request, settings), tier);
                 // For the always-sequential-capable edit lane a reject is the sc-10856 second-stage
                 // sequential overflow: even staged, the measured peak won't fit the (post-reclaim) budget.
                 if let Some(seq_gb) =
@@ -614,7 +616,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "qwen_edit",
-        0,
+        adapter_count,
         move || {
             let model = QwenEdit::load(&QwenEditPaths {
                 root: qwen_base,

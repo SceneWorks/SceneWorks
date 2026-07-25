@@ -39,7 +39,7 @@ const KREA_EDIT_CANDLE_TURBO_STEPS: u32 = 8;
 const KREA_EDIT_CANDLE_DEFAULT_GUIDANCE: f32 = 3.5;
 /// The adapter/engine id recorded on candle Krea edit assets + telemetry (distinct from the `candle_krea`
 /// txt2img lane — the edit is a separate surface with the required edit LoRA).
-const KREA_EDIT_CANDLE_ENGINE: &str = "candle_krea_edit";
+pub(super) const KREA_EDIT_CANDLE_ENGINE: &str = "candle_krea_edit";
 /// Reference cap — the edit LoRA's fixed-order contract: image 1 (required) + image 2 (optional), either
 /// can be a person. Swapping the
 /// order degrades results (the LoRA authors' note); more than two is off-contract.
