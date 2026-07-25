@@ -1,10 +1,10 @@
 use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
     control_kind_label, pose_entries, requested_control_kind, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, run_candle_strict_control, ApiClient, CancelFlag,
-    CandleStrictControl, Flux1ControlPaths, Flux1ControlRequest, Flux1DevControl, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Settings, Value, WorkerError,
-    WorkerResult,
+    resolve_advanced_or_manifest_u32, run_candle_strict_control, trusted_control_weight_revision,
+    ApiClient, CancelFlag, CandleStrictControl, Flux1ControlPaths, Flux1ControlRequest,
+    Flux1DevControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
+    Progress, Settings, Value, WorkerError, WorkerResult,
 };
 use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
@@ -39,9 +39,10 @@ const FLUX1_CONTROL_CANDLE_REPO: &str = "Shakker-Labs/FLUX.1-dev-ControlNet-Unio
 const FLUX1_CONTROL_CANDLE_FILE: &str = "diffusion_pytorch_model.safetensors";
 /// Pinned revision for the default `FLUX1_CONTROL_CANDLE_REPO` (sc-9879, F-077 follow-up). Fetching the
 /// mutable `main` branch means a re-push (or a compromised token) could silently swap the ControlNet
-/// checkpoint we load; pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). Applied ONLY
-/// to the default repo — a manifest `controlWeights.repo` override keeps `main`. HF's tree API still
-/// reports the file's `lfs.oid`, which `ensure_hf_cached_file` verifies against.
+/// checkpoint we load; pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). Registered
+/// overlays carry their own catalog-authorized immutable revision. HF's tree API still reports the
+/// file's `lfs.oid`, which `ensure_hf_cached_file` verifies against.
+#[cfg(test)]
 pub(super) const FLUX1_CONTROL_CANDLE_REVISION: &str = "5d700aaad96c5ddcdf8a38ef9b22a82aac2c38e5";
 /// The FLUX.1-dev base diffusers repo when the manifest omits `repo` (HF-gated). The candle lane loads
 /// the dense bf16 snapshot.
@@ -145,13 +146,13 @@ pub(super) fn flux1_control_candle_repo_file(
             .unwrap_or(default)
             .to_owned()
     };
-    Ok((
-        pick("repo", FLUX1_CONTROL_CANDLE_REPO),
-        safe_weight_filename(
-            &pick("filename", FLUX1_CONTROL_CANDLE_FILE),
-            "advanced.controlWeights.filename",
-        )?,
-    ))
+    let repo = pick("repo", FLUX1_CONTROL_CANDLE_REPO);
+    let file = safe_weight_filename(
+        &pick("filename", FLUX1_CONTROL_CANDLE_FILE),
+        "advanced.controlWeights.filename",
+    )?;
+    trusted_control_weight_revision(request, FLUX1_CONTROL_CANDLE_ENGINE_ID, &repo, &file)?;
+    Ok((repo, file))
 }
 
 /// Resolve the Shakker Union-Pro-2.0 weight **file** the `Flux1DevControl` provider loads, downloading on
@@ -172,7 +173,11 @@ async fn ensure_flux1_control_candle_weights(
             return Ok(p);
         }
     }
-    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, &repo) {
+    let revision =
+        trusted_control_weight_revision(request, FLUX1_CONTROL_CANDLE_ENGINE_ID, &repo, &file)?;
+    if let Some(snapshot) =
+        crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, &repo, &revision)
+    {
         let f = snapshot.join(&file);
         if f.is_file() {
             return Ok(f);
@@ -194,14 +199,8 @@ async fn ensure_flux1_control_candle_weights(
         .join("controlnet-flux1-candle")
         .join(&file);
     // Pin the exact commit for the default control repo so `main` moving under us can't swap the
-    // ControlNet checkpoint (sc-9879). A manifest `controlWeights.repo` override may carry its own
-    // revision layout, so only pin when we're on the default repo.
-    let revision = if repo == FLUX1_CONTROL_CANDLE_REPO {
-        FLUX1_CONTROL_CANDLE_REVISION
-    } else {
-        "main"
-    };
-    ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await?;
+    // ControlNet checkpoint (sc-9879). Registered overlays carry their own immutable pin.
+    ensure_hf_cached_file(&context, &repo, &revision, &file, &dst).await?;
     Ok(dst)
 }
 

@@ -2,9 +2,9 @@ use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
     pid_effective_dims, pid_output_tier, pose_entries, resolve_advanced_or_manifest_f32,
     resolve_advanced_or_manifest_u32_with, resolve_pid_weights, run_candle_strict_control,
-    ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot,
-    JsonObject, Path, PathBuf, Progress, Settings, Value, WorkerError, WorkerResult, ZImageControl,
-    ZImageControlPaths, ZImageControlRequest,
+    trusted_control_weight_revision, ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan,
+    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Settings, Value, WorkerError,
+    WorkerResult, ZImageControl, ZImageControlPaths, ZImageControlRequest,
 };
 use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
@@ -30,9 +30,10 @@ const ZIMAGE_CTRL_REPO: &str = "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2
 const ZIMAGE_CTRL_FILE: &str = "Z-Image-Turbo-Fun-Controlnet-Union-2.1-8steps.safetensors";
 /// Pinned revision for the default Turbo `ZIMAGE_CTRL_REPO` (sc-9879, F-077 follow-up). Fetching the
 /// mutable `main` branch means a re-push (or a compromised token) could silently swap the ControlNet
-/// checkpoint we load; pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). Applied ONLY
-/// to the default repo — a manifest `controlWeights.repo` override keeps `main`. HF's tree API still
-/// reports the file's `lfs.oid`, which `ensure_hf_cached_file` verifies against.
+/// checkpoint we load; pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). Registered
+/// overlays carry their own catalog-authorized immutable revision. HF's tree API still reports the
+/// file's `lfs.oid`, which `ensure_hf_cached_file` verifies against.
+#[cfg(test)]
 pub(super) const ZIMAGE_CTRL_REVISION: &str = "5155fc56d17821007d6f62ac192c09e0f0e72016";
 /// The Z-Image-Turbo base diffusers repo when the manifest omits `repo`.
 const ZIMAGE_CTRL_DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image-Turbo";
@@ -44,8 +45,9 @@ const ZIMAGE_CTRL_DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image-Turbo";
 const ZIMAGE_CTRL_BASE_REPO: &str = "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1";
 const ZIMAGE_CTRL_BASE_FILE: &str = "diffusion_pytorch_model.safetensors";
 /// Pinned revision for the default base `ZIMAGE_CTRL_BASE_REPO` (sc-9879, F-077 follow-up). Same
-/// defense-in-depth rationale as `ZIMAGE_CTRL_REVISION`; applied ONLY to the default base repo, an
-/// override keeps `main`, and the `lfs.oid` sha256 verify is retained.
+/// defense-in-depth rationale as `ZIMAGE_CTRL_REVISION`; registered overlays carry their own
+/// catalog-authorized immutable revision, and the `lfs.oid` sha256 verify is retained.
+#[cfg(test)]
 pub(super) const ZIMAGE_CTRL_BASE_REVISION: &str = "755999a934909bd5832e20718bb7c639d2a63eb9";
 /// The base Z-Image diffusers repo when the manifest omits `repo` (sc-8379).
 const ZIMAGE_CTRL_BASE_DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image";
@@ -192,13 +194,18 @@ pub(super) fn zimage_control_repo_file(request: &ImageRequest) -> WorkerResult<(
             .unwrap_or(default)
             .to_owned()
     };
-    Ok((
-        pick("repo", default_repo),
-        safe_weight_filename(
-            &pick("filename", default_file),
-            "advanced.controlWeights.filename",
-        )?,
-    ))
+    let repo = pick("repo", default_repo);
+    let file = safe_weight_filename(
+        &pick("filename", default_file),
+        "advanced.controlWeights.filename",
+    )?;
+    let engine_id = if is_zimage_base_model(&request.model) {
+        ZIMAGE_CTRL_BASE_ENGINE_ID
+    } else {
+        ZIMAGE_CTRL_ENGINE_ID
+    };
+    trusted_control_weight_revision(request, engine_id, &repo, &file)?;
+    Ok((repo, file))
 }
 
 /// Resolve the Fun-Controlnet-Union weight **file** the `ZImageControl` provider loads, downloading on
@@ -217,7 +224,15 @@ async fn ensure_zimage_control_weights(
             return Ok(p);
         }
     }
-    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, &repo) {
+    let engine_id = if is_zimage_base_model(&request.model) {
+        ZIMAGE_CTRL_BASE_ENGINE_ID
+    } else {
+        ZIMAGE_CTRL_ENGINE_ID
+    };
+    let revision = trusted_control_weight_revision(request, engine_id, &repo, &file)?;
+    if let Some(snapshot) =
+        crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, &repo, &revision)
+    {
         let f = snapshot.join(&file);
         if f.is_file() {
             return Ok(f);
@@ -238,16 +253,9 @@ async fn ensure_zimage_control_weights(
         .join("controlnet-zimage")
         .join(&file);
     // Pin the exact commit for whichever default control repo (Turbo or base) we resolved so `main`
-    // moving under us can't swap the ControlNet checkpoint (sc-9879). A manifest `controlWeights.repo`
-    // override may carry its own revision layout, so only pin when we're on a default repo.
-    let revision = if repo == ZIMAGE_CTRL_REPO {
-        ZIMAGE_CTRL_REVISION
-    } else if repo == ZIMAGE_CTRL_BASE_REPO {
-        ZIMAGE_CTRL_BASE_REVISION
-    } else {
-        "main"
-    };
-    ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await?;
+    // moving under us can't swap the ControlNet checkpoint (sc-9879). Registered overlays carry their
+    // own immutable pin.
+    ensure_hf_cached_file(&context, &repo, &revision, &file, &dst).await?;
     Ok(dst)
 }
 

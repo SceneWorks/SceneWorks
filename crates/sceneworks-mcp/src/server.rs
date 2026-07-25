@@ -107,6 +107,7 @@ impl JobWaitConfig {
 pub struct SceneWorksMcp {
     api: ApiClient,
     job_wait: JobWaitConfig,
+    allowed_hosts: Vec<String>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -115,6 +116,7 @@ impl SceneWorksMcp {
         Self {
             api,
             job_wait: JobWaitConfig::default(),
+            allowed_hosts: crate::loopback_allowed_hosts(),
             tool_router: Self::tool_router(),
         }
     }
@@ -122,6 +124,11 @@ impl SceneWorksMcp {
     /// Override the blocking-job polling cadence/deadline (tests).
     pub fn with_job_wait(mut self, job_wait: JobWaitConfig) -> Self {
         self.job_wait = job_wait;
+        self
+    }
+
+    pub fn with_allowed_hosts(mut self, allowed_hosts: Vec<String>) -> Self {
+        self.allowed_hosts = allowed_hosts;
         self
     }
 }
@@ -429,6 +436,7 @@ impl SceneWorksMcp {
             .and_then(Value::as_str)
             .unwrap_or(&args.project_id)
             .to_owned();
+        let project_path_segment = encode_path_segment(&project_id);
         let assets: Vec<&Value> = job
             .pointer("/result/assets")
             .and_then(Value::as_array)
@@ -455,7 +463,7 @@ impl SceneWorksMcp {
             let (bytes, header_mime) = self
                 .api
                 .get_bytes(&format!(
-                    "/api/v1/projects/{project_id}/files/{}",
+                    "/api/v1/projects/{project_path_segment}/files/{}",
                     encode_media_path(&media_path)
                 ))
                 .await
@@ -610,7 +618,7 @@ impl SceneWorksMcp {
     fn request_link_base(&self, extensions: &Extensions) -> String {
         extensions
             .get::<http::request::Parts>()
-            .and_then(|parts| request_base_url(&parts.headers, &parts.uri))
+            .and_then(|parts| request_base_url(&parts.headers, &parts.uri, &self.allowed_hosts))
             .unwrap_or_else(|| self.api.base_url().to_owned())
     }
 
@@ -675,9 +683,10 @@ impl SceneWorksMcp {
 
         let mut blocks = Vec::with_capacity(assets.len() + 1);
         let mut summary_assets = Vec::with_capacity(assets.len());
+        let project_path_segment = encode_path_segment(project_id);
         for (asset, media_path) in assets {
             let relative_url = format!(
-                "/api/v1/projects/{project_id}/files/{}?ticket={ticket}",
+                "/api/v1/projects/{project_path_segment}/files/{}?ticket={ticket}",
                 encode_media_path(&media_path)
             );
             let url = format!("{link_base}{relative_url}");
@@ -1079,18 +1088,32 @@ pub(crate) fn media_mime_type(path: &str, sidecar_mime: Option<&str>) -> Option<
 /// the request-target authority as a last resort), and `X-Forwarded-Proto` then
 /// the request scheme (default `http`) for the scheme. Returns `None` when no
 /// authority is available, so the caller falls back to the configured API base.
-pub(crate) fn request_base_url(headers: &http::HeaderMap, uri: &http::Uri) -> Option<String> {
-    let raw_authority = header_str(headers, "x-forwarded-host")
-        .or_else(|| header_str(headers, "host"))
-        .or_else(|| uri.authority().map(http::uri::Authority::as_str))?;
-    let authority = first_csv(raw_authority);
-    if authority.is_empty() {
-        return None;
+pub(crate) fn request_base_url(
+    headers: &http::HeaderMap,
+    uri: &http::Uri,
+    allowed_hosts: &[String],
+) -> Option<String> {
+    if let Some(raw_forwarded) = header_str(headers, "x-forwarded-host") {
+        let authority = first_csv(raw_forwarded);
+        if !crate::forwarded_authority_is_allowed(authority, allowed_hosts) {
+            // Deliberately fall back to SCENEWORKS_API_URL rather than silently
+            // reflecting the proxy's internal Host when its public authority is
+            // not configured.
+            return None;
+        }
+        let scheme = header_str(headers, "x-forwarded-proto")
+            .map(first_csv)
+            .map(str::to_ascii_lowercase)
+            .filter(|scheme| matches!(scheme.as_str(), "http" | "https"))?;
+        return Some(format!("{scheme}://{authority}"));
     }
-    let scheme = header_str(headers, "x-forwarded-proto")
-        .or_else(|| uri.scheme_str())
-        .map(first_csv)
-        .filter(|scheme| !scheme.is_empty())
+
+    let raw_authority = header_str(headers, "host")
+        .or_else(|| uri.authority().map(http::uri::Authority::as_str))?;
+    let authority = http::uri::Authority::try_from(raw_authority.trim()).ok()?;
+    let scheme = uri
+        .scheme_str()
+        .filter(|scheme| matches!(*scheme, "http" | "https"))
         .unwrap_or("http");
     Some(format!("{scheme}://{authority}"))
 }
@@ -1125,22 +1148,29 @@ fn is_image_asset(asset: &Value) -> bool {
 /// silently mis-resolving. The set is the URL path percent-encode set plus `%`
 /// itself (the input is a raw filesystem path, not an already-escaped URL).
 pub(crate) fn encode_media_path(path: &str) -> String {
+    path.split('/')
+        .map(encode_path_segment)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Percent-encode one untrusted URL path segment, including `/` so a project id
+/// cannot escape its route slot.
+pub(crate) fn encode_path_segment(segment: &str) -> String {
     use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
     const SEGMENT: &AsciiSet = &CONTROLS
         .add(b' ')
         .add(b'"')
         .add(b'#')
         .add(b'%')
+        .add(b'/')
         .add(b'<')
         .add(b'>')
         .add(b'?')
         .add(b'`')
         .add(b'{')
         .add(b'}');
-    path.split('/')
-        .map(|segment| utf8_percent_encode(segment, SEGMENT).to_string())
-        .collect::<Vec<_>>()
-        .join("/")
+    utf8_percent_encode(segment, SEGMENT).to_string()
 }
 
 /// The project-relative media path of a result asset, normalized for the
@@ -1800,31 +1830,48 @@ mod tests {
     }
 
     #[test]
-    fn request_base_url_prefers_forwarded_then_host_then_none() {
+    fn request_base_url_accepts_only_configured_forwarded_authority() {
         use http::{HeaderMap, HeaderValue, Uri};
         let uri: Uri = "/mcp".parse().unwrap();
+        let allowed = vec!["studio.example.com".to_owned()];
 
         // A plain Host header → http scheme by default.
         let mut headers = HeaderMap::new();
         headers.insert("host", HeaderValue::from_static("192.168.4.97:8000"));
         assert_eq!(
-            request_base_url(&headers, &uri).as_deref(),
+            request_base_url(&headers, &uri, &allowed).as_deref(),
             Some("http://192.168.4.97:8000")
         );
 
-        // Reverse-proxy headers win, and only the first CSV entry is used.
+        // A configured reverse-proxy authority wins, and only the first CSV entry is used.
         headers.insert(
             "x-forwarded-host",
             HeaderValue::from_static("studio.example.com, inner:8000"),
         );
         headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
         assert_eq!(
-            request_base_url(&headers, &uri).as_deref(),
+            request_base_url(&headers, &uri, &allowed).as_deref(),
             Some("https://studio.example.com")
         );
 
+        // An arbitrary forwarded authority never receives ticket-bearing URLs:
+        // None deliberately selects the configured API base.
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("attacker.example"),
+        );
+        assert_eq!(request_base_url(&headers, &uri, &allowed), None);
+        assert_eq!(request_base_url(&headers, &uri, &[]), None);
+
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("studio.example.com"),
+        );
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("ftp"));
+        assert_eq!(request_base_url(&headers, &uri, &allowed), None);
+
         // No authority anywhere → None so the caller keeps the configured base.
-        assert_eq!(request_base_url(&HeaderMap::new(), &uri), None);
+        assert_eq!(request_base_url(&HeaderMap::new(), &uri, &allowed), None);
     }
 
     #[test]
@@ -1841,6 +1888,15 @@ mod tests {
         );
         // A '?' in a segment can't be mistaken for the query string.
         assert_eq!(encode_media_path("a/b?c.png"), "a/b%3Fc.png");
+    }
+
+    #[test]
+    fn encode_project_id_cannot_escape_its_route_segment() {
+        assert_eq!(encode_path_segment("project_123"), "project_123");
+        assert_eq!(
+            encode_path_segment("../other?ticket=stolen"),
+            "..%2Fother%3Fticket=stolen"
+        );
     }
 
     #[test]
