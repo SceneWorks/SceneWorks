@@ -284,6 +284,10 @@ pub struct AppState {
     pub(crate) external_base_model_cache: Arc<Mutex<ExternalBaseModelCache>>,
     pub(crate) http_client: reqwest::Client,
     pub(crate) interrupted_jobs_on_startup: usize,
+    /// Deterministic race hook for progress acceptance tests. Production builds
+    /// contain no hook or synchronization overhead.
+    #[cfg(test)]
+    pub(crate) progress_before_accept_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {

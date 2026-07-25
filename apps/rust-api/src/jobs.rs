@@ -579,78 +579,94 @@ pub(crate) async fn update_job_progress(
         optional_number_to_f64(payload.peak_gpu_memory_pct.as_ref(), "peakGpuMemoryPct")?;
     let peak_gpu_load_pct =
         optional_number_to_f64(payload.peak_gpu_load_pct.as_ref(), "peakGpuLoadPct")?;
-    let mut result = payload.result;
-    // sc-11213 (F-028): the three completion side-effects below
-    // (`register_completed_training_lora`, `register_completed_control_overlay`,
-    // and `persist_reported_assets`) each write catalog/project state. They must
-    // fire ONLY when the forthcoming `store.update_job_progress` will actually
-    // accept this report — i.e. the reporter still owns the job and the job is
-    // not already terminal. Otherwise a report that lost the race with
-    // cancel/sweep/reclaim, or an authenticated non-owner, could register a ghost
-    // LoRA/overlay or persist assets the user explicitly canceled, and only
-    // *then* receive the 409. So read the job snapshot once and gate the
-    // side-effects on ownership + non-terminal status, mirroring the store's own
-    // `TerminalJobImmutable`/`NotJobOwner` checks. When the gate rejects, we fall
-    // straight through to `store.update_job_progress`, whose in-transaction
-    // re-check is the authoritative final gate and returns the same 409 unchanged.
-    let snapshot = store_call(state.clone(), {
-        let job_id = job_id.to_owned();
-        move |store, _timeout| store.get_job(&job_id)
+    let submitted_result = payload.result;
+
+    // Test-only one-shot rendezvous that makes a competing terminal transition
+    // deterministic. Take the hook before awaiting so the competing request is
+    // not blocked by the same mutex.
+    #[cfg(test)]
+    let progress_barrier = state.progress_before_accept_once.lock().take();
+    #[cfg(test)]
+    if let Some(barrier) = progress_barrier {
+        barrier.wait().await;
+        barrier.wait().await;
+    }
+
+    // Win the authoritative ownership/terminal-state race before performing
+    // any async catalog or project writes. A snapshot precheck is insufficient:
+    // cancel/sweep/a competing terminal report can commit while those writes
+    // await and make the later progress update return 409 after side effects.
+    let accepted = store_call(state.clone(), {
+        let job_id = job_id.clone();
+        let result = submitted_result.clone();
+        let worker_id = payload.worker_id.clone();
+        let status = payload.status.clone();
+        let stage = payload.stage;
+        let message = payload.message.clone();
+        let error = payload.error.clone();
+        let backend = payload.backend.clone();
+        move |store, _timeout| {
+            store.update_job_progress_with_outcome(
+                &job_id,
+                ProgressUpdate {
+                    status,
+                    stage,
+                    progress,
+                    message,
+                    error,
+                    result,
+                    eta_seconds,
+                    peak_gpu_memory_pct,
+                    peak_gpu_load_pct,
+                    backend,
+                    worker_id,
+                },
+            )
+        }
     })
     .await?;
-    let reporter_owns_job = match (payload.worker_id.as_deref(), snapshot.worker_id.as_deref()) {
-        (Some(reporter), Some(owner)) => reporter == owner,
-        _ => false,
-    };
-    let job_is_terminal = TERMINAL_STATUSES.contains(&snapshot.status.as_str());
-    if reporter_owns_job && !job_is_terminal {
+    let status_changed = accepted.previous_status != accepted.job.status;
+    let mut job = accepted.job;
+
+    if accepted.applied {
+        // Start from the store's accepted result because it may have merged
+        // accumulated training-sample history into the submitted object.
+        let accepted_result = job.result.clone();
+        let mut result = accepted_result.clone();
         // On a completing real training run, register the produced adapter as a
-        // SceneWorks LoRA *before* recording completion, and fold the outcome into
-        // the job result (story 1418). Doing it here keeps the result write atomic
-        // and makes a registration failure visible in the job record rather than
-        // silently dropping the trained output.
+        // SceneWorks LoRA after authoritative completion acceptance, then fold
+        // the registration outcome into the persisted result (story 1418).
         if matches!(payload.status, JobStatus::Completed) {
             if let Some(status) = register_completed_training_lora(&state, &job_id).await {
-                result.get_or_insert_with(JsonObject::new).extend(status);
+                result.extend(status);
             }
             // A completing ControlTraining run registers its trained overlay into the control-overlay
             // manifest so it is selectable + runnable in generation (sc-10165, B4). Gates on
             // `JobType::ControlTraining`, so exactly one of these two fires per job.
             if let Some(status) = register_completed_control_overlay(&state, &job_id).await {
-                result.get_or_insert_with(JsonObject::new).extend(status);
+                result.extend(status);
             }
         }
         // Persist any generated assets the worker reported as `assetWrites` facts and
         // re-inject the built sidecars into the result so the UI keeps streaming them
         // (story 1656 — Rust is the single project-store writer).
-        if let Some(result_obj) = result.as_mut() {
-            persist_reported_assets(&state, &job_id, result_obj).await?;
+        persist_reported_assets(&state, &job_id, &mut result).await?;
+
+        if result != accepted_result {
+            let expected_worker_id = job.worker_id.clone();
+            let expected_status = job.status;
+            job = store_call(state.clone(), move |store, _timeout| {
+                store.replace_job_result_after_progress(
+                    &job_id,
+                    expected_worker_id.as_deref(),
+                    expected_status,
+                    &accepted_result,
+                    &result,
+                )
+            })
+            .await?;
         }
     }
-    let (job, status_changed) = store_call(state.clone(), move |store, _timeout| {
-        // Read the prior status in the same blocking round-trip so we can tell a
-        // pure progress tick (status unchanged) from a real queue transition.
-        let previous_status = store.get_job(&job_id).map(|job| job.status).ok();
-        let job = store.update_job_progress(
-            &job_id,
-            ProgressUpdate {
-                status: payload.status,
-                stage: payload.stage,
-                progress,
-                message: payload.message,
-                error: payload.error,
-                result,
-                eta_seconds,
-                peak_gpu_memory_pct,
-                peak_gpu_load_pct,
-                backend: payload.backend,
-                worker_id: payload.worker_id,
-            },
-        )?;
-        let status_changed = previous_status.as_ref() != Some(&job.status);
-        Ok::<(JobSnapshot, bool), JobsStoreError>((job, status_changed))
-    })
-    .await?;
     publish(&state, "job.updated", &job);
     // sc-4203 (F-API-5): workers POST progress per inference step. The queue summary
     // is a full SQLite aggregation plus a stale-worker sweep, serialized and

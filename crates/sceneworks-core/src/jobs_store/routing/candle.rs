@@ -15,7 +15,7 @@ use crate::jobs_store::routing::mlx::{
     video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::{
-    has_nonempty_array, has_nonempty_string, has_nonempty_string_array,
+    has_nonempty_array, has_nonempty_nested_array, has_nonempty_string, has_nonempty_string_array,
 };
 
 /// Candle video models whose provider descriptor advertises user-LoRA inference, so a video job
@@ -229,6 +229,28 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
 #[cfg(test)]
 pub(crate) fn candle_image_route_lanes() -> Vec<CandleImageLane> {
     CANDLE_IMAGE_ROUTES.iter().map(|route| route.lane).collect()
+}
+
+#[cfg(test)]
+pub(crate) fn candle_pose_route_models() -> Vec<&'static str> {
+    CANDLE_IMAGE_ROUTES
+        .iter()
+        .filter(|route| {
+            matches!(
+                route.lane,
+                CandleImageLane::QwenControl
+                    | CandleImageLane::KolorsControl
+                    | CandleImageLane::ZImageControl
+                    | CandleImageLane::Flux1Control
+                    | CandleImageLane::Flux2Control
+                    | CandleImageLane::KreaControl
+            )
+        })
+        .flat_map(|route| match route.models {
+            ModelMatch::Any(models) => models.iter().copied(),
+            ModelMatch::Family(_) => [].iter().copied(),
+        })
+        .collect()
 }
 
 /// Resolve the first matching Candle image lane. The order is part of the scheduler contract:
@@ -622,10 +644,7 @@ pub(crate) fn sdxl_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
-    payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+    has_nonempty_string(payload, "sourceAssetId")
 }
 
 /// FLUX.2-klein edit candle-routing conditions (sc-5487, epic 5480). The candle `Flux2Edit` provider
@@ -638,10 +657,7 @@ pub(crate) fn flux2_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
-    payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+    has_nonempty_string(payload, "sourceAssetId")
 }
 
 /// Qwen-Image-Edit candle-routing conditions (sc-5487, epic 5480). The candle `QwenEdit` provider
@@ -654,10 +670,7 @@ pub(crate) fn qwen_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
-    payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+    has_nonempty_string(payload, "sourceAssetId")
 }
 
 /// Z-Image img2img / edit candle-routing conditions (sc-6595, epic 5480). The candle `ZImageEdit`
@@ -670,10 +683,7 @@ pub(crate) fn zimage_edit_candle_eligible(payload: &Map<String, Value>) -> bool 
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
-    payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+    has_nonempty_string(payload, "sourceAssetId")
 }
 
 /// Krea 2 Kontext-style dual-conditioned image-edit candle-routing conditions (epic 10871). The bespoke
@@ -691,19 +701,8 @@ pub(crate) fn krea_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
-    let has_reference_list = payload
-        .get("referenceAssetIds")
-        .and_then(Value::as_array)
-        .is_some_and(|ids| {
-            ids.iter()
-                .filter_map(Value::as_str)
-                .any(|id| !id.trim().is_empty())
-        });
-    has_reference_list
-        || payload
-            .get("sourceAssetId")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
+    has_nonempty_string_array(payload, "referenceAssetIds")
+        || has_nonempty_string(payload, "sourceAssetId")
 }
 
 /// Krea 2 img2img (reference-guided latent-init) candle-routing conditions (sc-10134 Turbo, sc-10226 Raw;
@@ -719,10 +718,7 @@ pub(crate) fn krea_img2img_candle_eligible(payload: &Map<String, Value>) -> bool
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+    has_nonempty_string(payload, "referenceAssetId")
 }
 
 /// Z-Image img2img (reference-guided latent-init) candle-routing conditions — the registered `z_image`
@@ -739,10 +735,7 @@ pub(crate) fn zimage_img2img_candle_eligible(payload: &Map<String, Value>) -> bo
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+    has_nonempty_string(payload, "referenceAssetId")
 }
 
 /// The three registered candle SD3.5 txt2img ids (`candle-gen-sd3`): Large (CFG), Large Turbo
@@ -765,10 +758,7 @@ pub(crate) fn sd3_img2img_candle_eligible(payload: &Map<String, Value>) -> bool 
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+    has_nonempty_string(payload, "referenceAssetId")
 }
 
 /// Ideogram 4 img2img / Remix + mask inpaint / outpaint edit candle-routing conditions (sc-6598, epic
@@ -784,10 +774,7 @@ pub(crate) fn ideogram_edit_candle_eligible(payload: &Map<String, Value>) -> boo
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
-    payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+    has_nonempty_string(payload, "sourceAssetId")
 }
 
 /// Ideogram 4 / Turbo img2img (reference-guided latent-init) candle-routing conditions (sc-10261, epic
@@ -804,10 +791,7 @@ pub(crate) fn ideogram_img2img_candle_eligible(payload: &Map<String, Value>) -> 
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+    has_nonempty_string(payload, "referenceAssetId")
 }
 
 /// Boogu instruction-edit candle-routing conditions (sc-7524, epic 6831). The candle `boogu_image_edit`
@@ -825,18 +809,8 @@ pub(crate) fn boogu_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     }
     // One source: the single `sourceAssetId`, or the plural `referenceAssetIds` multi-image picker
     // (sc-7645 — the Boogu DiT packs up to 5 references). Either routes the edit to candle.
-    let single = payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    let plural = payload
-        .get("referenceAssetIds")
-        .and_then(Value::as_array)
-        .is_some_and(|ids| {
-            ids.iter()
-                .any(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
-        });
-    single || plural
+    has_nonempty_string(payload, "sourceAssetId")
+        || has_nonempty_string_array(payload, "referenceAssetIds")
 }
 
 /// Boogu Base/Turbo img2img (reference-guided latent-init) candle-routing conditions (sc-11786, epic
@@ -853,10 +827,7 @@ pub(crate) fn boogu_img2img_candle_eligible(payload: &Map<String, Value>) -> boo
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+    has_nonempty_string(payload, "referenceAssetId")
 }
 
 /// Bernini still-image i2i candle-routing conditions (sc-10996, epic 6562). The candle
@@ -872,10 +843,7 @@ pub(crate) fn bernini_image_edit_candle_eligible(payload: &Map<String, Value>) -
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
-    payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+    has_nonempty_string(payload, "sourceAssetId")
 }
 
 /// SDXL IP-Adapter-Plus candle-routing conditions (sc-5488, epic 5480). The candle `IpAdapterSdxl`
@@ -889,13 +857,9 @@ pub(crate) fn sdxl_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bo
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    let non_empty = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    non_empty("referenceAssetId") && !non_empty("sourceAssetId") && !non_empty("maskAssetId")
+    has_nonempty_string(payload, "referenceAssetId")
+        && !has_nonempty_string(payload, "sourceAssetId")
+        && !has_nonempty_string(payload, "maskAssetId")
 }
 
 /// Kolors IP-Adapter-Plus candle-routing conditions (sc-5488, epic 5480). The candle `IpAdapterKolors`
@@ -909,13 +873,9 @@ pub(crate) fn kolors_ipadapter_candle_eligible(payload: &Map<String, Value>) -> 
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    let non_empty = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    non_empty("referenceAssetId") && !non_empty("sourceAssetId") && !non_empty("maskAssetId")
+    has_nonempty_string(payload, "referenceAssetId")
+        && !has_nonempty_string(payload, "sourceAssetId")
+        && !has_nonempty_string(payload, "maskAssetId")
 }
 
 /// FLUX XLabs IP-Adapter candle-routing conditions (sc-5872, epic 5480). The candle `IpAdapterFlux`
@@ -929,13 +889,9 @@ pub(crate) fn flux_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bo
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    let non_empty = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    non_empty("referenceAssetId") && !non_empty("sourceAssetId") && !non_empty("maskAssetId")
+    has_nonempty_string(payload, "referenceAssetId")
+        && !has_nonempty_string(payload, "sourceAssetId")
+        && !has_nonempty_string(payload, "maskAssetId")
 }
 
 /// Qwen-Image strict-pose ControlNet candle-routing conditions (sc-5489, epic 5480). The candle
@@ -949,12 +905,7 @@ pub(crate) fn qwen_control_candle_eligible(payload: &Map<String, Value>) -> bool
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
+    has_nonempty_nested_array(payload, "advanced", "poses")
 }
 
 /// Kolors strict-pose ControlNet candle-routing conditions (sc-5489, epic 5480). The candle
@@ -967,12 +918,7 @@ pub(crate) fn kolors_control_candle_eligible(payload: &Map<String, Value>) -> bo
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
+    has_nonempty_nested_array(payload, "advanced", "poses")
 }
 
 /// Z-Image strict-control Fun-ControlNet candle-routing conditions (sc-5489 origin / sc-8379 base, epic
@@ -986,12 +932,7 @@ pub(crate) fn zimage_control_candle_eligible(payload: &Map<String, Value>) -> bo
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
+    has_nonempty_nested_array(payload, "advanced", "poses")
 }
 
 /// Z-Image identity-init (Image Studio "With Character") candle-routing conditions (sc-8409, epic 4406).
@@ -1010,11 +951,7 @@ pub(crate) fn zimage_identity_candle_eligible(payload: &Map<String, Value>) -> b
         return false;
     }
     // A non-empty referenceAssetId is the identity source.
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    if !has_reference {
+    if !has_nonempty_string(payload, "referenceAssetId") {
         return false;
     }
     // referenceStrength > 0 engages the identity init (parity with `zimage_identity_strength`); without a
@@ -1049,13 +986,7 @@ pub(crate) fn zimage_identity_candle_eligible(payload: &Map<String, Value>) -> b
     if angle_set {
         return false;
     }
-    let has_poses = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
-    !has_poses
+    !has_nonempty_nested_array(payload, "advanced", "poses")
 }
 
 /// FLUX.1-dev strict-control Shakker Union-Pro-2.0 candle-routing conditions (sc-8412, epic 8236). The
@@ -1069,12 +1000,7 @@ pub(crate) fn flux1_control_candle_eligible(payload: &Map<String, Value>) -> boo
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
+    has_nonempty_nested_array(payload, "advanced", "poses")
 }
 
 /// FLUX.2-dev strict-pose Fun-Controlnet-Union candle-routing conditions (sc-7736, epic 6564). The candle
@@ -1087,12 +1013,7 @@ pub(crate) fn flux2_dev_control_candle_eligible(payload: &Map<String, Value>) ->
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
+    has_nonempty_nested_array(payload, "advanced", "poses")
 }
 
 /// Krea 2 pose-ControlNet candle-routing conditions (sc-8464, epic 8459). The candle `Krea2Control`
@@ -1105,12 +1026,7 @@ pub(crate) fn krea_control_candle_eligible(payload: &Map<String, Value>) -> bool
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
+    has_nonempty_nested_array(payload, "advanced", "poses")
 }
 
 /// Candle-routed image models that HAVE a candle strict-control lane (sc-5489; flux2_dev sc-7736; base
@@ -1123,6 +1039,7 @@ pub(crate) const CANDLE_POSE_MODELS: &[&str] = &[
     "z_image",
     "flux2_dev",
     "flux_dev",
+    "krea_2_turbo",
 ];
 
 pub(crate) fn model_has_candle_pose_lane(model: &str) -> bool {

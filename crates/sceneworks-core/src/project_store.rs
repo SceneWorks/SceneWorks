@@ -3,6 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 use parking_lot::{Mutex, ReentrantMutexGuard};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -261,6 +264,22 @@ struct RegistryItem {
 struct RegistryFingerprint {
     modified: SystemTime,
     len: u64,
+    // `modified + len` misses in-place same-length rewrites when a tool
+    // preserves mtime. Unix ctime is the filesystem change revision; dev+ino
+    // also distinguish atomic replacement by another process.
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+    // Platforms without a stable std change-time expose a content token
+    // instead. The registry is tiny, and correctness beats retaining a stale
+    // cross-process cache entry.
+    #[cfg(not(unix))]
+    content_token: u64,
 }
 
 #[derive(Debug, Default)]
@@ -277,6 +296,21 @@ fn registry_fingerprint(path: &Path) -> ProjectStoreResult<Option<RegistryFinger
         Ok(metadata) => Ok(Some(RegistryFingerprint {
             modified: metadata.modified()?,
             len: metadata.len(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+            #[cfg(unix)]
+            changed_seconds: metadata.ctime(),
+            #[cfg(unix)]
+            changed_nanoseconds: metadata.ctime_nsec(),
+            #[cfg(not(unix))]
+            content_token: {
+                use std::hash::{DefaultHasher, Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                fs::read(path)?.hash(&mut hasher);
+                hasher.finish()
+            },
         })),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
@@ -4889,6 +4923,61 @@ mod tests {
             reader.lock.lock().disk_reads,
             2,
             "a changed registry fingerprint must invalidate the cache"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recent_project_registry_cache_detects_same_size_rewrite_with_restored_mtime() {
+        use std::fs::{File, FileTimes, OpenOptions};
+        use std::io::Write;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let writer = ProjectStore::new(&data_dir, "test-version");
+        writer.create_project("Cached").expect("project creates");
+
+        let reader = ProjectStore::new(&data_dir, "test-version");
+        reader.list_projects().expect("first list");
+        assert_eq!(reader.lock.lock().disk_reads, 1);
+
+        let registry_path = reader.registry_path();
+        let metadata = std::fs::metadata(&registry_path).expect("registry metadata");
+        let original = std::fs::read_to_string(&registry_path).expect("registry reads");
+        let rewritten = original.replacen("\"Cached\"", "\"Mutate\"", 1);
+        assert_ne!(rewritten, original, "test must rewrite registry content");
+        assert_eq!(
+            rewritten.len(),
+            original.len(),
+            "test rewrite must preserve file length"
+        );
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&registry_path)
+            .expect("registry opens for rewrite");
+        file.write_all(rewritten.as_bytes())
+            .expect("same-size registry rewrite");
+        file.sync_all().expect("registry rewrite syncs");
+        File::open(&registry_path)
+            .expect("registry reopens")
+            .set_times(
+                FileTimes::new()
+                    .set_accessed(metadata.accessed().expect("accessed time"))
+                    .set_modified(metadata.modified().expect("modified time")),
+            )
+            .expect("mtime restores");
+
+        reader.list_projects().expect("invalidated list");
+        let cache = reader.lock.lock();
+        assert_eq!(
+            cache.disk_reads, 2,
+            "filesystem change revision must invalidate same-size same-mtime rewrites"
+        );
+        assert_eq!(
+            cache.items[0].name.as_deref(),
+            Some("Mutate"),
+            "cache must contain the externally rewritten registry"
         );
     }
 

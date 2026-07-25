@@ -2409,9 +2409,14 @@ fn stale_sweep_marks_worker_offline_and_job_interrupted() {
 fn json_columns_use_python_compatible_sorted_key_order() {
     let store = store("json-order");
     let job = store
-        .create_job(image_job(object(
-            json!({ "z": 1, "a": { "b": 2, "a": 1 } }),
-        )))
+        .create_job(image_job(object(json!({
+            "z": 1,
+            "a": {
+                "b": 2,
+                "a": 1,
+                "items": [{ "z": 3, "a": 2 }]
+            }
+        }))))
         .expect("job creates");
 
     let connection = Connection::open(store.db_path()).expect("db opens");
@@ -2423,7 +2428,10 @@ fn json_columns_use_python_compatible_sorted_key_order() {
         )
         .expect("payload json loads");
 
-    assert_eq!(payload_json, r#"{"a":{"a":1,"b":2},"z":1}"#);
+    assert_eq!(
+        payload_json,
+        r#"{"a":{"a":1,"b":2,"items":[{"a":2,"z":3}]},"z":1}"#
+    );
 }
 
 #[test]

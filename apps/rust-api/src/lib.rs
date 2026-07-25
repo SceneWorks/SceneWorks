@@ -35,7 +35,6 @@ use sceneworks_core::jobs_store::{
     candle_supported, mac_capabilities, mac_rust_supported, model_mac_support, CreateJob,
     DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
     RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
-    TERMINAL_STATUSES,
 };
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, canonical_lora_family, detect_lora_family, detect_model_family,
@@ -989,6 +988,8 @@ pub(crate) fn create_app_with_state(
         )),
         http_client: reqwest::Client::new(),
         interrupted_jobs_on_startup,
+        #[cfg(test)]
+        progress_before_accept_once: Arc::new(Mutex::new(None)),
     };
     let cors = cors_layer(&state.settings);
     let returned_state = state.clone();

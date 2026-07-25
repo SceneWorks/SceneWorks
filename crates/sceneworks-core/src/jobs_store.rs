@@ -375,6 +375,16 @@ pub struct ProgressUpdate {
     pub worker_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProgressUpdateOutcome {
+    pub job: JobSnapshot,
+    pub previous_status: JobStatus,
+    /// True only when this call won the ownership/terminal-state race and
+    /// committed the supplied progress. Same-status terminal retries return
+    /// the existing job with `applied == false`.
+    pub applied: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StaleSweep {
     pub workers: Vec<WorkerSnapshot>,
@@ -1953,6 +1963,15 @@ impl JobsStore {
         job_id: &str,
         update: ProgressUpdate,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.update_job_progress_with_outcome(job_id, update)
+            .map(|outcome| outcome.job)
+    }
+
+    pub fn update_job_progress_with_outcome(
+        &self,
+        job_id: &str,
+        update: ProgressUpdate,
+    ) -> JobsStoreResult<ProgressUpdateOutcome> {
         if !JOB_STATUSES.contains(&update.status.as_str()) {
             return Err(JobsStoreError::InvalidStatus(
                 update.status.as_str().to_owned(),
@@ -1987,11 +2006,16 @@ impl JobsStore {
         // progress report — that's exactly the failure mode the heartbeat
         // machinery exists to handle.
         let current = self.get_job_on_connection(&transaction, job_id)?;
+        let previous_status = current.status.clone();
         if is_terminal_status(current.status.as_str()) {
             // Idempotent re-report of the same terminal status (e.g. a retried
             // "canceled" POST) succeeds without touching the row.
             if current.status == update.status {
-                return Ok(current);
+                return Ok(ProgressUpdateOutcome {
+                    job: current,
+                    previous_status,
+                    applied: false,
+                });
             }
             return Err(JobsStoreError::TerminalJobImmutable {
                 job_id: job_id.to_owned(),
@@ -2074,6 +2098,41 @@ impl JobsStore {
                 )?;
             }
         }
+        transaction.commit()?;
+        Ok(ProgressUpdateOutcome {
+            job,
+            previous_status,
+            applied: true,
+        })
+    }
+
+    /// Replace an accepted progress report's result with its post-acceptance
+    /// augmentation (catalog registration / persisted asset sidecars). The
+    /// compare-and-swap guards prevent a slower request from overwriting a
+    /// competing status or result update that committed in the meantime.
+    pub fn replace_job_result_after_progress(
+        &self,
+        job_id: &str,
+        worker_id: Option<&str>,
+        status: JobStatus,
+        expected_result: &Map<String, Value>,
+        result: &Map<String, Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = self.get_job_on_connection(&transaction, job_id)?;
+        if current.worker_id.as_deref() != worker_id
+            || current.status != status
+            || &current.result != expected_result
+        {
+            return Ok(current);
+        }
+        transaction.execute(
+            "update jobs set result_json = ?1, updated_at = ?2 where id = ?3",
+            params![dumps(result)?, utc_now(), job_id],
+        )?;
+        let job = self.get_job_on_connection(&transaction, job_id)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -2344,10 +2403,9 @@ impl JobsStore {
         Ok(workers)
     }
 
-    /// Load a batch of jobs with one `IN` query, then restore the caller's id
-    /// ordering. Bulk transitions build ids in their externally visible order
-    /// (queue order, active-worker order, or candidate order), which SQL `IN`
-    /// does not preserve on its own.
+    /// Load a batch of jobs with one JSON-table join, then restore the caller's
+    /// id ordering. One JSON bind avoids SQLite's variable limit for large bulk
+    /// transitions while retaining the single-query behavior.
     fn jobs_by_ids(
         &self,
         connection: &Connection,
@@ -2356,13 +2414,11 @@ impl JobsStore {
         if job_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let placeholders = placeholders_from(1, job_ids.len());
-        let mut statement =
-            connection.prepare(&format!("select * from jobs where id in ({placeholders})"))?;
-        let jobs = collect_jobs(statement.query_map(
-            params_from_iter(job_ids.iter().map(String::as_str)),
-            row_to_job,
-        )?)?;
+        let mut statement = connection.prepare(
+            "select jobs.* from jobs join json_each(?1) as requested on jobs.id = requested.value",
+        )?;
+        let ids_json = dumps(job_ids)?;
+        let jobs = collect_jobs(statement.query_map(params![ids_json], row_to_job)?)?;
         let mut by_id = jobs
             .into_iter()
             .map(|job| (job.id.clone(), job))
@@ -2707,12 +2763,12 @@ where
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-fn dumps<T: serde::Serialize>(value: &T) -> JobsStoreResult<String> {
-    // `serde_json::Map` is a BTreeMap unless the optional `preserve_order`
-    // feature is enabled (it is not in this crate), so materializing through
-    // `Value` already gives stable recursive key order. Do not recursively
-    // clone every map just to sort it a second time.
-    let value = serde_json::to_value(value)?;
+fn dumps<T: serde::Serialize + ?Sized>(value: &T) -> JobsStoreResult<String> {
+    // Workspace feature unification can enable serde_json/preserve_order even
+    // though this crate does not request it. Sort recursively so the stored
+    // bytes stay compatible with Python's sort_keys=True in either build mode.
+    let mut value = serde_json::to_value(value)?;
+    value.sort_all_objects();
     serde_json::to_string(&value).map_err(Into::into)
 }
 

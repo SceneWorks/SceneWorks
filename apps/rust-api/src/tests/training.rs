@@ -2078,6 +2078,107 @@ async fn terminal_training_job_completed_report_registers_no_lora_and_409s() {
     );
 }
 
+/// The pre-side-effect snapshot fixed the already-terminal case but still left
+/// a TOCTOU window: another terminal report could commit while completion was
+/// registering its LoRA. Hold completion immediately before authoritative
+/// acceptance, let `failed` win, then prove the losing 409 wrote no catalog.
+#[tokio::test]
+async fn racing_terminal_training_report_loses_before_lora_side_effects() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (job_id, output_dir, adapter_path) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    stage_trained_adapter(&output_dir, &adapter_path);
+    claim_training_job(&app, &job_id).await;
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    *state.progress_before_accept_once.lock() = Some(barrier.clone());
+    let completing_app = app.clone();
+    let completing_job_id = job_id.clone();
+    let completing_adapter_path = adapter_path.display().to_string();
+    let completing = tokio::spawn(async move {
+        request(
+            completing_app,
+            "POST",
+            &format!("/api/v1/jobs/{completing_job_id}/progress"),
+            json!({
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Trained LoRA saved.",
+                "workerId": TEST_TRAINING_WORKER_ID,
+                "result": { "outputPath": completing_adapter_path }
+            }),
+        )
+        .await
+    });
+
+    // Completion has parsed the request but has not yet attempted the atomic
+    // ownership/terminal transition.
+    barrier.wait().await;
+    let (failed_status, failed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "failed",
+            "stage": "failed",
+            "progress": 1,
+            "message": "Competing terminal report won.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "error": "training failed"
+        }),
+    )
+    .await;
+    assert_eq!(failed_status, StatusCode::OK);
+    assert_eq!(failed["status"], "failed");
+    barrier.wait().await;
+
+    let (completed_status, _) = completing.await.expect("completion request joins");
+    assert_eq!(
+        completed_status,
+        StatusCode::CONFLICT,
+        "the completion report that loses authoritative acceptance must 409"
+    );
+
+    let (status, job) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(job["status"], "failed");
+
+    let (status, loras) = request(
+        app,
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .all(|item| item["name"] != json!("Aurora Style")),
+        "the losing completed report must not register a ghost LoRA"
+    );
+}
+
 /// sc-11213 (F-028): a `completed` report from a caller that does not own the job
 /// (here, any report carrying a `workerId` for a job whose owner is unset) must
 /// receive the 409 AND must NOT register a LoRA — the ownership check has to gate

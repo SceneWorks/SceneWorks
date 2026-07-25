@@ -319,32 +319,14 @@ pub(crate) fn mage_flow_edit_mlx_eligible(payload: &Map<String, Value>) -> bool 
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
-    let has_nonempty_string = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    let has_nonempty_array = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_array)
-            .is_some_and(|values| !values.is_empty())
-    };
-    let has_control = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
 
-    has_nonempty_string("sourceAssetId")
-        && !has_nonempty_string("referenceAssetId")
-        && !has_nonempty_string("maskAssetId")
-        && !has_nonempty_array("loras")
-        && !has_nonempty_array("controls")
-        && !has_nonempty_array("controlnets")
-        && !has_control
+    has_nonempty_string(payload, "sourceAssetId")
+        && !has_nonempty_string(payload, "referenceAssetId")
+        && !has_nonempty_string(payload, "maskAssetId")
+        && !has_nonempty_array(payload, "loras")
+        && !has_nonempty_array(payload, "controls")
+        && !has_nonempty_array(payload, "controlnets")
+        && !has_nonempty_nested_array(payload, "advanced", "poses")
 }
 
 /// Z-Image (sc-3022) MLX-routing conditions, ported from
