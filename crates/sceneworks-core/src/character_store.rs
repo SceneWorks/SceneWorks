@@ -790,6 +790,15 @@ pub fn reindex_characters_on_connection(
     connection: &Connection,
     project_path: &Path,
 ) -> ProjectStoreResult<u32> {
+    let (fingerprint, _) = character_index_fingerprint(project_path)?;
+    reindex_characters_with_fingerprint(connection, project_path, &fingerprint)
+}
+
+fn reindex_characters_with_fingerprint(
+    connection: &Connection,
+    project_path: &Path,
+    fingerprint: &str,
+) -> ProjectStoreResult<u32> {
     let mut count = 0;
     for sidecar_path in character_sidecars(project_path)? {
         let Ok(character) = read_json(&sidecar_path) else {
@@ -801,7 +810,10 @@ pub fn reindex_characters_on_connection(
         index_character_sidecar_on_connection(connection, project_path, &sidecar_path, &character)?;
         count += 1;
     }
-    store_character_index_fingerprint(connection, project_path)?;
+    connection.execute(
+        "insert or replace into project_metadata (key, value) values (?1, ?2)",
+        params![CHARACTER_INDEX_FINGERPRINT_KEY, fingerprint],
+    )?;
     Ok(count)
 }
 
@@ -832,7 +844,7 @@ fn ensure_character_index(project_path: &Path) -> ProjectStoreResult<()> {
     // or files changed outside the DB path, rebuild only when the sidecar fingerprint changes.
     let transaction = connection.transaction()?;
     clear_character_tables(&transaction)?;
-    reindex_characters_on_connection(&transaction, project_path)?;
+    reindex_characters_with_fingerprint(&transaction, project_path, &fingerprint)?;
     transaction.commit()?;
     Ok(())
 }

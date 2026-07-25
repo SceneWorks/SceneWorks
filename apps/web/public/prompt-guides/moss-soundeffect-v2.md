@@ -11,7 +11,7 @@ MOSS-SFX runs natively (Candle) on every platform. Install it once from the **Mo
 - Describe the source and its character: "heavy rain on a tin roof", "a distant thunderclap", "footsteps on gravel".
 - Add audible context when it matters: action, material, distance, intensity, environment, and acoustic space.
 - Bilingual prompts (English / Chinese) are supported; the language is advisory, not a mode switch.
-- Guidance (CFG) sharpens adherence to the prompt; the reference default is around 4.0, and 1.0 turns guidance off.
+- Leave **Guidance** and **Steps** blank unless you have a specific reason. Blank uses the values the model's authors published (CFG 4.0, 100 steps), which are what it was tuned for — more steps is not a quality dial to turn up.
 
 Example:
 
@@ -23,6 +23,10 @@ Example:
 
 Output is 48 kHz mono, up to **30 seconds**, with whole-second duration control. Ask for the length you need directly.
 
+One thing that is easy to get wrong: **a short clip does not render faster.** The model always denoises a full 30-second internal window and then crops to your requested length — that is how it was trained, and shortening the window degrades quality badly. A 3-second effect therefore costs the same as a 30-second one, so prefer asking for the longer clip and trimming in the timeline over rendering several short ones.
+
 ## Practical notes
 
-SFX generation is a diffusion process — more solver steps trade time for fidelity. Layer several short clips in the timeline to build a richer ambience rather than asking for one long busy clip.
+SFX generation is a diffusion process over a long sequence, and attention cost grows with the square of that length. On CPU a single render takes many minutes; on Apple GPU (Metal) it is a couple of minutes. If SFX feels unusably slow, check that the GPU audio path is enabled for your build.
+
+Layer several clips in the timeline to build a richer ambience rather than asking for one long busy clip — the model renders a single coherent event far better than a crowded scene.

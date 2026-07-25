@@ -155,6 +155,7 @@ pub(crate) fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         ],
         worker_timeout_seconds: 90,
         jobs_db_path: temp_dir.path().join("jobs.db"),
+        jobs_retention_days: 90,
         run_utility_inprocess: false,
         mlx_required: false,
         mlx_enforce_unsupported: false,

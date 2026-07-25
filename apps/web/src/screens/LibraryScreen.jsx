@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { AssetBatchModal, AssetSelectionBar, useAssetBatch } from "../assetBatch.jsx";
 import { foldUpscaledAssetVariants } from "../assetVariants.js";
 import { AssetDetail, AssetGrid, emptyTrash } from "../components/assetPanels.jsx";
+import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";
 import { isLibraryAsset, terminalStatuses } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
@@ -39,9 +40,13 @@ export function LibraryScreen() {
     setActiveView,
     updateAssetStatus,
     updateAssetTags,
+    audioModels = [],
   } = useAppContext();
   // Shared multi-select + batch toolbar (selection state, fan-out, Discard/Move).
   const batch = useAssetBatch();
+  // ONE audio transport for the screen (sc-14391): the grid tiles and the detail stage drive
+  // the same element, so playing a clip from either surface stops whatever was playing.
+  const audioPlayer = useAudioTakePlayer();
   // Bind the fullscreen preview to the currently filtered library view so
   // navigation stays inside the same type/tag/trash scope the user is browsing.
   const onPreview = (asset) => setPreviewAsset(asset, visibleAssets);
@@ -226,6 +231,7 @@ export function LibraryScreen() {
 
       <div className="library-layout">
         <AssetGrid
+          audioPlayer={audioPlayer}
           assets={visibleAssets}
           onPreview={onPreview}
           selectedAsset={librarySelectedAsset}
@@ -234,6 +240,7 @@ export function LibraryScreen() {
           onToggleSelect={batch.toggleSelect}
         />
         <AssetDetail
+          audioPlayer={audioPlayer}
           asset={librarySelectedAsset}
           deleteAsset={deleteAsset}
           purgeAsset={purgeAsset}
@@ -249,6 +256,7 @@ export function LibraryScreen() {
           vqaEnabled={vqaEnabled}
           vqaEntries={vqaEntries}
           vqaPending={vqaPending}
+          audioModels={audioModels}
           createVqaJob={createVqaJob}
         />
       </div>

@@ -119,6 +119,36 @@ fn sibling_video_modules_construct_private_types_through_owner_seams() {
 }
 
 #[test]
+fn backend_neutral_video_policy_has_no_candle_twins() {
+    const CANDLE: &str = include_str!("candle.rs");
+    const BERNINI: &str = include_str!("bernini.rs");
+
+    for stale_twin in [
+        "fn candle_wan_lightning_on(",
+        "fn candle_wan_sampling(",
+        "fn candle_resolve_lightning_loras(",
+        "fn candle_resolve_wan_adapters(",
+        "fn candle_scail2_sampling(",
+        "fn candle_scail2_engine_video_mode(",
+    ] {
+        assert!(
+            !CANDLE.contains(stale_twin),
+            "backend-neutral policy regressed to candle twin {stale_twin}"
+        );
+    }
+    for stale_twin in [
+        "fn candle_bernini_engine_id(",
+        "fn candle_bernini_engine_video_mode(",
+        "fn candle_bernini_raw_settings(",
+    ] {
+        assert!(
+            !BERNINI.contains(stale_twin),
+            "backend-neutral Bernini policy regressed to candle twin {stale_twin}"
+        );
+    }
+}
+
+#[test]
 fn candle_video_families_keep_explicit_cross_module_boundaries() {
     const PARENT: &str = include_str!("mod.rs");
     const BERNINI: &str = include_str!("bernini.rs");
@@ -1052,12 +1082,9 @@ fn no_candle_raw_settings_builder_records_its_own_frame_count() {
         ),
         (
             "candle_scail2",
-            candle_scail2_raw_settings(&req("scail2_14b"), false),
+            scail2_raw_settings(&req("scail2_14b"), false),
         ),
-        (
-            "candle_bernini",
-            candle_bernini_raw_settings(&req("bernini")),
-        ),
+        ("candle_bernini", bernini_raw_settings(&req("bernini"))),
         (
             "wan_vace",
             wan_vace_raw_settings(&req("wan_2_2"), "wan_vace"),
@@ -1081,7 +1108,7 @@ fn no_candle_raw_settings_builder_records_its_own_frame_count() {
     }
     // And the stamp still writes the clip's real length on this lane.
     let stamped = EncodedClip { frames: 7, fps: 25 }
-        .record_frame_count(candle_bernini_raw_settings(&req("bernini")));
+        .record_frame_count(bernini_raw_settings(&req("bernini")));
     assert_eq!(stamped["frameCount"], json!(7));
 }
 
@@ -2959,8 +2986,8 @@ fn seedvr2_video_revision_matches_image_lane() {
 }
 
 /// sc-11168 / F-007 (completes the sc-9879 rollout on the video lanes): both the MLX
-/// (`ensure_wan_lightning_present`) and candle (`candle_ensure_wan_lightning_present`) A14B Lightning
-/// self-heal fetches pull the FIXED `lightx2v/Wan2.2-Lightning` distill pair from the SHARED
+/// MLX and Candle A14B Lightning self-heal fetches share `ensure_wan_lightning_present` and pull the
+/// FIXED `lightx2v/Wan2.2-Lightning` distill pair from the SHARED
 /// `WAN_LIGHTNING_REVISION` const, so it must pin an exact commit rather than the mutable `main`
 /// branch — an upstream re-push would otherwise silently swap the high/low distill weights we load.
 /// Lock the pin to a real 40-hex lowercase commit id (mirrors the SeedVR2 format test above).
@@ -2985,6 +3012,24 @@ fn wan_lightning_revision_is_pinned_commit_not_main() {
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "the pinned revision must be lowercase hex"
     );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn wan_lightning_subdir_is_canonical_for_fetch_and_resolution() {
+    assert_eq!(
+        wan_lightning_subdir("wan2_2_t2v_14b"),
+        Some("Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1")
+    );
+    assert_eq!(
+        wan_lightning_subdir("wan2_2_i2v_14b"),
+        Some("Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1")
+    );
+    assert_eq!(wan_lightning_subdir("wan2_2_ti2v_5b"), None);
+    assert_eq!(wan_lightning_subdir("bernini"), None);
 }
 
 /// sc-9879 (F-077 follow-up): `ensure_ltx_q8_present` pulls `q8/*` from the FIXED SceneWorks LTX-2.3
@@ -3079,7 +3124,7 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
     settings.backend_candle_enabled = true;
     assert_eq!(
         resolve_candle_video_route(&scail2_replace, &settings),
-        CandleVideoRoute::ReplacePersonScail2(candle_scail2_engine_id("scail2_14b").unwrap()),
+        CandleVideoRoute::ReplacePersonScail2(scail2_engine_id("scail2_14b").unwrap()),
     );
     let extend = request(json!({
         "projectId": "p", "model": "wan_2_2_ti2v_5b", "mode": "extend_clip",
@@ -3099,7 +3144,7 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
 fn candle_video_route_bernini_every_mode() {
     let mut settings = Settings::from_env();
     settings.backend_candle_enabled = true;
-    let engine = candle_bernini_engine_id("bernini").expect("bernini engine id");
+    let engine = bernini_engine_id("bernini").expect("bernini engine id");
     for mode in [
         "text_to_video",
         "video_to_video",
@@ -3130,32 +3175,26 @@ fn candle_video_route_bernini_every_mode() {
 /// the byte-identical twin of the MLX `bernini_engine_id` / `bernini_engine_video_mode`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn candle_bernini_engine_id_and_video_mode_mapping() {
-    assert_eq!(candle_bernini_engine_id("bernini"), Some("bernini"));
+fn bernini_backends_share_engine_id_and_video_mode_mapping() {
+    assert_eq!(bernini_engine_id("bernini"), Some("bernini"));
     // The still `bernini_image` id + every other video family keep their own routing.
-    assert_eq!(candle_bernini_engine_id("bernini_image"), None);
-    assert_eq!(candle_bernini_engine_id("wan_2_2"), None);
-    assert_eq!(candle_bernini_engine_id("scail2_14b"), None);
-    assert_eq!(candle_bernini_engine_id(""), None);
+    assert_eq!(bernini_engine_id("bernini_image"), None);
+    assert_eq!(bernini_engine_id("wan_2_2"), None);
+    assert_eq!(bernini_engine_id("scail2_14b"), None);
+    assert_eq!(bernini_engine_id(""), None);
 
-    assert_eq!(candle_bernini_engine_video_mode("text_to_video"), "t2v");
-    assert_eq!(candle_bernini_engine_video_mode("video_to_video"), "v2v");
+    assert_eq!(bernini_engine_video_mode("text_to_video"), "t2v");
+    assert_eq!(bernini_engine_video_mode("video_to_video"), "v2v");
+    assert_eq!(bernini_engine_video_mode("reference_to_video"), "r2v");
     assert_eq!(
-        candle_bernini_engine_video_mode("reference_to_video"),
-        "r2v"
-    );
-    assert_eq!(
-        candle_bernini_engine_video_mode("reference_video_to_video"),
+        bernini_engine_video_mode("reference_video_to_video"),
         "rv2v"
     );
-    assert_eq!(
-        candle_bernini_engine_video_mode("multi_video_to_video"),
-        "mv2v"
-    );
-    assert_eq!(candle_bernini_engine_video_mode("ads2v"), "ads2v");
+    assert_eq!(bernini_engine_video_mode("multi_video_to_video"), "mv2v");
+    assert_eq!(bernini_engine_video_mode("ads2v"), "ads2v");
     // Unknown / image_to_video ⇒ plain t2v (the renderer is text-conditioned Wan2.2-T2V).
-    assert_eq!(candle_bernini_engine_video_mode("image_to_video"), "t2v");
-    assert_eq!(candle_bernini_engine_video_mode(""), "t2v");
+    assert_eq!(bernini_engine_video_mode("image_to_video"), "t2v");
+    assert_eq!(bernini_engine_video_mode(""), "t2v");
 }
 
 #[cfg(target_os = "macos")]
@@ -8221,9 +8260,9 @@ mod candle_video_label_tests {
         for moe in ["wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
             // Default-on (absent flag): the 4-step / CFG-off Lightning recipe.
             let on = req(json!({}));
-            assert!(candle_wan_lightning_on(moe, &on), "{moe} default-on");
+            assert!(wan_lightning_on(moe, &on), "{moe} default-on");
             assert_eq!(
-                candle_wan_sampling(moe, &on),
+                wan_sampling(moe, &on),
                 (Some(4), Some(1.0)),
                 "{moe} lightning recipe"
             );
@@ -8231,29 +8270,26 @@ mod candle_video_label_tests {
             // Explicit opt-out → native multi-step CFG: no user override ⇒ (None, None) so the engine
             // config defaults stand; a user override is honored verbatim.
             let off = req(json!({ "lightning": false }));
-            assert!(!candle_wan_lightning_on(moe, &off), "{moe} opt-out");
+            assert!(!wan_lightning_on(moe, &off), "{moe} opt-out");
             assert_eq!(
-                candle_wan_sampling(moe, &off),
+                wan_sampling(moe, &off),
                 (None, None),
                 "{moe} native defaults"
             );
             let off_override =
                 req(json!({ "lightning": false, "steps": 30, "guidanceScale": 3.5 }));
-            assert_eq!(
-                candle_wan_sampling(moe, &off_override),
-                (Some(30), Some(3.5))
-            );
+            assert_eq!(wan_sampling(moe, &off_override), (Some(30), Some(3.5)));
         }
 
         // Dense TI2V-5B: no Lightning toggle (always off), interim step default, user override wins.
         let five_b = req(json!({}));
-        assert!(!candle_wan_lightning_on("wan2_2_ti2v_5b", &five_b));
+        assert!(!wan_lightning_on("wan2_2_ti2v_5b", &five_b));
         assert_eq!(
-            candle_wan_sampling("wan2_2_ti2v_5b", &five_b),
-            (Some(CANDLE_WAN5B_INTERIM_STEPS), None)
+            wan_sampling("wan2_2_ti2v_5b", &five_b),
+            (Some(WAN5B_INTERIM_STEPS), None)
         );
         assert_eq!(
-            candle_wan_sampling("wan2_2_ti2v_5b", &req(json!({ "steps": 12 }))).0,
+            wan_sampling("wan2_2_ti2v_5b", &req(json!({ "steps": 12 }))).0,
             Some(12)
         );
     }

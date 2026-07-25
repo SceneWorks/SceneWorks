@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::project_store::{ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
@@ -27,6 +29,22 @@ pub(crate) const ASSET_FOLDERS: &[&str] = &[
 pub(crate) struct AssetRecord {
     pub(crate) file_path: Option<String>,
     pub(crate) sidecar_path: Option<String>,
+}
+
+pub(crate) fn sidecar_content_fingerprint(
+    path: &Path,
+) -> ProjectStoreResult<(u64, Option<String>, String)> {
+    let bytes = fs::read(path)?;
+    let modified_ns = fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos().to_string());
+    Ok((
+        bytes.len() as u64,
+        modified_ns,
+        format!("{:x}", Sha256::digest(&bytes)),
+    ))
 }
 
 /// Resolve an asset id to its on-disk sidecar path: prefer the indexed
@@ -88,7 +106,13 @@ pub(crate) fn index_asset_on_connection(
         Some(path) => Some(relative_string(project_path, path)?),
         None => None,
     };
-    upsert_asset_row(connection, asset, sidecar_rel.as_deref())
+    let sidecar_fingerprint = sidecar_path.and_then(|path| sidecar_content_fingerprint(path).ok());
+    upsert_asset_row(
+        connection,
+        asset,
+        sidecar_rel.as_deref(),
+        sidecar_fingerprint,
+    )
 }
 
 pub(crate) fn row_to_asset_record(row: &Row<'_>) -> rusqlite::Result<AssetRecord> {
@@ -204,9 +228,23 @@ pub(crate) fn normalize_asset_cached(
     generation_sets: &mut GenerationSetCache,
 ) -> ProjectStoreResult<Value> {
     let mut asset = read_json(sidecar_path)?;
+    hydrate_asset(project_id, project_path, &mut asset, generation_sets)?;
+    let sidecar_rel = relative_string(project_path, sidecar_path)?;
+    if let Some(object) = asset.as_object_mut() {
+        object.insert("sidecarPath".to_owned(), Value::String(sidecar_rel));
+    }
+    Ok(asset)
+}
+
+fn hydrate_asset(
+    project_id: &str,
+    project_path: &Path,
+    asset: &mut Value,
+    generation_sets: &mut GenerationSetCache,
+) -> ProjectStoreResult<()> {
     // Guarantee every API response carries an `origin`, even for legacy sidecars
     // written before the field existed (sc-2024).
-    let origin = asset_origin(&asset);
+    let origin = asset_origin(asset);
     if let Some(object) = asset.as_object_mut() {
         object
             .entry("origin".to_owned())
@@ -266,8 +304,22 @@ pub(crate) fn normalize_asset_cached(
             }
         }
     }
-    let sidecar_rel = relative_string(project_path, sidecar_path)?;
-    if let Some(object) = asset.as_object_mut() {
+    Ok(())
+}
+
+/// Hydrate a normalized asset envelope already stored in project.db.
+pub(crate) fn hydrate_indexed_asset_cached(
+    project_id: &str,
+    project_path: &Path,
+    mut asset: Value,
+    generation_sets: &mut GenerationSetCache,
+) -> ProjectStoreResult<Value> {
+    let sidecar_rel = asset
+        .get("sidecarPath")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    hydrate_asset(project_id, project_path, &mut asset, generation_sets)?;
+    if let (Some(object), Some(sidecar_rel)) = (asset.as_object_mut(), sidecar_rel) {
         object.insert("sidecarPath".to_owned(), Value::String(sidecar_rel));
     }
     Ok(asset)
@@ -277,14 +329,17 @@ pub(crate) fn upsert_asset_row(
     connection: &Connection,
     asset: &Value,
     sidecar_rel: Option<&str>,
+    sidecar_fingerprint: Option<(u64, Option<String>, String)>,
 ) -> ProjectStoreResult<()> {
     let status = asset.get("status").unwrap_or(&Value::Null);
     connection.execute(
         "
         insert or replace into assets (
           id, type, display_name, file_path, generation_set_id, created_at,
-          favorite, rating, rejected, trashed, sidecar_path, origin
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+          favorite, rating, rejected, trashed, sidecar_path, origin,
+          asset_json, source_asset_id, upscaled_from_asset_id,
+          sidecar_size, sidecar_modified_ns, sidecar_sha256
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
         ",
         params![
             required_str(asset, "id")?,
@@ -304,6 +359,30 @@ pub(crate) fn upsert_asset_row(
             optional_bool(status, "trashed").unwrap_or(false),
             sidecar_rel,
             asset_origin(asset),
+            serde_json::to_string(asset)?,
+            asset
+                .pointer("/lineage/sourceAssetId")
+                .and_then(Value::as_str),
+            asset
+                .pointer("/extra/upscaledFromAssetId")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    asset
+                        .pointer("/extra/isUpscaled")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                        .then(|| {
+                            asset
+                                .pointer("/lineage/sourceAssetId")
+                                .and_then(Value::as_str)
+                        })
+                        .flatten()
+                }),
+            sidecar_fingerprint.as_ref().map(|value| value.0),
+            sidecar_fingerprint
+                .as_ref()
+                .and_then(|value| value.1.clone()),
+            sidecar_fingerprint.map(|value| value.2),
         ],
     )?;
     Ok(())

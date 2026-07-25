@@ -58,21 +58,24 @@ fn is_sdxl_ipadapter_model(model: &str) -> bool {
     )
 }
 
-/// Default SDXL base repo for a model id when the manifest omits `repo`.
+/// Default SDXL base repo for a model id when the manifest omits `repo` — which, in production, is
+/// ALWAYS (sc-14463).
 ///
-/// `sdxl` and `realvisxl` name FLAT upstream diffusers snapshots (the conditioning fallback when the
-/// manifest omits `repo`, per sc-10614). Illustrious has no such upstream — OnomaAI ship a single-file
-/// LDM checkpoint — so it names its tiered turnkey. In practice the built-in SDXL family points `repo`
-/// at the SceneWorks quant-matrix turnkey (`mlx.standardTierLayout`), and — as of sc-10813 — this
-/// IP-Adapter lane packed-detects + serves the request's q4/q8 tier through `standard_tier_subdir`,
-/// exactly like the txt2img lane (sc-10767); this default is only the flat-repo fallback.
-fn sdxl_ipadapter_default_repo(model: &str) -> &'static str {
-    match model {
-        "realvisxl" => "SG161222/RealVisXL_V5.0",
-        "illustrious_xl_v1" => "SceneWorks/illustrious-xl-v1-mlx",
-        "illustrious_xl_v2" => "SceneWorks/illustrious-xl-v2-mlx",
-        _ => "stabilityai/stable-diffusion-xl-base-1.0",
-    }
+/// This reads `MODEL_TABLE` rather than carrying a private mapping, so it cannot drift from the
+/// txt2img lane (`base.rs::model_repo`) or InstantID (`INSTANTID_SDXL_REPO`) again. It previously
+/// hardcoded the flat upstream repos, and the comment here claimed "in practice the built-in SDXL
+/// family points `repo` at the SceneWorks turnkey" — that was false. The lanes read a TOP-LEVEL
+/// `repo` key, and no built-in model declares one (the manifest carries `downloads[].repo` and
+/// `paths.model`, which are different keys; `resolve_model_manifest_entry` injects only `modelPath`).
+/// So this is not a fallback, it is the only branch — and after the Group-B cutover (sc-8746) it
+/// named repos the installer no longer stages, silently routing every candle IP-Adapter job to torch.
+///
+/// The tier descent still applies on top: sc-10813 serves the request's q4/q8 tier via
+/// `standard_tier_subdir`, and `dense_tier_subdir` (sc-10614) takes the non-standard branch.
+pub(super) fn sdxl_ipadapter_default_repo(model: &str) -> &'static str {
+    // Every id `is_sdxl_ipadapter_model` admits has a MODEL_TABLE row; the SDXL base turnkey is a
+    // defensive floor rather than a reachable case.
+    crate::engines::default_repo_for(model).unwrap_or("SceneWorks/sdxl-base-mlx")
 }
 
 /// Resolve the SDXL base snapshot for the IP-Adapter route: an explicit `modelPath` dir (advanced or
@@ -472,4 +475,69 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod sdxl_ipadapter_repo_tests {
+    use super::*;
+
+    /// sc-14463 regression guard. This lane must resolve the SAME repo the txt2img lane does, because
+    /// `modelManifestEntry.repo` is ALWAYS absent in production (no built-in model declares a
+    /// top-level `repo`), which makes `sdxl_ipadapter_default_repo` the only reachable branch.
+    ///
+    /// The `assert_ne!`s are the point: they name the exact pre-fix constants, so this test FAILS
+    /// against the old code rather than merely restating whatever the function happens to return.
+    /// Both named repos are absent from every manifest `downloads` block, so `huggingface_snapshot_dir`
+    /// (a cache lookup, not a fetch) returned `None` and the lane declined every job to torch.
+    #[test]
+    fn ipadapter_default_repo_is_the_installed_turnkey_not_the_upstream_source() {
+        assert_eq!(
+            sdxl_ipadapter_default_repo("realvisxl"),
+            "SceneWorks/realvisxl-mlx"
+        );
+        assert_ne!(
+            sdxl_ipadapter_default_repo("realvisxl"),
+            "SG161222/RealVisXL_V5.0",
+            "the installer has not staged the flat upstream since the Group-B cutover (sc-8746)"
+        );
+        assert_eq!(
+            sdxl_ipadapter_default_repo("sdxl"),
+            "SceneWorks/sdxl-base-mlx"
+        );
+        assert_ne!(
+            sdxl_ipadapter_default_repo("sdxl"),
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            "same cutover moved the SDXL base to its turnkey"
+        );
+        // Illustrious was already correct; it must stay correct through the MODEL_TABLE rewire.
+        assert_eq!(
+            sdxl_ipadapter_default_repo("illustrious_xl_v1"),
+            "SceneWorks/illustrious-xl-v1-mlx"
+        );
+        assert_eq!(
+            sdxl_ipadapter_default_repo("illustrious_xl_v2"),
+            "SceneWorks/illustrious-xl-v2-mlx"
+        );
+    }
+
+    /// Every id this lane admits must have a MODEL_TABLE row — otherwise it silently takes the
+    /// defensive `unwrap_or` floor and loads the WRONG model's weights instead of failing.
+    #[test]
+    fn every_admitted_model_has_a_model_table_row() {
+        for model in [
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ] {
+            assert!(
+                is_sdxl_ipadapter_model(model),
+                "{model} must stay admitted by this lane"
+            );
+            assert!(
+                crate::engines::default_repo_for(model).is_some(),
+                "{model} is admitted but has no MODEL_TABLE row — it would silently take the floor"
+            );
+        }
+    }
 }

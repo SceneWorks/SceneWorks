@@ -15768,3 +15768,111 @@ button.audio-wave {
     text-align: left;
   }
 }
+
+/* ---------- Library: audio tiles + detail stage (sc-14391) ---------- */
+/* `AssetThumbnail` has no poster path for audio, so an audio asset used to paint an empty
+   tile. It now draws the shared waveform. The cell is a <div> rather than a <button> so its
+   play control isn't a nested interactive element; `.asset-tile-open` is the click target
+   and carries the tile's original select / double-click-to-preview semantics. */
+.asset-tile--audio {
+  position: relative;
+}
+
+.asset-tile-open {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: none;
+  cursor: pointer;
+}
+
+.asset-tile-audio-wave {
+  display: block;
+  height: 92px;
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.asset-tile-audio-bar {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.asset-tile-audio-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* The tile's own text sits above the click layer so selection still reads naturally. */
+.asset-tile--audio strong,
+.asset-tile--audio .asset-tile-tags {
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* The grid's single hidden <audio> and the detail stage's. */
+.asset-grid-audio-el {
+  display: none;
+}
+
+.asset-audio-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+
+.asset-audio-stage__head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.asset-audio-stage__model {
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-audio-stage__wave {
+  height: 150px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.asset-audio-stage__transport {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+/* The viewer's hero transport is 56px, matching the Simple Assets viewer (design screen 4a). */
+.asset-audio-stage__transport .audio-play-btn--xl {
+  width: 56px;
+  height: 56px;
+}
+
+.asset-audio-stage__transport .audio-clock {
+  font-size: 15px;
+}

@@ -864,6 +864,32 @@ describe("AudioStudio Speech generation (sc-13408)", () => {
     expect(rememberLocalGenerationJob).toHaveBeenCalledWith("audio", { id: "audio-job-2" });
   });
 
+  it("names the device the run is executing on in the strip's message line (screen 2a)", async () => {
+    await render(
+      baseContext({
+        audioLocalJobs: [
+          {
+            id: "audio-job-running",
+            type: "audio_generate",
+            status: "running",
+            progress: 0.44,
+            message: "chunk 4 of 9 · ~6 s left",
+            workerId: "worker-1",
+            payload: { ...SPEECH_RUN_PAYLOAD },
+            result: { expectedCount: 3 },
+          },
+        ],
+        visibleWorkers: [{ id: "worker-1", capabilities: ["gpu"], gpuName: "Apple M3 Max (40-core)" }],
+        createAudioJob: vi.fn(),
+        rememberLocalGenerationJob: vi.fn(),
+      }),
+    );
+    const strip = container.querySelector('[data-testid="audio-inflight-strip"]');
+    expect(strip.textContent).toContain("chunk 4 of 9 · ~6 s left · Apple M3 Max (40-core)");
+    // Still just the device — the hardware pills and GPU meters stay in the Queue.
+    expect(strip.querySelector(".worker-progress-card__meters")).toBeNull();
+  });
+
   it("renders a running run as the slim in-flight strip, not the full worker card (sc-14364)", async () => {
     const jobAction = vi.fn();
     await render(
