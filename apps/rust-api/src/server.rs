@@ -50,6 +50,8 @@ pub struct Settings {
     pub cors_origins: Vec<String>,
     pub worker_timeout_seconds: u64,
     pub jobs_db_path: PathBuf,
+    /// Terminal job history retention. Zero preserves all history.
+    pub jobs_retention_days: u32,
     pub run_utility_inprocess: bool,
     /// Epic 3482 — macOS "MLX-required" mode. When set (the desktop sets it on macOS,
     /// where it spawns the in-process `mlx` worker), the MPS torch worker never claims an
@@ -165,6 +167,10 @@ impl Settings {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(90),
             jobs_db_path,
+            jobs_retention_days: std::env::var("SCENEWORKS_JOBS_RETENTION_DAYS")
+                .ok()
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(90),
             run_utility_inprocess: std::env::var("SCENEWORKS_RUN_UTILITY_INPROCESS")
                 .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),
