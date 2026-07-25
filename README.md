@@ -1,9 +1,10 @@
 # SceneWorks
 
-SceneWorks is a **desktop-native AI image and video generation studio**. It runs
-generation directly on your machine's GPU — **MLX** on macOS (Apple Silicon) and
-**candle / CUDA** on Windows (NVIDIA) — with **no Python, no cloud, and no Docker
-required**. Your prompts, models, and media never leave the workstation.
+SceneWorks is a **desktop-native AI image, video, and audio generation studio**. It
+runs generation directly on your machine's GPU — **MLX** on macOS (Apple Silicon)
+and **candle / CUDA** on Windows and Linux (NVIDIA) — with **no Python, no cloud,
+and no Docker required**. Your prompts, models, and media never leave the
+workstation.
 
 The same codebase also ships as an optional **GPU server** for headless, LAN,
 shared-GPU, or RunPod deployments (see
@@ -17,11 +18,12 @@ single-installer desktop app.
 
 | | **Desktop app** (primary) | **Server** (Docker or RunPod) |
 | --- | --- | --- |
+| Platforms | macOS `.dmg`, Windows `.msi`/`.exe`, Linux `.AppImage`/`.deb` | Linux/amd64 container |
 | Install | One native installer — no Docker, no terminal, no Python | `docker compose` stack or public RunPod image |
-| Engine | MLX (macOS) / candle CUDA (Windows), in-process | candle CUDA worker container on an NVIDIA GPU |
+| Engine | MLX (macOS) / candle CUDA (Windows, Linux), in-process | candle CUDA worker container on an NVIDIA GPU |
 | Access | Local app window (loopback), optional LAN opt-in | Token-gated web UI over the network |
 | Credentials | Per-user OS keychain | `0600 credentials.json` / env vars |
-| Best for | A single creator on one Mac or Windows workstation | Shared GPUs, headless hosts, or an on-demand cloud GPU |
+| Best for | A single creator on one Mac, Windows, or Linux workstation | Shared GPUs, headless hosts, or an on-demand cloud GPU |
 
 **→ For the desktop app** — install, hardware requirements, first-run, storage
 layout, macOS GPU-memory tuning, and troubleshooting — see
@@ -32,6 +34,26 @@ layout, macOS GPU-memory tuning, and troubleshooting — see
 SceneWorks is organized into studios and libraries. Capabilities are advertised
 per device, so the UI only offers what the current machine can actually run.
 
+**Two interfaces**
+
+The app ships two shells over the same data. **Advanced** is the full workspace —
+every studio, library, and knob. **Simple** is a stripped-back alternative: Image,
+Video, Audio, and Assets, plus Model Manager / Queue / Settings / Licenses, each
+screen reduced to a prompt, a few controls, and a picker sheet for the rest. Flip
+between them with the **Simple ⇄ Advanced** switch in the sidebar, and make the
+choice stick with **Settings → Use Simple UI by default** (off by default, so an
+existing install keeps the workspace it already has). Phone-width viewports always
+render Simple. Both shells read the same catalogs, job feed, and projects — there is
+no second data layer, and a run started in one is visible in the other.
+
+The Advanced workspace groups its screens into **Workspace / Library / System**, and
+the generation studios share one layout: a prompt panel, mode tabs, a collapsed
+**Advanced** section for the deeper knobs, and a results zone. A studio keeps its
+in-progress prompt and settings when you navigate away and come back. Most models
+carry an in-app **prompt guide** — model-specific guidance opened from the studio —
+and the desktop app's first run walks a setup wizard that offers a recommended
+starter set of models.
+
 **Studios**
 
 - **Image Studio** — text-to-image, image-to-image, and reference-guided
@@ -41,6 +63,13 @@ per device, so the UI only offers what the current machine can actually run.
   overlays.
 - **Video Studio** — text-to-video and image-to-video, plus clip extend, bridge
   (first/last-frame), and person replacement (VACE).
+- **Audio Studio** — generate speech, music, and sound effects, or clone a voice,
+  across four modes: **Speech** (an advertised voice bank grouped by accent and
+  gender, plus multi-speaker dialogue scripts on models that support them),
+  **Sound FX**, **Music** (describe the track, with BPM / key / lyrics, and
+  inpaint / repaint / extend an existing one), and **Voice Clone** from a reference
+  track in your library, with cloned voices saveable to a named registry. Runs land
+  in a take grid with a docked play deck.
 - **Character Studio** — keep the same face across every shot using identity
   models (InstantID, PuLID-FLUX) and character LoRAs.
 - **Document Studio** — generate interleaved text-and-image documents such as
@@ -53,35 +82,42 @@ per device, so the UI only offers what the current machine can actually run.
 
 **Libraries & management**
 
-- **Assets** — browse stills and clips across all your projects.
+- **Assets** — browse stills, clips, and audio across all your projects; audio
+  tracks render as waveform tiles with a real transport.
 - **Data Sets** — create and caption training datasets.
 - **Pose Library** — manage whole-body pose skeletons and derive new ones from
   photos (ControlNet conditioning).
 - **Key Point Library** — face-angle framing presets and angle-set collections
   for character turnarounds.
 - **Presets** — save and reuse recurring generation setups.
-- **Model Manager** — a tabbed catalog (Image / Video / Utility / LoRAs) with
-  search; download, import, and manage local checkpoints, each showing its
+- **Model Manager** — a tabbed catalog (Image / Video / Audio / Utility / LoRAs)
+  with search; download, import, and manage local checkpoints, each showing its
   estimated size and minimum memory.
-- **Queue / Logs / Settings** — running and recent jobs, this session's routing
-  and worker activity, and paths, service tokens, and detected GPU.
+- **Queue / Stats / Logs / Settings / Licenses** — running and recent jobs, a
+  per-run comparison of model, quant tier, settings, timing, and memory, this
+  session's routing and worker activity, paths, service tokens, and detected GPU,
+  and the license notices for every bundled component and shipped model.
 
 ## Models
 
 SceneWorks ships a built-in catalog of models it can download and run natively;
-weights are pulled on first use, not bundled. The catalog currently spans **45
-image models, 9 video models, and 10 utility models**, including:
+weights are pulled on first use, not bundled. The catalog currently spans **53
+image models, 9 video models, 8 audio models, and 15 utility models**, including:
 
-- **Image** — Z-Image / Z-Image-Edit, Qwen-Image (+ Edit), FLUX.1
-  [schnell/dev], FLUX.2 [klein 9B / dev], Krea 2 (Raw/Turbo), Ideogram 4, Lens,
-  SenseNova-U1, Boogu, Anima 2B, Chroma1, Kolors, Stable Diffusion 3.5
-  (Large/Medium), SANA / SANA-Sprint, SDXL / RealVisXL / Illustrious-XL,
-  Bernini, plus identity models InstantID and PuLID-FLUX.
+- **Image** — Z-Image / Z-Image-Edit, Qwen-Image (+ Edit), Mage-Flow
+  (Base/RL/Turbo, + Edit), FLUX.1 [schnell/dev], FLUX.2 [klein 9B / dev], Krea 2
+  (Raw/Turbo), Ideogram 4, Lens, SenseNova-U1, Boogu, Anima 2B, Chroma1, Kolors,
+  Stable Diffusion 3.5 (Large/Medium), SANA / SANA-Sprint, SDXL / RealVisXL /
+  Illustrious-XL, Bernini, plus identity models InstantID and PuLID-FLUX.
 - **Video** — LTX-2.3 (and 10Eros), Wan 2.2 (TI2V-5B, T2V/I2V-14B, VACE-Fun
   A14B), Stable Video Diffusion, Bernini, SCAIL-2.
+- **Audio** — Kokoro 82M and MOSS-TTS-Realtime speech, MOSS-TTSD v0.5
+  multi-speaker dialogue, ACE-Step v1.5 XL Turbo music, MOSS SoundEffect v2 SFX,
+  and Chatterbox / OpenVoice V2 for cloned voices.
 - **Utility** — Real-ESRGAN and AuraSR v2 upscalers, JoyCaption and Qwen3-VL
-  vision captioners, an Anubis-8B prompt refiner, a CLIP image embedder, and PiD
-  pixel decoders for high-resolution output.
+  vision captioners, an Anubis-8B prompt refiner, an SDXL tile ControlNet for
+  detail enhance, CLIP and CLAP embedders, MMAudio video-to-audio, Whisper
+  transcription, and PiD pixel decoders for high-resolution output.
 
 Most models offer bf16 / Q8 / Q4 quantization tiers; each declares its own memory
 floor, and a job that needs more memory than the device has fails with a precise
@@ -108,15 +144,20 @@ SceneWorks runs a **single native worker** binary behind one HTTP job contract,
 which plays three roles depending on the build and platform:
 
 - **MLX GPU worker** on macOS (Apple Silicon), in-process with the API;
-- **candle / CUDA GPU worker** on the Windows/NVIDIA build;
+- **candle / CUDA GPU worker** on the Windows and Linux NVIDIA builds;
 - **CPU utility worker** (model downloads, LoRA imports, FFmpeg frame
   extraction, timeline MP4 exports) on Docker/Windows/Linux.
 
+Audio synthesis is candle-native and lives in its own generator registry, so the
+Audio Studio lane ships on every build — the macOS MLX worker, the Windows/Linux
+candle worker, and the server/RunPod images alike — and is advertised only when the
+lane is actually linked, never inferred.
+
 **There is no Python venv on any platform.** The legacy Python/PyTorch worker was
-deleted in the Python-eradication epic; every job kind — generation, editing,
-person detection/tracking, segmentation, upscaling, and training — now runs
-natively. If a worker can't serve a job, it fails loudly with an actionable error
-instead of queueing forever.
+deleted in the Python-eradication epic; every job kind — generation, editing, audio
+synthesis, person detection/tracking, segmentation, upscaling, and training — now
+runs natively. If a worker can't serve a job, it fails loudly with an actionable
+error instead of queueing forever.
 
 For the full per-job-kind breakdown of which capability each build advertises and
 the routing rules that decide, see the
@@ -436,10 +477,10 @@ lookups. The catalog still returns the same fields with unknown sizes.
 
 ```text
 apps/
-  desktop/    Tauri desktop app (macOS MLX / Windows candle-CUDA) — the primary target
-  web/        React + Vite app shell (UI, shared by desktop and server)
+  desktop/    Tauri desktop app (macOS MLX / Windows + Linux candle-CUDA) — the primary target
+  web/        React + Vite app shell (Advanced workspace + Simple shell, shared by desktop and server)
   rust-api/   Rust backend API (HTTP surface, project/queue filesystem contracts)
-  rust-worker/ Native worker binary — MLX (macOS) / candle-CUDA (Windows) / CPU utility
+  rust-worker/ Native worker binary — MLX (macOS) / candle-CUDA (Windows, Linux) / CPU utility
 crates/
   sceneworks-core/          Shared Rust contract/domain helpers
   sceneworks-worker/        Worker engine, job dispatch, training kernels
@@ -479,6 +520,13 @@ To build the Windows installer (NSIS) explicitly:
 
 ```powershell
 npm --prefix apps/desktop run build -- --bundles nsis
+```
+
+To build the Linux packages (AppImage + `.deb`) — on Linux, from an Ubuntu 22.04
+baseline so the AppImage stays compatible with 22.04 and 24.04:
+
+```bash
+npm --prefix apps/desktop run build:linux
 ```
 
 The Rust backend workspace is shared across desktop and server. Install a Rust
