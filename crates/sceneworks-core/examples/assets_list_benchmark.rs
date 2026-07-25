@@ -22,21 +22,33 @@ fn report(
     operations: AssetListFilesystemOperations,
 ) {
     println!(
-        "{label}: assets={assets} elapsed_ms={:.3} fs_total={} sidecar_reads={} \
-         generation_set_reads={} poster_stats={} directory_create_calls={} db_opens={}",
+        "{label}: assets={assets} elapsed_ms={:.3} fs_total={} registry_opens={} \
+         registry_metadata_reads={} registry_content_reads={} path_stats={} directory_scans={} \
+         sidecar_reads={} generation_set_reads={} poster_stats={} index_marker_reads={} \
+         index_marker_writes={} index_marker_removes={} directory_create_calls={} db_opens={}",
         elapsed.as_secs_f64() * 1_000.0,
         operations.total(),
+        operations.registry_opens,
+        operations.registry_metadata_reads,
+        operations.registry_content_reads,
+        operations.path_stats,
+        operations.directory_scans,
         operations.sidecar_reads,
         operations.generation_set_reads,
         operations.poster_stats,
+        operations.index_marker_reads,
+        operations.index_marker_writes,
+        operations.index_marker_removes,
         operations.directory_create_calls,
         operations.db_opens,
     );
 }
 
 fn run(store: ProjectStore, project_id: &str, iterations: usize) {
-    let (assets, cold_elapsed, cold_operations) = list_once(&store, project_id);
-    report("cold", assets, cold_elapsed, cold_operations);
+    // This is the first call through a new ProjectStore and therefore includes
+    // registry-cache population. It does NOT evict the OS filesystem cache.
+    let (assets, first_elapsed, first_operations) = list_once(&store, project_id);
+    report("first-call", assets, first_elapsed, first_operations);
 
     let mut warm_elapsed = Duration::ZERO;
     let mut warm_operations = AssetListFilesystemOperations::default();
@@ -44,21 +56,37 @@ fn run(store: ProjectStore, project_id: &str, iterations: usize) {
         let (warm_assets, elapsed, operations) = list_once(&store, project_id);
         assert_eq!(warm_assets, assets, "asset count changed during benchmark");
         warm_elapsed += elapsed;
+        warm_operations.registry_opens += operations.registry_opens;
+        warm_operations.registry_metadata_reads += operations.registry_metadata_reads;
+        warm_operations.registry_content_reads += operations.registry_content_reads;
+        warm_operations.path_stats += operations.path_stats;
+        warm_operations.directory_scans += operations.directory_scans;
         warm_operations.sidecar_reads += operations.sidecar_reads;
         warm_operations.generation_set_reads += operations.generation_set_reads;
         warm_operations.poster_stats += operations.poster_stats;
+        warm_operations.index_marker_reads += operations.index_marker_reads;
+        warm_operations.index_marker_writes += operations.index_marker_writes;
+        warm_operations.index_marker_removes += operations.index_marker_removes;
         warm_operations.directory_create_calls += operations.directory_create_calls;
         warm_operations.db_opens += operations.db_opens;
     }
     let divisor = iterations as u32;
     report(
-        &format!("warm-average({iterations})"),
+        &format!("steady-state-average({iterations})"),
         assets,
         warm_elapsed / divisor,
         AssetListFilesystemOperations {
+            registry_opens: warm_operations.registry_opens / iterations as u64,
+            registry_metadata_reads: warm_operations.registry_metadata_reads / iterations as u64,
+            registry_content_reads: warm_operations.registry_content_reads / iterations as u64,
+            path_stats: warm_operations.path_stats / iterations as u64,
+            directory_scans: warm_operations.directory_scans / iterations as u64,
             sidecar_reads: warm_operations.sidecar_reads / iterations as u64,
             generation_set_reads: warm_operations.generation_set_reads / iterations as u64,
             poster_stats: warm_operations.poster_stats / iterations as u64,
+            index_marker_reads: warm_operations.index_marker_reads / iterations as u64,
+            index_marker_writes: warm_operations.index_marker_writes / iterations as u64,
+            index_marker_removes: warm_operations.index_marker_removes / iterations as u64,
             directory_create_calls: warm_operations.directory_create_calls / iterations as u64,
             db_opens: warm_operations.db_opens / iterations as u64,
         },

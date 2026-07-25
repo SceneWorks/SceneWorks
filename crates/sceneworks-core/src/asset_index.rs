@@ -39,6 +39,7 @@ pub(crate) fn sidecar_content_fingerprint(
 ) -> ProjectStoreResult<(u64, Option<String>, String)> {
     record_asset_list_filesystem_operation(AssetListFilesystemOperation::SidecarRead);
     let bytes = fs::read(path)?;
+    record_asset_list_filesystem_operation(AssetListFilesystemOperation::PathStat);
     let modified_ns = fs::metadata(path)
         .ok()
         .and_then(|metadata| metadata.modified().ok())
@@ -137,11 +138,14 @@ pub(crate) fn asset_sidecars(project_path: &Path) -> ProjectStoreResult<Vec<Path
 }
 
 pub(crate) fn collect_sidecars(path: &Path, sidecars: &mut Vec<PathBuf>) -> ProjectStoreResult<()> {
+    record_asset_list_filesystem_operation(AssetListFilesystemOperation::PathStat);
     if !path.exists() {
         return Ok(());
     }
+    record_asset_list_filesystem_operation(AssetListFilesystemOperation::DirectoryScan);
     for entry in fs::read_dir(path)? {
         let path = entry?.path();
+        record_asset_list_filesystem_operation(AssetListFilesystemOperation::PathStat);
         if path.is_dir() {
             collect_sidecars(&path, sidecars)?;
         } else if path

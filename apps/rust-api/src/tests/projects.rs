@@ -89,6 +89,26 @@ async fn project_and_asset_routes_persist_contract_state() {
     assert_eq!(updated["status"]["rating"], 4);
     assert_eq!(updated["status"]["rejected"], true);
 
+    // Status must already be present in the DB-backed list before any later
+    // mutation gets a chance to refresh the same indexed envelope.
+    let (status, assets) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets?includeRejected=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let indexed = assets
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|asset| asset["id"] == asset_id)
+        .expect("status-mutated asset remains indexed");
+    assert_eq!(indexed["status"]["favorite"], true);
+    assert_eq!(indexed["status"]["rating"], 4);
+    assert_eq!(indexed["status"]["rejected"], true);
+
     let (status, tagged) = request(
         app.clone(),
         "PATCH",
@@ -99,8 +119,7 @@ async fn project_and_asset_routes_persist_contract_state() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(tagged["tags"], json!(["portrait", "reference"]));
 
-    // The list route is DB-envelope-backed: API mutations must update that
-    // envelope before returning, without relying on a subsequent sidecar read.
+    // Tags independently update the same indexed envelope before returning.
     let (status, assets) = request(
         app.clone(),
         "GET",
@@ -115,9 +134,6 @@ async fn project_and_asset_routes_persist_contract_state() {
         .iter()
         .find(|asset| asset["id"] == asset_id)
         .expect("mutated asset remains indexed");
-    assert_eq!(indexed["status"]["favorite"], true);
-    assert_eq!(indexed["status"]["rating"], 4);
-    assert_eq!(indexed["status"]["rejected"], true);
     assert_eq!(indexed["tags"], json!(["portrait", "reference"]));
 
     let (status, deleted) = request(
