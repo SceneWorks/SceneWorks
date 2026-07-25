@@ -72,7 +72,13 @@ backend-candle = ["dep:runtime-cuda", "dep:ort", "dep:zip"]
 ort = { version = "=2.0.0-rc.12", features = ["coreml", "load-dynamic", "download-binaries"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Canonical Apple inference composition. Bespoke provider APIs are re-exported by the bundle.
-runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "e322bdf71636b16ea74dcb5927b9e51066182f94" }
+# `audio-metal` is additive over the default `media` + `audio` lanes: it runs the DIFFUSION audio
+# providers (moss-sfx, acestep) on the Metal GPU. This is not a nice-to-have — MOSS-SoundEffect
+# denoises a full 30 s latent window with quadratic attention (sc-14441), which is ~159 s on Metal
+# against 35+ minutes on CPU for a single 3 s clip. The nearest-upsample-vocoder providers (Kokoro,
+# Chatterbox) are auto-routed back to CPU inside the lane, because candle-core's Metal backend lacks
+# upsample_nearest1d (sc-13691) — so enabling this stays correct instead of crashing them.
+runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "e322bdf71636b16ea74dcb5927b9e51066182f94", features = ["audio-metal"] }
 # Retained direct dependency: SceneWorks' native person detector uses MLX tensor primitives.
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "932beb4e60db44d378ffa1fe648defea59b5cbd0" }
 
