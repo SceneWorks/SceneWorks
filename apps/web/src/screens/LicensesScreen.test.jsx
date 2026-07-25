@@ -68,6 +68,26 @@ describe("LicensesScreen", () => {
     );
   });
 
+  it("renders complete notices for ported Cephes source and embedded CMUDICT data", async () => {
+    await render();
+    const cases = [
+      ["Cephes Math Library", "Steven Moshier", "Neither the name"],
+      ["CMU Pronouncing Dictionary", "Carnegie Mellon University", "Defense Advanced"],
+    ];
+    for (const [name, copyright, condition] of cases) {
+      const item = [...container.querySelectorAll(".licenses-item")].find((button) =>
+        button.textContent.includes(name),
+      );
+      expect(item).toBeTruthy();
+      await act(async () => item.click());
+      const text = container.querySelector(".licenses-text").textContent;
+      const normalized = text.replace(/\s+/g, " ");
+      expect(text).toContain(copyright);
+      expect(text).toContain(condition);
+      expect(normalized).toContain("DIRECT, INDIRECT, INCIDENTAL");
+    }
+  });
+
   it("records the ACE-Step SFT Cover-restyle co-requisite under MIT (sc-13821)", async () => {
     await render();
     const sftCover = [...container.querySelectorAll(".licenses-item")].find((b) =>

@@ -93,6 +93,9 @@ import controlnetTileSdxlApache20 from "../../../desktop/licenses/controlnet-til
 import pidNVIDIALicense from "../../../desktop/licenses/pid/NVIDIA-License.txt?raw";
 import realEsrganBSD3Clause from "../../../desktop/licenses/real-esrgan/BSD-3-Clause.txt?raw";
 import qwen3VlCaptionApache20 from "../../../desktop/licenses/qwen3-vl-caption/Apache-2.0.txt?raw";
+// Production third-party source/data compiled into the inference runtimes (sc-14403).
+import cephesBsd3Clause from "../../../desktop/licenses/cephes/BSD-3-Clause.txt?raw";
+import cmudictBsd2Clause from "../../../desktop/licenses/cmudict/BSD-2-Clause.txt?raw";
 
 // Maps a manifest document `key` to its imported text. New components: add the
 // files under apps/desktop/licenses/<id>/, list them in manifest.json, and wire
@@ -155,6 +158,8 @@ const DOCUMENT_TEXT = {
   "pid-nvidia-license": pidNVIDIALicense,
   "real-esrgan-bsd-3-clause": realEsrganBSD3Clause,
   "qwen3-vl-caption-apache": qwen3VlCaptionApache20,
+  "cephes-bsd-3-clause": cephesBsd3Clause,
+  "cmudict-bsd-2-clause": cmudictBsd2Clause,
 };
 
 // Resolve each component's document keys to its actual text once, at module load.
