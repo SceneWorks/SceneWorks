@@ -1,0 +1,748 @@
+{
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
+  "inferenceRevision": "8b0534512add4007cf6034f5d200e5649ed9b5f0",
+  "auditDigest": "9f4ad94d5f5a6aafb2dd9932fca7c0f039c897c374fe0008b8679db5fd5bfb38",
+  "artifacts": [
+    {
+      "id": "cmudict",
+      "kind": "embedded-third-party-data",
+      "component": "cmudict",
+      "source": "crates/audio/candle-audio-kokoro/src/g2p.rs:67",
+      "included": "crates/audio/candle-audio-kokoro/resources/cmudict.dict",
+      "disposition": "about-license",
+      "evidence": "CMUdict is third-party dictionary data; its complete BSD-2 notice is rendered by component cmudict."
+    }
+  ],
+  "prospectiveDisclosures": [
+    {
+      "id": "cephes",
+      "component": "cephes",
+      "firstInferenceRevision": "4dd518a5",
+      "source": "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs",
+      "evidence": "Current inference main, but not the pinned revision above, contains the Cephes port. The notice is pre-staged so the future pin cannot ship without disclosure."
+    }
+  ],
+  "provenanceScan": {
+    "scanner": "scripts/scan-inference-provenance.mjs",
+    "candidateList": "config/inference-provenance-candidates.tsv",
+    "revision": "8b0534512add4007cf6034f5d200e5649ed9b5f0",
+    "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
+    "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from (case-insensitive)",
+    "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
+    "matchedFiles": 520,
+    "populationSha256": "e1d7c40b613cb17f29780fcfb7fde2113ed743d9a767d0d3153e8b690640fb8b"
+  },
+  "portedSourceAreas": [
+    {
+      "id": "architecture:crates/audio/candle-audio-acestep",
+      "pathPrefix": "crates/audio/candle-audio-acestep/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers.",
+      "excludePaths": [
+        "crates/audio/candle-audio-acestep/src/vae.rs"
+      ]
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio-chatterbox",
+      "pathPrefix": "crates/audio/candle-audio-chatterbox/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio-chatterbox-ve",
+      "pathPrefix": "crates/audio/candle-audio-chatterbox-ve/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio-kokoro",
+      "pathPrefix": "crates/audio/candle-audio-kokoro/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio-mmaudio",
+      "pathPrefix": "crates/audio/candle-audio-mmaudio/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio-moss-sfx",
+      "pathPrefix": "crates/audio/candle-audio-moss-sfx/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio-openvoice",
+      "pathPrefix": "crates/audio/candle-audio-openvoice/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio-whisper",
+      "pathPrefix": "crates/audio/candle-audio-whisper/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/contracts/core-llm",
+      "pathPrefix": "crates/contracts/core-llm/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/contracts/gen-core",
+      "pathPrefix": "crates/contracts/gen-core/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers.",
+      "excludePaths": [
+        "crates/contracts/gen-core/src/sampling/cfgpp.rs",
+        "crates/contracts/gen-core/src/sampling/solvers.rs"
+      ]
+    },
+    {
+      "id": "architecture:crates/llm/candle-llm",
+      "pathPrefix": "crates/llm/candle-llm/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/llm/mlx-llm",
+      "pathPrefix": "crates/llm/mlx-llm/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen",
+      "pathPrefix": "crates/media/candle-gen/candle-gen/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-anima",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-anima/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-bernini",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-bernini/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-boogu",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-boogu/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-chroma",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-chroma/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-clip",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-clip/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-depth",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-depth/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-face",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-face/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-flux",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-flux/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers.",
+      "excludePaths": [
+        "crates/media/candle-gen/candle-gen-flux/src/packed_te.rs",
+        "crates/media/candle-gen/candle-gen-flux/src/vae/diffusers.rs",
+        "crates/media/candle-gen/candle-gen-flux/src/vae/native.rs"
+      ]
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-flux2",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-flux2/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-ideogram",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-ideogram/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-instantid",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-instantid/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers.",
+      "excludePaths": [
+        "crates/media/candle-gen/candle-gen-instantid/src/kps.rs"
+      ]
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-kolors",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-kolors/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers.",
+      "excludePaths": [
+        "crates/media/candle-gen/candle-gen-kolors/src/unet.rs"
+      ]
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-krea",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-krea/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-lens",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-lens/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-ltx",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-ltx/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-mochi",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-mochi/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-pid",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-pid/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-pulid",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-pulid/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-qwen-image",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-qwen-image/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-sam3",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-sam3/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-sana",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-sana/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-scail2",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-scail2/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-sd3",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-sd3/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-sdxl",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-sdxl/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-seedvr2",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-seedvr2/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-sensenova",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-sensenova/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-svd",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-svd/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-wan",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-wan/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-z-image",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-z-image/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/vendor/candle-kernels",
+      "pathPrefix": "crates/media/candle-gen/vendor/candle-kernels/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen",
+      "pathPrefix": "crates/media/mlx-gen/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-anima",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-anima/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-bernini",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-bernini/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-boogu",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-boogu/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-chroma",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-chroma/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-depth",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-depth/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-face",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-face/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-flux",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-flux/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-flux2",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-flux2/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-ideogram",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-ideogram/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-instantid",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-instantid/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers.",
+      "excludePaths": [
+        "crates/media/mlx-gen/mlx-gen-instantid/src/kps.rs"
+      ]
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-kolors",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-kolors/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-krea",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-krea/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-lens",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-lens/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-ltx",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-ltx/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-mochi",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-mochi/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-pid",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-pid/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-pulid",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-pulid/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-qwen-image",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-qwen-image/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-sam2",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-sam2/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-sam3",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-sam3/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-sana",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-sana/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-sd3",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-sd3/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-sdxl",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-sdxl/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-seedvr2",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-seedvr2/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-sensenova",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-sensenova/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-svd",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-svd/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-wan",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-wan/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-z-image",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-z-image/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "candle-transformers-source",
+      "paths": [
+        "crates/media/candle-gen/candle-gen-flux/src/packed_te.rs",
+        "crates/media/candle-gen/candle-gen-flux/src/vae/diffusers.rs",
+        "crates/media/candle-gen/candle-gen-flux/src/vae/native.rs",
+        "crates/media/candle-gen/candle-gen-kolors/src/unet.rs"
+      ],
+      "provenance": "Verbatim or faithful source ports from Hugging Face Candle transformer implementations, including both FLUX VAE variants, packed CLIP/T5 forwards, and the Kolors UNet base.",
+      "disposition": "about-license",
+      "component": "candle-transformers-source"
+    },
+    {
+      "id": "cfgpp-formula",
+      "paths": [
+        "crates/contracts/gen-core/src/sampling/cfgpp.rs"
+      ],
+      "provenance": "CFG++ formula reimplemented from paper and ComfyUI behavior.",
+      "disposition": "formula-reimplementation-no-notice",
+      "evidence": "The source explicitly states nothing is vendored; mathematical formula and independently written Rust are not copied expressive source."
+    },
+    {
+      "id": "comfy-kdiffusion-solvers",
+      "paths": [
+        "crates/contracts/gen-core/src/sampling/solvers.rs"
+      ],
+      "provenance": "Faithful solver formula ports from ComfyUI and k-diffusion.",
+      "disposition": "formula-reimplementation-existing-terms",
+      "evidence": "The module cites algorithm names and references; independently written Rust implements published numerical formulas without copied expressive source."
+    },
+    {
+      "id": "diffusers-source",
+      "paths": [
+        "crates/audio/candle-audio-acestep/src/vae.rs"
+      ],
+      "provenance": "Structural Rust port of Hugging Face Diffusers OobleckDecoder.",
+      "disposition": "about-license",
+      "component": "diffusers-source"
+    },
+    {
+      "id": "opencv-source",
+      "paths": [
+        "crates/media/candle-gen/candle-gen-instantid/src/kps.rs",
+        "crates/media/mlx-gen/mlx-gen-instantid/src/kps.rs"
+      ],
+      "provenance": "InstantID keypoint rasterizers faithfully port OpenCV drawing primitives and the literal SinTable.",
+      "disposition": "about-license",
+      "component": "opencv-source"
+    }
+  ],
+  "includeSites": [
+    {
+      "source": "crates/audio/candle-audio-kokoro/src/g2p.rs:67",
+      "included": "resources/cmudict.dict",
+      "disposition": "artifact",
+      "artifact": "cmudict"
+    },
+    {
+      "source": "crates/audio/candle-audio-mmaudio/src/clip.rs:455",
+      "included": "dfn5b_clip_merges.txt",
+      "disposition": "model-asset",
+      "component": "mmaudio",
+      "evidence": "DFN5B-CLIP tokenizer merges belong to the Apple-conditioned MMAudio model assembly already disclosed by the MMAudio Apple ML Research notice."
+    },
+    {
+      "source": "crates/audio/candle-audio-whisper/src/mel.rs:25",
+      "included": "melfilters.bytes",
+      "disposition": "generated-numeric-data",
+      "evidence": "Fixed mel-filter coefficients generated from the public signal-processing formula; no copied expressive source or separate notice."
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen-anima/src/tokenizer.rs:20",
+      "included": "assets/qwen_tokenizer.json",
+      "disposition": "model-asset",
+      "component": "anima",
+      "evidence": "Tokenizer asset distributed as part of the Anima model assembly and covered by its displayed upstream terms."
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen-anima/src/tokenizer.rs:22",
+      "included": "assets/t5_tokenizer.json",
+      "disposition": "model-asset",
+      "component": "anima",
+      "evidence": "Tokenizer asset distributed as part of the Anima model assembly and covered by its displayed upstream terms."
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen-chroma/src/text.rs:25",
+      "included": "assets/t5_tokenizer.json",
+      "disposition": "model-asset",
+      "component": "chroma1",
+      "evidence": "Tokenizer asset belongs to the Chroma model assembly already disclosed under Apache-2.0."
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen-flux/src/pipeline.rs:982",
+      "included": "assets/clip_tokenizer.json",
+      "disposition": "shared-model-asset",
+      "components": [
+        "flux1-dev",
+        "flux1-schnell",
+        "flux2-dev",
+        "flux2-klein"
+      ],
+      "evidence": "CLIP tokenizer is a model co-requisite; every shipped FLUX family using it has an About entry."
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen-mochi/src/tokenizer.rs:17",
+      "included": "assets/t5_tokenizer.json",
+      "disposition": "model-data-no-separate-notice",
+      "evidence": "Standard tokenizer vocabulary data, not a hand-ported source implementation; this crate is compiled into the catalog but Mochi is not exposed as a SceneWorks model."
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen-seedvr2/src/pipeline.rs:60",
+      "included": "data/neg_embed.safetensors",
+      "disposition": "model-data-no-separate-notice",
+      "evidence": "Fixed negative-conditioning numeric tensor, not source code; SeedVR2 is compiled into the catalog but is not exposed as a SceneWorks model."
+    },
+    {
+      "source": "crates/media/candle-gen/candle-gen/src/quant/cublaslt.rs:185",
+      "included": "quant/nvfp4_quant.cu",
+      "disposition": "first-party-source",
+      "evidence": "SceneWorks inference source compiled at runtime by NVRTC; not third-party source and covered by the project license."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-anima/src/tokenizer.rs:23",
+      "included": "assets/qwen_tokenizer.json",
+      "disposition": "model-asset",
+      "component": "anima",
+      "evidence": "Tokenizer asset distributed as part of the Anima model assembly and covered by its displayed upstream terms."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-anima/src/tokenizer.rs:25",
+      "included": "assets/t5_tokenizer.json",
+      "disposition": "model-asset",
+      "component": "anima",
+      "evidence": "Tokenizer asset distributed as part of the Anima model assembly and covered by its displayed upstream terms."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-chroma/src/loader.rs:22",
+      "included": "assets/t5_tokenizer.json",
+      "disposition": "model-asset",
+      "component": "chroma1",
+      "evidence": "Tokenizer asset belongs to the Chroma model assembly already disclosed under Apache-2.0."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-flux/src/loader.rs:41",
+      "included": "assets/clip_tokenizer.json",
+      "disposition": "shared-model-asset",
+      "components": [
+        "flux1-dev",
+        "flux1-schnell",
+        "flux2-dev",
+        "flux2-klein"
+      ],
+      "evidence": "CLIP tokenizer is a model co-requisite; every shipped FLUX family using it has an About entry."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-ltx/src/enhance.rs:38",
+      "included": "prompts/gemma_t2v_system_prompt.txt",
+      "disposition": "model-asset",
+      "component": "ltx-2.3",
+      "evidence": "Gemma enhancement prompt is part of the LTX/Gemma assembly whose two applicable terms are displayed."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-ltx/src/enhance.rs:39",
+      "included": "prompts/gemma_i2v_system_prompt.txt",
+      "disposition": "model-asset",
+      "component": "ltx-2.3",
+      "evidence": "Gemma enhancement prompt is part of the LTX/Gemma assembly whose two applicable terms are displayed."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-mochi/src/tokenizer.rs:17",
+      "included": "assets/t5_tokenizer.json",
+      "disposition": "model-data-no-separate-notice",
+      "evidence": "Standard tokenizer vocabulary data, not a hand-ported source implementation; this crate is compiled into the catalog but Mochi is not exposed as a SceneWorks model."
+    },
+    {
+      "source": "crates/media/mlx-gen/mlx-gen-seedvr2/src/pipeline.rs:75",
+      "included": "data/neg_embed.safetensors",
+      "disposition": "model-data-no-separate-notice",
+      "evidence": "Fixed negative-conditioning numeric tensor, not source code; SeedVR2 is compiled into the catalog but is not exposed as a SceneWorks model."
+    },
+    {
+      "source": "crates/media/candle-gen/vendor/candle-kernels/src/ptx.rs:1-11",
+      "included": "OUT_DIR/*.ptx",
+      "disposition": "generated-build-output",
+      "evidence": "Eleven include_str! calls embed PTX generated by this crate's build script from its already-licensed kernel sources; they introduce no independent source/data."
+    }
+  ]
+}

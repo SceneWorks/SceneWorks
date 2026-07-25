@@ -1,3 +1,16 @@
+use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
+use super::{
+    consume_gen_events, curated_image_menu, drive_gen_items_scored, load_reference_image,
+    non_empty, normalize_sampling_knob, read_advanced_sampling_knobs,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    resolve_character_image_likeness_source, resolve_seed, stage_likeness, start_gen_stream,
+    ApiClient, Image, ImagePlan, ImageRequest, IpAdapterKolors, IpAdapterKolorsPaths,
+    IpAdapterKolorsRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
+    WorkerResult,
+};
+use super::{resolve_app_managed_model_dir, DownloadContext};
+use serde_json::json;
+
 // Candle (Windows/CUDA) Kolors IP-Adapter-Plus reference route (sc-5488, epic 5480) — reference-image
 // (identity) conditioning on Kolors off-Mac via `runtime_cuda::providers::kolors::IpAdapterKolors`. The Kolors sibling
 // of the candle SDXL IP-Adapter lane (sdxl_ipadapter.rs): CLIP ViT-L/14-336 image tokens injected into
@@ -7,7 +20,7 @@
 // **Candle-only.** macOS keeps the MLX Kolors IP path (the `Reference` conditioning the registry
 // `kolors` generator handles once `with_ip_adapter` installs the K/V — kolors.rs, sc-4767); the candle
 // `IpAdapterKolors` is a bespoke provider, so this whole file is gated to the Windows/CUDA candle build
-// (the `include!` in image_jobs.rs carries the cfg). It is `include!`d into the `image_jobs` module, so
+// (the module declaration in image_jobs.rs carries the cfg). It is a child module of the `image_jobs` module, so
 // it shares that module's imports (ImageRequest/Settings/WorkerResult/`advanced`/`load_reference_image`/
 // `huggingface_snapshot_dir`/`ensure_hf_cached_file`/`start_gen_stream`/… all in scope unqualified).
 
@@ -19,7 +32,7 @@ const KOLORS_IPADAPTER_REPO: &str = "Kwai-Kolors/Kolors-IP-Adapter-Plus";
 /// Pinned to the exact commit at the tip of `refs/pr/4` rather than the mutable `refs/pr/4` ref itself
 /// (sc-11168 / F-007 — completes the sc-9879 rollout): a force-push to the PR could otherwise swap the
 /// adapter/encoder weights we load. The native downloader still verifies each file's own hash on download.
-const KOLORS_IPADAPTER_REVISION: &str = "5c72aa86cd8d9d23ff406d293c5473820e09e1d9";
+pub(super) const KOLORS_IPADAPTER_REVISION: &str = "5c72aa86cd8d9d23ff406d293c5473820e09e1d9";
 /// The IP-Adapter-Plus bundle file (root of the snapshot).
 const KOLORS_IPADAPTER_BUNDLE: &str = "ip_adapter_plus_general.safetensors";
 /// The CLIP ViT-L/14-336 image-encoder files inside the repo (config + weights).
@@ -62,7 +75,8 @@ fn resolve_kolors_ipadapter_base(
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
     {
-        return resolve_app_managed_model_dir(settings, &path, "Kolors IP-Adapter modelPath").map(Some);
+        return resolve_app_managed_model_dir(settings, &path, "Kolors IP-Adapter modelPath")
+            .map(Some);
     }
     let repo = request
         .model_manifest_entry
@@ -77,13 +91,16 @@ fn resolve_kolors_ipadapter_base(
 /// True when this is a candle-eligible Kolors IP-Adapter job: the `kolors` model with a reference image
 /// (and NOT an img2img/inpaint/edit shape — those are sc-5487) whose base resolves locally. Mirrors
 /// `jobs_store::kolors_ipadapter_candle_eligible` so the worker and router agree.
-fn kolors_ipadapter_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn kolors_ipadapter_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_kolors_ipadapter_model(&request.model)
         && request.mode != "edit_image"
         && non_empty(&request.reference_asset_id)
         && !non_empty(&request.source_asset_id)
         && !non_empty(&request.mask_asset_id)
-        && matches!(resolve_kolors_ipadapter_base(request, settings), Ok(Some(_)))
+        && matches!(
+            resolve_kolors_ipadapter_base(request, settings),
+            Ok(Some(_))
+        )
 }
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → default (50).
@@ -113,7 +130,10 @@ async fn ensure_kolors_ipadapter_weights(
 ) -> WorkerResult<PathBuf> {
     let has_layout = |dir: &Path| {
         dir.join(KOLORS_IPADAPTER_BUNDLE).is_file()
-            && dir.join("image_encoder").join("model.safetensors").is_file()
+            && dir
+                .join("image_encoder")
+                .join("model.safetensors")
+                .is_file()
     };
     // Env override: a directory laid out like the snapshot, pre-staged for local validation.
     if let Ok(root) = std::env::var("SCENEWORKS_IPADAPTER_KOLORS") {
@@ -187,7 +207,7 @@ fn kolors_ipadapter_raw_settings(
 /// load the `IpAdapterKolors` provider once + generate each image on the blocking thread. `request.count`
 /// images, each its own seed; `generate` takes the per-job `CancelFlag` + a `Progress` callback, so
 /// streaming is per-step and cancellation is honoured mid-denoise — same contract as the SDXL IP lane.
-async fn generate_candle_kolors_ipadapter_stream(
+pub(super) async fn generate_candle_kolors_ipadapter_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -198,7 +218,9 @@ async fn generate_candle_kolors_ipadapter_stream(
 ) -> WorkerResult<()> {
     let request = &plan.request;
     let kolors_base = resolve_kolors_ipadapter_base(request, settings)?.ok_or_else(|| {
-        WorkerError::InvalidPayload("Kolors IP-Adapter base (Kolors-diffusers) not found".to_owned())
+        WorkerError::InvalidPayload(
+            "Kolors IP-Adapter base (Kolors-diffusers) not found".to_owned(),
+        )
     })?;
     let reference_id = request
         .reference_asset_id
@@ -352,7 +374,13 @@ async fn generate_candle_kolors_ipadapter_stream(
                         Some(likeness_source_ref.as_str()),
                     )
                 });
-                Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
+                Ok(Some((
+                    seed,
+                    out.width,
+                    out.height,
+                    out.pixels,
+                    face_likeness,
+                )))
             })
         },
     );

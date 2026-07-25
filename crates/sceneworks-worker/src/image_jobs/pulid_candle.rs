@@ -1,3 +1,16 @@
+use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
+use super::{
+    consume_gen_events, curated_image_menu, drive_gen_items_scored, load_reference_image,
+    non_empty, normalize_sampling_knob, pid_effective_dims, pid_output_tier,
+    read_advanced_sampling_knobs, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32, resolve_character_image_likeness_source, resolve_pid_weights,
+    resolve_seed, stage_likeness, standard_tier_subdir, start_gen_stream, ApiClient, Image,
+    ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, PulidFlux, PulidFluxPaths,
+    PulidFluxRequest, Settings, Value, WorkerError, WorkerResult,
+};
+use super::{resolve_app_managed_model_dir, DownloadContext};
+use serde_json::json;
+
 // Candle (Windows/CUDA) PuLID-FLUX face-identity route (sc-5492, epic 5480) — identity-preserving
 // `character_image` generation on FLUX.1-dev off-Mac via `runtime_cuda::providers::pulid::PulidFlux`. The candle
 // sibling of the macOS `pulid_flux` registry route (image_jobs/pulid.rs): the reference face →
@@ -8,7 +21,7 @@
 // **Candle-only.** macOS keeps the inventory-registered `pulid_flux` MLX generator (it rides the
 // shared `start_cached_gen_stream` registry path with an env-var weight seam); the candle `PulidFlux`
 // is a bespoke provider taking explicit weight paths, so this whole file is gated to the Windows/CUDA
-// candle build (the `include!` in image_jobs.rs carries the cfg). It is `include!`d into the
+// candle build (the module declaration in image_jobs.rs carries the cfg). It is a child module of the
 // `image_jobs` module, so it shares that module's imports (ImageRequest/Settings/WorkerResult/`advanced`/
 // `load_reference_image`/`huggingface_snapshot_dir`/`ensure_hf_cached_file`/`start_gen_stream`/… all in
 // scope unqualified). Distinct model id `pulid_flux_dev` (not `flux_dev`) cleanly disambiguates this
@@ -34,7 +47,7 @@ const PULID_CANDLE_EVA_FILE: &str = "eva02_clip_l_336.safetensors";
 const PULID_CANDLE_BISENET_FILE: &str = "bisenet_parsing.safetensors";
 /// The SCRFD detector + ArcFace embedder: the SAME converted files InstantID ships (reused from
 /// `SceneWorks/instantid-mlx`); only EVA + BiSeNet + the PuLID adapter are PuLID-specific.
-const PULID_CANDLE_FACE_REPO: &str = "SceneWorks/instantid-mlx";
+pub(super) const PULID_CANDLE_FACE_REPO: &str = "SceneWorks/instantid-mlx";
 const PULID_CANDLE_SCRFD_FILE: &str = "scrfd_10g.safetensors";
 const PULID_CANDLE_ARCFACE_FILE: &str = "arcface_iresnet100.safetensors";
 /// Pinned commit revisions for the three PuLID download repos (sc-9879, F-077 follow-up). Every repo is
@@ -43,13 +56,13 @@ const PULID_CANDLE_ARCFACE_FILE: &str = "arcface_iresnet100.safetensors";
 /// exact commit for defense-in-depth (mirrors sc-8879/sc-9682); the `lfs.oid` sha256 verify in
 /// `ensure_hf_cached_file` is retained. `PULID_CANDLE_FACE_REPO` == `SceneWorks/instantid-mlx`, so its
 /// sha MUST equal `instantid.rs` `INSTANTID_MLX_REVISION` (they fetch the same repo).
-const PULID_CANDLE_ADAPTER_REVISION: &str = "492b1451255dc9d9bc3c857259690b5f8b998d4a";
-const PULID_CANDLE_MLX_REVISION: &str = "78ef91f977eae16d66fb191caf003154b7a0a0b8";
-const PULID_CANDLE_FACE_REVISION: &str = "bca0cacf8e5e04529bb2b326a521361b02be84fd";
+pub(super) const PULID_CANDLE_ADAPTER_REVISION: &str = "492b1451255dc9d9bc3c857259690b5f8b998d4a";
+pub(super) const PULID_CANDLE_MLX_REVISION: &str = "78ef91f977eae16d66fb191caf003154b7a0a0b8";
+pub(super) const PULID_CANDLE_FACE_REVISION: &str = "bca0cacf8e5e04529bb2b326a521361b02be84fd";
 
 /// The pinned revision for one PuLID download repo (sc-9879). Any repo not in this table falls back to
 /// `main` rather than a wrong sha.
-fn pulid_candle_revision(repo: &str) -> &'static str {
+pub(super) fn pulid_candle_revision(repo: &str) -> &'static str {
     match repo {
         PULID_CANDLE_ADAPTER_REPO => PULID_CANDLE_ADAPTER_REVISION,
         PULID_CANDLE_MLX_REPO => PULID_CANDLE_MLX_REVISION,
@@ -105,7 +118,7 @@ fn resolve_pulid_candle_base(
 /// mode with a reference face whose FLUX.1-dev base resolves locally. Mirrors
 /// `jobs_store::pulid_flux_candle_eligible` so the router and worker agree (and the MLX
 /// `pulid_flux_available`). PuLID-FLUX is text-to-image-with-a-face only — no `edit_image`.
-fn pulid_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn pulid_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model == PULID_CANDLE_MODEL
         && request.mode == "character_image"
         && non_empty(&request.reference_asset_id)
@@ -120,7 +133,12 @@ fn pulid_candle_steps(request: &ImageRequest) -> u32 {
 /// Resolve PuLID guidance: `advanced.guidanceScale` → manifest `guidanceScale` → 4.0 (the FLUX.1-dev
 /// guidance-distilled CFG the distilled single forward consumes).
 fn pulid_candle_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(request, "guidanceScale", PULID_CANDLE_DEFAULT_GUIDANCE, 0.0..=30.0)
+    resolve_advanced_or_manifest_f32(
+        request,
+        "guidanceScale",
+        PULID_CANDLE_DEFAULT_GUIDANCE,
+        0.0..=30.0,
+    )
 }
 
 /// The PuLID identity-strength knob → the provider's `id_weight` (0.0 = the no-id ablation = plain
@@ -217,8 +235,14 @@ async fn ensure_pulid_candle_weights(
         (PULID_CANDLE_FACE_REPO, PULID_CANDLE_ARCFACE_FILE),
         (PULID_CANDLE_MLX_REPO, PULID_CANDLE_BISENET_FILE),
     ] {
-        ensure_hf_cached_file(&context, repo, pulid_candle_revision(repo), file, &bundle.join(file))
-            .await?;
+        ensure_hf_cached_file(
+            &context,
+            repo,
+            pulid_candle_revision(repo),
+            file,
+            &bundle.join(file),
+        )
+        .await?;
     }
 
     Ok((adapter, eva, bundle))
@@ -252,7 +276,7 @@ fn pulid_candle_raw_settings(
 /// and CA injector are built per call), so — like the FLUX IP lane — the per-item closure needs no
 /// `mut`. Reuses the shared streaming seam (`consume_gen_events`) so step/cancel/asset behavior matches
 /// every other candle family.
-async fn generate_candle_pulid_stream(
+pub(super) async fn generate_candle_pulid_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -351,8 +375,12 @@ async fn generate_candle_pulid_stream(
     // Per-image work items: (seed, prompt) — `request.count` images at the reference identity.
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched).
-    let (width, height) =
-        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    let (width, height) = pid_effective_dims(
+        request.width,
+        request.height,
+        use_pid,
+        pid_output_tier(request),
+    );
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
@@ -369,9 +397,8 @@ async fn generate_candle_pulid_stream(
                 eva_weights: eva,
                 face_dir,
             };
-            let model = PulidFlux::load(&paths).map_err(|error| {
-                WorkerError::Engine(format!("PuLID-FLUX load failed: {error}"))
-            })?;
+            let model = PulidFlux::load(&paths)
+                .map_err(|error| WorkerError::Engine(format!("PuLID-FLUX load failed: {error}")))?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND snapshots cached.
             let model = match &pid_weights {
                 Some(pid) => model.with_pid(pid).map_err(|error| {
@@ -433,7 +460,13 @@ async fn generate_candle_pulid_stream(
                         Some(likeness_source_ref.as_str()),
                     )
                 });
-                Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
+                Ok(Some((
+                    seed,
+                    out.width,
+                    out.height,
+                    out.pixels,
+                    face_likeness,
+                )))
             })
         },
     );

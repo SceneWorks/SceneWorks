@@ -119,6 +119,10 @@ async fn spawn_binary_stub_with_options(
     let app = Router::new()
         .route("/api/v1/jobs/:job_id", get(job_stub))
         .route("/api/v1/jobs/:job_id/progress", post(progress_stub))
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_stub),
+        )
         .route("/*path", get(binary_stub).head(binary_head_stub))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -218,6 +222,12 @@ async fn progress_stub(
     axum::extract::Path(job_id): axum::extract::Path<String>,
 ) -> Response {
     Json(job_snapshot_json(&job_id, state.cancel_requested)).into_response()
+}
+
+async fn heartbeat_stub(
+    axum::extract::Path(worker_id): axum::extract::Path<String>,
+) -> Response {
+    Json(worker_snapshot_json(&worker_id)).into_response()
 }
 
 fn job_snapshot_json(job_id: &str, cancel_requested: bool) -> Value {

@@ -102,6 +102,14 @@ for (const contract of [
   "Datacenter Blackwell",
   "Unsupported in v1",
   "sc-14423",
+  "validate-runpod-proxy.mjs",
+  "100 MiB",
+  "15-second heartbeat",
+  "100-second",
+  "105,000,054-byte",
+  "33.851 seconds",
+  "seven heartbeat events",
+  "Preparing / 10%",
 ]) {
   assert.ok(doc.includes(contract), `${docPath} is missing ${contract}`);
 }

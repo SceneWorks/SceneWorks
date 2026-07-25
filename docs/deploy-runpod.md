@@ -225,6 +225,84 @@ an unauthenticated public bind.
 - If a model remains gated, verify that `HF_TOKEN` is present, the Hugging Face
   account has accepted the repository's license, and the Pod was restarted
   after adding the environment variable.
-- RunPod's HTTP proxy currently has a 100-second request limit. SceneWorks
-  generation runs as asynchronous jobs, but uploads or unrelated synchronous
-  clients should account for that proxy limit.
+- RunPod documents a 100-second Cloudflare proxy timeout for a service that has
+  not responded. SceneWorks generation uses short asynchronous API requests,
+  and `/api/v1/jobs/events` responds immediately before carrying progress as
+  SSE. The stream sends a 15-second heartbeat so an otherwise idle connection
+  continues to produce traffic. The web client reconnects with a new
+  short-lived event ticket if the connection is interrupted.
+- RunPod does not currently document a separate Pod HTTP-proxy request-body
+  limit. SceneWorks itself accepts a streaming multipart body up to 2 GiB, so
+  the file must remain slightly below that ceiling to leave room for framing.
+  Upload success still depends on sending the request body and receiving the
+  response within the proxy's timeout; use a stable uplink and retry a failed
+  import. Transcode or split very large video into parts that fit the tested
+  envelope rather than exposing an unauthenticated raw TCP port.
+
+## Validate the proxy path
+
+Before treating a new Pod, region, or RunPod proxy revision as production
+ready, verify the actual path with a real media file. The repository's probe:
+
+- connects to the authenticated job-event stream and requires the initial
+  `ready` event;
+- creates a harmless placeholder job and requires its matching `job.updated`
+  event within 10 seconds, then cancels if necessary and clears the probe job;
+- keeps that same SSE connection open for 110 seconds, past the documented
+  100-second boundary, and requires at least five 15-second heartbeat events;
+- streams a representative image or video of at least 100 MiB as multipart
+  data through the public proxy, requires a successful asset import, and
+  deletes the imported probe asset afterward.
+
+The token is accepted only through the environment and is never printed. The
+result also redacts the Pod ID. On macOS/Linux:
+
+```bash
+export SCENEWORKS_BASE_URL='https://<podid>-8010.proxy.runpod.net'
+read -rsp 'SceneWorks access token: ' SCENEWORKS_ACCESS_TOKEN
+export SCENEWORKS_ACCESS_TOKEN
+node scripts/validate-runpod-proxy.mjs \
+  --upload-file /path/to/representative-large-video.mp4
+unset SCENEWORKS_ACCESS_TOKEN
+```
+
+On PowerShell:
+
+```powershell
+$env:SCENEWORKS_BASE_URL = 'https://<podid>-8010.proxy.runpod.net'
+$env:SCENEWORKS_ACCESS_TOKEN = Read-Host 'SceneWorks access token'
+node scripts/validate-runpod-proxy.mjs `
+  --upload-file C:\path\to\representative-large-video.mp4
+Remove-Item Env:SCENEWORKS_ACCESS_TOKEN
+```
+
+Also keep the browser UI open while submitting a real generation job. Confirm
+that its queue card and progress change before the job completes; the probe
+validates the same transport, while this manual check confirms the UI consumes
+it. Record the file size, elapsed upload time, event latency, heartbeat count,
+observation duration, and any `524` or disconnect. Never record the access
+token, event ticket, full proxy hostname, or Pod ID in committed evidence.
+
+### Measured live result
+
+On 2026-07-24, the probe passed through a real RunPod Pod HTTPS proxy:
+
+- the initial SSE `ready` event arrived in 528 ms;
+- the matching `job.updated` event arrived in 464 ms, before the job request
+  completed its wider workflow;
+- the same connection remained open for the full 110-second observation and
+  delivered seven heartbeat events, with no buffering or premature disconnect;
+- in the browser UI at 2026-07-24T22:45:51Z, the proxied queue showed the same
+  placeholder job live at Preparing / 10% on the CPU utility worker, then
+  Completed / 100% after six seconds, without using a direct-origin URL;
+- a valid 105,000,054-byte (100.14 MiB) BMP completed as a streaming multipart
+  upload in 33.851 seconds with HTTP 201; and
+- the probe asset was trashed and permanently purged after validation.
+
+This establishes the tested body-size envelope at 100.14 MiB; it does not claim
+that RunPod has no higher undocumented cap. The 110-second connected stream
+also shows that the documented 100-second timeout does not terminate an SSE
+response that starts immediately and continues delivering heartbeat traffic.
+
+RunPod's current [HTTP proxy documentation](https://docs.runpod.io/pods/configuration/expose-ports)
+describes the proxy chain and timeout.
