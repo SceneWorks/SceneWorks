@@ -234,12 +234,6 @@ pub(crate) fn ingest_prepared_pose_pairs(
 
 // --- Annotated (COCO person_keypoints + captions) --------------------------------------------
 
-/// A COCO images/annotations JSON envelope (only the fields we read).
-#[derive(Deserialize)]
-struct CocoImages {
-    images: Vec<CocoImage>,
-}
-
 #[derive(Deserialize)]
 struct CocoImage {
     id: i64,
@@ -250,6 +244,7 @@ struct CocoImage {
 
 #[derive(Deserialize)]
 struct CocoKeypointFile {
+    images: Vec<CocoImage>,
     annotations: Vec<CocoKeypointAnn>,
 }
 
@@ -331,13 +326,12 @@ pub(crate) fn ingest_coco_annotated(
     let label = control_kind_label(&ControlKind::Pose);
     std::fs::create_dir_all(out_dir.join("train"))?;
 
-    let images: CocoImages = read_json(&source.keypoints_json)?;
     let keypoints: CocoKeypointFile = read_json(&source.keypoints_json)?;
     let captions: CocoCaptionFile = read_json(&source.captions_json)?;
 
     // image_id → (file_name, w, h)
     let image_by_id: std::collections::HashMap<i64, CocoImage> =
-        images.images.into_iter().map(|im| (im.id, im)).collect();
+        keypoints.images.into_iter().map(|im| (im.id, im)).collect();
     // image_id → first caption
     let mut caption_by_id: std::collections::HashMap<i64, String> =
         std::collections::HashMap::new();

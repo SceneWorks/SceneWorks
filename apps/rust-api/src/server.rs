@@ -373,6 +373,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let run_utility_inprocess = settings.run_utility_inprocess;
+    let utility_data_dir = settings.data_dir.clone();
     let app = create_app(settings)?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     // Use the actual bound address so port 0 (OS-assigned) is reported and the
@@ -385,7 +386,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "SceneWorks API listening"
     );
 
-    let utility_worker = run_utility_inprocess.then(|| spawn_inprocess_utility_worker(port));
+    let utility_worker = if run_utility_inprocess {
+        Some(spawn_inprocess_utility_worker(port, utility_data_dir).await?)
+    } else {
+        None
+    };
 
     // `into_make_service_with_connect_info` exposes the peer `SocketAddr` to the auth
     // middleware so loopback callers can be trusted (epic 4484: keep the local desktop UI

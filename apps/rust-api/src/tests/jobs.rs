@@ -165,6 +165,100 @@ async fn generic_model_utility_jobs_reject_path_unsafe_model_id_before_create() 
     assert!(jobs.as_array().expect("jobs array").is_empty());
 }
 
+#[tokio::test]
+async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let conversion_root = settings.data_dir.join("models/mlx");
+    let app = create_app(settings).expect("app creates");
+
+    let request_convert = |output_dir: &std::path::Path| {
+        json!({
+            "type": "model_convert",
+            "requestedGpu": "auto",
+            "payload": {
+                "modelId": "model-1",
+                "sourceRepo": "owner/source",
+                "outputDir": output_dir.display().to_string(),
+            },
+        })
+    };
+
+    let (status, accepted) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        request_convert(&conversion_root.join(".foo.finalize-backup-123")),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "backup-looking model names remain valid in the disjoint recovery design: {accepted}"
+    );
+
+    for (output_dir, expected) in [
+        (conversion_root.join("nested/model-2"), "direct child"),
+        (
+            temp_dir.path().join("data/models/custom-model"),
+            "direct child",
+        ),
+        (
+            conversion_root.join(".sceneworks-finalize-backups"),
+            "reserved",
+        ),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            request_convert(&output_dir),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{output_dir:?}: {body}");
+        assert!(
+            body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains(expected)),
+            "{output_dir:?}: expected {expected:?} in {body}"
+        );
+    }
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        jobs.as_array().expect("jobs array").len(),
+        1,
+        "invalid conversion targets must fail before persistence"
+    );
+}
+
+/// The route-derived output path is a trust-boundary input too. Confinement must run before
+/// `model_catalog` performs its filesystem/cache sweep, so an invalid path-shaped ID wins over the
+/// catalog's otherwise-observable "Model not found" response.
+#[tokio::test]
+async fn typed_model_convert_confines_route_id_before_catalog_lookup() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    for (encoded_model_id, expected) in [
+        ("%2E%2E", "direct child"),
+        (".sceneworks-finalize-backups", "reserved"),
+    ] {
+        let endpoint = format!("/api/v1/models/{encoded_model_id}/convert");
+        let (status, body) = request(app.clone(), "POST", &endpoint, json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{endpoint}: {body}");
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains(expected),
+            "{endpoint}: confinement must precede catalog/404 work, got {body}"
+        );
+        assert!(
+            !detail.contains("Model not found"),
+            "{endpoint}: invalid route ID must not fall through to catalog lookup"
+        );
+    }
+}
+
 /// sc-13617 / F-011: retry and duplicate merge payloadChanges into an existing generation
 /// payload. Validate the merged model before either operation can persist a new job.
 #[tokio::test]

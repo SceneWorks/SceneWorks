@@ -20,7 +20,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio as StdStdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -61,7 +61,8 @@ use super::media_jobs::{mask_rollup_state, segment_assembly_frames, SegmentClip,
 use super::model_jobs::{
     check_downloaded_model_family, derived_tokenizer_overlay,
     downloaded_model_detection_io_error_is_inconclusive, finalize_converted_dir,
-    huggingface_receipt_weights_dir, overlay_derived_tokenizer, validate_hf_download_inputs,
+    finalize_converted_dir_with_test_hook, huggingface_receipt_weights_dir,
+    overlay_derived_tokenizer, recover_stranded_model_conversions, validate_hf_download_inputs,
     DownloadFamilyCheck,
 };
 // `terminating_signal` is only exercised by a `#[cfg(unix)]` test (signal-death
@@ -83,6 +84,7 @@ use super::{
     write_model_install_marker, CredentialScheme, IdleHeartbeat, JsonObject,
     SafetensorsHeaderError, Settings, WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES,
     DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+    MODEL_CONVERSION_BACKUPS_DIR_NAME,
 };
 
 // HF-CLI input validation, downloaded-model family detection, atomic converted-dir finalize, and the

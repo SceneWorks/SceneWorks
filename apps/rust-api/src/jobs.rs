@@ -90,7 +90,7 @@ pub(crate) async fn create_job(
             payload.job_type.as_str()
         )));
     }
-    validate_raw_job_model_id(&payload.job_type, &payload.payload)?;
+    validate_raw_job_payload(&state, &payload.job_type, &payload.payload)?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: payload.job_type,
@@ -411,6 +411,8 @@ async fn validate_and_canonicalize_merged_generation_payload(
     merged.extend(payload_changes.clone());
     if generation_job_model_is_path_backed(&job_type) {
         validate_payload_model(&merged)?;
+    } else {
+        validate_raw_job_payload(state, &job_type, &merged)?;
     }
     if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         crate::control_overlays::resolve_control_overlay_selection(
@@ -426,9 +428,14 @@ async fn validate_and_canonicalize_merged_generation_payload(
 /// Jobs created through the raw queue route do not pass a typed request validator. Keep this
 /// inventory aligned with worker payload fields that reach filesystem model resolution:
 /// `image_upscale` and `prompt_refine` consume `model`; the model-management jobs consume
-/// `modelId`. Other raw job payloads may contain descriptive model metadata, but are deliberately
-/// absent unless that field selects a filesystem path.
-fn validate_raw_job_model_id(job_type: &JobType, payload: &JsonObject) -> Result<(), ApiError> {
+/// `modelId`, and `model_convert.outputDir` selects its final install location. Other raw job
+/// payloads may contain descriptive model metadata, but are deliberately absent unless that field
+/// selects a filesystem path.
+fn validate_raw_job_payload(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
     if matches!(job_type, JobType::ImageUpscale | JobType::PromptRefine) {
         validate_payload_model(payload)?;
     }
@@ -437,6 +444,15 @@ fn validate_raw_job_model_id(job_type: &JobType, payload: &JsonObject) -> Result
         JobType::ModelDownload | JobType::ModelImport | JobType::ModelConvert
     ) {
         validate_payload_model_id(payload)?;
+    }
+    if matches!(job_type, JobType::ModelConvert) {
+        let output_dir = payload
+            .get("outputDir")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| ApiError::bad_request("model_convert outputDir must be a string"))?;
+        sceneworks_worker::resolve_model_convert_output(&state.settings.data_dir, output_dir)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
     }
     Ok(())
 }

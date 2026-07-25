@@ -74,7 +74,7 @@ pub(crate) fn parse_plan(payload: &JsonObject) -> WorkerResult<TrainingPlan> {
 /// Validate a resolved plan the way the Python `validate_training_plan` does:
 /// reject an unknown plan version, an empty dataset, or missing dataset images.
 /// Shared by the dry-run validator and the real run so both reject the same inputs.
-fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -> WorkerResult<()> {
+pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -> WorkerResult<()> {
     if plan.plan_version != TRAINING_PLAN_VERSION {
         return Err(WorkerError::InvalidPayload(format!(
             "Unsupported training plan version {}; this worker understands version {}.",
@@ -773,6 +773,7 @@ pub(crate) async fn run_training_execution(
     // forces gradient checkpointing on for them (Z-Image, Wan A14B-T2V) regardless of the plan value.
     // On macOS this is the identity. See its doc comment for the why.
     let config = finalize_training_config(map_training_config(&plan.config), plan);
+    let sample_config = config.clone();
     let total_steps = config.steps;
     let file_name = plan.output.file_name.clone();
     let trigger_words = plan.output.trigger_words.clone();
@@ -850,6 +851,7 @@ pub(crate) async fn run_training_execution(
         settings,
         job,
         plan,
+        sample_config,
         backend,
         total_steps,
         rx,
@@ -923,7 +925,12 @@ impl SamplePersister {
     /// Resolve the sample config + destination paths for a run. `output_dir`/`project_root` are
     /// resolved leniently (already validated upstream in `run_training_execution`); if either is
     /// unavailable, samples simply don't render but training is unaffected.
-    fn new(settings: &Settings, job: &JobSnapshot, plan: &TrainingPlan) -> Self {
+    fn new(
+        settings: &Settings,
+        job: &JobSnapshot,
+        plan: &TrainingPlan,
+        cfg: TrainingConfig,
+    ) -> Self {
         let output_dir =
             resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir")
                 .ok();
@@ -951,7 +958,7 @@ impl SamplePersister {
             .unwrap_or("lora")
             .to_owned();
         Self {
-            cfg: map_training_config(&plan.config),
+            cfg,
             output_dir,
             project_root,
             stem,
@@ -1069,6 +1076,7 @@ async fn consume_training_events(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &TrainingPlan,
+    sample_config: TrainingConfig,
     backend: &str,
     total_steps: u32,
     mut rx: tokio::sync::mpsc::Receiver<TrainEvent>,
@@ -1090,7 +1098,7 @@ async fn consume_training_events(
     // config + destination paths + the accumulated cumulative/this-cadence record lists. The event
     // loop's `Sample` arm delegates to `samples.persist(...)` and the `Done` arm reads
     // `samples.all_samples` / `samples.cfg` for the final result fold.
-    let mut samples = SamplePersister::new(settings, job, plan);
+    let mut samples = SamplePersister::new(settings, job, plan, sample_config);
 
     let mut heartbeat_interval = tokio::time::interval(progress_report_interval(settings));
     heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -2423,7 +2431,16 @@ mod tests {
         .expect("job snapshot deserializes");
 
         // Drive the REAL provenance — this is where the two operands are resolved.
-        let persister = SamplePersister::new(&settings, &job, &plan);
+        let mut finalized_config =
+            finalize_training_config(map_training_config(&plan.config), &plan);
+        // Deliberately differ from the raw-plan mapping to model a backend finalize override.
+        // The persister must receive the exact config handed to the trainer, not remap the plan.
+        finalized_config.sample_steps = 37;
+        let persister = SamplePersister::new(&settings, &job, &plan, finalized_config.clone());
+        assert_eq!(
+            persister.cfg.sample_steps, finalized_config.sample_steps,
+            "preview persistence uses the trainer's finalized config"
+        );
         let resolved_output = persister
             .output_dir
             .clone()
