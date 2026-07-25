@@ -5,7 +5,10 @@ use sceneworks_core::credentials::normalize_host;
 use sceneworks_core::lora_family::is_hidden_file;
 
 const ALLOWED_MODEL_TYPES: &[&str] = &["image", "video", "audio", "utility"];
-const MODEL_SIZE_CACHE_LIMIT: usize = 64;
+// The shipped catalog currently has more than 64 distinct (repo, files) contexts. Keep ample
+// headroom for catalog growth so an in-order scan cannot evict the entries the next scan is about
+// to read and degrade into a zero-hit cycle.
+const MODEL_SIZE_CACHE_LIMIT: usize = 256;
 const MODEL_CATALOG_PROBE_CONCURRENCY: usize = 16;
 static MODEL_CATALOG_PROBE_PERMITS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
     std::sync::OnceLock::new();
@@ -13,6 +16,69 @@ static MODEL_CATALOG_PROBE_PERMITS: std::sync::OnceLock<Arc<tokio::sync::Semapho
 // negative-cached so a huggingface.co outage costs one 8s timeout per repo per
 // TTL window instead of one per catalog load (sc-4169).
 const MODEL_SIZE_NEGATIVE_TTL: Duration = Duration::from_secs(300);
+// Successful metadata can change when a repository is updated in place. Refresh it periodically
+// without making ordinary warm catalog loads depend on Hugging Face.
+const MODEL_SIZE_POSITIVE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ModelSizeEstimateTestHook {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    started: Arc<tokio::sync::Semaphore>,
+    release: Option<Arc<tokio::sync::Semaphore>>,
+    response: Option<u64>,
+}
+
+#[cfg(test)]
+impl ModelSizeEstimateTestHook {
+    pub(crate) fn immediate(response: Option<u64>) -> Self {
+        Self {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+            release: None,
+            response,
+        }
+    }
+
+    pub(crate) fn blocked(response: Option<u64>) -> Self {
+        Self {
+            release: Some(Arc::new(tokio::sync::Semaphore::new(0))),
+            ..Self::immediate(response)
+        }
+    }
+
+    pub(crate) fn call_count(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) async fn wait_for_call(&self) {
+        self.started
+            .acquire()
+            .await
+            .expect("model-size test hook remains open")
+            .forget();
+    }
+
+    pub(crate) fn release_one(&self) {
+        self.release
+            .as_ref()
+            .expect("blocked model-size test hook")
+            .add_permits(1);
+    }
+
+    async fn request(&self) -> Option<u64> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.started.add_permits(1);
+        if let Some(release) = &self.release {
+            release
+                .acquire()
+                .await
+                .expect("model-size test hook remains open")
+                .forget();
+        }
+        self.response
+    }
+}
 
 fn validate_huggingface_repo(repo: &str) -> Result<(), ApiError> {
     let parts: Vec<_> = repo.trim().split('/').collect();
@@ -71,7 +137,7 @@ impl ModelSizeCache {
             key,
             CachedSizeEstimate {
                 size_bytes: Some(value),
-                expires_at: None,
+                expires_at: Some(std::time::Instant::now() + MODEL_SIZE_POSITIVE_TTL),
             },
         );
     }
@@ -3274,43 +3340,29 @@ fn test_delay_catalog_probe(model: &Value) {
     TEST_CATALOG_PROBES_ACTIVE.fetch_sub(1, Ordering::SeqCst);
 }
 
-fn apply_model_catalog_entry(
-    mut model: Value,
-    download_context: Option<DownloadContext>,
+fn apply_model_catalog_size_fields(
+    model: &mut Value,
+    download_context: Option<&DownloadContext>,
     download_size_bytes: Option<u64>,
-    data_dir: &FsPath,
-    user_model_ids: &std::collections::HashSet<String>,
-) -> Result<Value, ApiError> {
-    #[cfg(test)]
-    test_delay_catalog_probe(&model);
-    let fallback_size_bytes = download_context
-        .as_ref()
-        .and_then(|context| context.fallback_size_bytes);
+) -> Result<(), ApiError> {
+    let fallback_size_bytes = download_context.and_then(|context| context.fallback_size_bytes);
     let primary_size_bytes = download_size_bytes.or(fallback_size_bytes);
     let download_size_estimated = download_size_bytes.is_none() && fallback_size_bytes.is_some();
     // Co-requisites (sc-9696) install alongside the primary, so the displayed footprint must
     // include them (e.g. PiD's ~2.7 GB checkpoint + ~5.2 GB gemma-2-2b-it). Their sizes come
     // from the manifest (the live HF estimate above only sizes the primary repo).
-    let co_requisite_size_bytes: u64 = model_co_requisite_downloads(&model)
+    let co_requisite_size_bytes: u64 = model_co_requisite_downloads(model)
         .iter()
-        .filter_map(|download| manifest_download_size_bytes(&model, download))
+        .filter_map(|download| manifest_download_size_bytes(model, download))
         .sum();
     let effective_download_size_bytes = match primary_size_bytes {
         Some(primary) => Some(primary + co_requisite_size_bytes),
         None if co_requisite_size_bytes > 0 => Some(co_requisite_size_bytes),
         None => None,
     };
-    let state = install_state_for(download_context, &model, data_dir);
     let object = model
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
-    let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();
-    let user_managed = user_model_ids.contains(model_id);
-    object.insert(
-        "catalogScope".to_owned(),
-        Value::String(if user_managed { "user" } else { "builtin" }.to_owned()),
-    );
-    object.insert("downloadable".to_owned(), Value::Bool(state.downloadable));
     object.insert(
         "downloadSizeBytes".to_owned(),
         effective_download_size_bytes
@@ -3328,6 +3380,28 @@ fn apply_model_catalog_entry(
         "downloadSizeEstimated".to_owned(),
         Value::Bool(download_size_estimated),
     );
+    Ok(())
+}
+
+fn apply_model_catalog_entry(
+    mut model: Value,
+    download_context: Option<DownloadContext>,
+    data_dir: &FsPath,
+    user_model_ids: &std::collections::HashSet<String>,
+) -> Result<Value, ApiError> {
+    #[cfg(test)]
+    test_delay_catalog_probe(&model);
+    let state = install_state_for(download_context, &model, data_dir);
+    let object = model
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+    let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+    let user_managed = user_model_ids.contains(model_id);
+    object.insert(
+        "catalogScope".to_owned(),
+        Value::String(if user_managed { "user" } else { "builtin" }.to_owned()),
+    );
+    object.insert("downloadable".to_owned(), Value::Bool(state.downloadable));
     object.insert(
         "installState".to_owned(),
         Value::String(
@@ -3391,7 +3465,7 @@ fn apply_model_catalog_entry(
     Ok(model)
 }
 
-type ModelCatalogWorkItem = (Value, (Option<DownloadContext>, Option<u64>));
+type ModelCatalogWorkItem = (Value, Option<DownloadContext>);
 const MODEL_SIZE_ESTIMATE_CONCURRENCY: usize = 8;
 
 async fn collect_bounded_ordered<I, T, F, Fut, R>(
@@ -3434,6 +3508,55 @@ mod model_size_concurrency_tests {
         assert_eq!(output, (0..12).collect::<Vec<_>>());
         assert_eq!(peak.load(Ordering::SeqCst), 3);
     }
+
+    #[test]
+    fn builtin_download_contexts_fit_in_size_cache() {
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value = serde_json::from_str(&crate::strip_jsonc_comments(raw))
+            .expect("builtin manifest parses");
+        for (os, expected_distinct_contexts) in
+            [("macos", 81_usize), ("windows", 80), ("linux", 80)]
+        {
+            let mut keys = std::collections::HashSet::new();
+            for mut model in manifest["models"]
+                .as_array()
+                .expect("models array")
+                .iter()
+                .cloned()
+            {
+                retain_downloads_for_os(&mut model, os);
+                if let Some(context) = model_download_context(&model).expect("download context") {
+                    keys.insert((context.repo, context.files));
+                }
+            }
+            assert_eq!(
+                keys.len(),
+                expected_distinct_contexts,
+                "{os} builtin download-context count changed; reconsider cache capacity"
+            );
+            assert!(
+                keys.len() <= MODEL_SIZE_CACHE_LIMIT,
+                "{os} builtin catalog has {} distinct download contexts but cache holds only {}",
+                keys.len(),
+                MODEL_SIZE_CACHE_LIMIT
+            );
+        }
+    }
+
+    #[test]
+    fn successful_size_estimates_have_a_bounded_positive_ttl() {
+        let mut cache = ModelSizeCache::default();
+        let key = ("owner/model".to_owned(), vec!["*.safetensors".to_owned()]);
+        let before = std::time::Instant::now();
+        cache.insert(key.clone(), 1234);
+        let expires_at = cache
+            .entries
+            .get(&key)
+            .and_then(|entry| entry.expires_at)
+            .expect("successful estimate expires");
+        assert!(expires_at > before);
+        assert!(expires_at <= before + MODEL_SIZE_POSITIVE_TTL + Duration::from_secs(1));
+    }
 }
 
 fn group_model_catalog_work_items(
@@ -3442,7 +3565,7 @@ fn group_model_catalog_work_items(
     let mut groups = Vec::<Vec<ModelCatalogWorkItem>>::new();
     let mut repo_groups = HashMap::<String, usize>::new();
     for item in work_items {
-        let (_, (download_context, _)) = &item;
+        let (_, download_context) = &item;
         let repo = download_context
             .as_ref()
             .map(|context| context.repo.clone());
@@ -3458,6 +3581,37 @@ fn group_model_catalog_work_items(
         }
     }
     groups
+}
+
+async fn estimate_model_catalog_sizes(
+    state: &AppState,
+    download_contexts: &[Option<DownloadContext>],
+    enabled: bool,
+) -> HashMap<ModelSizeCacheKey, Option<u64>> {
+    if !enabled {
+        return HashMap::new();
+    }
+    let mut seen = std::collections::HashSet::new();
+    let unique = download_contexts
+        .iter()
+        .flatten()
+        .filter_map(|context| {
+            let key = (context.repo.clone(), context.files.clone());
+            seen.insert(key.clone()).then_some((key, context.clone()))
+        })
+        .collect::<Vec<_>>();
+    collect_bounded_ordered(
+        unique,
+        MODEL_SIZE_ESTIMATE_CONCURRENCY,
+        |(key, context)| async move {
+            let estimate =
+                estimate_huggingface_download_size(state, &context.repo, &context.files).await;
+            (key, estimate)
+        },
+    )
+    .await
+    .into_iter()
+    .collect()
 }
 
 async fn model_catalog_inner(
@@ -3489,25 +3643,13 @@ async fn model_catalog_inner(
         .iter()
         .map(model_download_context)
         .collect::<Result<Vec<_>, _>>()?;
-    let download_size_bytes = collect_bounded_ordered(
-        download_contexts.iter().cloned(),
-        MODEL_SIZE_ESTIMATE_CONCURRENCY,
-        |context| async move {
-            match context {
-                Some(context) if estimate_sizes => {
-                    estimate_huggingface_download_size(state, &context.repo, &context.files).await
-                }
-                _ => None,
-            }
-        },
-    )
-    .await;
+    let size_estimates = estimate_model_catalog_sizes(state, &download_contexts, estimate_sizes);
 
     let data_dir = Arc::new(state.settings.data_dir.clone());
     let user_model_ids = Arc::new(user_model_ids);
     let work_items = models
         .into_iter()
-        .zip(download_contexts.into_iter().zip(download_size_bytes))
+        .zip(download_contexts.clone())
         .collect::<Vec<_>>();
     let work_groups = group_model_catalog_work_items(work_items);
     let data_dir_for_sweep = data_dir.clone();
@@ -3520,11 +3662,10 @@ async fn model_catalog_inner(
     let catalog_sweep = run_blocking_catalog_sweep(work_groups, move |work_group| {
         work_group
             .into_iter()
-            .map(|(model, (download_context, download_size_bytes))| {
+            .map(|(model, download_context)| {
                 apply_model_catalog_entry(
                     model,
                     download_context,
-                    download_size_bytes,
                     &data_dir_for_sweep,
                     &user_model_ids_for_sweep,
                 )
@@ -3540,8 +3681,19 @@ async fn model_catalog_inner(
         let mut cache = external_base_cache.lock();
         crate::external_base_models::scan_external_base_models(&external_roots, &mut cache)
     });
-    let (models, external) = tokio::join!(catalog_sweep, external_scan);
+    let (size_estimates, models, external) =
+        tokio::join!(size_estimates, catalog_sweep, external_scan);
     let mut models = models?.into_iter().flatten().collect::<Vec<_>>();
+    for model in &mut models {
+        let context = model_download_context(model)?;
+        let live_estimate = context.as_ref().and_then(|context| {
+            size_estimates
+                .get(&(context.repo.clone(), context.files.clone()))
+                .copied()
+                .flatten()
+        });
+        apply_model_catalog_size_fields(model, context.as_ref(), live_estimate)?;
+    }
     let external = external.map_err(|err| {
         ApiError::internal(format!("external model catalog scan task failed: {err}"))
     })?;
@@ -4279,6 +4431,17 @@ pub(crate) async fn estimate_huggingface_download_size(
     let cache_key = (repo.to_owned(), files.to_vec());
     if let Some(cached) = state.model_size_cache.lock().get(&cache_key) {
         return cached;
+    }
+    #[cfg(test)]
+    let test_hook = { state.model_size_estimate_test_hook.lock().clone() };
+    #[cfg(test)]
+    if let Some(hook) = test_hook {
+        let estimate = hook.request().await;
+        match estimate {
+            Some(estimate) => state.model_size_cache.lock().insert(cache_key, estimate),
+            None => state.model_size_cache.lock().insert_failure(cache_key),
+        }
+        return estimate;
     }
     let url = format!(
         "https://huggingface.co/api/models/{}?blobs=true",

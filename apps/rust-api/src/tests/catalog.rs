@@ -1,6 +1,31 @@
 //! rust-api catalog tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+struct RestoreEnv {
+    key: &'static str,
+    value: Option<std::ffi::OsString>,
+}
+
+impl RestoreEnv {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self {
+            key,
+            value: previous,
+        }
+    }
+}
+
+impl Drop for RestoreEnv {
+    fn drop(&mut self) {
+        match &self.value {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
 #[test]
 fn merge_model_manifest_entry_deep_merges_nested_blocks() {
     // The worker reads the merged manifest entry from the job payload now
@@ -352,6 +377,165 @@ async fn models_route_overlaps_slow_probes_with_bounded_fanout() {
         peak <= crate::models::test_catalog_probe_limit(),
         "concurrent /models requests exceeded the process-wide blocking-probe limit: {peak}"
     );
+}
+
+#[tokio::test]
+async fn models_catalog_reuses_every_unchanged_size_estimate_on_second_load() {
+    let _estimate_enabled = RestoreEnv::set("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "0");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let models = (0..70)
+        .map(|index| {
+            json!({
+                "id": format!("cache-{index:02}"),
+                "name": format!("Cache {index:02}"),
+                "family": "cache-test",
+                "type": "image",
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": format!("cache/model-{index:02}"),
+                    "files": ["*.safetensors"]
+                }]
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({ "schemaVersion": 1, "models": models }))
+            .expect("manifest serializes"),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let hook = crate::models::ModelSizeEstimateTestHook::immediate(Some(1234));
+    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+
+    let first = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(first.0, StatusCode::OK);
+    let first_models = first.1.as_array().expect("models array");
+    assert_eq!(first_models.len(), 70);
+    assert!(first_models.windows(2).all(|pair| pair[0]["name"]
+        .as_str()
+        .zip(pair[1]["name"].as_str())
+        .is_some_and(|(left, right)| left < right)));
+    assert!(first_models.iter().all(|model| {
+        model["downloadSizeBytes"] == json!(1234) && model["downloadSizeEstimated"] == json!(false)
+    }));
+    assert_eq!(
+        hook.call_count(),
+        70,
+        "first load estimates every distinct key"
+    );
+
+    let second = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(second.0, StatusCode::OK);
+    assert_eq!(
+        second.1, first.1,
+        "warm catalog output and ordering drifted"
+    );
+    assert_eq!(
+        hook.call_count(),
+        70,
+        "unchanged second load must issue no upstream size requests"
+    );
+}
+
+#[tokio::test]
+async fn models_catalog_starts_install_sweep_before_size_estimation_completes() {
+    let _estimate_enabled = RestoreEnv::set("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "0");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": "overlap",
+                "name": "Overlap",
+                "family": "overlap-test",
+                "type": "image",
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "overlap/model",
+                    "files": ["*.safetensors"]
+                }],
+                "__testCatalogProbeDelayMs": 250
+            }]
+        }))
+        .expect("manifest serializes"),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    crate::models::test_reset_catalog_probe_concurrency();
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(1234));
+    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+
+    let request_task = tokio::spawn(request(app, "GET", "/api/v1/models", Value::Null));
+    hook.wait_for_call().await;
+    let sweep_started_while_estimate_blocked =
+        tokio::time::timeout(Duration::from_millis(150), async {
+            loop {
+                if crate::models::test_catalog_probe_peak() > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+    hook.release_one();
+    let response = request_task.await.expect("models request joins");
+
+    assert_eq!(response.0, StatusCode::OK);
+    assert!(
+        sweep_started_while_estimate_blocked,
+        "SC-14530 install-state sweep must start before upstream size estimation completes"
+    );
+}
+
+#[tokio::test]
+async fn models_catalog_disabled_size_estimation_skips_upstream_requests() {
+    let _disable = RestoreEnv::set("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": "disabled",
+                "name": "Disabled",
+                "family": "disabled-test",
+                "type": "image",
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "disabled/model",
+                    "files": ["*.safetensors"],
+                    "estimatedSizeBytes": 4321
+                }]
+            }]
+        }))
+        .expect("manifest serializes"),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let hook = crate::models::ModelSizeEstimateTestHook::immediate(Some(1234));
+    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+
+    let response = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+    assert_eq!(response.0, StatusCode::OK);
+    assert_eq!(hook.call_count(), 0, "disabled mode must skip upstream");
+    assert_eq!(response.1[0]["downloadSizeBytes"], json!(4321));
+    assert_eq!(response.1[0]["downloadSizeEstimated"], json!(true));
 }
 
 #[tokio::test]
