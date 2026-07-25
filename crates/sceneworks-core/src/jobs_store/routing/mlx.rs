@@ -93,6 +93,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => sd3_5_mlx_eligible(payload),
         "sana_1600m" | "sana_sprint_1600m" => sana_mlx_eligible(payload),
         "anima_base" | "anima_aesthetic" | "anima_turbo" => anima_mlx_eligible(payload),
+        "mage_flow_base" | "mage_flow" | "mage_flow_turbo" => mage_flow_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
         _ => false,
@@ -304,6 +305,48 @@ pub(crate) fn qwen_edit_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// keeps a FLUX.1 job off MLX.
 pub(crate) fn flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+}
+
+/// Mage-Flow Base/RL/Turbo currently expose only the native plain text-to-image path. Keep this
+/// predicate deliberately narrower than the generic image request shape: the provider has no
+/// edit/reference, ControlNet, mask, or user-adapter implementation yet. Reject those requests at
+/// routing time instead of letting an MLX-only model queue for a worker path that cannot serve them
+/// (or silently dropping conditioning).
+pub(crate) fn mage_flow_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if !matches!(
+        payload.get("mode").and_then(Value::as_str),
+        None | Some("text_to_image")
+    ) {
+        return false;
+    }
+
+    let has_nonempty_string = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    let has_nonempty_array = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+    };
+    let has_control = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty());
+
+    !(has_nonempty_string("sourceAssetId")
+        || has_nonempty_string("referenceAssetId")
+        || has_nonempty_string("maskAssetId")
+        || has_nonempty_array("referenceAssetIds")
+        || has_nonempty_array("loras")
+        || has_nonempty_array("controls")
+        || has_nonempty_array("controlnets")
+        || has_control)
 }
 
 /// Z-Image (sc-3022) MLX-routing conditions, ported from
@@ -864,6 +907,53 @@ mod tests {
             "MLX_ROUTED_MODELS ids with no reachable arm in `image_request_mlx_eligible` — the mlx \
              worker can never claim these, so their jobs queue forever: {stranded:?}"
         );
+    }
+
+    #[test]
+    fn mage_flow_routes_only_plain_text_to_image_requests() {
+        let mage_models = ["mage_flow_base", "mage_flow", "mage_flow_turbo"];
+        let eligible = [
+            json!({}),
+            json!({ "mode": "text_to_image", "prompt": "a lighthouse in fog" }),
+            json!({ "mode": "text_to_image", "loras": [], "referenceAssetIds": [] }),
+        ];
+        for model in mage_models {
+            for payload in &eligible {
+                assert!(
+                    image_request_mlx_eligible(
+                        model,
+                        payload.as_object().expect("eligible payload is an object")
+                    ),
+                    "{model} must route its supported plain text-to-image shape: {payload}"
+                );
+            }
+        }
+
+        let unsupported = [
+            json!({ "mode": "edit_image", "sourceAssetId": "asset-1" }),
+            json!({ "mode": "character_image", "referenceAssetId": "asset-1" }),
+            json!({ "mode": "text_to_image", "sourceAssetId": "asset-1" }),
+            json!({ "mode": "text_to_image", "referenceAssetId": "asset-1" }),
+            json!({ "mode": "text_to_image", "referenceAssetIds": ["asset-1"] }),
+            json!({ "mode": "text_to_image", "maskAssetId": "mask-1" }),
+            json!({ "mode": "text_to_image", "loras": [{ "id": "adapter-1" }] }),
+            json!({ "mode": "text_to_image", "advanced": { "poses": [{}] } }),
+            json!({ "mode": "text_to_image", "controls": [{}] }),
+            json!({ "mode": "text_to_image", "controlnets": [{}] }),
+        ];
+        for model in mage_models {
+            for payload in &unsupported {
+                assert!(
+                    !image_request_mlx_eligible(
+                        model,
+                        payload
+                            .as_object()
+                            .expect("unsupported payload is an object")
+                    ),
+                    "{model} must fail closed for its unsupported request shape: {payload}"
+                );
+            }
+        }
     }
 
     /// The two-reference (scene + person) Krea 2 Raw edit (epic 10871) carries its conditioning image in

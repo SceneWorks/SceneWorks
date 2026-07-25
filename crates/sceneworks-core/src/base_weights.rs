@@ -617,6 +617,19 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
     {
         return Some("flux");
     }
+    // Mage-Flow: a 12-block dual-stream MMDiT with explicit img/txt modulation linears.
+    // Its broad `img_mlp`/`txt_mlp` + `add_q_proj` grammar overlaps Qwen-Image, so pin both the
+    // Mage-specific modulation names and the exact published depth (block 11 exists, block 12
+    // does not) before the broader Qwen arm below.
+    if observed_numbered_indices(keys, "transformer_blocks.") == (0_u32..12).collect()
+        && any_key_contains(keys, ".attn.add_q_proj.")
+        && any_key_contains(keys, ".img_mlp.")
+        && any_key_contains(keys, ".txt_mlp.")
+        && any_key_contains(keys, ".img_mod.1.")
+        && any_key_contains(keys, ".txt_mod.1.")
+    {
+        return Some("mage-flow");
+    }
     // Dual-stream MMDiT with `img_mlp`/`txt_mlp` + joint attention `add_q_proj`.
     // Among the families we ship as a single-file base this is Qwen-Image /
     // Qwen-Image-Edit. SD3's `ff_context`/`context_embedder` layout is excluded so
@@ -630,6 +643,15 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
         return Some("qwen-image");
     }
     None
+}
+
+fn observed_numbered_indices(keys: &[&str], marker: &str) -> std::collections::BTreeSet<u32> {
+    keys.iter()
+        .filter_map(|key| {
+            let (_, suffix) = key.split_once(marker)?;
+            suffix.split('.').next()?.parse().ok()
+        })
+        .collect()
 }
 
 /// Best-effort family label for text encoders and VAEs — informational only.
@@ -836,6 +858,86 @@ mod tests {
         assert_eq!(verdict.family.as_deref(), Some("krea_2"));
         assert_eq!(verdict.component, ComponentRole::Transformer);
         assert_eq!(verdict.quant, QuantFormat::ComfyQuantPacked);
+    }
+
+    #[test]
+    fn mage_flow_bf16_is_exact_twelve_block_transformer() {
+        fn mage_keys() -> Vec<String> {
+            let mut keys = (0..12)
+                .map(|block| format!("transformer_blocks.{block}.attn.to_q.weight"))
+                .collect::<Vec<_>>();
+            keys.extend(
+                [
+                    "transformer_blocks.0.attn.add_q_proj.weight",
+                    "transformer_blocks.0.img_mlp.net.0.proj.weight",
+                    "transformer_blocks.0.txt_mlp.net.0.proj.weight",
+                    "transformer_blocks.0.img_mod.1.weight",
+                    "transformer_blocks.0.txt_mod.1.weight",
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            );
+            keys
+        }
+        fn classify(keys: &[String]) -> BaseWeightVerdict {
+            let entries = keys
+                .iter()
+                .map(|key| (key.as_str(), "BF16"))
+                .collect::<Vec<_>>();
+            recognized(classify_base_header(&header(&entries)))
+        }
+        fn classify_family(keys: &[String]) -> Option<String> {
+            let entries = keys
+                .iter()
+                .map(|key| (key.as_str(), "BF16"))
+                .collect::<Vec<_>>();
+            match classify_base_header(&header(&entries)) {
+                BaseWeightDetection::Recognized(verdict) => verdict.family,
+                BaseWeightDetection::Unrecognized { .. } => None,
+            }
+        }
+
+        let complete = mage_keys();
+        let verdict = classify(&complete);
+        assert_eq!(verdict.family.as_deref(), Some("mage-flow"));
+        assert_eq!(verdict.component, ComponentRole::Transformer);
+        assert_eq!(verdict.quant, QuantFormat::Bf16);
+
+        for missing_block in [0, 5, 11] {
+            let marker = format!("transformer_blocks.{missing_block}.");
+            let mutated = complete
+                .iter()
+                .filter(|key| !key.contains(&marker))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_ne!(
+                classify_family(&mutated).as_deref(),
+                Some("mage-flow"),
+                "missing block {missing_block} must fail exact 0..11 detection"
+            );
+        }
+        let mut deeper = complete.clone();
+        deeper.push("transformer_blocks.12.attn.to_q.weight".to_owned());
+        assert_ne!(classify_family(&deeper).as_deref(), Some("mage-flow"));
+
+        for marker in [
+            ".attn.add_q_proj.",
+            ".img_mlp.",
+            ".txt_mlp.",
+            ".img_mod.1.",
+            ".txt_mod.1.",
+        ] {
+            let mutated = complete
+                .iter()
+                .filter(|key| !key.contains(marker))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_ne!(
+                classify_family(&mutated).as_deref(),
+                Some("mage-flow"),
+                "missing Mage grammar marker {marker} must fail closed"
+            );
+        }
     }
 
     #[test]

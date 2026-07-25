@@ -35,6 +35,33 @@ pub(crate) struct ModelRow {
 }
 
 pub(crate) const MODEL_TABLE: &[ModelRow] = &[
+    // Mage-Flow's three published generation variants use complete flat diffusers snapshots.
+    // q4/q8/bf16 are selected by the request's load-time quantization, so the worker deliberately
+    // passes the snapshot root rather than descending into a standard-tier subdirectory.
+    ModelRow {
+        sceneworks_id: "mage_flow_base",
+        engine_id: "mage_flow_base",
+        default_repo: "SceneWorks/Mage-Flow-Base",
+        default_steps: 30,
+        default_guidance: 5.0,
+        adapter_label: "mlx_mage",
+    },
+    ModelRow {
+        sceneworks_id: "mage_flow",
+        engine_id: "mage_flow",
+        default_repo: "SceneWorks/Mage-Flow",
+        default_steps: 20,
+        default_guidance: 5.0,
+        adapter_label: "mlx_mage",
+    },
+    ModelRow {
+        sceneworks_id: "mage_flow_turbo",
+        engine_id: "mage_flow_turbo",
+        default_repo: "SceneWorks/Mage-Flow-Turbo",
+        default_steps: 4,
+        default_guidance: 1.0,
+        adapter_label: "mlx_mage",
+    },
     ModelRow {
         sceneworks_id: "z_image_turbo",
         engine_id: "z_image_turbo",
@@ -1522,6 +1549,9 @@ mod tests {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     const EXPECTED_IMAGE_IDS: &[&str] = &[
+        "mage_flow_base",
+        "mage_flow",
+        "mage_flow_turbo",
         "z_image_turbo",
         "z_image",
         "z_image_edit",
@@ -1621,6 +1651,9 @@ mod tests {
             "anima_base" | "anima_aesthetic" | "anima_turbo" => p::anima::RES_MULTIPLE,
             "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => p::boogu::RES_MULTIPLE,
             "krea_2_turbo" | "krea_2_raw" => p::krea::RES_MULTIPLE,
+            // Mage's provider currently keeps SIZE_MULTIPLE private; the descriptor validates the
+            // same VAE-derived ÷16 lattice, pinned here until the const is re-exported.
+            "mage_flow_base" | "mage_flow" | "mage_flow_turbo" => 16,
             "lens" | "lens_turbo" => p::lens::VAE_SCALE_FACTOR,
             "qwen_image" | "qwen_image_edit" => p::qwen_image::SIZE_MULTIPLE,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
@@ -1646,6 +1679,9 @@ mod tests {
             "anima_base" | "anima_aesthetic" | "anima_turbo" => p::anima::RES_MULTIPLE,
             "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => p::boogu::SIZE_MULTIPLE,
             "krea_2_turbo" | "krea_2_raw" => p::krea::SIZE_MULTIPLE,
+            // Mage is macOS-only; keep the all-target MODEL_TABLE lattice tied to the same ÷16
+            // contract on candle CI even though runtime-cuda intentionally has no Mage provider.
+            "mage_flow_base" | "mage_flow" | "mage_flow_turbo" => 16,
             "lens" | "lens_turbo" => p::lens::VAE_SCALE_FACTOR,
             "qwen_image" | "qwen_image_edit" => p::qwen_image::SIZE_MULTIPLE,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
@@ -1820,6 +1856,7 @@ mod tests {
             ("anima_base", 16),
             ("boogu_image", 16),
             ("krea_2_turbo", 16),
+            ("mage_flow_base", 16),
             ("lens", 16),
             ("qwen_image", 16),
             ("z_image_turbo", 16),

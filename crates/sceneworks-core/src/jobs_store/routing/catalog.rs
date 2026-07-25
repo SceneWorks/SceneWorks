@@ -564,6 +564,11 @@ impl VideoModelCaps {
 /// Legend for the [`ModelCaps::new`] positional args:
 /// `new(id, mlx_routed, candle_routed, candle_quant, candle_lora, candle_quant_lora)`.
 pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
+    // Mage-Flow Base / RL / Turbo (sc-14047): macOS-only native MLX generation. Their q4/q8/bf16
+    // choices are load-time quantization over complete dense snapshots, not candle tier artifacts.
+    ModelCaps::new("mage_flow_base", true, false, false, false, false),
+    ModelCaps::new("mage_flow", true, false, false, false, false),
+    ModelCaps::new("mage_flow_turbo", true, false, false, false, false),
     // sc-3022 Z-Image / sc-3023 FLUX.1 / sc-3024 Qwen / sc-3025 FLUX.2 / sc-3026 SDXL — the founding
     // MLX-routed families (grows one family story at a time as each lands real generation in
     // `sceneworks-worker::image_jobs`). CANDLE: SDXL sc-3678, the four families sc-5096.
@@ -1260,6 +1265,9 @@ mod tests {
     }
 
     const EXPECTED_MLX_ROUTED_MODELS: &[&str] = &[
+        "mage_flow_base",
+        "mage_flow",
+        "mage_flow_turbo",
         "z_image_turbo",
         "z_image",
         "z_image_edit",

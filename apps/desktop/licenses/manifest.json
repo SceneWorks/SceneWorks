@@ -1042,7 +1042,11 @@
     },
     {
       "id": "mage",
-      "models": [],
+      "models": [
+        "mage_flow_base",
+        "mage_flow",
+        "mage_flow_turbo"
+      ],
       "name": "Mage-Flow (microsoft/Mage)",
       "publisher": "Microsoft",
       "license": "MIT",
@@ -1050,7 +1054,7 @@
       "platforms": [
         "macos"
       ],
-      "usage": "Faithful Rust/MLX source port of the microsoft/Mage (Mage-Flow) reference implementation — the 4B NR-MMDiT denoiser, Mage-VAE codec, and Qwen3-VL text encoder in the mlx-gen-mage crate. The port compiles into the native MLX runtime, so its MIT notice is included here for binary redistribution. Mage-Flow is not yet offered as a downloadable model.",
+      "usage": "Native MLX generation from the Base, RL and Turbo Mage-Flow checkpoints mirrored by SceneWorks, plus a faithful Rust/MLX source port of the microsoft/Mage reference implementation — the 4B NR-MMDiT denoiser, Mage-VAE codec, and Qwen3-VL text encoder. The MIT notice is included for both weight distribution and binary redistribution.",
       "documents": [
         {
           "label": "MIT License",

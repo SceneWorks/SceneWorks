@@ -462,6 +462,11 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("anima_base", true, true),
         ("anima_aesthetic", true, true),
         ("anima_turbo", false, false),
+        // Mage-Flow Base and RL retain classifier-free guidance and negative
+        // conditioning; the distilled Turbo recipe is CFG-free.
+        ("mage_flow_base", true, true),
+        ("mage_flow", true, true),
+        ("mage_flow_turbo", false, false),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());
