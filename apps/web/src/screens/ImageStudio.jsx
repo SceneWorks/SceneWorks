@@ -121,7 +121,7 @@ import {
   useGenerationStudio,
   useQuantTierPicker,
   useSavePreset,
-} from "./generationStudio.jsx";
+} from "../components/generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { useBatchPromptState } from "./imageStudio/useBatchPromptState.js";
 import { usePidState, useStrictControlState } from "./imageStudio/useImageControlState.js";

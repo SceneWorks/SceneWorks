@@ -45,6 +45,7 @@ export function DatasetCaptionDialog({
         : "Caption missing";
   const joy = settings.captioner === "joy_caption";
   const [downloadRequested, setDownloadRequested] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
 
   // Once the model finishes downloading (parent's catalog refresh flips modelMissing to
   // false), clear the "downloading" note so Run re-enables.
@@ -58,9 +59,14 @@ export function DatasetCaptionDialog({
 
   async function handleDownloadModel() {
     if (typeof onDownloadModel !== "function") return;
-    const job = await onDownloadModel();
-    if (job) {
-      setDownloadRequested(true);
+    setDownloadError("");
+    try {
+      const job = await onDownloadModel();
+      if (job) {
+        setDownloadRequested(true);
+      }
+    } catch (error) {
+      setDownloadError(error?.message || "Could not start the model download.");
     }
   }
 
@@ -99,9 +105,12 @@ export function DatasetCaptionDialog({
                   yet.
                 </p>
                 {typeof onDownloadModel === "function" ? (
-                  <button className="secondary-action" onClick={handleDownloadModel} type="button">
-                    Download captioning model
-                  </button>
+                  <>
+                    <button className="secondary-action" onClick={handleDownloadModel} type="button">
+                      Download captioning model
+                    </button>
+                    {downloadError ? <p className="inline-warning">{downloadError}</p> : null}
+                  </>
                 ) : (
                   <p className="inline-warning">Open the Models screen to download “{modelName}”.</p>
                 )}

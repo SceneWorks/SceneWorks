@@ -8,6 +8,7 @@ import {
   buildTicks,
   itemGeometry,
   clipHue,
+  isAiAudioTrack,
   isAiItem,
   waveformPath,
 } from "./editorUtils.js";
@@ -141,13 +142,13 @@ export function Timeline({
     window.addEventListener("mouseup", onUp);
   }
 
-  const audioSubLabel = (track, index) => {
+  const audioSubLabel = (track) => {
     if (track.name && track.name.toLowerCase() !== "audio") {
       return track.name;
     }
-    return ["dialogue", "AI music", "sfx"][index] ?? "audio";
+    return isAiAudioTrack(track, assetsById) ? "AI audio" : "audio";
   };
-  const audioIsAi = (track, index) => /music/i.test(track.name ?? "") || index === 1;
+  const audioIsAi = (track) => isAiAudioTrack(track, assetsById);
 
   return (
     <div className="ve-timeline">
@@ -212,9 +213,9 @@ export function Timeline({
               <div className="ve-head-name">
                 <strong>
                   A{index + 1}
-                  {audioIsAi(track, index) ? <Icon.Stars size={10} className="ve-ai-icon" /> : null}
+                  {audioIsAi(track) ? <Icon.Stars size={10} className="ve-ai-icon" /> : null}
                 </strong>
-                <span className="ve-head-sub">{audioSubLabel(track, index)}</span>
+                <span className="ve-head-sub">{audioSubLabel(track)}</span>
               </div>
               <div className="ve-track-mschips">
                 <button
@@ -321,13 +322,13 @@ export function Timeline({
             </div>
 
             {/* Audio lanes */}
-            {audioTracks.map((track, index) => (
+            {audioTracks.map((track) => (
               <div className="ve-lane ve-lane-audio" key={track.id}>
                 {trackItems(track).map((item) => {
                   const { leftPct, widthPct } = itemGeometry(item, duration);
                   return (
                     <button
-                      className={`ve-audio-clip${selectedItemId === item.id ? " selected" : ""}${audioIsAi(track, index) ? " ai" : ""}`}
+                      className={`ve-audio-clip${selectedItemId === item.id ? " selected" : ""}${audioIsAi(track) ? " ai" : ""}`}
                       key={item.id}
                       onClick={() => onSelectItem(item)}
                       style={{ left: `${leftPct}%`, width: `${widthPct}%`, "--clip-hue": clipHue(item.id) }}

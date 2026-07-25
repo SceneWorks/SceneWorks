@@ -107,7 +107,10 @@ export function BatchOperationsPanel({
             {items.map((item) => (
               <li className={`batch-ops-item batch-ops-item-${item.status}`} key={item.asset.id}>
                 <span className="batch-ops-item-name">{item.asset.displayName ?? item.asset.id}</span>
-                <span className="batch-ops-item-status">{STATUS_LABEL[item.status] ?? item.status}</span>
+                <span className="batch-ops-item-status">
+                  {STATUS_LABEL[item.status] ?? item.status}
+                  {item.error ? `: ${item.error}` : ""}
+                </span>
               </li>
             ))}
           </ul>

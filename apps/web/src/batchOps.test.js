@@ -5,6 +5,7 @@ import {
   batchEligibleAssets,
   buildBatchJob,
   batchItemStatus,
+  batchItemStatusForItem,
   batchItemResultAsset,
   summarizeBatchProgress,
   summarizeBatchRun,
@@ -98,6 +99,29 @@ describe("batch ops (sc-6112)", () => {
     // Submitted but not yet in the feed → queued; no job id → queued.
     expect(batchItemStatus("missing", jobs)).toBe("queued");
     expect(batchItemStatus(null, jobs)).toBe("queued");
+  });
+
+  it("maps a failed submission to failed before rendering its error", () => {
+    const item = { asset: { id: "a" }, jobId: null, error: "Models service rejected the request" };
+
+    expect(batchItemStatusForItem(item, [], new Map())).toBe("failed");
+    expect(summarizeBatchProgress([item], [], new Map())).toMatchObject({
+      failed: 1,
+      done: 1,
+      allDone: true,
+    });
+  });
+
+  it("keeps an in-flight submission placeholder queued and incomplete", () => {
+    const item = { asset: { id: "a" }, jobId: null, pending: true };
+
+    expect(batchItemStatusForItem(item, [], new Map())).toBe("queued");
+    expect(summarizeBatchProgress([item], [], new Map())).toMatchObject({
+      queued: 1,
+      failed: 0,
+      done: 0,
+      allDone: false,
+    });
   });
 
   it("treats a previously observed job as done after terminal-history eviction", () => {

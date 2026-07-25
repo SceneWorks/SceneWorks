@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { LoraKeywordSummary } from "../components/LoraKeywordSummary.jsx";
-import { Icon } from "../components/Icons.jsx";
-import { StudioUpdateBadge, StudioUpdateNotice } from "../components/StudioUpdateNotice.jsx";
+import { LoraKeywordSummary } from "./LoraKeywordSummary.jsx";
+import { Icon } from "./Icons.jsx";
+import { StudioUpdateBadge, StudioUpdateNotice } from "./StudioUpdateNotice.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import {
   LORA_WEIGHT_MAX,
@@ -27,7 +27,7 @@ import {
 import { savePresetDialogValidation } from "../generationValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
-import { StylePicker } from "../components/StylePicker.jsx";
+import { StylePicker } from "./StylePicker.jsx";
 import { defaultTierSelection } from "../quantTier.js";
 import { readLastTier, writeLastTier } from "../lastTierStore.js";
 import { readDefaultGenerationQuality } from "../generationQuality.js";

@@ -1,7 +1,12 @@
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mountRoot, unmountRoot } from "../testUtils/dom.js";
-import { ModeTabs, StyleAxisRow, TierPickerField, useQuantTierPicker } from "./generationStudio.jsx";
+import {
+  ModeTabs,
+  StyleAxisRow,
+  TierPickerField,
+  useQuantTierPicker,
+} from "../components/generationStudio.jsx";
 import { readLastTier, writeLastTier } from "../lastTierStore.js";
 
 vi.mock("../lastTierStore.js", () => ({

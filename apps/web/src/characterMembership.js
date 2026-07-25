@@ -29,10 +29,14 @@ export function characterAssetIds(character) {
   );
 }
 
+export function characterAssetIdIndex(characters) {
+  return new Map((characters ?? []).map((character) => [character.id, characterAssetIds(character)]));
+}
+
 // True when `asset` belongs to the character identified by `characterId`.
 // `character` (optional) supplies the reference lists for the membership-list
 // check; without it, only the recipe/metadata signals are consulted.
-export function assetMatchesCharacter(asset, characterId, character = null) {
+export function assetMatchesCharacter(asset, characterId, character = null, referencedAssetIds = null) {
   if (!characterId) {
     return false;
   }
@@ -42,5 +46,5 @@ export function assetMatchesCharacter(asset, characterId, character = null) {
   if ((asset?.metadata?.characterReferences ?? []).some((reference) => reference?.characterId === characterId)) {
     return true;
   }
-  return Boolean(asset?.id) && characterAssetIds(character).has(asset.id);
+  return Boolean(asset?.id) && (referencedAssetIds ?? characterAssetIds(character)).has(asset.id);
 }

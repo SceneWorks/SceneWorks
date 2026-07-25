@@ -1,6 +1,6 @@
 import React from "react";
 
-import { LoraPickerSection } from "../generationStudio.jsx";
+import { LoraPickerSection } from "../../components/generationStudio.jsx";
 
 export const EditorLoraPanel = React.memo(function EditorLoraPanel({
   selectedModel,

@@ -107,4 +107,20 @@ describe("BatchOperationsPanel (sc-6112)", () => {
     expect(items[0].textContent).toContain("Done");
     expect(items[1].textContent).toContain("Running");
   });
+
+  it("surfaces the reason for each batch item that failed to submit", async () => {
+    await mount({
+      items: [
+        {
+          asset: { id: "a", displayName: "one.png" },
+          status: "failed",
+          error: "Models service rejected the request",
+        },
+      ],
+      progress: { total: 1, done: 1, failed: 1, completed: 0, running: 0, queued: 0, allDone: true },
+    });
+    expect(document.body.querySelector(".batch-ops-item-status").textContent).toBe(
+      "Failed: Models service rejected the request",
+    );
+  });
 });

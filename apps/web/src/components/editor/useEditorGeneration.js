@@ -15,7 +15,7 @@ import {
 } from "../../quantTier.js";
 import { serializeLora, buildStudioPresetPayload } from "../../presetUtils.js";
 import { WAN_A14B_LIGHTNING_MODEL_IDS } from "../../constants.js";
-import { useGenerationStudio } from "../../screens/generationStudio.jsx";
+import { useGenerationStudio } from "../generationStudio.jsx";
 import { loadStudioSettings, useStudioSettingsWriter } from "../../hooks/useStudioSettings.js";
 import { MOTIONS, DEFAULT_MOTION } from "./editorUtils.js";
 
