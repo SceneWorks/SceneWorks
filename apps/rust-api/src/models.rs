@@ -6,6 +6,9 @@ use sceneworks_core::lora_family::is_hidden_file;
 
 const ALLOWED_MODEL_TYPES: &[&str] = &["image", "video", "audio", "utility"];
 const MODEL_SIZE_CACHE_LIMIT: usize = 64;
+const MODEL_CATALOG_PROBE_CONCURRENCY: usize = 16;
+static MODEL_CATALOG_PROBE_PERMITS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::OnceLock::new();
 // Failed estimates (offline, rate-limited, or size-less repo metadata) are
 // negative-cached so a huggingface.co outage costs one 8s timeout per repo per
 // TTL window instead of one per catalog load (sc-4169).
@@ -1371,23 +1374,39 @@ struct ReceiptFileSet {
     revision: Option<String>,
 }
 
-fn receipt_file_sets(managed_path: &FsPath, repo: &str) -> Vec<ReceiptFileSet> {
+fn receipt_entries(managed_path: &FsPath) -> Vec<Value> {
     let Ok(bytes) = std::fs::read(managed_path.join(".sceneworks-download-complete.json")) else {
         return Vec::new();
     };
     let Ok(receipt) = serde_json::from_slice::<Value>(&bytes) else {
         return Vec::new();
     };
-    let entries = receipt
+    receipt
         .get("receipts")
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_else(|| vec![receipt]);
-    entries
+        .unwrap_or_else(|| vec![receipt])
+}
+
+fn receipt_file_sets(
+    managed_path: &FsPath,
+    repo: &str,
+    model_id: Option<&str>,
+) -> Vec<ReceiptFileSet> {
+    receipt_entries(managed_path)
         .into_iter()
         .filter_map(|entry| {
             if entry.get("repo").and_then(Value::as_str) != Some(repo) {
                 return None;
+            }
+            // Shared repos back multiple catalog cards. A model-specific receipt must protect only
+            // the card that produced it; receipts predating modelId remain generic for compatibility.
+            if let (Some(expected), Some(actual)) =
+                (model_id, entry.get("modelId").and_then(Value::as_str))
+            {
+                if actual != expected {
+                    return None;
+                }
             }
             let files = entry
                 .get("resolvedFiles")?
@@ -1473,6 +1492,11 @@ fn receipt_files_present(
             .unwrap_or(false)
 }
 
+// Catalog entries can share a Hugging Face repo. The catalog sweep probes entries concurrently,
+// so serialize only the final receipt recheck/write (not the expensive snapshot walk) to prevent
+// two first-seen entries from truncating the same backfill file at once.
+static RECEIPT_BACKFILL_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// [`no_model_index_family_predicate`] for a whole manifest `model` entry — the receipt lanes carry the
 /// model, not a pre-split family/id pair.
 fn model_family_tier_predicate(model: &Value) -> Option<fn(&FsPath) -> bool> {
@@ -1491,7 +1515,8 @@ fn backfill_current_receipt(
     context: &DownloadContext,
     data_dir: &FsPath,
 ) {
-    if !receipt_file_sets(managed_path, &context.repo).is_empty() {
+    let model_id = model.get("id").and_then(Value::as_str).unwrap_or_default();
+    if !receipt_file_sets(managed_path, &context.repo, Some(model_id)).is_empty() {
         return;
     }
     let family_complete = model_family_tier_predicate(model);
@@ -1528,11 +1553,36 @@ fn backfill_current_receipt(
     if receipts.is_empty() {
         return;
     }
-    let mut receipt = receipts[0].clone();
+    let _write_guard = RECEIPT_BACKFILL_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !receipt_file_sets(managed_path, &context.repo, Some(model_id)).is_empty() {
+        return;
+    }
+    let mut merged = receipt_entries(managed_path);
+    for new_entry in receipts {
+        let identity = (
+            new_entry.get("repo").and_then(Value::as_str),
+            new_entry.get("modelId").and_then(Value::as_str),
+            new_entry.get("variant").and_then(Value::as_str),
+        );
+        if let Some(existing) = merged.iter_mut().find(|existing| {
+            (
+                existing.get("repo").and_then(Value::as_str),
+                existing.get("modelId").and_then(Value::as_str),
+                existing.get("variant").and_then(Value::as_str),
+            ) == identity
+        }) {
+            *existing = new_entry;
+        } else {
+            merged.push(new_entry);
+        }
+    }
+    let mut receipt = merged[0].clone();
     receipt
         .as_object_mut()
         .unwrap()
-        .insert("receipts".to_owned(), Value::Array(receipts));
+        .insert("receipts".to_owned(), Value::Array(merged));
     let _ = std::fs::create_dir_all(managed_path);
     let _ = serde_json::to_vec_pretty(&receipt).ok().and_then(|bytes| {
         std::fs::write(
@@ -1721,7 +1771,7 @@ mod download_receipt_tests {
             ]
         })).unwrap()).unwrap();
 
-        let primary = receipt_file_sets(&managed, "owner/primary");
+        let primary = receipt_file_sets(&managed, "owner/primary", None);
         assert_eq!(
             primary,
             vec![ReceiptFileSet {
@@ -1729,7 +1779,7 @@ mod download_receipt_tests {
                 revision: Some("primary-rev".to_owned())
             }]
         );
-        let dependency = receipt_file_sets(&managed, "owner/corequisite");
+        let dependency = receipt_file_sets(&managed, "owner/corequisite", None);
         assert_eq!(
             dependency,
             vec![ReceiptFileSet {
@@ -1838,6 +1888,57 @@ mod download_receipt_tests {
     }
 
     #[test]
+    fn shared_repo_backfill_preserves_each_models_receipt() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/shared";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("base.safetensors"), b"base weights").unwrap();
+        std::fs::write(snapshot.join("turbo.safetensors"), b"turbo weights").unwrap();
+        let base = json!({
+            "id": "shared-base",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": repo,
+                "files": ["base.safetensors"]
+            }]
+        });
+        let turbo = json!({
+            "id": "shared-turbo",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": repo,
+                "files": ["turbo.safetensors"]
+            }]
+        });
+
+        assert!(
+            install_state_for(model_download_context(&base).unwrap(), &base, data_dir).installed
+        );
+        assert!(
+            install_state_for(model_download_context(&turbo).unwrap(), &turbo, data_dir).installed
+        );
+
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        let base_receipts = receipt_file_sets(&managed, repo, Some("shared-base"));
+        let turbo_receipts = receipt_file_sets(&managed, repo, Some("shared-turbo"));
+        assert_eq!(base_receipts[0].files, vec!["base.safetensors".to_owned()]);
+        assert_eq!(
+            turbo_receipts[0].files,
+            vec!["turbo.safetensors".to_owned()]
+        );
+        assert_eq!(
+            receipt_entries(&managed).len(),
+            2,
+            "backfill must merge shared-repo model receipts instead of making the first writer win"
+        );
+    }
+
+    #[test]
     fn receipt_remains_usable_when_current_manifest_file_changes() {
         let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
         let temp = tempfile::tempdir().unwrap();
@@ -1859,7 +1960,7 @@ mod download_receipt_tests {
         )
         .unwrap();
 
-        let files = receipt_file_sets(&managed, repo);
+        let files = receipt_file_sets(&managed, repo, None);
         assert_eq!(files[0].files, vec!["old.safetensors".to_owned()]);
         assert!(receipt_files_present(data_dir, repo, &files[0], None));
         assert!(!huggingface_cache_health(&cache, &["new.safetensors".to_owned()]).installed);
@@ -2445,7 +2546,11 @@ fn install_state_for(
         // NOT independently mark it installed (sc-9909): a stale .sceneworks-download-complete.json
         // left by an empty download would otherwise read the whole model as installed while every tier
         // reads missing. Single-variant models keep the repo-level managed contract.
-        let receipt_file_sets = receipt_file_sets(&managed_path, &download_context.repo);
+        let receipt_file_sets = receipt_file_sets(
+            &managed_path,
+            &download_context.repo,
+            model.get("id").and_then(Value::as_str),
+        );
         let managed_installed = !model_has_variant_matrix(model)
             && receipt_file_sets.is_empty()
             && model_is_installed(&managed_path);
@@ -3061,6 +3166,235 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     }
 }
 
+async fn run_blocking_catalog_sweep<I, O, F>(
+    items: Vec<I>,
+    operation: F,
+) -> Result<Vec<O>, ApiError>
+where
+    I: Send + 'static,
+    O: Send + 'static,
+    F: Fn(I) -> Result<O, ApiError> + Send + Sync + 'static,
+{
+    let operation = Arc::new(operation);
+    let mut items = items.into_iter();
+    let mut output = Vec::new();
+    loop {
+        let batch = items
+            .by_ref()
+            .take(MODEL_CATALOG_PROBE_CONCURRENCY)
+            .collect::<Vec<_>>();
+        if batch.is_empty() {
+            break;
+        }
+        let permits = MODEL_CATALOG_PROBE_PERMITS
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MODEL_CATALOG_PROBE_CONCURRENCY)))
+            .clone();
+        let mut tasks = Vec::with_capacity(batch.len());
+        for item in batch {
+            let permit = permits
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| ApiError::internal("model catalog probe limiter closed"))?;
+            let operation = operation.clone();
+            tasks.push(tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                operation(item)
+            }));
+        }
+        let results = join_all(tasks).await;
+        for result in results {
+            output.push(result.map_err(|err| {
+                ApiError::internal(format!("model catalog probe task failed: {err}"))
+            })??);
+        }
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+static TEST_CATALOG_PROBES_ACTIVE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_CATALOG_PROBES_PEAK: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn test_reset_catalog_probe_concurrency() {
+    use std::sync::atomic::Ordering;
+    TEST_CATALOG_PROBES_ACTIVE.store(0, Ordering::SeqCst);
+    TEST_CATALOG_PROBES_PEAK.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn test_catalog_probe_peak() -> usize {
+    TEST_CATALOG_PROBES_PEAK.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(crate) fn test_catalog_probe_limit() -> usize {
+    MODEL_CATALOG_PROBE_CONCURRENCY
+}
+
+#[cfg(test)]
+fn test_delay_catalog_probe(model: &Value) {
+    use std::sync::atomic::Ordering;
+
+    let Some(delay_ms) = model
+        .get("__testCatalogProbeDelayMs")
+        .and_then(Value::as_u64)
+    else {
+        return;
+    };
+    let active = TEST_CATALOG_PROBES_ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+    TEST_CATALOG_PROBES_PEAK.fetch_max(active, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(delay_ms));
+    TEST_CATALOG_PROBES_ACTIVE.fetch_sub(1, Ordering::SeqCst);
+}
+
+fn apply_model_catalog_entry(
+    mut model: Value,
+    download_context: Option<DownloadContext>,
+    download_size_bytes: Option<u64>,
+    data_dir: &FsPath,
+    user_model_ids: &std::collections::HashSet<String>,
+) -> Result<Value, ApiError> {
+    #[cfg(test)]
+    test_delay_catalog_probe(&model);
+    let fallback_size_bytes = download_context
+        .as_ref()
+        .and_then(|context| context.fallback_size_bytes);
+    let primary_size_bytes = download_size_bytes.or(fallback_size_bytes);
+    let download_size_estimated = download_size_bytes.is_none() && fallback_size_bytes.is_some();
+    // Co-requisites (sc-9696) install alongside the primary, so the displayed footprint must
+    // include them (e.g. PiD's ~2.7 GB checkpoint + ~5.2 GB gemma-2-2b-it). Their sizes come
+    // from the manifest (the live HF estimate above only sizes the primary repo).
+    let co_requisite_size_bytes: u64 = model_co_requisite_downloads(&model)
+        .iter()
+        .filter_map(|download| manifest_download_size_bytes(&model, download))
+        .sum();
+    let effective_download_size_bytes = match primary_size_bytes {
+        Some(primary) => Some(primary + co_requisite_size_bytes),
+        None if co_requisite_size_bytes > 0 => Some(co_requisite_size_bytes),
+        None => None,
+    };
+    let state = install_state_for(download_context, &model, data_dir);
+    let object = model
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+    let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+    let user_managed = user_model_ids.contains(model_id);
+    object.insert(
+        "catalogScope".to_owned(),
+        Value::String(if user_managed { "user" } else { "builtin" }.to_owned()),
+    );
+    object.insert("downloadable".to_owned(), Value::Bool(state.downloadable));
+    object.insert(
+        "downloadSizeBytes".to_owned(),
+        effective_download_size_bytes
+            .map(|value| json!(value))
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "downloadSizeLabel".to_owned(),
+        effective_download_size_bytes
+            .map(format_bytes)
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "downloadSizeEstimated".to_owned(),
+        Value::Bool(download_size_estimated),
+    );
+    object.insert(
+        "installState".to_owned(),
+        Value::String(
+            if state.installed {
+                "installed"
+            } else {
+                "missing"
+            }
+            .to_owned(),
+        ),
+    );
+    object.insert(
+        "cacheState".to_owned(),
+        Value::String(
+            if state.cache_incomplete {
+                "incomplete"
+            } else if state.installed {
+                "complete"
+            } else {
+                "missing"
+            }
+            .to_owned(),
+        ),
+    );
+    object.insert(
+        "missingRequiredFiles".to_owned(),
+        Value::Array(
+            state
+                .missing_required_files
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "repairAvailable".to_owned(),
+        Value::Bool(state.downloadable && state.cache_incomplete),
+    );
+    object.insert(
+        "updateAvailable".to_owned(),
+        Value::Bool(state.update_available),
+    );
+    object.insert(
+        "installedPath".to_owned(),
+        state
+            .installed_path
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "removable".to_owned(),
+        Value::Bool(user_managed || state.installed),
+    );
+    // Per-variant install tracking (sc-8508, epic 8506): one entry per declared quant tier,
+    // each with its own installed flag + path + size + footprint. A single-variant model
+    // still emits exactly one "default" variant, so the array is a superset of the
+    // (retained) top-level installState/installedPath fields — nothing existing regresses.
+    apply_variant_fields(object, data_dir);
+    apply_gating_fields(object);
+    apply_mac_and_mlx_fields(object, data_dir);
+    Ok(model)
+}
+
+type ModelCatalogWorkItem = (Value, (Option<DownloadContext>, Option<u64>));
+
+fn group_model_catalog_work_items(
+    work_items: Vec<ModelCatalogWorkItem>,
+) -> Vec<Vec<ModelCatalogWorkItem>> {
+    let mut groups = Vec::<Vec<ModelCatalogWorkItem>>::new();
+    let mut repo_groups = HashMap::<String, usize>::new();
+    for item in work_items {
+        let (_, (download_context, _)) = &item;
+        let repo = download_context
+            .as_ref()
+            .map(|context| context.repo.clone());
+        if let Some(repo) = repo {
+            if let Some(index) = repo_groups.get(&repo).copied() {
+                groups[index].push(item);
+            } else {
+                repo_groups.insert(repo, groups.len());
+                groups.push(vec![item]);
+            }
+        } else {
+            groups.push(vec![item]);
+        }
+    }
+    groups
+}
+
 async fn model_catalog_inner(
     state: &AppState,
     estimate_sizes: bool,
@@ -3100,159 +3434,67 @@ async fn model_catalog_inner(
     }))
     .await;
 
-    let data_dir = state.settings.data_dir.clone();
-    // sc-10667: surface assembled external ComfyUI base models alongside the manifest
-    // catalog. Cloned before the blocking closure, mirroring the external-LoRA merge in
-    // `lora_catalog`; the scan is filesystem-bound and runs on the blocking pool below.
+    let data_dir = Arc::new(state.settings.data_dir.clone());
+    let user_model_ids = Arc::new(user_model_ids);
+    let work_items = models
+        .into_iter()
+        .zip(download_contexts.into_iter().zip(download_size_bytes))
+        .collect::<Vec<_>>();
+    let work_groups = group_model_catalog_work_items(work_items);
+    let data_dir_for_sweep = data_dir.clone();
+    let user_model_ids_for_sweep = user_model_ids.clone();
+
+    // sc-14530: each model's install-state resolution is independent but may spend seconds
+    // waiting on network-volume metadata. Dispatch bounded blocking tasks per primary-repo group
+    // so that latency overlaps instead of accumulating serially across the full catalog, while
+    // shared-repo receipt handling stays deterministic.
+    let catalog_sweep = run_blocking_catalog_sweep(work_groups, move |work_group| {
+        work_group
+            .into_iter()
+            .map(|(model, (download_context, download_size_bytes))| {
+                apply_model_catalog_entry(
+                    model,
+                    download_context,
+                    download_size_bytes,
+                    &data_dir_for_sweep,
+                    &user_model_ids_for_sweep,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+    });
+
+    // External ComfyUI discovery is independent from manifest install-state resolution; overlap
+    // that filesystem scan with the per-entry sweep too.
     let external_roots = state.settings.external_model_roots.clone();
     let external_base_cache = state.external_base_model_cache.clone();
-    // sc-4202 (F-API-3): the per-model install-state probes below hit the filesystem
-    // (huggingface_cache_health snapshot walks, model_is_installed, mlx_catalog_status)
-    // for every model. Assemble the catalog on the blocking pool so these synchronous
-    // walks don't stall a tokio worker thread under load or on a slow/network volume.
-    let models = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, ApiError> {
-        for (model, (download_context, download_size_bytes)) in models
-            .iter_mut()
-            .zip(download_contexts.into_iter().zip(download_size_bytes))
-        {
-            let fallback_size_bytes = download_context
-                .as_ref()
-                .and_then(|context| context.fallback_size_bytes);
-            let primary_size_bytes = download_size_bytes.or(fallback_size_bytes);
-            let download_size_estimated =
-                download_size_bytes.is_none() && fallback_size_bytes.is_some();
-            // Co-requisites (sc-9696) install alongside the primary, so the displayed footprint must
-            // include them (e.g. PiD's ~2.7 GB checkpoint + ~5.2 GB gemma-2-2b-it). Their sizes come
-            // from the manifest (the live HF estimate above only sizes the primary repo).
-            let co_requisite_size_bytes: u64 = model_co_requisite_downloads(model)
-                .iter()
-                .filter_map(|download| manifest_download_size_bytes(model, download))
-                .sum();
-            let effective_download_size_bytes = match primary_size_bytes {
-                Some(primary) => Some(primary + co_requisite_size_bytes),
-                None if co_requisite_size_bytes > 0 => Some(co_requisite_size_bytes),
-                None => None,
-            };
-            let state = install_state_for(download_context, model, &data_dir);
-            let object = model
-                .as_object_mut()
-                .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
-            let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();
-            let user_managed = user_model_ids.contains(model_id);
-            object.insert(
-                "catalogScope".to_owned(),
-                Value::String(if user_managed { "user" } else { "builtin" }.to_owned()),
-            );
-            object.insert("downloadable".to_owned(), Value::Bool(state.downloadable));
-            object.insert(
-                "downloadSizeBytes".to_owned(),
-                effective_download_size_bytes
-                    .map(|value| json!(value))
-                    .unwrap_or(Value::Null),
-            );
-            object.insert(
-                "downloadSizeLabel".to_owned(),
-                effective_download_size_bytes
-                    .map(format_bytes)
-                    .map(Value::String)
-                    .unwrap_or(Value::Null),
-            );
-            object.insert(
-                "downloadSizeEstimated".to_owned(),
-                Value::Bool(download_size_estimated),
-            );
-            object.insert(
-                "installState".to_owned(),
-                Value::String(
-                    if state.installed {
-                        "installed"
-                    } else {
-                        "missing"
-                    }
-                    .to_owned(),
-                ),
-            );
-            object.insert(
-                "cacheState".to_owned(),
-                Value::String(
-                    if state.cache_incomplete {
-                        "incomplete"
-                    } else if state.installed {
-                        "complete"
-                    } else {
-                        "missing"
-                    }
-                    .to_owned(),
-                ),
-            );
-            object.insert(
-                "missingRequiredFiles".to_owned(),
-                Value::Array(
-                    state
-                        .missing_required_files
-                        .into_iter()
-                        .map(Value::String)
-                        .collect(),
-                ),
-            );
-            object.insert(
-                "repairAvailable".to_owned(),
-                Value::Bool(state.downloadable && state.cache_incomplete),
-            );
-            object.insert(
-                "updateAvailable".to_owned(),
-                Value::Bool(state.update_available),
-            );
-            object.insert(
-                "installedPath".to_owned(),
-                state
-                    .installed_path
-                    .map(Value::String)
-                    .unwrap_or(Value::Null),
-            );
-            object.insert(
-                "removable".to_owned(),
-                Value::Bool(user_managed || state.installed),
-            );
-            // Per-variant install tracking (sc-8508, epic 8506): one entry per declared quant tier,
-            // each with its own installed flag + path + size + footprint. A single-variant model
-            // still emits exactly one "default" variant, so the array is a superset of the
-            // (retained) top-level installState/installedPath fields — nothing existing regresses.
-            apply_variant_fields(object, &data_dir);
-            apply_gating_fields(object);
-            apply_mac_and_mlx_fields(object, &data_dir);
-        }
-        // Append assembled external base models (empty unless external roots are
-        // configured; always empty on macOS). They carry their own catalogScope /
-        // installState / usable fields and deliberately skip the manifest
-        // install-state sweep above, exactly as external LoRAs skip
-        // `normalize_lora_entry` in `lora_catalog`.
-        let external = {
-            let mut cache = external_base_cache.lock();
-            crate::external_base_models::scan_external_base_models(&external_roots, &mut cache)
-        };
-        models.extend(external);
-        models.sort_by(|left, right| {
-            let left_key = (
-                left.get("type").and_then(Value::as_str).unwrap_or_default(),
-                left.get("name").and_then(Value::as_str).unwrap_or_default(),
-            );
-            let right_key = (
-                right
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-                right
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            );
-            left_key.cmp(&right_key)
-        });
-        Ok(models)
-    })
-    .await
-    .map_err(|err| ApiError::internal(format!("model catalog assembly task failed: {err}")))??;
+    let external_scan = tokio::task::spawn_blocking(move || {
+        let mut cache = external_base_cache.lock();
+        crate::external_base_models::scan_external_base_models(&external_roots, &mut cache)
+    });
+    let (models, external) = tokio::join!(catalog_sweep, external_scan);
+    let mut models = models?.into_iter().flatten().collect::<Vec<_>>();
+    let external = external.map_err(|err| {
+        ApiError::internal(format!("external model catalog scan task failed: {err}"))
+    })?;
+    models.extend(external);
+    models.sort_by(|left, right| {
+        let left_key = (
+            left.get("type").and_then(Value::as_str).unwrap_or_default(),
+            left.get("name").and_then(Value::as_str).unwrap_or_default(),
+        );
+        let right_key = (
+            right
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            right
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
+        left_key.cmp(&right_key)
+    });
+
     Ok(models)
 }
 
@@ -3768,6 +4010,15 @@ fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHealth {
                 missing.push(format!("{component}/<weights>"));
             } else if is_mage && !diffusers_component_safetensors_are_valid(snapshot, component) {
                 missing.push(format!("{component}/<weights> (malformed safetensors)"));
+            }
+        } else if is_mage && component == "tokenizer" {
+            // Mage's Qwen3-VL AutoProcessor is a logical `tokenizer` component in model_index.json,
+            // but the published diffusers snapshots colocate its tokenizer + vision processor
+            // configs under `text_encoder/` beside the Qwen3-VL weights.
+            for config in ["tokenizer_config.json", "preprocessor_config.json"] {
+                if !path_is_valid_json_object(&snapshot.join("text_encoder").join(config)) {
+                    missing.push(format!("text_encoder/{config}"));
+                }
             }
         } else if !diffusers_component_has_valid_config_file(snapshot, component) {
             // Weightless auxiliary components (scheduler, tokenizer, feature
@@ -4987,7 +5238,7 @@ mod variant_install_tests {
                 "repo": repo,
                 "variant": variant,
                 "files": [
-                    "model_index.json", "scheduler/*", "text_encoder/*", "tokenizer/*",
+                    "model_index.json", "scheduler/*", "text_encoder/*",
                     "transformer/*", "vae/*"
                 ]
             })
@@ -5004,7 +5255,7 @@ mod variant_install_tests {
                 "provider": "huggingface",
                 "repo": repo,
                 "files": [
-                    "model_index.json", "scheduler/*", "text_encoder/*", "tokenizer/*",
+                    "model_index.json", "scheduler/*", "text_encoder/*",
                     "transformer/*", "vae/*"
                 ]
             }]
@@ -5066,8 +5317,12 @@ mod variant_install_tests {
                 json!({"_class_name": "FlowMatchEulerDiscreteScheduler"}),
             );
             write_json(
-                &snapshot.join("tokenizer/tokenizer.json"),
+                &snapshot.join("text_encoder/tokenizer_config.json"),
                 json!({"version": "1.0"}),
+            );
+            write_json(
+                &snapshot.join("text_encoder/preprocessor_config.json"),
+                json!({"size": 384}),
             );
             snapshot
         }
@@ -5104,10 +5359,24 @@ mod variant_install_tests {
                 "scheduler/scheduler_config.json",
                 true,
             ),
-            ("tokenizer config absent", "tokenizer/tokenizer.json", false),
+            (
+                "tokenizer config absent",
+                "text_encoder/tokenizer_config.json",
+                false,
+            ),
             (
                 "tokenizer config malformed",
-                "tokenizer/tokenizer.json",
+                "text_encoder/tokenizer_config.json",
+                true,
+            ),
+            (
+                "vision processor config absent",
+                "text_encoder/preprocessor_config.json",
+                false,
+            ),
+            (
+                "vision processor config malformed",
+                "text_encoder/preprocessor_config.json",
                 true,
             ),
             (

@@ -301,6 +301,60 @@ async fn real_builtin_catalog_exposes_krea_img2img_ui_flag() {
 }
 
 #[tokio::test]
+async fn models_route_overlaps_slow_probes_with_bounded_fanout() {
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let probe_count = crate::models::test_catalog_probe_limit() + 4;
+    let models = (0..probe_count)
+        .map(|index| {
+            json!({
+                "id": format!("slow-probe-{index:02}"),
+                "name": format!("Slow Probe {index:02}"),
+                "family": "probe",
+                "type": "image",
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": format!("probe/model-{index:02}"),
+                    "files": ["model.safetensors"]
+                }],
+                "__testCatalogProbeDelayMs": 50
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({ "schemaVersion": 1, "models": models }))
+            .expect("manifest serializes"),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    crate::models::test_reset_catalog_probe_concurrency();
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (first, retry) = tokio::join!(
+        request(app.clone(), "GET", "/api/v1/models", Value::Null),
+        request(app, "GET", "/api/v1/models", Value::Null)
+    );
+
+    assert_eq!(first.0, StatusCode::OK);
+    assert_eq!(retry.0, StatusCode::OK);
+    assert_eq!(first.1.as_array().map(Vec::len), Some(probe_count));
+    assert_eq!(retry.1.as_array().map(Vec::len), Some(probe_count));
+    let peak = crate::models::test_catalog_probe_peak();
+    assert!(
+        peak > 1,
+        "the production /models path must overlap independent slow filesystem probes"
+    );
+    assert!(
+        peak <= crate::models::test_catalog_probe_limit(),
+        "concurrent /models requests exceeded the process-wide blocking-probe limit: {peak}"
+    );
+}
+
+#[tokio::test]
 async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
     // sc-3486: the catalog stamps per-model `macSupport`, and the capabilities endpoint
     // carries the master switch (`macGatingActive` = mlx_required) + infra gating.

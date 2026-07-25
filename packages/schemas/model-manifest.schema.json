@@ -301,6 +301,7 @@
               },
               "img2img": { "type": "boolean" },
               "multiReference": { "type": "boolean" },
+              "sourceWithMultiReference": { "type": "boolean" },
               "poseLibrary": { "type": "boolean" },
               "poseControlScale": { "type": "boolean" },
               "controlOverlay": { "type": "boolean" },

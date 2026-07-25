@@ -4609,6 +4609,69 @@ fn boogu_edit_reference_ids_prefers_plural_then_source() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn mage_edit_reference_ids_keeps_source_first_then_ordered_optional_references() {
+    assert_eq!(
+        mage_edit_reference_ids(&request(json!({
+            "projectId": "p",
+            "mode": "edit_image",
+            "sourceAssetId": "source",
+            "referenceAssetIds": ["reference-b", "reference-a"]
+        }))),
+        vec![
+            "source".to_owned(),
+            "reference-b".to_owned(),
+            "reference-a".to_owned()
+        ]
+    );
+    assert!(mage_edit_reference_ids(&request(json!({
+        "projectId": "p",
+        "mode": "edit_image",
+        "referenceAssetIds": ["reference-only"]
+    })))
+    .is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mage_edit_request_shape_reaches_each_registered_engine() {
+    for model in [
+        "mage_flow_edit_base",
+        "mage_flow_edit",
+        "mage_flow_edit_turbo",
+    ] {
+        let request = request(json!({
+            "projectId": "p",
+            "model": model,
+            "mode": "edit_image",
+            "prompt": "Replace the background with a field of sunflowers",
+            "sourceAssetId": "source",
+            "referenceAssetIds": ["reference-b", "reference-a"]
+        }));
+        assert!(is_mage_edit_model(&request.model));
+        assert_eq!(
+            crate::engines::mlx_model(model)
+                .expect("registered Mage Edit engine")
+                .engine_id(),
+            model
+        );
+        assert_eq!(
+            mage_edit_reference_ids(&request),
+            ["source", "reference-b", "reference-a"]
+        );
+        let image = gen_core::Image {
+            width: 8,
+            height: 8,
+            pixels: stub_rgb8(8, 8, 1),
+        };
+        match build_reference_conditioning(&[image.clone(), image]).as_slice() {
+            [gen_core::Conditioning::MultiReference { images }] => assert_eq!(images.len(), 2),
+            other => panic!("{model}: expected MultiReference request shape, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn boogu_build_reference_conditioning_single_vs_multi() {
     // sc-7645: one reference stays a `Reference` (byte-identical to the single-reference edit path);
     // 2–5 become a single `MultiReference` (the DiT packs all of them). Empty → no conditioning.

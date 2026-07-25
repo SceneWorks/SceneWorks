@@ -569,6 +569,9 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("mage_flow_base", true, false, false, false, false),
     ModelCaps::new("mage_flow", true, false, false, false, false),
     ModelCaps::new("mage_flow_turbo", true, false, false, false, false),
+    ModelCaps::new("mage_flow_edit_base", true, false, false, false, false),
+    ModelCaps::new("mage_flow_edit", true, false, false, false, false),
+    ModelCaps::new("mage_flow_edit_turbo", true, false, false, false, false),
     // sc-3022 Z-Image / sc-3023 FLUX.1 / sc-3024 Qwen / sc-3025 FLUX.2 / sc-3026 SDXL — the founding
     // MLX-routed families (grows one family story at a time as each lands real generation in
     // `sceneworks-worker::image_jobs`). CANDLE: SDXL sc-3678, the four families sc-5096.
@@ -1268,6 +1271,9 @@ mod tests {
         "mage_flow_base",
         "mage_flow",
         "mage_flow_turbo",
+        "mage_flow_edit_base",
+        "mage_flow_edit",
+        "mage_flow_edit_turbo",
         "z_image_turbo",
         "z_image",
         "z_image_edit",
