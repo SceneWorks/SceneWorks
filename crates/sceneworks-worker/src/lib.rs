@@ -167,6 +167,11 @@ mod training_jobs;
 use training_jobs::*;
 mod caption_jobs;
 use caption_jobs::*;
+// LAION-style URL/caption Parquet materialization belongs to the non-GPU
+// utility worker; the existing ControlNet trainer consumes the resulting
+// ordinary SceneWorks dataset.
+mod dataset_parquet_jobs;
+use dataset_parquet_jobs::*;
 // The shared scaffold both dataset-analysis jobs route through (sc-8836, F-034) — the `CancelJoinGuard`
 // select loop, per-item progress ramp, and sidecar POST extracted out of the two near-duplicate modules.
 // Gated to the same lanes as its only callers (the real `run_*_analysis_job` in the two modules below);
@@ -1315,6 +1320,9 @@ async fn run_utility_job(
             JobType::TrainingCaption => run_training_caption_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Training captioning failed.", error)),
+            JobType::DatasetParquetImport => run_dataset_parquet_import_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Parquet dataset import failed.", error)),
             // Dataset Doctor CLIP-embedding analysis (sc-6535): the macOS MLX worker embeds every dataset
             // image (clip_vit_l14) and POSTs the content-hash sidecar; off-Mac the handler returns a
             // precise unsupported error (no candle CLIP embedder yet).

@@ -12531,6 +12531,25 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 4px;
 }
 
+.dataset-parquet-copy,
+.dataset-parquet-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dataset-parquet-path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.dataset-parquet-path-row input {
+  min-width: 0;
+  font-family: var(--font-mono);
+}
+
 /* Asset preview chip (in pickers) */
 .asset-preview-chips {
   display: grid;

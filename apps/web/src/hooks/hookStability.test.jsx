@@ -37,7 +37,7 @@ const ACTION_KEYS = {
     "refreshTrainingDatasets", "loadTrainingDataset", "loadTrainingDatasetReadiness",
     "setTrainingDatasetItemQualityAck", "createTrainingDataset", "uploadTrainingDatasetItem",
     "updateTrainingDataset", "batchRenameTrainingDataset", "writeTrainingDatasetCaptionSidecars",
-    "createTrainingDatasetCaptionJob", "createTrainingDatasetUpscaleJob",
+    "createTrainingDatasetCaptionJob", "createTrainingDatasetParquetImportJob", "createTrainingDatasetUpscaleJob",
     "createTrainingDatasetAnalysisJob", "createTrainingDatasetFaceAnalysisJob",
     "smartCropTrainingDataset", "stripExifTrainingDataset", "createTrainingJob",
   ],

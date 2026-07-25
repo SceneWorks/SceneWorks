@@ -282,6 +282,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::FrameExtract
         | JobType::TimelineExport
         | JobType::PromptRefine
+        | JobType::DatasetParquetImport
         // sc-6535: dataset_analysis is a native Rust/MLX job (the CLIP image embedder), not a
         // Python-torch gap — so it's `Ok` here. Its real capability is gated by the worker's
         // advertisement once `mlx-gen-clip` is linked; until then it queues, never enforce-fails.
@@ -542,6 +543,7 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::FrameExtract
         | JobType::TimelineExport
         | JobType::PromptRefine
+        | JobType::DatasetParquetImport
         | JobType::ImageDetail
         | JobType::PersonDetect
         | JobType::PersonTrack
