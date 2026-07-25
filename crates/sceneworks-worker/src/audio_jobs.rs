@@ -786,9 +786,11 @@ async fn run_audio_synthesis_using(
     // Concurrent incremental-progress pump (sc-13675): posts a Running/Generating job update as each
     // streamed chunk arrives so the UI reflects the stream. It runs ALONGSIDE
     // `run_blocking_with_heartbeat` (which owns worker heartbeats + the cancel watcher on a DIFFERENT
-    // endpoint). It stops the instant the shared cancel flag is tripped, so it can never post a Running
-    // status after the watcher writes the terminal `Canceled` (no cancel/heartbeat regression), and it
-    // ends when synthesis closes the channel. Non-streaming synthesis never sends, so the pump exits
+    // endpoint). The cancel check stops new attempts once the shared flag is observed, but cancellation
+    // can still serialize while an already-started progress POST is awaiting the API. That race is safe
+    // because jobs_store transactionally rejects any nonterminal write after `Canceled`; the resulting
+    // 409 is deliberately ignored here because synthesis must not depend on its progress sink. The pump
+    // ends when synthesis closes the channel. Non-streaming synthesis never sends, so it exits
     // immediately with zero posts, leaving those modes untouched.
     let pump = {
         let api = api.clone();

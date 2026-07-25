@@ -2,6 +2,12 @@ import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
 
+const { appConfirmMock } = vi.hoisted(() => ({ appConfirmMock: vi.fn(async () => true) }));
+vi.mock("../appConfirm.jsx", async (importOriginal) => ({
+  ...(await importOriginal()),
+  appConfirm: appConfirmMock,
+}));
+
 vi.mock("../api.js", async (importOriginal) => {
   const actual = await importOriginal();
   return {
@@ -14,6 +20,19 @@ import { AppContext } from "../context/AppContext.js";
 import { AudioStudio } from "./AudioStudio.jsx";
 import { KEEP_ALIVE_VIEWS, navSections, viewTitles } from "../App.jsx";
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
+
+beforeEach(() => {
+  appConfirmMock.mockReset();
+  appConfirmMock.mockResolvedValue(true);
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 // Fixture audio models mirroring the seeded `type:"audio"` catalog entries (constants.js). Each
 // carries only the `audio` sub-block the eligibility predicates + UI read — voices (speech),
@@ -1718,7 +1737,7 @@ describe("AudioStudio register-a-voice (sc-13517)", () => {
     expect(notice.textContent).toContain("Brand New Voice");
   });
 
-  it("deletes a saved voice via its delete affordance", async () => {
+  it("confirms before deleting a saved voice", async () => {
     const savedVoices = [{ id: "voice_a", name: "Narrator", referenceAudioAssetId: "ref-voice-1" }];
     const deleteSavedVoice = vi.fn(async () => ({ id: "voice_a", status: "deleted" }));
     await render(
@@ -1731,7 +1750,53 @@ describe("AudioStudio register-a-voice (sc-13517)", () => {
     );
     await click(modeTab(container, "Voice Clone"));
     await click(container.querySelector(".saved-voice-delete"));
+    expect(appConfirmMock).toHaveBeenCalledWith(
+      expect.objectContaining({ tone: "danger", confirmLabel: "Delete permanently" }),
+    );
     expect(deleteSavedVoice).toHaveBeenCalledWith("voice_a");
+  });
+
+  it("keeps a saved voice when permanent deletion is canceled", async () => {
+    appConfirmMock.mockResolvedValueOnce(false);
+    const savedVoices = [{ id: "voice_a", name: "Narrator", referenceAudioAssetId: "ref-voice-1" }];
+    const deleteSavedVoice = vi.fn();
+    await render(
+      baseContext({
+        assets: [referenceAsset],
+        savedVoices,
+        createSavedVoice: vi.fn(),
+        deleteSavedVoice,
+      }),
+    );
+    await click(modeTab(container, "Voice Clone"));
+    await click(container.querySelector(".saved-voice-delete"));
+
+    expect(appConfirmMock).toHaveBeenCalledOnce();
+    expect(deleteSavedVoice).not.toHaveBeenCalled();
+  });
+
+  it("guards a saved-voice delete while the mutation is in flight", async () => {
+    const deletion = deferred();
+    const savedVoices = [{ id: "voice_a", name: "Narrator", referenceAudioAssetId: "ref-voice-1" }];
+    const deleteSavedVoice = vi.fn(() => deletion.promise);
+    await render(
+      baseContext({
+        assets: [referenceAsset],
+        savedVoices,
+        createSavedVoice: vi.fn(),
+        deleteSavedVoice,
+      }),
+    );
+    await click(modeTab(container, "Voice Clone"));
+    const deleteButton = container.querySelector(".saved-voice-delete");
+    await click(deleteButton);
+
+    expect(deleteSavedVoice).toHaveBeenCalledOnce();
+    expect(deleteButton.disabled).toBe(true);
+    deleteButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(deleteSavedVoice).toHaveBeenCalledOnce();
+
+    await act(async () => deletion.resolve({ id: "voice_a", status: "deleted" }));
   });
 });
 
@@ -1924,6 +1989,7 @@ describe("AudioStudio multi-speaker reveal (sc-13676)", () => {
       { text: "Hello, how are you today?", speaker: "S1" },
       { text: "I'm doing great, thanks for asking!", speaker: "S2" },
     ]);
+    expect(payload.prompt).toBe("");
     // A multi-speaker model ships no voice bank, so no `voice` is sent.
     expect(payload.voice).toBeUndefined();
     expect(rememberLocalGenerationJob).toHaveBeenCalledWith("audio", job);
