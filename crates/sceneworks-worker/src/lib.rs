@@ -687,6 +687,37 @@ struct DiscoveredGpu {
 }
 
 async fn shutdown_signal() {
+    use std::sync::OnceLock;
+    use tokio::sync::watch;
+
+    static SHUTDOWN: OnceLock<watch::Sender<bool>> = OnceLock::new();
+    let sender = SHUTDOWN.get_or_init(|| {
+        let (sender, _receiver) = watch::channel(false);
+        let signal = sender.clone();
+        tokio::spawn(async move {
+            wait_for_process_shutdown_source().await;
+            // Latch the request even if it arrives between two `select!` calls,
+            // when no receiver is currently subscribed.
+            signal.send_replace(true);
+        });
+        sender
+    });
+    let mut receiver = sender.subscribe();
+    wait_for_shutdown_latch(&mut receiver).await;
+}
+
+async fn wait_for_shutdown_latch(receiver: &mut tokio::sync::watch::Receiver<bool>) {
+    if *receiver.borrow_and_update() {
+        return;
+    }
+    while receiver.changed().await.is_ok() {
+        if *receiver.borrow_and_update() {
+            return;
+        }
+    }
+}
+
+async fn wait_for_process_shutdown_source() {
     #[cfg(unix)]
     {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
@@ -727,12 +758,9 @@ async fn shutdown_signal() {
 /// (sc-11184 / F-014) — the Windows graceful-shutdown signal, standing in for the unix
 /// SIGTERM the supervisor cannot deliver per-child on Windows.
 ///
-/// `shutdown_signal()` is awaited on every worker-loop turn, so opening a fresh reader
-/// per call would risk parking a blocking thread on each turn. Instead a SINGLE
-/// background reader is started once (guarded by a `OnceLock`) and its EOF result is
-/// fanned out over a `watch` channel; every caller just subscribes. The channel latches
-/// `true` on close and stays there, so a caller that subscribes AFTER the pipe already
-/// closed still returns immediately. The reader drains stdin on std's blocking handle
+/// The process-wide shutdown source calls this once on a supervised Windows child.
+/// A SINGLE background reader is guarded by a `OnceLock`, and its EOF result is
+/// latched over a `watch` channel. The reader drains stdin on std's blocking handle
 /// inside `spawn_blocking` (rather than `tokio::io::stdin`, which needs the `io-std`
 /// feature this crate does not enable).
 #[cfg(not(unix))]

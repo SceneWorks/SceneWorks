@@ -21,6 +21,7 @@
 //! the wiring is in `generate_candle_stream` (image_jobs/base.rs).
 
 use super::*;
+#[cfg(test)]
 use serde_json::Value;
 
 use crate::fit_gate::BYTES_PER_GIB;
@@ -749,20 +750,6 @@ fn video_weights_too_big_error(
         available = available_gb.round() as i64,
         weights = weights_gb.round() as i64,
     ))
-}
-
-/// Parse a JSON uint/int from either a number or a numeric string (mirrors base.rs `quant_int`).
-fn quant_int(value: &Value) -> Option<i64> {
-    value
-        .as_i64()
-        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
-}
-
-/// Parse a JSON float from either a number or a numeric string.
-fn json_f64(value: &Value) -> Option<f64> {
-    value
-        .as_f64()
-        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
 }
 
 #[cfg(test)]

@@ -73,13 +73,17 @@ pub(crate) fn bounded_tail(value: &str, max_lines: usize, max_chars: usize) -> S
     let mut lines = value.lines().rev().take(max_lines).collect::<Vec<_>>();
     lines.reverse();
     let mut output = lines.join("\n");
-    if output.len() > max_chars {
-        let start = output
-            .char_indices()
-            .rev()
-            .nth(max_chars)
-            .map_or(0, |(index, _)| index);
-        output = output[start..].to_owned();
+    let char_count = output.chars().count();
+    if char_count > max_chars {
+        if max_chars == 0 {
+            output.clear();
+        } else {
+            let start = output
+                .char_indices()
+                .nth(char_count - max_chars)
+                .map_or(output.len(), |(index, _)| index);
+            output = output[start..].to_owned();
+        }
     }
     output
 }

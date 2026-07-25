@@ -532,10 +532,25 @@ pub(crate) fn parse_f64(value: &str) -> Option<f64> {
     value.parse().ok()
 }
 
+const GPU_UTILIZATION_CACHE_AGE: Duration = Duration::from_secs(1);
+type GpuUtilizationCache =
+    tokio::sync::Mutex<HashMap<String, (Instant, Option<WorkerUtilizationSnapshot>)>>;
+
 pub(crate) async fn gpu_utilization(gpu_id: &str) -> Option<WorkerUtilizationSnapshot> {
     if gpu_id == "cpu" {
         return None;
     }
+    static CACHE: std::sync::OnceLock<GpuUtilizationCache> = std::sync::OnceLock::new();
+    cached_gpu_utilization_with(
+        gpu_id,
+        CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())),
+        GPU_UTILIZATION_CACHE_AGE,
+        |gpu_id| async move { query_gpu_utilization(&gpu_id).await },
+    )
+    .await
+}
+
+async fn query_gpu_utilization(gpu_id: &str) -> Option<WorkerUtilizationSnapshot> {
     // The Apple-Silicon `mlx` worker has no nvidia-smi to query; read its
     // unified-memory + GPU load from IOKit instead (epic 3018) so the dashboard
     // preserves the telemetry surface formerly supplied by the Python `mps` worker.
@@ -548,6 +563,30 @@ pub(crate) async fn gpu_utilization(gpu_id: &str) -> Option<WorkerUtilizationSna
         .into_iter()
         .find(|gpu| gpu.id == gpu_id)
         .and_then(|gpu| gpu.utilization)
+}
+
+pub(crate) async fn cached_gpu_utilization_with<F, Fut>(
+    gpu_id: &str,
+    cache: &GpuUtilizationCache,
+    max_age: Duration,
+    query: F,
+) -> Option<WorkerUtilizationSnapshot>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Option<WorkerUtilizationSnapshot>>,
+{
+    // Hold the mutex across a stale/missing probe so a heartbeat, per-job sampler,
+    // and fit-gate arriving together share one subprocess instead of stampeding.
+    // A worker process serves one GPU id, so cross-id serialization is immaterial.
+    let mut entries = cache.lock().await;
+    if let Some((sampled_at, snapshot)) = entries.get(gpu_id) {
+        if sampled_at.elapsed() < max_age {
+            return snapshot.clone();
+        }
+    }
+    let snapshot = query(gpu_id.to_owned()).await;
+    entries.insert(gpu_id.to_owned(), (Instant::now(), snapshot.clone()));
+    snapshot
 }
 
 /// Live per-GPU VRAM budget (free/total, GB) for the candle/CUDA fit-gate (epic 10765 Phase 0,

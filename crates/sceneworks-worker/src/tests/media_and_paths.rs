@@ -140,6 +140,9 @@ fn path_and_error_helpers_are_bounded_and_defensive() {
 
     assert!(tail.contains("caf\u{e9}"));
     assert!(!tail.contains("line 1 "));
+    assert_eq!(tail.chars().count(), 37);
+    assert_eq!(bounded_tail("aé日", 1, 2), "é日");
+    assert_eq!(bounded_tail("aé日", 1, 0), "");
 }
 
 #[test]

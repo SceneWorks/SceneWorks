@@ -1,4 +1,18 @@
 
+#[tokio::test]
+async fn process_shutdown_latch_survives_a_gap_without_waiters() {
+    let (sender, _receiver) = tokio::sync::watch::channel(false);
+    sender.send_replace(true);
+    let mut late_receiver = sender.subscribe();
+
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        wait_for_shutdown_latch(&mut late_receiver),
+    )
+    .await
+    .expect("a late waiter observes the already-latched shutdown");
+}
+
 /// sc-3513: the worker's `JobType::ImageEdit` dispatch arm delegates to
 /// `run_image_generate_job` — the engine keys edits on payload model+mode, not job
 /// type. Feeding an `image_edit`-typed job into the handler proves it reaches the image
