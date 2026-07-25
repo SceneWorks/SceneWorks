@@ -488,6 +488,242 @@ pub(crate) async fn create_training_dataset_caption_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
+const MAX_PARQUET_IMPORT_ITEMS: usize = 25_000;
+const MAX_PARQUET_IMPORT_CONCURRENCY: usize = 64;
+const MAX_PARQUET_FILTER_TERMS: usize = 32;
+const MAX_PARQUET_FILTER_TERM_CHARS: usize = 64;
+
+fn validate_parquet_import_request(
+    payload: &DatasetParquetImportJobRequest,
+) -> Result<std::path::PathBuf, ApiError> {
+    if payload.max_items == 0 || payload.max_items > MAX_PARQUET_IMPORT_ITEMS {
+        return Err(ApiError::bad_request(format!(
+            "Parquet maxItems must be between 1 and {MAX_PARQUET_IMPORT_ITEMS}."
+        )));
+    }
+    if payload.min_edge > 8192 {
+        return Err(ApiError::bad_request(
+            "Parquet minEdge must be between 0 and 8192.",
+        ));
+    }
+    if payload.concurrency == 0 || payload.concurrency > MAX_PARQUET_IMPORT_CONCURRENCY {
+        return Err(ApiError::bad_request(format!(
+            "Parquet concurrency must be between 1 and {MAX_PARQUET_IMPORT_CONCURRENCY}."
+        )));
+    }
+    for (label, column) in [
+        ("urlColumn", payload.url_column.trim()),
+        ("captionColumn", payload.caption_column.trim()),
+    ] {
+        if column.is_empty() || column.chars().count() > 128 {
+            return Err(ApiError::bad_request(format!(
+                "Parquet {label} must contain between 1 and 128 characters."
+            )));
+        }
+    }
+    for (label, terms) in [
+        ("captionIncludes", &payload.caption_includes),
+        ("captionExcludes", &payload.caption_excludes),
+    ] {
+        if terms.len() > MAX_PARQUET_FILTER_TERMS
+            || terms.iter().any(|term| {
+                term.trim().is_empty()
+                    || term.trim().chars().count() > MAX_PARQUET_FILTER_TERM_CHARS
+            })
+        {
+            return Err(ApiError::bad_request(format!(
+                "Parquet {label} accepts at most {MAX_PARQUET_FILTER_TERMS} non-empty terms of up to {MAX_PARQUET_FILTER_TERM_CHARS} characters."
+            )));
+        }
+    }
+    let source = std::path::PathBuf::from(payload.source_path.trim());
+    if !source.is_absolute() {
+        return Err(ApiError::bad_request(
+            "Parquet sourcePath must be absolute.",
+        ));
+    }
+    let source = std::fs::canonicalize(&source).map_err(|error| {
+        ApiError::bad_request(format!("Parquet sourcePath is unavailable: {error}"))
+    })?;
+    if !source.is_file() && !source.is_dir() {
+        return Err(ApiError::bad_request(
+            "Parquet sourcePath must point to a file or directory.",
+        ));
+    }
+    if source.is_file()
+        && !source
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("parquet"))
+    {
+        return Err(ApiError::bad_request(
+            "Parquet sourcePath file must end in .parquet.",
+        ));
+    }
+    Ok(source)
+}
+
+/// Queue a resumable materialization pass for LAION-style URL/caption Parquet shards.
+/// Import is separate from ControlNet training so Dataset Doctor can inspect the local targets
+/// before the expensive condition-render + training run.
+pub(crate) async fn create_training_dataset_parquet_import_job(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetParquetImportJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let source_path = validate_parquet_import_request(&payload)?;
+    let (dataset, dataset_root, project_name) = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let dataset_id = dataset_id.clone();
+        move |store| store.training_dataset_for_plan(&project_id, &dataset_id)
+    })
+    .await?;
+    if !dataset.items.is_empty() {
+        return Err(ApiError::bad_request(
+            "Parquet import currently requires an empty dataset.",
+        ));
+    }
+    let project_root = dataset_root
+        .ancestors()
+        .nth(3)
+        .ok_or_else(|| ApiError::internal("training dataset root has an invalid layout"))?
+        .to_path_buf();
+    let job_payload = match json!({
+        "provider": "training",
+        "kind": "dataset_parquet_import",
+        "projectId": project_id.clone(),
+        "datasetId": dataset.id,
+        "datasetName": dataset.name,
+        "datasetVersion": dataset.version,
+        "projectRoot": project_root.display().to_string(),
+        "datasetRoot": dataset_root.display().to_string(),
+        "sourcePath": source_path.display().to_string(),
+        "urlColumn": payload.url_column.trim(),
+        "captionColumn": payload.caption_column.trim(),
+        "maxItems": payload.max_items,
+        "minEdge": payload.min_edge,
+        "concurrency": payload.concurrency,
+        "captionIncludes": payload.caption_includes.iter().map(|term| term.trim()).collect::<Vec<_>>(),
+        "captionExcludes": payload.caption_excludes.iter().map(|term| term.trim()).collect::<Vec<_>>(),
+    }) {
+        Value::Object(map) => map,
+        _ => {
+            return Err(ApiError::internal(
+                "Parquet import payload must be an object",
+            ))
+        }
+    };
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job(CreateJob {
+            job_type: JobType::DatasetParquetImport,
+            project_id: Some(project_id),
+            project_name: Some(project_name),
+            payload: job_payload,
+            requested_gpu: "auto".to_owned(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetParquetImportFinalizeRequest {
+    pub(crate) job_id: String,
+    pub(crate) dataset_version: u32,
+    pub(crate) items: Vec<sceneworks_core::training_store::TrainingDatasetItemInput>,
+}
+
+/// Commit a worker's fully materialized import. Every item must resolve below the dataset's
+/// job-scoped staging directory, preventing this worker-only endpoint from becoming an arbitrary
+/// local-file copier.
+pub(crate) async fn finalize_training_dataset_parquet_import(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetParquetImportFinalizeRequest>,
+) -> Result<Json<TrainingDataset>, ApiError> {
+    if payload.items.is_empty() {
+        return Err(ApiError::bad_request(
+            "Parquet import produced no usable images.",
+        ));
+    }
+    if payload.items.len() > MAX_PARQUET_IMPORT_ITEMS {
+        return Err(ApiError::bad_request(
+            "Parquet import contains too many items.",
+        ));
+    }
+    let (dataset, dataset_root, _) = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let dataset_id = dataset_id.clone();
+        move |store| store.training_dataset_for_plan(&project_id, &dataset_id)
+    })
+    .await?;
+    if dataset.version != payload.dataset_version {
+        return Err(ApiError::conflict(format!(
+            "Dataset changed during Parquet import (expected version {}, found {}).",
+            payload.dataset_version, dataset.version
+        )));
+    }
+    if !dataset.items.is_empty() {
+        return Err(ApiError::conflict(
+            "Dataset is no longer empty; Parquet import was not applied.",
+        ));
+    }
+    if !payload.job_id.starts_with("job_")
+        || !payload
+            .job_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return Err(ApiError::bad_request("Invalid Parquet import jobId."));
+    }
+    let staging_root = dataset_root.join("parquet-imports").join(&payload.job_id);
+    let canonical_staging = std::fs::canonicalize(&staging_root).map_err(|error| {
+        ApiError::bad_request(format!(
+            "Parquet import staging directory is unavailable: {error}"
+        ))
+    })?;
+    let project_root = dataset_root
+        .ancestors()
+        .nth(3)
+        .ok_or_else(|| ApiError::internal("training dataset root has an invalid layout"))?;
+    for item in &payload.items {
+        let relative = item
+            .path
+            .as_deref()
+            .ok_or_else(|| ApiError::bad_request("Parquet import item path is required."))?;
+        let candidate = project_root.join(relative);
+        let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
+            ApiError::bad_request(format!("Parquet import item is unavailable: {error}"))
+        })?;
+        if !canonical.starts_with(&canonical_staging) || !canonical.is_file() {
+            return Err(ApiError::bad_request(
+                "Parquet import item path escapes its job staging directory.",
+            ));
+        }
+    }
+    let dataset = project_call(state, move |store| {
+        store.update_training_dataset(
+            &project_id,
+            &dataset_id,
+            TrainingDatasetUpdateInput {
+                name: None,
+                status: None,
+                character_id: None,
+                items: Some(payload.items),
+            },
+        )
+    })
+    .await?;
+    Ok(Json(dataset))
+}
+
 /// Enqueue a Dataset Doctor CLIP-embedding analysis job over a training dataset (sc-6535).
 /// Mirrors [`create_training_dataset_caption_job`]: build a per-item work list (item id + absolute
 /// image path + content hash) and create a GPU-routed `dataset_analysis` job. The Rust/MLX worker

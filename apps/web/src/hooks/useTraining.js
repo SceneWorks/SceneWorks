@@ -237,6 +237,26 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
     [token, activeProject, setJobs, setError],
   );
 
+  const createTrainingDatasetParquetImportJob = useCallback(
+    async (datasetId, payload, projectId = activeProject?.id) => {
+      if (!projectId || !datasetId) {
+        throw new Error("Select an empty training dataset first.");
+      }
+      const job = await apiFetch(
+        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/parquet-import-jobs`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        },
+      );
+      setJobs((items) => upsertJobNewest(items, job));
+      setError("");
+      return job;
+    },
+    [token, activeProject, setJobs, setError],
+  );
+
   // sc-6539: enqueue a Real-ESRGAN upscale over the low-resolution-flagged dataset items.
   const createTrainingDatasetUpscaleJob = useCallback(
     async (datasetId, payload, projectId = activeProject?.id) => {
@@ -371,6 +391,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
     batchRenameTrainingDataset,
     writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob,
+    createTrainingDatasetParquetImportJob,
     createTrainingDatasetUpscaleJob,
     createTrainingDatasetAnalysisJob,
     createTrainingDatasetFaceAnalysisJob,

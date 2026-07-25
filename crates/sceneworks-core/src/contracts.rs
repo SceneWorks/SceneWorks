@@ -280,6 +280,13 @@ string_enum! {
         // `lora_train`/`lora_train_execute` capabilities (no new WorkerCapability).
         ControlTraining => "control_training",
         TrainingCaption => "training_caption",
+        // Materialize a URL/caption Parquet source (LAION-style `URL`/`TEXT`) into an empty
+        // SceneWorks training dataset. Pure I/O/CPU: the utility worker streams bounded public
+        // image downloads into a job staging directory, then atomically asks the API to replace
+        // the empty dataset with the successful image/caption items. Kept separate from
+        // `control_training` so retries resume independently and Dataset Doctor can inspect the
+        // materialized targets before an expensive control-branch run.
+        DatasetParquetImport => "dataset_parquet_import",
         // CLIP image-embedding pass over a training dataset for Dataset Doctor analysis
         // (epic 6529 P2, sc-6535): set-level near-duplicate / diversity / aesthetic findings.
         // GPU-routed (MLX `clip_vit_l14`; in job_requires_gpu, not in NON_GPU_JOB_TYPES),

@@ -78,6 +78,7 @@ pub const NON_GPU_JOB_TYPES: &[&str] = &[
     "model_convert",
     "lora_import",
     "lora_download",
+    "dataset_parquet_import",
 ];
 pub const MAX_JOB_ATTEMPTS: u32 = 5;
 
@@ -2540,6 +2541,12 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
                 .unwrap_or("(unnamed dataset)")
                 .to_owned();
             Some(format!("Dataset Captioning — {subject}"))
+        }
+        JobType::DatasetParquetImport => {
+            let subject = first_str(payload, &["datasetName", "datasetId"])
+                .unwrap_or("(unnamed dataset)")
+                .to_owned();
+            Some(format!("Parquet Dataset Import - {subject}"))
         }
         JobType::DatasetAnalysis => {
             let subject = first_str(payload, &["datasetName", "datasetId"])

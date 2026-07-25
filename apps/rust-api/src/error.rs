@@ -49,6 +49,13 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn conflict(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            detail: detail.into(),
+        }
+    }
+
     pub(crate) fn internal(detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
