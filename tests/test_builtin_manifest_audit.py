@@ -179,7 +179,11 @@ def test_mage_flow_generation_family_is_pinned_and_complete():
     for model_id, (repo, revision, steps, guidance) in expected.items():
         model = models[model_id]
         assert model["family"] == "mage-flow"
-        assert model["macOnly"] is True
+        assert model["macOnly"] is False
+        assert model["candle"] == {
+            "minMemoryGb": 17,
+            "vramGbByTier": {"q4": 15.0, "q8": 17.0, "bf16": 21.0},
+        }
         assert model["defaults"]["steps"] == steps
         assert model["defaults"]["guidanceScale"] == guidance
         downloads = model["downloads"]
@@ -214,7 +218,11 @@ def test_mage_flow_edit_family_is_pinned_complete_and_source_gated():
         assert model["family"] == "mage-flow"
         assert model["adapter"] == "mlx_mage"
         assert model["capabilities"] == ["edit_image"]
-        assert model["macOnly"] is True
+        assert model["macOnly"] is False
+        assert model["candle"] == {
+            "minMemoryGb": 17,
+            "vramGbByTier": {"q4": 15.0, "q8": 17.0, "bf16": 21.0},
+        }
         assert model["defaults"]["steps"] == steps
         assert model["defaults"]["guidanceScale"] == guidance
         assert model["ui"]["sourceWithMultiReference"] is True

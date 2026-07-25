@@ -682,6 +682,51 @@ fn every_image_model_budgets_its_default_tier_against_a_measured_row() {
     }
 }
 
+/// sc-14053: every Mage variant is now a Candle/CUDA model and carries the same dense-snapshot,
+/// load-time quant tier budget. Pin all six rows and prove the generic gate rejects an oversized tier
+/// while admitting the lower one on the same emulated card.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn mage_cuda_catalog_rows_drive_tier_specific_vram_rejection() {
+    use crate::vram_gate::{fit_decision, predicted_peak_gb, FitDecision, VramBudget};
+
+    let budget = Some(VramBudget {
+        total_gb: 18.0,
+        free_gb: 18.0,
+    });
+    for id in [
+        "mage_flow_base",
+        "mage_flow",
+        "mage_flow_turbo",
+        "mage_flow_edit_base",
+        "mage_flow_edit",
+        "mage_flow_edit_turbo",
+    ] {
+        let entry = builtin_model_entry(id);
+        assert_eq!(entry.get("macOnly").and_then(Value::as_bool), Some(false));
+        let object = entry.as_object().expect("manifest model object");
+        assert_eq!(
+            predicted_peak_gb(object, "q4"),
+            Some(17.0),
+            "{id}: q4 peak plus headroom"
+        );
+        assert_eq!(
+            predicted_peak_gb(object, "bf16"),
+            Some(23.0),
+            "{id}: bf16 peak plus headroom"
+        );
+        assert_eq!(
+            fit_decision(predicted_peak_gb(object, "q4"), budget),
+            FitDecision::Fits,
+            "{id}: q4 must fit the emulated card"
+        );
+        assert!(matches!(
+            fit_decision(predicted_peak_gb(object, "bf16"), budget),
+            FitDecision::TooBig { .. }
+        ));
+    }
+}
+
 /// The tier key a no-pick request derives for `model` from `mlx.quantize` alone — a lane-independent
 /// mirror of `vram_gate::requested_tier_key`'s bits map (`None`/`> 4` ⇒ q8, `<= 0` ⇒ bf16, `<= 4` ⇒
 /// q4) with `advanced` empty and `nvfp4` false. See the lint above for why this is a mirror and not a

@@ -20,7 +20,7 @@
       "capabilities": [
         "edit_image"
       ],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           "provider": "huggingface",
@@ -100,6 +100,12 @@
       "mlx": {
         "quantize": 4
       },
+      // Shared by all six Mage rows. Conservative byte-derived bounds for the dense Qwen/VAE plus
+      // the quantized DiT and render workspace; the CUDA real-weight lane validates the physical peak.
+      "candle": {
+        "minMemoryGb": 17,
+        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 }
+      },
       "ui": {
         "label": "Mage-Flow Edit-Base",
         "description": "Foundation Mage-Flow instruction editor with true classifier-free guidance.",
@@ -124,7 +130,7 @@
       "capabilities": [
         "edit_image"
       ],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           "provider": "huggingface",
@@ -204,6 +210,10 @@
       "mlx": {
         "quantize": 4
       },
+      "candle": {
+        "minMemoryGb": 17,
+        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 }
+      },
       "ui": {
         "label": "Mage-Flow Edit",
         "description": "Reward-optimized Mage-Flow instruction editor with true classifier-free guidance.",
@@ -228,7 +238,7 @@
       "capabilities": [
         "edit_image"
       ],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           "provider": "huggingface",
@@ -308,6 +318,10 @@
       "mlx": {
         "quantize": 4
       },
+      "candle": {
+        "minMemoryGb": 17,
+        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 }
+      },
       "ui": {
         "label": "Mage-Flow Edit-Turbo",
         "description": "Distilled four-step Mage-Flow instruction editor for fast local edits.",
@@ -334,7 +348,7 @@
       "type": "image",
       "adapter": "mlx_mage",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           "provider": "huggingface",
@@ -379,6 +393,10 @@
       },
       "loraCompatibility": { "families": ["mage-flow"], "types": ["style", "enhance", "character"] },
       "mlx": { "quantize": 4 },
+      "candle": {
+        "minMemoryGb": 17,
+        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 }
+      },
       "ui": {
         "label": "Mage-Flow Base",
         "description": "Undistilled Mage-Flow foundation model with true classifier-free guidance.",
@@ -399,7 +417,7 @@
       "type": "image",
       "adapter": "mlx_mage",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           "provider": "huggingface",
@@ -444,6 +462,10 @@
       },
       "loraCompatibility": { "families": ["mage-flow"], "types": ["style", "enhance", "character"] },
       "mlx": { "quantize": 4 },
+      "candle": {
+        "minMemoryGb": 17,
+        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 }
+      },
       "ui": {
         "label": "Mage-Flow RL",
         "description": "Reward-optimized Mage-Flow model with true classifier-free guidance.",
@@ -464,7 +486,7 @@
       "type": "image",
       "adapter": "mlx_mage",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           "provider": "huggingface",
@@ -509,6 +531,10 @@
       },
       "loraCompatibility": { "families": ["mage-flow"], "types": ["style", "enhance", "character"] },
       "mlx": { "quantize": 4 },
+      "candle": {
+        "minMemoryGb": 17,
+        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 }
+      },
       "ui": {
         "label": "Mage-Flow Turbo",
         "description": "Distilled four-step Mage-Flow model for fast local generation.",
