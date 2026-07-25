@@ -2181,11 +2181,13 @@ async fn racing_terminal_training_report_loses_before_lora_side_effects() {
 
 /// A terminal row is committed before catalog/project side effects so a losing
 /// report cannot create ghosts. A production worker does not repeat terminal
-/// progress after the API has already committed `completed`: its subsequent job
-/// retry observes a terminal conflict and it idles. Recovery therefore must be
-/// API-driven across restart, with no second worker progress request.
+/// progress after the API has already committed `completed`, so recovery must
+/// be API-driven across restart. The test explicitly replays one failing
+/// same-terminal request only to pin event idempotency; it never completes side
+/// effects and recovery still occurs without a successful worker retry.
 #[tokio::test]
-async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_worker_retry() {
+async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_successful_worker_retry(
+) {
     let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
@@ -2211,6 +2213,7 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_wo
         "workerId": TEST_TRAINING_WORKER_ID,
         "result": { "outputPath": adapter_path.display().to_string() }
     });
+    let mut failure_events = state.events.subscribe();
     *state.progress_side_effects_fail_once.lock() = true;
     let (first_status, _) = request(
         app.clone(),
@@ -2223,6 +2226,45 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_wo
         first_status,
         StatusCode::INTERNAL_SERVER_ERROR,
         "the injected failure must happen after terminal acceptance"
+    );
+    let failure_event_names = drain_event_names(&mut failure_events).await;
+    assert_eq!(
+        failure_event_names
+            .iter()
+            .filter(|name| name.as_str() == "job.updated")
+            .count(),
+        1,
+        "the committed terminal snapshot must be published exactly once on side-effect failure: \
+         {failure_event_names:?}"
+    );
+    assert_eq!(
+        failure_event_names
+            .iter()
+            .filter(|name| name.as_str() == "queue.updated")
+            .count(),
+        1,
+        "the committed terminal transition must refresh queue counts despite the 500: \
+         {failure_event_names:?}"
+    );
+
+    // A same-terminal worker retry does not create another queue transition.
+    // Keep the handoff pending for startup recovery and prove the retry emits
+    // neither a duplicate terminal snapshot nor a duplicate queue refresh.
+    let mut retry_events = state.events.subscribe();
+    *state.progress_side_effects_fail_once.lock() = true;
+    let (retry_status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        completion,
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::INTERNAL_SERVER_ERROR);
+    let retry_event_names = drain_event_names(&mut retry_events).await;
+    assert!(
+        retry_event_names.is_empty(),
+        "a failed same-terminal retry changes neither the job snapshot nor queue composition: \
+         {retry_event_names:?}"
     );
 
     let (status, accepted) = request(
@@ -2238,6 +2280,18 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_wo
         accepted["result"]["loraRegistered"],
         Value::Null,
         "failed post-acceptance work must remain pending, not look finalized"
+    );
+    let (status, failed_queue) = request(app.clone(), "GET", "/api/v1/queue", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        failed_queue["activeJobs"]
+            .as_array()
+            .expect("active jobs array")
+            .iter()
+            .filter(|job| job["id"] == json!(job_id))
+            .count(),
+        0,
+        "the durably terminal job must leave the active queue even while side effects are pending"
     );
     let (status, partially_registered) = request(
         app.clone(),
@@ -2267,6 +2321,7 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_wo
     drop(state);
     let (restarted_app, restarted_state) =
         create_app_with_state(settings).expect("restarted app and state create");
+    let mut recovery_events = restarted_state.events.subscribe();
     let recovery_task =
         crate::jobs::spawn_terminal_progress_side_effect_recovery(restarted_state.clone());
     let recovered = tokio::time::timeout(Duration::from_secs(2), async {
@@ -2290,6 +2345,37 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_wo
     recovery_task.abort();
     assert_eq!(recovered["status"], "completed");
     assert_eq!(recovered["result"]["loraRegistered"], true);
+    let recovery_event_names = drain_event_names(&mut recovery_events).await;
+    assert_eq!(
+        recovery_event_names
+            .iter()
+            .filter(|name| name.as_str() == "job.updated")
+            .count(),
+        1,
+        "recovery must publish the one augmented terminal snapshot: {recovery_event_names:?}"
+    );
+    assert_eq!(
+        recovery_event_names
+            .iter()
+            .filter(|name| name.as_str() == "queue.updated")
+            .count(),
+        0,
+        "recovery must not duplicate the queue transition already published at terminal acceptance: \
+         {recovery_event_names:?}"
+    );
+    let (status, recovered_queue) =
+        request(restarted_app.clone(), "GET", "/api/v1/queue", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        recovered_queue["activeJobs"]
+            .as_array()
+            .expect("active jobs array")
+            .iter()
+            .filter(|job| job["id"] == json!(job_id))
+            .count(),
+        0,
+        "queue counts must remain converged after recovery"
+    );
 
     assert_eq!(
         crate::jobs::recover_pending_terminal_progress_side_effects_once(&restarted_state)

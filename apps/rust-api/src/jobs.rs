@@ -634,14 +634,35 @@ pub(crate) async fn update_job_progress(
         // drain its durable handoff. If it errors or the process dies, the
         // production recovery loop below discovers the same pending row without
         // depending on a worker retry.
-        job = match process_pending_terminal_progress_side_effects(&state, &job_id).await? {
-            Some(job) => job,
-            None => {
+        job = match process_pending_terminal_progress_side_effects(&state, &job_id).await {
+            Ok(Some(job)) => job,
+            Ok(None) => {
                 store_call(state.clone(), {
                     let job_id = job_id.clone();
                     move |store, _timeout| store.get_job(&job_id)
                 })
                 .await?
+            }
+            Err(error) => {
+                // Terminal acceptance already committed before the fallible
+                // catalog/project writes. Publish that authoritative transition
+                // even though the request returns 500, otherwise the UI retains
+                // the previous active job and queue counts until an unrelated
+                // transition occurs. A later retry/recovery has no status change,
+                // so it publishes only the augmented job snapshot below.
+                if status_changed {
+                    publish(&state, "job.updated", &job);
+                    if let Err(queue_error) = publish_queue(&state).await {
+                        tracing::error!(
+                            event = "terminal_progress_queue_publish_failed",
+                            job_id,
+                            status = queue_error.status.as_u16(),
+                            detail = %queue_error.detail,
+                            "terminal progress committed but its queue refresh failed"
+                        );
+                    }
+                }
+                return Err(error);
             }
         };
     } else if accepted.applied {
