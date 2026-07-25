@@ -7265,13 +7265,24 @@ fn svd_cuda_real_weights_encode_h264_and_preserve_provenance() {
         "seed": 42,
         "advanced": { "numFrames": 25, "decodeChunkSize": 8, "steps": 1 }
     }));
-    let raw = clip.record_frame_count(svd_raw_settings(&request));
+    let plan = VideoPlan::new(&request, temp.path());
+    let fact = video_asset_fact(
+        &plan,
+        resolve_video_seed(&request),
+        candle_video_adapter_label("svd_xt"),
+        svd_raw_settings(&request),
+        None,
+        clip,
+    );
+    let raw = &fact["rawAdapterSettings"];
     assert_eq!(candle_video_engine_id(&request.model), Some("svd_xt"));
     assert_eq!(candle_video_adapter_label("svd_xt"), "candle_svd");
+    assert_eq!(fact["seed"], json!(42));
+    assert_eq!(fact["model"], json!("svd"));
+    assert_eq!(fact["adapter"], json!("candle_svd"));
     assert_eq!(raw["model"], json!("svd"));
     assert_eq!(raw["frameCount"], json!(25));
     assert_eq!(raw["fps"], json!(7));
-    assert_eq!(raw["seed"], json!(42));
     assert_eq!(raw["realModelInference"], json!(true));
 }
 
