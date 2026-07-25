@@ -361,8 +361,17 @@ pub(super) fn resolved_tier_is_complete(request: &ImageRequest, dir: &Path) -> b
         return tier_components_present(dir)
             && sceneworks_core::mlx_tier_completeness::sana_tier_complete(dir);
     }
+    if let Some(complete) = sensenova_tier_predicate(&request.model) {
+        return tier_components_present(dir) && complete(dir);
+    }
     tier_components_present(dir)
 }
+
+// The SenseNova-U1 id list + its per-tier predicate dispatcher live beside the predicates themselves in
+// `sceneworks_core::mlx_tier_completeness` (`SENSENOVA_MODELS` / `sensenova_tier_predicate`), so this
+// resolver and rust-api's catalog gate on ONE list — a per-crate copy is how one of the two gates ends
+// up un-wired (sc-14432).
+use sceneworks_core::mlx_tier_completeness::sensenova_tier_predicate;
 
 /// Walk `chain` (a tier-name preference order) and return the first tier that is safe to load: one
 /// that is COMPLETE (`complete` returns true) if any qualifies, else the first that merely clears
@@ -508,11 +517,19 @@ pub(super) fn standard_tier_subdir_gated(
     // its `SceneWorks/Sana_*_mlx` turnkeys ship NO `model_index.json`, so that guard is a no-op for it —
     // fold in the concrete `sana_tier_complete` check (transformer + VAE + Gemma TE + tokenizer) so a
     // torn SANA tier is demoted too. Flat unified tiers (SenseNova-U1 MoT) ship no `model_index.json`
-    // either but are not SANA, so they resolve on the backbone probe exactly as before.
+    // either, and their backbone probe passes on the tier root, so fold in their predicate
+    // ([`sensenova_tier_predicate`]: whole backbone + config + an own-or-sibling `tokenizer.json`, plus
+    // the distill marker for the `_fast` twins) for the same reason — otherwise a torn SenseNova tier
+    // short-circuits the chain and dies at load (sc-14432).
     let is_sana = matches!(request.model.as_str(), "sana_1600m" | "sana_sprint_1600m");
+    let sensenova_complete = sensenova_tier_predicate(&request.model);
     let complete = |dir: &Path| {
         tier_components_present(dir)
             && (!is_sana || sceneworks_core::mlx_tier_completeness::sana_tier_complete(dir))
+            && match sensenova_complete {
+                Some(complete) => complete(dir),
+                None => true,
+            }
     };
     pick_loadable_tier(&[preferred, "q8", "bf16", "q4"], &present, &complete)
         .unwrap_or_else(|| root.to_path_buf())

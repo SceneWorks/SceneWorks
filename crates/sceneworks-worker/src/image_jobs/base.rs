@@ -2662,17 +2662,14 @@ fn is_flux_model(model: &str) -> bool {
 /// user is `image_jobs/sensenova.rs` (the MLX it2i / VQA / interleave routing), whose `include!` is
 /// itself `cfg(target_os = "macos")`; leaving the wider cfg makes this dead code on the candle build
 /// (`-D warnings` → `function is never used`).
+///
+/// The id list itself lives in [`sceneworks_core::mlx_tier_completeness::SENSENOVA_MODELS`], beside the
+/// per-tier completeness predicates the tier resolver and rust-api's catalog both gate on — two
+/// independently-maintained copies of a model-id list is exactly the drift that leaves one gate silently
+/// un-wired (sc-14432).
 #[cfg(target_os = "macos")]
 fn is_sensenova_model(model: &str) -> bool {
-    matches!(
-        model,
-        "sensenova_u1_8b"
-            | "sensenova_u1_8b_infographic_v2"
-            | "sensenova_u1_8b_infographic_v3"
-            | "sensenova_u1_8b_fast"
-            | "sensenova_u1_8b_infographic_v2_fast"
-            | "sensenova_u1_8b_infographic_v3_fast"
-    )
+    sceneworks_core::mlx_tier_completeness::SENSENOVA_MODELS.contains(&model)
 }
 
 /// Stage the engine's IP-Adapter dir contract from the two cached HF snapshots:
@@ -6226,6 +6223,58 @@ mod standard_tier_tests {
         );
     }
 
+    /// sc-14432: a SenseNova tier's backbone probe passes on the flat `model.safetensors` alone, so a
+    /// tier missing the rest of what its loader reads short-circuited the chain and then died at load
+    /// ("complete but unloadable"). Under the real `sensenova_u1_8b` id the resolver now folds in
+    /// `sensenova_tier_complete` and falls through to a complete sibling instead. Note the tokenizer is
+    /// model-wide: a tier that ships none still loads by borrowing a sibling tier's copy, so it is
+    /// `config.json` + the backbone that make a tier tier-specifically complete.
+    #[test]
+    fn sensenova_tier_selection_skips_a_torn_tier_for_a_complete_sibling() {
+        let sensenova_request = |bits: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "sensenova_u1_8b", "advanced": { "mlxQuantize": bits } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let seed_tier = |tier: &str, complete: bool| {
+            let dir = root.join(tier);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("model.safetensors"), b"x").unwrap();
+            if complete {
+                std::fs::write(dir.join("config.json"), b"x").unwrap();
+                std::fs::write(dir.join("tokenizer.json"), b"x").unwrap();
+            }
+        };
+
+        // Only a torn q4 is installed: nothing complete anywhere, so the resolver still lands on it
+        // (pre-sc-12279 behavior — never strand a model that might load) and warns.
+        seed_tier("q4", false);
+        assert_eq!(
+            standard_tier_subdir(root, &sensenova_request(json!(4))),
+            root.join("q4")
+        );
+
+        // Add a complete bf16: the explicit q4 pick now falls through to it rather than loading the torn
+        // tier. This is the assertion that goes RED without the completeness fold.
+        seed_tier("bf16", true);
+        assert_eq!(
+            standard_tier_subdir(root, &sensenova_request(json!(4))),
+            root.join("bf16")
+        );
+
+        // Complete q4 with its own `config.json` — it borrows bf16's tokenizer (the engine's sibling
+        // resolution), so it is loadable and the explicit pick is honored again.
+        std::fs::write(root.join("q4").join("config.json"), b"x").unwrap();
+        assert_eq!(
+            standard_tier_subdir(root, &sensenova_request(json!(4))),
+            root.join("q4")
+        );
+    }
+
     /// sc-10517 / sc-10714 / sc-10731: Anima is convert-at-install with a q4/q8/bf16 MATRIX under the
     /// injected `modelPath` root (`bf16/ q8/ q4/`, each a `diffusion_models/<variant>.safetensors` tree —
     /// NOT a `transformer/` component). [`anima_tier_subdir`] picks the tier by `mlxQuantize`
@@ -7539,6 +7588,43 @@ mod standard_tier_tests {
         seed_sana_tier(root, "bf16", true);
         assert!(!resolved_tier_is_complete(&request, &root.join("q8")));
         assert!(resolved_tier_is_complete(&request, &root.join("bf16")));
+    }
+
+    /// The same pre-flight dispatcher for SenseNova-U1 (sc-14432): a torn tier reads incomplete, and the
+    /// distilled `_fast` id additionally requires the pre-merged `distill_merged.json` marker — the base
+    /// id must NOT, or every base install would report a spurious gap.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolved_tier_is_complete_flags_a_torn_sensenova_tier_and_a_fast_tier_missing_its_marker() {
+        let sensenova = |model: &str| {
+            ImageRequest::from_payload(
+                json!({ "model": model, "advanced": {} }).as_object().unwrap(),
+            )
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let seed = |tier: &str, complete: bool| {
+            let dir = root.join(tier);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("model.safetensors"), b"x").unwrap();
+            if complete {
+                std::fs::write(dir.join("config.json"), b"x").unwrap();
+                std::fs::write(dir.join("tokenizer.json"), b"x").unwrap();
+            }
+        };
+        seed("q8", false);
+        seed("bf16", true);
+
+        let base = sensenova("sensenova_u1_8b");
+        assert!(!resolved_tier_is_complete(&base, &root.join("q8")));
+        assert!(resolved_tier_is_complete(&base, &root.join("bf16")));
+
+        // The bf16 tier satisfies the BASE contract but has no distill marker, so it is complete for the
+        // base id and incomplete for the fast one — the discriminating pair for the fast arm.
+        let fast = sensenova("sensenova_u1_8b_fast");
+        assert!(!resolved_tier_is_complete(&fast, &root.join("bf16")));
+        std::fs::write(root.join("bf16").join("distill_merged.json"), b"{}").unwrap();
+        assert!(resolved_tier_is_complete(&fast, &root.join("bf16")));
     }
 
     /// Seed an Anima tier (`bf16/ q8/ q4/`, `split_files` shape): the DiT + (when `complete`) the dense
