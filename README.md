@@ -101,11 +101,11 @@ starter set of models.
 ## Models
 
 SceneWorks ships a built-in catalog of models it can download and run natively;
-weights are pulled on first use, not bundled. The catalog currently spans **50
+weights are pulled on first use, not bundled. The catalog currently spans **53
 image models, 9 video models, 8 audio models, and 15 utility models**, including:
 
 - **Image** — Z-Image / Z-Image-Edit, Qwen-Image (+ Edit), Mage-Flow
-  (Base/RL/Turbo), FLUX.1 [schnell/dev], FLUX.2 [klein 9B / dev], Krea 2
+  (Base/RL/Turbo, + Edit), FLUX.1 [schnell/dev], FLUX.2 [klein 9B / dev], Krea 2
   (Raw/Turbo), Ideogram 4, Lens, SenseNova-U1, Boogu, Anima 2B, Chroma1, Kolors,
   Stable Diffusion 3.5 (Large/Medium), SANA / SANA-Sprint, SDXL / RealVisXL /
   Illustrious-XL, Bernini, plus identity models InstantID and PuLID-FLUX.
