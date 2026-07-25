@@ -45,10 +45,6 @@ fn load_rgb(path: &Path) -> Image {
     }
 }
 
-fn to_rgb_image(img: &Image) -> image::RgbImage {
-    image::RgbImage::from_raw(img.width, img.height, img.pixels.clone()).expect("rgb buffer")
-}
-
 /// Per-frame pixel std-dev, averaged — a cheap "is the clip non-degenerate" check (a NaN-clamped /
 /// all-black engine output collapses toward 0).
 fn avg_frame_std(frames: &[Image]) -> f64 {
@@ -105,11 +101,10 @@ fn scail2_candle_gpu_smoke() {
     // --- reference character + its color-coded mask (SAM3 -> the primary person painted blue) ---
     // Animation keeps the reference's world (white bg); replacement discards it (black bg).
     let reference = load_rgb(&ref_path);
-    let ref_rgb = to_rgb_image(&reference);
     let ref_masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
         &sam3_model,
         &sam3_tok,
-        std::slice::from_ref(&ref_rgb),
+        std::slice::from_ref(&reference),
         None,
         None,
     )
@@ -135,11 +130,10 @@ fn scail2_candle_gpu_smoke() {
         driving_dir.display()
     );
     let driving: Vec<Image> = paths.iter().map(|p| load_rgb(p)).collect();
-    let driving_rgb: Vec<image::RgbImage> = driving.iter().map(to_rgb_image).collect();
     let drive_masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
         &sam3_model,
         &sam3_tok,
-        &driving_rgb,
+        &driving,
         None,
         None,
     )

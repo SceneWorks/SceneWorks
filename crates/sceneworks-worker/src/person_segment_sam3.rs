@@ -269,7 +269,10 @@ fn build_point_tracker(model_path: &Path, quant: Option<i32>) -> WorkerResult<Sa
 /// Preprocess an RGB frame to the SAM3 input tensor: resize to a 1008×1008 square (bilinear,
 /// matching the processor's fixed-square resize — *not* aspect-preserving), rescale to `[0,1]`,
 /// normalize by mean/std `0.5` to `[-1,1]`, packed NCHW `[1,3,1008,1008]` f32.
-fn input_tensor(img: &image::RgbImage) -> Array {
+fn input_tensor<I>(img: &I) -> Array
+where
+    I: image::GenericImageView<Pixel = image::Rgb<u8>>,
+{
     let resized = image::imageops::resize(
         img,
         INPUT_SIZE,
@@ -672,7 +675,7 @@ fn segment_points_on_thread(
 pub(crate) fn segment_all_persons_in_memory(
     model_path: &Path,
     tokenizer_path: &Path,
-    frames: &[image::RgbImage],
+    frames: &[gen_core::Image],
     cancel: Option<CancelFlag>,
     mut progress: Option<SegmentProgress>,
 ) -> WorkerResult<AllPersonMasks> {
@@ -680,16 +683,29 @@ pub(crate) fn segment_all_persons_in_memory(
     let first = frames.first().ok_or_else(|| {
         WorkerError::InvalidPayload("scail2 segmentation: no frames to segment".into())
     })?;
-    let (width, height) = (first.width(), first.height());
+    let (width, height) = (first.width, first.height);
     if frames
         .iter()
-        .any(|f| f.width() != width || f.height() != height)
+        .any(|f| f.width != width || f.height != height)
     {
         return Err(WorkerError::InvalidPayload(
             "scail2 segmentation: frames are not all the same size".into(),
         ));
     }
-    let tensors: Vec<Array> = frames.iter().map(input_tensor).collect();
+    let tensors = frames
+        .iter()
+        .map(|frame| {
+            let view = image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(
+                frame.width,
+                frame.height,
+                frame.pixels.as_slice(),
+            )
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("scail2 segmentation: malformed RGB frame".into())
+            })?;
+            Ok(input_tensor(&view))
+        })
+        .collect::<WorkerResult<Vec<Array>>>()?;
 
     // Guard the cold 3.2 GB checkpoint parse + model build + quantize — the engine only observes
     // the flag once propagation starts.
@@ -808,7 +824,11 @@ mod tests {
             matches!(track, Err(WorkerError::Canceled(_))),
             "segment_track_blocking: expected Canceled, got {track:?}"
         );
-        let frames = vec![image::RgbImage::new(4, 4)];
+        let frames = vec![gen_core::Image {
+            pixels: vec![0; 4 * 4 * 3],
+            width: 4,
+            height: 4,
+        }];
         let all = segment_all_persons_in_memory(
             Path::new("/nonexistent/model.safetensors"),
             Path::new("/nonexistent/tokenizer.json"),
@@ -819,6 +839,26 @@ mod tests {
         assert!(
             matches!(all, Err(WorkerError::Canceled(_))),
             "segment_all_persons_in_memory: expected Canceled"
+        );
+    }
+
+    #[test]
+    fn in_memory_segmentation_rejects_malformed_engine_image_without_cloning() {
+        let frames = vec![gen_core::Image {
+            pixels: vec![0; 4 * 4 * 3 - 1],
+            width: 4,
+            height: 4,
+        }];
+        let result = segment_all_persons_in_memory(
+            Path::new("/nonexistent/model.safetensors"),
+            Path::new("/nonexistent/tokenizer.json"),
+            &frames,
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(WorkerError::InvalidPayload(ref m)) if m.contains("malformed RGB frame")),
+            "malformed borrowed frame must fail before loading weights"
         );
     }
 

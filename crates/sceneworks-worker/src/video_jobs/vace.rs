@@ -250,24 +250,8 @@ pub(super) async fn load_source_video_frames(
             "replace_person requires a source clip (sourceClipAssetId).".to_owned(),
         )
     })?;
-    let asset = ProjectStore::new(settings.data_dir.clone(), "worker")
-        .get_asset(&request.project_id, asset_id)
-        .map_err(|error| WorkerError::InvalidPayload(format!("source clip {asset_id}: {error}")))?;
-    let rel = asset
-        .get("file")
-        .and_then(|file| file.get("path"))
-        .and_then(Value::as_str)
-        .filter(|path| !path.trim().is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(format!("source clip {asset_id} has no media path"))
-        })?;
-    let media_path = crate::safe_project_path(project_path, rel)?;
-    if !tokio::fs::try_exists(&media_path).await? {
-        return Err(WorkerError::InvalidPayload(format!(
-            "source clip file is missing: {}",
-            media_path.display()
-        )));
-    }
+    let media_path =
+        resolve_clip_media_path(settings, &request.project_id, asset_id, project_path)?;
 
     // Sanitize the job id before it becomes a temp-dir path component (F-111): a hostile id would
     // otherwise escape `temp_dir()`. Mirrors `sw-person-track-{safe_download_dir(job.id)}` in media_jobs.
@@ -648,18 +632,8 @@ async fn generate_wan_vace_engine(
     )?;
 
     let negative_prompt = non_empty_negative_prompt(request);
-    let steps = request.advanced.get("steps").and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-            .map(|value| value as u32)
-    });
-    let guidance = request.advanced.get("guidanceScale").and_then(|value| {
-        value
-            .as_f64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-            .map(|value| value as f32)
-    });
+    let steps = super::wan::advanced_opt_u32(request, "steps");
+    let guidance = super::wan::advanced_opt_f32(request, "guidanceScale");
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -1040,18 +1014,8 @@ pub(super) async fn generate_wan_vace_extend_bridge(
         right_anchor,
     )?;
     let negative_prompt = non_empty_negative_prompt(request);
-    let steps = request.advanced.get("steps").and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-            .map(|value| value as u32)
-    });
-    let guidance = request.advanced.get("guidanceScale").and_then(|value| {
-        value
-            .as_f64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-            .map(|value| value as f32)
-    });
+    let steps = super::wan::advanced_opt_u32(request, "steps");
+    let guidance = super::wan::advanced_opt_f32(request, "guidanceScale");
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,

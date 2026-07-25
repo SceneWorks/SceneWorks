@@ -777,3 +777,18 @@ fn resolve_detector_weights_env_pin_missing_errors_and_unset_falls_through() {
     );
     // `_env` restores the prior value on drop.
 }
+
+#[test]
+fn detector_provenance_matches_the_compiled_runtime() {
+    assert_eq!(crate::media_jobs::PERSON_DETECTOR_MODEL, "yolo11m");
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(crate::media_jobs::PERSON_DETECTOR_ADAPTER, "yolo11_mlx");
+        assert_eq!(crate::media_jobs::PERSON_DETECTOR_BACKEND, "mlx");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert_eq!(crate::media_jobs::PERSON_DETECTOR_ADAPTER, "yolo11_ort");
+        assert_eq!(crate::media_jobs::PERSON_DETECTOR_BACKEND, "ort");
+    }
+}

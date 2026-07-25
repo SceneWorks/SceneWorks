@@ -80,6 +80,48 @@ const SEEDVR2_ADAPTER: &str = "mlx_seedvr2";
 ))]
 const SEEDVR2_CANCEL_MESSAGE: &str = "Video upscale canceled by user.";
 
+/// A failed post-encode step must not leave the intermediate, silent output, or derived poster
+/// behind. The API publishes the asset only after the final completion update succeeds.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(super) async fn cleanup_failed_seedvr2_mux(media_path: &Path, mux_tmp: &Path) {
+    let _ = tokio::fs::remove_file(mux_tmp).await;
+    let _ = tokio::fs::remove_file(media_path).await;
+    let _ = tokio::fs::remove_file(media_path.with_extension("poster.jpg")).await;
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(super) struct Seedvr2OutputGuard {
+    media_path: PathBuf,
+    mux_tmp: PathBuf,
+    armed: bool,
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+impl Seedvr2OutputGuard {
+    pub(super) fn new(media_path: &Path, mux_tmp: &Path) -> Self {
+        Self {
+            media_path: media_path.to_path_buf(),
+            mux_tmp: mux_tmp.to_path_buf(),
+            armed: true,
+        }
+    }
+
+    pub(super) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+impl Drop for Seedvr2OutputGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.mux_tmp);
+            let _ = std::fs::remove_file(&self.media_path);
+            let _ = std::fs::remove_file(self.media_path.with_extension("poster.jpg"));
+        }
+    }
+}
+
 /// Snap a dimension to the SeedVR2 VAE/patch stride (a multiple of 16, the engine's hard
 /// requirement), rounding to nearest and clamping to the engine's `[16, 4096]` size range.
 #[cfg(any(
@@ -1182,6 +1224,8 @@ pub(crate) async fn run_video_upscale_job(
     let _ = tokio::fs::remove_dir_all(&out_frames_dir).await;
     out_scratch.disarm();
     encode_result?;
+    let mux_tmp = media_path.with_extension("audiomux.mp4");
+    let mut output_guard = Seedvr2OutputGuard::new(&media_path, &mux_tmp);
 
     // Source-audio passthrough: remux the source's audio onto the upscaled video. `-map 1:a:0?`
     // makes audio optional, so a source with no audio yields a clean video-only file (no error);
@@ -1199,34 +1243,41 @@ pub(crate) async fn run_video_upscale_job(
         ),
     )
     .await?;
-    let mux_tmp = media_path.with_extension("audiomux.mp4");
     let ctx = FfmpegContext::new(api, settings, &job.id, SEEDVR2_CANCEL_MESSAGE);
-    run_ffmpeg(
-        vec![
-            "ffmpeg".to_owned(),
-            "-nostdin".to_owned(),
-            "-y".to_owned(),
-            "-i".to_owned(),
-            media_path.to_string_lossy().into_owned(),
-            "-i".to_owned(),
-            source_path.to_string_lossy().into_owned(),
-            "-map".to_owned(),
-            "0:v:0".to_owned(),
-            "-map".to_owned(),
-            "1:a:0?".to_owned(),
-            "-c:v".to_owned(),
-            "copy".to_owned(),
-            "-c:a".to_owned(),
-            "aac".to_owned(),
-            "-movflags".to_owned(),
-            "+faststart".to_owned(),
-            "-shortest".to_owned(),
-            mux_tmp.to_string_lossy().into_owned(),
-        ],
-        Some(ctx),
-    )
-    .await?;
-    tokio::fs::rename(&mux_tmp, &media_path).await?;
+    let mux_result: WorkerResult<()> = async {
+        run_ffmpeg(
+            vec![
+                "ffmpeg".to_owned(),
+                "-nostdin".to_owned(),
+                "-y".to_owned(),
+                "-i".to_owned(),
+                media_path.to_string_lossy().into_owned(),
+                "-i".to_owned(),
+                source_path.to_string_lossy().into_owned(),
+                "-map".to_owned(),
+                "0:v:0".to_owned(),
+                "-map".to_owned(),
+                "1:a:0?".to_owned(),
+                "-c:v".to_owned(),
+                "copy".to_owned(),
+                "-c:a".to_owned(),
+                "aac".to_owned(),
+                "-movflags".to_owned(),
+                "+faststart".to_owned(),
+                "-shortest".to_owned(),
+                mux_tmp.to_string_lossy().into_owned(),
+            ],
+            Some(ctx),
+        )
+        .await?;
+        tokio::fs::rename(&mux_tmp, &media_path).await?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = mux_result {
+        cleanup_failed_seedvr2_mux(&media_path, &mux_tmp).await;
+        return Err(error);
+    }
 
     let display_name = req
         .display_name
@@ -1269,6 +1320,13 @@ pub(crate) async fn run_video_upscale_job(
         "loras": [],
         "rawAdapterSettings": raw_settings,
         "sourceAssetId": req.source_asset_id,
+        "parents": [req.source_asset_id],
+        "extra": {
+            "isUpscaled": true,
+            "upscaledFromAssetId": req.source_asset_id,
+            "factor": factor,
+            "engine": "seedvr2",
+        },
         "timelineContext": json!({}),
     });
     let result = json!({
@@ -1304,5 +1362,6 @@ pub(crate) async fn run_video_upscale_job(
         ),
     )
     .await?;
+    output_guard.disarm();
     Ok(())
 }
