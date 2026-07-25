@@ -18,8 +18,9 @@ import {
 // The handlers reach back into App state through the setters/refs/callbacks passed in.
 // Every one of these is fed identity-stable: useState setters (stable by React),
 // useRef handles, and the two callbacks — `hasVisibleLocalFailure` (an empty-dep
-// useCallback reading only refs) and `enqueueTimelineGenerationApply` (a stable
-// ref-delegating useCallback in useTimelines) — which sc-11231 (F-037) hardened after
+// useCallback reading only refs), `enqueueTimelineGenerationApply` (a stable
+// ref-delegating useCallback in useTimelines), and `refreshHealth` — which sc-11231
+// (F-037) hardened after
 // finding them plain per-render declarations that the SSE effect captured stale at
 // subscribe time. Because they are stable, the effect's deps are exactly the three
 // inputs that must re-subscribe the stream — auth mode, readiness, and the token —
@@ -45,6 +46,7 @@ export function useJobEvents({
   activeProjectRef,
   enqueueTimelineGenerationApply,
   hasVisibleLocalFailure,
+  refreshHealth,
 }) {
   useEffect(() => {
     // Gated on `ready` (not just `authenticated`): SSE job updates carry assets whose
@@ -190,12 +192,14 @@ export function useJobEvents({
       source.addEventListener("queue.updated", handleQueueUpdated);
       source.onopen = () => {
         reconnectAttempt = 0;
+        refreshHealth();
       };
       source.onerror = () => {
         source.close();
         if (closed) {
           return;
         }
+        refreshHealth();
         const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);
         reconnectAttempt += 1;
         reconnectTimer = window.setTimeout(connect, delay);

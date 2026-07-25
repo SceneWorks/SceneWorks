@@ -88,12 +88,22 @@ export function buildBatchJob({ op, asset, params = {}, project, requestedGpu, d
   throw new Error(`Unknown batch op: ${op}`);
 }
 
-// One batch item's status, derived from the global jobs feed: "queued" until the job
-// surfaces (or while queued), "running" mid-flight, "completed"/"failed" once terminal.
-export function batchItemStatus(jobId, jobs) {
+// One batch item's status, derived from the capped global jobs feed. `observedJobs`
+// is owned by the batch UI: once a job has surfaced, active jobs cannot disappear
+// from the feed, so a later absence means the job reached a terminal state and was
+// evicted from retained history. Preserve an observed terminal outcome; otherwise
+// treat a vanished active job as completed instead of queued forever.
+export function batchItemStatus(jobId, jobs, observedJobs) {
   if (!jobId) return "queued";
   const job = (jobs ?? []).find((item) => item.id === jobId);
-  if (!job) return "queued"; // submitted; not yet in the feed
+  if (!job) {
+    const observed = observedJobs?.get(jobId);
+    return observed === "failed" || observed === "completed"
+      ? observed
+      : observedJobs?.has(jobId)
+        ? "completed"
+        : "queued";
+  }
   if (job.status === "completed") return "completed";
   if (terminalStatuses.has(job.status)) return "failed"; // failed / canceled / interrupted
   if (job.status === "running") return "running";
@@ -111,14 +121,14 @@ export function batchItemResultAsset(jobId, jobs) {
 // Aggregate a fan-out's progress. `items` = [{ assetId, jobId }]; returns the per-status
 // tallies plus `done` (terminal) and `allDone`. Items with no jobId (submission failed)
 // count as failed so the aggregate never claims more progress than really happened.
-export function summarizeBatchProgress(items, jobs) {
+export function summarizeBatchProgress(items, jobs, observedJobs) {
   const summary = { total: items?.length ?? 0, queued: 0, running: 0, completed: 0, failed: 0 };
   for (const item of items ?? []) {
     if (!item.jobId) {
       summary.failed += 1;
       continue;
     }
-    summary[batchItemStatus(item.jobId, jobs)] += 1;
+    summary[batchItemStatus(item.jobId, jobs, observedJobs)] += 1;
   }
   summary.done = summary.completed + summary.failed;
   summary.allDone = summary.total > 0 && summary.done === summary.total;
@@ -130,7 +140,7 @@ export function summarizeBatchProgress(items, jobs) {
 // before posting, so enqueueing can be slow. An item with no jobId and no `error` is
 // therefore PENDING submission (NOT failed); `error: true` marks a submission that threw.
 // `active` = queued + running (jobs that Cancel can still stop).
-export function summarizeBatchRun(items, jobs) {
+export function summarizeBatchRun(items, jobs, observedJobs) {
   const summary = { total: items?.length ?? 0, pending: 0, queued: 0, running: 0, completed: 0, failed: 0 };
   for (const item of items ?? []) {
     if (item.error) {
@@ -141,7 +151,7 @@ export function summarizeBatchRun(items, jobs) {
       summary.pending += 1;
       continue;
     }
-    summary[batchItemStatus(item.jobId, jobs)] += 1;
+    summary[batchItemStatus(item.jobId, jobs, observedJobs)] += 1;
   }
   summary.done = summary.completed + summary.failed;
   summary.active = summary.queued + summary.running;

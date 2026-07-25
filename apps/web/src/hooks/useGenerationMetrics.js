@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch, isAbortError } from "../api.js";
 
@@ -16,6 +16,7 @@ export function useGenerationMetrics({ token, enabled = true, params = {} } = {}
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const requestControllerRef = useRef(null);
   // Stable dependency for the filter object without depending on its identity.
   const paramsKey = JSON.stringify(params ?? {});
 
@@ -36,7 +37,7 @@ export function useGenerationMetrics({ token, enabled = true, params = {} } = {}
           setRows(Array.isArray(items) ? items : []);
         }
       } catch (err) {
-        if (!isAbortError(err)) {
+        if (!signal?.aborted && !isAbortError(err)) {
           setError(err?.message ?? "Failed to load generation metrics");
         }
       } finally {
@@ -48,17 +49,35 @@ export function useGenerationMetrics({ token, enabled = true, params = {} } = {}
     [token, paramsKey],
   );
 
+  const startLoad = useCallback(() => {
+    requestControllerRef.current?.abort();
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
+    const request = load(controller.signal);
+    request.finally(() => {
+      if (requestControllerRef.current === controller) {
+        requestControllerRef.current = null;
+      }
+    });
+    return request;
+  }, [load]);
+
   useEffect(() => {
     if (!enabled) {
+      requestControllerRef.current?.abort();
+      requestControllerRef.current = null;
+      setLoading(false);
       return undefined;
     }
-    const controller = new AbortController();
-    load(controller.signal);
-    return () => controller.abort();
-  }, [enabled, load]);
+    startLoad();
+    return () => {
+      requestControllerRef.current?.abort();
+    };
+  }, [enabled, startLoad]);
 
-  // Manual refresh (no external abort signal — its own fetch runs to completion).
-  const refresh = useCallback(() => load(), [load]);
+  // Manual and filter-driven loads share one controller. Starting either aborts
+  // the previous request so a superseded filter can never commit its rows.
+  const refresh = useCallback(() => startLoad(), [startLoad]);
 
   return { rows, loading, error, refresh };
 }

@@ -121,4 +121,36 @@ describe("project asset render boundary", () => {
       })),
     );
   });
+
+  it("does not fetch assets for a background-project SSE update", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+    expect(
+      global.fetch.mock.calls.some(([url]) =>
+        new URL(url).pathname.endsWith("/projects/project-b/assets"),
+      ),
+    ).toBe(false);
+
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "background-job",
+          projectId: "project-b",
+          status: "running",
+          createdAt: "2026-07-25T12:00:00Z",
+          result: { assetIds: ["background-asset"] },
+        }),
+      });
+    });
+    await settle();
+
+    expect(
+      global.fetch.mock.calls.some(([url]) =>
+        new URL(url).pathname.endsWith("/projects/project-b/assets"),
+      ),
+    ).toBe(false);
+  });
 });
