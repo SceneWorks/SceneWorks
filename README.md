@@ -247,6 +247,10 @@ contains the embedded-web API, candle CUDA worker, CPU utility worker, ffmpeg,
 and the native Model Manager downloader. PID 1 health-gates the worker on the
 loopback API and drains every process on SIGTERM; Compose is not used.
 
+For a public-image deployment with a reusable RunPod template, network volume,
+HTTPS proxy, and token login, follow the
+[turnkey RunPod deployment guide](docs/deploy-runpod.md).
+
 ```powershell
 docker build --secret id=inference_token,env=SCENEWORKS_INFERENCE_READ_TOKEN `
   --file docker/rust.Dockerfile `

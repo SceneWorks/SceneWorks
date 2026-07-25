@@ -18,7 +18,7 @@
 //! Grouping is by subsystem; the heavily cross-cutting stub servers + `test_settings` cluster live in
 //! `tests/support_stubs.rs`. The `#[cfg(...)]` gates on the imports/tests are preserved as-is.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio as StdStdio;
@@ -46,7 +46,8 @@ use super::downloads::{
 use super::gpu::mlx_gpu;
 use super::gpu::{
     cpu_gpu, cpu_worker_id, fallback_gpu, gpu_worker_id, parse_max_compute_cap,
-    parse_nvidia_smi_gpus, visible_gpu_ids, worker_capabilities_with_utility,
+    parse_nvidia_smi_gpus, run_bounded_command, visible_gpu_ids, worker_capabilities_with_utility,
+    GpuDiscoveryAttempt, GpuDiscoveryFailure,
 };
 use super::media_jobs::{
     candidate_people, concat_file_contents, crossfade_duration, output_dimensions, plan_segments,
@@ -69,9 +70,9 @@ use super::model_jobs::{
 #[cfg(unix)]
 use super::supervisor::terminating_signal;
 use super::supervisor::{
-    auto_worker_specs, child_died_abnormally, child_environment, restart_exited_children_at,
-    restart_exited_children_with_spawner, stop_children, utility_worker_specs, SupervisedChild,
-    WorkerSpec,
+    auto_worker_specs, child_died_abnormally, child_environment, choose_auto_worker_specs_with,
+    restart_exited_children_at, restart_exited_children_with_spawner, stop_children,
+    utility_worker_specs, SupervisedChild, WorkerSpec,
 };
 use super::{
     allow_pattern_matches, bounded_tail, cancel_requested_peek, cleanup_uploaded_import_source,

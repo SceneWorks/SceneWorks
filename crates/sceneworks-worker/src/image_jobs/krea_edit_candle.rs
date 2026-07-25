@@ -1,3 +1,12 @@
+use super::resolve_seed;
+use super::{
+    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, resolve_adapters,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_text_style_gain,
+    resolve_weights_dir, start_gen_stream, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot,
+    JsonObject, Path, Settings, Value, WorkerError, WorkerResult,
+};
+use serde_json::json;
+
 // Candle (Windows/CUDA) Krea 2 image-edit route (epic 10871) — the Kontext-style dual-conditioned edit
 // surface off-Mac via `runtime_cuda::providers::krea::pipeline::{load_components, load_edit_components, render_edit}`.
 // The candle sibling of the macOS `krea_edit.rs` (`generate_krea_edit_stream`): an `edit_image` job on
@@ -9,7 +18,7 @@
 // **Candle-only.** macOS keeps the MLX Krea edit path (`krea_edit.rs`, `krea_2_edit` registry generator);
 // the candle Krea edit is a bespoke pipeline (no registered `krea_2_edit` candle generator — the candle
 // edit providers are all driven directly by the worker), so this whole file is gated to the Windows/CUDA
-// candle build (the `include!` in image_jobs.rs carries the cfg). It is `include!`d into the `image_jobs`
+// candle build (the module declaration in image_jobs.rs carries the cfg). It is a child module of the `image_jobs`
 // module, so it shares that module's imports (ImageRequest/Settings/WorkerResult/WorkerError/
 // `load_reference_image`/`fit_engine_image`/`resolve_weights_dir`/`resolve_adapters`/`resolve_seed`/
 // `resolve_advanced_or_manifest_u32`/`start_gen_stream`/`drive_gen_items`/`consume_gen_events`/`non_empty`/
@@ -82,7 +91,7 @@ fn krea_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
 /// source reference. Both Krea image variants edit — Raw on the full-CFG loop, Turbo on the CFG-free
 /// distilled few-step loop (sc-11640). Mirrors the core router's `krea_edit_candle_eligible` (gated to the
 /// two models by its caller) + the macOS `krea_edit_available` (minus the weight-resolve check).
-fn krea_edit_candle_mode(request: &ImageRequest) -> bool {
+pub(super) fn krea_edit_candle_mode(request: &ImageRequest) -> bool {
     matches!(request.model.as_str(), "krea_2_raw" | "krea_2_turbo")
         && request.mode == "edit_image"
         && !krea_edit_candle_reference_ids(request).is_empty()
@@ -97,9 +106,8 @@ fn krea_edit_candle_distilled(request: &ImageRequest) -> bool {
 /// True when this is a candle-eligible Krea edit job whose Raw weights resolve locally. Mirrors
 /// `flux2_edit_candle_available` (Krea resolves through the shared `resolve_weights_dir` → the
 /// `krea_2_raw` tier subdir).
-fn krea_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
-    krea_edit_candle_mode(request)
-        && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
+pub(super) fn krea_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+    krea_edit_candle_mode(request) && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=100) → manifest `steps` → the per-variant default
@@ -183,7 +191,7 @@ fn krea_edit_candle_raw_settings(
 /// [`generate_candle_flux2_edit_stream`]'s blocking-thread + streamed-events shape and reuses
 /// [`consume_gen_events`]; differs in the required edit LoRA (R5) and the direct pipeline-function API
 /// (`render_edit` with `count = 1` per streamed item).
-async fn generate_candle_krea_edit_stream(
+pub(super) async fn generate_candle_krea_edit_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -240,7 +248,8 @@ async fn generate_candle_krea_edit_stream(
         .to_owned();
 
     let (width, height) = (request.width, request.height);
-    let references = load_krea_edit_candle_references(request, project_path, settings, width, height)?;
+    let references =
+        load_krea_edit_candle_references(request, project_path, settings, width, height)?;
     let raw_settings =
         krea_edit_candle_raw_settings(request, &repo, steps, guidance, references.len());
 
@@ -266,10 +275,13 @@ async fn generate_candle_krea_edit_stream(
                 None,
             )
             .map_err(|error| WorkerError::Engine(format!("Krea edit load failed: {error}")))?;
-            let edit = runtime_cuda::providers::krea::pipeline::load_edit_components(&weights_dir, &device)
-                .map_err(|error| {
-                    WorkerError::Engine(format!("Krea edit components load failed: {error}"))
-                })?;
+            let edit = runtime_cuda::providers::krea::pipeline::load_edit_components(
+                &weights_dir,
+                &device,
+            )
+            .map_err(|error| {
+                WorkerError::Engine(format!("Krea edit components load failed: {error}"))
+            })?;
             Ok(((comps, edit, device), references))
         },
         move |(components, references), tx, cancel| {
@@ -318,9 +330,9 @@ async fn generate_candle_krea_edit_stream(
                         )));
                     }
                 };
-                let image = images.pop().ok_or_else(|| {
-                    WorkerError::Engine("Krea edit produced no image".to_owned())
-                })?;
+                let image = images
+                    .pop()
+                    .ok_or_else(|| WorkerError::Engine("Krea edit produced no image".to_owned()))?;
                 Ok(Some((seed, image.width, image.height, image.pixels)))
             })
         },

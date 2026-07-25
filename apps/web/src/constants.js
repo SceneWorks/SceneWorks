@@ -9,7 +9,17 @@ export { terminalStatuses, actionStatuses } from "./jobTypes.js";
 // else — Character Studio outputs (`character_studio`), Pose/Key Point library assets
 // (`pose_library` / `keypoint_library`), and any future origin — stays out by default.
 // Origins are assigned by the backend (`crates/sceneworks-core/src/asset_index.rs`).
-export const LIBRARY_ORIGINS = new Set(["image_studio", "video_studio", "document_studio", "upload"]);
+// `audio_studio` (epic 13400) was never added here when the Audio Studio landed, so every
+// generated clip was filtered out of BOTH asset libraries — the Advanced Library screen and
+// the Simple Assets grid, whose "Audio" filter pill could therefore never match anything.
+// Audio is studio-generated media like the other three, so it belongs (epic 14361).
+export const LIBRARY_ORIGINS = new Set([
+  "image_studio",
+  "video_studio",
+  "audio_studio",
+  "document_studio",
+  "upload",
+]);
 
 // True when an asset belongs in the Main Asset Library. A missing origin is treated as
 // eligible: the normalized API always stamps one, so only legacy/non-normalized records
@@ -797,6 +807,10 @@ export const fallbackModels = [
       label: "Kokoro 82M",
       description:
         "Kokoro-82M text-to-speech (StyleTTS2 lineage) — the recommended Speech model. English voices (American + British), 24 kHz mono, up to ~30 s per clip. Candle-native on every platform. Apache-2.0.",
+      promptGuide: {
+        title: "Kokoro 82M Speech Guide",
+        path: "/prompt-guides/kokoro-82m.md",
+      },
     },
   },
   {
@@ -818,6 +832,10 @@ export const fallbackModels = [
       label: "MOSS-TTS-Realtime (Streaming)",
       description:
         "MOSS-TTS-Realtime-1.7B streaming text-to-speech — streams speech in incremental chunks as it renders, so the first audio arrives before the clip finishes. 24 kHz mono, English + Chinese. Candle-native on every platform. Apache-2.0.",
+      promptGuide: {
+        title: "MOSS-TTS-Realtime Guide",
+        path: "/prompt-guides/moss-tts-realtime.md",
+      },
     },
   },
   {
@@ -842,6 +860,10 @@ export const fallbackModels = [
       label: "MOSS-TTSD v0.5 (Multi-Speaker)",
       description:
         "MOSS-TTSD-v0.5 multi-speaker / long-form dialogue text-to-speech — give it a segmented script (up to two speakers, [S1]/[S2]) and it renders the whole dialogue in one clip, each turn in its own voice. 24 kHz mono, 20 in-band languages. Candle-native on every platform. Apache-2.0.",
+      promptGuide: {
+        title: "MOSS-TTSD Multi-Speaker Guide",
+        path: "/prompt-guides/moss-ttsd-v05.md",
+      },
     },
   },
   {
@@ -860,6 +882,10 @@ export const fallbackModels = [
       label: "MOSS SoundEffect v2",
       description:
         "MOSS-SoundEffect v2.0 text-to-audio flow-matching model for sound effects and ambience. 48 kHz mono, up to 30 s. Candle-native on every platform. Apache-2.0.",
+      promptGuide: {
+        title: "MOSS SoundEffect v2 Guide",
+        path: "/prompt-guides/moss-soundeffect-v2.md",
+      },
     },
   },
   {
@@ -881,6 +907,10 @@ export const fallbackModels = [
       label: "ACE-Step v1.5 XL Turbo",
       description:
         "ACE-Step v1.5 XL Turbo text-to-music model. 48 kHz stereo, up to 10 minutes, with prompted audio editing (inpaint / repaint / extend). Candle-native on every platform. MIT.",
+      promptGuide: {
+        title: "ACE-Step v1.5 XL Turbo Music Guide",
+        path: "/prompt-guides/acestep-v15-turbo.md",
+      },
     },
   },
   {
@@ -898,6 +928,10 @@ export const fallbackModels = [
       label: "OpenVoice V2",
       description:
         "OpenVoice V2 tone-color voice conversion — transfers a target voice's timbre onto source speech from a short reference clip. 22.05 kHz output. Candle-native on every platform. MIT.",
+      promptGuide: {
+        title: "OpenVoice V2 Voice Conversion Guide",
+        path: "/prompt-guides/openvoice-v2.md",
+      },
     },
   },
   {
@@ -919,6 +953,10 @@ export const fallbackModels = [
       label: "Chatterbox Clone-TTS",
       description:
         "Chatterbox (Resemble AI) native cloned-voice TTS — renders a full cloned-voice WAV directly from your script plus a short reference clip in a single step (no separate base-TTS/conversion pass). 24 kHz mono, up to 30 s. Candle-native on every platform. MIT.",
+      promptGuide: {
+        title: "Chatterbox Clone-TTS Guide",
+        path: "/prompt-guides/chatterbox-tts.md",
+      },
     },
   },
   {
@@ -935,6 +973,10 @@ export const fallbackModels = [
       label: "Chatterbox Voice Encoder",
       description:
         "Chatterbox (Resemble AI) speaker voice encoder — maps a few seconds of reference audio to a voice-identity embedding for cloned-voice conditioning. Candle-native on every platform. MIT.",
+      promptGuide: {
+        title: "Chatterbox Voice Encoder Guide",
+        path: "/prompt-guides/chatterbox-ve.md",
+      },
     },
   },
 ];

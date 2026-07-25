@@ -222,13 +222,13 @@
               "fps": {
                 "type": "array", "items": { "type": "integer", "minimum": 1 },
                 "x-sceneworks-contract": "binding",
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn allowed_fps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = fps_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs.rs", "anchor": "fps_limit_error(&request.model, request.fps" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn allowed_fps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = fps_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "fps_limit_error(&request.model, request.fps" }],
                 "description": "Allowed render frame rates; API and worker reject off-menu requests."
               },
               "hardMaxDuration": {
                 "type": "number", "exclusiveMinimum": 0,
                 "x-sceneworks-contract": "binding",
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn hard_max_duration" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = duration_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs.rs", "anchor": "if let Some(message) = duration_limit_error(" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn hard_max_duration" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = duration_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = duration_limit_error(" }],
                 "description": "Hard clip-duration ceiling in seconds; API and worker reject rather than clamp."
               },
               "maxPixels": {

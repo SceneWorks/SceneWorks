@@ -14,6 +14,8 @@ MOSS-TTSD runs natively (Candle) on every platform, on CPU / Accelerate. Install
 - Use normal punctuation — periods and commas shape the pacing. 20 in-band languages are supported (Chinese, English, and 18 more); write each turn in the language you want spoken.
 - There is no fixed voice bank: the model assigns a distinct natural voice to each speaker label. For a specific cloned voice, use the **Voice Clone** tab instead.
 
+Each turn has its own **Refine my prompt** action. Refinement treats that turn as spoken script, preserves its words and meaning, and leaves every other turn and speaker selection unchanged until you choose **Apply**.
+
 ## Single voice vs. multi-speaker
 
 A plain single-voice Speech model (Kokoro, MOSS-TTS-Realtime) reads one prompt in one voice. MOSS-TTSD is the model to reach for when you want a *dialogue* — an interview, a two-person scene, a narrated exchange — rendered as one continuous clip with the turns already voiced apart.

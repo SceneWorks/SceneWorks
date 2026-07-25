@@ -4,7 +4,7 @@ Chatterbox Clone-TTS (Resemble AI) renders a **full cloned-voice voiceover direc
 
 ## Installation
 
-The model runs natively (Candle) on every platform. Install it once from the **Models** screen — the T3 checkpoint, the S3Gen checkpoint, and the tokenizer download into the shared Hugging Face cache from `ResembleAI/chatterbox` (MIT). The speaker voice-encoder and the PerTh watermarker weights are small companion files the model resolves from the hub on first use.
+The model runs natively (Candle) on every platform. Install it once from the **Models** screen — the T3 checkpoint, S3Gen checkpoint, tokenizer, speaker voice encoder, and PerTh watermarker are provisioned as the model’s pinned downloads in the shared Hugging Face cache (`ResembleAI/chatterbox`, MIT).
 
 ## How it works
 
@@ -14,6 +14,8 @@ You provide two inputs:
 - **Reference voice** — a short library audio clip of the target voice. The model derives the speaker identity from it and uses it as the acoustic reference for the waveform, so one call produces the cloned voiceover.
 
 There is no separate base-voice or match-strength control: the clone is rendered end to end in the reference voice at 24 kHz mono, up to about 30 seconds per generation.
+
+**Refine my prompt** treats the prompt as a script. It preserves the words and meaning and makes only minimal punctuation or readability adjustments; it does not change the selected reference voice.
 
 ## Practical notes
 

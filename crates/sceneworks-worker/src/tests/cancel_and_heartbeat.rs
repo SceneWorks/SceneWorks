@@ -91,7 +91,7 @@ async fn begin_video_cancel_trips_flag_and_stays_non_terminal() {
     settings.api_url = base_url;
     let api = ApiClient::new(&settings);
     let cancel = gen_core::CancelFlag::new();
-    crate::video_jobs::begin_video_cancel(&api, "job-1", &cancel, "mlx").await;
+    crate::video_jobs::wan::begin_video_cancel(&api, "job-1", &cancel, "mlx").await;
     assert!(
         cancel.is_cancelled(),
         "begin_video_cancel must trip the engine cancel flag"
@@ -165,25 +165,25 @@ async fn begin_training_cancel_trips_flag_and_stays_non_terminal() {
 fn seedvr2_output_bytes_scales_with_frames_and_pixels() {
     // Raw RGB8 upper bound: 1 frame at 100×100 = 100·100·3 = 30_000 bytes.
     assert_eq!(
-        crate::video_jobs::seedvr2_estimated_output_bytes(1, 100, 100),
+        crate::video_jobs::seedvr2::seedvr2_estimated_output_bytes(1, 100, 100),
         30_000
     );
     // Linear in frame count and in each dimension.
     assert_eq!(
-        crate::video_jobs::seedvr2_estimated_output_bytes(10, 100, 100),
+        crate::video_jobs::seedvr2::seedvr2_estimated_output_bytes(10, 100, 100),
         300_000
     );
     assert_eq!(
-        crate::video_jobs::seedvr2_estimated_output_bytes(1, 200, 100),
+        crate::video_jobs::seedvr2::seedvr2_estimated_output_bytes(1, 200, 100),
         60_000
     );
     // A degenerate zero dimension / frame count yields zero (the guard treats that as "unknown").
     assert_eq!(
-        crate::video_jobs::seedvr2_estimated_output_bytes(0, 3840, 2160),
+        crate::video_jobs::seedvr2::seedvr2_estimated_output_bytes(0, 3840, 2160),
         0
     );
     assert_eq!(
-        crate::video_jobs::seedvr2_estimated_output_bytes(100, 0, 2160),
+        crate::video_jobs::seedvr2::seedvr2_estimated_output_bytes(100, 0, 2160),
         0
     );
 }
@@ -196,12 +196,12 @@ fn seedvr2_output_bytes_scales_with_frames_and_pixels() {
 fn seedvr2_disk_guard_passes_a_tiny_clip_and_is_noop_when_unknown() {
     let dir = tempdir().expect("tempdir");
     // A few small frames fit any real scratch volume — must pass.
-    crate::video_jobs::check_seedvr2_output_disk(dir.path(), 8, 64, 64)
+    crate::video_jobs::seedvr2::check_seedvr2_output_disk(dir.path(), 8, 64, 64)
         .expect("a tiny output footprint fits available disk");
     // Unknown frame count / dims short-circuit to Ok (the guard defers to the real count).
-    crate::video_jobs::check_seedvr2_output_disk(dir.path(), 0, 3840, 2160)
+    crate::video_jobs::seedvr2::check_seedvr2_output_disk(dir.path(), 0, 3840, 2160)
         .expect("zero frames is a no-op guard");
-    crate::video_jobs::check_seedvr2_output_disk(dir.path(), 1_000, 0, 0)
+    crate::video_jobs::seedvr2::check_seedvr2_output_disk(dir.path(), 1_000, 0, 0)
         .expect("zero dims is a no-op guard");
 }
 
@@ -215,9 +215,14 @@ fn seedvr2_disk_guard_rejects_an_impossibly_large_clip() {
     // 100M frames at 4096×4096 ≈ 4.7 exabytes of PNG — no scratch volume holds that, so the guard
     // must fail loud with an actionable message (unless the free-space probe is unavailable, in which
     // case the guard is a documented no-op and we skip the assertion).
-    if crate::video_jobs::available_disk_bytes(dir.path()).is_some() {
+    if crate::video_jobs::seedvr2::available_disk_bytes(dir.path()).is_some() {
         let error =
-            crate::video_jobs::check_seedvr2_output_disk(dir.path(), 100_000_000, 4096, 4096)
+            crate::video_jobs::seedvr2::check_seedvr2_output_disk(
+                dir.path(),
+                100_000_000,
+                4096,
+                4096,
+            )
                 .expect_err("an exabyte-scale output must be rejected");
         let message = error.to_string();
         assert!(
@@ -718,7 +723,7 @@ async fn begin_detail_cancel_trips_flag_and_stays_non_terminal() {
 mod stub_fallback_gate {
     use super::*;
     use crate::image_jobs::mlx_weights_gap;
-    use crate::video_jobs::ensure_video_engine_weights;
+    use crate::video_jobs::wan::ensure_video_engine_weights;
     use sceneworks_core::image_request::ImageRequest;
     use sceneworks_core::video_request::VideoRequest;
     use serde_json::Map;
@@ -1062,4 +1067,3 @@ async fn heartbeat_while_blocking_keeps_worker_live_through_a_long_pass() {
         beats.load(Ordering::SeqCst)
     );
 }
-

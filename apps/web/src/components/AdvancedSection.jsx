@@ -12,19 +12,28 @@ import { Icon } from "./Icons.jsx";
 //
 // Controlled via `open` / `onToggle`; presentational only. `actions` (e.g. "Reset
 // to model defaults") sit to the left of the caret and keep their own handlers.
+//
+// `leading` is optional non-interactive content pinned to the START of the header row,
+// pushing the "Advanced" trigger and its caret to the right (epic 14361: the Audio Studio
+// settings bar shares this row with the selected model's capability hint). It is outside the
+// toggle button on purpose — the row's click target stays the trigger itself.
 export function AdvancedSection({
   open,
   onToggle,
   label = "Advanced",
   hint,
   actions,
+  leading,
   className,
   children,
 }) {
-  const rootClass = ["advanced-section", open ? "open" : "", className].filter(Boolean).join(" ");
+  const rootClass = ["advanced-section", open ? "open" : "", leading ? "advanced-section--leading" : "", className]
+    .filter(Boolean)
+    .join(" ");
   return (
     <section className={rootClass}>
       <div className="advanced-section-head">
+        {leading ? <div className="advanced-section-leading">{leading}</div> : null}
         <button
           aria-expanded={Boolean(open)}
           className="advanced-section-toggle"
