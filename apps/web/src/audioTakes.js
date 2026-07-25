@@ -242,3 +242,30 @@ export function audioTakeTitle(job, asset) {
   const prompt = typeof job?.payload?.prompt === "string" ? job.payload.prompt.trim() : "";
   return prompt || asset?.displayName || "Untitled clip";
 }
+
+// The meta line an audio viewer shows under its mode chip — model · voice · language ·
+// rate/channels · age. Every clause is read off the asset's OWN recorded recipe and its
+// MEASURED file block (project_store's audio asset record), so a clip that recorded none
+// simply shows fewer clauses, and "mono" is a fact about the produced WAV rather than an
+// assumption about the model. The model shows its catalog label when still installed
+// (`run.modelName`), falling back to the recorded id.
+export function audioAssetMetaLine(asset, run = null) {
+  const settings = asset?.recipe?.normalizedSettings ?? {};
+  const rate = Number(asset?.file?.sampleRate);
+  const channels = Number(asset?.file?.channels);
+  const format = [
+    Number.isFinite(rate) && rate > 0 ? `${Math.round(rate / 100) / 10} kHz` : null,
+    channels === 1 ? "mono" : channels === 2 ? "stereo" : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return [
+    run?.modelName || asset?.recipe?.model || null,
+    settings.voice ?? null,
+    settings.language ?? null,
+    format || null,
+    formatRelativeTime(asset?.createdAt) || null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}

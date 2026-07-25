@@ -4,7 +4,24 @@ import { appConfirm } from "../appConfirm.jsx";
 import { assetMatchesCharacter } from "../characterMembership.js";
 import { saveAssetAs, revealAsset } from "../assetActions.js";
 import { isDesktop, isPageFullscreen, setViewerFullscreen } from "../runtime.js";
-import { AssetMedia, AssetThumbnail, assetCanRenderAsVideo, assetUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
+import {
+  AssetMedia,
+  AssetThumbnail,
+  assetCanRenderAsAudio,
+  assetCanRenderAsVideo,
+  assetUrl,
+  suppressThumbnailContextMenu,
+} from "./assetMedia.jsx";
+import {
+  AudioClock,
+  AudioPlayButton,
+  AudioWaveform,
+  LoadedAudioElement,
+  WAVEFORM_BARS,
+  useAudioTakePlayer,
+} from "./audioTakeParts.jsx";
+import { audioAssetDurationSeconds } from "./WorkerProgressCard.jsx";
+import { audioAssetMetaLine, audioAssetRunGroups, formatClock } from "../audioTakes.js";
 import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
@@ -305,7 +322,105 @@ function CharacterAssetLinker({ asset, characters = [], onMoveToCharacter }) {
 // a tile still opens the full asset via the detail/preview flow; the thumbnail only
 // changes what the grid paints, not what selection/open resolve to. Applies to every grid
 // that shares this component (Library, Pose Library, character-asset views).
-export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId, selectedIds = null, onToggleSelect = null }) {
+// Audio grid cell (sc-14391). `AssetThumbnail` has no poster path for audio, so an audio
+// asset used to paint an empty tile with only its name — invisible as a media type and
+// unplayable without opening it. It now draws the same waveform the studios use, over a bar
+// carrying a play button and the clip length.
+//
+// The cell can't be a <button> like the others: a play control inside it would nest
+// interactive elements. So the audio branch is a <div> whose body is an absolutely
+// positioned button (select on click, preview on double-click — identical semantics to the
+// standard tile), with the play bar layered above it. Non-audio tiles are untouched.
+// The detail pane's audio stage (sc-14391): mode chip + waveform + transport, the same
+// vocabulary the Audio Studio's deck and the Simple viewer use. The mode chip and model
+// name are derived from the clip's own replay record, so all three surfaces agree.
+function AudioAssetStage({ asset, models = [], player = null }) {
+  const ownPlayer = useAudioTakePlayer();
+  const transport = player ?? ownPlayer;
+  const run = React.useMemo(() => audioAssetRunGroups([asset], models)[0] ?? null, [asset, models]);
+  const loaded = transport.loadedTakeId === asset.id;
+  const duration = loaded && transport.duration > 0 ? transport.duration : audioAssetDurationSeconds(asset);
+  return (
+    <div className="asset-audio-stage">
+      {/* With a SHARED player the grid already mounts the one <audio> that transport drives;
+          mounting a second here would fight over the same ref. Only a stage that owns its
+          transport mounts its own element. */}
+      {player ? null : <LoadedAudioElement asset={asset} player={transport} className="asset-grid-audio-el" />}
+      <div className="asset-audio-stage__head">
+        {run ? (
+          <span className={`audio-mode-chip audio-mode-chip--${run.mode}`}>{run.modeLabel}</span>
+        ) : null}
+        <span className="asset-audio-stage__model">{audioAssetMetaLine(asset, run)}</span>
+      </div>
+      <div className="asset-audio-stage__wave">
+        <AudioWaveform
+          asset={asset}
+          bars={WAVEFORM_BARS.stage}
+          height={150}
+          label="Clip"
+          onSeek={transport.seekFraction}
+          progress={loaded ? transport.progress : 0}
+        />
+      </div>
+      <div className="asset-audio-stage__transport">
+        <AudioPlayButton onClick={() => transport.toggleTake(asset)} playing={loaded && transport.isPlaying} size="xl" />
+        <AudioClock current={loaded ? transport.currentTime : 0} total={duration} />
+      </div>
+    </div>
+  );
+}
+
+function AudioAssetTile({ asset, className, onSelect, onPreview, playing, onTogglePlay }) {
+  return (
+    <div className={`${className} asset-tile--audio`} onContextMenu={suppressThumbnailContextMenu}>
+      <button
+        aria-label={`Select ${asset.displayName ?? "audio clip"}`}
+        className="asset-tile-open"
+        onClick={onSelect}
+        onDoubleClick={() => onPreview(asset)}
+        type="button"
+      />
+      <span className="asset-tile-audio-wave">
+        <AudioWaveform asset={asset} bars={WAVEFORM_BARS.card} height={92} label={asset.displayName ?? "Clip"} />
+      </span>
+      <span className="asset-tile-audio-bar">
+        <AudioPlayButton
+          label={`${playing ? "Pause" : "Play"} ${asset.displayName ?? "clip"}`}
+          onClick={onTogglePlay}
+          playing={playing}
+          size="sm"
+        />
+        <span className="asset-tile-audio-time">{formatClock(audioAssetDurationSeconds(asset))}</span>
+      </span>
+      <strong>{asset.displayName}</strong>
+      {Array.isArray(asset.tags) && asset.tags.length ? (
+        <div className="asset-tile-tags">
+          {asset.tags.map((tag) => (
+            <span className="asset-tag compact" key={tag}>
+              {tag}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function AssetGrid({
+  assets,
+  onPreview,
+  selectedAsset,
+  setSelectedAssetId,
+  selectedIds = null,
+  onToggleSelect = null,
+  audioPlayer = null,
+}) {
+  // ONE transport per screen. The Library passes the same instance it gives AssetDetail, so a
+  // grid tile and the detail stage can never play two clips over each other; a grid rendered
+  // without one (character panels, Pose Library) falls back to its own.
+  const ownPlayer = useAudioTakePlayer();
+  const player = audioPlayer ?? ownPlayer;
+  const loadedAudio = assets.find((asset) => asset.id === player.loadedTakeId) ?? null;
   if (!assets.length) {
     return <div className="empty-panel">No assets in this view</div>;
   }
@@ -313,13 +428,24 @@ export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId
 
   return (
     <div className="asset-grid">
+      {/* The grid's single <audio>, driven by whichever cell's play button is armed. */}
+      <LoadedAudioElement asset={loadedAudio} player={player} className="asset-grid-audio-el" />
       {assets.map((asset) => {
         // In single-select mode the button IS the grid cell, so it carries the
         // windowing class; in multi-select the wrap is the cell (below).
         const tileClasses = ["asset-tile"];
         if (selectedAsset?.id === asset.id) tileClasses.push("active");
         if (!multi) tileClasses.push("asset-tile-windowed");
-        const tile = (
+        const tile = assetCanRenderAsAudio(asset) ? (
+          <AudioAssetTile
+            asset={asset}
+            className={tileClasses.join(" ")}
+            onPreview={onPreview}
+            onSelect={() => setSelectedAssetId(asset.id)}
+            onTogglePlay={() => player.toggleTake(asset)}
+            playing={player.loadedTakeId === asset.id && player.isPlaying}
+          />
+        ) : (
           <button
             className={tileClasses.join(" ")}
             onClick={() => setSelectedAssetId(asset.id)}
@@ -441,6 +567,8 @@ export function AssetDetail({
   vqaEntries = [],
   vqaPending = false,
   createVqaJob,
+  audioModels = [],
+  audioPlayer = null,
 }) {
   if (!asset) {
     return <aside className="asset-detail empty-panel">No asset selected</aside>;
@@ -450,6 +578,10 @@ export function AssetDetail({
     <aside className="asset-detail">
       {asset.type === "document" ? (
         <DocumentReader asset={asset} />
+      ) : assetCanRenderAsAudio(asset) ? (
+        /* Audio gets the play deck rather than a bare <audio controls> inside a button —
+           its transport controls can't be nested in the preview button (sc-14391). */
+        <AudioAssetStage asset={asset} models={audioModels} player={audioPlayer} />
       ) : (
         <button className="preview-button" onClick={() => onPreview(asset)} type="button">
           <AssetMedia asset={asset} />

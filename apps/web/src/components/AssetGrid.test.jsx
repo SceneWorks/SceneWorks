@@ -185,3 +185,85 @@ describe("AssetCard native context-menu suppression (sc-8731)", () => {
     expect(onPreview).toHaveBeenCalledWith(assets[0]);
   });
 });
+
+// Audio in the Advanced Library (sc-14391). Audio assets only became visible here once
+// `audio_studio` was added to LIBRARY_ORIGINS (epic 14361); before this change they painted
+// an empty tile — no waveform, no duration, no way to hear the clip without opening it.
+describe("AssetGrid audio tiles (sc-14391)", () => {
+  let container;
+  let root;
+
+  const audioAsset = {
+    id: "au",
+    type: "audio",
+    displayName: "Take 1 · rain at the door",
+    projectId: "p1",
+    file: { path: "assets/audio/take_1.wav", mimeType: "audio/wav", duration: 12 },
+    recipe: { model: "kokoro_82m", normalizedSettings: { voice: "af_heart" } },
+  };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  const render = (props = {}) =>
+    act(() =>
+      root.render(
+        <AssetGrid
+          assets={[audioAsset, ...assets]}
+          onPreview={vi.fn()}
+          selectedAsset={null}
+          setSelectedAssetId={vi.fn()}
+          {...props}
+        />,
+      ),
+    );
+
+  it("draws a waveform, a duration and a play control instead of a blank tile", async () => {
+    await render();
+    const tile = container.querySelector(".asset-tile--audio");
+    expect(tile).toBeTruthy();
+    // The waveform is a real <svg path>, not an empty box.
+    expect(tile.querySelector(".asset-tile-audio-wave .audio-wave__svg path")).toBeTruthy();
+    expect(tile.querySelector(".asset-tile-audio-time").textContent).toBe("0:12");
+    expect(tile.querySelector('[aria-label^="Play "]')).toBeTruthy();
+    // Image tiles keep the plain button cell — this is an audio-only branch.
+    expect(container.querySelectorAll(".asset-tile--audio").length).toBe(1);
+    expect(container.querySelectorAll("button.asset-tile").length).toBe(2);
+  });
+
+  it("keeps the tile's select / double-click-to-preview semantics on the audio cell", async () => {
+    const setSelectedAssetId = vi.fn();
+    const onPreview = vi.fn();
+    await render({ setSelectedAssetId, onPreview });
+    const open = container.querySelector(".asset-tile--audio .asset-tile-open");
+
+    await act(async () => open.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(setSelectedAssetId).toHaveBeenCalledWith("au");
+
+    await act(async () => open.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+    expect(onPreview).toHaveBeenCalledWith(audioAsset);
+  });
+
+  it("arms the grid's single <audio> element on the played clip — never one per tile", async () => {
+    await render();
+    // Nothing loaded yet, so no element is mounted at all.
+    expect(container.querySelector("audio")).toBeNull();
+
+    const play = container.querySelector('.asset-tile--audio [aria-label^="Play "]');
+    await act(async () => play.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+
+    const els = container.querySelectorAll("audio");
+    expect(els.length).toBe(1);
+    expect(els[0].getAttribute("src")).toContain("assets/audio/take_1.wav");
+  });
+});
