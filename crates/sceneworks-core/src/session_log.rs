@@ -193,9 +193,11 @@ fn redact_json_marker_value(output: String, key: &str) -> String {
 }
 
 fn redact_marker_value(mut output: String, marker: &str, terminators: &[char]) -> String {
+    // ASCII case folding preserves UTF-8 byte offsets. Keep one parallel search buffer and update
+    // only each replacement span instead of allocating/lowercasing the full line per occurrence.
+    let mut lowered = output.to_ascii_lowercase();
     let mut search_from = 0;
     loop {
-        let lowered = output.to_ascii_lowercase();
         let Some(relative_start) = lowered[search_from..].find(marker) else {
             return output;
         };
@@ -217,14 +219,15 @@ fn redact_marker_value(mut output: String, marker: &str, terminators: &[char]) -
             continue;
         }
         output.replace_range(value_start..value_end, "[REDACTED]");
+        lowered.replace_range(value_start..value_end, "[redacted]");
         search_from = value_start + "[REDACTED]".len();
     }
 }
 
 fn redact_authorization_header(mut output: String) -> String {
+    let mut lowered = output.to_ascii_lowercase();
     let mut search_from = 0;
     loop {
-        let lowered = output.to_ascii_lowercase();
         let Some(relative_start) = lowered[search_from..].find("authorization:") else {
             return output;
         };
@@ -263,6 +266,7 @@ fn redact_authorization_header(mut output: String) -> String {
             continue;
         }
         output.replace_range(value_start..value_end, "[REDACTED]");
+        lowered.replace_range(value_start..value_end, "[redacted]");
         search_from = value_start + "[REDACTED]".len();
     }
 }

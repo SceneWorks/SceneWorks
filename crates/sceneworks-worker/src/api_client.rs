@@ -76,11 +76,27 @@ where
 {
     let status = response.status();
     if !status.is_success() {
-        let detail = response
+        let body = response
             .text()
             .await
             .unwrap_or_else(|_| "request failed".to_owned());
-        return Err(WorkerError::Api { status, detail });
+        let envelope = serde_json::from_str::<Value>(&body).ok();
+        let detail = envelope
+            .as_ref()
+            .and_then(|value| value.get("detail"))
+            .and_then(Value::as_str)
+            .unwrap_or(&body)
+            .to_owned();
+        let code = envelope
+            .as_ref()
+            .and_then(|value| value.get("code"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        return Err(WorkerError::Api {
+            status,
+            detail,
+            code,
+        });
     }
     Ok(response.json::<T>().await?)
 }

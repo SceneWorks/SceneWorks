@@ -110,10 +110,11 @@ fn yolox_decode_embedded_nms_branch() {
     assert_eq!(boxes.len(), 1);
     assert!(approx(boxes[0].x1, 20.0, 1e-6));
     assert!(approx(boxes[0].y2, 80.0, 1e-6));
-    // non-NMS shape (last dim != 5) -> empty (we only ship the embedded-NMS export)
-    assert!(yolox_decode(&[0.0; 85], &[1, 1, 85], 1.0)
-        .expect("non-5 last dim is a benign empty")
-        .is_empty());
+    // A non-NMS head is a mis-pinned export, not a valid "no people" response.
+    assert!(matches!(
+        yolox_decode(&[0.0; 85], &[1, 1, 85], 1.0),
+        Err(WorkerError::Engine(_))
+    ));
 }
 
 #[test]
@@ -140,8 +141,14 @@ fn pose_decode_argmax_and_rescale() {
     sy[2] = 7.0;
     // crop geometry: center (50,60), scale (PW, PH) so px = (loc/2)/PW*PW + x0.
     let (cx, cy, sw, sh) = (50.0f32, 60.0f32, PW as f32, PH as f32);
-    let kp = pose_decode(&sx, &[1, k as i64, wx as i64], &sy, cx, cy, sw, sh)
-        .expect("valid simcc decodes");
+    let kp = pose_decode(
+        &sx,
+        &[1, k as i64, wx as i64],
+        &sy,
+        &[1, k as i64, wy as i64],
+        (cx, cy, sw, sh),
+    )
+    .expect("valid simcc decodes");
     assert_eq!(kp.len(), 1);
     // x: loc 2 -> 2/2=1 ; (1)/PW*sw + (cx - sw/2) = 1 + (50 - PW/2)
     let x0 = cx - sw / 2.0;
@@ -156,8 +163,14 @@ fn pose_decode_argmax_and_rescale() {
 fn pose_decode_negative_value_marks_missing() {
     let sx = vec![-1.0f32; 4];
     let sy = vec![-1.0f32; 4];
-    let kp = pose_decode(&sx, &[1, 1, 4], &sy, 50.0, 60.0, PW as f32, PH as f32)
-        .expect("valid simcc decodes");
+    let kp = pose_decode(
+        &sx,
+        &[1, 1, 4],
+        &sy,
+        &[1, 1, 4],
+        (50.0, 60.0, PW as f32, PH as f32),
+    )
+    .expect("valid simcc decodes");
     // val <= 0 -> loc (-1,-1) -> negative rescaled coords, score <= 0
     assert!(kp[0][2] <= 0.0);
 }
@@ -165,17 +178,47 @@ fn pose_decode_negative_value_marks_missing() {
 #[test]
 fn pose_decode_rejects_malformed_simcc() {
     // Rank < 3 simcc_x shape → Engine error, not an OOB panic on sx_shape[2] (F-102).
-    let rank2 = pose_decode(&[0.0; 4], &[1, 4], &[0.0; 4], 0.0, 0.0, 1.0, 1.0);
+    let rank2 = pose_decode(
+        &[0.0; 4],
+        &[1, 4],
+        &[0.0; 4],
+        &[1, 1, 4],
+        (0.0, 0.0, 1.0, 1.0),
+    );
     assert!(
         matches!(rank2, Err(WorkerError::Engine(_))),
         "rank-2 simcc_x must be rejected, got {rank2:?}"
     );
     // Well-formed rank but simcc_x is shorter than K*Wx → Engine error.
-    let short = pose_decode(&[0.0; 2], &[1, 2, 4], &[0.0; 8], 0.0, 0.0, 1.0, 1.0);
+    let short = pose_decode(
+        &[0.0; 2],
+        &[1, 2, 4],
+        &[0.0; 8],
+        &[1, 2, 4],
+        (0.0, 0.0, 1.0, 1.0),
+    );
     assert!(
         matches!(short, Err(WorkerError::Engine(_))),
         "truncated simcc_x must be rejected, got {short:?}"
     );
+    // A well-sized Y buffer cannot override the reported shape. A mismatched K or a truncated
+    // buffer relative to Wy must fail rather than manufacturing Wy from len/K.
+    let mismatched_k = pose_decode(
+        &[0.0; 8],
+        &[1, 2, 4],
+        &[0.0; 12],
+        &[1, 3, 4],
+        (0.0, 0.0, 1.0, 1.0),
+    );
+    assert!(matches!(mismatched_k, Err(WorkerError::Engine(_))));
+    let short_y = pose_decode(
+        &[0.0; 8],
+        &[1, 2, 4],
+        &[0.0; 6],
+        &[1, 2, 4],
+        (0.0, 0.0, 1.0, 1.0),
+    );
+    assert!(matches!(short_y, Err(WorkerError::Engine(_))));
 }
 
 #[test]

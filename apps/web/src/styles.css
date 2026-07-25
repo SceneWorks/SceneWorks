@@ -10094,6 +10094,18 @@ details[open] > summary.lora-scope-group-heading::before,
   text-align: center;
   padding: 20px 0;
 }
+.ve-bin-more {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  display: flex;
+  font-size: 11px;
+  justify-content: space-between;
+  padding: 8px 10px;
+}
+.ve-bin-more button {
+  min-height: 28px;
+}
 .ve-bin-item {
   position: relative;
   aspect-ratio: 16 / 10;

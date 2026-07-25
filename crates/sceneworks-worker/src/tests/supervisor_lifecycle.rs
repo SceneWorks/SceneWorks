@@ -752,3 +752,22 @@ async fn receipt_writer_preserves_primary_and_corequisite_default_entries() {
     assert!(receipts.iter().any(|entry| entry["modelId"] == "other-model" && entry["resolvedFiles"] == json!(["other.safetensors"])));
     assert!(receipts.iter().any(|entry| entry["variant"] == "q4" && entry["resolvedFiles"] == json!(["q4/model.safetensors"])));
 }
+#[test]
+fn database_lock_retry_uses_only_the_machine_readable_api_code() {
+    let typed = WorkerError::Api {
+        status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        detail: "wording may change".to_owned(),
+        code: Some("database_locked".to_owned()),
+    };
+    assert!(is_database_locked(&typed));
+
+    let wording_only = WorkerError::Api {
+        status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        detail: "database is locked".to_owned(),
+        code: None,
+    };
+    assert!(
+        !is_database_locked(&wording_only),
+        "rendered wording must never be the retry contract"
+    );
+}

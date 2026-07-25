@@ -235,6 +235,22 @@ impl std::fmt::Display for JobsStoreError {
 
 impl std::error::Error for JobsStoreError {}
 
+impl JobsStoreError {
+    /// Machine-readable SQLite lock classification for the API/worker retry seam. Do not make
+    /// callers parse rusqlite's rendered wording: SQLite exposes both BUSY and LOCKED as stable
+    /// result codes, while their human messages are not an API contract.
+    pub fn is_database_locked(&self) -> bool {
+        matches!(
+            self,
+            Self::Sqlite(error)
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                )
+        )
+    }
+}
+
 impl From<std::io::Error> for JobsStoreError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
@@ -449,6 +465,8 @@ impl JobsStore {
               on jobs(status, created_at);
             create index if not exists idx_jobs_project_created
               on jobs(project_id, created_at);
+            create index if not exists idx_jobs_created
+              on jobs(created_at);
             create index if not exists idx_jobs_assigned_gpu_status
               on jobs(assigned_gpu, status);
             create index if not exists idx_jobs_worker_status
@@ -598,6 +616,8 @@ impl JobsStore {
                where 0;
             create unique index if not exists idx_genmetrics_history_job
               on generation_metrics_history(job_id);
+            create index if not exists idx_genmetrics_history_created
+              on generation_metrics_history(j_created_at);
             ",
         )?;
         transaction.commit()?;
@@ -1827,10 +1847,9 @@ impl JobsStore {
     /// queued past the grace window when no live candle worker exists, terminal with
     /// `candle_unavailable` — so a deployment can fail loudly instead of queuing forever.
     ///
-    /// "Live candle worker" = a worker advertising the `candle` marker capability that is not
-    /// offline and has a heartbeat within `grace_seconds` (the marker is a fixed JSON string in
-    /// `capabilities_json`, matched as a substring — the candle worker runs on a real CUDA gpu
-    /// index, not the `mlx` sentinel, so it can't be matched by `gpu_id`; see [`worker_is_candle`]).
+    /// "Live candle worker" = a worker advertising the exact `candle` marker capability that is not
+    /// offline and has a heartbeat within `grace_seconds`. Capabilities are decoded through the same
+    /// typed parser as [`row_to_worker`], rather than substring-matching JSON.
     /// While one exists (even merely busy) this is a no-op and candle-eligible jobs wait, so a
     /// transient candle crash the supervisor restarts inside the window never fails a job. Off
     /// (`!candle_required`) it returns immediately, leaving normal capability routing unaffected.
@@ -1854,20 +1873,21 @@ impl JobsStore {
         // A live candle worker means candle-eligible jobs should wait for it — it may simply be
         // busy. Only when none has checked in within the window do we treat candle as unavailable
         // and fail the stranded jobs.
-        let live_candle_worker = transaction
-            .query_row(
+        let live_candle_worker = {
+            let mut statement = transaction.prepare(
                 "
-                select 1 from workers
+                select capabilities_json from workers
                  where status != 'offline'
                    and last_seen_at >= ?1
-                   and capabilities_json like '%\"candle\"%'
-                 limit 1
                 ",
-                params![cutoff],
-                |_row| Ok(()),
-            )
-            .optional()?
-            .is_some();
+            )?;
+            let capabilities = statement
+                .query_map(params![cutoff], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            capabilities
+                .iter()
+                .any(|encoded| encoded_worker_has_capability(encoded, "candle"))
+        };
         if live_candle_worker {
             return Ok(Vec::new());
         }
@@ -3158,6 +3178,12 @@ where
     value
         .and_then(|text| serde_json::from_str::<Vec<T>>(text).ok())
         .unwrap_or_default()
+}
+
+fn encoded_worker_has_capability(encoded: &str, expected: &str) -> bool {
+    loads_vec::<WorkerCapability>(Some(encoded))
+        .iter()
+        .any(|capability| capability.as_str() == expected)
 }
 
 fn loads_optional<T>(value: Option<&str>) -> Option<T>

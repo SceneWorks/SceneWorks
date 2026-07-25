@@ -37,6 +37,7 @@ pub(crate) async fn create_lora_download_job(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "LoRA not found".to_owned(),
+            code: None,
         })?;
     if lora.get("installState").and_then(Value::as_str) == Some("installed")
         && lora.get("updateAvailable").and_then(Value::as_bool) != Some(true)
@@ -152,6 +153,7 @@ pub(crate) async fn delete_lora(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "LoRA not found".to_owned(),
+            code: None,
         })?;
     let scope = query
         .scope
@@ -286,6 +288,7 @@ pub(crate) async fn update_lora(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "LoRA not found".to_owned(),
+            code: None,
         })?;
     let scope = query
         .scope
@@ -352,6 +355,7 @@ pub(crate) async fn update_lora(
     updated.map(Json).ok_or_else(|| ApiError {
         status: StatusCode::NOT_FOUND,
         detail: "LoRA has no editable manifest entry in this scope".to_owned(),
+        code: None,
     })
 }
 
@@ -376,6 +380,7 @@ pub(crate) async fn lora_embedded_tags(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "LoRA not found".to_owned(),
+            code: None,
         })?;
     let Some(installed_path) = lora
         .get("installedPath")

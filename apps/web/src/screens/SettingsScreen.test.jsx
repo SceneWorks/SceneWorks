@@ -546,6 +546,50 @@ describe("SettingsScreen default generation quality (sc-10728)", () => {
     );
   });
 
+  it("rolls back the optimistic cache and reports a failed durable preference write", async () => {
+    apiFetch.mockImplementation(async (path, _token, options) => {
+      if (path === "/api/v1/ui-preferences" && options?.method === "PUT") {
+        throw new Error("disk full");
+      }
+      return [];
+    });
+    await render();
+    await chooseQuality("Q4");
+    expect(selectedQuality().textContent.trim()).toBe("Auto");
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBe("auto");
+    expect(container.textContent).toContain("Could not save default generation quality");
+    expect(container.textContent).not.toContain("Default generation quality set to");
+  });
+
+  it("does not let an older failed PUT roll back a newer successful quality choice", async () => {
+    const writes = [];
+    apiFetch.mockImplementation((path, _token, options) => {
+      if (path === "/api/v1/ui-preferences" && options?.method === "PUT") {
+        return new Promise((resolve, reject) => writes.push({ resolve, reject }));
+      }
+      return Promise.resolve([]);
+    });
+    await render();
+
+    await chooseQuality("Q4");
+    await chooseQuality("bf16");
+    expect(writes).toHaveLength(2);
+
+    await act(async () => {
+      writes[1].resolve({});
+      await Promise.resolve();
+    });
+    await act(async () => {
+      writes[0].reject(new Error("older disk failure"));
+      await Promise.resolve();
+    });
+
+    expect(selectedQuality().textContent.trim()).toBe("bf16");
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBe("bf16");
+    expect(container.textContent).toContain("Default generation quality set to High fidelity (bf16)");
+    expect(container.textContent).not.toContain("older disk failure");
+  });
+
   it("seeds the control from the instant-paint cache on mount (cache round-trip)", async () => {
     // App.jsx re-primes this cache from the durable server copy on launch (covered in App.shell.test.jsx);
     // here we assert the control reflects whatever the cache holds on mount.

@@ -287,7 +287,9 @@ fn decode(
     let channels = shape[1].max(0) as usize; // 84 = 4 box + 80 classes
     let anchors = shape[2].max(0) as usize; // 8400
     if channels < 5 {
-        return Ok(Vec::new());
+        return Err(WorkerError::Engine(format!(
+            "yolo11m output has {channels} channels, expected at least 5 (box + person score)"
+        )));
     }
     if data.len() < channels.saturating_mul(anchors) {
         return Err(WorkerError::Engine(format!(

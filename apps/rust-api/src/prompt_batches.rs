@@ -325,6 +325,7 @@ fn prompt_batch_not_found() -> ApiError {
     ApiError {
         status: StatusCode::NOT_FOUND,
         detail: "Prompt batch not found".to_owned(),
+        code: None,
     }
 }
 

@@ -58,6 +58,14 @@ use uuid::Uuid;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod advanced;
 mod api_client;
+// Shared one-child PNG persistence for upscale (Mac + candle) and smart-select (Mac).
+// Keep the include site on the callers' superset so the neither-backend lane does not
+// compile an otherwise dead helper.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod single_child_asset;
 // Lazy, on-demand download-credential pull from the macOS desktop credential socket
 // (sc-5891). Compiles on all targets; the socket I/O is `cfg(unix)` and inert unless
 // the desktop injects `SCENEWORKS_CRED_IPC_*`, so server/Docker/Windows are unaffected.
@@ -1056,14 +1064,14 @@ async fn run_job_with_shutdown(
     JobOutcome::ShutdownDuringJob
 }
 
-/// True when an error ultimately stems from SQLite reporting the jobs database as locked.
-/// The claim travels worker→API→store, so a lock surfaces as an `Api { detail }` whose
-/// message embeds the SQLite text; match on the rendered string rather than a typed variant.
+/// True when the API reports SQLite's typed BUSY/LOCKED class for the jobs database.
 fn is_database_locked(error: &WorkerError) -> bool {
-    error
-        .to_string()
-        .to_ascii_lowercase()
-        .contains("database is locked")
+    matches!(
+        error,
+        WorkerError::Api {
+            code: Some(code), ..
+        } if code == "database_locked"
+    )
 }
 
 async fn register_worker_with_retry(

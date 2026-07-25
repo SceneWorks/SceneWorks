@@ -1060,6 +1060,13 @@ enum Sd3Variant {
     Medium,
 }
 
+fn unknown_converter_error(model_id: &str, converter: &str) -> ConvertPlanError {
+    ConvertPlanError {
+        message: "Unknown MLX converter.",
+        detail: format!("Unrecognized mlx.converter '{converter}' for {model_id}."),
+    }
+}
+
 /// Resolve the native [`ConvertPlan`] for a convert job from its `converter` discriminator, or a
 /// [`ConvertPlanError`] naming why it can't proceed (missing source file, base model not installed,
 /// unknown converter, …). Split out of [`run_model_convert_job`] (sc-8921, F-119): the converter-arm
@@ -1086,10 +1093,7 @@ async fn resolve_convert_plan(
     // the exact drift that shipped as sc-10573 (`ltx_video` handled here but missing from the gate).
     // The empty ("" = no converter configured) case still falls through to its own arm below.
     if !converter.is_empty() && !NATIVE_CONVERTERS.contains(&converter) {
-        return Ok(Err(ConvertPlanError {
-            message: "Unknown MLX converter.",
-            detail: format!("Unrecognized mlx.converter '{converter}' for {model_id}."),
-        }));
+        return Ok(Err(unknown_converter_error(model_id, converter)));
     }
     let plan = match converter {
         "flux2_klein_diffusers" => {
@@ -1255,10 +1259,9 @@ async fn resolve_convert_plan(
             }));
         }
         other => {
-            return Ok(Err(ConvertPlanError {
-                message: "Unknown MLX converter.",
-                detail: format!("Unrecognized mlx.converter '{other}' for {model_id}."),
-            }));
+            // The registry precheck above makes this defensive arm unreachable for production
+            // inputs. Keep one shared error constructor so the guard and fallback cannot drift.
+            return Ok(Err(unknown_converter_error(model_id, other)));
         }
     };
     Ok(Ok(plan))
@@ -1827,112 +1830,143 @@ pub(crate) fn huggingface_receipt_weights_dir(
     variant: Option<&str>,
 ) -> Option<PathBuf> {
     let models_dir = data_dir.join("models");
-    let mut markers = Vec::new();
-    markers.push(
-        models_dir
-            .join(safe_download_dir(repo))
-            .join(INSTALL_MARKER),
-    );
+    let repo_marker = models_dir
+        .join(safe_download_dir(repo))
+        .join(INSTALL_MARKER);
+    let mut targeted = vec![repo_marker];
     if let Some(model_id) = model_id {
-        markers.push(
+        targeted.push(
             models_dir
                 .join(safe_download_dir(model_id))
                 .join(INSTALL_MARKER),
         );
     }
-    if let Ok(entries) = std::fs::read_dir(&models_dir) {
-        markers.extend(
-            entries
-                .flatten()
-                .map(|entry| entry.path().join(INSTALL_MARKER)),
-        );
-    }
-    markers.sort();
-    markers.dedup();
+    targeted.dedup();
 
-    for marker in markers {
-        let Ok(bytes) = std::fs::read(marker) else {
-            continue;
-        };
-        let Ok(top) = serde_json::from_slice::<Value>(&bytes) else {
-            continue;
-        };
-        let receipts = top
-            .get("receipts")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_else(|| vec![top]);
-        for receipt in receipts {
-            if receipt.get("repo").and_then(Value::as_str) != Some(repo) {
-                continue;
-            }
-            if let Some(model_id) = model_id {
-                if receipt
-                    .get("modelId")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| id != model_id)
-                {
-                    continue;
-                }
-            }
-            if let Some(variant) = variant {
-                if receipt.get("variant").and_then(Value::as_str) != Some(variant) {
-                    continue;
-                }
-            }
-            let files = receipt
-                .get("resolvedFiles")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>();
-            if files.is_empty() {
-                continue;
-            }
-            let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
-            let snapshots = repo_dir.join("snapshots");
-            let Ok(snapshot_entries) = std::fs::read_dir(&snapshots) else {
-                continue;
-            };
-            let recorded_revision = receipt
-                .get("snapshotRevision")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|revision| !revision.is_empty());
-            let matching = snapshot_entries
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|snapshot| {
-                    snapshot.is_dir() && files.iter().all(|file| snapshot.join(file).is_file())
-                })
-                .filter(|snapshot| {
-                    recorded_revision.map_or(true, |revision| {
-                        snapshot.file_name().and_then(|name| name.to_str()) == Some(revision)
-                    })
-                })
-                .collect::<Vec<_>>();
-            // Schema-v2 receipts written before snapshotRevision are accepted only when their exact
-            // file set identifies one revision unambiguously. Never guess by filesystem order.
-            if recorded_revision.is_none() && matching.len() != 1 {
-                continue;
-            }
-            if let Some(snapshot) = matching.into_iter().next() {
-                // Tier receipts are self-contained below a tier directory.  Only descend when every
-                // file belongs to that same recorded tier; otherwise return the snapshot root for a
-                // single-variant/whole-repo install.
-                if let Some(variant) = receipt.get("variant").and_then(Value::as_str) {
-                    let tier = snapshot.join(variant);
-                    let prefix = format!("{variant}/");
-                    if files.iter().all(|file| file.starts_with(&prefix)) && tier.is_dir() {
-                        return Some(tier);
-                    }
-                }
-                return Some(snapshot);
-            }
+    // The repo/model marker is the overwhelmingly common path. Resolve it before walking every
+    // installed model directory; a targeted hit makes this lookup O(1) in the catalog size.
+    for marker in &targeted {
+        if let Some(weights_dir) =
+            receipt_weights_dir_from_marker(data_dir, marker, repo, model_id, variant)
+        {
+            return Some(weights_dir);
+        }
+    }
+
+    let entries = std::fs::read_dir(&models_dir).ok()?;
+    for marker in entries
+        .flatten()
+        .map(|entry| entry.path().join(INSTALL_MARKER))
+        .filter(|marker| !targeted.contains(marker))
+    {
+        if let Some(weights_dir) =
+            receipt_weights_dir_from_marker(data_dir, &marker, repo, model_id, variant)
+        {
+            return Some(weights_dir);
         }
     }
     None
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+fn receipt_weights_dir_from_marker(
+    data_dir: &Path,
+    marker: &Path,
+    repo: &str,
+    model_id: Option<&str>,
+    variant: Option<&str>,
+) -> Option<PathBuf> {
+    #[cfg(test)]
+    RECEIPT_MARKERS_READ.with(|count| count.set(count.get() + 1));
+    let bytes = std::fs::read(marker).ok()?;
+    let top = serde_json::from_slice::<Value>(&bytes).ok()?;
+    let receipts = top
+        .get("receipts")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| vec![top]);
+    for receipt in receipts {
+        if receipt.get("repo").and_then(Value::as_str) != Some(repo) {
+            continue;
+        }
+        if let Some(model_id) = model_id {
+            if receipt
+                .get("modelId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id != model_id)
+            {
+                continue;
+            }
+        }
+        if let Some(variant) = variant {
+            if receipt.get("variant").and_then(Value::as_str) != Some(variant) {
+                continue;
+            }
+        }
+        let files = receipt
+            .get("resolvedFiles")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        if files.is_empty() {
+            continue;
+        }
+        let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
+        let snapshots = repo_dir.join("snapshots");
+        let snapshot_entries = std::fs::read_dir(&snapshots).ok()?;
+        let recorded_revision = receipt
+            .get("snapshotRevision")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|revision| !revision.is_empty());
+        let matching = snapshot_entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|snapshot| {
+                snapshot.is_dir() && files.iter().all(|file| snapshot.join(file).is_file())
+            })
+            .filter(|snapshot| {
+                recorded_revision.map_or(true, |revision| {
+                    snapshot.file_name().and_then(|name| name.to_str()) == Some(revision)
+                })
+            })
+            .collect::<Vec<_>>();
+        // Schema-v2 receipts written before snapshotRevision are accepted only when their exact
+        // file set identifies one revision unambiguously. Never guess by filesystem order.
+        if recorded_revision.is_none() && matching.len() != 1 {
+            continue;
+        }
+        if let Some(snapshot) = matching.into_iter().next() {
+            // Tier receipts are self-contained below a tier directory. Only descend when every
+            // file belongs to that same recorded tier; otherwise return the snapshot root.
+            if let Some(variant) = receipt.get("variant").and_then(Value::as_str) {
+                let tier = snapshot.join(variant);
+                let prefix = format!("{variant}/");
+                if files.iter().all(|file| file.starts_with(&prefix)) && tier.is_dir() {
+                    return Some(tier);
+                }
+            }
+            return Some(snapshot);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    static RECEIPT_MARKERS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_receipt_markers_read() {
+    RECEIPT_MARKERS_READ.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn receipt_markers_read() -> usize {
+    RECEIPT_MARKERS_READ.with(std::cell::Cell::get)
 }
 
 fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathBuf> {
