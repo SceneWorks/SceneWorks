@@ -10,8 +10,8 @@ pub(crate) async fn list_assets(
         Some("library") => sceneworks_core::project_store::AssetScope::Library,
         _ => sceneworks_core::project_store::AssetScope::All,
     };
-    let assets = project_call(state, move |store| {
-        store.list_assets(
+    let (assets, filesystem_operations) = project_call(state, move |store| {
+        store.list_assets_with_filesystem_operations(
             &project_id,
             query.include_rejected.unwrap_or(false),
             query.include_trashed.unwrap_or(false),
@@ -19,6 +19,17 @@ pub(crate) async fn list_assets(
         )
     })
     .await?;
+    tracing::debug!(
+        event = "asset_list_filesystem_operations",
+        total = filesystem_operations.total(),
+        sidecar_reads = filesystem_operations.sidecar_reads,
+        generation_set_reads = filesystem_operations.generation_set_reads,
+        poster_stats = filesystem_operations.poster_stats,
+        directory_create_calls = filesystem_operations.directory_create_calls,
+        db_opens = filesystem_operations.db_opens,
+        asset_count = assets.len(),
+        "listed assets from the indexed project store"
+    );
     let assets = match character_id {
         Some(character_id) if !character_id.is_empty() => assets
             .into_iter()

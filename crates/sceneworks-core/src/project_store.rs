@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
@@ -16,8 +17,7 @@ use serde_json::{json, Map, Value};
 
 use crate::asset_index::{
     asset_origin, asset_sidecars, find_asset_sidecar_path_on_connection,
-    hydrate_indexed_asset_cached, index_asset_on_connection, normalize_asset,
-    normalize_asset_cached, sidecar_content_fingerprint, GenerationSetCache,
+    hydrate_indexed_asset_cached, index_asset_on_connection, normalize_asset, GenerationSetCache,
 };
 use crate::character_store::{
     apply_character_migrations, clear_character_tables, reindex_characters_on_connection,
@@ -223,6 +223,94 @@ pub enum AssetScope {
     #[default]
     All,
     Library,
+}
+
+/// Filesystem operations performed while serving one asset-list request.
+///
+/// This is intentionally one aggregate surface rather than a sidecar-only
+/// counter: removing sidecar hashing must not hide the generation-set reads,
+/// poster probes, or SQLite opens that remain on the request path (SC-14799).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AssetListFilesystemOperations {
+    pub sidecar_reads: u64,
+    pub generation_set_reads: u64,
+    pub poster_stats: u64,
+    pub directory_create_calls: u64,
+    pub db_opens: u64,
+}
+
+impl AssetListFilesystemOperations {
+    pub const fn total(self) -> u64 {
+        self.sidecar_reads
+            + self.generation_set_reads
+            + self.poster_stats
+            + self.directory_create_calls
+            + self.db_opens
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum AssetListFilesystemOperation {
+    SidecarRead,
+    GenerationSetRead,
+    PosterStat,
+    DirectoryCreateCall,
+    DbOpen,
+}
+
+thread_local! {
+    static ASSET_LIST_FILESYSTEM_OPERATIONS: RefCell<Vec<AssetListFilesystemOperations>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn record_asset_list_filesystem_operation(operation: AssetListFilesystemOperation) {
+    ASSET_LIST_FILESYSTEM_OPERATIONS.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        let Some(operations) = stack.last_mut() else {
+            return;
+        };
+        match operation {
+            AssetListFilesystemOperation::SidecarRead => operations.sidecar_reads += 1,
+            AssetListFilesystemOperation::GenerationSetRead => {
+                operations.generation_set_reads += 1;
+            }
+            AssetListFilesystemOperation::PosterStat => operations.poster_stats += 1,
+            AssetListFilesystemOperation::DirectoryCreateCall => {
+                operations.directory_create_calls += 1;
+            }
+            AssetListFilesystemOperation::DbOpen => operations.db_opens += 1,
+        }
+    });
+}
+
+struct AssetListFilesystemOperationScope {
+    active: bool,
+}
+
+impl AssetListFilesystemOperationScope {
+    fn begin() -> Self {
+        ASSET_LIST_FILESYSTEM_OPERATIONS.with(|stack| {
+            stack
+                .borrow_mut()
+                .push(AssetListFilesystemOperations::default());
+        });
+        Self { active: true }
+    }
+
+    fn finish(mut self) -> AssetListFilesystemOperations {
+        self.active = false;
+        ASSET_LIST_FILESYSTEM_OPERATIONS.with(|stack| stack.borrow_mut().pop().unwrap_or_default())
+    }
+}
+
+impl Drop for AssetListFilesystemOperationScope {
+    fn drop(&mut self) {
+        if self.active {
+            ASSET_LIST_FILESYSTEM_OPERATIONS.with(|stack| {
+                stack.borrow_mut().pop();
+            });
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -1158,7 +1246,37 @@ impl ProjectStore {
         include_trashed: bool,
         scope: AssetScope,
     ) -> ProjectStoreResult<Vec<Value>> {
-        self.list_assets_filtered(project_id, include_rejected, include_trashed, scope, None)
+        self.list_assets_with_filesystem_operations(
+            project_id,
+            include_rejected,
+            include_trashed,
+            scope,
+        )
+        .map(|(assets, _)| assets)
+    }
+
+    /// List assets and return the complete request-scoped filesystem-operation
+    /// inventory used by performance tests, benchmarks, and API observability.
+    ///
+    /// The indexed `asset_json` envelope is authoritative on this clean path.
+    /// SceneWorks-owned mutations update the sidecar and index before returning.
+    /// Tools that edit sidecars out of band must call
+    /// [`Self::reindex_project`] (the REST equivalent is
+    /// `POST /api/v1/projects/:project_id/reindex`) before expecting those edits
+    /// in listings. This explicit contract includes same-size rewrites and edits
+    /// that preserve timestamps; list requests do not inspect or hash sidecars.
+    pub fn list_assets_with_filesystem_operations(
+        &self,
+        project_id: &str,
+        include_rejected: bool,
+        include_trashed: bool,
+        scope: AssetScope,
+    ) -> ProjectStoreResult<(Vec<Value>, AssetListFilesystemOperations)> {
+        let operation_scope = AssetListFilesystemOperationScope::begin();
+        let result =
+            self.list_assets_filtered(project_id, include_rejected, include_trashed, scope, None);
+        let operations = operation_scope.finish();
+        result.map(|assets| (assets, operations))
     }
 
     fn list_assets_filtered(
@@ -1200,8 +1318,7 @@ impl ProjectStore {
         };
         let mut statement = connection.prepare(&format!(
             "
-            select sidecar_path, file_path, asset_json, sidecar_size, sidecar_modified_ns,
-                   sidecar_sha256
+            select sidecar_path, asset_json
               from assets
              where (?1 or rejected = 0)
                and (?2 or trashed = 0)
@@ -1217,10 +1334,6 @@ impl ProjectStore {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
                         row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<u64>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
                     ))
                 },
             )?
@@ -1232,106 +1345,31 @@ impl ProjectStore {
         let mut seen_asset_ids = std::collections::HashSet::new();
         let mut generation_sets = GenerationSetCache::default();
         let mut assets = Vec::new();
-        for row in rows {
-            let (
-                sidecar_rel,
-                file_rel,
-                asset_json,
-                indexed_size,
-                _indexed_modified_ns,
-                indexed_sha256,
-            ) = row;
-            let indexed_sidecar = sidecar_rel
-                .as_ref()
-                .map(|path| project_path.join(path))
-                .or_else(|| {
-                    file_rel
-                        .as_ref()
-                        .map(|path| project_path.join(path).with_extension("sceneworks.json"))
-                });
-            // Size and mtime alone are not content identity: editors can
-            // preserve timestamps and same-length rewrites are common. The
-            // hash makes the sidecar authoritative even when mtime is absent.
-            let indexed_fingerprint_matches = indexed_sidecar
-                .as_ref()
-                .and_then(|path| sidecar_content_fingerprint(path).ok())
-                .is_some_and(|(size, _modified_ns, sha256)| {
-                    indexed_size == Some(size) && indexed_sha256.as_deref() == Some(sha256.as_str())
-                });
-            if indexed_fingerprint_matches {
-                if let Some(asset_json) = asset_json {
-                    if let Ok(mut asset) = serde_json::from_str::<Value>(&asset_json) {
-                        if let Some(sidecar_rel) = sidecar_rel.as_ref() {
-                            if let Some(object) = asset.as_object_mut() {
-                                object.insert(
-                                    "sidecarPath".to_owned(),
-                                    Value::String(sidecar_rel.clone()),
-                                );
-                            }
-                        }
-                        if let Ok(asset) = hydrate_indexed_asset_cached(
-                            project_id,
-                            &project_path,
-                            asset,
-                            &mut generation_sets,
-                        ) {
-                            let asset_id = asset
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .to_owned();
-                            if seen_asset_ids.insert(asset_id) {
-                                assets.push(asset);
-                            }
-                            continue;
-                        }
-                    }
-                }
-            }
-            let mut candidates = Vec::new();
+        for (sidecar_rel, asset_json) in rows {
+            let Some(asset_json) = asset_json else {
+                continue;
+            };
+            let Ok(mut asset) = serde_json::from_str::<Value>(&asset_json) else {
+                continue;
+            };
             if let Some(sidecar_rel) = sidecar_rel {
-                candidates.push(project_path.join(sidecar_rel));
+                if let Some(object) = asset.as_object_mut() {
+                    object.insert("sidecarPath".to_owned(), Value::String(sidecar_rel));
+                }
             }
-            if let Some(file_rel) = file_rel {
-                candidates.push(
-                    project_path
-                        .join(file_rel)
-                        .with_extension("sceneworks.json"),
-                );
-            }
-            for sidecar_path in candidates {
-                if !sidecar_path.exists() {
-                    continue;
-                }
-                let Ok(asset) = normalize_asset_cached(
-                    project_id,
-                    &project_path,
-                    &sidecar_path,
-                    &mut generation_sets,
-                ) else {
-                    continue;
-                };
-                // The sidecar changed outside a store write (or this is a
-                // legacy row without a fingerprint). Refresh the indexed
-                // envelope once; subsequent listings stay read-free.
-                if let Ok(raw_asset) = read_json(&sidecar_path) {
-                    let _ = index_asset_on_connection(
-                        &connection,
-                        &project_path,
-                        &raw_asset,
-                        Some(&sidecar_path),
-                    );
-                }
-                let asset_id = asset
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                if !seen_asset_ids.insert(asset_id) {
-                    break;
-                }
+            let Ok(asset) = hydrate_indexed_asset_cached(
+                project_id,
+                &project_path,
+                asset,
+                &mut generation_sets,
+            ) else {
+                continue;
+            };
+            let Some(asset_id) = asset.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if seen_asset_ids.insert(asset_id.to_owned()) {
                 assets.push(asset);
-                break;
             }
         }
         Ok(assets)
@@ -3152,6 +3190,7 @@ fn backfill_upscale_variant_lineage(project_path: &Path) -> ProjectStoreResult<u
         std::collections::HashMap::new();
     let mut parsed: Vec<(PathBuf, Value)> = Vec::with_capacity(sidecars.len());
     for sidecar_path in sidecars {
+        record_asset_list_filesystem_operation(AssetListFilesystemOperation::SidecarRead);
         let Ok(asset) = read_json(&sidecar_path) else {
             continue;
         };
@@ -3309,6 +3348,7 @@ fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexCounts
 
     let mut counts = ReindexCounts::default();
     for sidecar_path in asset_sidecars(project_path)? {
+        record_asset_list_filesystem_operation(AssetListFilesystemOperation::SidecarRead);
         let Ok(asset) = read_json(&sidecar_path) else {
             continue;
         };
@@ -3939,6 +3979,8 @@ fn write_project_file(
 }
 
 fn connect_project_db(project_path: &Path) -> ProjectStoreResult<Connection> {
+    record_asset_list_filesystem_operation(AssetListFilesystemOperation::DirectoryCreateCall);
+    record_asset_list_filesystem_operation(AssetListFilesystemOperation::DbOpen);
     fs::create_dir_all(project_path)?;
     let connection = Connection::open(project_path.join("project.db"))?;
     connection.busy_timeout(Duration::from_millis(5000))?;
@@ -4996,8 +5038,8 @@ mod tests {
         connect_project_db, ensure_project_db_ready, find_timeline_file, guess_mime_from_filename,
         index_timeline, is_safe_relative_path, is_safe_upload_extension, normalize_asset_tags,
         read_json, read_registry_payload, sniff_image_format, upload_extension,
-        upscale_lineage_group, AssetScope, CharacterCreateInput, CharacterLookInput,
-        CharacterReferenceInput, ProjectStore, ProjectStoreError, UploadAsset,
+        upscale_lineage_group, write_json, AssetScope, AssetStatusPatch, CharacterCreateInput,
+        CharacterLookInput, CharacterReferenceInput, ProjectStore, ProjectStoreError, UploadAsset,
         ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID,
         MAX_REGISTRY_BYTES, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
         UPSCALE_LINEAGE_QUERY,
@@ -6434,8 +6476,7 @@ mod tests {
     }
 
     #[test]
-    fn list_assets_refreshes_a_stale_indexed_envelope_once() {
-        use crate::store_util::write_json;
+    fn list_assets_external_same_size_edit_requires_explicit_reindex() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
         let project = store.create_project("Indexed").expect("project creates");
@@ -6455,39 +6496,163 @@ mod tests {
             .expect("asset persists");
         let project_path = store.find_project_path(&project.id).unwrap();
         let sidecar = project_path.join("assets/images/set/asset_cached.sceneworks.json");
+        std::fs::write(
+            project_path.join("assets/images/set/asset_cached.png"),
+            b"png",
+        )
+        .unwrap();
         let mut asset = read_json(&sidecar).unwrap();
-        asset["displayName"] = json!("After");
+        asset["displayName"] = json!("After!");
+        let old_metadata = std::fs::metadata(&sidecar).unwrap();
         write_json(&sidecar, &asset).unwrap();
-
-        let listed = store
-            .list_assets(&project.id, false, false, AssetScope::All)
-            .expect("list refreshes");
-        assert_eq!(listed[0]["displayName"], json!("After"));
-        let connection = connect_project_db(&project_path).unwrap();
-        let cached: String = connection
-            .query_row(
-                "select asset_json from assets where id='asset_cached'",
-                [],
-                |row| row.get(0),
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&sidecar)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_accessed(old_metadata.accessed().unwrap())
+                    .set_modified(old_metadata.modified().unwrap()),
             )
             .unwrap();
         assert_eq!(
-            serde_json::from_str::<Value>(&cached).unwrap()["displayName"],
-            json!("After")
+            std::fs::metadata(&sidecar).unwrap().len(),
+            old_metadata.len(),
+            "fixture is a same-size rewrite"
+        );
+        assert_eq!(
+            std::fs::metadata(&sidecar).unwrap().modified().unwrap(),
+            old_metadata.modified().unwrap(),
+            "fixture restores the original modification timestamp"
+        );
+
+        let (listed, operations) = store
+            .list_assets_with_filesystem_operations(&project.id, false, false, AssetScope::All)
+            .expect("clean indexed list");
+        assert_eq!(
+            listed[0]["displayName"],
+            json!("Before"),
+            "out-of-band edits do not bypass the explicit reindex contract"
+        );
+        assert_eq!(operations.sidecar_reads, 0);
+
+        store
+            .reindex_project(&project.id)
+            .expect("explicit reindex");
+        let listed = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("list after reindex");
+        assert_eq!(
+            listed[0]["displayName"],
+            json!("After!"),
+            "reindex reads content, so timestamps are irrelevant to reconciliation"
         );
     }
 
     #[test]
-    fn list_assets_rejects_same_metadata_and_missing_mtime_cache_false_hits() {
-        use crate::store_util::write_json;
+    fn list_assets_many_clean_rows_reads_no_sidecar_content() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
-        let project = store.create_project("Content fingerprint").unwrap();
+        let project = store.create_project("Many indexed assets").unwrap();
+        for index in 0..128 {
+            let asset_id = format!("asset_{index:03}");
+            let fact = json!({
+                "assetId": asset_id,
+                "mediaPath": format!("assets/images/shared/{asset_id}.png"),
+                "mimeType": "image/png",
+                "displayName": format!("Asset {index:03}"),
+                "createdAt": format!("2026-05-25T00:{:02}:{:02}Z", index / 60, index % 60),
+                "mode": "text_to_image",
+                "model": "z_image_turbo",
+                "adapter": "z_image_diffusers",
+                "prompt": "indexed",
+            });
+            store
+                .persist_generated_asset(&project.id, "job-1", "shared", &fact)
+                .unwrap();
+        }
+
+        let (assets, operations) = store
+            .list_assets_with_filesystem_operations(&project.id, false, false, AssetScope::All)
+            .unwrap();
+        assert_eq!(assets.len(), 128);
+        assert_eq!(
+            operations.sidecar_reads, 0,
+            "clean indexed listing must not read or hash one sidecar per row"
+        );
+        assert_eq!(
+            operations.generation_set_reads, 1,
+            "the shared generation set remains deduplicated within the request"
+        );
+        assert_eq!(operations.poster_stats, 0, "images do not probe posters");
+        assert!(
+            operations.db_opens > 0,
+            "DB opens stay visible in the total"
+        );
+        assert_eq!(
+            operations.total(),
+            operations.generation_set_reads
+                + operations.poster_stats
+                + operations.directory_create_calls
+                + operations.db_opens
+        );
+    }
+
+    #[test]
+    fn list_assets_skips_corrupt_indexed_envelope_without_hiding_healthy_rows() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Corrupt envelope").unwrap();
+        for asset_id in ["healthy", "corrupt"] {
+            let fact = json!({
+                "assetId": asset_id,
+                "mediaPath": format!("assets/images/set/{asset_id}.png"),
+                "mimeType": "image/png",
+                "displayName": asset_id,
+                "createdAt": if asset_id == "healthy" {
+                    "2026-05-25T00:00:00Z"
+                } else {
+                    "2026-05-25T00:00:01Z"
+                },
+                "mode": "text_to_image",
+                "model": "z_image_turbo",
+                "adapter": "z_image_diffusers",
+                "prompt": "cache",
+            });
+            store
+                .persist_generated_asset(&project.id, "job-1", "set", &fact)
+                .unwrap();
+        }
+        let project_path = store.find_project_path(&project.id).unwrap();
+        connect_project_db(&project_path)
+            .unwrap()
+            .execute(
+                "update assets set asset_json = '{not-json' where id = 'corrupt'",
+                [],
+            )
+            .unwrap();
+
+        let (assets, operations) = store
+            .list_assets_with_filesystem_operations(&project.id, false, false, AssetScope::All)
+            .unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0]["id"], json!("healthy"));
+        assert_eq!(
+            operations.sidecar_reads, 0,
+            "a corrupt cached row fails closed instead of falling back to sidecar IO"
+        );
+    }
+
+    #[test]
+    fn store_mutation_updates_indexed_envelope_before_returning() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Immediate mutation").unwrap();
         let fact = json!({
-            "assetId": "asset_fingerprint",
-            "mediaPath": "assets/images/set/asset_fingerprint.png",
+            "assetId": "asset_mutated",
+            "mediaPath": "assets/images/set/asset_mutated.png",
             "mimeType": "image/png",
-            "displayName": "Before",
+            "displayName": "Mutated",
             "createdAt": "2026-05-25T00:00:00Z",
             "mode": "text_to_image",
             "model": "z_image_turbo",
@@ -6497,58 +6662,99 @@ mod tests {
         store
             .persist_generated_asset(&project.id, "job-1", "set", &fact)
             .unwrap();
-        let project_path = store.find_project_path(&project.id).unwrap();
-        let sidecar = project_path.join("assets/images/set/asset_fingerprint.sceneworks.json");
-
-        let mut asset = read_json(&sidecar).unwrap();
-        asset["displayName"] = json!("After!");
-        write_json(&sidecar, &asset).unwrap();
-        let metadata = std::fs::metadata(&sidecar).unwrap();
-        let modified_ns = metadata
-            .modified()
-            .unwrap()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-            .to_string();
-        let connection = connect_project_db(&project_path).unwrap();
-        connection
-            .execute(
-                "update assets set sidecar_size=?1, sidecar_modified_ns=?2
-                  where id='asset_fingerprint'",
-                params![metadata.len(), modified_ns],
+        store
+            .update_asset_status(
+                &project.id,
+                "asset_mutated",
+                AssetStatusPatch {
+                    favorite: Some(true),
+                    rating: Some(4),
+                    rejected: Some(true),
+                    trashed: None,
+                },
             )
             .unwrap();
-        drop(connection);
-        let listed = store
+
+        let (assets, operations) = store
+            .list_assets_with_filesystem_operations(&project.id, true, false, AssetScope::All)
+            .unwrap();
+        assert_eq!(assets[0]["status"]["favorite"], json!(true));
+        assert_eq!(assets[0]["status"]["rating"], json!(4));
+        assert_eq!(assets[0]["status"]["rejected"], json!(true));
+        assert_eq!(operations.sidecar_reads, 0);
+    }
+
+    #[test]
+    fn indexed_listing_preserves_order_filters_and_library_scope() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Selection").unwrap();
+        for (asset_id, created_at, mode) in [
+            ("older", "2026-05-25T00:00:01Z", "text_to_image"),
+            ("rejected", "2026-05-25T00:00:02Z", "text_to_image"),
+            ("character", "2026-05-25T00:00:03Z", "character_image"),
+        ] {
+            store
+                .persist_generated_asset(
+                    &project.id,
+                    "job-1",
+                    "set",
+                    &json!({
+                        "assetId": asset_id,
+                        "mediaPath": format!("assets/images/set/{asset_id}.png"),
+                        "mimeType": "image/png",
+                        "displayName": asset_id,
+                        "createdAt": created_at,
+                        "mode": mode,
+                        "model": "z_image_turbo",
+                        "adapter": "z_image_diffusers",
+                        "prompt": "selection",
+                    }),
+                )
+                .unwrap();
+        }
+        store
+            .update_asset_status(
+                &project.id,
+                "rejected",
+                AssetStatusPatch {
+                    rejected: Some(true),
+                    ..AssetStatusPatch::default()
+                },
+            )
+            .unwrap();
+
+        let visible = store
             .list_assets(&project.id, false, false, AssetScope::All)
             .unwrap();
         assert_eq!(
-            listed[0]["displayName"],
-            json!("After!"),
-            "content hash catches same-size/same-mtime rewrites"
+            visible
+                .iter()
+                .map(|asset| asset["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["character", "older"],
+            "created-at descending order and rejected filtering are DB-backed"
         );
-
-        let mut asset = read_json(&sidecar).unwrap();
-        asset["displayName"] = json!("Later!");
-        write_json(&sidecar, &asset).unwrap();
-        let metadata = std::fs::metadata(&sidecar).unwrap();
-        let connection = connect_project_db(&project_path).unwrap();
-        connection
-            .execute(
-                "update assets set sidecar_size=?1, sidecar_modified_ns=null
-                  where id='asset_fingerprint'",
-                params![metadata.len()],
-            )
-            .unwrap();
-        drop(connection);
-        let listed = store
-            .list_assets(&project.id, false, false, AssetScope::All)
+        let including_rejected = store
+            .list_assets(&project.id, true, false, AssetScope::All)
             .unwrap();
         assert_eq!(
-            listed[0]["displayName"],
-            json!("Later!"),
-            "content hash remains authoritative when mtime is unavailable"
+            including_rejected
+                .iter()
+                .map(|asset| asset["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["character", "rejected", "older"]
+        );
+        let library = store
+            .list_assets(&project.id, true, false, AssetScope::Library)
+            .unwrap();
+        assert_eq!(
+            library
+                .iter()
+                .map(|asset| asset["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["rejected", "older"],
+            "Library scope excludes character-studio outputs"
         );
     }
 
