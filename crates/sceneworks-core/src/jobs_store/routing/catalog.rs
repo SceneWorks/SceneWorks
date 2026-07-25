@@ -10,7 +10,7 @@ use serde_json::{json, Map, Value};
 use crate::jobs_store::routing::gaps::{classify_image_gap, classify_video_gap, UnsupportedReason};
 use crate::jobs_store::routing::mlx::{image_request_mlx_eligible, video_mode_is_mlx_eligible};
 
-/// The user-facing affordance prefix the Mac UI shows in place of a torch-only control
+/// The user-facing affordance prefix the Mac UI shows in place of a control with no native Mac lane
 /// (sc-3486). Centralised so the API, the web client, and the gap docs read identically.
 pub const MAC_NOT_AVAILABLE_LABEL: &str = "Not available on Mac (MLX only)";
 
@@ -18,7 +18,7 @@ pub const MAC_NOT_AVAILABLE_LABEL: &str = "Not available on Mac (MLX only)";
 /// predicates as the [`mac_rust_supported`] job oracle — one source of truth, so what the UI
 /// hides can never drift from what routing refuses. `supported` = at least one generation config
 /// for this model routes to the in-process Rust/MLX flow on macOS, so the model stays in the
-/// picker; `false` = a torch-only model the Mac UI hides/disables once gating is active (its
+/// picker; `false` = a model with no native Mac lane that the UI hides/disables once gating is active (its
 /// `reason` names the porting epic). The per-feature flags use "available in *some* MLX config"
 /// semantics (they never over-gate a valid combination) so a control is disabled only when the
 /// model can't use it on MLX at all; residual config-specific dead ends are caught by the
@@ -67,7 +67,7 @@ pub(crate) fn probe_payload(model: &str, entries: &[(&str, Value)]) -> Map<Strin
 
 /// UI gating support for a model id of the given catalog `model_type` ("image" / "video" / other).
 /// Non-image/video types (utility/infra: upscalers, captioners) are reported `supported` — their
-/// Python-only *actions* are gated by [`mac_capabilities`] at the job-type level, not by hiding
+/// Capability-specific *actions* are gated by [`mac_capabilities`] at the job-type level, not by hiding
 /// the model from a picker. Same source of truth as [`mac_rust_supported`].
 ///
 /// `family` is the model's catalog-declared architecture family (`None` for a builtin whose routing
@@ -188,7 +188,8 @@ pub(crate) fn image_model_mac_support(model: &str, family: Option<&str>) -> Mode
 /// The `video_generate` modes the UI offers, in display order, so the gating mirrors
 /// [`video_mode_is_mlx_eligible`] for every mode a Mac user could pick. The clip-conditioning
 /// modes `extend_clip` / `video_bridge` are included (sc-3773) so the Mac UI gates them
-/// per-model — MLX on the LTX IC-LoRA path, torch on Wan — rather than via a coarse global flag.
+/// per-model — native on the supported LTX/Wan paths, queued when unsupported — rather than via a
+/// coarse global flag.
 pub(crate) const VIDEO_UI_MODES: &[&str] = &[
     "text_to_video",
     "image_to_video",
@@ -247,7 +248,7 @@ pub struct MacFeatureSupport {
 impl MacFeatureSupport {
     // Declares a Mac feature gap with the reason + suggested port epic. Currently no
     // feature is gated (poseFromPhoto was the last, ported in sc-3487/flipped in
-    // sc-4206) — kept as the gating vocabulary for the next torch-only surface that
+    // sc-4206) — kept as the gating vocabulary for the next unsupported native surface that
     // appears before its Rust port lands, so a gap is declared the same way every time.
     #[allow(dead_code)]
     fn unsupported(feature: &str, detail: &str, suggested_epic: &str) -> Self {
@@ -264,7 +265,7 @@ impl MacFeatureSupport {
 }
 
 /// macOS training support (sc-3486): the kernels with a native mlx-gen Rust trainer, so the
-/// Training studio can disable a base model whose kernel only runs on the Python torch trainer.
+/// Training studio can disable a base model whose kernel has no native Mac trainer.
 /// `lokr_on_wan_supported=false` mirrors the LoKr-on-Wan routing caveat.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -273,7 +274,7 @@ pub struct MacTrainingSupport {
     pub lokr_on_wan_supported: bool,
 }
 
-/// What the Mac UI needs to gate every non-model Python surface plus the master switch
+/// What the Mac UI needs to gate every non-model native gap plus the master switch
 /// (sc-3486). `mac_gating_active` is the rollout flag (`SCENEWORKS_MLX_REQUIRED`): when `false`
 /// (Windows/Linux, or a Mac still in observe mode) the client applies no gating at all, so
 /// non-Mac pickers are untouched. The per-feature entries are facts about the Rust flow
@@ -316,15 +317,15 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
     );
     features.insert(
         // The AuraSR upscale engine (`engine=aura-sr`) is dropped on Mac (sc-3668, port-or-drop
-        // spike): it is a 617M-param torch-only GigaGAN with no viable Rust path and only a marginal,
+        // spike): it is a 617M-param legacy GigaGAN with no viable Rust path and only a marginal,
         // ~35-50x-slower quality difference vs the already-ported Real-ESRGAN x4. As of sc-5499 it is
         // also dropped as an OFFERED engine off-Mac — there is no native (MLX/candle) path and the
-        // Python torch backend that served it on Windows/Linux is retired in Phase 7 (epic 5483), so
-        // exposing it would point users at a path about to disappear. `supported: false` on every
+        // historical Python backend that served it on Windows/Linux is retired, so exposing it would
+        // point users at a nonexistent path. `supported: false` on every
         // platform (platform-intrinsic, like `imageUpscaleSeedvr2`), so the UI hides the engine
         // everywhere. Must agree with the AuraSR arm of `mac_rust_supported` (UI-hidden == routing
-        // refuses): the native MLX/candle workers refuse it; only the (transitional) torch worker runs
-        // an explicitly-submitted aura-sr job until Phase 7.
+        // refuses): the native MLX/candle workers refuse it, so an explicitly submitted AuraSR job
+        // remains queued.
         "imageUpscaleAuraSr".to_owned(),
         MacFeatureSupport {
             supported: false,
@@ -344,7 +345,7 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         // (a backend exists, regardless of the gating rollout flag) so the web upscale picker offers
         // SeedVR2 on every platform that has a backend (Mac, Windows, Linux) and hides it only where
         // there is none (contrast AuraSR, which the UI hides only under active gating). Must agree with
-        // the routing oracle (mlx OR candle claims seedvr2; a plain torch worker refuses it).
+        // the routing oracle (mlx OR candle claims SeedVR2; every other descriptor refuses it).
         "imageUpscaleSeedvr2".to_owned(),
         MacFeatureSupport {
             supported: seedvr2_supported,
@@ -417,7 +418,7 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
     features.insert(
         // Video upscaling is net-new on Mac (epic 4811 / sc-4816): the native-MLX SeedVR2
         // engine gives SceneWorks its first video upscaler, running in-process on the macOS
-        // MLX worker (zero-Python). There is no torch fallback (mac-only), so this feature is
+        // MLX worker. There is no fallback (mac-only), so this feature is
         // the gate for the Video Studio "Upscale" action. Must agree with the VideoUpscale arm
         // of `mac_rust_supported` (what the UI shows == what routing accepts).
         "videoUpscale".to_owned(),
@@ -656,7 +657,8 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("illustrious_xl_v2", true, true, false, false, true),
     // RealVisXL Lightning (MLX sc-6075 / candle sc-7176): standalone few-step distilled SDXL checkpoint
     // on the shared `sdxl` engine, few-step `lightning` accel sampler. **txt2img only** on both backends —
-    // edit / reference / mask / pose shapes fall back to torch (accel sampler is conditioning-incompatible).
+    // edit / reference / mask / pose shapes are refused and remain queued (the accel sampler is
+    // conditioning-incompatible).
     // sc-10812 (epic 9083): shares `candle-gen-sdxl`, which advertises `supported_quants: [Q4, Q8]` +
     // inference LoRA-on-packed after sc-10767 (packed UNet sc-9416 / dual-CLIP sc-9527 / adapter fold
     // sc-9528). Its `SceneWorks/realvisxl-lightning-mlx` turnkey ships the standard q4/q8/bf16 tiers
@@ -734,12 +736,13 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // packed ChatGLM3 (the four GLM projections) + the vendored packed-detecting SDXL UNet, VAE dense —
     // and advertises `supported_quants: [Q4, Q8]`. So a quant tier-select stays on candle → `candle_quant`.
     // NOT `candle_quant_lora`: kolors advertises NO candle inference LoRA (`supports_lora: false`), so a
-    // LoRA still defers to torch. bf16 still resolves to Quant::None (dense), verbatim.
+    // A LoRA is still refused by the candle lane and remains queued. bf16 still resolves to
+    // Quant::None (dense), verbatim.
     ModelCaps::new("kolors", true, true, true, false, false),
     // Microsoft Lens / Lens-Turbo (epic 3164 / sc-5105 MLX; sc-5126 candle): pure T2I family. UNLIKE the
     // other candle families it DOES advertise on-the-fly quant AND LoRA/LoKr, so `candle_quant_lora` is
-    // set — the first (and, with SD3.5/Krea, one of the) candle families exempt from the quant/LoRA → torch
-    // fallbacks. Lens was the LAST whole-model torch-only image family — once it routed, the per-model
+    // set — the first (and, with SD3.5/Krea, one of the) candle families exempt from quant/LoRA
+    // refusal. Lens was the LAST whole-model torch-only image family — once it routed, the per-model
     // torch-only image epic seam matched nothing and was retired (sc-8951).
     ModelCaps::new("lens", true, true, false, false, true),
     ModelCaps::new("lens_turbo", true, true, false, false, true),
@@ -788,7 +791,7 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("krea_2_raw", true, true, false, false, true),
     // Stable Diffusion 3.5 Large / Large Turbo / Medium (epic 7841 / sc-7871 MLX; sc-7880 candle):
     // pure txt2img. Candle advertises Q4/Q8 (sc-7879) but NOT inference LoRA (`supports_lora: false`), so
-    // `candle_quant` is set — an explicit quant request stays on candle while a LoRA still defers to torch.
+    // `candle_quant` is set — an explicit quant request stays on candle while a LoRA is refused.
     ModelCaps::new("sd3_5_large", true, true, true, false, false),
     ModelCaps::new("sd3_5_large_turbo", true, true, true, false, false),
     ModelCaps::new("sd3_5_medium", true, true, true, false, false),
@@ -797,7 +800,7 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // (Windows/CUDA + Linux, candle-gen #495 — loads the whole `Efficient-Large-Model/
     // Sana_1600M_1024px_diffusers` HF snapshot dense), so `candle_routed = true`. Pure txt2img; NOT
     // `candle_quant` / `candle_lora`: the candle base path advertises neither (dense bf16, no adapter
-    // fold) — an `mlxQuantize` or LoRA request defers to torch off-Mac.
+    // fold) — an `mlxQuantize` or LoRA request is refused off-Mac and remains queued.
     ModelCaps::new("sana_1600m", true, true, false, false, false),
     // SANA-Sprint 1.6B (epic 8485 / sc-8490 MLX; sc-11781 candle): NVIDIA's few-step CFG-FREE distill of
     // SANA — the SAME 1.6B Linear-DiT trunk with a guidance embedder, sampled by the SCM/TrigFlow
@@ -806,7 +809,7 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // candle-gen #498 — loads the whole `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` HF
     // snapshot dense), so `candle_routed = true`. Pure txt2img; NOT `candle_quant` / `candle_lora`: the
     // candle Sprint path advertises neither (the adapter rejects quant / LoRA / control) — an `mlxQuantize`
-    // or LoRA request defers to torch off-Mac.
+    // or LoRA request is refused off-Mac and remains queued.
     ModelCaps::new("sana_sprint_1600m", true, true, false, false, false),
     // Anima base / aesthetic / turbo (epic 10512): anime txt2img on BOTH backends — native-MLX (macOS,
     // install-time Q4/Q8 quant) and the candle off-Mac lane (sc-10676), which sc-10625 GPU-validated on
@@ -916,7 +919,7 @@ macro_rules! derive_model_list {
 derive_model_list! {
     /// Models the in-process Rust MLX worker generates today, by id (derived from
     /// [`IMAGE_MODEL_CAPS`]`.mlx_routed`, sc-9495). A model id absent here is never routed to the mlx
-    /// worker, so the Python torch path stays authoritative for it.
+    /// worker, so an absent id remains unclaimed unless family-based imported routing admits it.
     pub(crate) MLX_ROUTED_MODELS, IMAGE_MODEL_CAPS, mlx_routed
 }
 
@@ -1081,8 +1084,8 @@ pub(crate) fn imported_image_request_family_eligible(
 derive_model_list! {
     /// The models the candle (Windows/CUDA) lane can serve for base txt2img (derived from
     /// [`IMAGE_MODEL_CAPS`]`.candle_routed`, sc-9495). Mirrors the worker's `image_jobs::is_candle_engine`.
-    /// Deliberately narrow: candle is a gated txt2img-only lane, so every conditioning shape falls back to
-    /// the Python torch worker unless a bespoke candle lane in `image_job_is_candle_eligible` claims it.
+    /// Deliberately narrow: candle is a gated txt2img-only lane, so every conditioning shape is
+    /// refused unless a bespoke candle lane in `image_job_is_candle_eligible` claims it.
     pub(crate) CANDLE_ROUTED_MODELS, IMAGE_MODEL_CAPS, candle_routed
 }
 
@@ -1100,7 +1103,7 @@ derive_model_list! {
     /// The candle image families that advertise on-the-fly Q4/Q8 quant AND LoRA/LoKr adapters — Lens /
     /// Lens-Turbo and Krea 2 Turbo (derived from [`IMAGE_MODEL_CAPS`]`.candle_quant_lora`, sc-9495; Krea
     /// added sc-9983 once sc-9607 flipped its `supported_quants`). For these a LoRA or an explicit quant
-    /// request does NOT force the job to torch. Subset of [`CANDLE_ROUTED_MODELS`].
+    /// request stays on candle instead of being refused. Subset of [`CANDLE_ROUTED_MODELS`].
     pub(crate) CANDLE_QUANT_LORA_MODELS, IMAGE_MODEL_CAPS, candle_quant_lora
 }
 
@@ -1108,7 +1111,8 @@ derive_model_list! {
     /// The candle image families that advertise on-the-fly Q4/Q8 quant but NOT inference LoRA — Stable
     /// Diffusion 3.5, Ideogram 4 (+Turbo), and Boogu (Base/Turbo/Edit) (derived from
     /// [`IMAGE_MODEL_CAPS`]`.candle_quant`, sc-9495; the ideogram/boogu packed families added sc-9983 once
-    /// sc-9607 flipped their `supported_quants`). Quant stays on candle; a LoRA still defers to torch.
+    /// sc-9607 flipped their `supported_quants`). Quant stays on candle; a LoRA is refused and remains
+    /// queued.
     /// Disjoint from [`CANDLE_QUANT_LORA_MODELS`]; both are consulted by the gate. Subset of
     /// [`CANDLE_ROUTED_MODELS`].
     pub(crate) CANDLE_QUANT_MODELS, IMAGE_MODEL_CAPS, candle_quant
@@ -1159,10 +1163,10 @@ derive_model_list! {
 /// kernel and base model onto an engine trainer id). `kolors_lora` (SDXL U-Net plus
 /// ChatGLM3) gained a native trainer in sc-4568, cut over here in sc-4732. `lens_lora`
 /// gained a native mlx-gen-lens trainer in sc-5148, cut over here in sc-5180 (off-Mac
-/// keeps the Python sidecar trainer). `krea_lora` is the native `mlx-gen-krea` trainer
-/// (sc-7577); it has no torch path, so it is also listed in `MLX_ONLY_TRAINING_KERNELS`
+/// has no off-Mac trainer). `krea_lora` is the native `mlx-gen-krea` trainer
+/// (sc-7577); it is native-only, so it is also listed in `MLX_ONLY_TRAINING_KERNELS`
 /// (sc-7578). `sd3_lora` is the native `mlx-gen-sd3` trainer (sc-7883/7885; Large +
-/// MMDiT-X Medium training bases), cut over here in sc-7884; it has no torch path either,
+/// MMDiT-X Medium training bases), cut over here in sc-7884; it is native-only too,
 /// so it is also in `MLX_ONLY_TRAINING_KERNELS`. A kernel absent here is never routed to
 /// the mlx worker.
 pub(crate) const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
@@ -1176,7 +1180,7 @@ pub(crate) const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "wan_moe_lora",
     "ltx_mlx_lora",
     // Anima (epic 10512, sc-10522): the native `mlx-gen-anima` LoRA/LoKr trainer (DiT + `llm_adapter`
-    // conditioner). No torch path, so it is also in `MLX_ONLY_TRAINING_KERNELS`.
+    // conditioner). It is native-only, so it is also in `MLX_ONLY_TRAINING_KERNELS`.
     "anima_lora",
 ];
 
@@ -1185,13 +1189,13 @@ pub(crate) const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
 /// holds trainers for `sdxl`, `z_image_turbo`, `lens`, `krea_2_raw` (the Krea 2 Raw 12B DiT, epic
 /// 7565 P4 — sc-8614 wires it here), and the Wan **A14B T2V** MoE (`wan2_2_t2v_14b`); the first four
 /// map straight from kernel, while `wan_moe_lora` is base-model gated (handled in
-/// [`training_job_is_candle_eligible`]). UNLIKE the torch families (z-image/sdxl/lens/wan), Krea has
-/// NO torch trainer — it is in BOTH this set and [`MLX_ONLY_TRAINING_KERNELS`] (Rust-only: mlx OR
-/// candle, never torch). The dense Wan 5B + the I2V A14B have no candle trainer yet (sc-5167
-/// follow-ups) and Kolors/LTX none at all — those kernels stay on the Python torch worker off-Mac.
+/// [`training_job_is_candle_eligible`]). Krea is in BOTH this set and
+/// [`MLX_ONLY_TRAINING_KERNELS`] (Rust-only: mlx OR candle). The dense Wan 5B + the I2V A14B have no
+/// candle trainer yet (sc-5167 follow-ups), and Kolors/LTX none at all; unsupported kernels remain
+/// queued off-Mac.
 /// `krea_control` (epic 10159, B2 sc-10163 / B1 sc-10162) is the Krea 2 pose-ControlNet branch trainer
-/// (candle-gen-krea `ControlTrainer`, dispatched under `krea_2_control`); it too has NO torch or MLX
-/// trainer, so — like `krea_lora` — it is also in [`MLX_ONLY_TRAINING_KERNELS`] but NOT
+/// (candle-gen-krea `ControlTrainer`, dispatched under `krea_2_control`); it has no MLX trainer, so —
+/// like `krea_lora` — it is also in [`MLX_ONLY_TRAINING_KERNELS`] but NOT
 /// [`MLX_ROUTED_TRAINING_KERNELS`] (the MLX control lane is B5/sc-10177).
 pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "z_image_lora",
@@ -1201,18 +1205,17 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "krea_control",
 ];
 
-/// Training kernels with NO **torch** fallback — only a Rust worker can run them, so a torch worker
+/// Native-only training kernels — only a Rust worker can run them, so a generic worker descriptor
 /// must refuse the job (leaving it queued for a Rust worker) rather than claim it and fail with "no
 /// training kernel". `ltx_mlx_lora` was Apple-Silicon-only MLX-Python; epic 3039 (sc-3049) retired
-/// that Python trainer, leaving the native Rust LTX trainer as the sole path. The torch families
-/// (z-image/sdxl/wan) keep their Python trainer as the Windows path + Mac fallback, so they are
-/// deliberately NOT listed here. `krea_lora` (epic 7565) is Rust-native with no torch trainer — but
+/// that Python trainer, leaving the native Rust LTX trainer as the sole path. Kernels that have an
+/// alternate native trainer are deliberately NOT listed here. `krea_lora` (epic 7565) is Rust-native — but
 /// UNLIKE LTX/SD3 it now ALSO has a candle trainer (sc-8614, P4), so it is the one member that runs
 /// on EITHER Rust backend (mlx in-process on Mac, candle off-Mac); the [`worker_supports_job`] gate
 /// exempts a candle worker for a `krea_lora` job it is candle-eligible for (it is also in
-/// [`CANDLE_ROUTED_TRAINING_KERNELS`]), while torch is still refused. `sd3_lora` (epic 7841 T3
-/// sc-7884) is MLX-native with no torch trainer and no candle trainer yet (the off-Mac/candle SD3.5
-/// trainer is epic 7982), so — like LTX — only an mlx worker runs it today.
+/// [`CANDLE_ROUTED_TRAINING_KERNELS`]), while a generic worker is refused. `sd3_lora` (epic 7841 T3
+/// sc-7884) is MLX-native with no candle trainer yet (the off-Mac/candle SD3.5 trainer is epic
+/// 7982), so — like LTX — only an mlx worker runs it today.
 pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     "ltx_mlx_lora",
     "krea_lora",

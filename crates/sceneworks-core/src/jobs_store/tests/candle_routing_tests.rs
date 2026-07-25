@@ -1,6 +1,6 @@
 //! Candle (Windows/CUDA) SDXL lane routing (epic 3672, sc-3678): the candle worker serves a
-//! gated, narrow SDXL/RealVisXL **txt2img-only** lane and must defer every other shape to the
-//! Python torch worker. These tests pin the lane boundary (`image_request_candle_eligible`) and
+//! gated, narrow SDXL/RealVisXL **txt2img-only** lane and must refuse every other shape, leaving it
+//! queued for a compatible native worker. These tests pin the lane boundary (`image_request_candle_eligible`) and
 //! the full claim gate (`worker_supports_job` via the `candle` marker capability).
 use super::*;
 use serde_json::{json, Value};
@@ -54,7 +54,7 @@ fn image_edit_job(payload: Value) -> JobSnapshot {
 }
 
 /// A worker on a real CUDA gpu index advertising `capabilities` (string ids). The candle worker
-/// carries the `candle` marker; the torch worker on the same box does not.
+/// carries the `candle` marker; a synthetic generic descriptor does not.
 fn gpu_worker(capabilities: &[&str]) -> WorkerSnapshot {
     serde_json::from_value(json!({
         "id": "worker_1",
@@ -71,7 +71,7 @@ fn gpu_worker(capabilities: &[&str]) -> WorkerSnapshot {
 // Mirrors the real candle advertised set (`with_candle_capabilities`): `image_generate` (derived)
 // plus the `image_edit` carve-out (sc-5487 edit lanes) and the `candle` lane marker.
 const CANDLE_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "candle"];
-// The Python torch worker advertises the broad image surface but no `candle` marker.
+// Synthetic generic descriptor used to exercise the non-candle branch; production has no fallback.
 const TORCH_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "image_detail"];
 
 #[test]
@@ -294,7 +294,7 @@ fn candle_routed_models_plain_txt2img_are_eligible() {
     // INCLUDING base `z_image` (sc-8679): the registered candle `z_image` base generator makes a plain
     // txt2img `z_image` job candle-eligible, the base sibling of `z_image_turbo`. (Its strict-pose
     // control lane is branched out earlier in `image_job_is_candle_eligible`; its edit shapes reject
-    // below — see `new_candle_families_conditioning_shapes_fall_back_to_torch`.)
+    // below — see the conditioning-shape refusal test.)
     for model in CANDLE_ROUTED_MODELS {
         assert!(
             image_request_candle_eligible(model, &object(json!({ "prompt": "a red fox" }))),
@@ -402,8 +402,8 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
 #[test]
 fn base_z_image_txt2img_is_candle_eligible_but_edit_shapes_are_not() {
     // sc-8679: base `z_image` plain txt2img rides the candle lane (the base sibling of z_image_turbo);
-    // its edit / reference / mask conditioning shapes still defer to the Python torch worker (no candle
-    // base-z-image edit provider — that is a separate story).
+    // its edit / reference / mask conditioning shapes are refused and remain queued (no candle
+    // base-z-image edit provider).
     assert!(
         image_request_candle_eligible("z_image", &object(json!({ "prompt": "a red fox" }))),
         "base z_image plain txt2img must be candle-eligible (sc-8679)"
@@ -423,9 +423,9 @@ fn base_z_image_txt2img_is_candle_eligible_but_edit_shapes_are_not() {
 #[test]
 fn non_candle_families_and_variants_are_never_candle_eligible() {
     // The still-unwired weight/shape variants of wired families (edit ids) plus a genuinely
-    // txt2img-torch-only image id (`pulid_flux_dev` — its only candle lane is the bespoke
-    // character-reference path, so a PLAIN txt2img prompt has no candle route) all stay on the Python
-    // torch worker. (chroma / kolors / sensenova ARE candle-routed now — sc-5484 / sc-5576 — for
+    // unsupported plain-txt2img image id (`pulid_flux_dev` — its only candle lane is the bespoke
+    // character-reference path, so a PLAIN txt2img prompt has no native route) all remain queued.
+    // (chroma / kolors / sensenova ARE candle-routed now — sc-5484 / sc-5576 — for
     // txt2img; the FLUX.2-klein `_kv` / `_true_v2` weight variants are too — sc-7459 — see the
     // dedicated test below. `bernini_image` is now candle-routed off-Mac too — sc-10996. Base
     // `sana_1600m` AND the Sprint distill `sana_sprint_1600m` are candle-routed off-Mac too —
@@ -445,8 +445,8 @@ fn sana_candle_txt2img_routes_to_candle() {
     // Sana_1600M_1024px_diffusers` snapshot). sc-11781: the CFG-free SANA-Sprint distill
     // `sana_sprint_1600m` rides it too (the `candle-gen-sana` Sprint pipeline, candle-gen #498 — the
     // whole `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` snapshot). Pure txt2img on BOTH:
-    // any conditioning / LoRA / quant shape still defers to the Python torch worker (neither candle
-    // base path advertises adapters or quant — the Sprint adapter rejects all three).
+    // any conditioning / LoRA / quant shape is refused and remains queued (neither candle base path
+    // advertises adapters or quant — the Sprint adapter rejects all three).
     for model in ["sana_1600m", "sana_sprint_1600m"] {
         assert!(
             image_request_candle_eligible(model, &object(json!({ "prompt": "a red fox" }))),
@@ -478,8 +478,8 @@ fn flux2_klein_weight_variants_route_txt2img_to_candle() {
         );
     }
     // ...but their reference/edit shapes are NOT in scope (txt2img weight parity only). The `_kv`
-    // checkpoint's whole point is the reference-edit KV-cache accel — that stays on the Python torch
-    // worker (the candle lane has no klein edit path), same as every other candle conditioning shape.
+    // checkpoint's whole point is the reference-edit KV-cache accel; candle has no klein edit path,
+    // so the request is refused and remains queued.
     for payload in [
         json!({ "referenceAssetId": "a" }),
         json!({ "mode": "edit_image", "sourceAssetId": "a" }),
@@ -493,8 +493,8 @@ fn flux2_klein_weight_variants_route_txt2img_to_candle() {
 
 #[test]
 fn new_candle_families_conditioning_shapes_fall_back_to_torch() {
-    // Every candle image family is txt2img-only on candle: any conditioning shape defers to torch
-    // (the worker advertises none of these, so this is the no-silently-dropped-control boundary).
+    // Every candle image family is txt2img-only on candle: unsupported conditioning shapes are
+    // refused (the worker advertises none of these, so this is the no-silently-dropped-control boundary).
     let cases = [
         (
             "z_image_turbo",
@@ -508,8 +508,8 @@ fn new_candle_families_conditioning_shapes_fall_back_to_torch() {
         ),
         // NB: `flux2_klein_9b` + `edit_image` is NOT here — sc-5487 wired it to the candle `Flux2Edit`
         // lane (asserted via `image_job_is_candle_eligible` in `candle_worker_claims_*`), like SDXL
-        // edit. The txt2img gate still rejects it (it rejects all `edit_image`), but it no longer
-        // "falls back to torch" at the router level.
+        // edit. The txt2img gate still rejects it (it rejects all `edit_image`), but the bespoke
+        // candle edit lane claims it at the router level.
         // sc-5484 / sc-5576: Chroma / Kolors / SenseNova-U1 are pure T2I on candle. Their MLX-only
         // conditioning shapes (Kolors edit / IP-reference / pose-control; SenseNova edit) defer.
         (
@@ -545,8 +545,8 @@ fn ideogram_candle_txt2img_and_edit_route_to_candle() {
     // text-to-image via the generic `image_request_candle_eligible` gate. sc-6598: img2img / Remix +
     // mask inpaint / outpaint now route to candle too — via the bespoke `ideogram_edit_candle_eligible`
     // branch in `image_job_is_candle_eligible` (the generic gate stays txt2img-only, like every other
-    // candle edit family). A pure `referenceAssetId` (IP-Adapter — no candle Ideogram path) still
-    // defers to torch.
+    // candle edit family). A pure `referenceAssetId` (IP-Adapter — no candle Ideogram path) is
+    // refused and remains queued.
     for model in ["ideogram_4", "ideogram_4_turbo"] {
         // Plain txt2img → the generic gate.
         assert!(
@@ -673,7 +673,7 @@ fn bernini_candle_txt2img_and_i2i_route_to_candle() {
         "model": "bernini_image", "mode": "edit_image"
     }))));
     // NOT `candle_quant` (sc-10996): the off-Mac packed-tier select is deferred (sc-11003), so an
-    // explicit `mlxQuantize` request defers to torch rather than staying on candle — the descriptor
+    // explicit `mlxQuantize` request is refused rather than staying on candle — the descriptor
     // advertises Q4/Q8 but no consumable off-Mac tier exists yet.
     assert!(!image_request_candle_eligible(
         "bernini_image",
@@ -803,7 +803,7 @@ fn boogu_base_and_turbo_img2img_route_to_candle() {
 #[test]
 fn explicit_quantization_falls_back_to_torch_image_and_video() {
     // sc-5099: a candle provider that advertises NO quant (supported_quants: &[]) must route an
-    // explicit `advanced.mlxQuantize > 0` to Python rather than silently running dense. chroma1_hd
+    // explicit `advanced.mlxQuantize > 0` is refused rather than silently running dense. chroma1_hd
     // is such a dense-only candle family (contrast the SDXL family, sc-10767, which now advertises
     // Q4/Q8 packed tiers and stays on candle — covered by `sdxl_family_quant_and_lora_stay_on_candle`).
     assert!(!image_request_candle_eligible(
@@ -849,7 +849,7 @@ fn qwen_image_quant_tier_select_stays_on_candle() {
         "qwen_image",
         &object(json!({ "prompt": "x" }))
     ));
-    // A LoRA request still defers to torch — no candle inference LoRA on base qwen.
+    // A LoRA request is still refused — no candle inference LoRA on base qwen.
     assert!(!image_request_candle_eligible(
         "qwen_image",
         &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
@@ -886,7 +886,7 @@ fn flux2_turnkey_quant_tier_select_stays_on_candle() {
                 "{model} dense/plain shape must stay candle-eligible"
             );
         }
-        // No candle inference LoRA on any FLUX.2 id — a LoRA still defers to torch.
+        // No candle inference LoRA on any FLUX.2 id, so a LoRA is still refused.
         assert!(
             !image_request_candle_eligible(
                 model,
@@ -988,8 +988,7 @@ fn sdxl_family_quant_and_lora_stay_on_candle() {
 #[test]
 fn lens_quant_and_lora_stay_on_the_candle_lane() {
     // sc-5126: Lens / Lens-Turbo advertise Q4/Q8 + LoRA/LoKr, so — UNLIKE the sc-3675/sc-5096
-    // families — a quant request or a LoRA does NOT defer to torch; the candle lane maps both into
-    // the LoadSpec.
+    // families — a quant request or a LoRA stays on candle; the lane maps both into the LoadSpec.
     for model in ["lens", "lens_turbo"] {
         assert!(
             image_request_candle_eligible(
@@ -1018,7 +1017,7 @@ fn lens_quant_and_lora_stay_on_the_candle_lane() {
 #[test]
 fn lens_conditioning_shapes_fall_back_to_torch() {
     // Lens is pure T2I (the port has no img2img/edit/reference/ControlNet), so every conditioning
-    // shape still defers to the Python worker — quant/LoRA being allowed does not widen this.
+    // shape is refused and remains queued — quant/LoRA being allowed does not widen this.
     let cases = [
         json!({ "mode": "edit_image", "sourceAssetId": "a" }),
         json!({ "referenceAssetId": "a" }),
@@ -1039,7 +1038,7 @@ fn lens_conditioning_shapes_fall_back_to_torch() {
 fn sd3_5_quant_stays_on_candle_but_lora_and_conditioning_defer() {
     // sc-7880 (epic 7982): the candle SD3.5 descriptor advertises supported_quants: [Q4, Q8] but
     // supports_lora: false, so — unlike Lens — an explicit quant request stays on the candle lane
-    // while a LoRA (and every conditioning shape) still defers to the Python torch worker.
+    // while a LoRA (and every conditioning shape) is refused and remains queued.
     for model in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
         // Plain txt2img is eligible.
         assert!(
@@ -1086,8 +1085,8 @@ fn krea_lora_and_quant_stay_on_candle_but_conditioning_defers() {
     // inference) AND, since sc-9607, `supported_quants: [Q4, Q8]` (a no-op on the already-packed q4/q8
     // turnkey subdir), so BOTH a LoRA and a Q8/Q4 tier-select stay on the candle lane (Krea is in
     // CANDLE_QUANT_LORA_MODELS). Only the conditioning shapes (edit/reference/mask/pose) defer to the
-    // Python torch worker. Regression guard for the two missed router un-gates: before sc-7836 a Krea
-    // LoRA, and before sc-9983 a Krea Q8/Q4, each hit the no-torch-fallback candle gap off-Mac.
+    // queue. Regression guard for the two missed router un-gates: before sc-7836 a Krea LoRA, and
+    // before sc-9983 a Krea Q8/Q4, each hit the native-support gap off-Mac.
     let model = "krea_2_turbo";
     // Plain txt2img is eligible.
     assert!(
@@ -1334,7 +1333,7 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
         "sana_1600m",
         // sc-11781 (epic 8485): the CFG-free SANA-Sprint distill `sana_sprint_1600m` rides the candle
         // lane too (the `candle-gen-sana` Sprint pipeline, candle-gen #498). Pure txt2img (1–4 step
-        // SCM/TrigFlow) — the Sprint adapter rejects quant / LoRA / control, so those defer to torch.
+        // SCM/TrigFlow) — the Sprint adapter rejects quant / LoRA / control, so those requests remain queued.
         "sana_sprint_1600m",
     ] {
         assert!(
@@ -1345,10 +1344,10 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
             "candle worker should claim {model} plain txt2img"
         );
     }
-    // Refuses a genuinely txt2img-torch-only image id (`pulid_flux_dev` — its only candle lane is the
+    // Refuses a genuinely unsupported plain-txt2img image id (`pulid_flux_dev` — its only candle lane is the
     // bespoke character-reference path, so a PLAIN txt2img prompt has no candle route, candle_routed=
     // false), an adapter shape on the txt2img-only SANA base (candle SANA advertises neither quant nor
-    // LoRA — sc-11780/sc-11781), and a conditioning shape on a wired family — all defer to torch.
+    // LoRA — sc-11780/sc-11781), and a conditioning shape on a wired family — all are refused.
     assert!(!worker_supports_job(
         &candle,
         &image_generate_job(json!({ "model": "pulid_flux_dev", "prompt": "p" }))
@@ -1409,9 +1408,9 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
         "candle worker should claim z_image_turbo strict-pose (sc-5489)"
     );
     // sc-5968: plain `sdxl` + poses has NO candle pose lane (SDXL pose ships via InstantID), and
-    // the torch `sdxl` adapter has no pose path either — so the candle worker CLAIMS it (to reject
-    // with a typed error in the handler) rather than declining → torch silently rendering an
-    // unconditioned T2I image. `worker_supports_job` is therefore TRUE here (candle owns it to fail
+    // no native fallback can serve it off-Mac — so the candle worker CLAIMS it (to reject
+    // with a typed error in the handler) rather than allowing a generic claimant to silently render
+    // an unconditioned T2I image. `worker_supports_job` is therefore TRUE here (candle owns it to fail
     // it loudly); the handler's `candle_unsupported_pose_reject` guard does the rejecting.
     assert!(worker_supports_job(
         &candle,
@@ -1421,7 +1420,7 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
         }))
     ));
     // sc-5487: a plain SDXL edit (img2img: `edit_image` + a source) is now a candle lane (the
-    // bespoke `SdxlEdit` route), so the candle worker CLAIMS it — it no longer declines → torch.
+    // bespoke `SdxlEdit` route), so the candle worker CLAIMS it.
     assert!(worker_supports_job(
         &candle,
         &image_generate_job(json!({
@@ -1431,7 +1430,7 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
         }))
     ));
     // sc-5487: a FLUX.2-klein edit (`edit_image` + a source) is now the candle `Flux2Edit` lane.
-    // klein has no torch path, so the candle worker CLAIMS it (the only off-Mac lane for it).
+    // candle is the only off-Mac lane for klein, so the worker CLAIMS it.
     assert!(worker_supports_job(
         &candle,
         &image_generate_job(json!({
@@ -1441,7 +1440,7 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
         }))
     ));
     // The -kv distill edit has no candle provider yet (needs the reference-K/V cache port) → NOT
-    // claimed by candle; it stays on the MLX/torch path.
+    // claimed by candle; it remains queued until an MLX worker can serve it.
     assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
         "model": "flux2_klein_9b_kv",
         "mode": "edit_image",
@@ -1463,7 +1462,7 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
     }))));
     // sc-7736: a pure-reference flux2_dev job (a `referenceAssetId`, NO `edit_image` source, NO poses)
     // is neither the edit lane (needs `edit_image` + a source) nor the control lane (needs poses), so
-    // the txt2img gate rejects the reference shape → it still defers to torch.
+    // the txt2img gate rejects the reference shape, so it remains queued.
     assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
         "model": "flux2_dev",
         "referenceAssetId": "asset_1"
@@ -1514,10 +1513,9 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
 
 #[test]
 fn torch_worker_claims_everything_the_candle_worker_defers() {
-    // The co-resident Python torch worker (no `candle` marker) is ungated here: it claims the
-    // shapes the candle worker refused, so nothing is stranded — EXCEPT the unsupported-pose shapes
-    // the candle worker now owns-to-reject (sc-5968, asserted at the end of this test): torch
-    // declines those so it can't silently render an unconditioned T2I image.
+    // This synthetic generic descriptor (no `candle` marker) exercises the legacy non-candle branch.
+    // Production has no fallback: shapes refused by candle remain queued, including unsupported-pose
+    // shapes that candle owns-to-reject (sc-5968) to prevent unconditioned T2I rendering.
     let torch = gpu_worker(TORCH_CAPS);
     // A family with no candle provider (`sana_1600m` — MLX-only, candle_routed=false; `bernini_image`
     // is now candle-routed off-Mac, sc-10996), and a conditioning shape on a wired family.
@@ -1548,10 +1546,10 @@ fn torch_worker_claims_everything_the_candle_worker_defers() {
             "sourceAssetId": "asset_1"
         }))
     ));
-    // sc-5968: but torch DECLINES the unsupported-pose shape the candle worker owns-to-reject
-    // (sdxl + poses) — so it can't silently render an unconditioned T2I; only candle takes it (and
-    // rejects). On Mac the same shape is MLX-served, so the `mlx` worker still claims it (asserted
-    // in `unsupported_pose_is_owned_by_candle_declined_by_torch_served_by_mlx`).
+    // sc-5968: the synthetic generic descriptor DECLINES the unsupported-pose shape the candle
+    // worker owns-to-reject (sdxl + poses), preventing silent unconditioned T2I; candle takes it and
+    // rejects. On Mac the same shape is MLX-served, so the `mlx` worker still claims it (asserted
+    // in the cross-descriptor unsupported-pose test).
     assert!(!worker_supports_job(
         &torch,
         &image_generate_job(json!({
@@ -1561,8 +1559,8 @@ fn torch_worker_claims_everything_the_candle_worker_defers() {
     ));
 }
 
-/// sc-5968: the unsupported-pose routing across the three GPU workers — candle OWNS it (to reject),
-/// torch DECLINES it (no silent T2I), and the Mac `mlx` worker still SERVES it (no Mac regression,
+/// sc-5968: unsupported-pose routing across descriptors — candle OWNS it (to reject), the synthetic
+/// generic descriptor DECLINES it (no silent T2I), and the Mac `mlx` worker SERVES it (no regression,
 /// `sdxl_mlx_eligible` is unconditional). Plus: the wired candle pose families are unaffected, and
 /// `image_job_is_candle_eligible` still reports sdxl+poses as NOT candle-*served* (it's owned only
 /// to reject — the distinction the worker's dispatch guard keys on).
@@ -1677,8 +1675,8 @@ fn candle_routed_video_models_are_eligible_in_their_native_shape() {
 #[test]
 fn non_candle_video_models_and_conditioned_shapes_fall_back() {
     // `ltx_2_3_eros` now routes to candle for plain text_to_video (sc-5495 — it's a full dense
-    // LTX-2.3 fine-tune on the `ltx_2_3_distilled` engine), but any conditioned eros shape stays on
-    // the Python torch worker (the candle LTX lane is txt2video-only).
+    // LTX-2.3 fine-tune on the `ltx_2_3_distilled` engine), but any conditioned eros shape is
+    // refused and remains queued (the candle LTX lane is txt2video-only).
     assert!(
         video_request_candle_eligible("ltx_2_3_eros", &object(json!({ "mode": "text_to_video" }))),
         "ltx_2_3_eros text_to_video must route to the candle lane"
@@ -1690,7 +1688,7 @@ fn non_candle_video_models_and_conditioned_shapes_fall_back() {
         ),
         "a conditioned ltx_2_3_eros shape must fall back to the Python worker"
     );
-    // A genuinely non-candle video model stays on torch.
+    // A genuinely non-candle video model is refused and remains queued.
     assert!(
         !video_request_candle_eligible(
             "some_unported_model",
@@ -1698,7 +1696,7 @@ fn non_candle_video_models_and_conditioned_shapes_fall_back() {
         ),
         "an unported model must fall back to the Python worker"
     );
-    // A txt2video model in any conditioned shape (default/i2v mode, a source, or a LoRA) → torch.
+    // A txt2video model in any conditioned shape (default/i2v mode, a source, or a LoRA) is refused.
     let cases = [
         json!({ "prompt": "p" }), // no mode → defaults to i2v
         json!({ "mode": "image_to_video", "sourceAssetId": "a" }),
@@ -1712,7 +1710,7 @@ fn non_candle_video_models_and_conditioned_shapes_fall_back() {
             "wan_2_2 shape must fall back to torch: {case}"
         );
     }
-    // The 14B T2V is text-only: any image_to_video / sourced shape falls back to torch (sc-5175).
+    // The 14B T2V is text-only: any image_to_video / sourced shape is refused (sc-5175).
     for case in [
         json!({ "mode": "image_to_video", "sourceAssetId": "a" }),
         json!({ "mode": "text_to_video", "sourceAssetId": "a" }),
@@ -1722,7 +1720,7 @@ fn non_candle_video_models_and_conditioned_shapes_fall_back() {
             "wan_2_2_t2v_14b conditioned shape must fall back to torch: {case}"
         );
     }
-    // The 14B I2V + SVD are image→video only: a txt2video shape or an i2v with no source → torch
+    // The 14B I2V + SVD are image→video only: a txt2video shape or an i2v with no source is refused
     // (sc-5175 / sc-5493).
     for model in ["wan_2_2_i2v_14b", "svd"] {
         for case in [
@@ -1839,7 +1837,7 @@ fn candle_vace_modes_eligible_with_required_assets() {
 
 #[test]
 fn candle_vace_modes_fall_back_without_assets_or_for_unsupported_models() {
-    // Missing required assets → torch.
+    // Missing required assets make the request ineligible, so it remains queued.
     assert!(!video_request_candle_vace_eligible(
         "wan_2_2",
         &object(json!({ "sourceClipAssetId": "clip_1" })), // no personTrackId / characterId
@@ -1857,7 +1855,7 @@ fn candle_vace_modes_fall_back_without_assets_or_for_unsupported_models() {
         &object(json!({ "sourceClipAssetId": "c", "personTrackId": "t", "characterId": "ch" })),
         &JobType::PersonReplace
     ));
-    // A LoRA shape → torch (the candle VACE provider advertises no adapters).
+    // A LoRA shape is refused (the candle VACE provider advertises no adapters).
     assert!(!video_request_candle_vace_eligible(
         "wan_2_2",
         &object(json!({
@@ -1917,7 +1915,7 @@ fn scail2_candle_serves_animation_and_replace_in_native_shape() {
         );
     }
     // An animate job carrying an inference LoRA (DPO / lightning / user adapter) stays on candle —
-    // the provider merges it into the dense DiT (sc-6838); only on-the-fly quant defers to torch.
+    // the provider merges it into the dense DiT (sc-6838); only on-the-fly quant is refused.
     assert!(
         scail2_animate_candle_eligible(
             "scail2_14b",
@@ -2083,7 +2081,7 @@ fn scail2_candle_rejects_incomplete_or_wrong_shape() {
             "sourceClipAssetId": "c"
         }))
     ));
-    // On-the-fly quant still defers to torch (the candle SCAIL-2 provider is dense).
+    // On-the-fly quant is still refused (the candle SCAIL-2 provider is dense).
     {
         let mut payload = object(json!({
             "mode": "animate_character",
@@ -2096,7 +2094,7 @@ fn scail2_candle_rejects_incomplete_or_wrong_shape() {
             "scail2 animate with on-the-fly quant must defer to torch: {payload:?}"
         );
     }
-    // replace_person needs the clip + track + character; missing any → torch.
+    // replace_person needs the clip + track + character; missing any makes it ineligible.
     for case in [
         json!({ "sourceClipAssetId": "c", "personTrackId": "t" }),
         json!({ "sourceClipAssetId": "c", "characterId": "ch" }),
@@ -2166,7 +2164,8 @@ fn candle_worker_claims_txt2video_but_refuses_other_video_shapes() {
         &candle,
         &video_generate_job(json!({ "model": "wan_2_2_i2v_14b", "mode": "text_to_video" }))
     ));
-    // The co-resident torch worker claims everything the candle worker defers.
+    // This synthetic generic-GPU descriptor can claim the legacy compatibility shape in isolation;
+    // no deployed fallback worker registers it, so production leaves unsupported work queued.
     let torch = gpu_worker(TORCH_VIDEO_CAPS);
     assert!(worker_supports_job(
         &torch,
@@ -2303,7 +2302,7 @@ fn image_upscale_job(payload: Value) -> JobSnapshot {
 /// sc-5499 + sc-5928: the candle worker claims both off-Mac image upscalers — Real-ESRGAN
 /// (`ort`/CUDA, sc-5499, incl. the default engine) and SeedVR2 (`candle-gen-seedvr2`, sc-5928).
 /// Only `aura-sr` (an offered engine dropped on every platform, sc-3668 / sc-5499) has no candle
-/// path → refused (it runs only on the Python torch worker until Phase 7).
+/// path and is refused, so it remains queued.
 #[test]
 fn candle_worker_claims_real_esrgan_and_seedvr2_image_upscale_refuses_aura_sr() {
     let candle = gpu_worker(&["gpu", "image_upscale", "candle"]);
@@ -2349,9 +2348,9 @@ fn candle_worker_claims_seedvr2_video_upscale_and_refuses_other_engines() {
     ));
 }
 
-/// sc-5928: SeedVR2 has no torch backend, so a plain torch GPU worker (neither `mlx` nor candle)
-/// REFUSES a `seedvr2` image upscale — it stays queued for the mlx/candle worker instead of being
-/// claimed and failing. Real-ESRGAN (the torch engine) is still claimed. The inverse of AuraSR.
+/// sc-5928: a synthetic generic GPU descriptor (neither `mlx` nor candle) REFUSES a `seedvr2`
+/// image upscale, so it stays queued for an mlx/candle worker. Real-ESRGAN exercises the generic
+/// compatibility branch. The inverse of AuraSR.
 #[test]
 fn torch_worker_refuses_seedvr2_image_upscale_but_claims_real_esrgan() {
     let torch = gpu_worker(&["gpu", "image_upscale"]); // no candle marker, gpu_id != "mlx"
@@ -2388,10 +2387,8 @@ fn kps_extract_job(payload: Value) -> JobSnapshot {
 }
 
 /// sc-5497: the candle worker advertises `kps_extract` (the candle SCRFD/ArcFace face stack) and
-/// claims a kps_extract job — the off-Mac sibling of the native-MLX path. UNLIKE SeedVR2, the Python
-/// InsightFace path CAN serve kps_extract, so there is NO torch-refusal gate: a co-resident torch
-/// worker that advertises the capability still claims it (the candle worker just runs it Python-free
-/// when it polls first; the Python path is retired wholesale in Phase 7, epic 5483). A worker that
+/// claims a kps_extract job — the off-Mac sibling of the native-MLX path. The generic descriptor
+/// below is a synthetic capability-routing check, not a deployed fallback worker. A worker that
 /// never advertises the capability (e.g. a candle-disabled box) refuses it.
 #[test]
 fn candle_worker_claims_kps_extract_no_torch_refusal() {
@@ -2436,12 +2433,9 @@ fn pose_detect_job(payload: Value) -> JobSnapshot {
 }
 
 /// sc-5496: the candle worker advertises `pose_detect` (the DWPose RTMW detector via the `ort` CUDA
-/// EP) and claims a pose_detect job — the off-Mac sibling of the macOS `ort`/CoreML path. Like
-/// kps_extract (and unlike SeedVR2), the Python rtmlib path CAN serve pose_detect, so there is NO
-/// torch-refusal gate: a co-resident torch worker that advertises the capability still claims it (the
-/// candle worker just runs it Python-free when it polls first; the Python path is retired wholesale in
-/// Phase 7, epic 5483). A worker that never advertises the capability (e.g. a candle-disabled box)
-/// refuses it.
+/// EP) and claims a pose_detect job — the off-Mac sibling of the macOS `ort`/CoreML path. The generic
+/// descriptor below is a synthetic capability-routing check, not a deployed fallback worker. A
+/// worker that never advertises the capability (e.g. a candle-disabled box) refuses it.
 #[test]
 fn candle_worker_claims_pose_detect_no_torch_refusal() {
     let payload = json!({ "sources": [{ "assetId": "a" }], "projectId": "p" });
@@ -2507,10 +2501,8 @@ fn person_track_job(payload: Value) -> JobSnapshot {
 /// sc-5498: the candle worker advertises `person_detect` + `person_track` (YOLO11 via the `ort`
 /// CUDA EP + the pure-Rust ByteTrack) and claims both — the off-Mac sibling of the macOS
 /// native-MLX path (sc-3633/sc-3634). Like kps_extract / pose_detect (and unlike SeedVR2), the
-/// Python Ultralytics path CAN serve them, so there is NO torch-refusal gate: a co-resident
-/// torch worker that advertises the capability still claims it (the candle worker just runs it
-/// Python-free when it polls first; the Python path is retired wholesale in Phase 7, epic 5483).
-/// A worker that never advertises the capability refuses the job. (These are the real,
+/// capability branch is also covered with a synthetic generic descriptor. Production has no
+/// Python fallback; a worker that never advertises the capability refuses the job. (These are the real,
 /// non-preview jobs; the procedural `preview: true` path keys off the separate
 /// `person_detect_preview` / `person_track_preview` capabilities.)
 #[test]
@@ -2575,7 +2567,7 @@ fn candle_worker_claims_joycaption_but_refuses_other_captioners() {
         &candle,
         &caption_job(json!({ "captioner": "joy_caption", "datasetId": "ds_1" }))
     ));
-    // Refuses a non-JoyCaption captioner → falls back to the Python torch worker.
+    // Refuses a non-JoyCaption captioner; without another native captioner it remains queued.
     assert!(!worker_supports_job(
         &candle,
         &caption_job(json!({ "captioner": "blip2", "datasetId": "ds_1" }))
@@ -2588,8 +2580,8 @@ fn candle_worker_claims_joycaption_but_refuses_other_captioners() {
 }
 
 /// sc-5501: the candle worker claims SenseNova-U1 `image_vqa` / `image_interleave` (served off-Mac
-/// by the concrete candle `T2iModel::{vqa, interleave_gen}`) but refuses other models, which stay
-/// on the Python torch worker.
+/// by the concrete candle `T2iModel::{vqa, interleave_gen}`) but refuses other models, which remain
+/// queued without another compatible native worker.
 #[test]
 fn candle_worker_claims_sensenova_understanding_but_refuses_other_models() {
     let candle = gpu_worker(&["gpu", "image_vqa", "image_interleave", "candle"]);
@@ -2659,7 +2651,7 @@ fn candle_worker_claims_sensenova_understanding_but_refuses_other_models() {
             json!({ "model": "sensenova_u1_8b_infographic_v3", "prompt": "an illustrated explainer" })
         )
     ));
-    // Refuses a non-SenseNova understanding job → falls back to the Python torch worker.
+    // Refuses a non-SenseNova understanding job; without another compatible native worker it remains queued.
     assert!(!worker_supports_job(
         &candle,
         &understanding_job(
@@ -2724,7 +2716,7 @@ fn sdxl_ipadapter_reference_jobs_route_to_candle() {
     assert!(!sdxl_ipadapter_candle_eligible(&object(
         json!({ "model": "sdxl" })
     )));
-    // img2img / inpaint / edit shapes are NOT this lane (those are sc-5487, still torch).
+    // img2img / inpaint / edit shapes are NOT this lane; unsupported shapes remain queued.
     assert!(!sdxl_ipadapter_candle_eligible(&object(json!({
         "model": "sdxl", "mode": "edit_image", "referenceAssetId": "a", "sourceAssetId": "s"
     }))));
@@ -2902,9 +2894,9 @@ fn image_edit_job_type_routes_through_candle_edit_lane() {
             "{model} edit via the `image_edit` job type must reach its candle lane"
         );
     }
-    // A torch-only edit family (`kolors` has a candle txt2img lane but no candle EDIT lane) submitted
-    // as `image_edit` is NOT candle-eligible: the candle worker must refuse it so it falls back to the
-    // co-resident torch worker, which claims it. (Mirrors the `image_generate` + edit_image case.)
+    // An unsupported edit family (`kolors` has a candle txt2img lane but no candle EDIT lane)
+    // submitted as `image_edit` is NOT candle-eligible. The generic descriptor asserted below is a
+    // synthetic compatibility check, not a deployed fallback; production leaves the job queued.
     let kolors_edit = json!({
         "model": "kolors",
         "mode": "edit_image",
@@ -2938,7 +2930,7 @@ fn kolors_ipadapter_reference_jobs_route_to_candle() {
     assert!(!kolors_ipadapter_candle_eligible(&object(
         json!({ "model": "kolors" })
     )));
-    // img2img / inpaint / edit shapes are NOT this lane (those are sc-5487, still torch).
+    // img2img / inpaint / edit shapes are NOT this lane; unsupported shapes remain queued.
     assert!(!kolors_ipadapter_candle_eligible(&object(json!({
         "model": "kolors", "mode": "edit_image", "referenceAssetId": "a", "sourceAssetId": "s"
     }))));
@@ -2964,7 +2956,7 @@ fn flux_ipadapter_reference_jobs_route_to_candle() {
     assert!(!flux_ipadapter_candle_eligible(&object(
         json!({ "model": "flux_dev" })
     )));
-    // img2img / inpaint / edit shapes are NOT this lane (those are sc-5487, still torch).
+    // img2img / inpaint / edit shapes are NOT this lane; unsupported shapes remain queued.
     assert!(!flux_ipadapter_candle_eligible(&object(json!({
         "model": "flux_dev", "mode": "edit_image", "referenceAssetId": "a", "sourceAssetId": "s"
     }))));
@@ -3007,7 +2999,7 @@ fn pulid_flux_character_jobs_route_to_candle_off_mac() {
 #[test]
 fn qwen_control_pose_jobs_route_to_candle() {
     // qwen_image + advanced.poses routes to the candle strict-pose lane (sc-5489) via the bespoke
-    // branch, NOT the txt2img gate (which DEFERS any advanced.poses job to torch).
+    // branch, NOT the txt2img gate (which refuses any `advanced.poses` job).
     let payload = json!({ "model": "qwen_image", "advanced": { "poses": [{ "keypoints": [] }] } });
     assert!(qwen_control_candle_eligible(&object(payload.clone())));
     assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
@@ -3035,7 +3027,7 @@ fn qwen_control_pose_jobs_route_to_candle() {
 #[test]
 fn kolors_control_pose_jobs_route_to_candle() {
     // kolors + advanced.poses routes to the candle strict-pose lane (sc-5489) via the bespoke
-    // branch, NOT the txt2img gate (which DEFERS any advanced.poses job to torch).
+    // branch, NOT the txt2img gate (which refuses any `advanced.poses` job).
     let payload = json!({ "model": "kolors", "advanced": { "poses": [{ "keypoints": [] }] } });
     assert!(kolors_control_candle_eligible(&object(payload.clone())));
     assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
@@ -3059,7 +3051,7 @@ fn kolors_control_pose_jobs_route_to_candle() {
 #[test]
 fn zimage_control_pose_jobs_route_to_candle() {
     // z_image_turbo + advanced.poses routes to the candle VACE strict-pose lane (sc-5489, the last
-    // family) via the bespoke branch, NOT the txt2img gate (which DEFERS any advanced.poses to torch).
+    // family) via the bespoke branch, NOT the txt2img gate (which refuses any `advanced.poses` job).
     let payload =
         json!({ "model": "z_image_turbo", "advanced": { "poses": [{ "keypoints": [] }] } });
     assert!(zimage_control_candle_eligible(&object(payload.clone())));
@@ -3085,8 +3077,8 @@ fn zimage_base_control_pose_jobs_route_to_candle() {
     assert!(zimage_control_candle_eligible(&object(payload.clone())));
     assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
     // A base z_image with no poses is plain txt2img — now a candle lane too (sc-8679: the registered
-    // candle `z_image` base generator), so it routes to the generic candle txt2img gate rather than
-    // deferring to torch. It is NOT this strict-control lane, though.
+    // candle `z_image` base generator), so it routes to the generic candle txt2img gate. It is NOT
+    // this strict-control lane, though.
     let plain = json!({ "model": "z_image", "prompt": "a misty fjord" });
     assert!(!zimage_control_candle_eligible(&object(plain.clone())));
     assert!(image_job_is_candle_eligible(&image_generate_job(plain)));
@@ -3098,7 +3090,7 @@ fn zimage_base_control_pose_jobs_route_to_candle() {
 #[test]
 fn flux1_dev_control_pose_jobs_route_to_candle() {
     // sc-8412: flux_dev + advanced.poses routes to the candle Shakker Union-Pro-2.0 strict-control
-    // lane via the bespoke branch, NOT the txt2img gate (which DEFERS any advanced.poses to torch).
+    // lane via the bespoke branch, NOT the txt2img gate (which refuses any `advanced.poses` job).
     let payload = json!({ "model": "flux_dev", "advanced": { "poses": [{ "keypoints": [] }] } });
     assert!(flux1_control_candle_eligible(&object(payload.clone())));
     assert!(image_job_is_candle_eligible(&image_generate_job(payload)));

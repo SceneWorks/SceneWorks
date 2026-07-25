@@ -16,8 +16,7 @@
 //! the candle lane (`backend-candle`, off-Mac) — the same gate as the module. The tiling
 //! math (`tile_slices`, crop/place) is pure and unit-tested without the onnx weights;
 //! only the execution provider (`build_session`) is cfg-split. Off-Mac, Real-ESRGAN is
-//! served by the candle worker; the Python torch Real-ESRGAN path stays a co-resident
-//! fallback until Phase 7 (epic 5483) retires it.
+//! served by the candle worker.
 //!
 //! Engine scope: `engine=real-esrgan` (the default, the `ort` path above) and
 //! `engine=seedvr2` (epic 4811 / sc-4815 — the one-step diffusion super-resolution upscaler) are
@@ -26,10 +25,10 @@
 //! (single-resident engine cache — it evicts any cached image-gen engine, bounding peak memory,
 //! which matters because the SeedVR2 image path has no spatial tiling yet). It takes a target
 //! resolution (factor → `round_to_16(src × factor)`) and an optional `--softness` pre-blur.
-//! `aura-sr` (a 617M-param torch-only GigaGAN) was dropped on Mac after the sc-3668 port-or-drop
+//! `aura-sr` (a 617M-param legacy GigaGAN) was dropped on Mac after the sc-3668 port-or-drop
 //! spike and is now dropped as an offered engine off-Mac too (sc-5499): it is refused by the routing
 //! oracle (`upscale_job_is_mlx_eligible` / `upscale_job_is_candle_eligible`) and hidden in the UI,
-//! so it only runs if explicitly submitted to the Python torch worker (retired in Phase 7).
+//! so an explicit defensive submission is refused and remains queued.
 //!
 //! Tiling parity (matched to `upscalers.py:_run_tiled`):
 //!  - tile grid `tile_slices(w,h,512)`; per-tile crop padded by `tile_pad=16`
@@ -1059,7 +1058,7 @@ pub(crate) async fn run_image_upscale_job(
         // candle GPU-worker lane (sc-5499), both with a CPU fallback. The routing oracle
         // (`upscale_job_is_candle_eligible` / `upscale_job_is_mlx_eligible`) admits Real-ESRGAN on
         // both lanes; `engine=aura-sr` is refused before reaching here (defensive `engine_id` guard
-        // above), staying on the Python torch worker until Phase 7.
+        // above) and remains queued.
         update_job(
             api,
             &job.id,

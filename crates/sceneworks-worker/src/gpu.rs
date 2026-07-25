@@ -17,7 +17,7 @@ pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
         // Seed the registration with a live snapshot so the worker shows
         // memory/load immediately, mirroring the nvidia path (heartbeats refresh
         // it). `query_mlx_utilization` reads Apple-Silicon unified-memory + GPU
-        // load from the same unprivileged probes the Python mps worker uses.
+        // load from the same unprivileged probes the retired Python mps worker used.
         gpu.utilization = query_mlx_utilization().await;
         return gpu;
     }
@@ -49,8 +49,8 @@ pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
 /// from the linked candle generator descriptors, plus `lora_train` + `lora_train_execute` from the
 /// linked candle trainers — sc-7817) plus a `candle` marker capability. The marker lets the API
 /// routing gate (`jobs_store::worker_supports_job`) recognize this worker and confine each lane to
-/// the candle-served shapes (txt2img/txt2video, the candle-trainable kernels, …) — every other shape
-/// falls back to the Python torch worker. Mirrors the macOS `mlx_gpu` derivation, but bolted onto
+/// the candle-served shapes (txt2img/txt2video, the candle-trainable kernels, …); every unsupported
+/// shape is refused and remains queued. Mirrors the macOS `mlx_gpu` derivation, but bolted onto
 /// the real nvidia GPU descriptor rather than a sentinel id.
 ///
 /// All-targets signature so `discover_gpu` is uniform; a no-op everywhere except the Windows candle
@@ -80,8 +80,8 @@ fn with_candle_capabilities(
             // from a single generator descriptor (`registry_capabilities` only emits `image_generate`),
             // so advertise it explicitly — otherwise the candle worker never claims an edit job and the
             // API enforce-fails it `candle_unsupported`. The routing gate confines the claim to the
-            // candle-eligible edit models (`image_job_is_candle_eligible`); torch-only edit models stay on
-            // the co-resident Python worker.
+            // candle-eligible edit models (`image_job_is_candle_eligible`); unsupported edit models
+            // are refused and remain queued.
             if !gpu.capabilities.contains(&WorkerCapability::ImageEdit) {
                 gpu.capabilities.push(WorkerCapability::ImageEdit);
             }
@@ -107,7 +107,7 @@ fn with_candle_capabilities(
             // modality), so they aren't in `registry_capabilities`; advertise them explicitly. The
             // routing gate (`upscale_job_is_candle_eligible` / `video_upscale_job_is_candle_eligible`)
             // admits Real-ESRGAN + SeedVR2; only `aura-sr` has no candle path (dropped as an offered
-            // engine, sc-3668 / sc-5499) and runs on the Python torch worker until Phase 7.
+            // engine, sc-3668 / sc-5499) and remains queued if submitted defensively.
             for capability in [
                 WorkerCapability::ImageUpscale,
                 WorkerCapability::VideoUpscale,
@@ -121,10 +121,8 @@ fn with_candle_capabilities(
             // stack (`candle-gen-face`, the InstantID/PuLID detector reused directly from kps_jobs.rs)
             // serves `kps_extract` for the Key Point Library "extract kps from this image" flow — the
             // off-Mac sibling of the native-MLX path. A job-type capability (not a generation modality),
-            // so it isn't in `registry_capabilities`; advertise it explicitly. Unlike SeedVR2, the Python
-            // InsightFace path CAN serve kps_extract, so there's NO torch-refusal gate — the candle worker
-            // claims it Python-free, with the co-resident torch worker as fallback (the Python kps path is
-            // retired wholesale in Phase 7, epic 5483).
+            // so it isn't in `registry_capabilities`; advertise it explicitly. The candle face stack is
+            // the off-Mac native path, so a build without it leaves the job queued.
             if !gpu.capabilities.contains(&WorkerCapability::KpsExtract) {
                 gpu.capabilities.push(WorkerCapability::KpsExtract);
             }
@@ -152,10 +150,8 @@ fn with_candle_capabilities(
             // `ort`/CoreML path (sc-3487) — the same RTMW detector via `pose_jobs::run_pose_detect_job`
             // with the CUDA execution provider, serving `pose_detect` for the Pose Library "create from
             // photo" flow + InstantID pose conditioning. A job-type capability (not a generation modality),
-            // so it isn't in `registry_capabilities`; advertise it explicitly. Like kps_extract — and
-            // unlike SeedVR2 — the Python rtmlib path CAN serve pose_detect, so there's NO torch-refusal
-            // gate: the candle worker claims it Python-free, with the co-resident torch worker as a
-            // fallback (the Python rtmlib path is retired wholesale in Phase 7, epic 5483).
+            // so it isn't in `registry_capabilities`; advertise it explicitly. The candle RTMW stack is
+            // the off-Mac native path, so a build without it leaves the job queued.
             if !gpu.capabilities.contains(&WorkerCapability::PoseDetect) {
                 gpu.capabilities.push(WorkerCapability::PoseDetect);
             }
@@ -164,12 +160,10 @@ fn with_candle_capabilities(
             // via `ort`/CUDA in `person_jobs` + the pure-Rust SORT/ByteTrack in `person_track`,
             // serving `person_detect` (Replace-Person candidate boxes) + `person_track` (the
             // reusable selected-person track). Job-type capabilities (not generation modalities),
-            // so they aren't in `registry_capabilities`; advertise them explicitly. Like
-            // kps_extract / pose_detect — and unlike SeedVR2 — the Python Ultralytics path CAN
-            // serve them, so there's NO torch-refusal gate: the candle worker claims them
-            // Python-free, with the co-resident torch worker as a fallback (retired wholesale in
-            // Phase 7, epic 5483). Person *segmentation* (SAM masks) is NOT ported off-Mac yet
-            // (epic 3792, sc-5062), so candle person tracks are box-only (`maskState = "missing"`).
+            // so they aren't in `registry_capabilities`; advertise them explicitly. The candle
+            // YOLO11/ByteTrack stack is the off-Mac native path, and `media_jobs::run_candle_segmenter`
+            // adds SAM3 masks to tracked people (sc-8847 / sc-8833), so off-Mac tracks are not
+            // box-only.
             for capability in [
                 WorkerCapability::PersonDetect,
                 WorkerCapability::PersonTrack,
@@ -544,7 +538,7 @@ pub(crate) async fn gpu_utilization(gpu_id: &str) -> Option<WorkerUtilizationSna
     }
     // The Apple-Silicon `mlx` worker has no nvidia-smi to query; read its
     // unified-memory + GPU load from IOKit instead (epic 3018) so the dashboard
-    // shows memory/load for it like it does for the Python `mps` worker.
+    // preserves the telemetry surface formerly supplied by the Python `mps` worker.
     #[cfg(target_os = "macos")]
     if gpu_id == "mlx" {
         return query_mlx_utilization().await;
@@ -849,18 +843,17 @@ pub(crate) fn cpu_gpu() -> DiscoveredGpu {
 /// does NOT carry the CPU utility capabilities, so downloads/imports/etc. still go to
 /// the CPU worker. `video_generate` is claimed from the video runtime onward (sc-3033);
 /// the procedural stub backs models whose real MLX path is not yet linked (Wan sc-3034,
-/// LTX+audio sc-3035), and the API-side MLX-vs-Python routing is sc-3036.
+/// LTX+audio sc-3035), and the API-side native-worker routing is sc-3036.
 ///
 /// Training (epic 3039, sc-3043/3049): the engine is always linked on macOS, so this
 /// worker can both validate plans (`lora_train`) and run real training
-/// (`lora_train_execute`) — unlike the Python worker, which advertises execute only
-/// when its torch backend is present. The API gates which `lora_train` jobs reach
+/// (`lora_train_execute`). The API gates which `lora_train` jobs reach
 /// here to the MLX-native families (`jobs_store::training_job_is_mlx_eligible`);
-/// `kolors`/`lens` and LoKr-on-Wan stay on the Python torch worker.
+/// unsupported training shapes are refused and remain queued.
 ///
 /// Dataset captioning (sc-3556): JoyCaption is linked through mlx-gen's captioner
-/// registry and runs in-process on this worker; the Python captioner remains the
-/// Windows/Linux and explicit non-MLX fallback.
+/// registry and runs in-process on this worker; other platforms require a compatible native
+/// captioner or leave the job queued.
 #[cfg(target_os = "macos")]
 pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
     let mut capabilities = vec![WorkerCapability::Gpu];
@@ -880,7 +873,7 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         // edit paths as the `character_image` reference flow — qwen/flux2/sdxl
         // edit dispatched by payload model+mode in `run_image_generate_job`. The
         // API only routes MLX-eligible edit models here (`image_job_is_mlx_eligible`);
-        // torch-only edit models stay on the Python worker.
+        // unsupported edit models are refused and remain queued.
         WorkerCapability::ImageEdit,
         // Tile-ControlNet detail refine (epic 3041, sc-3060) — the SDXL-family
         // `image_detail` job runs in-process on the engine here too.
@@ -889,24 +882,23 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         // question answering (`image_vqa`) and interleaved text-image generation
         // (`image_interleave`) run in-process via the concrete `T2iModel` (the modes the
         // `Generator` contract can't express). The API routes these here only for the
-        // SenseNova-U1 ids (`jobs_store::understanding_job_is_mlx_eligible`); off macOS the
-        // capabilities are never advertised, so the Python torch worker serves them on
-        // Windows/Linux.
+        // SenseNova-U1 ids (`jobs_store::understanding_job_is_mlx_eligible`). Off macOS the candle
+        // worker advertises the same capabilities through `with_candle_capabilities`.
         WorkerCapability::ImageVqa,
         WorkerCapability::ImageInterleave,
         // Clip-conditioning advanced video modes (epic 3040, sc-3522): extend_clip /
         // video_bridge run the LTX IC-LoRA keyframe-append path in-process. The API gates
         // these `video_extend` / `video_bridge` jobs to the LTX engines
-        // (`jobs_store::video_job_is_mlx_eligible`); a Wan extend/bridge has no IC-LoRA
-        // path and stays on the Python torch worker.
+        // (`jobs_store::video_job_is_mlx_eligible`). LTX and Wan TI2V-5B are native; 14B Wan MoE
+        // engines have no `Keyframe` path, so their extend/bridge requests are refused and remain queued.
         WorkerCapability::VideoExtend,
         WorkerCapability::VideoBridge,
         // replace_person → native Wan-VACE (epic 3040, sc-3521): the `PersonReplace`
         // job builds the masked control inputs (source clip + onnx-track mask + character
         // refs) and runs the engine `wan_vace` provider in-process — the native
         // equivalent of the torch `WanVACEPipeline` path. The API routes only
-        // MLX-eligible replace_person jobs here; non-VACE replacement + Windows/Linux
-        // keep the Python torch path.
+        // MLX-eligible replace_person jobs here; off-Mac, candle Wan-VACE/SCAIL-2 serves eligible
+        // replacements, while unsupported models are refused and remain queued.
         WorkerCapability::PersonReplace,
         // DWPose whole-body pose detection (epic 3482, sc-3487): RTMW via
         // onnxruntime/CoreML, served in-process by `pose_jobs::run_pose_detect_job`.
@@ -939,7 +931,7 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         // onnxruntime/CoreML, served in-process by `upscale_jobs::run_image_upscale_job`.
         // Replaces the Python torch Real-ESRGAN path so the Image Editor upscale tool
         // works on a Python-free Mac. Only `engine=real-esrgan` (the default) is
-        // served here; `aura-sr` stays on the Python worker (routing oracle).
+        // served here; `aura-sr` is dropped and remains queued if submitted defensively.
         WorkerCapability::ImageUpscale,
         // Dataset Doctor one-tap upscale (sc-6539): reuses the Real-ESRGAN engine to upscale flagged
         // low-resolution training items, then re-points each. Advertised wherever image_upscale is.
@@ -947,15 +939,15 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt
         // segmentation, served in-process by `segment_jobs::run_image_segment_job` (the
         // box-PVS path of the sc-4926 SAM3 stack). The Image Editor smart-select tool's
-        // backend: a box prompt → a binary inpaint mask asset. Advertised ONLY here (no
-        // torch/candle SAM3 image path), so a segment job routes to the Mac worker by
+        // backend: a box prompt → a binary inpaint mask asset. Advertised ONLY here (there is no
+        // off-Mac standalone image-segment lane), so a segment job routes to the Mac worker by
         // construction.
         WorkerCapability::ImageSegment,
         // SeedVR2 video upscaling (epic 4811, sc-4816): native-MLX one-step super-resolution
         // (`mlx-gen-seedvr2`), served in-process by `video_jobs::run_video_upscale_job` —
         // SceneWorks' first video upscaler. Decodes the source clip, runs the temporal-chunked
         // 5D upscale, re-encodes, and passes the source audio through. The off-Mac
-        // twin is advertised by `with_candle_capabilities` (there is no torch path).
+        // twin is advertised by `with_candle_capabilities`; no other lane serves it.
         WorkerCapability::VideoUpscale,
         // Real, model-backed person detection + tracking (epic 3482, sc-3488 /
         // sc-3633/3634/3709): the native-MLX YOLO11 detector + SORT/ByteTrack tracker +
@@ -1019,7 +1011,7 @@ pub(crate) fn worker_capabilities_with_utility(
             WorkerCapability::LoraDownload,
             // Procedural detection/tracking is a preview only. Real, model-backed
             // PersonDetect/PersonTrack run on the macOS MLX worker (native
-            // YOLO11/SAM2, epic 3482) or the Python GPU worker on Windows/Linux;
+            // YOLO11/SAM2, epic 3482) or the off-Mac candle worker (YOLO11/SAM3);
             // advertising the preview capabilities here keeps the CPU placeholder
             // claimable solely for explicit `preview: true` jobs
             // (jobs_store::worker_supports_job).

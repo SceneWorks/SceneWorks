@@ -105,8 +105,8 @@ fn builtin_targets_gate_network_types() {
             .is_some_and(|types| types.iter().any(|entry| entry.as_str() == Some(value)))
     };
 
-    // Every target advertises `lora`; the validated torch/PEFT backends (epic 2193)
-    // advertise `lokr`: the Z-Image/SDXL image backends (v1), the Kolors image backend
+    // Every target advertises `lora`; validated native backends (epic 2193) advertise `lokr`:
+    // the Z-Image/SDXL image backends (v1), the Kolors image backend
     // (SDXL-architecture, epic 1929 / sc-2217), the Lens sidecar backend (sc-2218), and
     // the Wan2.2 5B video backend (sc-2211). Krea 2 (epic 7565) is the first *native-MLX*
     // LoKr target: its `mlx-gen-krea` trainer reports `supports_lokr` and builds LoKr targets
@@ -529,7 +529,7 @@ fn builtin_registry_exposes_krea_target() {
     // Krea 2 (epic 7565) trains on the undistilled `krea/Krea-2-Raw` 12B single-stream
     // DiT via the `krea_lora` kernel and applies at Krea 2 Turbo inference (family `krea_2`,
     // no base-model gating). Rust-native on BOTH backends — mlx (Apple Silicon) + candle
-    // (Windows/Linux NVIDIA, sc-8614) — no torch path.
+    // (Windows/Linux NVIDIA, sc-8614).
     let registry = builtin_training_targets();
     let target = registry
         .targets
@@ -560,7 +560,7 @@ fn builtin_registry_exposes_krea_target() {
         target.limits.get("networkTypes"),
         Some(&serde_json::json!(["lora", "lokr"]))
     );
-    // No torch Krea trainer, but Rust-native on BOTH backends (mlx + candle, sc-8614) — so it is
+    // Rust-native on BOTH backends (mlx + candle, sc-8614), so it is
     // NOT Apple-Silicon-only: the `appleSiliconOnly`/`requiresBackend` mlx-only markers are gone
     // (matching the candle-capable z-image/lens targets; routing is enforced by the worker tables).
     assert_eq!(target.limits.get("appleSiliconOnly"), None);
@@ -632,7 +632,7 @@ fn builtin_registry_exposes_sd3_targets() {
             Some(&serde_json::json!(["lora", "lokr"])),
             "{id} advertises lora + lokr"
         );
-        // No torch SD3 trainer — Apple-Silicon/MLX-only (off-Mac/candle is epic 7982).
+        // Apple-Silicon/MLX-only (off-Mac/candle is epic 7982).
         assert_eq!(
             target.limits.get("appleSiliconOnly"),
             Some(&serde_json::Value::Bool(true)),
@@ -742,8 +742,8 @@ fn builtin_registry_exposes_wan_target() {
     assert_eq!(target.kernel, "wan_lora");
     assert_eq!(target.defaults.rank, 32);
     assert_eq!(target.defaults.resolution, 512);
-    // Cross-platform default: plain AdamW (adamw8bit is CUDA-only and falls back off it). The
-    // backend is per-platform — off-Mac torch/CUDA, on macOS the native MLX trainer (sc-13878).
+    // Cross-platform plan default: plain AdamW. The native MLX trainer serves this target on macOS;
+    // the unsupported off-Mac shape remains queued (sc-13878).
     assert_eq!(target.defaults.optimizer, "adamw");
     // Wan transformer attention projections drive the LoRA injection.
     assert_eq!(
@@ -755,9 +755,9 @@ fn builtin_registry_exposes_wan_target() {
         target.defaults.advanced.get("numFrames"),
         Some(&serde_json::json!(1))
     );
-    // Not Apple-Silicon-gated: it runs off-Mac (torch/CUDA) AND on macOS (the native MLX trainer
-    // against the installed MLX turnkey, sc-13878), so it carries no `appleSiliconOnly` marker —
-    // unlike the MLX-only LTX target. The macOS base-weight resolution lives in the rust-api
+    // The shared contract carries no `appleSiliconOnly` marker, while current execution is the
+    // native MLX trainer against the installed MLX turnkey on macOS (sc-13878); unsupported
+    // off-Mac work remains queued. The macOS base-weight resolution lives in the rust-api
     // `macos_wan_*` gate/resolver, guarded by `macos_wan_targets_have_a_macos_installable_mlx_turnkey_base`.
     assert_eq!(target.limits.get("appleSiliconOnly"), None);
 }

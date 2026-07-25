@@ -996,7 +996,7 @@ pub(crate) async fn run_image_generate_job(
                 }
                 // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane (e.g.
                 // sdxl) must be REJECTED with a clear error, not silently rendered as plain txt2img (poses
-                // dropped) and not bounced to torch. The candle worker CLAIMS these (jobs_store
+                // dropped) and not rerouted. The candle worker CLAIMS these (jobs_store
                 // `image_job_candle_pose_reject`) precisely to fail them loudly here. SDXL identity-pose
                 // ships via InstantID; the wired candle pose families are `WIRED_CANDLE_POSE_FAMILIES`.
                 CandleImageRoute::PoseReject => {
@@ -2038,8 +2038,8 @@ include!("image_jobs/pulid.rs");
 // image detail tile-ControlNet routing.
 include!("image_jobs/detail.rs");
 
-/// Off macOS the in-process engine is unavailable; `image_detail` is served by the Python
-/// torch worker (the `mlx` worker — the only one advertising this capability — is macOS-only).
+/// Off macOS the in-process engine is unavailable; the capability is not advertised and
+/// `image_detail` remains queued (the `mlx` worker is macOS-only).
 #[cfg(not(target_os = "macos"))]
 pub(crate) async fn run_image_detail_job(
     _api: &ApiClient,

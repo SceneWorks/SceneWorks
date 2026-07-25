@@ -22,12 +22,12 @@
 //! (`_load_model(distill_lora=None)`) — the full base model.
 //!
 //! When neither the MLX nor the candle engine is linked (a non-macOS build with `backend-candle`
-//! off), the `image_vqa` / `image_interleave` capabilities are not advertised and the handlers are
-//! stubs that error loudly (the Python torch worker serves these modes there).
+//! off), the `image_vqa` / `image_interleave` capabilities are not advertised, jobs remain queued,
+//! and the handlers are defensive stubs that error loudly if called.
 
 use super::*;
-// The macOS (MLX) and candle (Windows/CUDA) handlers parse an `ImageRequest`; the torch-defer stub
-// doesn't.
+// The macOS (MLX) and candle (Windows/CUDA) handlers parse an `ImageRequest`; the defensive
+// no-backend stub does not.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 use sceneworks_core::image_request::ImageRequest;
 
@@ -348,8 +348,8 @@ fn vqa_generate(
     Ok(strip_reasoning(&answer))
 }
 
-/// Off macOS without the candle backend the in-process engine is unavailable; `image_vqa` is served
-/// by the Python torch worker (macOS runs the MLX engine; Windows/CUDA runs candle when enabled).
+/// Off macOS without the candle backend the in-process engine is unavailable; the capability is not
+/// advertised and `image_vqa` remains queued (macOS runs MLX; Windows/CUDA runs candle when enabled).
 #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
 pub(crate) async fn run_vqa_job(
     _api: &ApiClient,
@@ -819,8 +819,8 @@ fn interleave_generate(
     Ok((out.text, decoded))
 }
 
-/// Off macOS without the candle backend the in-process engine is unavailable; `image_interleave` is
-/// served by the Python torch worker (macOS runs MLX; Windows/CUDA runs candle when enabled).
+/// Off macOS without the candle backend the in-process engine is unavailable; the capability is not
+/// advertised and `image_interleave` remains queued (macOS runs MLX; Windows/CUDA runs candle when enabled).
 #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
 pub(crate) async fn run_interleave_job(
     _api: &ApiClient,

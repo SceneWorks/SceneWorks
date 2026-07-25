@@ -53,7 +53,7 @@ fn is_flux2_edit_candle_dev(model: &str) -> bool {
 
 /// FLUX.2 model ids the candle edit route accepts: the klein base 9b + true_v2 (which share the edit
 /// variant) and the dev 32B flagship (sc-7736). The klein `-kv` distill needs the reference-K/V cache
-/// port and stays on the MLX/torch path for now.
+/// port and is refused by candle for now.
 fn is_flux2_edit_candle_model(model: &str) -> bool {
     matches!(
         model,

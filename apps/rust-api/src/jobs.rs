@@ -131,7 +131,7 @@ pub(crate) async fn claim_job(
             // Off-Mac candle-required (sc-5502, epic 5483): the Windows/Linux twins of the two
             // sweeps above — fail any candle-eligible job stranded with no live candle worker, and
             // (enforce) any queued job the candle/CUDA flow can't serve. Both no-op when the flag
-            // is off (the default), so a deployment still keeping the torch worker is unaffected.
+            // is off (the default), so normal capability routing is unaffected.
             let candle_stranded = store.fail_stranded_candle_jobs(candle_required, timeout)?;
             let candle_unsupported =
                 store.fail_unsupported_candle_jobs(candle_required, candle_enforce)?;
@@ -166,17 +166,17 @@ pub(crate) async fn claim_job(
         emit_route_decision(decision);
     }
     if let Some(job) = &response {
-        // Warn-only (sc-3484): an unsupported job the torch worker just claimed on a Mac —
-        // log the gap once so the inventory materializes while the job still runs on torch.
+        // Warn-only (sc-3484): an unsupported job claimed by a non-MLX GPU descriptor on a Mac —
+        // log the gap once so the inventory materializes.
         // In enforce mode such a job was already failed above and never reaches here.
         if mlx_required && !enforce_unsupported {
             if let Err(reason) = mac_rust_supported(job) {
                 emit_mlx_unsupported(job, &reason, "warn");
             }
         }
-        // Warn-only (sc-5502): the off-Mac candle twin — log the gap once while the job still
-        // runs on the co-resident torch worker, so the off-Mac port-or-drop inventory
-        // materializes. In enforce mode such a job was already failed above and never reaches here.
+        // Warn-only (sc-5502): the off-Mac candle twin — log the gap once if a non-candle GPU
+        // descriptor claims it, so the off-Mac port-or-drop inventory materializes. In enforce mode
+        // such a job was already failed above and never reaches here.
         if candle_required && !candle_enforce {
             if let Err(reason) = candle_supported(job) {
                 emit_candle_unsupported(job, &reason, "warn");
@@ -205,8 +205,8 @@ pub(crate) async fn claim_job(
 
 /// Emit the macOS `mlx_unsupported` gap event (epic 3482 / sc-3484) as a structured JSON line
 /// for the desktop stdout capture + headless `GET /api/v1/logs` buffer (sc-3447/3451/3453).
-/// `mode` is `"enforce"` (the job was failed terminal) or `"warn"` (logged but still run on
-/// torch). The body is the feature-precise [`UnsupportedReason`] — model/feature/detail/
+/// `mode` is `"enforce"` (the job was failed terminal) or `"warn"` (logged while it remains
+/// queued for a compatible native worker). The body is the feature-precise [`UnsupportedReason`] — model/feature/detail/
 /// suggestedEpic — so the Logs surface and the gap inventory name the exact port-or-drop work.
 fn emit_mlx_unsupported(job: &JobSnapshot, reason: &UnsupportedReason, mode: &str) {
     let mut value = serde_json::to_value(reason).unwrap_or_else(|_| json!({}));
@@ -231,7 +231,8 @@ fn emit_mlx_unsupported(job: &JobSnapshot, reason: &UnsupportedReason, mode: &st
 /// the desktop's stdout capture + the headless `GET /api/v1/logs` buffer (sc-3447/3451/3453).
 /// Mirrors [`emit_route_decision`]: this is the System → Logs surface that turns "no MLX
 /// worker took the job" into a named, actionable line instead of a job silently stuck or
-/// run on MPS (sc-3483). `reason` carries the full actionable error set on the job.
+/// entering the legacy MPS compatibility branch (sc-3483). `reason` carries the full actionable
+/// error set on the job.
 fn emit_mlx_unavailable(job: &JobSnapshot) {
     let model = job.payload.get("model").and_then(Value::as_str);
     sceneworks_core::observability::emit_event(
@@ -248,7 +249,7 @@ fn emit_mlx_unavailable(job: &JobSnapshot) {
 
 /// Emit the off-Mac `candle_unsupported` gap event (sc-5502, epic 5483) — the candle twin of
 /// [`emit_mlx_unsupported`]. `mode` is `"enforce"` (the job was failed terminal) or `"warn"`
-/// (logged but still run on the co-resident torch worker). The body is the feature-precise
+/// (logged if a non-candle GPU descriptor claimed it). The body is the feature-precise
 /// [`UnsupportedReason`] so the Logs surface + the off-Mac gap inventory name the exact
 /// port-or-drop work.
 fn emit_candle_unsupported(job: &JobSnapshot, reason: &UnsupportedReason, mode: &str) {

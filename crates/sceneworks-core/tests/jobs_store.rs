@@ -2587,7 +2587,7 @@ fn image_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
 }
 
 /// Capabilities a real image GPU worker advertises once it also serves the distinct
-/// `image_edit` job type (sc-3513) — both the Python torch worker (`IMAGE_JOB_TYPES`)
+/// `image_edit` job type (sc-3513). The synthetic generic descriptor used by these routing tests
 /// and the macOS mlx worker (`gpu::mlx_gpu`) carry `image_edit` alongside `image_generate`.
 fn image_edit_caps() -> Vec<WorkerCapability> {
     vec![
@@ -2648,7 +2648,7 @@ fn mlx_eligible_image_job_defers_from_torch_worker_to_idle_mlx_worker() {
         ))
         .expect("job creates");
 
-    // The torch worker defers the MLX-eligible job to the idle mlx worker.
+    // The synthetic generic descriptor refuses the MLX-eligible job; the idle mlx worker claims it.
     assert!(store
         .claim_next_job("worker-torch")
         .expect("torch claim ok")
@@ -2681,7 +2681,7 @@ fn qwen_edit_image_job_defers_to_mlx_worker() {
         ))
         .expect("job creates");
 
-    // The torch worker defers it to the idle mlx worker, which claims it.
+    // The synthetic generic descriptor refuses it; the idle mlx worker claims it.
     assert!(store
         .claim_next_job("worker-torch")
         .expect("torch claim ok")
@@ -2735,7 +2735,7 @@ fn sensenova_understanding_jobs_defer_to_mlx_worker() {
             })
             .expect("job creates");
 
-        // The torch worker defers it to the idle mlx worker, which claims it in-process.
+        // The synthetic generic descriptor refuses it; the idle mlx worker claims it in-process.
         assert!(
             store
                 .claim_next_job("worker-torch")
@@ -2789,7 +2789,7 @@ fn mlx_worker_excluded_from_torch_only_image_job() {
     let store = store("mlx-routing-exclude");
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // edit_image on a Z-Image model is not a txt2img request → torch path only.
+    // edit_image on a Z-Image model without the required source shape is refused by MLX.
     let job = store
         .create_job(image_job_with(
             json!({
@@ -2801,13 +2801,13 @@ fn mlx_worker_excluded_from_torch_only_image_job() {
         ))
         .expect("job creates");
 
-    // The mlx worker must not claim a torch-only image job.
+    // The mlx worker must not claim an unsupported image job.
     assert!(store
         .claim_next_job("worker-mlx")
         .expect("mlx claim ok")
         .is_none());
 
-    // A torch worker is the home for it.
+    // The generic descriptor below is a synthetic compatibility check, not a deployed fallback.
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     let claimed = store
         .claim_next_job("worker-torch")
@@ -2830,7 +2830,8 @@ fn mlx_eligible_image_job_falls_back_to_torch_when_no_mlx_worker() {
         ))
         .expect("job creates");
 
-    // With no idle mlx worker, nothing defers — the torch worker is the fallback.
+    // Legacy warn-mode fixture: the synthetic generic descriptor can claim when no mlx worker is idle.
+    // Production has no fallback; unsupported work remains queued.
     let claimed = store
         .claim_next_job("worker-torch")
         .expect("torch claim ok")
@@ -2839,10 +2840,10 @@ fn mlx_eligible_image_job_falls_back_to_torch_when_no_mlx_worker() {
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("cuda:0"));
 }
 
-// epic 3482 / sc-3483 — macOS "MLX-required": the MPS worker never claims an MLX-eligible
+// epic 3482 / sc-3483 — macOS "MLX-required": a synthetic MPS descriptor never claims an MLX-eligible
 // job, and a job no live `mlx` worker takes within the grace window fails terminal with
-// `mlx_unavailable` rather than silently running on MPS. Ships behind a flag (default OFF);
-// the sibling `*_falls_back_to_torch_*` tests above pin the OFF behaviour.
+// `mlx_unavailable` rather than entering the legacy compatibility branch. Ships behind a flag
+// (default OFF); the sibling legacy-routing fixtures above pin the OFF behaviour.
 
 /// Backdate a job's `created_at` so the grace sweep treats it as having outlived the
 /// window (mirrors how `stale_sweep_*` backdates `last_seen_at`).
@@ -2908,8 +2909,8 @@ fn queue_summary_counts_and_active_jobs_ignore_500_row_cap() {
 fn mlx_required_defers_eligible_job_even_with_no_idle_mlx_worker() {
     let store = store("mlx-required-defer");
     // Only an MPS worker is registered — no idle `mlx` worker to take the job. With the
-    // flag OFF this is exactly the torch fallback; with it ON the MPS worker yields
-    // unconditionally ("never MPS" on Mac).
+    // flag OFF this exercises the legacy generic-worker branch; with it ON the MPS worker yields
+    // unconditionally ("never MPS" on Mac). Production has no Python fallback.
     register_gpu_worker(&store, "worker-mps", "mps", image_caps());
     store
         .create_job(image_job_with(
@@ -3006,8 +3007,8 @@ fn fail_stranded_mlx_jobs_is_noop_when_not_required() {
 
 #[test]
 fn mlx_required_still_lets_mps_claim_a_non_eligible_model() {
-    // 3483 only kills the MPS fallback for MLX-*eligible* jobs. A torch-only model is not
-    // eligible, so it is NOT deferred and still runs on MPS — surfacing it as a loud
+    // 3483 only gates MLX-*eligible* jobs. An unsupported model is not eligible, so this synthetic
+    // MPS descriptor can still claim it — surfacing it as a loud
     // `mlx_unsupported` failure is sc-3484's job, not this slice's.
     let store = store("mlx-required-noneligible");
     register_gpu_worker(&store, "worker-mps", "mps", image_caps());
@@ -3055,7 +3056,7 @@ fn candle_supported_accepts_eligible_and_in_process_jobs() {
         json!({ "model": "z_image_turbo", "prompt": "p" }),
     );
     assert!(candle_supported(&eligible).is_ok());
-    // In-process job types run off-Mac with zero torch.
+    // In-process job types run off-Mac on native Rust lanes.
     let download = job_of(&store, JobType::ModelDownload, json!({ "repo": "x/y" }));
     assert!(candle_supported(&download).is_ok());
     let refine = job_of(&store, JobType::PromptRefine, json!({ "prompt": "p" }));
@@ -3082,14 +3083,14 @@ fn candle_supported_rejects_unsupported_strict_pose() {
 
 #[test]
 fn candle_supported_flags_a_torch_only_image_model() {
-    // `pulid_flux_dev` is txt2img-torch-only off-Mac: its ONLY candle lane is the bespoke
+    // `pulid_flux_dev` plain txt2img is unsupported off-Mac: its ONLY candle lane is the bespoke
     // character-reference path (`pulid_flux_candle_eligible`, which needs character_image + a
     // referenceAssetId), so a PLAIN txt2img prompt has no candle route and it is not in
     // CANDLE_ROUTED_MODELS — the candle/CUDA oracle must flag it as an unsupported image model off-Mac.
     // (`bernini_image` used to be the example here but is now candle-routed — sc-10996, epic 6562; the
     // base `sana_1600m` was the example next but is now candle-routed too — sc-11780, epic 8485; then
     // `sana_sprint_1600m`, but the CFG-free SANA-Sprint distill is candle-routed too now — sc-11781,
-    // epic 8485. PuLID-FLUX's reference-less txt2img shape is the still-torch-only representative.)
+    // epic 8485. PuLID-FLUX's reference-less txt2img shape is the remaining unsupported representative.)
     let store = store("candle-oracle-torch-model");
     let job = job_of(
         &store,
@@ -3111,7 +3112,7 @@ fn candle_required_enforce_fails_unsupported_job() {
         JobType::ImageGenerate,
         json!({ "model": "sdxl", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
     );
-    // Warn mode (enforce = false): no-op, the job stays queued (still runs on torch).
+    // Warn mode (enforce = false): no-op; the unsupported job stays queued.
     let warn = store
         .fail_unsupported_candle_jobs(true, false)
         .expect("sweep ok");
@@ -3166,7 +3167,7 @@ fn candle_required_enforce_leaves_eligible_job_queued() {
 #[test]
 fn candle_required_fails_stranded_eligible_job_when_no_live_candle_worker() {
     let store = store("candle-strand");
-    // A non-candle torch GPU worker exists, but no candle worker — the candle-eligible job strands.
+    // A synthetic generic GPU descriptor exists, but no candle worker; the candle-eligible job strands.
     register_gpu_worker(&store, "worker-torch", "0", image_caps());
     let job = job_of(
         &store,
@@ -3459,7 +3460,7 @@ fn mac_rust_supported_names_infra_job_types() {
     let person_track = job_of(&store, JobType::PersonTrack, json!({}));
     assert!(mac_rust_supported(&person_track).is_ok());
     // replace_person → native Wan-VACE is supported on a replace-capable MLX video model
-    // (sc-3521); a replace_person job on a model with no MLX video engine stays a torch gap.
+    // (sc-3521); a replace_person job on a model with no native video engine remains queued.
     let replace_mlx = job_of(
         &store,
         JobType::PersonReplace,
@@ -3513,7 +3514,8 @@ fn mac_rust_supported_names_infra_job_types() {
 #[test]
 fn mac_rust_supported_names_advanced_video_and_svd() {
     let store = store("oracle-video");
-    // extend / bridge on a 14B Wan MoE engine: no `Keyframe` path → torch gap (sc-3522 / sc-3357).
+    // Extend / bridge on a 14B Wan MoE engine has no `Keyframe` path, so it is a native gap
+    // (sc-3522 / sc-3357).
     // The mode is derived from the job type, so a missing payload `mode` still classifies correctly.
     let extend = job_of(
         &store,
@@ -3604,7 +3606,7 @@ fn mac_rust_supported_convert_flux2_ok_else_python_gap() {
         json!({ "model": "sd3_5_medium", "converter": "sd3_5_medium_quant" }),
     );
     assert!(mac_rust_supported(&sd3).is_ok());
-    // The default/absent converter is the Python mlx-video Wan/LTX path → gap.
+    // The default/absent converter has no native implementation and remains an unsupported gap.
     let wan = job_of(&store, JobType::ModelConvert, json!({ "model": "wan_2_2" }));
     assert_eq!(
         mac_rust_supported(&wan)
@@ -3922,7 +3924,7 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
         .video_modes;
     assert_eq!(ltx.get("extend_clip"), Some(&true));
     assert_eq!(ltx.get("video_bridge"), Some(&true));
-    // The 14B Wan MoE engines have no FLF Keyframe path → torch.
+    // The 14B Wan MoE engines have no FLF Keyframe path, so FLF is unsupported.
     assert_eq!(
         model_mac_support("wan_2_2_t2v_14b", "video", None)
             .features
@@ -4177,7 +4179,7 @@ fn routing_decision_reports_claimed_by_candle() {
     let store = store("route-decision-candle");
     // The Windows/Linux happy path: the candle (CUDA) worker — identified by the `candle`
     // capability marker, on a real gpu index ("0") — claims an MLX-eligible auto job. The
-    // decision names candle, never "fell back to torch": nothing is missing here.
+    // decision names candle directly: nothing is missing here.
     register_candle_worker(&store, "worker-candle");
     let job = store
         .create_job(image_job_with(
@@ -4264,9 +4266,9 @@ fn routing_decision_is_none_for_non_mlx_model() {
 // "Plain Image Edit" is submitted as JobType::ImageEdit (mode=edit_image + sourceAssetId),
 // a *distinct* job type from the character/reference flow (JobType::ImageGenerate). The
 // engine dispatches edits on payload model+mode, not job type, so the edit-capable families
-// (qwen/flux2/sdxl) must route to the in-process mlx worker exactly like the generate flow;
-// torch-only edit models stay on torch. Before sc-3513 the routing gate excluded every
-// non-ImageGenerate type, so these jobs ran on torch silently with no `gpu_route_decision`.
+// (qwen/flux2/sdxl) must route to the in-process mlx worker exactly like the generate flow.
+// Unsupported edit models remain queued. Before sc-3513 the routing gate excluded every
+// non-ImageGenerate type, so these jobs took the generic branch with no `gpu_route_decision`.
 
 #[test]
 fn qwen_image_edit_job_type_defers_to_mlx_worker() {
@@ -4286,7 +4288,7 @@ fn qwen_image_edit_job_type_defers_to_mlx_worker() {
         ))
         .expect("job creates");
 
-    // The torch worker defers the MLX-eligible edit to the idle mlx worker, which claims it.
+    // The synthetic generic descriptor refuses the MLX-eligible edit; the idle mlx worker claims it.
     assert!(store
         .claim_next_job("worker-torch")
         .expect("torch claim ok")
@@ -4357,10 +4359,10 @@ fn active_mlx_image_edit_blocks_mps_image_edit_claim() {
     assert_eq!(claimed_mlx.id, mlx_job.id);
     assert_eq!(claimed_mlx.assigned_gpu.as_deref(), Some("mlx"));
 
-    // An unported image model is the MPS job: not in MLX_ROUTED_MODELS, so it isn't MLX-eligible and
-    // isn't soft-deferred to the mlx worker — it stays on the torch worker, exercising the shared-GPU
-    // exclusion cleanly. (No real image model is torch-only anymore: Lens — formerly this example —
-    // is MLX after epic 3164 / sc-5105, as Kolors/PuLID-FLUX were before it.)
+    // An unported image model is assigned to the synthetic generic descriptor in this compatibility
+    // test: it is not in MLX_ROUTED_MODELS, so it is not soft-deferred to the mlx worker. Production
+    // has no such fallback worker, so an unsupported model remains queued. (Every real built-in image
+    // family is MLX-routed after Lens landed in epic 3164 / sc-5105.)
     let mps_job = store
         .create_job(image_job_with(
             json!({
@@ -4394,9 +4396,8 @@ fn active_mps_image_edit_blocks_mlx_image_edit_claim() {
     register_gpu_worker(&store, "worker-mps", "mps", image_edit_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
 
-    // An unported image model is the MPS job (not in MLX_ROUTED_MODELS, so it isn't soft-deferred to
-    // the mlx worker). No real image model is torch-only anymore — Lens, the last one, is MLX after
-    // epic 3164 / sc-5105 (PuLID-FLUX was MLX after sc-3344).
+    // A synthetic unported image model exercises the MPS compatibility descriptor (not in
+    // MLX_ROUTED_MODELS, so it is not soft-deferred to mlx). Production has no MPS fallback.
     let mps_job = store
         .create_job(image_job_with(
             json!({
@@ -4474,10 +4475,10 @@ fn torch_only_image_model_stays_on_torch() {
     let store = store("mlx-routing-image-torch-only");
     register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
 
-    // An unported image model (not in MLX_ROUTED_MODELS) stays on the Python torch path and the mlx
-    // worker must refuse it. Every ported image family — incl. Kolors' full surface (epic 3090),
-    // PuLID-FLUX (sc-3344), and Lens (epic 3164 / sc-5105, the last one) — is MLX now, so a
-    // torch-only example must come from an unported model id.
+    // An unported image model (not in MLX_ROUTED_MODELS) is refused by the mlx worker and remains
+    // queued in production. Every ported image family — incl. Kolors' full surface (epic 3090),
+    // PuLID-FLUX (sc-3344), and Lens (epic 3164 / sc-5105, the last one) — is MLX now, so this
+    // synthetic compatibility example must use an unported model id.
     let job = store
         .create_job(image_job_with(
             json!({
@@ -4493,7 +4494,8 @@ fn torch_only_image_model_stays_on_torch() {
         .expect("mlx claim ok")
         .is_none());
 
-    // A torch worker is the home for it, and the claim is routing-neutral (no event).
+    // This legacy fixture exercises a synthetic generic claim, which is routing-neutral (no event).
+    // Production has no fallback; unsupported shapes remain queued.
     register_gpu_worker(&store, "worker-torch", "mps", image_edit_caps());
     let (claimed, decision) = store
         .claim_next_job_routed("worker-torch", false)
@@ -4542,7 +4544,7 @@ fn explicit_gpu_image_job_is_not_deferred_to_mlx_worker() {
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // The user explicitly pinned this MLX-eligible job to the torch GPU; honour it.
+    // This legacy fixture pins the MLX-eligible job to a synthetic generic GPU descriptor.
     let job = store
         .create_job(image_job_with(
             json!({ "model": "z_image_turbo", "prompt": "p" }),
@@ -4698,7 +4700,7 @@ fn mlx_eligible_training_job_defers_from_torch_worker_to_idle_mlx_worker() {
         ))
         .expect("job creates");
 
-    // The torch worker defers the MLX-native training job to the idle mlx worker.
+    // The synthetic generic descriptor refuses the MLX-native job; the idle mlx worker claims it.
     assert!(store
         .claim_next_job("worker-torch")
         .expect("torch claim ok")
@@ -4730,7 +4732,7 @@ fn mlx_eligible_kolors_training_job_defers_from_torch_worker_to_idle_mlx_worker(
         ))
         .expect("job creates");
 
-    // The torch worker defers the now-MLX-native kolors training job to the idle mlx worker.
+    // The synthetic generic descriptor refuses the MLX-native job; the idle mlx worker claims it.
     assert!(store
         .claim_next_job("worker-torch")
         .expect("torch claim ok")
@@ -4780,7 +4782,7 @@ fn mlx_worker_excluded_from_lokr_wan_training_job() {
     let store = store("mlx-training-lokr-wan");
     register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
 
-    // LoKr-on-Wan has no Kronecker merge in the mlx Wan path → torch only.
+    // LoKr-on-Wan has no Kronecker merge in the mlx Wan path, so MLX refuses it.
     let job = store
         .create_job(mlx_training_job(
             "wan_moe_lora",
@@ -4836,7 +4838,8 @@ fn lokr_z_image_training_stays_mlx_eligible() {
 #[test]
 fn mlx_eligible_training_falls_back_to_torch_when_no_mlx_worker() {
     let store = store("mlx-training-fallback");
-    // No mlx worker (Windows/Linux, or it's down) — torch is the only path.
+    // Legacy compatibility fixture with no mlx worker. Production has no fallback; unsupported
+    // work remains queued for a compatible native worker.
     register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
 
     let job = store
@@ -4865,8 +4868,8 @@ fn candle_training_caps() -> Vec<WorkerCapability> {
 #[test]
 fn candle_worker_claims_candle_native_training_kernels() {
     // The five families with a candle trainer (sdxl / z_image / lens / Krea 2 Raw / Wan A14B T2V)
-    // route to the candle worker off-Mac. `krea_lora` is no-torch-fallback (MLX_ONLY) yet candle
-    // claims it (sc-8614) — the gate exempts a candle-eligible job from the mlx-only refusal. Each in
+    // route to the candle worker off-Mac. `krea_lora` is listed in MLX_ONLY yet candle claims it
+    // (sc-8614) — the gate exempts a candle-eligible job from the mlx-only refusal. Each in
     // its own store so the claim is unambiguous.
     let cases: &[(&str, &str, &str)] = &[
         ("sdxl_lora", "sdxl", "lora"),
@@ -4897,10 +4900,10 @@ fn candle_worker_claims_candle_native_training_kernels() {
 
 #[test]
 fn candle_worker_refuses_torch_served_training_kernels() {
-    // Kernels with no candle trainer but a torch fallback: the candle worker must REFUSE them (the
-    // `lora_train_execute` advertisement is coarse), leaving them for the co-resident torch worker —
-    // otherwise the candle worker would claim and fail terminally. Covers Kolors, the dense Wan 5B,
-    // and the I2V A14B (candle has only the T2V A14B trainer).
+    // Kernels with no candle trainer must be refused by candle because the
+    // `lora_train_execute` advertisement is coarse; production leaves them queued instead of
+    // mis-claiming and failing terminally. The generic descriptor below is a synthetic compatibility
+    // check. Covers Kolors, the dense Wan 5B, and the I2V A14B.
     let cases: &[(&str, &str)] = &[
         ("kolors_lora", "kolors"),
         ("wan_lora", "wan_2_2"),
@@ -4919,7 +4922,7 @@ fn candle_worker_refuses_torch_served_training_kernels() {
                 .is_none(),
             "candle must refuse {kernel}/{base_model} (no candle trainer)"
         );
-        // The co-resident torch worker serves it.
+        // A synthetic generic training descriptor can claim it in this isolated routing test.
         register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
         let claimed = store
             .claim_next_job("worker-torch")
@@ -4931,8 +4934,8 @@ fn candle_worker_refuses_torch_served_training_kernels() {
 
 #[test]
 fn candle_worker_refuses_ltx_mlx_only_training() {
-    // ltx_mlx_lora has no torch fallback (MLX_ONLY_TRAINING_KERNELS) AND no candle trainer, so off-Mac
-    // neither the candle worker nor a torch worker may claim it — it stays queued for an mlx worker.
+    // ltx_mlx_lora is native-MLX-only (MLX_ONLY_TRAINING_KERNELS) and has no candle trainer, so off-Mac
+    // neither candle nor a generic descriptor may claim it; it stays queued for an mlx worker.
     let store = store("candle-refuse-ltx");
     register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
     register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
@@ -4964,8 +4967,8 @@ fn candle_worker_refuses_ltx_mlx_only_training() {
 #[test]
 fn ltx_training_is_mlx_worker_only_with_no_torch_fallback() {
     let store = store("mlx-training-ltx-only");
-    // sc-3049 retired the Python MLX LTX trainer, so `ltx_mlx_lora` has no torch
-    // fallback: a torch worker must NOT claim it — it stays queued for the mlx worker.
+    // sc-3049 retired the Python MLX LTX trainer, so `ltx_mlx_lora` is native-only: a generic
+    // worker must NOT claim it — it stays queued for the mlx worker.
     register_gpu_worker(&store, "worker-torch", "mps", training_caps());
     let job = store
         .create_job(mlx_training_job(
@@ -4995,8 +4998,8 @@ fn ltx_training_is_mlx_worker_only_with_no_torch_fallback() {
 #[test]
 fn krea_training_has_no_torch_fallback_but_runs_on_either_rust_backend() {
     let store = store("training-krea-no-torch");
-    // Krea 2 (epic 7565) trains on a native Rust trainer and has NO torch path, so — like LTX — a
-    // torch worker must NOT claim a `krea_lora` job. UNLIKE LTX it is Rust-only on BOTH backends:
+    // Krea 2 (epic 7565) trains on a native Rust trainer, so — like LTX — a generic worker must NOT
+    // claim a `krea_lora` job. UNLIKE LTX it is Rust-only on BOTH backends:
     // the mlx worker (Mac) and, since sc-8614, the candle worker (off-Mac) each run it.
     register_gpu_worker(&store, "worker-torch", "mps", training_caps());
     let job = store
@@ -5009,13 +5012,13 @@ fn krea_training_has_no_torch_fallback_but_runs_on_either_rust_backend() {
         ))
         .expect("job creates");
 
-    // Torch defers (no Krea torch trainer).
+    // The synthetic generic descriptor refuses Krea because it has no matching native trainer.
     assert!(store
         .claim_next_job("worker-torch")
         .expect("torch claim ok")
         .is_none());
 
-    // The candle worker claims it off-Mac (sc-8614): no-torch-fallback no longer means mlx-only.
+    // The candle worker claims it off-Mac (sc-8614), so Krea is native on both Rust backends.
     register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
     let claimed = store
         .claim_next_job("worker-candle")
@@ -5050,9 +5053,9 @@ fn control_training_job(requested_gpu: &str) -> CreateJob {
 
 #[test]
 fn control_training_routes_to_candle_only() {
-    // The Krea pose-ControlNet trainer is candle-only (epic 10159): `krea_control` has no torch and no
-    // MLX trainer (the MLX control lane is B5/sc-10177), so neither a torch nor an mlx worker may claim
-    // a `control_training` job — only the candle worker does.
+    // The Krea pose-ControlNet trainer is candle-only (epic 10159): it has no MLX trainer (the MLX
+    // control lane is B5/sc-10177), so a generic or mlx descriptor refuses `control_training`;
+    // only the candle worker claims it.
     let store = store("control-training-candle-only");
     register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
@@ -5060,7 +5063,7 @@ fn control_training_routes_to_candle_only() {
         .create_job(control_training_job("auto"))
         .expect("job creates");
 
-    // Torch refuses (no torch control trainer — krea_control is no-torch-fallback).
+    // The synthetic generic descriptor refuses because it has no native control trainer.
     assert!(store
         .claim_next_job("worker-torch")
         .expect("torch claim ok")
@@ -5113,7 +5116,7 @@ fn krea_training_runs_on_the_mlx_worker() {
 fn lokr_krea_training_stays_mlx_eligible() {
     let store = store("mlx-training-krea-lokr");
     // Unlike Wan (no MLX Kronecker merge), Krea's native trainer + Turbo inference seam both
-    // handle LoKr, so a LoKr `krea_lora` job stays MLX-eligible and is NOT shed to torch.
+    // handle LoKr, so a LoKr `krea_lora` job stays MLX-eligible.
     register_gpu_worker(&store, "worker-torch", "mps", training_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
     let job = store
@@ -5126,7 +5129,7 @@ fn lokr_krea_training_stays_mlx_eligible() {
         ))
         .expect("job creates");
 
-    // Torch defers (Krea is MLX-only); the mlx worker claims the LoKr job.
+    // The synthetic generic descriptor refuses Krea; the mlx worker claims the LoKr job.
     assert!(store
         .claim_next_job("worker-torch")
         .expect("torch claim ok")
@@ -5183,7 +5186,7 @@ fn mlx_eligible_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
         ))
         .expect("job creates");
 
-    // The torch worker defers the MLX-eligible video job to the idle mlx worker.
+    // The synthetic generic descriptor refuses the MLX-eligible job; the idle mlx worker claims it.
     assert!(store
         .claim_next_job("worker-torch")
         .expect("torch claim ok")
@@ -5201,9 +5204,9 @@ fn mlx_worker_excluded_from_advanced_mode_video_job() {
     let store = store("mlx-video-routing-exclude");
     register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
 
-    // extend_clip / video_bridge stay torch on engines with no keyframe path — the 14B Wan MoE
-    // here (sc-3522 / sc-3357: LTX + Wan TI2V-5B serve them on MLX, the MoE engines do not); the
-    // mlx worker must not claim this one.
+    // extend_clip / video_bridge are refused on engines with no keyframe path — the 14B Wan MoE
+    // here (sc-3522 / sc-3357: LTX + Wan TI2V-5B serve them on MLX, the MoE engines do not); no
+    // native worker claims this one, so production leaves it queued.
     let job = store
         .create_job(video_job_with(
             json!({ "model": "wan_2_2_t2v_14b", "mode": "extend_clip" }),
@@ -5228,7 +5231,7 @@ fn mlx_worker_excluded_from_advanced_mode_video_job() {
 #[test]
 fn replace_person_job_defers_from_torch_worker_to_idle_mlx_worker() {
     // sc-3521 cutover: replace_person → native Wan-VACE is MLX-eligible on the replace-capable
-    // models, so a torch worker defers the `PersonReplace` job to an idle mlx worker.
+    // models, so the generic test descriptor refuses it and an idle mlx worker claims it.
     let store = store("mlx-video-routing-replace");
     register_gpu_worker(&store, "worker-torch", "mps", video_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
@@ -5259,7 +5262,7 @@ fn replace_person_job_defers_from_torch_worker_to_idle_mlx_worker() {
 #[test]
 fn flf_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
     // sc-3055 cutover: first_last_frame is MLX-eligible on the FLF-capable engines (LTX +
-    // Wan TI2V-5B `wan_2_2`), so a torch worker defers it to an idle mlx worker.
+    // Wan TI2V-5B `wan_2_2`), so the generic test descriptor refuses it and mlx claims it.
     for model in ["ltx_2_3", "wan_2_2"] {
         let store = store(&format!("mlx-video-routing-flf-{model}"));
         register_gpu_worker(&store, "worker-torch", "mps", video_caps());
@@ -5293,7 +5296,7 @@ fn flf_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
 
 #[test]
 fn flf_video_job_stays_on_torch_for_non_flf_capable_wan_moe() {
-    // FLF on the 14B Wan MoE engines has no engine Keyframe path → stays torch.
+    // FLF on the 14B Wan MoE engines has no native engine Keyframe path and remains queued.
     let store = store("mlx-video-routing-flf-moe");
     register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
 
@@ -5321,8 +5324,8 @@ fn flf_video_job_stays_on_torch_for_non_flf_capable_wan_moe() {
 #[test]
 fn clip_conditioning_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
     // sc-3522 / sc-3357 cutover: extend_clip / video_bridge are MLX-eligible on the LTX IC-LoRA
-    // path and Wan TI2V-5B (`wan_2_2`, boundary-keyframe conditioning), so a torch worker defers
-    // the dedicated job types to an idle mlx worker.
+    // path and Wan TI2V-5B (`wan_2_2`, boundary-keyframe conditioning), so the generic test
+    // descriptor refuses the dedicated job types and an idle mlx worker claims them.
     for (job_type, mode) in [
         (JobType::VideoExtend, "extend_clip"),
         (JobType::VideoBridge, "video_bridge"),
@@ -5362,8 +5365,8 @@ fn clip_conditioning_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
 
 #[test]
 fn clip_conditioning_video_job_stays_on_torch_for_wan_moe_engines() {
-    // extend_clip / video_bridge have no `Keyframe` path on the 14B Wan MoE engines → stays torch,
-    // even though the mlx worker advertises the VideoExtend/VideoBridge capabilities. (Wan TI2V-5B
+    // extend_clip / video_bridge have no `Keyframe` path on the 14B Wan MoE engines, so they remain
+    // queued even though the mlx worker advertises VideoExtend/VideoBridge. (Wan TI2V-5B
     // `wan_2_2` IS MLX-eligible — sc-3357 — and is covered by the defer test above.)
     for (job_type, mode) in [
         (JobType::VideoExtend, "extend_clip"),
@@ -5445,8 +5448,8 @@ fn lokr_on_wan_video_routes_to_mlx() {
     register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
 
     // LoKr-on-Wan now routes to MLX (epic 3641 / sc-3644): the Wan engine merges the Kronecker
-    // delta in-place (merge_one_lokr, sc-2393) — the old torch gate was a routing caution, not an
-    // engine limit. (Wan LoKr *training* still stays torch, epic 3039 — a separate path.)
+    // delta in-place (merge_one_lokr, sc-2393) — the old gate was a routing caution, not an engine
+    // limit. Wan LoKr training is a separate native-support decision.
     let job = store
         .create_job(video_job_with(
             json!({
@@ -5471,8 +5474,7 @@ fn lokr_on_ltx_video_routes_to_mlx_worker() {
     register_gpu_worker(&store, "worker-torch", "mps", video_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
 
-    // LoKr-on-LTX stays MLX: the torch LTX path has no LoKr loader; the Rust engine
-    // applies it natively.
+    // LoKr-on-LTX stays MLX; the Rust engine applies it natively.
     let job = store
         .create_job(video_job_with(
             json!({
@@ -5601,8 +5603,8 @@ fn flux_reference_job_routes_to_mlx() {
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // FLUX.1 reference/IP-Adapter (epic 3621) now runs natively on the Rust/MLX worker →
-    // torch refuses it, mlx claims it.
+    // FLUX.1 reference/IP-Adapter (epic 3621) runs natively on Rust/MLX; the synthetic generic
+    // descriptor refuses it and mlx claims it.
     let job = store
         .create_job(image_job_with(
             json!({ "model": "flux_dev", "prompt": "p", "referenceAssetId": "asset_1" }),
@@ -5818,7 +5820,7 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
     }
 
     // sc-3060: SDXL reference/IP-Adapter + edit_image (inpaint/outpaint) now run on the Rust
-    // engine, so they route to the mlx worker (the torch worker defers).
+    // engine, so the generic test descriptor refuses them and they route to the mlx worker.
     for payload in [
         json!({ "model": "sdxl", "prompt": "p", "referenceAssetId": "asset_1" }),
         json!({ "model": "sdxl", "prompt": "p", "mode": "edit_image", "sourceAssetId": "src_1" }),
@@ -5880,8 +5882,8 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
 fn realvisxl_lightning_reference_falls_back_off_mlx() {
     // sc-6075: RealVisXL Lightning is txt2img-only — the engine's few-step `lightning` sampler
     // rejects reference/img2img conditioning. A reference or edit_image job is therefore NOT
-    // MLX-eligible (`realvisxl_lightning_mlx_eligible`), so the torch worker claims it directly
-    // instead of deferring to the mlx worker (the txt2img case is covered above).
+    // MLX-eligible (`realvisxl_lightning_mlx_eligible`). This legacy fixture exercises the generic
+    // descriptor branch; production has no fallback and leaves the shape queued.
     let store = store("mlx-routing-realvisxl-lightning");
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
@@ -5928,8 +5930,8 @@ fn realvisxl_lightning_reference_falls_back_off_mlx() {
 #[test]
 fn image_detail_routes_to_mlx_worker() {
     // sc-3060: the tile-ControlNet detail refine (`image_detail`) now runs on the Rust
-    // engine for SDXL-family backbones, so it routes to the `mlx` worker (the torch worker
-    // defers); a third-party LyCORIS LoRA also runs on MLX now (epic 3641, sc-3671).
+    // engine for SDXL-family backbones, so the generic test descriptor refuses it and it routes to
+    // the `mlx` worker; a third-party LyCORIS LoRA also runs on MLX now (epic 3641, sc-3671).
     let store = store("mlx-routing-detail");
     let caps = vec![
         WorkerCapability::Gpu,
@@ -6012,9 +6014,9 @@ fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // A torch-only image model with no mlx-gen engine (pulid_flux_dev — PuLID has no MLX crate;
-    // Kolors base T2I is ported via sc-3875, InstantID via sc-3345, SenseNova-U1 via sc-3900) stays
-    // on the Python path: the torch worker claims it without deferral, and the mlx worker refuses it.
+    // A synthetic unsupported image model shape with no mlx-gen engine (`pulid_flux_dev` plain
+    // txt2img) exercises the generic-descriptor branch while the mlx worker refuses it. Production
+    // has no Python fallback; the shape remains queued.
     let job = store
         .create_job(image_job_with(
             json!({ "model": "pulid_flux_dev", "prompt": "p" }),
@@ -6034,7 +6036,7 @@ fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
 fn mlx_worker_claims_eligible_job_with_idle_mps_worker_present() {
     // Regression for the auto-GPU deferral deadlock (sc-3289): an Apple-Silicon
     // mlx worker reports no utilization (the real `gpu_utilization("mlx")` probes
-    // nvidia-smi and finds nothing -> None), while an idle Python mps worker does
+    // nvidia-smi and finds nothing -> None), while an idle synthetic MPS descriptor does
     // report utilization. A queued auto MLX-eligible job (here flux2_klein_9b_kv
     // text_to_image) must be claimed by the mlx worker; the mps worker must defer
     // it. Before the fix, `dispatch_score` scored the no-utilization mlx worker as
@@ -6091,7 +6093,7 @@ fn mlx_worker_claims_eligible_job_with_idle_mps_worker_present() {
         }))))
         .expect("job creates");
 
-    // The mps worker must defer (an idle mlx worker can run it).
+    // The synthetic MPS descriptor must defer because an idle mlx worker can run it.
     assert!(
         store
             .claim_next_job("mps-worker")
@@ -6451,7 +6453,7 @@ fn progress_from_non_owner_worker_is_rejected() {
 /// `anima_turbo` shipped as `mlx_routed = true` rows in `IMAGE_MODEL_CAPS`, but
 /// `image_request_mlx_eligible` had no dispatch arm for them, so they fell through to `_ => false`.
 /// The mlx worker then refused to claim them (`worker_supports_job`), and because Anima advertises
-/// no candle/torch lane (`candle_routed = false`, macOnly) NOTHING could claim the job — every
+/// no candle lane (`candle_routed = false`, macOnly) NOTHING could claim the job — every
 /// Anima generation sat on "Waiting for an available worker." forever.
 #[test]
 fn mlx_worker_claims_anima_text_to_image_jobs() {

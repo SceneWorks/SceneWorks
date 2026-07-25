@@ -54,18 +54,18 @@ pub struct Settings {
     pub jobs_retention_days: u32,
     pub run_utility_inprocess: bool,
     /// Epic 3482 — macOS "MLX-required" mode. When set (the desktop sets it on macOS,
-    /// where it spawns the in-process `mlx` worker), the MPS torch worker never claims an
+    /// where it spawns the in-process `mlx` worker), any non-MLX GPU descriptor never claims an
     /// MLX-eligible job: it defers unconditionally to the `mlx` worker, and a job no live
     /// `mlx` worker takes within the grace window fails terminal with `mlx_unavailable`
-    /// instead of silently falling back to MPS (sc-3483). Absent on Windows/Linux/Docker
-    /// (no `mlx` worker) → today's behaviour unchanged. Ships default OFF (observe); the
+    /// instead of remaining queued indefinitely (sc-3483). Absent on Windows/Linux/Docker
+    /// (no `mlx` worker). Ships default OFF (observe); the
     /// final cutover (sc-3492) flips it on for the packaged Mac build.
     pub mlx_required: bool,
     /// Epic 3482 / sc-3484 — when MLX-required, what to do with a job the Rust/MLX flow can't
     /// run (`mac_rust_supported` returns `Err`). **false = warn-only** (default): log a
     /// structured `mlx_unsupported` gap event at claim time but still run the job on the
-    /// existing torch path, so flipping `mlx_required` on for observation materializes the gap
-    /// list without breaking anything. **true = enforce**: fail the job terminal with
+    /// normal capability routing; without a capable native worker the job remains queued. Flipping
+    /// `mlx_required` on for observation materializes the gap list. **true = enforce**: fail the job terminal with
     /// `mlx_unsupported`. Read from `SCENEWORKS_MLX_UNSUPPORTED_MODE` (`enforce` vs anything
     /// else). Irrelevant unless `mlx_required`.
     pub mlx_enforce_unsupported: bool,
@@ -73,15 +73,15 @@ pub struct Settings {
     /// the candle (CUDA) worker is the only GPU backend: a candle-eligible job no live candle
     /// worker takes within the grace window fails terminal with `candle_unavailable` instead of
     /// waiting forever, and (under `candle_enforce_unsupported`) a job the candle/CUDA flow can't
-    /// serve (`candle_supported` returns `Err`) fails with `candle_unsupported` instead of silently
-    /// falling back to torch. Ships default OFF (the Python torch worker is still the fallback until
-    /// the Phase-7 cutover); flip it on per-deployment as candle reaches parity. Read from
+    /// serve (`candle_supported` returns `Err`) fails with `candle_unsupported` instead of remaining
+    /// queued without a capable native worker. Ships default OFF; flip it on per-deployment when
+    /// terminal gap reporting is desired. Read from
     /// `SCENEWORKS_CANDLE_REQUIRED`. Absent on macOS (the `mlx_required` path governs there).
     pub candle_required: bool,
     /// Epic 5483 (sc-5502) — the candle twin of `mlx_enforce_unsupported`. **false = warn-only**
-    /// (default): log a structured `candle_unsupported` gap event at claim time but still let the
-    /// job run on the existing torch path, so flipping `candle_required` on for observation
-    /// materializes the off-Mac gap list without breaking anything. **true = enforce**: fail the
+    /// (default): log a structured `candle_unsupported` gap event if an unsupported job is claimed;
+    /// otherwise normal capability routing leaves it queued. Flipping `candle_required` on for
+    /// observation materializes the off-Mac gap list. **true = enforce**: fail the
     /// job terminal with `candle_unsupported`. Read from `SCENEWORKS_CANDLE_UNSUPPORTED_MODE`
     /// (`enforce` vs anything else). Irrelevant unless `candle_required`.
     pub candle_enforce_unsupported: bool,

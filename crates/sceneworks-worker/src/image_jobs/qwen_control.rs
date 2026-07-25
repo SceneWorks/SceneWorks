@@ -80,7 +80,7 @@ fn is_qwen_control_model(model: &str) -> bool {
 
 /// Resolve the Qwen-Image-2512 base (diffusers) snapshot: an explicit `modelPath` (advanced or manifest) →
 /// the HF cache snapshot for the manifest `repo` (default `Qwen/Qwen-Image-2512`, sc-8350). `None` ⇒ not
-/// present locally (the job is not candle-runnable, falls through to torch). Mirrors
+/// present locally (the candle lane refuses the job; no fallback is attempted). Mirrors
 /// `resolve_kolors_ipadapter_base`.
 fn resolve_qwen_control_base(
     request: &ImageRequest,

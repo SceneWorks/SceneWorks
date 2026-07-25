@@ -103,8 +103,8 @@ pub(super) fn zimage_control_base_default_repo(model: &str) -> &'static str {
 
 /// Resolve the Z-Image base (diffusers) snapshot: an explicit `modelPath` (advanced or manifest) → the
 /// HF cache snapshot for the manifest `repo` (default `Tongyi-MAI/Z-Image-Turbo`, or `Tongyi-MAI/Z-Image`
-/// for the base model, sc-8379). `None` ⇒ not present locally (the job is not candle-runnable, falls
-/// through to torch). Mirrors `resolve_kolors_control_base`.
+/// for the base model, sc-8379). `None` ⇒ not present locally (the candle lane refuses the job; no
+/// fallback is attempted). Mirrors `resolve_kolors_control_base`.
 pub(super) fn resolve_zimage_control_base(
     request: &ImageRequest,
     settings: &Settings,
