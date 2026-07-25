@@ -45,7 +45,7 @@ pub(super) const FLUX_IPADAPTER_ENCODER_REVISION: &str = "32bd64288804d66eefd0cc
 const FLUX_IPADAPTER_IP_SCALE: f32 = 0.7;
 /// The adapter/engine id recorded on candle FLUX IP-Adapter assets + telemetry (distinct from the
 /// txt2img `candle_flux` lane).
-const FLUX_IPADAPTER_ENGINE: &str = "candle_flux_ipadapter";
+pub(super) const FLUX_IPADAPTER_ENGINE: &str = "candle_flux_ipadapter";
 
 /// Model ids the candle FLUX IP-Adapter route accepts (both variants — the forked DiT injects the same
 /// XLabs adapter for each; dev embeds the guidance scalar, schnell ignores it).

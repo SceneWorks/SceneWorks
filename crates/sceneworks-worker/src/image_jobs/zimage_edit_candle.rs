@@ -33,7 +33,7 @@ const ZIMAGE_EDIT_CANDLE_DEFAULT_STEPS: u32 = 4;
 pub(super) const ZIMAGE_EDIT_CANDLE_DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image-Turbo";
 /// The adapter/engine id recorded on candle Z-Image edit assets + telemetry (distinct from the txt2img
 /// `candle_z_image` and the `candle_zimage_control` lanes).
-const ZIMAGE_EDIT_CANDLE_ENGINE: &str = "candle_zimage_edit";
+pub(super) const ZIMAGE_EDIT_CANDLE_ENGINE: &str = "candle_zimage_edit";
 
 /// Model ids the candle Z-Image edit route accepts: the txt2img `z_image_turbo` (in `edit_image` mode)
 /// and the dedicated `z_image_edit` id — both drive the Turbo weights' img2img path.

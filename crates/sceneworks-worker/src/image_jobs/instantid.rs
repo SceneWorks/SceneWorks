@@ -213,7 +213,7 @@ fn instantid_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     // `tokenizer/` missing) now falls through to a complete sibling instead of crashing the SDXL loader
     // on the absent tokenizer. `instantid.rs` is `include!`d into the `image_jobs` module, so
     // `pick_loadable_tier` / `tier_components_present` (base.rs) are directly in scope.
-    pick_loadable_tier(&[preferred, "bf16", "q4", "q8"], &present, &tier_components_present)
+    pick_loadable_tier(&[preferred, "bf16", "q8", "q4"], &present, &tier_components_present)
         .unwrap_or_else(|| root.to_path_buf())
 }
 
@@ -1254,7 +1254,7 @@ mod instantid_tier_tests {
     /// surfaces a clear missing-weights error), and an absent turnkey resolves to the repo root.
     #[test]
     fn falls_back_when_preferred_tier_absent() {
-        // Only q8 downloaded: an unset (bf16-preferred) request falls through bf16 → q4 → q8.
+        // Only q8 downloaded: an unset (bf16-preferred) request falls through bf16 → q8.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         seed_unet(root, "q8", "diffusion_pytorch_model.safetensors");
@@ -1267,6 +1267,31 @@ mod instantid_tier_tests {
         assert_eq!(
             instantid_tier_subdir(empty.path(), &request(json!({}))),
             empty.path().to_path_buf()
+        );
+    }
+
+    #[test]
+    fn fallback_prefers_q8_over_q4_and_skips_a_torn_q8() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_unet(root, "q8", "diffusion_pytorch_model.safetensors");
+        seed_unet(root, "q4", "diffusion_pytorch_model.safetensors");
+
+        assert_eq!(
+            instantid_tier_subdir(root, &request(json!({}))),
+            root.join("q8"),
+            "dense fallback should preserve the highest available fidelity"
+        );
+
+        std::fs::write(
+            root.join("q8").join("model_index.json"),
+            br#"{"unet":["diffusers","UNet2DConditionModel"],"tokenizer":["transformers","CLIPTokenizer"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            instantid_tier_subdir(root, &request(json!({}))),
+            root.join("q4"),
+            "a q8 tier missing a model-index component must not block a complete q4 fallback"
         );
     }
 }

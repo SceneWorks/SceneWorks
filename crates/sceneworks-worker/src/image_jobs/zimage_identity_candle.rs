@@ -45,7 +45,7 @@ use serde_json::json;
 
 /// The adapter/engine id recorded on candle Z-Image identity-init assets + telemetry (distinct from the
 /// txt2img `candle_z_image`, the `candle_zimage_edit`, and the `candle_zimage_control` lanes).
-const ZIMAGE_IDENTITY_CANDLE_ENGINE: &str = "candle_zimage_identity";
+pub(super) const ZIMAGE_IDENTITY_CANDLE_ENGINE: &str = "candle_zimage_identity";
 
 /// Model ids the candle Z-Image identity-init route accepts: only `z_image_turbo` (the With-Character
 /// target — the candle z-image engine is the distilled Turbo). The dedicated `z_image_edit` id is an

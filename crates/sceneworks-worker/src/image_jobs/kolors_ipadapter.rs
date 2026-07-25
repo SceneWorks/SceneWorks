@@ -51,7 +51,7 @@ const KOLORS_IPADAPTER_DEFAULT_GUIDANCE: f32 = 5.0;
 const KOLORS_IPADAPTER_DEFAULT_REPO: &str = "Kwai-Kolors/Kolors-diffusers";
 /// The adapter/engine id recorded on candle Kolors IP-Adapter assets + telemetry (distinct from the
 /// txt2img `candle_kolors` lane).
-const KOLORS_IPADAPTER_ENGINE: &str = "candle_kolors_ipadapter";
+pub(super) const KOLORS_IPADAPTER_ENGINE: &str = "candle_kolors_ipadapter";
 
 /// Model ids the candle Kolors IP-Adapter route accepts.
 fn is_kolors_ipadapter_model(model: &str) -> bool {

@@ -180,8 +180,7 @@ use runtime_cuda::providers::pulid::{PulidFlux, PulidFluxPaths, PulidFluxRequest
 /// `tests/fixtures/rust_migration_contracts/sidecars/asset-image.sceneworks.json`).
 const STUB_ADAPTER: &str = "procedural_preview";
 /// The adapter id recorded on assets produced by the candle (Windows/CUDA) SDXL lane (sc-3678).
-/// Used both per-asset (`generate_candle_stream`) and at the generation-set level (`adapter_id`)
-/// so the sidecar + result agree on which backend produced the image.
+/// Used by the generic candle per-asset stream and its route-derived generation-set label.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_ADAPTER: &str = "candle_sdxl";
 // Shared by the MLX path and the candle Lens lane (sc-5126) — both cap a job's total LoRAs at
@@ -245,9 +244,10 @@ pub(crate) async fn run_image_generate_job(
     #[cfg(target_os = "macos")]
     let route = resolve_image_route(&request, settings);
     #[cfg(target_os = "macos")]
-    let plan = ImagePlan::with_count(
+    let plan = ImagePlan::with_count_and_adapter(
         &request,
         route.map_or(request.count, |route| route.image_count(&request, settings)) * upscale_mult,
+        route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request)),
     );
     // Windows/CUDA candle lane: resolve the candle dispatch branch once and bake THAT branch's real
     // total into the plan, exactly as the macOS arm does with `resolve_image_route`. An InstantID
@@ -257,11 +257,13 @@ pub(crate) async fn run_image_generate_job(
     // (sc-5491 InstantID; sc-11171 F-009 strict-pose). `resolve_candle_image_route` returns `None` when
     // candle is disabled, so any other job (or a disabled backend) keeps `request.count`.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let plan = {
-        let count = resolve_candle_image_route(&request, settings)
-            .map_or(request.count, |route| route.image_count(&request, settings));
-        ImagePlan::with_count(&request, count * upscale_mult)
-    };
+    let route = resolve_candle_image_route(&request, settings);
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let plan = ImagePlan::with_count_and_adapter(
+        &request,
+        route.map_or(request.count, |route| route.image_count(&request, settings)) * upscale_mult,
+        route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request)),
+    );
     #[cfg(all(
         not(target_os = "macos"),
         not(all(not(target_os = "macos"), feature = "backend-candle"))
@@ -276,7 +278,7 @@ pub(crate) async fn run_image_generate_job(
     sceneworks_core::lora_family::validate_lora_compatibility(
         &request.loras,
         Some(plan.family.as_str()),
-        adapter_id(&request),
+        plan.adapter,
         Some(request.model.as_str()),
     )
     .map_err(WorkerError::InvalidPayload)?;
@@ -625,7 +627,7 @@ pub(crate) async fn run_image_generate_job(
     // `ImageRoute::InstantId` arm) — checked first since `instantid_realvisxl` is not an inventory
     // `is_candle_engine` id.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let handled = match resolve_candle_image_route(&request, settings) {
+    let handled = match route {
         Some(route) => {
             match route {
                 // InstantID (sc-5491, epic 5480): the candle InstantID provider's bespoke path (the
@@ -1185,6 +1187,9 @@ pub(crate) struct ImagePlan {
     pub(crate) family: String,
     pub(crate) slug: String,
     pub(crate) generation_set: Value,
+    /// Backend adapter label selected by the resolved dispatch route. Keeping it in the plan makes
+    /// generation-set telemetry use the same one-time route decision as per-asset generation.
+    pub(crate) adapter: &'static str,
     /// Number of images this job produces. Usually `request.count`, but a FLUX.2 angle
     /// set is 11 and a pose set is the pose count (sc-3030) — the generation set's
     /// `count`/`expectedCount` reflect this so the gallery streams against the real
@@ -1198,11 +1203,20 @@ impl ImagePlan {
     /// effective count that differs from `request.count`).
     #[cfg(test)]
     fn new(request: &ImageRequest) -> Self {
-        Self::with_count(request, request.count)
+        Self::with_count_and_adapter(request, request.count, adapter_id(request))
     }
 
     /// Build a plan whose generation set reports `image_count` images (see the field).
     pub(crate) fn with_count(request: &ImageRequest, image_count: u32) -> Self {
+        Self::with_count_and_adapter(request, image_count, adapter_id(request))
+    }
+
+    /// Build a plan with the count and adapter label selected by the already-resolved route.
+    fn with_count_and_adapter(
+        request: &ImageRequest,
+        image_count: u32,
+        adapter: &'static str,
+    ) -> Self {
         let genset_id = format!("genset_{}", Uuid::new_v4().simple());
         let created_at = now_rfc3339();
         let family = resolve_family(request);
@@ -1223,6 +1237,7 @@ impl ImagePlan {
             family,
             slug,
             generation_set,
+            adapter,
             image_count,
         }
     }
@@ -1568,7 +1583,7 @@ fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     json!({
         "generationSetId": plan.genset_id,
         "expectedCount": plan.image_count,
-        "adapter": adapter_id(&plan.request),
+        "adapter": plan.adapter,
         "model": plan.request.model,
         "generationSet": plan.generation_set,
         "assetWrites": asset_writes,
@@ -1578,8 +1593,8 @@ fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     .expect("json! object literal")
 }
 
-/// The adapter id reported for the set (real engine on macOS for a linked family,
-/// else the procedural stub).
+/// Request-only fallback used by test plans and the backend-less stub plan. Production MLX/candle
+/// plans bind their adapter from the resolved route so bespoke IDs cannot fall through to the stub.
 fn adapter_id(request: &ImageRequest) -> &'static str {
     #[cfg(target_os = "macos")]
     if let Some(model) = mlx_model(&request.model) {

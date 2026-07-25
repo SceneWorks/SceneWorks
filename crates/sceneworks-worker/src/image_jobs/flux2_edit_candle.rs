@@ -37,7 +37,7 @@ const FLUX2_EDIT_CANDLE_DEV_STEPS: u32 = 28;
 const FLUX2_EDIT_CANDLE_DEV_GUIDANCE: f32 = 4.0;
 /// The adapter/engine id recorded on candle FLUX.2 edit assets + telemetry (distinct from the txt2img
 /// `candle_flux2` lane). Shared by klein + dev edit (the dev variant is the same edit surface).
-const FLUX2_EDIT_CANDLE_ENGINE: &str = "candle_flux2_edit";
+pub(super) const FLUX2_EDIT_CANDLE_ENGINE: &str = "candle_flux2_edit";
 /// Cap on references fed to a single FLUX.2 edit (the multi-image picker, sc-6211): the dev edit is
 /// activation-bound, so cap at the engine's validated native fan-out. This deliberately differs from
 /// the MLX `MAX_EDIT_REFERENCES` (4): that bound is set by the 96 GB Apple-Silicon unified-memory

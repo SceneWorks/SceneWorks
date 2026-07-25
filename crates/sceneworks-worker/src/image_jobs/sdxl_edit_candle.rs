@@ -31,7 +31,7 @@ const SDXL_EDIT_CANDLE_DEFAULT_STEPS: u32 = 30;
 const SDXL_EDIT_CANDLE_DEFAULT_GUIDANCE: f32 = 5.0;
 /// The adapter/engine id recorded on candle SDXL edit assets + telemetry (distinct from the txt2img
 /// `candle_sdxl` and the `candle_sdxl_ipadapter` lanes).
-const SDXL_EDIT_CANDLE_ENGINE: &str = "candle_sdxl_edit";
+pub(super) const SDXL_EDIT_CANDLE_ENGINE: &str = "candle_sdxl_edit";
 
 /// SDXL model ids the candle edit route accepts (the txt2img-eligible SDXL family). Must stay in
 /// lockstep with `jobs_store::routing::candle::image_request_candle_lane`'s `sdxl_edit_candle_eligible`
