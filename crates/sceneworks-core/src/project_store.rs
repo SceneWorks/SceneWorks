@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 use std::fs;
-#[cfg(windows)]
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
@@ -91,6 +92,12 @@ pub const KEYPOINT_UPLOADS_CACHE_DIR: &str = "keypoint-uploads";
 /// [`KEYPOINT_UPLOADS_CACHE_DIR`]): API staging route, startup sweep, and the worker's
 /// `pose sourcePath` confinement + post-detect cleanup.
 pub const POSE_UPLOADS_CACHE_DIR: &str = "pose-uploads";
+
+/// `recent-projects.json` contains only one small metadata record per project.
+/// Eight MiB accommodates many thousands of projects even with long paths while
+/// bounding every cache fingerprint/read if the file is externally corrupted
+/// or replaced with an unexpectedly large payload.
+const MAX_REGISTRY_BYTES: u64 = 8 * 1024 * 1024;
 
 /// One resolved angle preset for generation (sc-4450): the kps to draw + a display name + (for
 /// built-ins) the canonical angle name that drives prompt augmentation. User presets have
@@ -279,16 +286,14 @@ struct RegistryFingerprint {
     changed_nanoseconds: i64,
     // Stable Rust does not expose the filesystem ChangeTime on Windows, and
     // this workspace forbids unsafe Win32 calls. File identity covers atomic
-    // replacement; retaining the exact bytes from the same open handle covers
-    // every in-place rewrite even when length and last-write time are restored.
-    // recent-projects.json is a small registry, so this correctness-first
-    // fallback is preferable to a bounded sample that can miss an edit.
+    // replacement; a fixed-size digest from the same open handle covers every
+    // in-place rewrite even when length and last-write time are restored.
     #[cfg(windows)]
     volume_serial_number: u64,
     #[cfg(windows)]
     file_index: u64,
     #[cfg(windows)]
-    content: Vec<u8>,
+    content_sha256: [u8; 32],
 }
 
 #[derive(Debug, Default)]
@@ -306,12 +311,11 @@ fn registry_fingerprint(path: &Path) -> ProjectStoreResult<Option<RegistryFinger
             #[cfg(windows)]
             let mut file = file;
             let metadata = file.metadata()?;
+            ensure_registry_size(metadata.len())?;
             #[cfg(windows)]
             let file_information = winapi_util::file::information(&file)?;
             #[cfg(windows)]
-            let mut content = Vec::new();
-            #[cfg(windows)]
-            file.read_to_end(&mut content)?;
+            let content_sha256 = registry_content_sha256(&mut file)?;
             Ok(Some(RegistryFingerprint {
                 modified: metadata.modified()?,
                 len: metadata.len(),
@@ -328,12 +332,89 @@ fn registry_fingerprint(path: &Path) -> ProjectStoreResult<Option<RegistryFinger
                 #[cfg(windows)]
                 file_index: file_information.file_index(),
                 #[cfg(windows)]
-                content,
+                content_sha256,
             }))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+fn ensure_registry_size(len: u64) -> ProjectStoreResult<()> {
+    if len > MAX_REGISTRY_BYTES {
+        return Err(ProjectStoreError::Io(registry_size_error(len)));
+    }
+    Ok(())
+}
+
+fn registry_size_error(len: u64) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "recent-projects.json is {len} bytes; the maximum supported size is \
+             {MAX_REGISTRY_BYTES} bytes"
+        ),
+    )
+}
+
+#[derive(Default)]
+struct RegistrySizeCounter {
+    len: u64,
+}
+
+impl Write for RegistrySizeCounter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let next_len = self
+            .len
+            .saturating_add(u64::try_from(buffer.len()).unwrap_or(u64::MAX));
+        if next_len > MAX_REGISTRY_BYTES {
+            return Err(registry_size_error(next_len));
+        }
+        self.len = next_len;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn ensure_registry_serialized_size(value: &Value) -> ProjectStoreResult<()> {
+    let mut counter = RegistrySizeCounter::default();
+    serde_json::to_writer_pretty(&mut counter, value)?;
+    counter.write_all(b"\n")?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn registry_content_sha256(file: &mut fs::File) -> ProjectStoreResult<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    let mut limited = file.take(MAX_REGISTRY_BYTES + 1);
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let read = limited.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        ensure_registry_size(total)?;
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn read_registry_payload(path: &Path) -> ProjectStoreResult<String> {
+    let file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    ensure_registry_size(len)?;
+    let mut payload = String::with_capacity(
+        usize::try_from(len).expect("registry byte ceiling fits every supported target"),
+    );
+    file.take(MAX_REGISTRY_BYTES + 1)
+        .read_to_string(&mut payload)?;
+    ensure_registry_size(u64::try_from(payload.len()).unwrap_or(u64::MAX))?;
+    Ok(payload)
 }
 
 #[derive(Debug)]
@@ -2832,7 +2913,7 @@ impl ProjectStore {
             {
                 registry_cache.disk_reads += 1;
             }
-            let payload = fs::read_to_string(&registry_path)?;
+            let payload = read_registry_payload(&registry_path)?;
             serde_json::from_str(&payload)?
         } else {
             Vec::new()
@@ -2852,7 +2933,9 @@ impl ProjectStore {
         // `write_json` stages to a unique temp and renames atomically (sc-1633),
         // so the registry write no longer needs its own intermediate temp file.
         let registry_path = self.registry_path();
-        write_json(&registry_path, &serde_json::to_value(projects)?)?;
+        let registry_value = serde_json::to_value(projects)?;
+        ensure_registry_serialized_size(&registry_value)?;
+        write_json(&registry_path, &registry_value)?;
         registry_cache.fingerprint = registry_fingerprint(&registry_path)?;
         registry_cache.items = projects.to_vec();
         registry_cache.loaded = true;
@@ -4896,10 +4979,11 @@ mod tests {
         apply_project_migrations, backfill_upscale_variant_lineage, build_generated_asset_sidecar,
         connect_project_db, ensure_project_db_ready, find_timeline_file, guess_mime_from_filename,
         index_timeline, is_safe_relative_path, is_safe_upload_extension, normalize_asset_tags,
-        read_json, sniff_image_format, upload_extension, upscale_lineage_group, AssetScope,
-        CharacterCreateInput, CharacterLookInput, CharacterReferenceInput, ProjectStore,
-        ProjectStoreError, UploadAsset, ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID,
-        GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
+        read_json, read_registry_payload, sniff_image_format, upload_extension,
+        upscale_lineage_group, AssetScope, CharacterCreateInput, CharacterLookInput,
+        CharacterReferenceInput, ProjectStore, ProjectStoreError, UploadAsset,
+        ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID,
+        MAX_REGISTRY_BYTES, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
         UPSCALE_LINEAGE_QUERY,
     };
     use rusqlite::{params, Connection, OptionalExtension};
@@ -4942,6 +5026,39 @@ mod tests {
             reader.lock.lock().disk_reads,
             2,
             "a changed registry fingerprint must invalidate the cache"
+        );
+    }
+
+    #[test]
+    fn oversized_recent_project_registry_fails_before_fingerprinting_or_parsing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir creates");
+        let registry_path = data_dir.join("recent-projects.json");
+        std::fs::File::create(&registry_path)
+            .expect("registry creates")
+            .set_len(MAX_REGISTRY_BYTES + 1)
+            .expect("oversized sparse registry creates");
+
+        let assert_size_error = |error: ProjectStoreError| match error {
+            ProjectStoreError::Io(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+                assert!(
+                    error.to_string().contains("maximum supported size"),
+                    "size failure should be actionable: {error}"
+                );
+            }
+            other => panic!("expected deterministic registry size error, got {other}"),
+        };
+
+        assert_size_error(
+            read_registry_payload(&registry_path)
+                .expect_err("bounded registry reader must reject oversized input"),
+        );
+        assert_size_error(
+            ProjectStore::new(&data_dir, "test-version")
+                .list_projects()
+                .expect_err("cache fingerprint must reject oversized input before parsing"),
         );
     }
 
