@@ -1096,19 +1096,6 @@ export function App() {
     }
   }, [activeProject]);
 
-  // The request settle mark is recorded before its state update; this layout
-  // effect then runs on the resulting commit, identifying the first render in
-  // which the Assets surface can consume the selected project's catalog.
-  useLayoutEffect(() => {
-    if (
-      activeView === "Library" &&
-      activeProject &&
-      loadedAssetsProjectId === activeProject.id
-    ) {
-      recordStartupMark("assets-ready-render");
-    }
-  }, [activeProject, activeView, loadedAssetsProjectId]);
-
   useEffect(() => {
     localGenerationJobIdsRef.current = localGenerationJobIds;
   }, [localGenerationJobIds]);
@@ -2357,6 +2344,9 @@ export function App() {
     queueTimelineVideoJob,
     // Assets / library (sc-1651 Phase B batch 1)
     assets,
+    assetsReady: Boolean(
+      activeProject && loadedAssetsProjectId === activeProject.id
+    ),
     selectedAsset,
     // The RAW selection id (null when nothing is explicitly selected). Studios need it
     // to tell an explicit user selection apart from `selectedAsset`'s assets[0] fallback
@@ -2517,7 +2507,7 @@ export function App() {
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline, isActiveTimelineDirty,
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
-    assets, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
+    assets, loadedAssetsProjectId, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobAction, clearCompletedJobs, cancelPendingJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     projectFilter, setProjectFilter, projects,

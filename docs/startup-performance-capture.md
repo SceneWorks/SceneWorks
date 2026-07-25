@@ -28,11 +28,13 @@ fixed phases:
 - `reserved_project_initialization`
 - `orphaned_asset_maintenance`
 
-The web app records fixed `sceneworks.*` marks for bootstrap start, access
-resolution, media authorization settlement, projects committed, active project
-selection, asset request start/settle, and the first Assets-ready render.
-Repeated asset refreshes clear and reuse the same entries. Startup marks are
-one-shot, so the browser retains a fixed, bounded set.
+The parser-blocking pre-paint entry records `sceneworks.bootstrap-start` before
+the application module graph is fetched/evaluated. The web app then records
+fixed marks for access resolution, media authorization settlement, projects
+committed, active project selection, asset request start/settle, and the first
+commit of the actual Advanced Library or Simple Assets surface with a settled
+catalog. Repeated asset refreshes clear and reuse the same entries. Startup
+marks are one-shot, so the browser retains a fixed, bounded set.
 
 ## RunPod capture procedure
 

@@ -15,6 +15,10 @@ export const STARTUP_MARK_ORDER = Object.freeze([
 
 const startupOnce = new Set();
 let lastStartupIndex = -1;
+if (globalThis.__SCENEWORKS_BOOTSTRAP_TIMING_STARTED__ === true) {
+  startupOnce.add("bootstrap-start");
+  lastStartupIndex = STARTUP_MARK_ORDER.indexOf("bootstrap-start");
+}
 const STARTUP_MEASURE_NAMES = [
   ...STARTUP_MARK_ORDER.slice(1).map(
     (name, index) => `${STARTUP_MARK_ORDER[index]}-to-${name}`,
