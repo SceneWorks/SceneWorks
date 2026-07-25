@@ -493,8 +493,8 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         model_type.trim().to_ascii_lowercase().as_str(),
         normalize_model_family(family).as_str(),
     ) {
-        // No `character_image`: the worker's ZImageDiffusersAdapter has no IP-Adapter
-        // / reference-conditioning code, and no Z-Image IP-Adapter exists upstream
+        // No `character_image`: the native Z-Image lane has no IP-Adapter/reference-conditioning
+        // code, and no Z-Image IP-Adapter exists upstream
         // (sc-2005). Custom z-image models that override capabilities can still
         // re-declare it, but the family default shouldn't claim what it can't do.
         ("image", "z-image") => vec!["text_to_image", "style_variations"],

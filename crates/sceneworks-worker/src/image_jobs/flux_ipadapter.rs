@@ -76,8 +76,8 @@ fn flux_ipadapter_default_guidance(model: &str) -> f32 {
 
 /// Resolve the FLUX base (BFL snapshot) for the IP-Adapter route: an explicit `modelPath` dir
 /// (advanced or manifest) wins, else the HF cache snapshot for the manifest `repo` (the installed
-/// `MODEL_TABLE` turnkey by variant). `None` means the base is not present locally,
-/// so the job is not candle-runnable (falls through to torch). Mirrors `resolve_kolors_ipadapter_base`.
+/// `MODEL_TABLE` turnkey by variant). `None` means the base is not present locally, so the candle lane
+/// refuses the job and no fallback is attempted. Mirrors `resolve_kolors_ipadapter_base`.
 fn resolve_flux_ipadapter_base(
     request: &ImageRequest,
     settings: &Settings,

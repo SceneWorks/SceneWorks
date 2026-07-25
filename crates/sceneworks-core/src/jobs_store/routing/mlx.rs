@@ -27,9 +27,9 @@ pub(crate) fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     // `mode=edit_image` + `sourceAssetId`, epic 2427) route through the same
     // per-model predicates. The engine dispatches on payload model+mode, not job
     // type (`run_image_generate_job`), and the per-model arms below already gate
-    // `edit_image` (qwen/flux2/sdxl edit → eligible; torch-only edit models aren't
-    // in `MLX_ROUTED_MODELS` → torch). Without `image_edit` in this gate, plain
-    // Image Edit fell through to torch silently with no `gpu_route_decision`
+    // `edit_image` (qwen/flux2/sdxl edit → eligible; unsupported edit models aren't
+    // in `MLX_ROUTED_MODELS` and remain queued). Without `image_edit` in this gate, plain
+    // Image Edit was left unclaimed with no `gpu_route_decision`
     // (sc-3513).
     if !matches!(job.job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         return false;
@@ -107,8 +107,8 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
 /// ports the tile-ControlNet detail refine onto the engine. Detail is SDXL-family only
 /// (`sdxl` / `realvisxl`, the detail-capable backbones; the payload defaults to `realvisxl`).
 /// Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the SDXL merge path too (epic 3641,
-/// sc-3671), so it no longer forces torch. On Windows/Linux no `mlx` worker exists, so detail stays
-/// on the Python torch path.
+/// sc-3671), so it no longer changes eligibility. On Windows/Linux no `mlx` worker exists, so detail
+/// remains queued unless a compatible native worker registers.
 pub(crate) fn image_detail_mlx_eligible(job: &JobSnapshot) -> bool {
     if !matches!(job.job_type, JobType::ImageDetail) {
         return false;
@@ -137,7 +137,7 @@ pub(crate) fn job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// because the `Generator` contract emits Images/Video only. SenseNova-U1 is the only model with an
 /// in-process understanding path, so eligibility = a SenseNova-U1 id (the worker handler validates
 /// the per-mode request: VQA needs a source image + question; interleave needs a prompt). Other
-/// models on these job types have no MLX path and stay on the Python torch worker.
+/// models on these job types have no MLX path and remain queued.
 pub(crate) fn understanding_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if !matches!(job.job_type, JobType::ImageVqa | JobType::ImageInterleave) {
         return false;
@@ -168,8 +168,8 @@ pub(crate) fn understanding_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// SDXL MLX-routing conditions. sc-3026 brought txt2img + LoRA; sc-3060 (epic 3041) adds the
 /// advanced shapes the Rust `mlx-gen-sdxl` engine now handles — reference/IP-Adapter, img2img
 /// `edit_image`, masked inpaint, and outpaint — so they route to the in-process MLX worker on
-/// Mac instead of the Python torch `SdxlDiffusersAdapter`. The torch path stays authoritative
-/// on Windows/Linux (no `mlx` worker registered → nothing defers) and as the Mac fallback.
+/// Mac instead of the historical Python `SdxlDiffusersAdapter`. On Windows/Linux, no `mlx` worker is
+/// registered; only a compatible native lane may claim the job.
 /// Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the SDXL merge path (epic 3641,
 /// sc-3671), so every SDXL shape — including a LyCORIS-tagged job — is MLX-eligible.
 /// `image_detail` is a separate job type with its own routing (see `image_detail_mlx_eligible`).
@@ -181,7 +181,7 @@ pub(crate) fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
 /// `sdxl` engine on its few-step `lightning` (Euler-trailing) sampler, which the engine restricts to
 /// **txt2img** (it rejects an img2img/reference init — `mlx-gen-sdxl` "acceleration sampler is
 /// txt2img-only"). So only a plain text-to-image job is MLX-eligible here; any `edit_image`, source,
-/// reference, or mask conditioning falls back to the torch worker (or is hidden by the manifest's
+/// reference, or mask conditioning is refused and remains queued (or is hidden by the manifest's
 /// txt2img-only `capabilities`). LoRAs + quant are fine on the SDXL path, so they don't gate.
 pub(crate) fn realvisxl_lightning_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
@@ -244,9 +244,9 @@ pub(crate) fn flux2_mlx_eligible(_payload: &Map<String, Value>) -> bool {
 
 /// Qwen-Image (sc-3024 / strict pose sc-3575) MLX-routing conditions: text-to-image,
 /// plus the base-Qwen strict pose tier (`advanced.poses`) handled by the `qwen_image_control`
-/// engine variant. A reference without poses (character/edit flow) and `edit_image` stay on
-/// the Python torch path. Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the core MLX
-/// loader (epic 3641, sc-3642/3643), so it no longer forces torch.
+/// engine variant. A reference without poses (character/edit flow) and `edit_image` are refused and
+/// remain queued. Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the core MLX
+/// loader (epic 3641, sc-3642/3643), so it no longer changes eligibility.
 pub(crate) fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
@@ -294,11 +294,6 @@ pub(crate) fn qwen_edit_mlx_eligible(payload: &Map<String, Value>) -> bool {
     }
 }
 
-/// FLUX.1 (sc-3023) MLX-routing conditions, ported from `_should_route_flux_to_mlx`:
-/// text-to-image only — FLUX.1 reference/IP-Adapter and `edit_image` stay on the
-/// Python torch path (`FluxDiffusersAdapter`). A third-party LyCORIS LoRA also falls
-/// back to torch: the engine + the worker's `classify_adapter` apply LoRA and peft
-/// LoKr natively, but not arbitrary LyCORIS (which the worker would reject).
 /// FLUX.1 (`flux_schnell` / `flux_dev`) MLX-routing conditions. Text-to-image and
 /// **reference-image** (the XLabs IP-Adapter, epic 3621 — `referenceAssetId`, both
 /// variants: the Rust engine has no diffusers `load_ip_adapter` schnell limitation,
@@ -390,8 +385,8 @@ pub(crate) fn mage_flow_edit_mlx_eligible(payload: &Map<String, Value>) -> bool 
 /// `_should_route_z_image_to_mlx`: text-to-image, reference-identity img2img-init
 /// (sc-3619 — `referenceAssetId` without a pose set, the plain img2img path the
 /// base engine already supports), reference+pose (the Fun-ControlNet pose tier
-/// lives only on MLX — sc-2257/sc-2328, so a reference+pose job must NOT divert to
-/// torch, which would honour count while dropping the poses), and `edit_image`
+/// lives only on MLX — sc-2257/sc-2328, so a reference+pose job must stay on MLX rather
+/// than reach a claimant that would honour count while dropping the poses), and `edit_image`
 /// img2img-edit (epic 3529 — the engine's `Conditioning::Reference` img2img path with a
 /// `sourceAssetId` init, shared by `z_image_turbo` edit_image mode and the `z_image_edit`
 /// model, both on Turbo weights). An `edit_image` without a source asset has nothing to
@@ -436,7 +431,8 @@ pub(crate) fn chroma_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// (base path), instruction edit (`edit_image` → `Conditioning::Reference`), and Character Studio
 /// (`character_image` → `Conditioning::MultiReference`, incl. the angle set) — all via the Rust
 /// worker. It has NO ControlNet, so the strict-pose tier (`advanced.poses`) is unsupported and
-/// drops to torch on non-Mac (it has no Mac path — epic 3482). Edit/character require the
+/// is refused and remains queued on non-Mac (it has no alternate native path — epic 3482).
+/// Edit/character require the
 /// reference the it2i path needs; plain T2I is always eligible. User LoRAs are not supported
 /// (`supports_lora=false`) and the manifest surfaces no LoRA slot, so no LoRA gate is needed.
 pub(crate) fn sensenova_mlx_eligible(payload: &Map<String, Value>) -> bool {
@@ -625,16 +621,16 @@ pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
 ///
 /// Anima is `mlx_routed` with `candle_routed = false`, so this predicate is the ONLY thing that can
 /// make an Anima job claimable: the mlx worker refuses a job it is not eligible for
-/// (`worker_supports_job`) and no candle/torch lane advertises the family. A missing arm here left
+/// (`worker_supports_job`) and no candle lane advertises the family. A missing arm here left
 /// every Anima job queued on "Waiting for an available worker." forever.
 pub(crate) fn anima_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 
 /// Epic 3018 routing (sc-3036, the video sibling of [`image_job_is_mlx_eligible`]):
-/// does this video job belong on the in-process Rust MLX worker? Encodes today's
-/// Python `create_video_adapter` MLX-eligibility (video_adapters.py) at the claim
-/// layer, minus the worker-local gates (MPS presence / sidecar) — those are now
+/// does this video job belong on the in-process Rust MLX worker? Encodes the retired Python
+/// `create_video_adapter` MLX-eligibility (video_adapters.py) at the claim
+/// layer, minus the legacy worker-local gates (synthetic MPS presence / sidecar) — those are now
 /// expressed by whether an `mlx` worker is registered and idle (see
 /// [`should_defer_video_to_mlx_worker`]).
 ///
@@ -644,8 +640,8 @@ pub(crate) fn anima_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// `video_bridge` on the LTX IC-LoRA path **and Wan TI2V-5B** (sc-3522 / sc-3357, the `VideoExtend`
 /// / `VideoBridge` job types — Wan via single-frame boundary keyframe conditioning), and
 /// `replace_person` → native Wan-VACE (the `PersonReplace` job type, sc-3521 — see
-/// [`video_mode_is_mlx_eligible`]). Still on the Python torch path: a non-MLX model, and
-/// extend/bridge on the 14B Wan MoE engines (no `Keyframe` path).
+/// [`video_mode_is_mlx_eligible`]). A non-MLX model, or extend/bridge on the 14B Wan MoE engines
+/// (no `Keyframe` path), is refused and remains queued.
 /// **Third-party LyCORIS (LoHa / non-peft LoKr) and LoKr-on-Wan now run on MLX**
 /// (epic 3641, sc-3671 + sc-3644): the Wan/LTX engine paths reconstruct + merge/residual the delta —
 /// the peft-LoKr-on-Wan merge has existed since sc-2393, and the old `create_video_adapter` torch
@@ -696,14 +692,14 @@ pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// additionally MLX on the FLF-capable engines — LTX (`ltx_2_3`/`ltx_2_3_eros`, the
 /// reference-grounded `Keyframe` path, sc-3052) and Wan TI2V-5B (`wan_2_2`, the mask-blend
 /// multi-keyframe path, sc-3357). The 14B Wan MoE engines have no `Keyframe` path, so FLF on
-/// them stays torch. **SVD (`svd`) is image-conditioned only** — it serves `image_to_video`
+/// them is refused. **SVD (`svd`) is image-conditioned only** — it serves `image_to_video`
 /// exclusively (no text→video, sc-3523). The clip-conditioning modes `extend_clip` /
 /// `video_bridge` are MLX on the **LTX** engines (`ltx_2_3`/`ltx_2_3_eros`, the IC-LoRA
 /// multi-frame keyframe-append path — sc-3522, engine `build_clips` sc-3052/3053) **and Wan
 /// TI2V-5B** (`wan_2_2`, single-frame boundary `Keyframe` conditioning — sc-3357: extend pins the
 /// source clip's last frame, bridge pins the two boundary frames, the same mask-blend primitive as
 /// Wan FLF, matching the torch Wan reference which routed these to plain i2v). The 14B Wan MoE
-/// engines have no `Keyframe` path so they stay torch. `replace_person` is MLX on the
+/// engines have no `Keyframe` path, so those requests are refused. `replace_person` is MLX on the
 /// replace-capable models (→ native Wan-VACE, sc-3521).
 pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     if model == "svd" {
@@ -754,7 +750,7 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
         // generated-span mask) and falls back to the TI2V-5B single-frame boundary keyframe path
         // (sc-3357) when the VACE snapshot is unprovisioned. Both run MLX-native, so `wan_2_2` is
         // eligible regardless of which the worker picks. The 14B Wan MoE engines have neither
-        // path, so extend/bridge on them stay torch.
+        // path, so extend/bridge on them are refused and remain queued.
         "extend_clip" | "video_bridge" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
         // replace_person → native Wan-VACE (sc-3521): the engine `wan_vace` provider serves it
         // regardless of the user-picked replace-capable model (ltx_2_3 / ltx_2_3_eros / wan_2_2,
@@ -765,10 +761,10 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
 }
 
 /// Epic 3039 routing — does this `lora_train` job belong on the in-process Rust MLX
-/// worker (vs the Python torch worker)? The training sibling of
+/// worker? The training sibling of
 /// [`image_job_is_mlx_eligible`]/[`video_job_is_mlx_eligible`]: the engine has a
 /// native trainer for the family. Both dry-run and real runs are eligible (the
-/// dry-run validates the same resolved plan). LoKr-on-Wan stays torch — the mlx Wan
+/// dry-run validates the same resolved plan). LoKr-on-Wan is refused — the mlx Wan
 /// inference path can't load a Kronecker adapter, mirroring [`video_job_is_mlx_eligible`];
 /// LoKr on Z-Image/SDXL/LTX is fine (the Rust engine applies it natively).
 ///
@@ -791,7 +787,7 @@ pub(crate) fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if !MLX_ROUTED_TRAINING_KERNELS.contains(&kernel) {
         return false;
     }
-    // LoKr-on-Wan stays on the torch path (no Kronecker merge in the mlx Wan path).
+    // LoKr-on-Wan is refused (no Kronecker merge in the mlx Wan path).
     if matches!(kernel, "wan_lora" | "wan_moe_lora") && training_plan_is_lokr(plan) {
         return false;
     }
@@ -813,9 +809,9 @@ pub(crate) fn caption_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// Whether an `image_upscale` job runs on the Rust/MLX path (epic 3482, sc-3489): the
 /// Real-ESRGAN (RRDBNet) engine — the default — is ported to the Rust worker, and `seedvr2`
 /// (the native-MLX one-step diffusion upscaler, epic 4811 / sc-4815) runs in-process via
-/// `mlx-gen-seedvr2`. `aura-sr` (a 617M-param torch-only GigaGAN) was dropped on Mac after the
-/// sc-3668 port-or-drop spike, so the mlx worker refuses it (it runs on the Python worker on
-/// Windows/Linux). Engine defaults to `real-esrgan` when absent (mirrors `run_image_upscale`).
+/// `mlx-gen-seedvr2`. `aura-sr` (a 617M-param historical GigaGAN backend) was dropped on Mac after
+/// the sc-3668 port-or-drop spike, so the mlx worker refuses it and it remains queued.
+/// Engine defaults to `real-esrgan` when absent (mirrors `run_image_upscale`).
 /// SeedVR2 is Mac-only here (a Windows/Linux Candle backend is the separate sc-5157); the Mac UI
 /// gating + `imageUpscaleSeedvr2` capability keep it off non-Mac pickers.
 pub(crate) fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
@@ -835,8 +831,8 @@ pub(crate) fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 }
 
 /// Whether a `video_upscale` job is MLX-eligible (epic 4811 / sc-4816). The only Mac engine is the
-/// native-MLX SeedVR2 upscaler (`mlx-gen-seedvr2`); there is no torch fallback. A job with any other
-/// engine is refused by the mlx worker. The off-Mac candle lane mirrors this predicate for its
+/// native-MLX SeedVR2 upscaler (`mlx-gen-seedvr2`); there is no fallback. A job with any other engine
+/// is refused by the mlx worker. The off-Mac candle lane mirrors this predicate for its
 /// SeedVR2 provider, so both native GPU backends enforce the same contract boundary. Defaults to
 /// `seedvr2` when the payload omits the engine.
 pub(crate) fn video_upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
@@ -853,8 +849,8 @@ pub(crate) fn video_upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 }
 
 /// Whether an `image_upscale` job explicitly requests the SeedVR2 engine (`engine=seedvr2`, the id the
-/// web sends and the worker accepts). SeedVR2 has no torch backend — it runs on MLX (Mac) or candle
-/// (Windows/Linux) — so this also drives the torch worker's refusal (the inverse of the AuraSR gate).
+/// web sends and the worker accepts). SeedVR2 runs on MLX (Mac) or candle (Windows/Linux), so this
+/// also drives every generic worker descriptor's refusal (the inverse of the AuraSR gate).
 /// The image default engine is Real-ESRGAN, so an absent engine is NOT SeedVR2.
 pub(crate) fn upscale_job_requests_seedvr2(job: &JobSnapshot) -> bool {
     matches!(job.job_type, JobType::ImageUpscale)
@@ -865,11 +861,12 @@ pub(crate) fn upscale_job_requests_seedvr2(job: &JobSnapshot) -> bool {
             .is_some_and(|engine| engine.trim().eq_ignore_ascii_case("seedvr2"))
 }
 
-/// Whether this training job targets a kernel with no torch fallback (see
+/// Whether this training job targets a native-only kernel (see
 /// [`MLX_ONLY_TRAINING_KERNELS`]). Such a job can only run on a Rust worker (mlx, or candle when the
-/// candle exception in [`worker_supports_job`] admits it — e.g. `krea_control`), so a torch worker
-/// must refuse it. Covers both the `lora_train` and the ControlNet studio (`control_training`) jobs —
-/// both stamp a resolved plan whose `krea_control` kernel is no-torch-fallback (epic 10159).
+/// candle exception in [`worker_supports_job`] admits it — e.g. `krea_control`), so any generic
+/// worker descriptor must refuse it. Covers both the `lora_train` and the ControlNet studio
+/// (`control_training`) jobs; both stamp a resolved plan whose `krea_control` kernel is native-only
+/// (epic 10159).
 pub(crate) fn training_kernel_is_mlx_only(job: &JobSnapshot) -> bool {
     if !matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining) {
         return false;
@@ -1285,7 +1282,7 @@ mod tests {
             builtin_with_family.as_object().expect("probe is an object")
         ));
 
-        // A torch-only builtin id-keyed verdict is unchanged: `flux_dev` edit stays off MLX even if a
+        // An unsupported builtin id-keyed verdict is unchanged: `flux_dev` edit stays off MLX even if a
         // (spurious) krea_2 manifest family rides along — the builtin arm decides, never the fallback.
         let builtin_edit = json!({
             "model": "flux_dev",

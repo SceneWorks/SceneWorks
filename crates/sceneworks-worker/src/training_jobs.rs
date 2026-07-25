@@ -19,10 +19,9 @@
 //! cross-platform. The real run executes in-process on the macOS
 //! MLX engine OR — the off-Mac cutover (sc-7817, epic 5164) — on the candle Windows/CUDA + Linux
 //! engine, for the five families with a candle trainer (`sdxl`/`z_image_turbo`/`lens`/the Krea 2 Raw
-//! 12B DiT `krea_2_raw` (sc-8614)/the Wan A14B **T2V** `wan2_2_t2v_14b`). The Python torch trainer
-//! has no Krea path at all (Krea is Rust-only — mlx or candle); it stays the fallback for everything
-//! else off-Mac with no candle trainer (Kolors, LTX, the dense Wan 5B, the Wan I2V A14B) and the
-//! cross-platform default until candle is the default off-Mac worker.
+//! 12B DiT `krea_2_raw` (sc-8614)/the Wan A14B **T2V** `wan2_2_t2v_14b`). Families without a native
+//! trainer for the active backend (Kolors, LTX, the dense Wan 5B, and Wan I2V A14B off-Mac) are
+//! refused and remain queued; there is no Python/torch training fallback.
 
 use super::*;
 use sceneworks_core::training::{TrainingPlan, TRAINING_PLAN_VERSION};
@@ -537,7 +536,8 @@ fn resolve_sample_prompts(pool: Vec<String>, count: u32) -> Vec<String> {
 /// got checkpointing in sc-5246, and the Wan A14B trainer needs it too). Scoped to exactly the
 /// candle-trainable big-DiT families: Z-Image and the Wan A14B **T2V** MoE — the same set
 /// `jobs_store::training_job_is_candle_eligible` gates the MoE to (only `wan_2_2_t2v_14b` has a candle
-/// trainer; the I2V A14B / dense 5B stay on torch). Krea 2 Raw is a 12B DiT (epic 7565 P4, sc-8614) —
+/// trainer; the I2V A14B / dense 5B are refused and remain queued). Krea 2 Raw is a 12B DiT
+/// (epic 7565 P4, sc-8614) —
 /// the same dense-backward OOM class, so it is forced too (the sc-7900 big-DiT backstop). SDXL's
 /// smaller U-Net fits a dense backward (the `candle_sdxl_real_weights` smoke trains it with
 /// checkpointing off) and Lens is small, so neither is forced — both honor the plan's value.

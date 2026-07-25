@@ -188,7 +188,7 @@ fn rust_cpu_capabilities_do_not_claim_gpu_generation_jobs() {
         .iter()
         .any(|capability| capability.as_str() == "timeline_export"));
     // The CPU utility worker advertises only the procedural *preview*
-    // capabilities; real detection/tracking route to the Python GPU worker.
+    // capabilities; real detection/tracking route to the native MLX/candle worker.
     assert!(cpu_capabilities
         .iter()
         .any(|capability| capability.as_str() == "person_detect_preview"));
@@ -238,7 +238,7 @@ fn mlx_gpu_advertises_generation_capabilities_only() {
         .iter()
         .any(|capability| capability.as_str() == "image_generate"));
     // Plain Image Edit (sc-3513): without this the API's worker_supports_job would
-    // reject an `image_edit` claim and the job would silently fall back to torch.
+    // reject an `image_edit` claim and the job would remain queued.
     assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "image_edit"));

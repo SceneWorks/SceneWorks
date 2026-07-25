@@ -60,8 +60,8 @@ fn is_kolors_ipadapter_model(model: &str) -> bool {
 
 /// Resolve the Kolors base (diffusers) snapshot for the IP-Adapter route: an explicit `modelPath` dir
 /// (advanced or manifest) wins, else the HF cache snapshot for the manifest `repo` (default
-/// `Kwai-Kolors/Kolors-diffusers`). `None` means the base is not present locally, so the job is not
-/// candle-runnable (falls through to torch). Mirrors `resolve_sdxl_ipadapter_base`.
+/// `Kwai-Kolors/Kolors-diffusers`). `None` means the base is not present locally, so the candle lane
+/// refuses the job and no fallback is attempted. Mirrors `resolve_sdxl_ipadapter_base`.
 fn resolve_kolors_ipadapter_base(
     request: &ImageRequest,
     settings: &Settings,

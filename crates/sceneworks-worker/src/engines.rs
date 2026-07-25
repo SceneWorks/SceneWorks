@@ -371,9 +371,8 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // encoder + SDXL VAE, EulerDiscrete sampler. Real CFG (negative prompt + guidance 5.0).
     // Python `MODEL_TARGETS` / `KolorsDiffusersAdapter` parity: 25 steps, guidance 5.0. The engine
     // `kolors` model (sc-3874) supports the full surface — img2img / ControlNet-pose /
-    // IP-Adapter-Plus / Q8/Q4 / LoRA/LoKr — but this base row drives plain T2I (+ quant + LoRA)
-    // through `generate_stream`; the advanced conditioning modes are gated to torch by
-    // `kolors_mlx_eligible` until their dedicated streams land (subsequent epic-3090 slices).
+    // IP-Adapter-Plus / Q8/Q4 / LoRA/LoKr. This base row drives plain T2I (+ quant + LoRA)
+    // through `generate_stream`; dedicated image-job streams handle the advanced conditioning modes.
     ModelRow {
         sceneworks_id: "kolors",
         // sc-9946 (epic 8506): flipped to the SceneWorks re-host `SceneWorks/kolors-mlx`, which ships
@@ -517,8 +516,8 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // no conditioning — no img2img / ControlNet / IP), so both ids ride the base [`generate_stream`]
     // path with quant (Q8 default) + LoRA/LoKr. Standard guidance family: `supports_guidance=true` +
     // `supports_negative_prompt=true` (NOT [`uses_true_cfg`]), so the CFG scale flows through
-    // `guidance` and the negative prompt is forwarded. `mac_only` — there is no torch fallback on the
-    // macOS path (the Python `/opt/lens-venv` sidecar is retired on Mac; Win/Linux/Docker keep it).
+    // `guidance` and the negative prompt is forwarded. `mac_only` — this row is the MLX path; the
+    // off-Mac native candle lane is registered separately.
     // The two SceneWorks ids map 1:1 to the engine registry ids of the same name and differ only in
     // their step/guidance defaults: base `lens` is 20-step / CFG 5.0, distilled `lens_turbo` is
     // 4-step / guidance 1.0 (≈ no CFG) — Python `MODEL_TARGETS` parity. Each variant resolves its own
@@ -1027,8 +1026,8 @@ fn registry_capabilities_from(
     // model-first: mlx-llm's `mlx-llama` on macOS (sc-7158), candle-llm's `candle-llama` on the
     // Windows/CUDA candle build (sc-7404). Light up `prompt_refine` when an enabled backend has a
     // core-llm text (non-vision) provider linked — the vision providers (mlx-joycaption / candle-llava)
-    // set `supports_vision` and are excluded. The Python torch `PromptRefiner` stays the fallback on
-    // platforms with neither.
+    // set `supports_vision` and are excluded. On platforms with neither, the capability is not
+    // advertised and prompt-refine jobs remain queued.
     //
     // sc-8105: the `image_caption` task (reference image → Ideogram JSON caption) rides on this SAME
     // `PromptRefine` capability + job — it is a payload `task` discriminator, not a separate cap, so it

@@ -86,7 +86,7 @@ const PULID_CANDLE_ENGINE: &str = "candle_pulid_flux";
 /// selected quant-matrix **tier subdir** via [`standard_tier_subdir`] (sc-10103): `bf16/` when the
 /// request opts out of quant, `q8/` for Q8, else `q4/`. `candle_gen_pulid`'s `FluxRefBackbone`
 /// packed-detects whichever tier landed (or a dense BFL snapshot for a legacy `modelPath`). `None` means
-/// the base is not present locally, so the job is not candle-runnable (falls through to torch). Mirrors
+/// the base is not present locally, so the candle lane refuses the job and no fallback is attempted. Mirrors
 /// `resolve_flux_ipadapter_base` / the MLX `resolve_pulid_flux_base`.
 fn resolve_pulid_candle_base(
     request: &ImageRequest,

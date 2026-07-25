@@ -133,7 +133,7 @@ use image_jobs::*;
 // sc-6501). Pure prompt-guard + post-render heuristic, compiled cross-platform so its unit tests run
 // on the Linux parity lane. sc-6610: its functions are called only from the macOS MLX generate path
 // (`image_jobs/base.rs` `generate_stream`, `#[cfg(target_os = "macos")]`) — off-Mac, Ideogram routes
-// to candle (txt2img) or the torch worker, neither of which applies the caption guard, so they read
+// to candle for eligible shapes or remains queued, and neither path applies the caption guard, so they read
 // as dead code on EVERY non-macOS build (the candle `backend-candle` lane included; the prior
 // `not(feature = "backend-candle")` carve-out wrongly assumed the candle path called them).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -457,8 +457,8 @@ mod canny;
 mod depth;
 // DWPose pose detection via onnxruntime (epic 3482, sc-3487). On Mac the CoreML EP +
 // on the off-Mac candle GPU-worker lane the CUDA EP (sc-5496, epic 5482) run the same
-// RTMW detector in-process; on a candle-disabled box the Python rtmlib path stays the
-// Windows/Linux backend.
+// RTMW detector in-process; on a candle-disabled box the capability is not advertised and the job
+// remains queued.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -526,7 +526,7 @@ mod ort_cuda;
 // candle SCRFD/ArcFace stack on the Windows/Linux candle lane (sc-5497, epic 5482) — the same
 // InstantID face-stack detector reused in-process for the Key Point Library "extract kps from this
 // image" capability. So the module compiles on Mac AND the candle lane; on a candle-disabled box the
-// Python InsightFace path stays the Windows/Linux backend.
+// capability is not advertised and the job remains queued.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -535,8 +535,8 @@ mod kps_jobs;
 // Image upscaling: Real-ESRGAN (epic 3482, sc-3489) RRDBNet x2/x4 via `ort`/CoreML on Mac, plus the
 // SeedVR2 one-step diffusion upscaler — native MLX on Mac (sc-4815) and the candle CUDA backend on
 // Windows (sc-5928). So the module compiles on Mac AND the Windows/CUDA candle lane; the ort/CoreML
-// Real-ESRGAN path inside stays Mac-gated (the Python torch Real-ESRGAN / AuraSR path is the
-// Windows/Linux backend), while the SeedVR2 path is backend-neutral (`crate::inference_runtime::load("seedvr2")`).
+// Real-ESRGAN path inside stays Mac-gated while the candle worker supplies the off-Mac Real-ESRGAN
+// lane, and SeedVR2 is backend-neutral (`crate::inference_runtime::load("seedvr2")`).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -545,9 +545,8 @@ mod upscale_jobs;
 // YOLO11 person detection + selected-person ByteTrack tracking (epic 3482, sc-3488/sc-3633;
 // off-Mac candle lane sc-5498, epic 5482). Native-MLX YOLO11m on Mac, `ort`/CUDA on the off-Mac
 // candle GPU-worker lane (the pure-Rust ByteTrack in `person_track` is backend-neutral). So both
-// modules compile on Mac AND the candle lane; on a candle-disabled box the Python Ultralytics
-// path stays the Windows/Linux backend. Person *segmentation* (SAM masks) stays Mac-only
-// (`person_segment*` below) — off-Mac tracks are box-only; a candle SAM backport is epic 3792.
+// modules compile on Mac AND the candle lane; a candle-disabled off-Mac build refuses the jobs.
+// Person segmentation uses MLX SAM2/SAM3 on Mac and native candle SAM3 off-Mac.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -559,9 +558,8 @@ mod person_jobs;
 ))]
 mod person_track;
 // Native-MLX SAM2 person segmentation (epic 3704, sc-3709): the `mlx-gen-sam2`
-// box-prompt segmenter generates per-frame masks in `run_person_track`. macOS-only
-// like person_jobs (mlx-gen builds MLX from source); the Python SAM2 path stays the
-// Windows/Linux backend.
+// box-prompt segmenter generates per-frame masks in `run_person_track`. On Mac this is SAM2; off-Mac
+// the candle SAM3 seam in `media_jobs::run_candle_segmenter` supplies real masks.
 #[cfg(target_os = "macos")]
 mod person_segment;
 // SAM3 text-concept (PCS) person segmenter — the box-prompt-free upgrade of `person_segment`
@@ -571,7 +569,8 @@ mod person_segment;
 mod person_segment_sam3;
 // Smart-select image segmentation (epic 6087, sc-6105): the `image_segment` job runs SAM3
 // box-prompt segmentation in-process to produce an inpaint mask asset for the Image Editor.
-// macOS-only like its `person_segment_sam3` (SAM3) dependency; no torch/candle image-segment path.
+// macOS-only like its `person_segment_sam3` (SAM3) dependency; there is no off-Mac standalone
+// image-segment lane.
 #[cfg(target_os = "macos")]
 mod segment_jobs;
 // Off-Mac candle SAM3 text-concept person segmenter (sc-6247, epic 5482 under sc-5062) — the
@@ -907,7 +906,7 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
                 // SQLite claim contention. With busy_timeout + BEGIN IMMEDIATE in the
                 // store this should be rare, but back off (instead of hammering at the
                 // flat poll interval) and make it visible so an MLX-eligible job lost to
-                // lock contention is explained rather than silently retried into torch.
+                // lock contention is explained rather than silently losing the claim to another poller.
                 lock_failures = lock_failures.saturating_add(1);
                 let delay = retry_delay(settings.poll_seconds, lock_failures);
                 emit_event_value(
@@ -1239,16 +1238,15 @@ async fn run_utility_job(
                 .map_err(|error| ("Image edit failed.", error)),
             // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
             // by the engine on the macOS Apple-Silicon GPU worker. Off macOS the capability is
-            // never advertised, so this arm is unreachable there (image_detail runs on torch).
+            // never advertised, so this arm is unreachable there and the job remains queued.
             JobType::ImageDetail => run_image_detail_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image detail enhancement failed.", error)),
             // SenseNova-U1 visual question answering + Document Studio interleave (epic 3180,
             // sc-3905). These bypass the `Generator` registry and call the concrete `T2iModel`
             // directly (text / text+images output the `GenerationOutput` contract can't express).
-            // The API routes them here only on Mac (`understanding_job_is_mlx_eligible`); off macOS
-            // the `image_vqa`/`image_interleave` capabilities are never advertised, so these arms
-            // are unreachable there (the Python torch worker serves them on Windows/Linux).
+            // On Mac the API routes them here through `understanding_job_is_mlx_eligible`; off-Mac
+            // the candle worker advertises the same capabilities and uses the candle handlers below.
             JobType::ImageVqa => run_vqa_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Visual question answering failed.", error)),
@@ -1275,10 +1273,9 @@ async fn run_utility_job(
             // type (and `video_generate` mode=`replace_person`) shares the video handler, which
             // dispatches on `mode == "replace_person"` to the engine `wan_vace` provider — the
             // native equivalent of the torch `WanVACEPipeline` path. The API routes only
-            // MLX-eligible replace_person jobs here (`jobs_store::video_job_is_mlx_eligible`);
-            // off macOS the `person_replace` capability is never advertised, so this arm only
-            // produces a real video on the macOS MLX worker (and the Python torch path serves
-            // Windows/Linux + non-VACE replacement).
+            // MLX-eligible replace_person jobs here (`jobs_store::video_job_is_mlx_eligible`). The
+            // off-Mac candle lane serves eligible Wan-VACE/SCAIL-2 replacement; unsupported models
+            // are refused and remain queued.
             JobType::PersonReplace => run_video_generate_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Person replacement failed.", error)),
@@ -1294,8 +1291,8 @@ async fn run_utility_job(
             // Native MLX LoRA/LoKr training (epic 3039, sc-3043/3049), served in-process
             // by the linked mlx-gen engine on the macOS Apple-Silicon GPU worker. The API
             // routes only MLX-native families here (jobs_store::training_job_is_mlx_eligible);
-            // kolors/lens + LoKr-on-Wan stay on the Python torch worker, which is also the
-            // Windows/Linux path. Off macOS the execute capability is never advertised.
+            // unsupported shapes are refused and remain queued for a compatible native trainer.
+            // Off macOS the execute capability is advertised only by a linked native trainer.
             JobType::LoraTrain => run_lora_train_job(api, settings, &job)
                 .await
                 .map_err(|error| ("LoRA training failed.", error)),
@@ -1310,8 +1307,8 @@ async fn run_utility_job(
                     .map_err(|error| ("ControlNet training failed.", error))
             }
             // Native MLX JoyCaption dataset captioning (epic 3550, sc-3556). The API
-            // routes only `captioner=joy_caption` jobs here; Windows/Linux and
-            // explicit non-MLX GPU choices keep the Python torch captioner fallback.
+            // routes only `captioner=joy_caption` jobs here; other captioners remain queued unless
+            // another compatible native captioner registers.
             JobType::TrainingCaption => run_training_caption_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Training captioning failed.", error)),
@@ -1338,9 +1335,8 @@ async fn run_utility_job(
             // Native candle prompt refinement (epic 5095, sc-5525; consolidated onto candle-llm in sc-7404):
             // routes `prompt_refine` to the candle `core_llm::TextLlm` provider (candle-llama, resolved
             // model-first). The candle worker advertises `prompt_refine` only when `backend_candle_enabled`
-            // (engines::registry_capabilities from the registered core_llm provider); off the Windows candle
-            // build the capability is never advertised, so this arm is unreachable there and the Python torch
-            // refiner serves the job (sc-5525 keeps it as the Mac + default-installer fallback).
+            // (engines::registry_capabilities from the registered core_llm provider); without a native
+            // text provider the capability is not advertised and the job remains queued.
             JobType::PromptRefine => run_prompt_refine_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Prompt refinement failed.", error)),
@@ -1371,9 +1367,8 @@ async fn run_utility_job(
             // DWPose whole-body pose detection (epic 3482, sc-3487 Mac / sc-5496 off-Mac):
             // RTMW via onnxruntime, replacing the Python rtmlib path — CoreML EP on the
             // macOS MLX worker, CUDA EP on the off-Mac candle GPU worker. Available on Mac
-            // AND the candle lane; on a candle-disabled box `PoseDetect` is never advertised
-            // by the Rust worker (the Python worker handles it), so this falls to the `_`
-            // arm there.
+            // AND the candle lane; on a candle-disabled box `PoseDetect` is never advertised, so the
+            // job remains queued and this falls to the `_` arm only if called defensively.
             #[cfg(any(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
@@ -1384,8 +1379,8 @@ async fn run_utility_job(
             // SCRFD 5-point landmark extraction (epic 4422, sc-4433): native-MLX SCRFD on Mac + the candle
             // SCRFD/ArcFace stack on the Windows/Linux candle lane (sc-5497, epic 5482), served in-process
             // for the Key Point Library. Available on Mac AND the candle lane; on a candle-disabled box
-            // `KpsExtract` is never advertised by the Rust worker (the Python InsightFace path handles it),
-            // so this falls to the `_` arm there.
+            // `KpsExtract` is never advertised, so the job remains queued and this falls to the `_` arm
+            // only if called defensively.
             #[cfg(any(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
@@ -1396,9 +1391,8 @@ async fn run_utility_job(
             // Image upscaling, served in-process by `upscale_jobs::run_image_upscale_job`: Real-ESRGAN
             // RRDBNet x2/x4 via onnxruntime/CoreML (epic 3482, sc-3489, Mac) + SeedVR2 one-step diffusion
             // (native MLX on Mac sc-4815 / candle CUDA on Windows sc-5928). Available on Mac AND the
-            // Windows/CUDA candle lane; on a plain Windows/Linux box `ImageUpscale` is never advertised by
-            // the Rust worker, so it falls to the `_` arm (Python Real-ESRGAN/AuraSR). The routing oracle
-            // refuses `engine=seedvr2` on torch and `engine=real-esrgan`/`aura-sr` on the candle worker.
+            // Windows/CUDA candle lane; on a build without either lane `ImageUpscale` is never advertised,
+            // so the job remains queued. The routing oracle admits only the engines each native lane serves.
             #[cfg(any(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")

@@ -1,7 +1,7 @@
 //! Content-based selected-person tracking (sc-3634, Slice 2 of sc-3488 / epic 3482).
 //!
-//! Ports the Python `person_adapters.py` tracking semantics to Rust, replacing the procedural
-//! `track_frames_from_detection` placeholder. The Python path runs `ultralytics yolo.track(
+//! Ports the retired Python `person_adapters.py` tracking semantics to Rust, replacing the procedural
+//! `track_frames_from_detection` placeholder. The reference used `ultralytics yolo.track(
 //! tracker="bytetrack.yaml")` — a pure algorithm (no neural net): a YOLO detector per frame plus
 //! Kalman + IoU association. Here we run the native-MLX YOLO11 detector (sc-3633) at the 2-FPS
 //! sample cadence and associate the per-frame boxes into track identities with a self-contained

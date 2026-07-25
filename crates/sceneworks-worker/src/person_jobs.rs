@@ -25,13 +25,12 @@
 //!    shared `decode`/`nms`/`detections_to_json` consume both backends unchanged.
 //!
 //! Available on macOS AND the off-Mac candle lane (it gates with `pose_jobs`/`kps_jobs`);
-//! on a candle-disabled box the Python Ultralytics path stays the Windows/Linux backend
-//! (the candle worker advertises `person_detect`/`person_track` while the Python path stays
-//! a co-resident fallback, retired wholesale in Phase 7, epic 5483). The MLX forward pass is
+//! on a candle-disabled box the capabilities are not advertised and the jobs remain queued. The
+//! MLX forward pass is
 //! covered by an `#[ignore]` parity test against a captured per-block reference oracle; the
-//! off-Mac `ort` lane by an `#[ignore]` GPU smoke. Person *segmentation* (SAM masks) is NOT
-//! ported here — off-Mac tracks are box-only (`maskState = "missing"`); a candle SAM backport
-//! is tracked separately (epic 3792, sc-5062).
+//! off-Mac `ort` lane by an `#[ignore]` GPU smoke. Person segmentation is orchestrated separately:
+//! MLX uses SAM2, while off-Mac `media_jobs::run_candle_segmenter` supplies SAM3 masks
+//! (sc-8847 / sc-8833), so candle tracks are not box-only.
 //!
 //! Pipeline (matched to the Ultralytics YOLO11 export — verified against the real
 //! `yolo11m.onnx` + `ultralytics.predict`):

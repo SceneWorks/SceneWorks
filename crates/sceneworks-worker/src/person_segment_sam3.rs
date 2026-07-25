@@ -13,10 +13,9 @@
 //! per clip frame, written under `person-tracks/{track_id}/masks/` by the orchestrator in
 //! `media_jobs::segment_assembly_frames` — so the replacement loader and Wan-VACE are unchanged.
 //!
-//! macOS-only, like `person_segment` / `person_jobs`: `mlx-gen-sam3` builds Apple MLX from source
-//! and is meaningless off Apple Silicon. **Cross-platform divergence (surfaced, not silent — cf.
-//! epic 3792):** the Python/torch SAM2 *box-prompt* path stays the Windows/Linux backend until a
-//! parallel SAM3 backport; only the macOS MLX worker gets the text-concept upgrade today.
+//! On macOS this module uses `mlx-gen-sam3`; off-Mac the candle worker serves the same SAM3
+//! text-concept contract through its native segmenter and returns masks. The implementation is
+//! backend-specific, but neither platform falls back to Python/torch.
 //!
 //! Unlike SAM2 (converted `.pt` → MLX), SAM3 loads the **stock `facebook/sam3` checkpoint
 //! directly** (`model.safetensors` + `tokenizer.json`); no conversion step. The model is

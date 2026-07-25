@@ -5,8 +5,8 @@
 //! backend-neutral `crate::inference_runtime::load_captioner` seam: the macOS `mlx` worker via mlx-gen's
 //! JoyCaption provider, and the Windows/CUDA candle worker via candle-gen-joycaption
 //! (`--features backend-candle`). `cfg(target_os)` only decides which provider crate registers the
-//! captioner; the job flow below is identical. The Python torch captioner remains the explicit
-//! non-MLX/non-candle fallback (and the default Windows/Linux path).
+//! captioner; the job flow below is identical. Without either native provider the capability is not
+//! advertised and captioning jobs remain queued.
 
 use super::*;
 

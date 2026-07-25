@@ -36,8 +36,8 @@ pub struct Settings {
     /// off-Mac, so a candle build advertises them by default — no `SCENEWORKS_BACKEND_CANDLE_ENABLED`
     /// needed. A non-candle build (Mac mlx, the desktop installer with no CUDA, any CPU/Linux build
     /// without the feature) defaults `false` and links no candle crate, so this is inert there. The
-    /// env var still overrides either way (set `0` to force a candle build back onto the Python
-    /// torch fallback during a staged rollout).
+    /// env var still overrides either way (set `0` to disable native candle capabilities during a
+    /// staged rollout; unsupported jobs then remain queued).
     pub backend_candle_enabled: bool,
     /// Operator-configured directories outside the app data dir and the Hugging Face cache
     /// that may be read for model weights — typically an existing ComfyUI `models/` tree

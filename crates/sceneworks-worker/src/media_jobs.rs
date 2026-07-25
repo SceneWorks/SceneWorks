@@ -628,8 +628,8 @@ pub(crate) async fn run_person_detect(
 /// Run the YOLO11 person detector on a rendered frame, returning the normalized detection
 /// array (Python `run_person_detect` shape) + the device the model ran on. Available on Mac
 /// (native MLX, epic 3482 / sc-3633) AND the off-Mac candle GPU-worker lane (`ort`/CUDA,
-/// sc-5498); identical body — the platform backend is chosen inside `person_jobs`. On a
-/// candle-disabled box the Python Ultralytics path serves Windows/Linux (the stub below).
+/// sc-5498); identical body — the platform backend is chosen inside `person_jobs`. A
+/// candle-disabled off-Mac build refuses the job (the stub below).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -695,7 +695,7 @@ async fn run_yolo11_person_detect(
 /// `ffmpeg -ss duration` accurate seek then yields no output and fails the whole track.
 /// 0.2 s clears one frame for any clip ≥ 5 fps without meaningfully moving the sample.
 /// Available on Mac AND the off-Mac candle lane, like its sole caller
-/// `assemble_real_person_track` (the Python Win/Linux path samples/extracts separately).
+/// `assemble_real_person_track`.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -803,9 +803,9 @@ struct PersonTrackBackend {
 /// the boxes into track identities with the pure-Rust SORT/ByteTrack tracker, resample the chosen
 /// identity onto the sample cadence (sc-3634), then fill per-frame masks with the SAM segmenter.
 ///
-/// One cfg-free orchestrator shared by the macOS (native-MLX) and off-Mac candle lanes (sc-8833);
-/// the Python Ultralytics path is the fallback on a candle-disabled box. The only per-backend seams
-/// are the `backend` descriptor (device/backend/segmenter labels) and the `run_segmenter` closure —
+/// One cfg-free orchestrator shared by the macOS (native-MLX) and off-Mac candle lanes (sc-8833).
+/// A candle-disabled off-Mac build refuses the job. The only per-backend seams are the `backend`
+/// descriptor (device/backend/segmenter labels) and the `run_segmenter` closure —
 /// every rendered frame's real device overrides `device_default`, so the default only shows through
 /// in the (unreachable) zero-frame case. The work dir is cleaned up on both the not-found error path
 /// and the success path.
@@ -1465,8 +1465,7 @@ async fn assemble_real_person_track(
 
 /// Off-Mac candle GPU-worker entry point for [`assemble_real_person_track_shared`] (sc-5498 /
 /// sc-8833): supplies the candle backend descriptor (device `cuda`, SAM3-only segmenter, sc-6247)
-/// and the candle SAM3 segmenter closure. The Python Ultralytics path is the fallback on a
-/// candle-disabled box.
+/// and the candle SAM3 segmenter closure. A candle-disabled build has no person-track lane.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[allow(clippy::too_many_arguments)]
 async fn assemble_real_person_track(

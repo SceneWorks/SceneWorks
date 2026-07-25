@@ -133,8 +133,8 @@ fn pose_to_body_points(keypoints: &[crate::openpose_skeleton::Keypoint]) -> Vec<
 /// Resolve the RealVisXL (SDXL) base snapshot for InstantID: an explicit `modelPath` dir
 /// (advanced or manifest) wins, else the selected quant tier subdir of the HF cache snapshot for the
 /// manifest `repo` (default `SceneWorks/realvisxl-mlx`). The big base is staged by the normal
-/// model-download flow; `None` here means it is not present, so the job is not native-runnable
-/// (falls through to torch). An explicit `modelPath` override loads verbatim (no tier resolution) —
+/// model-download flow; `None` here means it is not present, so the native lane refuses the job and
+/// no fallback is attempted. An explicit `modelPath` override loads verbatim (no tier resolution) —
 /// it is a fully-assembled diffusers dir the caller vouches for.
 fn resolve_instantid_sdxl_base(
     request: &ImageRequest,

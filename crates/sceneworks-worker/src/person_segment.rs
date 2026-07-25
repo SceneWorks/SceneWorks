@@ -11,9 +11,8 @@
 //! a mask, and a detected frame that drifts is corrected back with its ByteTrack box. The
 //! binary `L` masks are written under `person-tracks/{track_id}/masks/`.
 //!
-//! macOS-only, like `person_jobs`: `mlx-gen-sam2` builds Apple MLX from source and is
-//! meaningless off Apple Silicon. The Python SAM2 path stays the Windows/Linux backend (its
-//! per-frame quality gap is tracked in epic 3792 — backport video-SAM2 via candle-gen).
+//! This SAM2 implementation is macOS-only because `mlx-gen-sam2` builds Apple MLX from source.
+//! Off-Mac person segmentation uses the native candle SAM3 lane; there is no Python fallback.
 //!
 //! The orchestration (which span to propagate, the maskState rollup, the sidecar write) lives
 //! in `media_jobs::assemble_real_person_track`; this module owns the weight
