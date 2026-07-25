@@ -158,9 +158,19 @@ impl SavedVoiceStore {
                 "Invalid reference audio asset id".to_owned(),
             ));
         }
-        if input.embedding.is_empty() {
+        if input.embedding.len() != VOICE_EMBEDDING_DIM {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Voice embedding must contain exactly {VOICE_EMBEDDING_DIM} values"
+            )));
+        }
+        if input.embedding.iter().any(|value| !value.is_finite()) {
             return Err(ProjectStoreError::BadRequest(
-                "Voice embedding must not be empty".to_owned(),
+                "Voice embedding values must be finite".to_owned(),
+            ));
+        }
+        if !dedup_threshold.is_finite() || !(0.0..=1.0).contains(&dedup_threshold) {
+            return Err(ProjectStoreError::BadRequest(
+                "Voice dedup threshold must be between 0 and 1".to_owned(),
             ));
         }
 
@@ -276,6 +286,12 @@ mod tests {
         let connection = Connection::open_in_memory().expect("in-memory db");
         apply_voice_migrations(&connection).expect("voice migration runs");
         connection
+    }
+
+    fn valid_embedding(axis: usize) -> Vec<f32> {
+        let mut embedding = vec![0.0; VOICE_EMBEDDING_DIM];
+        embedding[axis] = 1.0;
+        embedding
     }
 
     /// The store's public delegating layer opens the real project.db; the unit tests here drive the
@@ -397,7 +413,7 @@ mod tests {
                 SavedVoiceCreateInput {
                     name: "Narrator".to_owned(),
                     reference_audio_asset_id: "asset_ref_1".to_owned(),
-                    embedding: vec![0.9, 0.1, 0.2, 0.05, 0.3],
+                    embedding: valid_embedding(0),
                 },
                 DEFAULT_VOICE_DEDUP_THRESHOLD,
             )
@@ -414,7 +430,11 @@ mod tests {
                 SavedVoiceCreateInput {
                     name: "Narrator (again)".to_owned(),
                     reference_audio_asset_id: "asset_ref_2".to_owned(),
-                    embedding: vec![0.901, 0.099, 0.2, 0.05, 0.301],
+                    embedding: {
+                        let mut embedding = valid_embedding(0);
+                        embedding[1] = 0.01;
+                        embedding
+                    },
                 },
                 DEFAULT_VOICE_DEDUP_THRESHOLD,
             )
@@ -429,7 +449,7 @@ mod tests {
                 SavedVoiceCreateInput {
                     name: "Villain".to_owned(),
                     reference_audio_asset_id: "asset_ref_3".to_owned(),
-                    embedding: vec![-0.2, 0.8, -0.6, 0.7, -0.9],
+                    embedding: valid_embedding(1),
                 },
                 DEFAULT_VOICE_DEDUP_THRESHOLD,
             )
@@ -479,5 +499,56 @@ mod tests {
                 DEFAULT_VOICE_DEDUP_THRESHOLD,
             )
             .is_err());
+    }
+
+    #[test]
+    fn create_requires_a_finite_256_value_embedding_and_bounded_threshold() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = SavedVoiceStore::new(temp.path());
+        let create = |embedding: Vec<f32>, threshold| {
+            store.create_saved_voice(
+                "project_1",
+                SavedVoiceCreateInput {
+                    name: "Narrator".to_owned(),
+                    reference_audio_asset_id: "asset_ref".to_owned(),
+                    embedding,
+                },
+                threshold,
+            )
+        };
+
+        for invalid in [
+            vec![0.0; VOICE_EMBEDDING_DIM - 1],
+            vec![0.0; VOICE_EMBEDDING_DIM + 1],
+        ] {
+            assert!(matches!(
+                create(invalid, DEFAULT_VOICE_DEDUP_THRESHOLD),
+                Err(ProjectStoreError::BadRequest(message))
+                    if message.contains("exactly 256 values")
+            ));
+        }
+
+        let mut non_finite = valid_embedding(0);
+        non_finite[1] = f32::NAN;
+        assert!(matches!(
+            create(non_finite, DEFAULT_VOICE_DEDUP_THRESHOLD),
+            Err(ProjectStoreError::BadRequest(message))
+                if message == "Voice embedding values must be finite"
+        ));
+
+        for threshold in [-0.01, 1.01, f32::NAN] {
+            assert!(matches!(
+                create(valid_embedding(0), threshold),
+                Err(ProjectStoreError::BadRequest(message))
+                    if message == "Voice dedup threshold must be between 0 and 1"
+            ));
+        }
+
+        for threshold in [0.0, 1.0, DEFAULT_VOICE_DEDUP_THRESHOLD] {
+            assert!(
+                create(valid_embedding(0), threshold).is_ok(),
+                "threshold {threshold} should be accepted"
+            );
+        }
     }
 }

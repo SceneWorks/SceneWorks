@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
+import { isCurrentProjectRequest } from "../appStateHelpers.js";
 
 // Owns the project's Voice Clone "saved voices" roster + its create/delete mutations (sc-13517).
 // A saved voice is a named pointer to a library audio reference clip (plus its Chatterbox-VE speaker
@@ -10,6 +11,12 @@ import { apiFetch, isAbortError } from "../api.js";
 // across App's SSE-driven re-renders (mirrors the sc-4194 note in useCharacters/useModelsAndLoras).
 export function useSavedVoices({ token, activeProject, activeProjectRef, setError }) {
   const [savedVoices, setSavedVoices] = useState([]);
+
+  const isCurrentVoiceRequest = useCallback(
+    (projectId) =>
+      isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId),
+    [activeProjectRef],
+  );
 
   const refreshSavedVoices = useCallback(
     async (projectId = activeProject?.id, { signal } = {}) => {
@@ -24,17 +31,17 @@ export function useSavedVoices({ token, activeProject, activeProjectRef, setErro
         );
         // Drop a stale response for a project the user already switched away from
         // (mirrors refreshCharacters' guard).
-        if (activeProjectRef?.current?.id && activeProjectRef.current.id !== projectId) {
+        if (!isCurrentVoiceRequest(projectId)) {
           return;
         }
         setSavedVoices(Array.isArray(items) ? items : []);
         setError("");
       } catch (err) {
-        if (isAbortError(err)) return;
+        if (isAbortError(err) || !isCurrentVoiceRequest(projectId)) return;
         setError(err.message);
       }
     },
-    [token, activeProject, activeProjectRef, setError],
+    [token, activeProject, isCurrentVoiceRequest, setError],
   );
 
   // Register a saved voice: the backend resolves the reference clip, computes its embedding, runs
@@ -46,15 +53,19 @@ export function useSavedVoices({ token, activeProject, activeProjectRef, setErro
         setError("Create or open a project first.");
         return null;
       }
+      const projectId = activeProject.id;
       try {
         const created = await apiFetch(
-          `/api/v1/projects/${activeProject.id}/voices`,
+          `/api/v1/projects/${projectId}/voices`,
           token,
           {
             method: "POST",
             body: JSON.stringify({ name, referenceAudioAssetId }),
           },
         );
+        if (!isCurrentVoiceRequest(projectId)) {
+          return null;
+        }
         setSavedVoices((items) => [
           created,
           ...items.filter((item) => item.id !== created.id),
@@ -62,11 +73,12 @@ export function useSavedVoices({ token, activeProject, activeProjectRef, setErro
         setError("");
         return created;
       } catch (err) {
+        if (!isCurrentVoiceRequest(projectId)) return null;
         setError(err.message);
         return null;
       }
     },
-    [token, activeProject, setError],
+    [token, activeProject, isCurrentVoiceRequest, setError],
   );
 
   const deleteSavedVoice = useCallback(
@@ -75,21 +87,26 @@ export function useSavedVoices({ token, activeProject, activeProjectRef, setErro
         setError("Create or open a project first.");
         return null;
       }
+      const projectId = activeProject.id;
       try {
         await apiFetch(
-          `/api/v1/projects/${activeProject.id}/voices/${encodeURIComponent(voiceId)}`,
+          `/api/v1/projects/${projectId}/voices/${encodeURIComponent(voiceId)}`,
           token,
           { method: "DELETE" },
         );
+        if (!isCurrentVoiceRequest(projectId)) {
+          return null;
+        }
         setSavedVoices((items) => items.filter((item) => item.id !== voiceId));
         setError("");
         return { id: voiceId, status: "deleted" };
       } catch (err) {
+        if (!isCurrentVoiceRequest(projectId)) return null;
         setError(err.message);
         return null;
       }
     },
-    [token, activeProject, setError],
+    [token, activeProject, isCurrentVoiceRequest, setError],
   );
 
   return {
