@@ -167,6 +167,20 @@ passed on an NVIDIA RTX PRO 4500 Blackwell:
 - the process tree contained the API, the supervisor, and exactly those two
   children.
 
+At `2026-07-25T01:40:55Z`, a second fresh cold boot of the same tag and OCI
+index passed on an NVIDIA A40:
+
+- compute capability 8.6, driver 570.195.03, and 46,068 MiB VRAM;
+- an ONNX Runtime CUDA host-to-device-to-host round trip passed for 4,096 bytes;
+- the authenticated API was healthy with `authRequired=true`;
+- `/workers` reported the idle `runpod-worker-0` GPU child with GPU ID 0, the
+  measured A40 name and memory, and the `gpu`, `nvidia`, `candle`,
+  `image_generate`, and `video_generate` capability markers;
+- `/workers` also reported the idle `runpod-worker-cpu` utility child with
+  capabilities including `model_download`; and
+- the process tree contained the API, the supervisor, and exactly those two
+  children.
+
 This is an image-level support statement, not a promise that every model fits
 every supported card. Check the model's VRAM requirement separately. RunPod's
 GPU inventory also changes over time; confirm the exact product name and
