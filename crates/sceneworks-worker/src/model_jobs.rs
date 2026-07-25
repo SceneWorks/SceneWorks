@@ -426,7 +426,7 @@ pub(crate) async fn run_lora_download_job(
         snapshot.total_bytes(),
         progress_report_interval(settings),
     );
-    download_snapshot_into_cache(
+    let resolved_revision = download_snapshot_into_cache(
         &DownloadContext {
             api,
             client: http_client,
@@ -441,17 +441,6 @@ pub(crate) async fn run_lora_download_job(
         &mut progress,
     )
     .await?;
-    // Symmetric with the `refs/<rev>` write in `download_snapshot_into_cache`: confine the read path
-    // so this receipt-facing lookup can't be turned into an arbitrary-file read by a `..`/absolute
-    // revision (sc-13583). `revision` is already validated at the entry point above; this is the
-    // defense-in-depth twin of the write-side `safe_join`.
-    let refs_path = safe_join(&repo_dir.join("refs"), revision)?;
-    let resolved_revision = tokio::fs::read_to_string(refs_path)
-        .await
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| revision.to_owned());
     let resolved_files = snapshot
         .files
         .iter()
@@ -1569,7 +1558,9 @@ pub(crate) async fn run_model_convert_job(
 
     // Promote the completed conversion atomically; on any rename failure the partial
     // temp dir is removed so it can't be picked up later.
-    if let Err(error) = finalize_converted_dir(&temp_dir, &final_dir).await {
+    if let Err(error) =
+        finalize_converted_dir(&temp_dir, &final_dir, &settings.data_dir.join("models/mlx")).await
+    {
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
         return Err(error);
     }
@@ -2062,43 +2053,12 @@ fn relink_to_blob(link: &Path) {
 /// first, rename temp → final, and only then delete the backup. If anything fails after
 /// the aside move, we RESTORE the backup back to `final_dir`, honoring the doc's promise
 /// that on error the previously working model is left untouched.
-pub(crate) async fn finalize_converted_dir(temp_dir: &Path, final_dir: &Path) -> WorkerResult<()> {
-    if let Some(parent) = final_dir.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    // Move any stale install aside instead of destroying it, so a later failure can
-    // restore it. The backup lives next to `final_dir` (same filesystem) so the move is
-    // an atomic rename and the restore is equally cheap and safe.
-    let backup_dir: Option<PathBuf> = if final_dir.exists() {
-        let backup = converted_dir_backup_path(final_dir);
-        // A leftover backup from a prior interrupted finalize would block the aside move;
-        // clear it first (best effort — a stale backup is never the working install).
-        let _ = tokio::fs::remove_dir_all(&backup).await;
-        tokio::fs::rename(final_dir, &backup).await?;
-        Some(backup)
-    } else {
-        None
-    };
-
-    // Promote the freshly converted dir into place. On any failure, restore the stale
-    // install so the user keeps the previously working model.
-    if let Err(error) = tokio::fs::rename(temp_dir, final_dir).await {
-        if let Some(backup) = backup_dir {
-            // Best effort: the working install is the priority, so ignore restore errors
-            // (there is nothing more we can do) but surface the original failure.
-            let _ = tokio::fs::remove_dir_all(final_dir).await;
-            let _ = tokio::fs::rename(&backup, final_dir).await;
-        }
-        return Err(error.into());
-    }
-
-    // Success: the new install is in place; drop the stale backup (best effort — a
-    // leftover backup is harmless and never mistaken for the live install).
-    if let Some(backup) = backup_dir {
-        let _ = tokio::fs::remove_dir_all(&backup).await;
-    }
-    Ok(())
+pub(crate) async fn finalize_converted_dir(
+    temp_dir: &Path,
+    final_dir: &Path,
+    conversion_root: &Path,
+) -> WorkerResult<()> {
+    finalize_converted_dir_with_hook(temp_dir, final_dir, conversion_root, |_| {}).await
 }
 
 /// Sibling backup path used to move a stale converted dir aside during finalize
@@ -2109,11 +2069,259 @@ fn converted_dir_backup_path(final_dir: &Path) -> PathBuf {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "model".to_string());
-    let suffix = format!(".{name}.finalize-backup-{}", std::process::id());
+    let suffix = format!(
+        ".{name}.finalize-backup-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    );
     match final_dir.parent() {
         Some(parent) => parent.join(suffix),
         None => PathBuf::from(suffix),
     }
+}
+
+const CONVERSION_LIFECYCLE_LOCK: &str = ".conversion-finalize.lock";
+const CONVERSION_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const CONVERSION_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Run one final promotion under a cross-process shared lifecycle lock plus an exclusive per-target
+/// lock. The shared lock excludes the startup sweep; the target lock serializes the four utility
+/// worker processes when they race to replace the same converted model.
+async fn finalize_converted_dir_with_hook<F>(
+    temp_dir: &Path,
+    final_dir: &Path,
+    conversion_root: &Path,
+    after_aside: F,
+) -> WorkerResult<()>
+where
+    F: FnOnce(&Path) + Send + 'static,
+{
+    let temp_dir = temp_dir.to_path_buf();
+    let final_dir = final_dir.to_path_buf();
+    let conversion_root = conversion_root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        finalize_converted_dir_blocking(&temp_dir, &final_dir, &conversion_root, after_aside)
+    })
+    .await
+    .map_err(|error| task_join_error("converted model finalize", error))?
+}
+
+fn finalize_converted_dir_blocking<F>(
+    temp_dir: &Path,
+    final_dir: &Path,
+    conversion_root: &Path,
+    after_aside: F,
+) -> WorkerResult<()>
+where
+    F: FnOnce(&Path),
+{
+    std::fs::create_dir_all(conversion_root)?;
+    let conversion_root = std::fs::canonicalize(conversion_root)?;
+    let final_parent = final_dir.parent().ok_or_else(|| {
+        WorkerError::InvalidPayload("Converted model final directory has no parent.".to_owned())
+    })?;
+    let final_parent = std::fs::canonicalize(final_parent)?;
+    if final_parent != conversion_root {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Converted model final directory {} must be a direct child of {}.",
+            final_dir.display(),
+            conversion_root.display()
+        )));
+    }
+    let _locks = ConversionFinalizeLocks::acquire(&conversion_root, final_dir)?;
+
+    // Move any stale install aside instead of destroying it, so a later failure can restore it. No
+    // sweep runs here: another process may have a live recovery source. Stranded backups are handled
+    // only by the exclusive startup lifecycle pass.
+    let backup_dir = if final_dir.exists() {
+        let backup = converted_dir_backup_path(final_dir);
+        std::fs::rename(final_dir, &backup)?;
+        after_aside(&backup);
+        Some(backup)
+    } else {
+        None
+    };
+
+    if let Err(error) = std::fs::rename(temp_dir, final_dir) {
+        if let Some(backup) = backup_dir {
+            let _ = std::fs::remove_dir_all(final_dir);
+            let _ = std::fs::rename(&backup, final_dir);
+        }
+        return Err(error.into());
+    }
+
+    if let Some(backup) = backup_dir {
+        let _ = std::fs::remove_dir_all(backup);
+    }
+    Ok(())
+}
+
+struct ConversionFinalizeLocks {
+    _lifecycle: std::fs::File,
+    _target: std::fs::File,
+}
+
+impl ConversionFinalizeLocks {
+    fn acquire(conversion_root: &Path, final_dir: &Path) -> WorkerResult<Self> {
+        let lifecycle_path = conversion_root.join(CONVERSION_LIFECYCLE_LOCK);
+        let lifecycle = open_conversion_lock(&lifecycle_path)?;
+        lock_conversion_file(&lifecycle, &lifecycle_path, true)?;
+
+        let target_name = final_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "model".to_owned());
+        let target_path = conversion_root.join(format!(".{target_name}.finalize.lock"));
+        let target = open_conversion_lock(&target_path)?;
+        lock_conversion_file(&target, &target_path, false)?;
+        Ok(Self {
+            _lifecycle: lifecycle,
+            _target: target,
+        })
+    }
+}
+
+fn open_conversion_lock(path: &Path) -> WorkerResult<std::fs::File> {
+    Ok(std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?)
+}
+
+fn lock_conversion_file(file: &std::fs::File, path: &Path, shared: bool) -> WorkerResult<()> {
+    let deadline = std::time::Instant::now() + CONVERSION_LOCK_TIMEOUT;
+    let contended = fs2::lock_contended_error().raw_os_error();
+    loop {
+        let result = if shared {
+            fs2::FileExt::try_lock_shared(file)
+        } else {
+            fs2::FileExt::try_lock_exclusive(file)
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) if error.raw_os_error() == contended => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(WorkerError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "timed out after {:?} waiting for conversion lock {}",
+                            CONVERSION_LOCK_TIMEOUT,
+                            path.display()
+                        ),
+                    )));
+                }
+                std::thread::sleep(CONVERSION_LOCK_POLL);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// Recover or remove crash-stranded converted-model backups at top-level worker startup.
+///
+/// The exclusive lifecycle lock guarantees no finalizer is active in any utility process. The scan
+/// is bounded to direct children of the one known conversion destination, `<data>/models/mlx`, and
+/// only real directories matching the exact backup naming convention are touched. If the canonical
+/// target is missing, the newest backup is restored before older copies are removed.
+pub(crate) async fn sweep_stranded_conversion_backups(data_dir: &Path) -> WorkerResult<()> {
+    let conversion_root = data_dir.join("models/mlx");
+    tokio::task::spawn_blocking(move || {
+        sweep_stranded_conversion_backups_blocking(&conversion_root)
+    })
+    .await
+    .map_err(|error| task_join_error("converted model startup sweep", error))?
+}
+
+fn sweep_stranded_conversion_backups_blocking(conversion_root: &Path) -> WorkerResult<()> {
+    std::fs::create_dir_all(conversion_root)?;
+    let conversion_root = std::fs::canonicalize(conversion_root)?;
+    let lifecycle_path = conversion_root.join(CONVERSION_LIFECYCLE_LOCK);
+    let lifecycle = open_conversion_lock(&lifecycle_path)?;
+    lock_conversion_file(&lifecycle, &lifecycle_path, false)?;
+
+    let mut by_target: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for entry in std::fs::read_dir(&conversion_root)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        let Some(target) = converted_backup_target_name(&entry.file_name()) else {
+            continue;
+        };
+        by_target.entry(target).or_default().push(entry.path());
+    }
+
+    for (target, mut backups) in by_target {
+        let final_dir = conversion_root.join(&target);
+        match std::fs::symlink_metadata(&final_dir) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                for backup in backups {
+                    std::fs::remove_dir_all(backup)?;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                backups.sort_by(|left, right| {
+                    backup_modified_time(left)
+                        .cmp(&backup_modified_time(right))
+                        .then_with(|| left.file_name().cmp(&right.file_name()))
+                });
+                let restore = backups.pop().expect("backup group is non-empty");
+                std::fs::rename(&restore, &final_dir)?;
+                for backup in backups {
+                    std::fs::remove_dir_all(backup)?;
+                }
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    event = "conversion_backup_sweep_skipped_target",
+                    target = %final_dir.display(),
+                    "converted-model startup sweep found a non-directory target; preserving backups"
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn converted_backup_target_name(name: &std::ffi::OsStr) -> Option<String> {
+    let name = name.to_str()?.strip_prefix('.')?;
+    let (target, suffix) = name.rsplit_once(".finalize-backup-")?;
+    let mut suffix_parts = suffix.splitn(2, '-');
+    let process_id = suffix_parts.next()?;
+    if target.is_empty()
+        || target.contains('/')
+        || target.contains('\\')
+        || process_id.parse::<u32>().is_err()
+        || suffix_parts
+            .next()
+            .is_some_and(|value| Uuid::parse_str(value).is_err())
+    {
+        return None;
+    }
+    Some(target.to_owned())
+}
+
+fn backup_modified_time(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+}
+
+#[cfg(test)]
+pub(crate) async fn finalize_converted_dir_with_test_hook<F>(
+    temp_dir: &Path,
+    final_dir: &Path,
+    conversion_root: &Path,
+    after_aside: F,
+) -> WorkerResult<()>
+where
+    F: FnOnce(&Path) + Send + 'static,
+{
+    finalize_converted_dir_with_hook(temp_dir, final_dir, conversion_root, after_aside).await
 }
 
 /// Fetch the `files` glob patterns from `repo`@`revision` into the shared Hugging Face hub cache
@@ -2352,6 +2560,7 @@ pub(crate) async fn run_lora_import_job(
     http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    validate_lora_import_digest_contract(&job.payload)?;
     let repo = optional_payload_string(&job.payload, "repo");
     let source_url = optional_payload_string(&job.payload, "sourceUrl");
     let source_path = optional_payload_string(&job.payload, "sourcePath");
@@ -2598,6 +2807,22 @@ pub(crate) async fn run_lora_import_job(
         ),
     )
     .await?;
+    Ok(())
+}
+
+/// A single `expectedSha256` cannot identify both files in a paired Wan MoE upload. Reject that
+/// ambiguous contract before heartbeat, target creation, or moving either staged upload. Single-file
+/// imports retain their existing digest verification.
+pub(crate) fn validate_lora_import_digest_contract(payload: &JsonObject) -> WorkerResult<()> {
+    if optional_payload_string(payload, "secondarySourcePath").is_some()
+        && optional_payload_string(payload, "expectedSha256").is_some()
+    {
+        return Err(WorkerError::InvalidPayload(
+            "LoRA import expectedSha256 is ambiguous with secondarySourcePath; provide a paired \
+             upload without a single-file digest."
+                .to_owned(),
+        ));
+    }
     Ok(())
 }
 

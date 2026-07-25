@@ -333,7 +333,8 @@ fn download_family_check_proceeds_for_derived_family_base_architecture() {
 async fn finalize_converted_dir_promotes_atomically_and_replaces_stale() {
     let temp = tempdir().expect("tempdir creates");
     let root = temp.path();
-    let final_dir = root.join("mlx").join("wan_2_2");
+    let conversion_root = root.join("mlx");
+    let final_dir = conversion_root.join("wan_2_2");
 
     // A completed temp conversion sitting in its sibling staging dir.
     let temp_dir = root.join("mlx").join(".wan_2_2.converting-job1");
@@ -344,7 +345,7 @@ async fn finalize_converted_dir_promotes_atomically_and_replaces_stale() {
     // The canonical dir only appears after finalize, so a partial conversion can
     // never be picked up as a ready model.
     assert!(!final_dir.exists());
-    finalize_converted_dir(&temp_dir, &final_dir)
+    finalize_converted_dir(&temp_dir, &final_dir, &conversion_root)
         .await
         .expect("finalize");
     assert!(final_dir.join("config.json").is_file());
@@ -357,7 +358,7 @@ async fn finalize_converted_dir_promotes_atomically_and_replaces_stale() {
     let temp_dir2 = root.join("mlx").join(".wan_2_2.converting-job2");
     std::fs::create_dir_all(&temp_dir2).expect("temp dir 2");
     std::fs::write(temp_dir2.join("config.json"), "{}").expect("config 2");
-    finalize_converted_dir(&temp_dir2, &final_dir)
+    finalize_converted_dir(&temp_dir2, &final_dir, &conversion_root)
         .await
         .expect("finalize 2");
     assert!(final_dir.join("config.json").is_file());
@@ -374,7 +375,8 @@ async fn finalize_converted_dir_promotes_atomically_and_replaces_stale() {
 async fn finalize_converted_dir_restores_stale_install_on_rename_failure() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path();
-    let final_dir = root.join("mlx").join("model");
+    let conversion_root = root.join("mlx");
+    let final_dir = conversion_root.join("model");
     std::fs::create_dir_all(&final_dir).expect("final dir");
     std::fs::write(final_dir.join("weights.safetensors"), b"OLD-BUT-WORKING")
         .expect("seed old install");
@@ -382,7 +384,7 @@ async fn finalize_converted_dir_restores_stale_install_on_rename_failure() {
     // Intentionally never created, so the temp→final rename fails after the stale aside.
     let temp_dir = root.join("mlx").join(".model.converting-jobX");
 
-    let error = finalize_converted_dir(&temp_dir, &final_dir)
+    let error = finalize_converted_dir(&temp_dir, &final_dir, &conversion_root)
         .await
         .expect_err("a missing temp dir must make the promotion fail");
     assert!(
@@ -419,14 +421,14 @@ async fn finalize_converted_dir_restores_stale_install_on_rename_failure() {
 async fn finalize_converted_dir_replaces_existing_install_leaves_no_backup() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path();
-    let final_dir = root.join("mlx").join("model");
+    let conversion_root = root.join("mlx");
+    let final_dir = conversion_root.join("model");
     std::fs::create_dir_all(&final_dir).expect("final dir");
     std::fs::write(final_dir.join("weights.safetensors"), b"OLD").expect("seed old");
     let temp_dir = root.join("mlx").join(".model.converting-jobY");
     std::fs::create_dir_all(&temp_dir).expect("temp dir");
     std::fs::write(temp_dir.join("weights.safetensors"), b"NEW").expect("seed new");
-
-    finalize_converted_dir(&temp_dir, &final_dir)
+    finalize_converted_dir(&temp_dir, &final_dir, &conversion_root)
         .await
         .expect("finalize should succeed");
 
@@ -457,13 +459,14 @@ async fn finalize_converted_dir_replaces_existing_install_leaves_no_backup() {
 async fn finalize_converted_dir_first_install_succeeds() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path();
-    let final_dir = root.join("mlx").join("installed").join("model");
+    let conversion_root = root.join("mlx");
+    let final_dir = conversion_root.join("model");
     let temp_dir = root.join("mlx").join(".model.converting-jobZ");
     std::fs::create_dir_all(&temp_dir).expect("temp dir");
     std::fs::write(temp_dir.join("weights.safetensors"), b"FRESH").expect("seed fresh");
 
     assert!(!final_dir.exists());
-    finalize_converted_dir(&temp_dir, &final_dir)
+    finalize_converted_dir(&temp_dir, &final_dir, &conversion_root)
         .await
         .expect("first install should succeed");
 
@@ -475,6 +478,205 @@ async fn finalize_converted_dir_first_install_succeeds() {
     assert!(
         !temp_dir.exists(),
         "temp dir must have been moved into place"
+    );
+}
+
+/// Startup runs before utility children are spawned and under the exclusive conversion lifecycle
+/// lock. It removes backups for a present target, restores the recovery source when the target is
+/// absent, and never broadens beyond direct real directories under `<data>/models/mlx`.
+#[tokio::test]
+async fn startup_sweeps_stranded_conversion_backups_with_recovery_and_confinement() {
+    let temp = tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let parent = data_dir.join("models/mlx");
+    std::fs::create_dir_all(&parent).expect("parent");
+    let final_dir = parent.join("model");
+    std::fs::create_dir_all(&final_dir).expect("current target");
+    std::fs::write(final_dir.join("weights.safetensors"), b"CURRENT").expect("current contents");
+    let stale_one = parent.join(".model.finalize-backup-111");
+    let stale_two =
+        parent.join(".model.finalize-backup-222-00000000-0000-4000-8000-000000000222");
+    let recover =
+        parent.join(".recover.finalize-backup-333-00000000-0000-4000-8000-000000000333");
+    let unrelated = parent.join(".other.finalize-backup-not-a-process-id");
+    let matching_file = parent.join(".model.finalize-backup-file");
+    for dir in [&stale_one, &stale_two, &recover, &unrelated] {
+        std::fs::create_dir_all(dir).expect("backup fixture");
+        std::fs::write(dir.join("weights.safetensors"), b"weights").expect("backup contents");
+    }
+    std::fs::write(&matching_file, b"not a directory").expect("matching file");
+
+    sweep_stranded_conversion_backups(&data_dir)
+        .await
+        .expect("startup sweep succeeds");
+
+    assert!(!stale_one.exists(), "first stranded backup is removed");
+    assert!(!stale_two.exists(), "second stranded backup is removed");
+    assert!(
+        parent.join("recover/weights.safetensors").is_file(),
+        "a lone recovery source is restored when its canonical target is absent"
+    );
+    assert!(
+        unrelated.exists(),
+        "a directory outside the exact backup convention is preserved"
+    );
+    assert!(
+        matching_file.is_file(),
+        "a matching non-directory is never removed"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn finalize_backup_sweep_does_not_follow_matching_symlink() {
+    let temp = tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let parent = data_dir.join("models/mlx");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&parent).expect("parent");
+    std::fs::create_dir_all(&outside).expect("outside");
+    std::fs::write(outside.join("keep.txt"), b"keep").expect("outside fixture");
+    let link =
+        parent.join(".model.finalize-backup-444-00000000-0000-4000-8000-000000000444");
+    std::os::unix::fs::symlink(&outside, &link).expect("matching symlink");
+
+    sweep_stranded_conversion_backups(&data_dir)
+        .await
+        .expect("sweep succeeds");
+
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok(),
+        "matching symlink itself is preserved"
+    );
+    assert!(
+        outside.join("keep.txt").is_file(),
+        "sweep never follows the symlink outside the parent"
+    );
+}
+
+/// Two utility processes may finalize the same target. Pause the first after it has moved the
+/// working install aside, then start a second promotion. The second must remain blocked until the
+/// first restores on failure; without the per-target lock it would promote NEW and the first
+/// rollback would delete NEW and replace it with OLD.
+#[tokio::test]
+async fn concurrent_finalizers_serialize_rollback_and_preserve_second_promotion() {
+    let temp = tempdir().expect("tempdir");
+    let conversion_root = temp.path().join("mlx");
+    let final_dir = conversion_root.join("model");
+    std::fs::create_dir_all(&final_dir).expect("working install");
+    std::fs::write(final_dir.join("weights.safetensors"), b"OLD").expect("old weights");
+    let missing_temp = conversion_root.join(".model.converting-fail");
+    let good_temp = conversion_root.join(".model.converting-good");
+    std::fs::create_dir_all(&good_temp).expect("good temp");
+    std::fs::write(good_temp.join("weights.safetensors"), b"NEW").expect("new weights");
+
+    let (aside_tx, aside_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let first_final = final_dir.clone();
+    let first_root = conversion_root.clone();
+    let first = tokio::spawn(async move {
+        finalize_converted_dir_with_test_hook(
+            &missing_temp,
+            &first_final,
+            &first_root,
+            move |_| {
+                let _ = aside_tx.send(());
+                let _ = release_rx.blocking_recv();
+            },
+        )
+        .await
+    });
+    aside_rx.await.expect("first finalizer moved OLD aside");
+
+    let second_final = final_dir.clone();
+    let second_root = conversion_root.clone();
+    let second = tokio::spawn(async move {
+        finalize_converted_dir(&good_temp, &second_final, &second_root).await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !second.is_finished(),
+        "second finalizer waits while the first owns the target recovery source"
+    );
+
+    release_tx.send(()).expect("release first finalizer");
+    first
+        .await
+        .expect("first task joins")
+        .expect_err("first promotion fails and rolls OLD back");
+    second
+        .await
+        .expect("second task joins")
+        .expect("second promotion succeeds after rollback");
+    assert_eq!(
+        std::fs::read(final_dir.join("weights.safetensors")).expect("final weights"),
+        b"NEW",
+        "the successful second promotion survives the first finalizer's rollback"
+    );
+    let backups = std::fs::read_dir(&conversion_root)
+        .expect("read conversion root")
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("finalize-backup")
+        })
+        .count();
+    assert_eq!(backups, 0, "both finalizers clean up only their own backup");
+}
+
+/// The startup sweep takes the lifecycle lock exclusively. Even if another top-level process starts
+/// while a utility worker is finalizing, it must wait rather than deleting the live rollback source.
+#[tokio::test]
+async fn startup_sweep_waits_for_an_active_finalizers_recovery_source() {
+    let temp = tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let conversion_root = data_dir.join("models/mlx");
+    let final_dir = conversion_root.join("model");
+    std::fs::create_dir_all(&final_dir).expect("working install");
+    std::fs::write(final_dir.join("weights.safetensors"), b"OLD").expect("old weights");
+    let missing_temp = conversion_root.join(".model.converting-fail");
+
+    let (aside_tx, aside_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let active_final = final_dir.clone();
+    let active_root = conversion_root.clone();
+    let finalizer = tokio::spawn(async move {
+        finalize_converted_dir_with_test_hook(
+            &missing_temp,
+            &active_final,
+            &active_root,
+            move |_| {
+                let _ = aside_tx.send(());
+                let _ = release_rx.blocking_recv();
+            },
+        )
+        .await
+    });
+    aside_rx.await.expect("finalizer moved OLD aside");
+
+    let sweep_data = data_dir.clone();
+    let sweep = tokio::spawn(async move { sweep_stranded_conversion_backups(&sweep_data).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !sweep.is_finished(),
+        "startup sweep waits while a finalizer owns a live backup"
+    );
+
+    release_tx.send(()).expect("release finalizer");
+    finalizer
+        .await
+        .expect("finalizer task joins")
+        .expect_err("missing temp triggers rollback");
+    sweep
+        .await
+        .expect("sweep task joins")
+        .expect("startup sweep completes after rollback");
+    assert_eq!(
+        std::fs::read(final_dir.join("weights.safetensors")).expect("restored weights"),
+        b"OLD",
+        "startup cleanup cannot delete the active finalizer's recovery source"
     );
 }
 

@@ -828,7 +828,11 @@ pub async fn run() -> WorkerResult<()> {
         );
     }
     let settings = Settings::from_env();
+    // Only the top-level worker process performs conversion recovery. It runs before any utility
+    // children are spawned, and the lifecycle lock excludes independently running finalizers.
+    // Child restarts must never sweep while sibling utility workers may be converting.
     if !settings.is_child_worker {
+        sweep_stranded_conversion_backups(&settings.data_dir).await?;
         if settings.gpu_id == "auto" {
             return supervise_auto_workers(settings).await;
         }
