@@ -469,11 +469,19 @@ pub fn gpu_check() -> Result<(), String> {
 /// (sc-10723). Running ≥2 loops lets independent downloads proceed in parallel; the
 /// per-file `DownloadLock` (sc-8900) still serializes two jobs resolving the *same*
 /// cache target, so concurrency never corrupts a shared file.
-fn spawn_inprocess_utility_worker(port: u16) -> InProcessUtilityWorker {
+async fn spawn_inprocess_utility_worker(
+    port: u16,
+    data_dir: PathBuf,
+) -> Result<InProcessUtilityWorker, sceneworks_worker::WorkerError> {
     let mut worker_settings = sceneworks_worker::Settings::from_env();
     worker_settings.api_url = format!("http://127.0.0.1:{port}");
+    worker_settings.data_dir = data_dir;
     worker_settings.gpu_id =
         inprocess_worker_gpu_id(std::env::var("SCENEWORKS_RUST_WORKER_GPU_ID").ok());
+    // This API process is the top-level owner of the in-process utility loops, which deliberately
+    // call `run_worker_loop` directly. Recover once here before any loop can claim a conversion;
+    // never put recovery inside each child loop, where sibling restarts could sweep live backups.
+    sceneworks_worker::recover_stranded_model_conversions(&worker_settings.data_dir).await?;
     let grace = Duration::from_secs(worker_settings.shutdown_timeout_seconds.max(1));
     let count = inprocess_utility_worker_count();
     let base_worker_id = worker_settings.worker_id.clone();
@@ -492,7 +500,7 @@ fn spawn_inprocess_utility_worker(port: u16) -> InProcessUtilityWorker {
             tokio::spawn(async move { sceneworks_worker::run_worker_loop(settings).await })
         })
         .collect();
-    InProcessUtilityWorker { handles, grace }
+    Ok(InProcessUtilityWorker { handles, grace })
 }
 
 /// Number of in-process CPU utility worker loops to run. Defaults to **2** so desktop

@@ -120,6 +120,7 @@ mod vram_gate;
 mod krea_control_fit;
 use supervisor::*;
 mod model_jobs;
+pub use model_jobs::recover_stranded_model_conversions;
 use model_jobs::*;
 mod media_jobs;
 use media_jobs::*;
@@ -832,7 +833,7 @@ pub async fn run() -> WorkerResult<()> {
     // children are spawned, and the lifecycle lock excludes independently running finalizers.
     // Child restarts must never sweep while sibling utility workers may be converting.
     if !settings.is_child_worker {
-        sweep_stranded_conversion_backups(&settings.data_dir).await?;
+        recover_stranded_model_conversions(&settings.data_dir).await?;
         if settings.gpu_id == "auto" {
             return supervise_auto_workers(settings).await;
         }

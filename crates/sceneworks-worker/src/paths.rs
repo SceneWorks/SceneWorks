@@ -554,25 +554,33 @@ pub(crate) fn resolve_model_import_target(
     ))
 }
 
-pub(crate) fn resolve_model_convert_output(
-    settings: &Settings,
-    output_dir: &str,
-) -> WorkerResult<PathBuf> {
+pub const MODEL_CONVERSION_BACKUPS_DIR_NAME: &str = ".sceneworks-finalize-backups";
+
+pub fn resolve_model_convert_output(data_dir: &Path, output_dir: &str) -> WorkerResult<PathBuf> {
     // Canonicalize before the confinement check so a symlink/`..` can't escape the
-    // lexical `starts_with`; allow the managed root's lexical or canonical form so a
-    // not-yet-created output dir still matches (sc-8877 / F-075).
+    // lexical comparison. Model conversion finalization and crash recovery both
+    // operate on direct children of the one MLX conversion root, so enforce that
+    // contract before expensive conversion work begins.
     let target = normalize_existing_or_absolute(Path::new(output_dir))?;
-    let models_root = settings.data_dir.join("models");
-    let allowed_roots = [
-        normalize_absolute_path(&models_root)?,
-        normalize_existing_or_absolute(&models_root)?,
-    ];
-    if allowed_roots.iter().any(|root| target.starts_with(root)) {
-        return Ok(target);
+    let conversion_root = normalize_existing_or_absolute(&data_dir.join("models/mlx"))?;
+    if target.parent() != Some(conversion_root.as_path()) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Model convert outputDir must be a direct child of {}",
+            data_dir.join("models/mlx").display()
+        )));
     }
-    Err(WorkerError::InvalidPayload(
-        "Model convert outputDir must be inside app-managed data/models".to_owned(),
-    ))
+    let target_name = target.file_name().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Model convert outputDir must name a model directory".to_owned(),
+        )
+    })?;
+    if target_name == std::ffi::OsStr::new(MODEL_CONVERSION_BACKUPS_DIR_NAME) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Model convert outputDir name {} is reserved for conversion recovery",
+            MODEL_CONVERSION_BACKUPS_DIR_NAME
+        )));
+    }
+    Ok(target)
 }
 
 pub(crate) fn model_manifest_target(

@@ -158,6 +158,38 @@ fn inprocess_utility_worker_ids_are_distinct_and_stable() {
     assert_eq!(ids.len(), 4);
 }
 
+/// The rust-api does not call the worker crate's top-level `run`; it owns and spawns
+/// `run_worker_loop` tasks directly. Exercise that exact production spawn boundary and prove
+/// recovery runs before any loop is created by giving it an unsafe conversion root. If recovery
+/// were removed from the topology, this would return a live pool instead of the confinement error.
+#[cfg(unix)]
+#[tokio::test]
+async fn inprocess_utility_worker_startup_runs_conversion_recovery_before_spawning_loops() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let models_dir = data_dir.join("models");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&models_dir).expect("models root");
+    std::fs::create_dir_all(&outside).expect("outside root");
+    std::os::unix::fs::symlink(&outside, models_dir.join("mlx"))
+        .expect("nested conversion-root symlink");
+
+    let result = crate::spawn_inprocess_utility_worker(0, data_dir).await;
+
+    match result {
+        Err(error) => assert!(
+            error.to_string().contains("escapes managed data root"),
+            "the production spawn boundary surfaces recovery confinement: {error:?}"
+        ),
+        Ok(worker) => {
+            for handle in worker.handles {
+                handle.abort();
+            }
+            panic!("production in-process startup skipped conversion recovery");
+        }
+    }
+}
+
 /// The watchdog must stay pending while the parent lives and resolve once it
 /// exits — the desktop-sidecar orphan fix. Mirrors the Python worker's
 /// parent-death test: spawn a dummy parent, confirm it isn't flagged alive

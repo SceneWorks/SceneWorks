@@ -348,6 +348,21 @@ pub(crate) async fn create_model_convert_job(
     Path(model_id): Path<String>,
     ApiJson(payload): ApiJson<ModelConvertRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    // Derive and confine the route-selected destination before catalog assembly performs any
+    // filesystem/cache inspection. Path-shaped IDs must fail at the request boundary rather than
+    // falling through to a misleading catalog 404 after that work.
+    let output_dir = state
+        .settings
+        .data_dir
+        .join("models")
+        .join("mlx")
+        .join(&model_id);
+    sceneworks_worker::resolve_model_convert_output(
+        &state.settings.data_dir,
+        &output_dir.display().to_string(),
+    )
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+
     let model = model_catalog(&state)
         .await?
         .into_iter()
@@ -388,12 +403,6 @@ pub(crate) async fn create_model_convert_job(
             "Model does not require MLX conversion",
         ));
     };
-    let output_dir = state
-        .settings
-        .data_dir
-        .join("models")
-        .join("mlx")
-        .join(&model_id);
     let mut job_payload = JsonObject::new();
     job_payload.insert("modelId".to_owned(), Value::String(model_id.clone()));
     job_payload.insert(
