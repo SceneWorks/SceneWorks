@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AssetMedia, AssetThumbnail, MissingMedia, posterUrl } from "./assetMedia.jsx";
+import { AssetMedia, AssetThumbnail, MissingMedia, posterUrl, thumbnailUrl } from "./assetMedia.jsx";
 
 const imageAsset = {
   id: "img",
@@ -54,6 +54,9 @@ describe("thumbnail native context-menu suppression (sc-8731)", () => {
     await act(() => root.render(<AssetThumbnail asset={imageAsset} />));
     const img = container.querySelector("img");
     expect(img).not.toBeNull();
+    expect(img.getAttribute("loading")).toBe("lazy");
+    expect(img.getAttribute("decoding")).toBe("async");
+    expect(new URL(img.src).searchParams.get("thumbnail")).toBe("384");
     const event = fireContextMenu(img);
     expect(event.defaultPrevented).toBe(true);
   });
@@ -78,8 +81,18 @@ describe("thumbnail native context-menu suppression (sc-8731)", () => {
     await act(() => root.render(<AssetMedia asset={imageAsset} />));
     const img = container.querySelector("img");
     expect(img).not.toBeNull();
+    expect(new URL(img.src).searchParams.has("thumbnail")).toBe(false);
+    expect(img.hasAttribute("loading")).toBe(false);
     const event = fireContextMenu(img);
     expect(event.defaultPrevented).toBe(false);
+  });
+});
+
+describe("bounded thumbnail URLs (sc-14797)", () => {
+  it("uses the derivative only for shared grid thumbnails", () => {
+    expect(new URL(thumbnailUrl(imageAsset)).searchParams.get("thumbnail")).toBe("384");
+    expect(new URL(thumbnailUrl(videoAsset)).searchParams.get("thumbnail")).toBe("384");
+    expect(new URL(posterUrl(videoAsset)).searchParams.has("thumbnail")).toBe(false);
   });
 });
 
