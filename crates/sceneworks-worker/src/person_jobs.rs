@@ -919,7 +919,7 @@ impl OrtYolo {
 }
 
 #[cfg(not(target_os = "macos"))]
-static DETECTOR: OnceLock<Mutex<Option<OrtYolo>>> = OnceLock::new();
+static DETECTOR: OnceLock<Mutex<Option<(PathBuf, OrtYolo)>>> = OnceLock::new();
 
 /// Blocking person detection on a single rendered frame (off-Mac `ort`/CUDA backend). The
 /// session is loaded once and cached process-wide; invoke via `spawn_blocking`.
@@ -942,10 +942,12 @@ pub(crate) fn detect_people_blocking(
         *guard = None;
         guard
     });
-    if guard.is_none() {
-        *guard = Some(OrtYolo::load(&weights_path)?);
+    if !guard.as_ref().is_some_and(|(cached_path, _)| {
+        crate::util::resolved_cache_paths_match([cached_path.as_path()], [weights_path.as_path()])
+    }) {
+        *guard = Some((weights_path.clone(), OrtYolo::load(&weights_path)?));
     }
-    let detector = guard.as_mut().expect("detector loaded");
+    let detector = &mut guard.as_mut().expect("detector loaded").1;
     let device = detector.device;
     let detections = detector.detect_people(&img, conf)?;
     Ok(DetectResult {

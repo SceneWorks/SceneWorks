@@ -39,6 +39,7 @@ use ort::value::Tensor;
 use serde_json::{json, Value};
 
 use crate::openpose_skeleton::{body_stickwidth, draw_wholebody, Keypoint};
+use crate::util::{resolve_env_file_pin, resolved_cache_paths_match};
 use crate::{
     heartbeat, normalize_app_managed_cache_path, optional_payload_string, progress_payload,
     run_blocking_with_heartbeat, task_join_error, update_job, ApiClient, Settings, WorkerError,
@@ -481,7 +482,7 @@ struct Detector {
     device: &'static str,
 }
 
-static DETECTOR: OnceLock<Mutex<Option<Detector>>> = OnceLock::new();
+static DETECTOR: OnceLock<Mutex<Option<(PathBuf, PathBuf, Detector)>>> = OnceLock::new();
 
 /// Build a session, optionally registering the platform hardware EP (CoreML on macOS,
 /// CUDA off-Mac). `accel == false` builds a plain CPU session (the fallback).
@@ -644,10 +645,20 @@ fn detect_batch(
         *guard = None;
         guard
     });
-    if guard.is_none() {
-        *guard = Some(Detector::load(&det_path, &pose_path)?);
+    let cache_matches = guard.as_ref().is_some_and(|(cached_det, cached_pose, _)| {
+        resolved_cache_paths_match(
+            [cached_det.as_path(), cached_pose.as_path()],
+            [det_path.as_path(), pose_path.as_path()],
+        )
+    });
+    if !cache_matches {
+        *guard = Some((
+            det_path.clone(),
+            pose_path.clone(),
+            Detector::load(&det_path, &pose_path)?,
+        ));
     }
-    let detector = guard.as_mut().expect("detector loaded");
+    let detector = &mut guard.as_mut().expect("detector loaded").2;
     let device = detector.device;
     let mut out = Vec::with_capacity(images.len());
     for path in images {
@@ -693,10 +704,6 @@ fn detect_batch(
 /// Blocking (onnx forward + raster); callers on an async runtime should wrap it in
 /// `spawn_blocking`, exactly as the batch job does for its detect + render loops.
 ///
-/// Lands with its registry wrapper ahead of the first non-test caller — the folder-ingest
-/// data-prep pipeline (A2, sc-10161) drives it through [`crate::control_preprocess::PosePreprocessor`];
-/// allow dead_code until then.
-#[allow(dead_code)]
 pub(crate) fn detect_and_render_skeleton(
     det_path: &Path,
     pose_path: &Path,
@@ -716,10 +723,20 @@ pub(crate) fn detect_and_render_skeleton(
         *guard = None;
         guard
     });
-    if guard.is_none() {
-        *guard = Some(Detector::load(det_path, pose_path)?);
+    let cache_matches = guard.as_ref().is_some_and(|(cached_det, cached_pose, _)| {
+        resolved_cache_paths_match(
+            [cached_det.as_path(), cached_pose.as_path()],
+            [det_path, pose_path],
+        )
+    });
+    if !cache_matches {
+        *guard = Some((
+            det_path.to_path_buf(),
+            pose_path.to_path_buf(),
+            Detector::load(det_path, pose_path)?,
+        ));
     }
-    let detector = guard.as_mut().expect("detector loaded");
+    let detector = &mut guard.as_mut().expect("detector loaded").2;
     let people = detector.detect(image)?;
 
     // Convert + squareify each person, keep the largest-area one (same ordering rule as the
@@ -821,29 +838,6 @@ async fn ensure_weights(
     Ok((det, pose))
 }
 
-/// Resolve an explicit env-pinned weight path (sc-8911). Unset → `Ok(None)` (fall through
-/// to cache/download). Set and existing → `Ok(Some(path))`. Set but missing → an
-/// `InvalidPayload` error, so an operator's typo fails loudly rather than silently
-/// loading whatever the download path resolves. Takes the raw value explicitly so it's
-/// unit-testable without mutating the process environment.
-fn resolve_pinned_weight(
-    env_key: &str,
-    value: Option<std::ffi::OsString>,
-    file: &str,
-) -> WorkerResult<Option<PathBuf>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let path = PathBuf::from(&value);
-    if path.exists() {
-        return Ok(Some(path));
-    }
-    Err(WorkerError::InvalidPayload(format!(
-        "{env_key} is set to {} but that path does not exist. Point it at the local {file}, or unset it to download on first use.",
-        path.display()
-    )))
-}
-
 async fn ensure_one(
     env_key: &str,
     file: &str,
@@ -856,7 +850,7 @@ async fn ensure_one(
     // path is missing, that's an operator error — surface it instead of silently falling
     // through to the cache/network (sc-8911), which would mask a typo and load different
     // weights than the operator intended.
-    if let Some(path) = resolve_pinned_weight(env_key, std::env::var_os(env_key), file)? {
+    if let Some(path) = resolve_env_file_pin(env_key, std::env::var_os(env_key), file)? {
         return Ok(path);
     }
     let target = cache.join(file);
