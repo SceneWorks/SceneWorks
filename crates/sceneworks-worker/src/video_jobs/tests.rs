@@ -322,7 +322,7 @@ fn comfyui_wan_a14b_gate_rejects_32gb_and_admits_large_card() {
         "larger-card behavior remains admitted"
     );
     assert_eq!(
-        candle_wan_offload_policy(WAN_COMFYUI_T2V_ENGINE),
+        candle_video_offload_policy(WAN_COMFYUI_T2V_ENGINE),
         OffloadPolicy::Sequential
     );
     std::fs::remove_dir_all(&root).ok();
@@ -6826,20 +6826,26 @@ fn video_load_spec_threads_text_encoder_dir() {
     );
 }
 
-/// sc-12631 / sc-13175: the candle Wan engines the manifest sizes by a MEASURED sequential
+/// sc-12631 / sc-13175 / sc-14625: the candle video engines that require the provider's sequential
 /// `candle.vramGbByTier` peak load with `OffloadPolicy::Sequential` — the A14B (T2V + I2V) so its two
 /// 14B experts swap one-resident-at-a-time, and the dense TI2V-5B (sc-13175) so its UMT5 TE + z48 VAE
 /// are flushed off-GPU around the denoise. That residency is the coupling that makes the gate's
-/// admission number truthful. `ltx`/`svd` carry no offload lifecycle and stay `Resident`. Both halves
-/// are pinned: the policy predicate AND that `video_load_spec` actually threads it onto the `LoadSpec`
+/// admission number truthful. SVD-XT stages conditioner → UNet → VAE decode, while LTX has no
+/// offload lifecycle and stays `Resident`. Both halves are pinned: the policy predicate AND that
+/// `video_load_spec` actually threads it onto the `LoadSpec`
 /// (a decoupled predicate that never reached the spec would silently OOM on the resident path the gate
 /// did not size for).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn candle_wan_sequential_engines_offload_others_resident() {
-    for id in ["wan2_2_ti2v_5b", "wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
+fn candle_sequential_video_engines_offload_others_resident() {
+    for id in [
+        "svd_xt",
+        "wan2_2_ti2v_5b",
+        "wan2_2_t2v_14b",
+        "wan2_2_i2v_14b",
+    ] {
         assert_eq!(
-            candle_wan_offload_policy(id),
+            candle_video_offload_policy(id),
             OffloadPolicy::Sequential,
             "{id} must offload (sized by its measured sequential peak, not the resident load)"
         );
@@ -6848,7 +6854,7 @@ fn candle_wan_sequential_engines_offload_others_resident() {
         // makes the sequential-peak gate truthful).
         let input = VideoGenInput {
             engine_id: id,
-            offload_policy: candle_wan_offload_policy(id),
+            offload_policy: candle_video_offload_policy(id),
             ..VideoGenInput::default()
         };
         assert_eq!(
@@ -6857,16 +6863,16 @@ fn candle_wan_sequential_engines_offload_others_resident() {
             "{id}: video_load_spec must thread Sequential onto the LoadSpec"
         );
     }
-    // ltx/svd carry no offload lifecycle — forcing them sequential would be a no-op that misleads.
-    for id in ["ltx_2_3_distilled", "svd_xt"] {
+    // LTX carries no offload lifecycle — forcing it sequential would be a no-op that misleads.
+    for id in ["ltx_2_3_distilled"] {
         assert_eq!(
-            candle_wan_offload_policy(id),
+            candle_video_offload_policy(id),
             OffloadPolicy::Resident,
             "{id} must stay resident"
         );
         let input = VideoGenInput {
             engine_id: id,
-            offload_policy: candle_wan_offload_policy(id),
+            offload_policy: candle_video_offload_policy(id),
             ..VideoGenInput::default()
         };
         assert_eq!(
