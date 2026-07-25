@@ -506,3 +506,22 @@ async fn character_studio_routes_manage_references_loras_and_test_jobs() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(archived.as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn move_asset_to_character_uses_the_shaped_json_error_contract() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, _, body) = request_raw(
+        app,
+        "POST",
+        "/api/v1/projects/project-1/assets/asset-1/move-to-character",
+        Body::from(r#"{"characterId":"#),
+        &[("content-type", "application/json")],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value = serde_json::from_slice(&body).expect("json error body");
+    assert_eq!(body["detail"][0]["type"], "json_invalid");
+    assert_eq!(body["detail"][0]["loc"], json!(["body", 0]));
+}

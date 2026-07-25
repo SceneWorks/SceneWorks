@@ -134,6 +134,27 @@ runs:
         }
         Write-Host "OK: $out"
 
+        # RUSTC_WRAPPER is runner-global on the self-hosted boxes. Treat it as an
+        # optional accelerator, not a build prerequisite: if an administrator
+        # removes sccache but leaves the environment variable behind, even
+        # `cargo fetch` fails before rustc can run. Clear only an unresolvable
+        # wrapper and let subsequent steps invoke the verified toolchain directly.
+        $rustcWrapper = $env:RUSTC_WRAPPER
+        if ($rustcWrapper) {
+          if ([IO.Path]::IsPathRooted($rustcWrapper)) {
+            $wrapperUsable = Test-Path -LiteralPath $rustcWrapper -PathType Leaf
+          } else {
+            $wrapperUsable = $null -ne (
+              Get-Command $rustcWrapper -CommandType Application -ErrorAction SilentlyContinue
+            )
+          }
+          if (-not $wrapperUsable) {
+            Write-Host "::warning title=Missing Rust compiler wrapper::RUSTC_WRAPPER points to '$rustcWrapper', but that executable is unavailable. Clearing it and using the verified rustc directly."
+            Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+            Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+          }
+        }
+
         # Prepend the real toolchain bin so every later step's cargo/rustc/clippy resolves
         # here FIRST, ahead of the fragile .cargo\bin proxies. $GITHUB_PATH prepends, and
         # the entry survives the `call vcvars64.bat` cmd steps (vcvars only appends).

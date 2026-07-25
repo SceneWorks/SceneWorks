@@ -2959,6 +2959,7 @@ async fn catalog_delete_routes_remove_manifest_entries_and_owned_artifacts() {
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     // permanent=true keeps the assertions deterministic (the default move-to-OS-trash
     // path depends on the host having a usable recycle bin/trash).
+    crate::test_reset_catalog_build_counters();
     let (model_status, model_delete) = request(
         app.clone(),
         "DELETE",
@@ -2969,6 +2970,11 @@ async fn catalog_delete_routes_remove_manifest_entries_and_owned_artifacts() {
     assert_eq!(model_status, StatusCode::OK);
     assert_eq!(model_delete["removedManifestEntry"], true);
     assert_eq!(model_delete["removedLocalArtifacts"], true);
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        1,
+        "one delete request must assemble the model catalog only once"
+    );
     assert!(model_delete["warnings"][0]
         .as_str()
         .is_some_and(|warning| warning.contains("Moody")));
