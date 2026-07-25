@@ -47,6 +47,18 @@ export function generationQualityLabel(value) {
   return LABELS[value] ?? value;
 }
 
+// Chip-sized label for a quality value — [Auto, bf16, Q8, Q4]. Derived from the value rather than a
+// lookup table, so a tier added to the vocabulary still gets a sensible chip; the descriptive wording
+// above rides the chip's `title` and the line beneath it. Shared by both Settings screens (the
+// advanced one's Generation group and Simple Settings), which render the same four chips.
+export function shortQualityLabel(value) {
+  if (value === AUTO_GENERATION_QUALITY) {
+    return "Auto";
+  }
+  // bf16 is written lower-case everywhere in the product; the quant tiers are upper-case.
+  return value === "bf16" ? "bf16" : String(value).toUpperCase();
+}
+
 // The valid setting for `value` — "auto" or an explicit bf16|q8|q4 — else the "auto" default when it
 // isn't one of them. Auto is the app-wide default (epic 10721 R3): an unset/invalid preference means
 // "let the app pick the best tier that fits", not a flat q8.

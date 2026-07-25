@@ -4,12 +4,13 @@ import { apiFetch } from "../api.js";
 import { useAppContext } from "../context/AppContext.js";
 import { ACCENTS } from "../accents.js";
 import {
-  AUTO_GENERATION_QUALITY,
   GENERATION_QUALITY_OPTIONS,
   generationQualityLabel,
   readDefaultGenerationQuality,
+  shortQualityLabel,
   writeDefaultGenerationQuality,
 } from "../generationQuality.js";
+import { describeDevice } from "../deviceSummary.js";
 import { loadCredentials, saveCredential } from "../credentials.js";
 import { Chips } from "./studioParts.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";
@@ -237,37 +238,4 @@ export function SimpleSettings({ accent, onAccentChange, simpleDefault, onSimple
       </div>
     </div>
   );
-}
-
-// Chip-sized label for a quality value — the design's [bf16, Q8, Q4] plus Auto. Derived
-// from the value rather than a lookup table, so a tier added to the vocabulary still gets a
-// sensible chip; the full descriptive wording rides the chip's title and the line beneath.
-export function shortQualityLabel(value) {
-  if (value === AUTO_GENERATION_QUALITY) {
-    return "Auto";
-  }
-  // bf16 is written lower-case everywhere in the product; the quant tiers are upper-case.
-  return value === "bf16" ? "bf16" : String(value).toUpperCase();
-}
-
-// Engine + GPU summary from the live worker registry. An MLX worker means Apple Silicon
-// unified memory; anything else is the discrete-GPU (candle) lane. Unknown values read
-// "Detecting…" rather than a fabricated placeholder.
-export function describeDevice(workers, macCapabilities) {
-  const gpuWorkers = (workers ?? []).filter((worker) => worker?.gpuId && worker.gpuId !== "cpu");
-  const mlx = gpuWorkers.find((worker) => worker.gpuId === "mlx");
-  const primary = mlx ?? gpuWorkers[0] ?? null;
-  const engine = mlx
-    ? "MLX · Apple Silicon"
-    : primary
-      ? "Candle · discrete GPU"
-      : macCapabilities?.platform === "macos"
-        ? "MLX · Apple Silicon"
-        : "Detecting…";
-  if (!primary) {
-    return { engine, gpu: "No worker connected" };
-  }
-  const totalMb = Number(primary.utilization?.memoryTotalMb);
-  const memory = Number.isFinite(totalMb) && totalMb > 0 ? ` · ${(totalMb / 1024).toFixed(0)} GB` : "";
-  return { engine, gpu: `${primary.gpuName ?? `GPU ${primary.gpuId}`}${memory}` };
 }
