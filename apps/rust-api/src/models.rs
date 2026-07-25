@@ -4381,15 +4381,23 @@ pub(crate) fn manifest_download_size_bytes(model: &Value, download: &Value) -> O
         })
 }
 
+fn model_size_estimation_disabled(_state: &AppState) -> bool {
+    #[cfg(test)]
+    if let Some(disabled) = *_state.model_size_estimate_disabled_override.lock() {
+        return disabled;
+    }
+    matches!(
+        std::env::var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
 pub(crate) async fn estimate_huggingface_download_size(
     state: &AppState,
     repo: &str,
     files: &[String],
 ) -> Option<u64> {
-    if matches!(
-        std::env::var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE").as_deref(),
-        Ok("1" | "true" | "TRUE" | "yes" | "YES")
-    ) {
+    if model_size_estimation_disabled(state) {
         return None;
     }
     let cache_key = (repo.to_owned(), files.to_vec());

@@ -1,31 +1,6 @@
 //! rust-api catalog tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
-struct RestoreEnv {
-    key: &'static str,
-    value: Option<std::ffi::OsString>,
-}
-
-impl RestoreEnv {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self {
-            key,
-            value: previous,
-        }
-    }
-}
-
-impl Drop for RestoreEnv {
-    fn drop(&mut self) {
-        match &self.value {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
-
 #[test]
 fn merge_model_manifest_entry_deep_merges_nested_blocks() {
     // The worker reads the merged manifest entry from the job payload now
@@ -381,7 +356,6 @@ async fn models_route_overlaps_slow_probes_with_bounded_fanout() {
 
 #[tokio::test]
 async fn models_catalog_reuses_every_unchanged_size_estimate_on_second_load() {
-    let _estimate_enabled = RestoreEnv::set("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "0");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
@@ -409,6 +383,7 @@ async fn models_catalog_reuses_every_unchanged_size_estimate_on_second_load() {
     write_empty_sibling_manifests(&config_dir);
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(false);
     let hook = crate::models::ModelSizeEstimateTestHook::immediate(Some(1234));
     *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
@@ -444,7 +419,6 @@ async fn models_catalog_reuses_every_unchanged_size_estimate_on_second_load() {
 
 #[tokio::test]
 async fn models_catalog_starts_install_sweep_before_size_estimation_completes() {
-    let _estimate_enabled = RestoreEnv::set("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "0");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
@@ -472,11 +446,14 @@ async fn models_catalog_starts_install_sweep_before_size_estimation_completes() 
     crate::models::test_reset_catalog_probe_concurrency();
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(false);
     let hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(1234));
     *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
     let request_task = tokio::spawn(request(app, "GET", "/api/v1/models", Value::Null));
-    hook.wait_for_call().await;
+    tokio::time::timeout(Duration::from_secs(2), hook.wait_for_call())
+        .await
+        .expect("size estimator starts before overlap-test deadline");
     let sweep_started_while_estimate_blocked =
         tokio::time::timeout(Duration::from_millis(150), async {
             loop {
@@ -489,7 +466,10 @@ async fn models_catalog_starts_install_sweep_before_size_estimation_completes() 
         .await
         .is_ok();
     hook.release_one();
-    let response = request_task.await.expect("models request joins");
+    let response = tokio::time::timeout(Duration::from_secs(2), request_task)
+        .await
+        .expect("models request completes before overlap-test deadline")
+        .expect("models request joins");
 
     assert_eq!(response.0, StatusCode::OK);
     assert!(
@@ -500,7 +480,6 @@ async fn models_catalog_starts_install_sweep_before_size_estimation_completes() 
 
 #[tokio::test]
 async fn models_catalog_disabled_size_estimation_skips_upstream_requests() {
-    let _disable = RestoreEnv::set("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
@@ -527,6 +506,7 @@ async fn models_catalog_disabled_size_estimation_skips_upstream_requests() {
     write_empty_sibling_manifests(&config_dir);
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(true);
     let hook = crate::models::ModelSizeEstimateTestHook::immediate(Some(1234));
     *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
