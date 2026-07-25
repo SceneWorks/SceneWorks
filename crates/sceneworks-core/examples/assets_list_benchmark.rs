@@ -24,8 +24,9 @@ fn report(
     println!(
         "{label}: assets={assets} elapsed_ms={:.3} fs_total={} registry_opens={} \
          registry_metadata_reads={} registry_content_reads={} path_stats={} directory_scans={} \
-         sidecar_reads={} generation_set_reads={} poster_stats={} index_marker_reads={} \
-         index_marker_writes={} index_marker_removes={} directory_create_calls={} db_opens={}",
+         sidecar_reads={} generation_set_reads={} timeline_reads={} character_reads={} \
+         poster_stats={} index_marker_reads={} index_marker_writes={} index_marker_removes={} \
+         directory_create_calls={} db_opens={}",
         elapsed.as_secs_f64() * 1_000.0,
         operations.total(),
         operations.registry_opens,
@@ -35,6 +36,8 @@ fn report(
         operations.directory_scans,
         operations.sidecar_reads,
         operations.generation_set_reads,
+        operations.timeline_reads,
+        operations.character_reads,
         operations.poster_stats,
         operations.index_marker_reads,
         operations.index_marker_writes,
@@ -63,6 +66,8 @@ fn run(store: ProjectStore, project_id: &str, iterations: usize) {
         warm_operations.directory_scans += operations.directory_scans;
         warm_operations.sidecar_reads += operations.sidecar_reads;
         warm_operations.generation_set_reads += operations.generation_set_reads;
+        warm_operations.timeline_reads += operations.timeline_reads;
+        warm_operations.character_reads += operations.character_reads;
         warm_operations.poster_stats += operations.poster_stats;
         warm_operations.index_marker_reads += operations.index_marker_reads;
         warm_operations.index_marker_writes += operations.index_marker_writes;
@@ -83,6 +88,8 @@ fn run(store: ProjectStore, project_id: &str, iterations: usize) {
             directory_scans: warm_operations.directory_scans / iterations as u64,
             sidecar_reads: warm_operations.sidecar_reads / iterations as u64,
             generation_set_reads: warm_operations.generation_set_reads / iterations as u64,
+            timeline_reads: warm_operations.timeline_reads / iterations as u64,
+            character_reads: warm_operations.character_reads / iterations as u64,
             poster_stats: warm_operations.poster_stats / iterations as u64,
             index_marker_reads: warm_operations.index_marker_reads / iterations as u64,
             index_marker_writes: warm_operations.index_marker_writes / iterations as u64,
@@ -125,7 +132,13 @@ fn synthetic(asset_count: usize, iterations: usize) {
             .expect("synthetic asset persists");
     }
     println!("storage=synthetic-local path={}", data_dir.display());
-    run(store, &project.id, iterations);
+    // Seed through one store, then report the first call through a genuinely
+    // fresh registry cache. This still does not evict the operating-system cache.
+    run(
+        ProjectStore::new(data_dir, "assets-list-benchmark"),
+        &project.id,
+        iterations,
+    );
 }
 
 fn existing(data_dir: PathBuf, project_id: &str, iterations: usize) {

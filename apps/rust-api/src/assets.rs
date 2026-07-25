@@ -29,6 +29,8 @@ pub(crate) async fn list_assets(
         directory_scans = filesystem_operations.directory_scans,
         sidecar_reads = filesystem_operations.sidecar_reads,
         generation_set_reads = filesystem_operations.generation_set_reads,
+        timeline_reads = filesystem_operations.timeline_reads,
+        character_reads = filesystem_operations.character_reads,
         poster_stats = filesystem_operations.poster_stats,
         index_marker_reads = filesystem_operations.index_marker_reads,
         index_marker_writes = filesystem_operations.index_marker_writes,

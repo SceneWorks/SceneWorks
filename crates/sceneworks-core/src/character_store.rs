@@ -13,7 +13,8 @@ use crate::asset_index::{
 };
 use crate::contracts;
 use crate::project_store::{
-    connect_project_db_migrated, AssetIndexMutation, ProjectStoreError, ProjectStoreResult,
+    connect_project_db_migrated, record_asset_list_filesystem_operation, AssetIndexMutation,
+    AssetListFilesystemOperation, ProjectStoreError, ProjectStoreResult,
 };
 use crate::store_util::{
     atomic_write, is_safe_id, optional_bool, optional_f64, optional_str, random_hex, read_json,
@@ -809,6 +810,7 @@ fn reindex_characters_with_fingerprint(
 ) -> ProjectStoreResult<u32> {
     let mut count = 0;
     for sidecar_path in character_sidecars(project_path)? {
+        record_asset_list_filesystem_operation(AssetListFilesystemOperation::CharacterRead);
         let Ok(character) = read_json(&sidecar_path) else {
             continue;
         };

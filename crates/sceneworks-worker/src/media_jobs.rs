@@ -240,18 +240,10 @@ where
     }
 
     let sidecar_path = media_path.with_extension("sceneworks.json");
-    write_json_value(&sidecar_path, &asset).await?;
-    write_json_value(
-        &project_path
-            .join("recipes")
-            .join(format!("{asset_id}.recipe.json")),
-        &asset["recipe"],
-    )
-    .await?;
     let project_id = required_payload_string(&job.payload, "projectId")?;
     source
         .store
-        .index_asset_sidecar(project_id, &sidecar_path)?;
+        .persist_native_asset_sidecar(project_id, &sidecar_path, &asset)?;
 
     Ok((asset_id, asset, extra))
 }
@@ -2120,19 +2112,9 @@ impl TimelineExport<'_> {
             duration,
         );
         let sidecar_path = output_path.with_extension("sceneworks.json");
-        write_json_value(&sidecar_path, &asset).await?;
-        tokio::fs::create_dir_all(self.project_path.join("recipes")).await?;
         let asset_id = required_value_str(&asset, "id")?.to_owned();
-        write_json_value(
-            &self
-                .project_path
-                .join("recipes")
-                .join(format!("{asset_id}.recipe.json")),
-            &asset["recipe"],
-        )
-        .await?;
         self.store
-            .index_asset_sidecar(&self.request.project_id, &sidecar_path)?;
+            .persist_native_asset_sidecar(&self.request.project_id, &sidecar_path, &asset)?;
 
         let mut result = JsonObject::new();
         result.insert("assetIds".to_owned(), json!([asset_id]));
