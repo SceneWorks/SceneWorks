@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   SCHEME_LABELS,
   loadCredentials,
@@ -98,6 +98,7 @@ export function SettingsScreen({
   // origin-keyed localStorage. Seeded here from the cache (App.jsx re-primes it from the server on launch);
   // q8 by default.
   const [defaultQuality, setDefaultQuality] = useState(readDefaultGenerationQuality);
+  const defaultQualityRequest = useRef(0);
 
   const refresh = useCallback(async () => {
     try {
@@ -218,14 +219,29 @@ export function SettingsScreen({
   // 127.0.0.1:<port> origin changes each launch, wiping origin-keyed localStorage). Same contract as
   // theme/accent in App.jsx — the endpoint MERGES, so sending only this field can't disturb theme/accent.
   // Token is "" because ui-preferences is a public route (like /health); mirrors App.jsx's PUT.
-  function changeDefaultQuality(value) {
+  async function changeDefaultQuality(value) {
+    const request = defaultQualityRequest.current + 1;
+    defaultQualityRequest.current = request;
+    const previous = defaultQuality;
     const next = writeDefaultGenerationQuality(value);
     setDefaultQuality(next);
-    apiFetch("/api/v1/ui-preferences", "", {
-      method: "PUT",
-      body: JSON.stringify({ defaultGenerationQuality: next }),
-    }).catch(() => {});
-    setStatus(`Default generation quality set to ${generationQualityLabel(next)}.`);
+    try {
+      await apiFetch("/api/v1/ui-preferences", "", {
+        method: "PUT",
+        body: JSON.stringify({ defaultGenerationQuality: next }),
+      });
+      if (defaultQualityRequest.current === request) {
+        setStatus(`Default generation quality set to ${generationQualityLabel(next)}.`);
+      }
+    } catch (error) {
+      // An older request may finish after a newer click. Only the latest operation owns the
+      // optimistic cache/state; a stale failure must not roll back a newer successful choice.
+      if (defaultQualityRequest.current === request) {
+        writeDefaultGenerationQuality(previous);
+        setDefaultQuality(previous);
+        setStatus(`Could not save default generation quality: ${String(error)}`);
+      }
+    }
   }
 
   async function restartWorker() {

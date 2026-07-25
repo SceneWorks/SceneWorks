@@ -62,8 +62,8 @@ use super::model_jobs::{
     check_downloaded_model_family, derived_tokenizer_overlay,
     downloaded_model_detection_io_error_is_inconclusive, finalize_converted_dir,
     finalize_converted_dir_with_test_hook, huggingface_receipt_weights_dir,
-    overlay_derived_tokenizer, recover_stranded_model_conversions, validate_hf_download_inputs,
-    DownloadFamilyCheck,
+    overlay_derived_tokenizer, receipt_markers_read, recover_stranded_model_conversions,
+    reset_receipt_markers_read, validate_hf_download_inputs, DownloadFamilyCheck,
 };
 // `terminating_signal` is only exercised by a `#[cfg(unix)]` test (signal-death
 // attribution is uncatchable and only observable on Unix), so gate the import to
@@ -78,13 +78,13 @@ use super::supervisor::{
 use super::{
     allow_pattern_matches, bounded_tail, cancel_requested_peek, cleanup_uploaded_import_source,
     copy_lora_source, fresh_asset_id, heartbeat_while_blocking, import_lora_source_file_as,
-    import_lora_source_path, normalize_app_managed_cache_path, now_rfc3339, parse_credentials_env,
-    resolve_model_convert_output, resolve_model_import_target, safe_download_dir,
-    safe_project_path, value_f64, wait_for_shutdown_latch, wan_moe_pair_filenames,
-    write_model_download_receipt, write_model_install_marker, CredentialScheme, IdleHeartbeat,
-    JsonObject, SafetensorsHeaderError, Settings, WorkerCredential, WorkerError,
-    DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS,
-    INSTALL_MARKER, MODEL_CONVERSION_BACKUPS_DIR_NAME,
+    import_lora_source_path, is_database_locked, normalize_app_managed_cache_path, now_rfc3339,
+    parse_credentials_env, resolve_model_convert_output, resolve_model_import_target,
+    safe_download_dir, safe_project_path, value_f64, wait_for_shutdown_latch,
+    wan_moe_pair_filenames, write_model_download_receipt, write_model_install_marker,
+    CredentialScheme, IdleHeartbeat, JsonObject, SafetensorsHeaderError, Settings,
+    WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
+    DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER, MODEL_CONVERSION_BACKUPS_DIR_NAME,
 };
 
 // HF-CLI input validation, downloaded-model family detection, atomic converted-dir finalize, and the

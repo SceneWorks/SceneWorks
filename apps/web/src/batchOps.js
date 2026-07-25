@@ -118,8 +118,8 @@ export function batchItemStatusForItem(item, jobs, observedJobs) {
   return batchItemStatus(item.jobId, jobs, observedJobs);
 }
 
-// The completed result asset for a batch item (the worker returns it on `result.assets[0]`),
-// or null while pending / on failure.
+// The completed result asset for a batch item (the API exposes persisted worker asset writes on
+// `result.assets[0]`), or null while pending / on failure.
 export function batchItemResultAsset(jobId, jobs) {
   const job = (jobs ?? []).find((item) => item.id === jobId);
   if (!job || job.status !== "completed") return null;

@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import appSource from "./App.jsx?raw";
 import {
+  applySuccessfulProjectRefresh,
   hasVisibleLocalFailureForView,
   isCurrentProjectRequest,
+  reconcileActiveProject,
   reconcileSelectedAssetId,
 } from "./appStateHelpers.js";
 
@@ -86,5 +88,62 @@ describe("isCurrentProjectRequest", () => {
       "isCurrentProjectRequest(activeProject?.id ?? null, projectId)",
     );
     expect(refreshStart).not.toContain("activeProjectRef.current");
+  });
+});
+
+describe("reconcileActiveProject", () => {
+  const refreshed = [
+    { id: "project-a", name: "A refreshed", updatedAt: "new" },
+    { id: "project-b", name: "B" },
+  ];
+
+  it("replaces a selected project's stale snapshot with the refreshed object", () => {
+    expect(reconcileActiveProject(refreshed, { id: "project-a", name: "A stale" })).toBe(
+      refreshed[0],
+    );
+  });
+
+  it("selects the first current project when the old selection disappeared", () => {
+    expect(reconcileActiveProject(refreshed, { id: "deleted" })).toBe(refreshed[0]);
+    expect(reconcileActiveProject([], { id: "deleted" })).toBeNull();
+  });
+});
+
+describe("applySuccessfulProjectRefresh", () => {
+  it("retains the current project list and selection when the projects request fails", () => {
+    let projectWrites = 0;
+    let activeProjectWrites = 0;
+    const applied = applySuccessfulProjectRefresh(
+      { value: [], error: "Projects: offline" },
+      () => {
+        projectWrites += 1;
+      },
+      () => {
+        activeProjectWrites += 1;
+      },
+    );
+
+    expect(applied).toBe(false);
+    expect(projectWrites).toBe(0);
+    expect(activeProjectWrites).toBe(0);
+  });
+
+  it("updates both list and selected snapshot after a successful projects request", () => {
+    const refreshed = [{ id: "project-a", name: "A refreshed" }];
+    let writtenProjects = null;
+    let activeUpdater = null;
+    const applied = applySuccessfulProjectRefresh(
+      { value: refreshed, error: "" },
+      (projects) => {
+        writtenProjects = projects;
+      },
+      (updater) => {
+        activeUpdater = updater;
+      },
+    );
+
+    expect(applied).toBe(true);
+    expect(writtenProjects).toBe(refreshed);
+    expect(activeUpdater({ id: "project-a", name: "A stale" })).toBe(refreshed[0]);
   });
 });

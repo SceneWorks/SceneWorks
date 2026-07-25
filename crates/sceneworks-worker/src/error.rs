@@ -7,7 +7,11 @@ pub enum WorkerError {
     Io(std::io::Error),
     Json(serde_json::Error),
     ProjectStore(ProjectStoreError),
-    Api { status: StatusCode, detail: String },
+    Api {
+        status: StatusCode,
+        detail: String,
+        code: Option<String>,
+    },
     InvalidPayload(String),
     Engine(String),
     Canceled(String),
@@ -20,7 +24,14 @@ impl fmt::Display for WorkerError {
             Self::Io(error) => write!(formatter, "{error}"),
             Self::Json(error) => write!(formatter, "{error}"),
             Self::ProjectStore(error) => write!(formatter, "{error}"),
-            Self::Api { status, detail } => write!(formatter, "API {status}: {detail}"),
+            Self::Api {
+                status,
+                detail,
+                code,
+            } => match code {
+                Some(code) => write!(formatter, "API {status} ({code}): {detail}"),
+                None => write!(formatter, "API {status}: {detail}"),
+            },
             Self::InvalidPayload(detail) => formatter.write_str(detail),
             Self::Engine(detail) => formatter.write_str(detail),
             Self::Canceled(detail) => formatter.write_str(detail),

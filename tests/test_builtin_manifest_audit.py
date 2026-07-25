@@ -33,8 +33,10 @@ embedded manifest, in ``crates/sceneworks-worker/src/engines.rs`` (the tests
 
 from __future__ import annotations
 
+import copy
 import json
 import re
+from functools import lru_cache
 from pathlib import Path
 
 import jsonschema
@@ -156,9 +158,35 @@ def _strip_jsonc_comments(body: str) -> str:
     return "".join(result)
 
 
-def _load_builtin_models_manifest() -> dict:
-    raw = MANIFEST_PATH.read_text(encoding="utf-8")
+@lru_cache(maxsize=None)
+def _cached_jsonc(path: Path) -> dict:
+    raw = path.read_text(encoding="utf-8")
     return json.loads(_strip_jsonc_comments(raw))
+
+
+@lru_cache(maxsize=None)
+def _cached_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_builtin_models_manifest() -> dict:
+    return copy.deepcopy(_cached_jsonc(MANIFEST_PATH))
+
+
+def _load_schema(path: Path) -> dict:
+    return copy.deepcopy(_cached_json(path))
+
+
+def test_cached_manifest_and_schema_loaders_return_isolated_copies():
+    first_manifest = _load_builtin_models_manifest()
+    original_id = first_manifest["models"][0]["id"]
+    first_manifest["models"][0]["id"] = "mutated"
+    assert _load_builtin_models_manifest()["models"][0]["id"] == original_id
+
+    first_schema = _load_schema(SCHEMA_PATH)
+    original_type = first_schema["type"]
+    first_schema["type"] = "mutated"
+    assert _load_schema(SCHEMA_PATH)["type"] == original_type
 
 
 def test_mage_flow_generation_family_is_pinned_and_complete():
@@ -546,7 +574,7 @@ def test_manifest_model_path_is_only_an_optional_override():
 def test_builtin_models_manifest_satisfies_authoring_schema():
     """sc-12338: the builtin catalog's $schema is an enforced CI contract."""
     manifest = _load_builtin_models_manifest()
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     jsonschema.Draft202012Validator.check_schema(schema)
     errors = sorted(
         jsonschema.Draft202012Validator(schema).iter_errors(manifest),
@@ -562,7 +590,7 @@ def test_builtin_schema_rejects_an_unknown_closed_model_key():
     """Mutation guard: a typo/decorative builtin key must make the CI gate fail."""
     manifest = _load_builtin_models_manifest()
     manifest["models"][0]["recommendded"] = True
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
     assert any("recommendded" in error.message for error in errors)
 
@@ -611,7 +639,7 @@ def _sample_audio_model_entry() -> dict:
 def test_schema_accepts_audio_type_and_audio_sub_block():
     """sc-13401: a `type: "audio"` entry with a populated `audio` sub-block
     validates against the authoring schema (the new sibling of mlx/candle)."""
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     jsonschema.Draft202012Validator.check_schema(schema)
     manifest = {"schemaVersion": 1, "models": [_sample_audio_model_entry()]}
     errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
@@ -624,7 +652,7 @@ def test_schema_accepts_audio_type_and_audio_sub_block():
 def test_schema_rejects_unknown_field_under_audio_sub_block():
     """Mutation guard: the `audio` block is additionalProperties:false, so a typo
     / undeclared field under it must fail validation."""
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     entry = _sample_audio_model_entry()
     entry["audio"]["bogusField"] = True
     manifest = {"schemaVersion": 1, "models": [entry]}
@@ -636,7 +664,7 @@ def test_schema_rejects_unknown_field_under_audio_sub_block():
 
 def test_schema_rejects_audio_voice_without_id():
     """A voice object requires `id` so the picker always has a backend key."""
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     entry = _sample_audio_model_entry()
     entry["audio"]["voices"] = [{"label": "No Id", "gender": "female"}]
     manifest = {"schemaVersion": 1, "models": [entry]}
@@ -661,7 +689,7 @@ def test_schema_rejects_audio_voice_without_id():
 def test_schema_rejects_unknown_model_type():
     """Negative control: the `type` enum still rejects an out-of-set value even
     after `audio` was added, so the enum is not accidentally open."""
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     entry = _sample_audio_model_entry()
     entry["type"] = "hologram"
     manifest = {"schemaVersion": 1, "models": [entry]}
@@ -890,7 +918,7 @@ def test_schema_pins_download_revision_to_a_40hex_sha():
     (the F-029 pin authority), accepting a valid SHA and rejecting a branch/tag/
     short/uppercase/wrong-length value via the `pattern` keyword.
     """
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     jsonschema.Draft202012Validator.check_schema(schema)
     validator = jsonschema.Draft202012Validator(schema)
 
@@ -926,7 +954,7 @@ def test_schema_accepts_a_component_id_on_a_corequisite_download():
     authoring schema constrains it to lowercase snake_case (same shape as a descriptor id), accepting
     a valid id and rejecting capitals / hyphens / a leading digit / empty via the `pattern` keyword.
     """
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     jsonschema.Draft202012Validator.check_schema(schema)
     validator = jsonschema.Draft202012Validator(schema)
 
@@ -970,7 +998,7 @@ def test_schema_rejects_a_component_id_on_a_non_corequisite_download():
     by the `a_required_component_with_no_matching_component_id_is_a_manifest_error` unit test in
     crates/sceneworks-worker/src/model_jobs.rs).
     """
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     jsonschema.Draft202012Validator.check_schema(schema)
     validator = jsonschema.Draft202012Validator(schema)
 
@@ -1041,7 +1069,7 @@ def test_manifest_constraint_contract_registry_is_complete_and_live():
     to reject requests, which is materially different from an accidental dead key.
     """
     manifest = _load_builtin_models_manifest()
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     model_properties = schema["properties"]["models"]["items"]["properties"]
 
     declared: set[str] = set()
@@ -1477,14 +1505,14 @@ RECIPE_PRESET_SCHEMA_PATH = ROOT / "packages" / "schemas" / "recipe-preset.schem
 
 def _load_jsonc(path: Path) -> dict:
     """Generalization of `_load_builtin_models_manifest` for the sibling catalogs."""
-    return json.loads(_strip_jsonc_comments(path.read_text(encoding="utf-8")))
+    return copy.deepcopy(_cached_jsonc(path))
 
 
 def _schema_errors(manifest: dict, schema_path: Path) -> list:
     """Validate `manifest` against the schema at `schema_path`, returning the
     (path-sorted) validation errors. Also asserts the schema itself is a legal
     Draft 2020-12 document (a broken schema is a silent all-pass otherwise)."""
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema = _load_schema(schema_path)
     jsonschema.Draft202012Validator.check_schema(schema)
     return sorted(
         jsonschema.Draft202012Validator(schema).iter_errors(manifest),

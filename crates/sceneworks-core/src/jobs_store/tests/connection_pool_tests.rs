@@ -70,3 +70,30 @@ fn write_connection_is_reused_across_calls() {
         "the connection-scoped temp table persists → same long-lived connection reused"
     );
 }
+
+#[test]
+fn generation_stats_created_at_sort_keys_are_indexed() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = JobsStore::new(dir.path().join("jobs.db"));
+    store.initialize().expect("store initializes");
+    let connection = store.open_connection().expect("read connection");
+
+    let index_exists = |table: &str, index: &str| {
+        let mut statement = connection
+            .prepare(&format!("pragma index_list({table})"))
+            .expect("index list prepares");
+        statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("index list reads")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("index names decode")
+            .iter()
+            .any(|name| name == index)
+    };
+
+    assert!(index_exists("jobs", "idx_jobs_created"));
+    assert!(index_exists(
+        "generation_metrics_history",
+        "idx_genmetrics_history_created"
+    ));
+}

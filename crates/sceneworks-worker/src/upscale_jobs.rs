@@ -43,6 +43,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use crate::generator_cache::with_cached_generator;
+use crate::single_child_asset::{write_single_child_asset, SingleChildAssetSpec};
 use crate::util::resolve_env_file_pin;
 use gen_core::{
     CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Image as GenImage, LoadSpec,
@@ -61,8 +62,8 @@ use ort::value::Tensor;
 use serde_json::{json, Value};
 
 use crate::{
-    fresh_asset_id, heartbeat, now_rfc3339, progress_payload, resolve_dataset_item_path,
-    safe_project_path, task_join_error, update_job, ApiClient, Settings, WorkerError, WorkerResult,
+    heartbeat, progress_payload, resolve_dataset_item_path, safe_project_path, task_join_error,
+    update_job, ApiClient, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -1109,36 +1110,6 @@ pub(crate) async fn run_image_upscale_job(
     };
     let (out_w, out_h) = (upscaled.width(), upscaled.height());
 
-    // write exactly one child asset with lineage back to the source (mirrors
-    // image_adapters.run_image_upscale).
-    let created_at = now_rfc3339();
-    let generation_set_id = format!("genset_{}", uuid::Uuid::new_v4().simple());
-    let asset_id = fresh_asset_id();
-    let date = &created_at[..10];
-    // filename suffix = asset_id[6:14] (the 8 hex chars after "asset_")
-    let suffix: String = asset_id.chars().skip(6).take(8).collect();
-    let filename = format!("{date}_upscaled_x{factor}_{suffix}.png");
-    let media_rel = format!("assets/images/{generation_set_id}/{filename}");
-    let media_path = project_path.join(&media_rel);
-    if let Some(parent) = media_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let tmp_path = media_path.with_extension("tmp.png");
-    // Encode the upscaled PNG off the async runtime thread (sc-8909 / F-107).
-    let encode_tmp = tmp_path.clone();
-    tokio::task::spawn_blocking(move || {
-        upscaled
-            .save_with_format(&encode_tmp, image::ImageFormat::Png)
-            .map_err(|e| WorkerError::Io(std::io::Error::other(e)))
-    })
-    .await
-    .map_err(|e| task_join_error("upscale encode task", e))??;
-    tokio::fs::rename(&tmp_path, &media_path)
-        .await
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&tmp_path);
-        })?;
-
     let source_name = payload
         .get("displayName")
         .and_then(Value::as_str)
@@ -1165,55 +1136,50 @@ pub(crate) async fn run_image_upscale_job(
         // upscale result reveals whether the hardware EP ran or it fell back to CPU (sc-8923).
         upscale_settings["device"] = json!(device);
     }
-    let fact = json!({
-        "assetId": asset_id,
-        "mediaPath": media_rel,
-        "mimeType": "image/png",
-        "type": "image",
-        "width": out_w,
-        "height": out_h,
-        "normalizedWidth": out_w,
-        "normalizedHeight": out_h,
-        "count": 1,
-        "seed": seed,
-        "displayName": format!("{source_name} ({factor}x upscaled)"),
-        "createdAt": created_at.clone(),
-        "mode": "image_upscale",
-        "model": engine_id,
-        "adapter": engine_id,
-        "prompt": "",
-        "negativePrompt": "",
-        "loras": [],
-        "stylePreset": "",
-        "sourceAssetId": source_asset_id,
-        "rawAdapterSettings": { "upscale": upscale_settings },
-        "parents": [source_asset_id],
-        "extra": {
-            "isUpscaled": true,
-            "upscaledFromAssetId": source_asset_id,
-            "factor": factor,
-            "engine": engine_id,
+    let result = write_single_child_asset(
+        &project_path,
+        image::DynamicImage::ImageRgb8(upscaled),
+        SingleChildAssetSpec {
+            filename_stem: &format!("upscaled_x{factor}"),
+            mode: "image_upscale",
+            model: engine_id,
+            adapter: engine_id,
+            encode_label: "upscale encode task",
         },
-    });
-    let generation_set = json!({
-        "id": generation_set_id,
-        "mode": "image_upscale",
-        "model": engine_id,
-        "prompt": "",
-        "negativePrompt": "",
-        "count": 1,
-        "createdAt": created_at,
-    });
-    let mut result = JsonObject::new();
-    result.insert(
-        "generationSetId".to_owned(),
-        Value::String(generation_set_id),
-    );
-    result.insert("expectedCount".to_owned(), json!(1));
-    result.insert("adapter".to_owned(), Value::String(engine_id.to_owned()));
-    result.insert("model".to_owned(), Value::String(engine_id.to_owned()));
-    result.insert("generationSet".to_owned(), generation_set);
-    result.insert("assetWrites".to_owned(), Value::Array(vec![fact]));
+        |write| {
+            json!({
+                "assetId": write.asset_id,
+                "mediaPath": write.media_path,
+                "mimeType": "image/png",
+                "type": "image",
+                "width": out_w,
+                "height": out_h,
+                "normalizedWidth": out_w,
+                "normalizedHeight": out_h,
+                "count": 1,
+                "seed": seed,
+                "displayName": format!("{source_name} ({factor}x upscaled)"),
+                "createdAt": write.created_at,
+                "mode": "image_upscale",
+                "model": engine_id,
+                "adapter": engine_id,
+                "prompt": "",
+                "negativePrompt": "",
+                "loras": [],
+                "stylePreset": "",
+                "sourceAssetId": source_asset_id,
+                "rawAdapterSettings": { "upscale": upscale_settings },
+                "parents": [source_asset_id],
+                "extra": {
+                    "isUpscaled": true,
+                    "upscaledFromAssetId": source_asset_id,
+                    "factor": factor,
+                    "engine": engine_id,
+                },
+            })
+        },
+    )
+    .await?;
 
     update_job(
         api,

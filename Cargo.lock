@@ -6312,6 +6312,7 @@ dependencies = [
  "parking_lot",
  "reqwest 0.12.28",
  "rmcp",
+ "rusqlite",
  "rust-embed",
  "sceneworks-core",
  "sceneworks-image-quality",

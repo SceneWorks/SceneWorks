@@ -3201,6 +3201,7 @@ fn find_timeline_item<'a>(timeline: &'a Value, item_id: &str) -> Result<&'a Valu
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Timeline item not found".to_owned(),
+            code: None,
         })
 }
 

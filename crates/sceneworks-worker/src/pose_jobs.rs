@@ -204,13 +204,16 @@ fn yolox_preprocess(img: &RgbImage) -> (Vec<f32>, f32) {
 /// return an `Engine` error instead (sc-8904).
 fn yolox_decode(dets: &[f32], shape: &[i64], ratio: f32) -> WorkerResult<Vec<Box4>> {
     let mut out = Vec::new();
-    if shape.last().copied() != Some(5) {
-        return Ok(out);
-    }
     if shape.len() < 2 {
         return Err(WorkerError::Engine(format!(
             "yolox output rank {} < 2 (expected (…, N, 5))",
             shape.len()
+        )));
+    }
+    if shape.last().copied() != Some(5) {
+        return Err(WorkerError::Engine(format!(
+            "yolox output last dimension {:?}, expected 5 for embedded-NMS detections",
+            shape.last()
         )));
     }
     let n = shape[1].max(0) as usize;
@@ -289,15 +292,20 @@ fn pose_decode(
     simcc_x: &[f32],
     sx_shape: &[i64],
     simcc_y: &[f32],
-    cx: f32,
-    cy: f32,
-    sw: f32,
-    sh: f32,
+    sy_shape: &[i64],
+    crop: (f32, f32, f32, f32),
 ) -> WorkerResult<Vec<[f32; 3]>> {
+    let (cx, cy, sw, sh) = crop;
     if sx_shape.len() < 3 {
         return Err(WorkerError::Engine(format!(
             "rtmw simcc_x rank {} < 3 (expected (1, K, Wx))",
             sx_shape.len()
+        )));
+    }
+    if sy_shape.len() < 3 {
+        return Err(WorkerError::Engine(format!(
+            "rtmw simcc_y rank {} < 3 (expected (1, K, Wy))",
+            sy_shape.len()
         )));
     }
     let k = sx_shape[1].max(0) as usize;
@@ -307,7 +315,18 @@ fn pose_decode(
             "rtmw simcc_x has 0 keypoints".to_owned(),
         ));
     }
-    let wy = simcc_y.len() / k;
+    let y_k = sy_shape[1].max(0) as usize;
+    if y_k != k {
+        return Err(WorkerError::Engine(format!(
+            "rtmw simcc keypoint dimensions disagree: x reports {k}, y reports {y_k}"
+        )));
+    }
+    let wy = sy_shape[2].max(0) as usize;
+    if wx == 0 || wy == 0 {
+        return Err(WorkerError::Engine(format!(
+            "rtmw simcc bins must be non-zero (Wx={wx}, Wy={wy})"
+        )));
+    }
     if simcc_x.len() < k.saturating_mul(wx) || simcc_y.len() < k.saturating_mul(wy) {
         return Err(WorkerError::Engine(format!(
             "rtmw simcc buffers too short: x has {} (needs {}), y has {} (needs {})",
@@ -611,10 +630,8 @@ impl Detector {
                 &pout[xi].1,
                 &pout[xi].0,
                 &pout[yi].1,
-                cx,
-                cy,
-                sw,
-                sh,
+                &pout[yi].0,
+                (cx, cy, sw, sh),
             )?);
         }
         Ok(people)

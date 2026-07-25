@@ -161,6 +161,7 @@ pub(crate) async fn create_model_download_job(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            code: None,
         })?;
     // Tier selection (sc-8508): an explicit `variant` installs that quant tier's download entry; an
     // absent variant installs the default tier (back-compat). A variant the model doesn't advertise
@@ -370,6 +371,7 @@ pub(crate) async fn create_model_convert_job(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            code: None,
         })?;
     let mlx = model
         .get("mlx")
@@ -487,6 +489,7 @@ pub(crate) async fn delete_model(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            code: None,
         })?;
     let manifest_path = state
         .settings
@@ -574,6 +577,7 @@ pub(crate) async fn delete_model_variant(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            code: None,
         })?;
     let data_dir = &state.settings.data_dir;
     let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];

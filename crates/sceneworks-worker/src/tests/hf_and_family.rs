@@ -1123,9 +1123,23 @@ fn stale_receipt_resolves_exact_old_quant_tier_after_manifest_rename() {
             "resolvedFiles": ["q4/transformer/old-1.safetensors", "q4/transformer/old-2.safetensors", "q4/config.json"]
         })).unwrap(),
     ).unwrap();
+    for index in 0..20 {
+        let unrelated = root
+            .path()
+            .join("models")
+            .join(format!("unrelated-{index}"));
+        std::fs::create_dir_all(&unrelated).unwrap();
+        std::fs::write(unrelated.join(INSTALL_MARKER), b"{}").unwrap();
+    }
 
+    reset_receipt_markers_read();
     let resolved = huggingface_receipt_weights_dir(root.path(), repo, Some("model-id"), Some("q4"));
     assert_eq!(resolved, Some(snapshot.join("q4")));
+    assert_eq!(
+        receipt_markers_read(),
+        1,
+        "a targeted receipt hit must return before scanning unrelated install markers"
+    );
     assert!(!snapshot.join("q4/transformer/new-name.safetensors").exists());
 }
 

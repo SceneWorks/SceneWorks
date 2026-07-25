@@ -85,6 +85,7 @@ import {
   readStoredTheme,
 } from "./appHelpers.js";
 import {
+  applySuccessfulProjectRefresh,
   hasVisibleLocalFailureForView,
   isCurrentProjectRequest,
   reconcileSelectedAssetId,
@@ -546,13 +547,13 @@ export function App() {
   // Same persistence contract as theme: instant localStorage cache + durable
   // server copy. The PUT sends only the changed field, so the endpoint must
   // MERGE partial updates (theme writes already rely on this).
-  const changeAccent = (next) => {
+  const changeAccent = useCallback((next) => {
     setAccent(next);
     apiFetch("/api/v1/ui-preferences", "", {
       method: "PUT",
       body: JSON.stringify({ accent: next }),
     }).catch(() => {});
-  };
+  }, []);
   // Simple UI (design handoff). `simpleUiDefault` is the persisted "Use Simple UI by
   // default" preference — same durable contract as theme/accent (server copy in
   // ui-preferences.json + a localStorage instant-paint cache), because the desktop
@@ -1415,10 +1416,8 @@ export function App() {
     fetchInitial("Mac capabilities", "/api/v1/capabilities/mac", DEFAULT_MAC_CAPABILITIES, true)
       .then((result) => setMacCapabilities(result.value ?? DEFAULT_MAC_CAPABILITIES))
       .catch(() => {});
-    const projectItems = projectsResult.value;
-    setProjects(projectItems);
+    applySuccessfulProjectRefresh(projectsResult, setProjects, setActiveProject);
     setProjectsLoaded(true);
-    setActiveProject((current) => current ?? projectItems[0] ?? null);
     setJobs((current) => mergeFreshJobs(current, jobsResult.value));
     setWorkers(workersResult.value.sort(sortWorkers));
     setQueueSummary(null);

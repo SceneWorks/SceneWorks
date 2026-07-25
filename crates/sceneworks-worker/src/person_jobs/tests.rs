@@ -97,11 +97,12 @@ fn decode_rejects_malformed_output_shape_and_length() {
         matches!(short, Err(WorkerError::Engine(_))),
         "truncated data buffer must be rejected, got {short:?}"
     );
-    // channels < 5 (no person class channel) is a benign "nothing to decode", not an error.
+    // channels < 5 means this is not the detector head we pinned. Treating it as no detections
+    // would hide a mis-pinned export as "no people found".
     let no_person = decode(&[0.0; 8], &[1, 4, 2], &lb, 0.25, 640, 640);
     assert!(
-        matches!(no_person, Ok(ref v) if v.is_empty()),
-        "channels<5 → empty, got {no_person:?}"
+        matches!(no_person, Err(WorkerError::Engine(_))),
+        "channels<5 must be rejected, got {no_person:?}"
     );
 }
 

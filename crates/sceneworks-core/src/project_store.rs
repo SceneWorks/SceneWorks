@@ -1158,6 +1158,17 @@ impl ProjectStore {
         include_trashed: bool,
         scope: AssetScope,
     ) -> ProjectStoreResult<Vec<Value>> {
+        self.list_assets_filtered(project_id, include_rejected, include_trashed, scope, None)
+    }
+
+    fn list_assets_filtered(
+        &self,
+        project_id: &str,
+        include_rejected: bool,
+        include_trashed: bool,
+        scope: AssetScope,
+        asset_type: Option<&str>,
+    ) -> ProjectStoreResult<Vec<Value>> {
         let project_path = self.find_project_path(project_id)?;
         ensure_project_db_ready(&project_path)?;
         let total = {
@@ -1194,21 +1205,25 @@ impl ProjectStore {
               from assets
              where (?1 or rejected = 0)
                and (?2 or trashed = 0)
+               and (?3 is null or type = ?3)
                {origin_filter}
              order by created_at desc
             "
         ))?;
         let rows = statement
-            .query_map(params![include_rejected, include_trashed], |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<u64>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                ))
-            })?
+            .query_map(
+                params![include_rejected, include_trashed, asset_type],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<u64>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
         // HashSet dedup (was an O(n²) Vec linear scan) and a per-call
@@ -2195,13 +2210,14 @@ impl ProjectStore {
 
     fn list_user_keypoint_presets(&self) -> ProjectStoreResult<Vec<Value>> {
         self.ensure_global_keypoints_project()?;
-        let assets =
-            self.list_assets(GLOBAL_KEYPOINTS_PROJECT_ID, false, false, AssetScope::All)?;
-        Ok(assets
-            .iter()
-            .filter(|asset| asset.get("type").and_then(Value::as_str) == Some("keypoint"))
-            .map(keypoint_asset_to_preset)
-            .collect())
+        let assets = self.list_assets_filtered(
+            GLOBAL_KEYPOINTS_PROJECT_ID,
+            false,
+            false,
+            AssetScope::All,
+            Some("keypoint"),
+        )?;
+        Ok(assets.iter().map(keypoint_asset_to_preset).collect())
     }
 
     /// The set of preset ids a collection may reference: the built-in ids + the user's stored
@@ -7903,6 +7919,34 @@ mod tests {
             [0.43, 0.53],
             [0.58, 0.53]
         ])
+    }
+
+    #[test]
+    fn keypoint_reads_keep_the_asset_type_filter_at_the_sql_seam() {
+        let source = include_str!("project_store.rs");
+        let list = source
+            .split_once("fn list_assets_filtered(")
+            .expect("filtered asset query")
+            .1
+            .split_once("pub fn get_asset(")
+            .expect("end of asset listing")
+            .0;
+        assert!(
+            list.contains("and (?3 is null or type = ?3)"),
+            "the shared asset reader must push its optional type filter into SQLite"
+        );
+        let keypoints = source
+            .split_once("fn list_user_keypoint_presets(")
+            .expect("keypoint reader")
+            .1
+            .split_once("fn known_preset_ids(")
+            .expect("end of keypoint reader")
+            .0;
+        assert!(keypoints.contains("Some(\"keypoint\")"));
+        assert!(
+            !keypoints.contains(".filter("),
+            "keypoint reads must not fetch every asset and filter in Rust"
+        );
     }
 
     #[test]
