@@ -640,6 +640,21 @@ fn read_diffusers_model_index_family(dir: &Path) -> Option<String> {
     let bytes = fs::read(&index_path).ok()?;
     let index: Value = serde_json::from_slice(&bytes).ok()?;
     let class_name = index.get("_class_name").and_then(Value::as_str)?;
+    // Mage-Flow's MMDiT tensor names overlap Qwen-Image, so the directory classifier must use
+    // the exact pipeline + transformer contract rather than accepting a class-name lookalike.
+    if class_name.eq_ignore_ascii_case("MageFlowPipeline") {
+        let config: Value =
+            serde_json::from_slice(&fs::read(dir.join("transformer").join("config.json")).ok()?)
+                .ok()?;
+        let is_mage = config
+            .get("_class_name")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == "MageFlow")
+            && config.get("in_channels").and_then(Value::as_u64) == Some(128)
+            && config.get("hidden_size").and_then(Value::as_u64) == Some(3072)
+            && config.get("depth").and_then(Value::as_u64) == Some(12);
+        return is_mage.then(|| "mage-flow".to_owned());
+    }
     diffusers_class_name_to_family(class_name)
 }
 
@@ -658,6 +673,9 @@ pub fn diffusers_class_name_to_family(class_name: &str) -> Option<String> {
             Some("qwen-image".to_owned())
         }
         "lenspipeline" => Some("lens".to_owned()),
+        // Directory detection additionally validates transformer/config.json before accepting this
+        // family; this mapping is also used by callers that already hold a trusted class name.
+        "mageflowpipeline" => Some("mage-flow".to_owned()),
         // Anima (epic 10512). Its diffusers modular pipeline (`AnimaModularPipeline`) is the
         // `model_index.json` `_class_name` a diffusers-format Anima export would carry.
         "animamodularpipeline" => Some("anima".to_owned()),
@@ -3223,6 +3241,45 @@ mod tests {
         .expect("write index");
         let family = detect_model_family(temp.path()).expect("detect");
         assert_eq!(family.as_deref(), Some("z-image"));
+    }
+
+    #[test]
+    fn detect_model_family_requires_exact_mage_diffusers_contract() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(temp.path().join("transformer")).expect("transformer dir");
+        std::fs::write(
+            temp.path().join("model_index.json"),
+            br#"{"_class_name":"MageFlowPipeline"}"#,
+        )
+        .expect("write index");
+        let config_path = temp.path().join("transformer").join("config.json");
+        let valid = json!({
+            "_class_name": "MageFlow",
+            "in_channels": 128,
+            "hidden_size": 3072,
+            "depth": 12
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&valid).unwrap()).expect("write config");
+        assert_eq!(
+            detect_model_family(temp.path()).expect("detect").as_deref(),
+            Some("mage-flow")
+        );
+
+        for (field, wrong) in [
+            ("_class_name", json!("NotMage")),
+            ("in_channels", json!(64)),
+            ("hidden_size", json!(2048)),
+            ("depth", json!(24)),
+        ] {
+            let mut mutated = valid.clone();
+            mutated[field] = wrong;
+            std::fs::write(&config_path, serde_json::to_vec(&mutated).unwrap())
+                .expect("mutate config");
+            assert!(
+                detect_model_family(temp.path()).expect("detect").is_none(),
+                "{field} mismatch must fail closed"
+            );
+        }
     }
 
     #[test]

@@ -582,8 +582,35 @@ pub(crate) async fn delete_model_variant(
         }
         let repo_cache = huggingface_repo_cache_path(data_dir, &repo);
         let managed_dir = Some(data_dir.join("models").join(safe_download_dir(&repo)));
+        // Some families expose load-time quant choices over one dense snapshot (Mage-Flow):
+        // their q4/q8/bf16 entries intentionally overlap. Protect every path still referenced
+        // by a sibling logical tier; a delete then truthfully reclaims zero bytes rather than
+        // corrupting the snapshot used by the remaining choices.
+        let retained_files = model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|entry| {
+                !is_co_requisite_download(entry)
+                    && entry.get("repo").and_then(Value::as_str) == Some(repo.as_str())
+                    && entry
+                        .get("variant")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.eq_ignore_ascii_case(&variant))
+            })
+            .flat_map(|entry| string_array_field(entry, "files"))
+            .collect::<Vec<_>>();
         // Always permanent (skip the OS trash) — see the fn doc (sc-12088).
-        remove_tier_artifacts(repo_cache, managed_dir, &files, &allowed_roots, true).await?
+        remove_tier_artifacts(
+            repo_cache,
+            managed_dir,
+            &files,
+            &retained_files,
+            &allowed_roots,
+            true,
+        )
+        .await?
     } else if model_has_convert_tier(&model, &variant) {
         // Convert-at-install: the tier is a real dir under the converted MLX tree. Prefer the
         // catalog's resolved `mlxConvertedPath`; fall back to the canonical convert output dir.
@@ -599,7 +626,10 @@ pub(crate) async fn delete_model_variant(
             "Model does not advertise a '{variant}' quant tier"
         )));
     };
-    if removal.removed_paths.is_empty() {
+    let shared_logical_tier = removal.removed_paths.is_empty()
+        && !removal.retained_paths.is_empty()
+        && model_download_for_variant(&model, &variant).is_some();
+    if removal.removed_paths.is_empty() && !shared_logical_tier {
         return Err(ApiError::bad_request(format!(
             "Tier '{variant}' is not installed"
         )));
@@ -652,6 +682,7 @@ pub(crate) async fn remove_tier_artifacts(
     repo_cache: Option<PathBuf>,
     managed_dir: Option<PathBuf>,
     tier_files: &[String],
+    retained_files: &[String],
     allowed_roots: &[PathBuf],
     permanent: bool,
 ) -> Result<TierRemoval, ApiError> {
@@ -679,13 +710,33 @@ pub(crate) async fn remove_tier_artifacts(
     for dir in &scan_dirs {
         for rel in snapshot_files(dir) {
             let abs = dir.join(&rel);
+            let selected = tier_files
+                .iter()
+                .any(|pattern| pattern_matches(pattern, &rel));
+            let retained = retained_files
+                .iter()
+                .any(|pattern| pattern_matches(pattern, &rel));
+            if selected && !retained {
+                tier_entries.push(abs);
+            } else {
+                if let Ok(real) = tokio::fs::canonicalize(&abs).await {
+                    retained_reals.insert(real);
+                }
+            }
+        }
+    }
+
+    let mut manifest_retained = Vec::new();
+    for dir in &scan_dirs {
+        for rel in snapshot_files(dir) {
             if tier_files
                 .iter()
                 .any(|pattern| pattern_matches(pattern, &rel))
+                && retained_files
+                    .iter()
+                    .any(|pattern| pattern_matches(pattern, &rel))
             {
-                tier_entries.push(abs);
-            } else if let Ok(real) = tokio::fs::canonicalize(&abs).await {
-                retained_reals.insert(real);
+                manifest_retained.push(dir.join(rel).display().to_string());
             }
         }
     }
@@ -727,7 +778,8 @@ pub(crate) async fn remove_tier_artifacts(
         }
     }
 
-    let removal = remove_owned_artifacts(ordered, allowed_roots, permanent).await?;
+    let mut removal = remove_owned_artifacts(ordered, allowed_roots, permanent).await?;
+    removal.retained_paths.extend(manifest_retained);
     let reclaimed_bytes = removal
         .removed_paths
         .iter()
@@ -3434,6 +3486,36 @@ fn huggingface_filtered_cache_health(
     // tier" signal, captured before the tier-completeness augmentation below can add entries.
     let coarse_all_absent = missing.len() == files.len();
 
+    // Flat diffusers snapshots (Mage-Flow's logical q4/q8/bf16 load-time choices) list the
+    // root `model_index.json` plus component globs rather than one `<tier>/*` subdir. The coarse
+    // glob check only proves that each directory contains *something*; it does not prove the
+    // model_index is valid or that every declared component has valid config + weights. Apply the
+    // same full snapshot health used by the unfiltered path whenever this filter selects the root
+    // model index. Multiple cached revisions are alternatives: one complete revision is enough.
+    let flat_diffusers = snapshots
+        .iter()
+        .filter(|snapshot| {
+            path_is_readable_file(&snapshot.join("model_index.json"))
+                && files
+                    .iter()
+                    .any(|pattern| pattern_matches(pattern, "model_index.json"))
+        })
+        .collect::<Vec<_>>();
+    if !flat_diffusers.is_empty() {
+        let health = flat_diffusers
+            .iter()
+            .map(|snapshot| diffusers_snapshot_health(snapshot))
+            .min_by_key(|health| health.missing_files.len())
+            .expect("non-empty flat diffusers candidates");
+        if !health.installed {
+            for component in health.missing_files {
+                if !missing.contains(&component) {
+                    missing.push(component);
+                }
+            }
+        }
+    }
+
     // A `<tier>/*` whole-subdir glob is satisfied as soon as a SINGLE file under `<tier>/` exists, so
     // the coarse check never notices missing weights INSIDE the tier: a torn download (its
     // `model_index.json` + a config or two present, but the transformer/vae weights gone) reported a
@@ -3515,6 +3597,19 @@ fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHealth {
     };
 
     let mut missing = Vec::new();
+    let is_mage = index
+        .get("_class_name")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == "MageFlowPipeline");
+    if is_mage
+        && sceneworks_core::lora_family::detect_model_family(snapshot)
+            .ok()
+            .flatten()
+            .as_deref()
+            != Some("mage-flow")
+    {
+        missing.push("transformer/config.json (invalid Mage config)".to_owned());
+    }
     for (component, spec) in index {
         if component.starts_with('_') || spec.is_null() {
             continue;
@@ -3536,13 +3631,15 @@ fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHealth {
             // Weight-bearing components (unet, transformer, vae, text_encoder,
             // controlnet, …) reliably ship a `config.json` alongside their
             // weight files, so require both.
-            if !path_is_readable_file(&snapshot.join(format!("{component}/config.json"))) {
+            if !path_is_valid_json_object(&snapshot.join(format!("{component}/config.json"))) {
                 missing.push(format!("{component}/config.json"));
             }
             if !diffusers_component_has_weight_file(snapshot, component) {
                 missing.push(format!("{component}/<weights>"));
+            } else if is_mage && !diffusers_component_safetensors_are_valid(snapshot, component) {
+                missing.push(format!("{component}/<weights> (malformed safetensors)"));
             }
-        } else if !diffusers_component_dir_nonempty(snapshot, component) {
+        } else if !diffusers_component_has_valid_config_file(snapshot, component) {
             // Weightless auxiliary components (scheduler, tokenizer, feature
             // extractors, and image/video/composite processors) ship config
             // files whose names vary by class — scheduler_config.json,
@@ -3576,15 +3673,24 @@ fn diffusers_component_requires_weights(component: &str, class_name: &str) -> bo
         || class.contains("processor"))
 }
 
-/// Whether a component directory exists and holds at least one file. Used as the
-/// completeness signal for weightless auxiliary components, whose config file
-/// names vary too much by class to enumerate reliably.
-fn diffusers_component_dir_nonempty(snapshot: &FsPath, component: &str) -> bool {
+fn path_is_valid_json_object(path: &FsPath) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|contents| serde_json::from_slice::<Value>(&contents).ok())
+        .is_some_and(|value| value.is_object())
+}
+
+/// Weightless diffusers components use different JSON config filenames, but every shipped
+/// scheduler/tokenizer/processor has at least one JSON object. Requiring a parseable object rejects
+/// an empty or corrupted config without hard-coding class-specific filenames.
+fn diffusers_component_has_valid_config_file(snapshot: &FsPath, component: &str) -> bool {
     std::fs::read_dir(snapshot.join(component))
         .map(|entries| {
             entries.flatten().any(|entry| {
                 let path = entry.path();
-                !is_hidden_file(&path) && path_is_readable_file(&path)
+                !is_hidden_file(&path)
+                    && path.extension().and_then(|value| value.to_str()) == Some("json")
+                    && path_is_valid_json_object(&path)
             })
         })
         .unwrap_or(false)
@@ -3609,6 +3715,39 @@ fn diffusers_component_has_weight_file(snapshot: &FsPath, component: &str) -> bo
                 || name.ends_with(".msgpack")
                 || name.ends_with(".gguf"))
     })
+}
+
+fn diffusers_component_safetensors_are_valid(snapshot: &FsPath, component: &str) -> bool {
+    let files = snapshot_files(&snapshot.join(component))
+        .into_iter()
+        .filter(|path| path.to_ascii_lowercase().ends_with(".safetensors"))
+        .collect::<Vec<_>>();
+    !files.is_empty()
+        && files
+            .iter()
+            .all(|path| safetensors_header_is_valid(&snapshot.join(component).join(path)))
+}
+
+fn safetensors_header_is_valid(path: &FsPath) -> bool {
+    use std::io::Read as _;
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut length = [0_u8; 8];
+    if file.read_exact(&mut length).is_err() {
+        return false;
+    }
+    let header_len = u64::from_le_bytes(length);
+    let Ok(file_len) = file.metadata().map(|metadata| metadata.len()) else {
+        return false;
+    };
+    if header_len == 0 || header_len > file_len.saturating_sub(8) || header_len > 64 * 1024 * 1024 {
+        return false;
+    }
+    let mut header = vec![0_u8; header_len as usize];
+    file.read_exact(&mut header).is_ok()
+        && serde_json::from_slice::<Value>(&header).is_ok_and(|value| value.is_object())
 }
 
 fn snapshot_has_payload_file(snapshot: &FsPath) -> bool {
@@ -4631,6 +4770,206 @@ mod variant_install_tests {
         assert!(!q4.cache_incomplete);
     }
 
+    #[test]
+    fn load_time_quant_variants_share_one_complete_snapshot_predicate() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "SceneWorks/Mage-Flow";
+        let downloads = ["q4", "q8", "bf16"].map(|variant| {
+            json!({
+                "provider": "huggingface",
+                "repo": repo,
+                "variant": variant,
+                "files": [
+                    "model_index.json", "scheduler/*", "text_encoder/*", "tokenizer/*",
+                    "transformer/*", "vae/*"
+                ]
+            })
+        });
+        let model = json!({
+            "id": "mage_flow",
+            "family": "mage-flow",
+            "downloads": downloads
+        });
+        let single = json!({
+            "id": "mage_flow_single",
+            "family": "mage-flow",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": repo,
+                "files": [
+                    "model_index.json", "scheduler/*", "text_encoder/*", "tokenizer/*",
+                    "transformer/*", "vae/*"
+                ]
+            }]
+        });
+
+        fn write_json(path: &FsPath, value: Value) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        fn write_safetensors(path: &FsPath) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let header = br#"{"tensor":{"dtype":"BF16","shape":[1],"data_offsets":[0,2]}}"#;
+            let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(header);
+            bytes.extend_from_slice(&[0, 0]);
+            std::fs::write(path, bytes).unwrap();
+        }
+        fn seed_mage(data_dir: &FsPath, repo: &str) -> PathBuf {
+            let snapshot = huggingface_repo_cache_path(data_dir, repo)
+                .unwrap()
+                .join("snapshots/abc123");
+            write_json(
+                &snapshot.join("model_index.json"),
+                json!({
+                    "_class_name": "MageFlowPipeline",
+                    "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
+                    "text_encoder": ["transformers", "Qwen3VLForConditionalGeneration"],
+                    "tokenizer": ["transformers", "AutoProcessor"],
+                    "transformer": ["mage_flow", "MageFlow"],
+                    "vae": ["mage_flow", "MageVAE"]
+                }),
+            );
+            for (component, class) in [
+                ("text_encoder", "Qwen3VLForConditionalGeneration"),
+                ("vae", "MageVAE"),
+            ] {
+                write_json(
+                    &snapshot.join(component).join("config.json"),
+                    json!({"_class_name": class}),
+                );
+                write_safetensors(
+                    &snapshot
+                        .join(component)
+                        .join("diffusion_pytorch_model.safetensors"),
+                );
+            }
+            write_json(
+                &snapshot.join("transformer/config.json"),
+                json!({
+                    "_class_name": "MageFlow",
+                    "in_channels": 128,
+                    "hidden_size": 3072,
+                    "depth": 12
+                }),
+            );
+            write_safetensors(&snapshot.join("transformer/diffusion_pytorch_model.safetensors"));
+            write_json(
+                &snapshot.join("scheduler/scheduler_config.json"),
+                json!({"_class_name": "FlowMatchEulerDiscreteScheduler"}),
+            );
+            write_json(
+                &snapshot.join("tokenizer/tokenizer.json"),
+                json!({"version": "1.0"}),
+            );
+            snapshot
+        }
+        let assert_health = |data_dir: &FsPath, installed: bool, label: &str| {
+            let states = model_variant_states(&model, data_dir);
+            assert_eq!(states.len(), 3);
+            assert!(
+                states.iter().all(|state| {
+                    state.installed == installed && state.cache_incomplete == !installed
+                }),
+                "{label}: every logical variant must share one health result"
+            );
+            let top = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+            assert_eq!(top.installed, installed, "{label}: matrix top-level");
+            let single_top =
+                install_state_for(model_download_context(&single).unwrap(), &single, data_dir);
+            assert_eq!(single_top.installed, installed, "{label}: single-variant");
+        };
+
+        let valid_dir = tmp.path().join("valid");
+        seed_mage(&valid_dir, repo);
+        assert_health(&valid_dir, true, "complete Mage snapshot");
+
+        let mutations = [
+            ("model_index absent", "model_index.json", false),
+            ("model_index malformed", "model_index.json", true),
+            (
+                "scheduler config absent",
+                "scheduler/scheduler_config.json",
+                false,
+            ),
+            (
+                "scheduler config malformed",
+                "scheduler/scheduler_config.json",
+                true,
+            ),
+            ("tokenizer config absent", "tokenizer/tokenizer.json", false),
+            (
+                "tokenizer config malformed",
+                "tokenizer/tokenizer.json",
+                true,
+            ),
+            (
+                "text encoder config absent",
+                "text_encoder/config.json",
+                false,
+            ),
+            (
+                "text encoder config malformed",
+                "text_encoder/config.json",
+                true,
+            ),
+            (
+                "text encoder weights absent",
+                "text_encoder/diffusion_pytorch_model.safetensors",
+                false,
+            ),
+            (
+                "text encoder weights malformed",
+                "text_encoder/diffusion_pytorch_model.safetensors",
+                true,
+            ),
+            (
+                "transformer config absent",
+                "transformer/config.json",
+                false,
+            ),
+            (
+                "transformer config malformed",
+                "transformer/config.json",
+                true,
+            ),
+            (
+                "transformer weights absent",
+                "transformer/diffusion_pytorch_model.safetensors",
+                false,
+            ),
+            (
+                "transformer weights malformed",
+                "transformer/diffusion_pytorch_model.safetensors",
+                true,
+            ),
+            ("VAE config absent", "vae/config.json", false),
+            ("VAE config malformed", "vae/config.json", true),
+            (
+                "VAE weights absent",
+                "vae/diffusion_pytorch_model.safetensors",
+                false,
+            ),
+            (
+                "VAE weights malformed",
+                "vae/diffusion_pytorch_model.safetensors",
+                true,
+            ),
+        ];
+        for (index, (label, relative, malformed)) in mutations.into_iter().enumerate() {
+            let data_dir = tmp.path().join(format!("mutation-{index}"));
+            let snapshot = seed_mage(&data_dir, repo);
+            let path = snapshot.join(relative);
+            if malformed {
+                std::fs::write(path, b"not valid").unwrap();
+            } else {
+                std::fs::remove_file(path).unwrap();
+            }
+            assert_health(&data_dir, false, label);
+        }
+    }
+
     /// Anima is convert-at-install; its variants[] "default" tracks the three exact `split_files/` SOURCE
     /// files (not a tier subdir). `tier_subdir_name` resolves those to `split_files`, so the downgrade
     /// RUNS — but must be a NO-OP: a complete source passes `anima_tier_complete` (the layout is
@@ -5005,6 +5344,7 @@ mod variant_delete_tests {
             Some(repo.clone()),
             None,
             &["q4/*".to_owned()],
+            &[],
             std::slice::from_ref(&hub),
             true,
         )
@@ -5039,6 +5379,7 @@ mod variant_delete_tests {
             Some(repo.clone()),
             None,
             &["q4/*".to_owned()],
+            &[],
             std::slice::from_ref(&hub),
             true,
         )
@@ -5066,6 +5407,7 @@ mod variant_delete_tests {
             Some(repo.clone()),
             None,
             &["q4/*".to_owned()],
+            &[],
             std::slice::from_ref(&hub),
             true,
         )
@@ -5095,6 +5437,7 @@ mod variant_delete_tests {
             None,
             Some(managed.clone()),
             &["q4/*".to_owned()],
+            &[],
             std::slice::from_ref(&models),
             true,
         )
@@ -5118,6 +5461,7 @@ mod variant_delete_tests {
             Some(repo.clone()),
             None,
             &[],
+            &[],
             std::slice::from_ref(&hub),
             true,
         )
@@ -5127,6 +5471,46 @@ mod variant_delete_tests {
         assert!(repo.join("blobs/q4a").exists());
         assert!(removal.removed_paths.is_empty());
         assert_eq!(removal.reclaimed_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn overlapping_logical_tiers_retain_the_shared_snapshot_and_reclaim_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let repo = hub.join("models--SceneWorks--Mage-Flow");
+        seed(
+            &repo,
+            "transformer/diffusion_pytorch_model.safetensors",
+            "dit",
+            100,
+        );
+        seed(&repo, "text_encoder/model.safetensors", "te", 200);
+        seed(&repo, "vae/diffusion_pytorch_model.safetensors", "vae", 50);
+
+        let complete = vec![
+            "transformer/*".to_owned(),
+            "text_encoder/*".to_owned(),
+            "vae/*".to_owned(),
+        ];
+        let removal = remove_tier_artifacts(
+            Some(repo.clone()),
+            None,
+            &complete,
+            &complete,
+            std::slice::from_ref(&hub),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(removal.reclaimed_bytes, 0);
+        assert!(removal.removed_paths.is_empty());
+        assert_eq!(removal.retained_paths.len(), 3);
+        assert!(repo
+            .join("snapshots/rev/transformer/diffusion_pytorch_model.safetensors")
+            .exists());
+        assert!(repo.join("blobs/te").exists());
+        assert!(repo.join("blobs/vae").exists());
     }
 
     // Convert-at-install (Anima) tiers are real `<converted>/<tier>/` dirs with a packed DiT plus

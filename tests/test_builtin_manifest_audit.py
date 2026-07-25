@@ -95,6 +95,40 @@ def _load_builtin_models_manifest() -> dict:
     return json.loads(_strip_jsonc_comments(raw))
 
 
+def test_mage_flow_generation_family_is_pinned_and_complete():
+    """sc-14047: all published Mage generation variants remain loadable flat snapshots."""
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+    expected = {
+        "mage_flow_base": ("SceneWorks/Mage-Flow-Base", "a160c0a2c9d82106687d969d161c313c7e528550", 30, 5),
+        "mage_flow": ("SceneWorks/Mage-Flow", "e6719fb1abb0d3fa83ecebbf31cbf431eb054ab8", 20, 5),
+        "mage_flow_turbo": ("SceneWorks/Mage-Flow-Turbo", "6fc43b7b586078997047acc9c39dbbd26044a035", 4, 1),
+    }
+    complete_snapshot = {
+        "model_index.json",
+        "scheduler/*",
+        "text_encoder/*",
+        "tokenizer/*",
+        "transformer/*",
+        "vae/*",
+    }
+    for model_id, (repo, revision, steps, guidance) in expected.items():
+        model = models[model_id]
+        assert model["family"] == "mage-flow"
+        assert model["macOnly"] is True
+        assert model["defaults"]["steps"] == steps
+        assert model["defaults"]["guidanceScale"] == guidance
+        downloads = model["downloads"]
+        assert [entry["variant"] for entry in downloads] == ["q4", "q8", "bf16"]
+        assert sum(entry.get("default") is True for entry in downloads) == 1
+        for entry in downloads:
+            assert entry["repo"] == repo
+            assert entry["revision"] == revision
+            # These are load-time quant choices over one dense mirror, so every logical tier
+            # uses the same full-snapshot predicate. Physical tier provisioning belongs to sc-14059.
+            assert set(entry["files"]) == complete_snapshot
+        assert model["paths"]["model"] == f"${{HF_CACHE}}/{repo}"
+
+
 def _model_table_default_repos() -> dict[str, str]:
     """Read the worker's pure-data ``MODEL_TABLE`` without importing Rust.
 
