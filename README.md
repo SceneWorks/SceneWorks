@@ -5,21 +5,23 @@ generation directly on your machine's GPU — **MLX** on macOS (Apple Silicon) a
 **candle / CUDA** on Windows (NVIDIA) — with **no Python, no cloud, and no Docker
 required**. Your prompts, models, and media never leave the workstation.
 
-The same codebase also ships as an optional **Docker server** for headless, LAN,
-or shared-GPU deployments (see [Server deployment](#server-deployment-docker)),
-but the primary target is a single-installer desktop app.
+The same codebase also ships as an optional **GPU server** for headless, LAN,
+shared-GPU, or RunPod deployments (see
+[RunPod GPU deployment](#runpod-gpu-deployment) and
+[Server deployment](#server-deployment-docker)), but the primary target is a
+single-installer desktop app.
 
 ![SceneWorks](screenshot.png)
 
 ## Two ways to run it
 
-| | **Desktop app** (primary) | **Server** (Docker) |
+| | **Desktop app** (primary) | **Server** (Docker or RunPod) |
 | --- | --- | --- |
-| Install | One native installer — no Docker, no terminal, no Python | `docker compose` stack |
-| Engine | MLX (macOS) / candle CUDA (Windows), in-process | candle CUDA worker container (NVIDIA + container toolkit) |
-| Access | Local app window (loopback), optional LAN opt-in | Web UI over the network (opt-in, token-gated) |
+| Install | One native installer — no Docker, no terminal, no Python | `docker compose` stack or public RunPod image |
+| Engine | MLX (macOS) / candle CUDA (Windows), in-process | candle CUDA worker container on an NVIDIA GPU |
+| Access | Local app window (loopback), optional LAN opt-in | Token-gated web UI over the network |
 | Credentials | Per-user OS keychain | `0600 credentials.json` / env vars |
-| Best for | A single creator on one Mac or Windows workstation | Shared/remote GPUs, multiple users, headless hosts |
+| Best for | A single creator on one Mac or Windows workstation | Shared GPUs, headless hosts, or an on-demand cloud GPU |
 
 **→ For the desktop app** — install, hardware requirements, first-run, storage
 layout, macOS GPU-memory tuning, and troubleshooting — see
@@ -199,6 +201,32 @@ overlays the optional `SCENEWORKS_CREDENTIALS` env var, a JSON map
 host**, so operators can inject secrets from a vault without writing the file.
 Hugging Face keeps its dedicated path: set `HF_TOKEN` for gated HF repos (the same
 variable `huggingface_hub` reads). Both are picked up at worker startup.
+
+## RunPod GPU deployment
+
+SceneWorks has first-class support for an on-demand NVIDIA GPU in a RunPod Pod.
+The public `linux/amd64` image combines the web UI, authenticated API, candle
+CUDA worker, CPU utility worker, ffmpeg, and Model Manager downloader, so the
+Pod does not need Docker Compose, SSH setup, or GHCR credentials.
+
+A secure deployment uses:
+
+- the public `ghcr.io/sceneworks/sceneworks-runpod` image pinned to an official
+  version;
+- a RunPod Secret for the required SceneWorks login token;
+- one HTTP service on port `8010`; and
+- a network volume mounted at `/workspace` to preserve projects, generated
+  assets, configuration, and downloaded models when the Pod is replaced.
+
+RTX PRO 4500 Blackwell (32 GB) and A40 (48 GB) Pods have passed live
+end-to-end validation. Other Ampere, Ada, Hopper, and consumer/workstation
+Blackwell GPUs are supported by the image, subject to each model's VRAM
+requirement.
+
+Follow the human-oriented
+**[RunPod deployment and operations guide](docs/deploy-runpod.md)** for the
+exact template fields, secret creation, storage setup, first generation,
+stop/restart behavior, upgrades, release-image publishing, and troubleshooting.
 
 ## Server deployment (Docker)
 
