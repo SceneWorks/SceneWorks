@@ -46,16 +46,16 @@ Exact Git release tags of the form `vX.Y.Z` publish both `:X.Y.Z` and
 Manual publication tags (`manual-*`) are validation artifacts, not official
 releases and are never promoted to `:latest`. Until the first official release,
 the checked-in template uses the anonymously pullable validation tag
-`manual-sc10367-2c4dd777560a`:
+`manual-sc14427-4fe122b7dba3`:
 
 ```text
-ghcr.io/sceneworks/sceneworks-runpod:manual-sc10367-2c4dd777560a
+ghcr.io/sceneworks/sceneworks-runpod:manual-sc14427-4fe122b7dba3
 ```
 
 That tag resolved during publication validation to this manifest:
 
 ```text
-ghcr.io/sceneworks/sceneworks-runpod@sha256:fdd60e35655708915ea046a9db86093360a81c2946f08fe63cef58f59f9ab065
+ghcr.io/sceneworks/sceneworks-runpod@sha256:376182ddbdf4c78d2a6f66a1e3ce66c573145b4c21b99300e42aeefba9f710ab
 ```
 
 The manifest digest is the immutable verification evidence; the tag is used in
