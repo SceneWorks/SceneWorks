@@ -197,13 +197,26 @@ COPY apps/desktop/build.rs ./apps/desktop/build.rs
 COPY config ./config
 
 # nvcc compiles every candle provider's CUDA kernels here (compiling needs no GPU).
+# The general Candle kernels retain compute_80 PTX, but the GGUF/MoE kernels in
+# libmoe.a need explicit cubins. Inspect the exact executable copied to /out
+# (rather than a Cargo build-directory candidate) so a stale cache entry cannot
+# satisfy the check when the linked artifact is wrong. This prevents a
+# dropped/changed vendored patch from silently narrowing the documented RunPod
+# matrix (sc-10369; the same guard protects desktop packaging in
+# apps/desktop/scripts/build-sidecar.mjs).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
     cargo build --offline -p sceneworks-rust-worker --release \
         --features sceneworks-worker/backend-candle \
     && mkdir -p /out \
-    && cp target/release/sceneworks-rust-worker /out/sceneworks-rust-worker
+    && cp target/release/sceneworks-rust-worker /out/sceneworks-rust-worker \
+    && cuobjdump --list-elf /out/sceneworks-rust-worker > /tmp/worker-elf.txt \
+    && cuobjdump --list-ptx /out/sceneworks-rust-worker > /tmp/worker-ptx.txt \
+    && grep -q 'sm_80\.cubin' /tmp/worker-elf.txt \
+    && grep -q 'sm_90\.cubin' /tmp/worker-elf.txt \
+    && grep -q 'sm_120\.cubin' /tmp/worker-elf.txt \
+    && grep -q 'sm_120\.ptx' /tmp/worker-ptx.txt
 
 # --- Candle GPU worker runtime (CUDA-12) -------------------------------------
 # The off-Mac torch replacement: Docker GPU inference runs on the native candle/CUDA
