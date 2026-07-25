@@ -57,6 +57,10 @@ assert.ok(
   "entrypoint must use worker auto-supervision to create GPU and utility children",
 );
 assert.ok(
+  entrypoint.includes("NVIDIA_VISIBLE_DEVICES=all"),
+  "entrypoint must normalize init-time RunPod visibility before auto GPU discovery",
+);
+assert.ok(
   entrypoint.includes('SCENEWORKS_API_URL="${api_url}"'),
   "worker must connect to the API over loopback",
 );

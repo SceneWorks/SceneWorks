@@ -82,6 +82,7 @@ else
   printf 'worker:token:absent\n' >>"${SCENEWORKS_TEST_EVENTS}"
 fi
 printf 'worker:start:%s:%s\n' "${SCENEWORKS_API_URL}" "${SCENEWORKS_GPU_ID}" >>"${SCENEWORKS_TEST_EVENTS}"
+printf 'worker:nvidia-visible:%s\n' "${NVIDIA_VISIBLE_DEVICES:-<unset>}" >>"${SCENEWORKS_TEST_EVENTS}"
 trap 'printf "worker:term\n" >>"${SCENEWORKS_TEST_EVENTS}"; exit 0' TERM INT HUP
 if [[ "${SCENEWORKS_TEST_WORKER_EXIT_CODE:-}" =~ ^[0-9]+$ ]]; then
   sleep 0.1
@@ -361,6 +362,7 @@ test_access_token="runpod-self-test-$PPID-$RANDOM"
 SCENEWORKS_TEST_EVENTS="${events}" \
 SCENEWORKS_TEST_CURL_COUNT="${run_dir}/curl-count" \
 SCENEWORKS_TEST_EXPECTED_TOKEN="${test_access_token}" \
+NVIDIA_VISIBLE_DEVICES=void \
 SCENEWORKS_API_HOST=0.0.0.0 \
 SCENEWORKS_ACCESS_TOKEN="${test_access_token}" \
 SCENEWORKS_ALLOW_OPEN_BIND=1 \
@@ -377,6 +379,7 @@ SCENEWORKS_SHUTDOWN_GRACE_INTERVAL_SECONDS=0.05 \
 bash "${entrypoint}" >"${run_dir}/stdout" 2>"${run_dir}/stderr" &
 supervisor_pid=$!
 wait_for_event "worker:start:http://127.0.0.1:8010:auto" "${events}"
+wait_for_event "worker:nvidia-visible:all" "${events}"
 wait_for_event "api:token:present" "${events}"
 wait_for_event "worker:token:present" "${events}"
 kill -TERM "${supervisor_pid}"
