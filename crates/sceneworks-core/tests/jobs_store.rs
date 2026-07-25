@@ -6413,8 +6413,8 @@ fn reads_proceed_while_a_writer_holds_the_write_lock() {
 }
 
 /// sc-4172 — a zombie worker's late progress report must not resurrect a job
-/// the stale sweep marked `interrupted`; terminal statuses are immutable except
-/// for an idempotent re-report of the same terminal status.
+/// the stale sweep marked `interrupted`; terminal statuses are immutable and
+/// even same-status no-op retries still require the stored owner.
 #[test]
 fn progress_cannot_resurrect_terminal_jobs() {
     fn report(status: JobStatus, stage: ProgressStage, worker_id: Option<&str>) -> ProgressUpdate {
@@ -6480,9 +6480,9 @@ fn progress_cannot_resurrect_terminal_jobs() {
         .expect_err("terminal job rejects a different terminal status");
     assert!(matches!(error, JobsStoreError::TerminalJobImmutable { .. }));
 
-    // An idempotent re-report of the same terminal status is a no-op success
-    // (e.g. a worker retrying its own "canceled" POST).
-    let job = store
+    // The sweep deliberately cleared ownership, so even an idempotent
+    // same-terminal retry from the zombie is unauthorized.
+    let error = store
         .update_job_progress(
             &created.id,
             report(
@@ -6491,16 +6491,13 @@ fn progress_cannot_resurrect_terminal_jobs() {
                 Some("worker-1"),
             ),
         )
-        .expect("same-terminal re-report succeeds");
-    assert_eq!(job.status, JobStatus::Interrupted);
-    assert_eq!(
-        job.message, "Lost contact with the worker.",
-        "no-op re-report must not rewrite the row"
-    );
+        .expect_err("ownerless terminal row rejects same-status retry");
+    assert!(matches!(error, JobsStoreError::NotJobOwner { .. }));
 
     let job = store.get_job(&created.id).expect("job loads");
     assert_eq!(job.status, JobStatus::Interrupted);
     assert_eq!(job.worker_id, None);
+    assert_eq!(job.message, "Lost contact with the worker.");
 }
 
 /// sc-4172 / sc-5751 — progress reports must name the claimed job's owner.
@@ -6645,6 +6642,55 @@ fn terminal_side_effect_handoff_is_resumable_only_by_the_original_owner() {
         .expect("the owner may retry the same terminal state");
     assert!(!retry.applied);
     assert!(retry.side_effects_pending);
+}
+
+#[test]
+fn cleared_terminal_same_status_retry_still_requires_the_stored_owner() {
+    let store = store("cleared-terminal-owner");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    let completion = |worker_id: Option<&str>| ProgressUpdate {
+        status: JobStatus::Completed,
+        stage: ProgressStage::Completed,
+        progress: 1.0,
+        message: "done".to_owned(),
+        error: None,
+        result: Some(object(json!({ "assetWrites": [] }))),
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: None,
+        worker_id: worker_id.map(str::to_owned),
+    };
+
+    store
+        .update_job_progress(&created.id, completion(Some("worker-1")))
+        .expect("terminal progress lands");
+    store.clear_job(&created.id).expect("terminal job clears");
+
+    for reporter in [Some("worker-2"), None] {
+        let error = store
+            .update_job_progress(&created.id, completion(reporter))
+            .expect_err("a non-owner cannot retry a cleared terminal row");
+        assert!(matches!(error, JobsStoreError::NotJobOwner { .. }));
+    }
+    let retry = store
+        .update_job_progress(&created.id, completion(Some("worker-1")))
+        .expect("the stored owner retains idempotent retry semantics");
+    assert_eq!(retry.status, JobStatus::Completed);
+    assert!(
+        store
+            .list_jobs(None, None, 100)
+            .expect("queue list reads")
+            .is_empty(),
+        "the accepted no-op must not un-clear the row"
+    );
 }
 
 #[test]

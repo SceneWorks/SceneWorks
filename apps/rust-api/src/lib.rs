@@ -976,6 +976,7 @@ pub(crate) fn create_app_with_state(
         jobs_store,
         project_store,
         events: Arc::new(EventHub::default()),
+        queue_snapshot_lock: Arc::new(AsyncMutex::new(())),
         event_tickets: Arc::new(TicketStore::new(EVENT_TICKET_TTL_SECONDS)),
         media_tickets: Arc::new(TicketStore::new(MEDIA_TICKET_TTL_SECONDS)),
         auth_throttle: Arc::new(AuthThrottle::default()),
@@ -991,6 +992,8 @@ pub(crate) fn create_app_with_state(
         progress_side_effects_lock: Arc::new(AsyncMutex::new(())),
         #[cfg(test)]
         progress_before_accept_once: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        sse_snapshot_before_subscribe_once: Arc::new(Mutex::new(None)),
         #[cfg(test)]
         progress_side_effects_fail_once: Arc::new(Mutex::new(false)),
         #[cfg(test)]
@@ -1876,6 +1879,7 @@ async fn create_generation_job_with_status(
 }
 
 async fn publish_queue(state: &AppState) -> Result<(), ApiError> {
+    let _snapshot_guard = state.queue_snapshot_lock.lock().await;
     let queue = queue_summary_snapshot(state.clone()).await?;
     publish(state, "queue.updated", &queue);
     Ok(())
@@ -1886,6 +1890,7 @@ async fn publish_queue(state: &AppState) -> Result<(), ApiError> {
 /// only right after a `mark_stale_workers_interrupted` call — otherwise stale
 /// workers won't be reaped on this refresh.
 async fn publish_queue_skip_sweep(state: &AppState) -> Result<(), ApiError> {
+    let _snapshot_guard = state.queue_snapshot_lock.lock().await;
     let queue = queue_summary_snapshot_inner(state.clone(), true).await?;
     publish(state, "queue.updated", &queue);
     Ok(())

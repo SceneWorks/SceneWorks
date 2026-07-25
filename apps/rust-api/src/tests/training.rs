@@ -2377,12 +2377,13 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_su
         "queue counts must remain converged after recovery"
     );
     let (status, reconnect_events) =
-        request_sse_prefix(restarted_app.clone(), "/api/v1/jobs/events", 2).await;
+        request_sse_prefix(restarted_app.clone(), "/api/v1/jobs/events", 3).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(reconnect_events[0].0, "ready");
-    assert_eq!(reconnect_events[1].0, "queue.updated");
+    assert_eq!(reconnect_events[1].0, "jobs.snapshot");
+    assert_eq!(reconnect_events[2].0, "queue.updated");
     assert_eq!(
-        reconnect_events[1].1["activeJobs"]
+        reconnect_events[2].1["activeJobs"]
             .as_array()
             .expect("reconnect active jobs array")
             .iter()

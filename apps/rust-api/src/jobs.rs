@@ -627,6 +627,8 @@ pub(crate) async fn update_job_progress(
     .await?;
     let status_changed = accepted.previous_status != accepted.job.status;
     let terminal_side_effects_pending = accepted.side_effects_pending;
+    let accepted_job = accepted.job.clone();
+    let mut publish_job_update = accepted.applied;
     let mut job = accepted.job;
 
     if terminal_side_effects_pending {
@@ -665,10 +667,13 @@ pub(crate) async fn update_job_progress(
                 return Err(error);
             }
         };
+        publish_job_update |= job != accepted_job;
     } else if accepted.applied {
         job = apply_progress_side_effects(&state, job, false).await?;
     }
-    publish(&state, "job.updated", &job);
+    if publish_job_update {
+        publish(&state, "job.updated", &job);
+    }
     // sc-4203 (F-API-5): workers POST progress per inference step. The queue summary
     // is a full SQLite aggregation plus a stale-worker sweep, serialized and
     // broadcast to every SSE subscriber — but the queue composition only changes when

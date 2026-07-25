@@ -265,6 +265,11 @@ pub struct AppState {
     pub(crate) jobs_store: Arc<JobsStore>,
     pub(crate) project_store: Arc<ProjectStore>,
     pub(crate) events: Arc<EventHub>,
+    /// Serializes authoritative SSE snapshots with queue publications. A
+    /// reconnect subscribes while holding this lock, so a queue mutation is
+    /// represented either in the initial snapshot or by a later live event,
+    /// never by a buffered event that can be replayed behind a newer snapshot.
+    pub(crate) queue_snapshot_lock: Arc<AsyncMutex<()>>,
     pub(crate) event_tickets: Arc<TicketStore>,
     pub(crate) media_tickets: Arc<TicketStore>,
     // sc-8870 (F-068): per-peer-IP failed-token throttle for the auth oracle.
@@ -292,6 +297,10 @@ pub struct AppState {
     /// contain no hook or synchronization overhead.
     #[cfg(test)]
     pub(crate) progress_before_accept_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    /// Deterministic rendezvous after an SSE snapshot is read but before its
+    /// live subscription is installed. Production builds contain no hook.
+    #[cfg(test)]
+    pub(crate) sse_snapshot_before_subscribe_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     /// One-shot failure after terminal acceptance, used to prove the durable
     /// pending handoff survives an error and resumes on the owner's retry.
     #[cfg(test)]

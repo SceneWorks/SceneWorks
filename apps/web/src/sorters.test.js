@@ -160,4 +160,17 @@ describe("upsertJobNewest (sc-8860)", () => {
     expect(items.filter((j) => j.status === "completed")).toHaveLength(MAX_TERMINAL_JOBS);
     expect(items.length).toBeLessThanOrEqual(MAX_TERMINAL_JOBS);
   });
+
+  it("rejects an older snapshot row after a fresher live update", () => {
+    const current = [{
+      ...job("a", "2026-07-01T01:00:00Z", "completed"),
+      updatedAt: "2026-07-01T01:02:00Z",
+    }];
+    const stale = {
+      ...job("a", "2026-07-01T01:00:00Z", "running"),
+      updatedAt: "2026-07-01T01:01:00Z",
+    };
+    expect(upsertJobNewest(current, stale)).toBe(current);
+    expect(current[0].status).toBe("completed");
+  });
 });

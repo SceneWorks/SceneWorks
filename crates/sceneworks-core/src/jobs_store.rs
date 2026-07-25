@@ -2066,18 +2066,17 @@ impl JobsStore {
             let side_effects_pending =
                 self.progress_side_effects_pending_on_connection(&transaction, job_id)?;
             // Idempotent re-report of the same terminal status (e.g. a retried
-            // "canceled" POST) succeeds without touching the row. When the API
-            // still owes post-acceptance side effects, only the original owner
-            // may use that retry to resume them.
+            // "canceled" POST) succeeds without touching the row, but it is
+            // still an authenticated worker operation. Clearing a terminal row
+            // only hides it from queue surfaces; it must not turn the no-op path
+            // into an ownership bypass.
             if current.status == update.status {
-                if track_terminal_side_effects && side_effects_pending {
-                    match (update.worker_id.as_deref(), current.worker_id.as_deref()) {
-                        (Some(reporter), Some(owner)) if reporter == owner => {}
-                        _ => {
-                            return Err(JobsStoreError::NotJobOwner {
-                                job_id: job_id.to_owned(),
-                            });
-                        }
+                match (update.worker_id.as_deref(), current.worker_id.as_deref()) {
+                    (Some(reporter), Some(owner)) if reporter == owner => {}
+                    _ => {
+                        return Err(JobsStoreError::NotJobOwner {
+                            job_id: job_id.to_owned(),
+                        });
                     }
                 }
                 return Ok(ProgressUpdateOutcome {

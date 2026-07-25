@@ -78,24 +78,59 @@ pub(crate) async fn job_events(
             "Invalid or expired event stream ticket",
         ));
     }
-    // Subscribe before reading the snapshot so a queue transition that races
-    // the read remains buffered behind it. Every connection starts with the
-    // authoritative aggregate, which repairs clients after an API restart or
-    // any event they missed while disconnected; live events then continue on
-    // the same subscription.
+    // Serialize the snapshot read and subscription with every queue publication.
+    // A concurrent mutation is therefore either visible in these authoritative
+    // snapshots or published after the subscription is installed. Subscribing
+    // before an unlocked read is not sufficient: an event buffered during that
+    // read could otherwise replay after (and overwrite) the newer snapshot.
+    let _snapshot_guard = state.queue_snapshot_lock.lock().await;
+    // Install the subscription while queue publishers are excluded. Job-only
+    // progress ticks may still publish during the reads below; buffering them
+    // prevents a missed job update, and the client rejects an older buffered
+    // row by updatedAt after applying the snapshot.
     let messages = state.events.subscribe();
-    let queue = queue_summary_snapshot(state).await?;
+    let queue = queue_summary_snapshot(state.clone()).await?;
+    let mut jobs = store_call(state.clone(), |store, _timeout| {
+        store.list_jobs(None, None, 500)
+    })
+    .await?;
+    let mut job_ids = jobs
+        .iter()
+        .map(|job| job.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    for job in &queue.active_jobs {
+        if job_ids.insert(job.id.clone()) {
+            jobs.push(job.clone());
+        }
+    }
+    jobs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    let initial_jobs = EventMessage {
+        event: "jobs.snapshot".to_owned(),
+        data: serde_json::to_string(&jobs)
+            .map_err(|error| ApiError::internal(format!("Could not serialize jobs: {error}")))?,
+    };
     let initial_queue = EventMessage {
         event: "queue.updated".to_owned(),
         data: serde_json::to_string(&queue)
             .map_err(|error| ApiError::internal(format!("Could not serialize queue: {error}")))?,
     };
-    Ok(Sse::new(sse_event_stream(messages, initial_queue)))
+    #[cfg(test)]
+    let snapshot_barrier = state.sse_snapshot_before_subscribe_once.lock().take();
+    #[cfg(test)]
+    if let Some(barrier) = snapshot_barrier {
+        barrier.wait().await;
+        barrier.wait().await;
+    }
+    drop(_snapshot_guard);
+    Ok(Sse::new(sse_event_stream(
+        messages,
+        vec![initial_jobs, initial_queue],
+    )))
 }
 
 fn sse_event_stream(
     messages: ReceiverStream<EventMessage>,
-    initial_queue: EventMessage,
+    initial_messages: Vec<EventMessage>,
 ) -> impl futures_util::Stream<Item = Result<Event, Infallible>> {
     let mut heartbeat = tokio::time::interval_at(
         TokioInstant::now() + Duration::from_secs(15),
@@ -103,18 +138,18 @@ fn sse_event_stream(
     );
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     futures_util::stream::unfold(
-        (messages, heartbeat, true, Some(initial_queue)),
-        |(mut messages, mut heartbeat, send_ready, initial_queue)| async move {
+        (messages, heartbeat, true, initial_messages.into_iter()),
+        |(mut messages, mut heartbeat, send_ready, mut initial_messages)| async move {
             if send_ready {
                 return Some((
                     Ok(ready_event()),
-                    (messages, heartbeat, false, initial_queue),
+                    (messages, heartbeat, false, initial_messages),
                 ));
             }
-            if let Some(initial_queue) = initial_queue {
+            if let Some(initial_message) = initial_messages.next() {
                 return Some((
-                    Ok(sse_message_event(initial_queue)),
-                    (messages, heartbeat, false, None),
+                    Ok(sse_message_event(initial_message)),
+                    (messages, heartbeat, false, initial_messages),
                 ));
             }
             tokio::select! {
@@ -122,12 +157,12 @@ fn sse_event_stream(
                     message.map(|message| {
                         (
                             Ok(sse_message_event(message)),
-                            (messages, heartbeat, false, None),
+                            (messages, heartbeat, false, initial_messages),
                         )
                     })
                 }
                 _ = heartbeat.tick() => {
-                    Some((Ok(heartbeat_event()), (messages, heartbeat, false, None)))
+                    Some((Ok(heartbeat_event()), (messages, heartbeat, false, initial_messages)))
                 }
             }
         },

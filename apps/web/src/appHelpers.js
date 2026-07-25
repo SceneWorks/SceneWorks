@@ -6,7 +6,7 @@
 // (appHelpers.test.js) without mounting App. Behavior is unchanged — this is a move, not a
 // rewrite.
 import { terminalStatuses } from "./constants.js";
-import { capTerminalJobs, sortNewest, sortOldest } from "./sorters.js";
+import { capTerminalJobs, jobFreshnessMs, sortNewest, sortOldest } from "./sorters.js";
 import { DEFAULT_ACCENT, isAccentId } from "./accents.js";
 
 export function isActiveWorker(worker) {
@@ -72,11 +72,7 @@ export function noticeKindForJob(job) {
   return "general";
 }
 
-export function jobFreshnessMs(job) {
-  const timestamp = job?.updatedAt ?? job?.completedAt ?? job?.canceledAt ?? job?.startedAt ?? job?.createdAt;
-  const parsed = Date.parse(timestamp ?? "");
-  return Number.isFinite(parsed) ? parsed : 0;
-}
+export { jobFreshnessMs };
 
 export function mergeFreshJobs(currentJobs, serverJobs) {
   const merged = new Map();
@@ -93,6 +89,27 @@ export function mergeFreshJobs(currentJobs, serverJobs) {
   // longer returns, so without a cap a long session grows unbounded. Cap the
   // retained terminal-job tail (active jobs are never dropped) so a refresh can't
   // monotonically grow `jobs`.
+  return capTerminalJobs([...merged.values()].sort(sortNewest));
+}
+
+// Reconnect snapshots are authoritative for active jobs: the server payload
+// includes its uncapped active set, so a locally cached active row absent from
+// the snapshot has transitioned or been cleared while the stream was down.
+// Terminal client-only history remains retained because the server intentionally
+// caps its recent-job snapshot. Duplicate rows still resolve by updatedAt so an
+// in-flight live event cannot be regressed by an older snapshot.
+export function reconcileAuthoritativeJobs(currentJobs, serverJobs) {
+  const merged = new Map(serverJobs.map((job) => [job.id, job]));
+  for (const current of currentJobs) {
+    const server = merged.get(current.id);
+    if (server) {
+      if (jobFreshnessMs(current) > jobFreshnessMs(server)) {
+        merged.set(current.id, current);
+      }
+    } else if (terminalStatuses.has(current.status)) {
+      merged.set(current.id, current);
+    }
+  }
   return capTerminalJobs([...merged.values()].sort(sortNewest));
 }
 

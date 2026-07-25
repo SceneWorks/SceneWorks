@@ -1599,6 +1599,109 @@ async fn progress_ticks_only_republish_queue_on_status_change() {
 }
 
 #[tokio::test]
+async fn cleared_terminal_noop_retry_is_owner_checked_and_emits_no_events() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": "GPU 0",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "mist" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let job_id = created["id"].as_str().expect("job id").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+    let terminal_payload = json!({
+        "status": "completed",
+        "stage": "completed",
+        "progress": 1,
+        "message": "done",
+        "result": {},
+        "workerId": "worker-1"
+    });
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        terminal_payload.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["status"], "completed");
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut events = state.events.subscribe();
+    let (status, retry) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        terminal_payload,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(retry["status"], "completed");
+    assert!(
+        drain_event_names(&mut events).await.is_empty(),
+        "an unapplied, unaugmented same-terminal retry must publish no event"
+    );
+
+    let (status, rejected) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "stale retry",
+            "workerId": "worker-2"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(rejected["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("no longer owns")));
+    assert!(
+        drain_event_names(&mut events).await.is_empty(),
+        "an unauthorized same-terminal retry must publish no event"
+    );
+}
+
+#[tokio::test]
 async fn canceling_queued_job_finishes_without_worker_acknowledgement() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");

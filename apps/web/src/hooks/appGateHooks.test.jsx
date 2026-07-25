@@ -306,6 +306,38 @@ describe("useJobEvents (sc-9750)", () => {
     expect(refreshedProjects).toContain("proj-1");
   });
 
+  it("reconciles stale active job state from jobs.snapshot on reconnect", async () => {
+    let jobs = [{
+      id: "job-1",
+      status: "running",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:01:00Z",
+    }];
+    const props = baseProps({
+      setJobs: (updater) => {
+        jobs = updater(jobs);
+      },
+    });
+    mount(props);
+    await settle();
+
+    const source = FakeEventSource.instances[0];
+    expect(typeof source.listeners["jobs.snapshot"]).toBe("function");
+    act(() => {
+      source.listeners["jobs.snapshot"]({
+        data: JSON.stringify([{
+          id: "job-1",
+          status: "completed",
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:02:00Z",
+        }]),
+      });
+    });
+
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].status).toBe("completed");
+  });
+
   it("closes the EventSource on unmount", async () => {
     mount(baseProps({ ready: true }));
     await settle();

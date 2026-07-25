@@ -1,5 +1,7 @@
 //! rust-api media tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
+use crate::publish_queue;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn project_file_route_serves_files_and_rejects_traversal() {
@@ -247,21 +249,87 @@ async fn sse_connection_starts_with_authoritative_queue_snapshot() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
 
-    let (status, events) = request_sse_prefix(app, "/api/v1/jobs/events", 2).await;
+    let (status, events) = request_sse_prefix(app, "/api/v1/jobs/events", 3).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         events[0],
         ("ready".to_owned(), json!({ "status": "connected" }))
     );
-    assert_eq!(events[1].0, "queue.updated");
-    assert_eq!(events[1].1["counts"]["queued"], 1);
+    assert_eq!(events[1].0, "jobs.snapshot");
     assert!(
-        events[1].1["activeJobs"]
+        events[1]
+            .1
+            .as_array()
+            .expect("jobs snapshot array")
+            .iter()
+            .any(|job| job["id"] == created["id"]),
+        "the reconnect snapshot must include the authoritative job row"
+    );
+    assert_eq!(events[2].0, "queue.updated");
+    assert_eq!(events[2].1["counts"]["queued"], 1);
+    assert!(
+        events[2].1["activeJobs"]
             .as_array()
             .expect("active jobs array")
             .iter()
             .any(|job| job["id"] == created["id"]),
         "the initial stream snapshot must include jobs created before this connection"
+    );
+}
+
+#[tokio::test]
+async fn sse_snapshot_precedes_a_concurrent_queue_publication() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "mist" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = created["id"].as_str().expect("job id").to_owned();
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    *state.sse_snapshot_before_subscribe_once.lock() = Some(barrier.clone());
+    let stream = tokio::spawn(request_sse_prefix(app, "/api/v1/jobs/events", 4));
+    barrier.wait().await;
+
+    state
+        .jobs_store
+        .cancel_job(&job_id)
+        .expect("concurrent terminal transition commits");
+    let publish_state = state.clone();
+    let publish = tokio::spawn(async move { publish_queue(&publish_state).await });
+    barrier.wait().await;
+
+    publish
+        .await
+        .expect("queue publisher joins")
+        .expect("queue publication succeeds");
+    let (status, events) = stream.await.expect("SSE request joins");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(events[0].0, "ready");
+    assert_eq!(events[1].0, "jobs.snapshot");
+    assert_eq!(events[2].0, "queue.updated");
+    assert_eq!(events[2].1["counts"]["queued"], 1);
+    assert_eq!(events[3].0, "queue.updated");
+    assert_eq!(events[3].1["counts"]["queued"], 0);
+    assert_eq!(events[3].1["counts"]["canceled"], 1);
+    assert!(
+        events[3].1["activeJobs"]
+            .as_array()
+            .expect("active jobs array")
+            .iter()
+            .all(|job| job["id"] != json!(job_id)),
+        "the concurrent live event must follow and supersede the older snapshot"
     );
 }
 

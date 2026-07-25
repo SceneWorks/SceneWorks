@@ -7,6 +7,7 @@ import {
   generatedResultAssetCount,
   noticeKindForJob,
   parseSseJson,
+  reconcileAuthoritativeJobs,
 } from "../appHelpers.js";
 
 // Owns the live job/worker/queue SSE stream (the EventSource lifecycle: ticket mint,
@@ -153,6 +154,14 @@ export function useJobEvents({
       setWorkers((items) => [worker, ...items.filter((item) => item.id !== worker.id)].sort(sortWorkers));
     }
 
+    function handleJobsSnapshot(event) {
+      const jobs = parseSseJson(event, "jobs snapshot");
+      if (!Array.isArray(jobs)) {
+        return;
+      }
+      setJobs((items) => reconcileAuthoritativeJobs(items, jobs));
+    }
+
     function handleQueueUpdated(event) {
       const summary = parseSseJson(event, "queue");
       if (!summary) {
@@ -187,6 +196,7 @@ export function useJobEvents({
 
       const source = new EventSource(eventUrl("/api/v1/jobs/events", ticket));
       events = source;
+      source.addEventListener("jobs.snapshot", handleJobsSnapshot);
       source.addEventListener("job.updated", handleJobUpdated);
       source.addEventListener("worker.updated", handleWorkerUpdated);
       source.addEventListener("queue.updated", handleQueueUpdated);
