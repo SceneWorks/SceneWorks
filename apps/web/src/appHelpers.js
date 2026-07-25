@@ -6,7 +6,13 @@
 // (appHelpers.test.js) without mounting App. Behavior is unchanged — this is a move, not a
 // rewrite.
 import { terminalStatuses } from "./constants.js";
-import { capTerminalJobs, jobFreshnessMs, sortNewest, sortOldest } from "./sorters.js";
+import {
+  acceptsJobUpdate,
+  capTerminalJobs,
+  jobFreshnessMs,
+  sortNewest,
+  sortOldest,
+} from "./sorters.js";
 import { DEFAULT_ACCENT, isAccentId } from "./accents.js";
 
 export function isActiveWorker(worker) {
@@ -98,12 +104,22 @@ export function mergeFreshJobs(currentJobs, serverJobs) {
 // Terminal client-only history remains retained because the server intentionally
 // caps its recent-job snapshot. Duplicate rows still resolve by updatedAt so an
 // in-flight live event cannot be regressed by an older snapshot.
-export function reconcileAuthoritativeJobs(currentJobs, serverJobs) {
-  const merged = new Map(serverJobs.map((job) => [job.id, job]));
+export function reconcileAuthoritativeJobs(currentJobs, serverJobs, clearedJobIds = []) {
+  const cleared = new Set(clearedJobIds);
+  // Tombstones win even if a server-side composition bug includes the same row
+  // in both collections. Never let a soft-hidden job re-enter local state.
+  const merged = new Map(
+    serverJobs
+      .filter((job) => !cleared.has(job.id))
+      .map((job) => [job.id, job]),
+  );
   for (const current of currentJobs) {
+    if (cleared.has(current.id)) {
+      continue;
+    }
     const server = merged.get(current.id);
     if (server) {
-      if (jobFreshnessMs(current) > jobFreshnessMs(server)) {
+      if (!acceptsJobUpdate([current], server)) {
         merged.set(current.id, current);
       }
     } else if (terminalStatuses.has(current.status)) {

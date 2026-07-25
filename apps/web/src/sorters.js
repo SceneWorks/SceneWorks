@@ -28,6 +28,26 @@ export function jobFreshnessMs(job) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+export function jobRevision(job) {
+  const revision = Number(job?.revision);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
+}
+
+export function acceptsJobUpdate(items, job) {
+  const current = items.find((item) => item.id === job.id);
+  const currentRevision = jobRevision(current);
+  const incomingRevision = jobRevision(job);
+  if (
+    current &&
+    currentRevision !== null &&
+    incomingRevision !== null &&
+    currentRevision > incomingRevision
+  ) {
+    return false;
+  }
+  return !current || jobFreshnessMs(current) <= jobFreshnessMs(job);
+}
+
 // Insert `job` into a newest-first (`sortNewest`, i.e. createdAt-descending) list in
 // O(n): drop any existing entry with the same id, then splice the job in at its
 // createdAt-ordered position. Equivalent output to `[job, ...rest].sort(sortNewest)`
@@ -88,8 +108,7 @@ export function capTerminalJobs(items, max = MAX_TERMINAL_JOBS) {
 // `[job, ...items.filter((i) => i.id !== job.id)].sort(sortNewest)` copy-sort that ran
 // on every SSE `job.updated` and each enqueue across App.jsx and the data hooks.
 export function upsertJobNewest(items, job) {
-  const current = items.find((item) => item.id === job.id);
-  if (current && jobFreshnessMs(current) > jobFreshnessMs(job)) {
+  if (!acceptsJobUpdate(items, job)) {
     return items;
   }
   return capTerminalJobs(insertNewest(items, job));

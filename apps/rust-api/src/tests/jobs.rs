@@ -2061,6 +2061,77 @@ async fn clear_single_job_soft_hides_only_that_terminal_job() {
 }
 
 #[tokio::test]
+async fn clear_publishes_a_live_tombstone_and_retains_it_for_reconnect() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    let (_, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "done" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/cancel"),
+        Value::Null,
+    )
+    .await;
+
+    let mut events = state.events.subscribe();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let names = drain_event_names(&mut events).await;
+    assert!(
+        names.iter().any(|name| name == "jobs.cleared"),
+        "connected peers need an explicit clear tombstone: {names:?}"
+    );
+
+    let (status, ticket) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        json!({ "knownTerminalJobIds": [job_id] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ticket = ticket["ticket"].as_str().expect("event ticket");
+    let (status, reconnect) =
+        request_sse_prefix(app, &format!("/api/v1/jobs/events?ticket={ticket}"), 3).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        reconnect[1].1["jobs"]
+            .as_array()
+            .expect("snapshot jobs")
+            .iter()
+            .all(|job| job["id"] != json!(job_id)),
+        "a requested soft-hidden row must not be composed back into the snapshot"
+    );
+    assert!(
+        reconnect[1].1["clearedJobIds"]
+            .as_array()
+            .expect("clear tombstones array")
+            .iter()
+            .any(|id| id == &json!(job_id)),
+        "a peer reconnecting after the live event must receive the persistent tombstone"
+    );
+}
+
+#[tokio::test]
 async fn clear_single_job_rejects_a_non_terminal_job() {
     // sc-12231: clearing an active (queued) job is a 400 — the × only appears on
     // terminal cards, and the server refuses to soft-hide a live job.

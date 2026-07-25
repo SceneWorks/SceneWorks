@@ -147,23 +147,24 @@ use workers::{
 mod events;
 use events::{create_event_ticket, job_events, EventHub, EventMessage};
 mod tickets;
-use tickets::{create_media_ticket, TicketResponse, TicketStore};
+use tickets::{create_media_ticket, EventTicketContext, TicketResponse, TicketStore};
 mod dto;
 use dto::{
     AccessResponse, AssetPurgeQuery, AssetsQuery, AudioJobRequest, CatalogDeleteQuery,
     CharacterCreateRequest, CharacterLookRequest, CharacterLookUpdateRequest, CharacterLoraRequest,
     CharacterLoraUpdateRequest, CharacterReferenceRequest, CharacterReferenceUpdateRequest,
-    CharacterTestRequest, CharacterUpdateRequest, CharactersQuery, DatasetAnalysisJobRequest,
-    DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest, DatasetFaceRecordsBody,
-    DatasetImageFixBody, DatasetParquetImportJobRequest, DatasetRepointBody,
-    DatasetUpscaleJobRequest, DirectoriesResponse, EventsQuery, FaceLikenessCompareRequest,
-    FrameExtractRequest, HealthResponse, HostCapabilitiesResponse, ImageJobRequest,
-    InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest,
-    LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest, ModelImportRequest,
-    PersonDetectionJobRequest, PersonTrackCorrectionsRequest, PersonTrackJobRequest,
-    ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest, QualityAckBody, ReadinessQuery,
-    RecipePresetsQuery, SavedVoiceCreateRequest, TimelineCreateRequest, TimelineExportRequest,
-    TimelineSaveRequest, TrainingCaptionJobRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
+    CharacterTestRequest, CharacterUpdateRequest, CharactersQuery, CreateEventTicketRequest,
+    DatasetAnalysisJobRequest, DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest,
+    DatasetFaceRecordsBody, DatasetImageFixBody, DatasetParquetImportJobRequest,
+    DatasetRepointBody, DatasetUpscaleJobRequest, DirectoriesResponse, EventsQuery,
+    FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse, HostCapabilitiesResponse,
+    ImageJobRequest, InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest,
+    LoraUpdateRequest, LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest,
+    ModelImportRequest, PersonDetectionJobRequest, PersonTrackCorrectionsRequest,
+    PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest,
+    QualityAckBody, ReadinessQuery, RecipePresetsQuery, SavedVoiceCreateRequest,
+    TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest,
+    VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 use manifest::{
@@ -271,6 +272,15 @@ const DEFAULT_CORS_ORIGINS: &str = concat!(
 const EVENT_BUFFER_SIZE: usize = 100;
 // SSE tickets are single-use and consumed on connect, so a tight window suffices.
 const EVENT_TICKET_TTL_SECONDS: u64 = 30;
+// Reconnect context is bounded independently from the router-wide 10 MiB JSON
+// allowance. 1,024 active UUIDs preserves the tested 600-job reconnect case;
+// terminal IDs mirror the web client's 200-row retained-history cap.
+const MAX_EVENT_TICKET_ACTIVE_JOB_IDS: usize = 1024;
+const MAX_EVENT_TICKET_TERMINAL_JOB_IDS: usize = 200;
+const MAX_EVENT_TICKET_JOB_ID_BYTES: usize = 128;
+const MAX_EVENT_TICKET_CONTEXT_BYTES: usize = 48 * 1024;
+const MAX_EVENT_TICKET_BODY_BYTES: usize = 64 * 1024;
+const MAX_OUTSTANDING_EVENT_TICKETS: usize = 128;
 // Media tickets ride in <img>/<video>/<a download> URLs (headers impossible), so
 // they are multi-use; the web client re-arms the sliding ticket every TTL/3, and a
 // leaked URL dies at most one TTL after the last authenticated refresh (sc-8810).
@@ -977,7 +987,10 @@ pub(crate) fn create_app_with_state(
         project_store,
         events: Arc::new(EventHub::default()),
         queue_snapshot_lock: Arc::new(AsyncMutex::new(())),
-        event_tickets: Arc::new(TicketStore::new(EVENT_TICKET_TTL_SECONDS)),
+        event_tickets: Arc::new(TicketStore::with_max_outstanding(
+            EVENT_TICKET_TTL_SECONDS,
+            MAX_OUTSTANDING_EVENT_TICKETS,
+        )),
         media_tickets: Arc::new(TicketStore::new(MEDIA_TICKET_TTL_SECONDS)),
         auth_throttle: Arc::new(AuthThrottle::default()),
         manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
@@ -1902,6 +1915,7 @@ fn publish<T: Serialize>(state: &AppState, event: &str, data: &T) {
         state.events.publish(EventMessage {
             event: event.to_owned(),
             data,
+            revision: 0,
         });
     }
 }

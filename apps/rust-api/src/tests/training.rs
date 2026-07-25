@@ -2381,6 +2381,7 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_su
     assert_eq!(status, StatusCode::OK);
     assert_eq!(reconnect_events[0].0, "ready");
     assert_eq!(reconnect_events[1].0, "jobs.snapshot");
+    assert!(reconnect_events[1].1["jobs"].is_array());
     assert_eq!(reconnect_events[2].0, "queue.updated");
     assert_eq!(
         reconnect_events[2].1["activeJobs"]

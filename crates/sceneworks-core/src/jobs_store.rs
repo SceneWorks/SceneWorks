@@ -12,8 +12,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Number, Value};
 
 use crate::contracts::{
-    ContractNumber, GenerationMetrics, GenerationMetricsRow, JobSnapshot, JobStatus, JobType,
-    ProgressStage, QueueSummary, WorkerCapability, WorkerSnapshot, WorkerStatus,
+    ContractNumber, ExtraFields, GenerationMetrics, GenerationMetricsRow, JobSnapshot, JobStatus,
+    JobType, ProgressStage, QueueSummary, WorkerCapability, WorkerSnapshot, WorkerStatus,
     WorkerUtilizationSnapshot,
 };
 use crate::store_util::{ensure_column, parse_string_enum, random_hex};
@@ -477,6 +477,28 @@ impl JobsStore {
         // remains readable for historical rows. First-non-null wins so the WorkerProgressCard's
         // arch pill stays stable across the run.
         ensure_column(&transaction, "jobs", "backend", "text")?;
+        // Durable per-row ordering for SSE reconciliation. updated_at is
+        // intentionally second-granularity, so it cannot distinguish two
+        // commits in the same second. The trigger advances revision for every
+        // UPDATE without requiring each mutation site to remember the field.
+        ensure_column(
+            &transaction,
+            "jobs",
+            "revision",
+            "integer not null default 0",
+        )?;
+        transaction.execute_batch(
+            "
+            create trigger if not exists jobs_revision_after_update
+            after update on jobs
+            when new.revision = old.revision
+            begin
+              update jobs
+                 set revision = old.revision + 1
+               where id = new.id;
+            end;
+            ",
+        )?;
         // Durable handoff between terminal progress acceptance and the API's
         // idempotent catalog/project writes. The bit is set in the same
         // transaction as terminal acceptance and cleared only by the guarded
@@ -856,11 +878,77 @@ impl JobsStore {
         Ok(jobs)
     }
 
+    /// Bounded reconnect history ordered by the last durable mutation rather
+    /// than creation time. The SSE endpoint supplements this generic history
+    /// with every pre-disconnect active id named by the client, so correctness
+    /// does not depend on a terminal transition remaining inside this cap.
+    pub fn list_jobs_recently_updated(&self, limit: u32) -> JobsStoreResult<Vec<JobSnapshot>> {
+        let connection = self.open_connection()?;
+        let limit = limit.clamp(1, 500);
+        let mut statement = connection.prepare(
+            "select * from jobs
+              where cleared_at is null
+              order by updated_at desc, id desc
+              limit ?1",
+        )?;
+        let jobs = collect_jobs(statement.query_map(params![limit], row_to_job)?)?;
+        Ok(jobs)
+    }
+
+    /// Load every retained job named by a reconnecting client, preserving the
+    /// requested order and ignoring ids whose rows were already purged. This
+    /// supplements the bounded recent-history snapshot with the client's exact
+    /// pre-disconnect active set, so an older terminal transition cannot fall
+    /// outside that history window.
+    pub fn list_existing_jobs_by_ids(
+        &self,
+        job_ids: &[String],
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        if job_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.open_connection()?;
+        let ids_json = dumps(job_ids)?;
+        let mut statement = connection.prepare(
+            "select jobs.*
+               from json_each(?1) as requested
+               join jobs on jobs.id = requested.value
+              where jobs.cleared_at is null
+              order by cast(requested.key as integer)",
+        )?;
+        let jobs = collect_jobs(statement.query_map(params![ids_json], row_to_job)?)?;
+        Ok(jobs)
+    }
+
     pub fn get_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
         // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
         // (sc-8950 / F-148 — see list_jobs for the full rationale).
         let connection = self.open_connection()?;
         self.get_job_on_connection(&connection, job_id)
+    }
+
+    /// Return clear tombstones only for the reconnecting client's bounded known
+    /// rows. Tombstones live with retained jobs and disappear under normal
+    /// retention, but reconnect cost must never scale with the full retained
+    /// history (including deployments where retention is disabled).
+    pub fn cleared_job_ids_by_ids(&self, job_ids: &[String]) -> JobsStoreResult<Vec<String>> {
+        if job_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.open_connection()?;
+        let ids_json = dumps(job_ids)?;
+        let mut statement = connection.prepare(
+            "select jobs.id
+               from json_each(?1) as requested
+               join jobs on jobs.id = requested.value
+              where jobs.cleared_at is not null
+              order by cast(requested.key as integer)",
+        )?;
+        let ids = statement
+            .query_map(params![ids_json], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(JobsStoreError::from)?;
+        Ok(ids)
     }
 
     /// Upsert the structured generation metrics for a job (epic 10402). Called
@@ -2680,6 +2768,9 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
     let job_type: JobType = parse_string_enum(&row.get::<_, String>("type")?);
     let payload = loads_object(row.get::<_, Option<String>>("payload_json")?.as_deref());
     let title = derive_job_title(&job_type, &payload);
+    let revision = row.get::<_, i64>("revision").unwrap_or_default().max(0);
+    let mut extra = ExtraFields::default();
+    extra.insert("revision".to_owned(), Value::from(revision));
     Ok(JobSnapshot {
         id: row.get("id")?,
         job_type,
@@ -2711,7 +2802,7 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
         peak_gpu_load_pct: peak_load.map(number_from_f64),
         backend,
         title,
-        extra: Default::default(),
+        extra,
     })
 }
 

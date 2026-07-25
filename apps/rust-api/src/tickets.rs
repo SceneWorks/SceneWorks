@@ -17,37 +17,84 @@ use super::*;
 #[derive(Debug)]
 pub(crate) struct TicketStore {
     ttl: Duration,
+    max_outstanding: Option<usize>,
     state: Mutex<TicketStoreState>,
 }
 
 #[derive(Debug, Default)]
 struct TicketStoreState {
-    tickets: HashMap<String, Instant>,
+    tickets: HashMap<String, TicketEntry>,
     // Most recently issued ticket, so `issue_sliding` can hand the same value to
     // every caller while it stays alive (URL stability across React re-renders).
     latest: Option<String>,
+}
+
+#[derive(Debug)]
+struct TicketEntry {
+    expires_at: Instant,
+    event_context: EventTicketContext,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct EventTicketContext {
+    pub(crate) active_job_ids: Vec<String>,
+    pub(crate) known_terminal_job_ids: Vec<String>,
 }
 
 impl TicketStore {
     pub(crate) fn new(ttl_seconds: u64) -> Self {
         Self {
             ttl: Duration::from_secs(ttl_seconds),
+            max_outstanding: None,
+            state: Mutex::new(TicketStoreState::default()),
+        }
+    }
+
+    pub(crate) fn with_max_outstanding(ttl_seconds: u64, max_outstanding: usize) -> Self {
+        assert!(max_outstanding > 0, "ticket capacity must be non-zero");
+        Self {
+            ttl: Duration::from_secs(ttl_seconds),
+            max_outstanding: Some(max_outstanding),
             state: Mutex::new(TicketStoreState::default()),
         }
     }
 
     /// Issue a fresh single-use ticket (SSE flavor; pair with `consume`).
     pub(crate) fn issue(&self) -> TicketResponse {
+        self.try_issue_event(EventTicketContext::default())
+            .expect("unbounded ticket store issues")
+    }
+
+    /// Issue an SSE ticket carrying the reconnecting client's bounded job context.
+    /// The opaque ticket keeps the EventSource GET URL short; its payload disappears
+    /// with the same single-use redemption. A bounded event store returns `None`
+    /// instead of allocating beyond its outstanding-ticket backpressure ceiling.
+    pub(crate) fn try_issue_event(
+        &self,
+        event_context: EventTicketContext,
+    ) -> Option<TicketResponse> {
         let now = Instant::now();
         let mut state = self.state.lock();
         prune_tickets(&mut state.tickets, now);
+        if self
+            .max_outstanding
+            .is_some_and(|limit| state.tickets.len() >= limit)
+        {
+            return None;
+        }
         let ticket = Uuid::new_v4().simple().to_string();
-        state.tickets.insert(ticket.clone(), now + self.ttl);
+        state.tickets.insert(
+            ticket.clone(),
+            TicketEntry {
+                expires_at: now + self.ttl,
+                event_context,
+            },
+        );
         state.latest = Some(ticket.clone());
-        TicketResponse {
+        Some(TicketResponse {
             ticket,
             expires_in_seconds: self.ttl.as_secs(),
-        }
+        })
     }
 
     /// Issue a reusable ticket (media flavor; pair with `validate`). While the most
@@ -61,7 +108,13 @@ impl TicketStore {
         prune_tickets(&mut state.tickets, now);
         if let Some(ticket) = state.latest.clone() {
             if state.tickets.contains_key(&ticket) {
-                state.tickets.insert(ticket.clone(), now + self.ttl);
+                state.tickets.insert(
+                    ticket.clone(),
+                    TicketEntry {
+                        expires_at: now + self.ttl,
+                        event_context: EventTicketContext::default(),
+                    },
+                );
                 return TicketResponse {
                     ticket,
                     expires_in_seconds: self.ttl.as_secs(),
@@ -72,12 +125,16 @@ impl TicketStore {
         self.issue()
     }
 
-    /// Single-use check: the ticket is removed whether or not it is still valid.
-    pub(crate) fn consume(&self, ticket: &str) -> bool {
+    /// Redeem one SSE ticket and return the reconnect context minted with it.
+    pub(crate) fn consume_event(&self, ticket: &str) -> Option<EventTicketContext> {
         let now = Instant::now();
         let mut state = self.state.lock();
         prune_tickets(&mut state.tickets, now);
-        matches!(state.tickets.remove(ticket), Some(expires_at) if expires_at >= now)
+        state
+            .tickets
+            .remove(ticket)
+            .filter(|entry| entry.expires_at >= now)
+            .map(|entry| entry.event_context)
     }
 
     /// Non-consuming check for multi-use (media) tickets.
@@ -88,7 +145,7 @@ impl TicketStore {
         let now = Instant::now();
         let mut state = self.state.lock();
         prune_tickets(&mut state.tickets, now);
-        matches!(state.tickets.get(ticket), Some(expires_at) if *expires_at >= now)
+        matches!(state.tickets.get(ticket), Some(entry) if entry.expires_at >= now)
     }
 }
 
@@ -106,6 +163,6 @@ pub(crate) async fn create_media_ticket(State(state): State<AppState>) -> Json<T
     Json(state.media_tickets.issue_sliding())
 }
 
-fn prune_tickets(tickets: &mut HashMap<String, Instant>, now: Instant) {
-    tickets.retain(|_, expires_at| *expires_at >= now);
+fn prune_tickets(tickets: &mut HashMap<String, TicketEntry>, now: Instant) {
+    tickets.retain(|_, entry| entry.expires_at >= now);
 }

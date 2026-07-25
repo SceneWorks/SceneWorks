@@ -1047,7 +1047,7 @@ pub(crate) fn model_has_candle_pose_lane(model: &str) -> bool {
 }
 
 /// A strict-pose (`advanced.poses`) job on a **candle-routed model with no candle pose lane** —
-/// `sdxl` / `realvisxl` / `chroma*` / `flux*` / `lens*` / `sensenova*` (everything but the three wired
+/// `sdxl` / `realvisxl` / `chroma*` / `flux*` / `lens*` / `sensenova*` (everything outside the wired
 /// pose families), not `edit_image` (sc-5968, epic 5483). No native lane has a pose path for these
 /// models off-Mac (the historical `sdxl` adapter's OpenPose lived only in
 /// the `instantid_realvisxl` adapter), so a generic claimant could silently drop the poses and render an unconditioned T2I

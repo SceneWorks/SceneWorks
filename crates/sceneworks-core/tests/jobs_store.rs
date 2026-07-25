@@ -453,6 +453,14 @@ fn clear_terminal_jobs_soft_hides_from_queue_but_keeps_stats() {
     );
     assert!(cleared.contains(&completed.id));
     assert!(cleared.contains(&canceled.id));
+    let requested = store
+        .list_existing_jobs_by_ids(&[completed.id.clone(), canceled.id.clone(), queued.id.clone()])
+        .expect("requested reconnect jobs load");
+    assert_eq!(
+        requested.iter().map(|job| &job.id).collect::<Vec<_>>(),
+        vec![&queued.id],
+        "targeted reconnect lookup must not compose soft-hidden rows with clear tombstones"
+    );
 
     // The queue now lists only the still-queued job.
     let remaining = store.list_jobs(None, None, 100).expect("list after clear");
@@ -533,6 +541,23 @@ fn clear_job_soft_hides_a_single_terminal_job() {
 
     let cleared = store.clear_job(&canceled.id).expect("clears one job");
     assert_eq!(cleared.id, canceled.id);
+    assert_eq!(
+        store
+            .cleared_job_ids_by_ids(&[
+                queued.id.clone(),
+                canceled.id.clone(),
+                other_terminal.id.clone(),
+            ])
+            .expect("clear tombstones read"),
+        vec![canceled.id.clone()]
+    );
+    assert!(
+        store
+            .cleared_job_ids_by_ids(&[queued.id.clone(), other_terminal.id.clone()])
+            .expect("unrelated tombstone query reads")
+            .is_empty(),
+        "clear reconciliation returns only requested cleared ids"
+    );
 
     // Only the one job is gone; the other terminal job and the queued job remain.
     let remaining: Vec<String> = store
@@ -570,6 +595,40 @@ fn clear_job_rejects_a_non_terminal_job() {
     let listed = store.list_jobs(None, None, 100).expect("list");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, queued.id);
+}
+
+#[test]
+fn reconnect_window_prioritizes_recently_updated_old_jobs() {
+    let store = store("reconnect-updated-window");
+    let old = store
+        .create_job(image_job(Map::new()))
+        .expect("old creates");
+    let newer = store
+        .create_job(image_job(Map::new()))
+        .expect("newer creates");
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .execute(
+            "update jobs set created_at = '2000-01-01T00:00:00Z', updated_at = '2000-01-01T00:00:00Z' where id = ?1",
+            params![old.id],
+        )
+        .expect("old timestamps set");
+    connection
+        .execute(
+            "update jobs set created_at = '2020-01-01T00:00:00Z', updated_at = '2020-01-01T00:00:00Z' where id = ?1",
+            params![newer.id],
+        )
+        .expect("newer timestamps set");
+    store.cancel_job(&old.id).expect("old job transitions now");
+
+    assert_eq!(
+        store
+            .list_jobs_recently_updated(1)
+            .expect("reconnect window reads")[0]
+            .id,
+        old.id,
+        "an old job's missed terminal transition must stay in the bounded reconnect window"
+    );
 }
 
 #[test]

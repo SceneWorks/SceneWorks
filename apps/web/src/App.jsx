@@ -1352,6 +1352,7 @@ export function App() {
     access,
     ready,
     token,
+    jobsRef,
     setJobs,
     setWorkers,
     setQueueSummary,

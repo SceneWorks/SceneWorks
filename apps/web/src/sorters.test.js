@@ -173,4 +173,18 @@ describe("upsertJobNewest (sc-8860)", () => {
     expect(upsertJobNewest(current, stale)).toBe(current);
     expect(current[0].status).toBe("completed");
   });
+
+  it("uses durable per-job revision before equal-second timestamp ordering", () => {
+    const current = [{
+      ...job("a", "2026-07-01T01:00:00Z", "completed"),
+      updatedAt: "2026-07-01T01:01:00Z",
+      revision: 2,
+    }];
+    const delayed = {
+      ...job("a", "2026-07-01T01:00:00Z", "running"),
+      updatedAt: "2026-07-01T01:01:00Z",
+      revision: 1,
+    };
+    expect(upsertJobNewest(current, delayed)).toBe(current);
+  });
 });

@@ -509,6 +509,9 @@ pub(crate) async fn clear_jobs(
         store.clear_terminal_jobs(payload.project_id.as_deref())
     })
     .await?;
+    if !cleared_ids.is_empty() {
+        publish(&state, "jobs.cleared", &json!({ "ids": &cleared_ids }));
+    }
     // Republish the queue so every subscriber's status counts drop the cleared
     // jobs; the acting client also prunes them locally from the returned ids.
     publish_queue(&state).await?;
@@ -564,6 +567,7 @@ pub(crate) async fn clear_job(
         store.clear_job(&job_id)
     })
     .await?;
+    publish(&state, "jobs.cleared", &json!({ "ids": [job.id.clone()] }));
     publish_queue(&state).await?;
     Ok(Json(job))
 }

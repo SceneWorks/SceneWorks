@@ -935,6 +935,21 @@ pub(crate) async fn request_sse_prefix(
     uri: &str,
     event_count: usize,
 ) -> (StatusCode, Vec<(String, Value)>) {
+    let (status, detailed) = request_sse_prefix_with_ids(app, uri, event_count).await;
+    (
+        status,
+        detailed
+            .into_iter()
+            .map(|(event, _id, data)| (event, data))
+            .collect(),
+    )
+}
+
+pub(crate) async fn request_sse_prefix_with_ids(
+    app: axum::Router,
+    uri: &str,
+    event_count: usize,
+) -> (StatusCode, Vec<(String, Option<u64>, Value)>) {
     let request = Request::builder()
         .method("GET")
         .uri(uri)
@@ -962,16 +977,20 @@ pub(crate) async fn request_sse_prefix(
         .take(event_count)
         .map(|block| {
             let mut event = None;
+            let mut id = None;
             let mut data = None;
             for line in block.lines() {
                 if let Some(value) = line.strip_prefix("event: ") {
                     event = Some(value.to_owned());
+                } else if let Some(value) = line.strip_prefix("id: ") {
+                    id = Some(value.parse().expect("SSE id is an integer revision"));
                 } else if let Some(value) = line.strip_prefix("data: ") {
                     data = Some(serde_json::from_str(value).expect("SSE event data is valid JSON"));
                 }
             }
             (
                 event.expect("SSE block has an event name"),
+                id,
                 data.expect("SSE block has event data"),
             )
         })

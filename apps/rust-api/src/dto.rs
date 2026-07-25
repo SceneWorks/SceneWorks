@@ -188,8 +188,18 @@ pub(crate) struct PromptBatchesQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct EventsQuery {
     pub(crate) ticket: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateEventTicketRequest {
+    #[serde(default)]
+    pub(crate) active_job_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) known_terminal_job_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
