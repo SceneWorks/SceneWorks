@@ -17,7 +17,7 @@ use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
-use futures_util::future::join_all;
+use futures_util::{future::join_all, stream};
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
     CancelPendingJobsRequest, CancelPendingJobsResponse, ClaimRequest, ClaimResponse,
@@ -203,7 +203,7 @@ mod manifest_entity;
 mod recipe_presets;
 use recipe_presets::{
     create_recipe_preset, delete_recipe_preset, duplicate_recipe_preset, get_recipe_preset,
-    list_recipe_presets, preset_lora_id, preset_lora_weight, preset_prompt, recipe_preset_catalog,
+    list_recipe_presets, preset_lora_id, preset_lora_weight, preset_prompt,
     recipe_preset_catalog_with, recipe_preset_loras, serialize_preset_lora,
     stamp_recipe_preset_used, update_recipe_preset,
 };
@@ -1926,6 +1926,39 @@ async fn project_path_for_id(state: AppState, project_id: &str) -> Result<PathBu
     Ok(PathBuf::from(project.path))
 }
 
+/// Resolve a project asset record to an on-disk path without allowing absolute
+/// paths or traversal outside the owning project.
+async fn resolve_project_confined_asset_path(
+    state: AppState,
+    project_id: &str,
+    asset_id: &str,
+    project_path: &FsPath,
+) -> Result<PathBuf, ApiError> {
+    let project_id = project_id.to_owned();
+    let asset_id = asset_id.to_owned();
+    let asset = project_call(state, move |store| store.get_asset(&project_id, &asset_id)).await?;
+    let relative_path = asset
+        .get("file")
+        .and_then(|file| file.get("path"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("Asset has no file path"))?;
+    let mut resolved = project_path.to_path_buf();
+    for component in FsPath::new(relative_path).components() {
+        match component {
+            std::path::Component::Normal(value) => resolved.push(value),
+            _ => {
+                return Err(ApiError::bad_request(
+                    "Asset path must stay inside the project directory",
+                ))
+            }
+        }
+    }
+    if !resolved.exists() {
+        return Err(ApiError::bad_request("Asset file not found on disk"));
+    }
+    Ok(resolved)
+}
+
 fn model_lora_families(model: &Value) -> Vec<String> {
     families_from_value_chain(
         model,
@@ -1976,9 +2009,10 @@ async fn catalog_delete_warnings(
     kind: &str,
     id: &str,
     project_id: Option<&str>,
+    catalogs: Option<&JobCatalogSnapshot>,
 ) -> Result<Vec<String>, ApiError> {
     let mut warnings = Vec::new();
-    let presets = recipe_preset_catalog(state, project_id).await?;
+    let presets = recipe_preset_catalog_with(state, project_id, catalogs).await?;
     let preset_names = presets
         .iter()
         .filter(|preset| match kind {

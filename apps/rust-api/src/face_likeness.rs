@@ -30,9 +30,15 @@ pub(crate) async fn create_face_likeness_compare_job(
     // Resolve both assets to confined on-disk paths up front so an invalid id is a clean 400 (the
     // worker re-resolves + re-confines independently; this is fail-fast UX, not the sole guard).
     let project_path = project_path_for_id(state.clone(), project_id).await?;
-    resolve_project_asset_path(state.clone(), project_id, source_asset_id, &project_path).await?;
-    resolve_project_asset_path(state.clone(), project_id, candidate_asset_id, &project_path)
+    resolve_project_confined_asset_path(state.clone(), project_id, source_asset_id, &project_path)
         .await?;
+    resolve_project_confined_asset_path(
+        state.clone(),
+        project_id,
+        candidate_asset_id,
+        &project_path,
+    )
+    .await?;
 
     let mut job_payload = JsonObject::new();
     job_payload.insert("projectId".to_owned(), Value::String(project_id.to_owned()));
@@ -55,43 +61,4 @@ pub(crate) async fn create_face_likeness_compare_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(job)))
-}
-
-/// Resolve a project asset id to an absolute, project-confined on-disk path. Mirrors the worker's
-/// `load_reference_image` / the prompt-refine `resolve_image_caption_path`: read the asset record's
-/// relative `file.path`, join it under the project directory using only `Normal` components (rejecting
-/// `..`/absolute traversal), and confirm the file exists. Returns a 400 for a missing/garbled record or
-/// a path that escapes the project root.
-async fn resolve_project_asset_path(
-    state: AppState,
-    project_id: &str,
-    asset_id: &str,
-    project_path: &std::path::Path,
-) -> Result<(), ApiError> {
-    let project_id_owned = project_id.to_owned();
-    let asset_id_owned = asset_id.to_owned();
-    let asset = project_call(state, move |store| {
-        store.get_asset(&project_id_owned, &asset_id_owned)
-    })
-    .await?;
-    let rel = asset
-        .get("file")
-        .and_then(|file| file.get("path"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::bad_request("Asset has no file path"))?;
-    let mut path = project_path.to_path_buf();
-    for component in std::path::Path::new(rel).components() {
-        match component {
-            std::path::Component::Normal(value) => path.push(value),
-            _ => {
-                return Err(ApiError::bad_request(
-                    "Asset path must stay inside the project directory",
-                ))
-            }
-        }
-    }
-    if !path.exists() {
-        return Err(ApiError::bad_request("Asset image not found on disk"));
-    }
-    Ok(())
 }

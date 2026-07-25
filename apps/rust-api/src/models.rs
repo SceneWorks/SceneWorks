@@ -477,10 +477,13 @@ pub(crate) async fn delete_model(
     Query(query): Query<CatalogDeleteQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let permanent = query.permanent.unwrap_or(false);
-    let catalog = model_catalog(&state).await?;
-    let model = catalog
-        .into_iter()
+    let catalogs = JobCatalogSnapshot::default();
+    let model = catalogs
+        .models(&state)
+        .await?
+        .iter()
         .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
+        .cloned()
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
@@ -528,7 +531,8 @@ pub(crate) async fn delete_model(
             "Built-in model catalog entries are read-only unless local files are installed",
         ));
     }
-    let warnings = catalog_delete_warnings(&state, "model", &model_id, None).await?;
+    let warnings =
+        catalog_delete_warnings(&state, "model", &model_id, None, Some(&catalogs)).await?;
     let policy = if removed_entry.is_some() {
         "Removed the model registry entry and SceneWorks-owned local model files."
     } else {
@@ -1103,20 +1107,25 @@ pub(crate) async fn queue_model_import_job(
         .join("user.models.jsonc");
     let source_path_rel = format!("models/imports/{target_name}");
     let allowed_source_roots = vec![state.settings.data_dir.join("models")];
-    if let Some(source_path) = payload.source_path.as_deref() {
+    if let Some(source_path) = payload.source_path.clone() {
         let allowed_source_roots = if payload.uploaded_source_path {
             vec![state.settings.data_dir.join("cache").join("model-uploads")]
         } else {
             allowed_source_roots
         };
-        validate_lora_import_source_path(source_path, &allowed_source_roots)?;
-        // Compatibility gate (sc-14019): refuse — synchronously, with the detector's typed reason —
-        // any staged/local base checkpoint whose (family, component, quant) has no loader today.
-        // Runs AFTER confinement above; it never widens the allowed roots. Repo/URL imports (no file
-        // on disk yet) are gated by the worker over the downloaded bytes instead.
-        import_source_supported(FsPath::new(source_path))?;
-        let detected =
-            detect_model_family(FsPath::new(source_path)).map_err(model_family_inspection_error)?;
+        let (source_path, detected) = tokio::task::spawn_blocking(move || {
+            validate_lora_import_source_path(&source_path, &allowed_source_roots)?;
+            // Compatibility gate (sc-14019): refuse, with the detector's typed
+            // reason, any local checkpoint whose shape has no loader today.
+            import_source_supported(FsPath::new(&source_path))?;
+            let detected = detect_model_family(FsPath::new(&source_path))
+                .map_err(model_family_inspection_error)?;
+            Ok::<_, ApiError>((source_path, detected))
+        })
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!("Model import inspection task failed: {error}"))
+        })??;
         payload.family = reconcile_model_family(
             payload.family.take(),
             detected,
@@ -3379,6 +3388,49 @@ fn apply_model_catalog_entry(
 }
 
 type ModelCatalogWorkItem = (Value, (Option<DownloadContext>, Option<u64>));
+const MODEL_SIZE_ESTIMATE_CONCURRENCY: usize = 8;
+
+async fn collect_bounded_ordered<I, T, F, Fut, R>(
+    items: I,
+    concurrency: usize,
+    operation: F,
+) -> Vec<R>
+where
+    I: IntoIterator<Item = T>,
+    F: FnMut(T) -> Fut,
+    Fut: std::future::Future<Output = R>,
+{
+    let pending = futures_util::StreamExt::map(stream::iter(items), operation);
+    let bounded = futures_util::StreamExt::buffered(pending, concurrency.max(1));
+    futures_util::StreamExt::collect(bounded).await
+}
+
+#[cfg(test)]
+mod model_size_concurrency_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn bounded_collection_caps_concurrency_and_preserves_order() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let output = collect_bounded_ordered(0..12, 3, |value| {
+            let active = active.clone();
+            let peak = peak.clone();
+            async move {
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(current, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                value
+            }
+        })
+        .await;
+
+        assert_eq!(output, (0..12).collect::<Vec<_>>());
+        assert_eq!(peak.load(Ordering::SeqCst), 3);
+    }
+}
 
 fn group_model_catalog_work_items(
     work_items: Vec<ModelCatalogWorkItem>,
@@ -3433,14 +3485,18 @@ async fn model_catalog_inner(
         .iter()
         .map(model_download_context)
         .collect::<Result<Vec<_>, _>>()?;
-    let download_size_bytes = join_all(download_contexts.iter().map(|context| async move {
-        match context {
-            Some(context) if estimate_sizes => {
-                estimate_huggingface_download_size(state, &context.repo, &context.files).await
+    let download_size_bytes = collect_bounded_ordered(
+        download_contexts.iter().cloned(),
+        MODEL_SIZE_ESTIMATE_CONCURRENCY,
+        |context| async move {
+            match context {
+                Some(context) if estimate_sizes => {
+                    estimate_huggingface_download_size(state, &context.repo, &context.files).await
+                }
+                _ => None,
             }
-            _ => None,
-        }
-    }))
+        },
+    )
     .await;
 
     let data_dir = Arc::new(state.settings.data_dir.clone());

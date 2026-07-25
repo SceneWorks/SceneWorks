@@ -255,7 +255,7 @@ pub(crate) struct AssetMoveToCharacterBody {
 pub(crate) async fn move_asset_to_character(
     State(state): State<AppState>,
     Path((project_id, asset_id)): Path<(String, String)>,
-    Json(body): Json<AssetMoveToCharacterBody>,
+    ApiJson(body): ApiJson<AssetMoveToCharacterBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     Ok(Json(
         project_call(state, move |store| {

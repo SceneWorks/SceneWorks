@@ -243,7 +243,8 @@ pub(crate) async fn delete_lora(
         ));
     }
     let warnings =
-        catalog_delete_warnings(&state, "lora", &lora_id, query.project_id.as_deref()).await?;
+        catalog_delete_warnings(&state, "lora", &lora_id, query.project_id.as_deref(), None)
+            .await?;
     let policy = if removed_entry.is_some() {
         "Removed the LoRA registry entry and SceneWorks-owned local LoRA files."
     } else {
@@ -866,15 +867,21 @@ pub(crate) async fn queue_lora_import_job(
     } else {
         allowed_source_roots
     };
-    if let Some(local_source) = payload.source_path.as_deref() {
-        validate_lora_import_source_path(local_source, &source_roots)?;
-        // A paired Wan A14B MoE upload (sc-1991) carries a second low-noise file;
-        // validate it against the same upload root here. The high/low_noise filenames
-        // are assigned once the family-scoped target name is known, below.
-        if let Some(secondary_source_path) = payload.secondary_source_path.as_deref() {
-            validate_lora_import_source_path(secondary_source_path, &source_roots)?;
-        }
-        let detected = detect_family_from_local_path(local_source)?;
+    if let Some(local_source) = payload.source_path.clone() {
+        let secondary_source = payload.secondary_source_path.clone();
+        let (local_source, detected) = tokio::task::spawn_blocking(move || {
+            validate_lora_import_source_path(&local_source, &source_roots)?;
+            // A paired Wan A14B MoE upload (sc-1991) carries a second low-noise
+            // file; validate it against the same upload root.
+            if let Some(secondary_source) = secondary_source.as_deref() {
+                validate_lora_import_source_path(secondary_source, &source_roots)?;
+            }
+            detect_family_from_local_path(&local_source).map(|detected| (local_source, detected))
+        })
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!("LoRA import inspection task failed: {error}"))
+        })??;
         payload.family = reconcile_lora_family(
             payload.family.take(),
             detected,
@@ -897,8 +904,17 @@ pub(crate) async fn queue_lora_import_job(
     // *different* family, with an honest message instead of stacking two adapters the
     // header inspector would arbitrate non-deterministically. Same-family re-imports
     // (the folder's existing file matches) are still allowed.
-    if let Some(family) = payload.family.as_deref() {
-        if let Some(existing) = conflicting_folder_family(&target_dir, family)? {
+    if let Some(family) = payload.family.clone() {
+        let target_dir_for_inspection = target_dir.clone();
+        let family_for_inspection = family.clone();
+        let existing = tokio::task::spawn_blocking(move || {
+            conflicting_folder_family(&target_dir_for_inspection, &family_for_inspection)
+        })
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!("LoRA target inspection task failed: {error}"))
+        })??;
+        if let Some(existing) = existing {
             return Err(ApiError::bad_request(format!(
                 "The folder for LoRA '{lora_id}' already contains a {existing} LoRA. \
                  Import this {family} LoRA under a different name so each family keeps its own folder."
