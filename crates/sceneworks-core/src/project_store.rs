@@ -7467,7 +7467,7 @@ mod tests {
                 crate::voice_store::SavedVoiceCreateInput {
                     name: "Narrator".to_owned(),
                     reference_audio_asset_id: asset_id.clone(),
-                    embedding: vec![0.1, 0.2, 0.3, 0.4],
+                    embedding: vec![0.1; crate::voice_store::VOICE_EMBEDDING_DIM],
                 },
                 crate::voice_store::DEFAULT_VOICE_DEDUP_THRESHOLD,
             )
@@ -7557,7 +7557,7 @@ mod tests {
                 crate::voice_store::SavedVoiceCreateInput {
                     name: "Narrator".to_owned(),
                     reference_audio_asset_id: "asset_ref".to_owned(),
-                    embedding: vec![0.5, 0.5, 0.5],
+                    embedding: vec![0.5; crate::voice_store::VOICE_EMBEDDING_DIM],
                 },
                 crate::voice_store::DEFAULT_VOICE_DEDUP_THRESHOLD,
             )

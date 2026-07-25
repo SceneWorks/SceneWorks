@@ -22,6 +22,16 @@ fn map_voice_embed_error(error: VoiceEmbedError) -> ApiError {
     }
 }
 
+fn validated_dedup_threshold(value: Option<f32>) -> Result<f32, ApiError> {
+    let threshold = value.unwrap_or(DEFAULT_VOICE_DEDUP_THRESHOLD);
+    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+        return Err(ApiError::bad_request(
+            "dedupThreshold must be a finite number between 0 and 1",
+        ));
+    }
+    Ok(threshold)
+}
+
 pub(crate) async fn list_saved_voices(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
@@ -46,9 +56,7 @@ pub(crate) async fn create_saved_voice(
             "A reference audio asset id is required",
         ));
     }
-    let threshold = payload
-        .dedup_threshold
-        .unwrap_or(DEFAULT_VOICE_DEDUP_THRESHOLD);
+    let threshold = validated_dedup_threshold(payload.dedup_threshold)?;
 
     // 1. Resolve the reference clip to an absolute on-disk path (blocking store call).
     let wav_path = project_call(state.clone(), {
@@ -107,4 +115,23 @@ pub(crate) async fn delete_saved_voice(
         })
         .await?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dedup_threshold_accepts_default_and_closed_unit_interval_only() {
+        assert_eq!(
+            validated_dedup_threshold(None).expect("default threshold"),
+            DEFAULT_VOICE_DEDUP_THRESHOLD
+        );
+        assert_eq!(validated_dedup_threshold(Some(0.0)).unwrap(), 0.0);
+        assert_eq!(validated_dedup_threshold(Some(1.0)).unwrap(), 1.0);
+
+        for invalid in [-0.01, 1.01, f32::NAN, f32::INFINITY] {
+            assert!(validated_dedup_threshold(Some(invalid)).is_err());
+        }
+    }
 }

@@ -1780,6 +1780,24 @@ mod download_receipt_tests {
     // real HF cache when HF_HOME is set. Serialize on the same `HF_ENV_LOCK`; never add a second lock.
     use crate::tests::support::isolate_hf_cache;
 
+    fn builtin_models_entry(model_id: &str) -> Value {
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .expect("builtin.models.jsonc present");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin.models.jsonc parses");
+        manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
+            .cloned()
+            .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
+    }
+
     #[test]
     fn multi_repo_marker_filters_nested_receipts_by_requested_repo() {
         let temp = tempfile::tempdir().unwrap();
@@ -2209,24 +2227,6 @@ mod download_receipt_tests {
     #[test]
     fn mmaudio_install_state_gates_on_all_five_component_co_requisites() {
         let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
-        fn builtin_models_entry(model_id: &str) -> Value {
-            let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-                .iter()
-                .find(|(name, _)| *name == "builtin.models.jsonc")
-                .map(|(_, contents)| *contents)
-                .expect("builtin.models.jsonc present");
-            let manifest: Value =
-                serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-                    .expect("builtin.models.jsonc parses");
-            manifest["models"]
-                .as_array()
-                .expect("models array")
-                .iter()
-                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
-                .cloned()
-                .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
-        }
-
         for model_id in ["mmaudio_small_16k", "mmaudio_large_44k"] {
             let temp = tempfile::tempdir().unwrap();
             let data_dir = temp.path();
@@ -2306,24 +2306,6 @@ mod download_receipt_tests {
     #[test]
     fn moss_tts_install_state_gates_on_the_codec_co_requisite() {
         let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
-        fn builtin_models_entry(model_id: &str) -> Value {
-            let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-                .iter()
-                .find(|(name, _)| *name == "builtin.models.jsonc")
-                .map(|(_, contents)| *contents)
-                .expect("builtin.models.jsonc present");
-            let manifest: Value =
-                serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-                    .expect("builtin.models.jsonc parses");
-            manifest["models"]
-                .as_array()
-                .expect("models array")
-                .iter()
-                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
-                .cloned()
-                .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
-        }
-
         for model_id in ["moss_ttsd_v05", "moss_tts_realtime"] {
             let temp = tempfile::tempdir().unwrap();
             let data_dir = temp.path();
@@ -2419,24 +2401,6 @@ mod download_receipt_tests {
     #[test]
     fn sdxl_shared_components_are_candle_only_and_gate_install_state_off_macos() {
         use std::collections::BTreeSet;
-
-        fn builtin_models_entry(model_id: &str) -> Value {
-            let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-                .iter()
-                .find(|(name, _)| *name == "builtin.models.jsonc")
-                .map(|(_, contents)| *contents)
-                .expect("builtin.models.jsonc present");
-            let manifest: Value =
-                serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-                    .expect("builtin.models.jsonc parses");
-            manifest["models"]
-                .as_array()
-                .expect("models array")
-                .iter()
-                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
-                .cloned()
-                .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
-        }
 
         let want: BTreeSet<String> = ["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"]
             .iter()
