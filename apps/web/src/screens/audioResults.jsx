@@ -18,6 +18,8 @@ import {
   formatRelativeTime,
 } from "../audioTakes.js";
 import { terminalStatuses } from "../jobTypes.js";
+import { useAppLive } from "../context/AppContext.js";
+import { deriveWorkerHardware, findWorkerForJob } from "../workers.js";
 // `job.progress` is a 0..1 fraction (the same value WorkerProgressCard renders); `percent`
 // is the one place that conversion lives.
 import { percent } from "../formatting.js";
@@ -55,13 +57,20 @@ function ModeChip({ mode, label, extra = null, className = "" }) {
  */
 export function AudioInflightStrip({ run, onCancel, onOpenQueue }) {
   const { job } = run;
+  const { workersById, visibleWorkers } = useAppLive();
   const takes = audioExpectedTakes(job);
   const numeric = Number(job.progress);
   const hasProgress = Number.isFinite(numeric) && numeric > 0;
   const title = [run.modeLabel, run.modelName, takes ? `${takes} takes` : null]
     .filter(Boolean)
     .join(" · ");
-  const message = job.message ?? "";
+  // The design's message line ends with WHERE the run is executing. The strip carries only the
+  // device name — the full hardware pills and GPU meters stay in the Queue.
+  const device = useMemo(() => {
+    const worker = (job.workerId && workersById?.get?.(job.workerId)) || findWorkerForJob(job, visibleWorkers ?? []);
+    return deriveWorkerHardware(worker)?.gpuLabel ?? "";
+  }, [job, workersById, visibleWorkers]);
+  const message = [job.message, device].filter(Boolean).join(" · ");
   return (
     <div className="audio-inflight" data-testid="audio-inflight-strip">
       <span className="audio-inflight__status">{job.cancelRequested ? "Canceling" : "Rendering"}</span>
