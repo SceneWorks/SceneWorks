@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { AssetMedia, assetCanRenderAsAudio, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
 import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";
-import { audioAssetRunGroups, formatRelativeTime } from "../audioTakes.js";
+import { audioAssetMetaLine, audioAssetRunGroups } from "../audioTakes.js";
 import { useAppContext } from "../context/AppContext.js";
 import { SimpleAudioViewer } from "./simpleAudioParts.jsx";
 import { DownloadButton } from "./studioParts.jsx";
@@ -68,7 +68,7 @@ export function SimplePreview({
           <SimpleAudioViewer
             asset={asset}
             breakpoint={breakpoint}
-            meta={audioMetaLine(asset, run)}
+            meta={audioAssetMetaLine(asset, run)}
             onSendToVideo={onSendToVideo}
             player={player}
             run={run}
@@ -105,30 +105,4 @@ export function SimplePreview({
       </div>
     </div>
   );
-}
-
-// The viewer's meta line — model · voice · language · rate/channels · age. Every clause is
-// read off the asset's OWN recorded recipe and measured file block (project_store's audio
-// asset record), so a clip that recorded none simply shows fewer clauses. The model is shown
-// by its catalog LABEL when it's still installed (the recipe records the id), falling back to
-// the recorded id so a clip from an uninstalled model still names what produced it.
-function audioMetaLine(asset, run) {
-  const settings = asset?.recipe?.normalizedSettings ?? {};
-  const rate = Number(asset?.file?.sampleRate);
-  const channels = Number(asset?.file?.channels);
-  const format = [
-    Number.isFinite(rate) && rate > 0 ? `${Math.round(rate / 100) / 10} kHz` : null,
-    channels === 1 ? "mono" : channels === 2 ? "stereo" : null,
-  ]
-    .filter(Boolean)
-    .join(" ");
-  return [
-    run?.modelName || asset?.recipe?.model || null,
-    settings.voice ?? null,
-    settings.language ?? null,
-    format || null,
-    formatRelativeTime(asset?.createdAt) || null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
 }
