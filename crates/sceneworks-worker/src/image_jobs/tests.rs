@@ -5825,6 +5825,99 @@ fn candle_image_route_gates_on_flag_then_pose_reject_then_txt2img() {
     assert_eq!(resolve_candle_image_route(&unknown, &settings), None);
 }
 
+// sc-13840: scheduler/worker Candle routing parity. This iterates the core scheduler's generated
+// built-in oracle directly, so adding a routed model without a worker route fails here instead of
+// reaching the procedural-preview stub at runtime (the sc-13831 `krea_2_raw` regression).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn scheduler_models_without_native_candle_generator<'a>(
+    scheduler_models: &'a [&'a str],
+    bespoke_models: &[&str],
+) -> Vec<&'a str> {
+    scheduler_models
+        .iter()
+        .copied()
+        .filter(|model| !bespoke_models.contains(model))
+        .filter(|model| {
+            !mlx_model(model).is_some_and(|resolved| {
+                resolved.backend() == "candle"
+                    && matches!(resolved.descriptor.modality, gen_core::Modality::Image)
+            })
+        })
+        .collect()
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn every_scheduler_routed_candle_image_has_a_native_worker_route() {
+    // Scope is deliberately the core built-in oracle. Manifest-routed imported ids are a separate
+    // contract: for example `resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lane`
+    // exercises a forwarded external manifest and proves it reaches its native worker route.
+    // Built-in scheduler ids that intentionally bypass the generic txt2img engine.
+    const BESPOKE_BUILTIN_ROUTES: &[(&str, CandleImageRoute)] =
+        &[("bernini_image", CandleImageRoute::Bernini)];
+    const BESPOKE_BUILTIN_MODELS: &[&str] = &["bernini_image"];
+
+    let mut settings = Settings::from_env();
+    settings.backend_candle_enabled = true;
+
+    let scheduler_models = sceneworks_core::jobs_store::candle_routed_image_models();
+    assert_eq!(
+        scheduler_models_without_native_candle_generator(
+            scheduler_models,
+            BESPOKE_BUILTIN_MODELS,
+        ),
+        Vec::<&str>::new(),
+        "every generic scheduler-routed id must resolve through MODEL_TABLE to a linked Candle image \
+         generator; route membership alone is not proof that the worker can render it",
+    );
+
+    for &model in scheduler_models {
+        let native = request(json!({
+            "projectId": "route-parity",
+            "model": model,
+            "prompt": "route parity",
+            "count": 1
+        }));
+        let route = resolve_candle_image_route(&native, &settings);
+        assert!(
+            route.is_some(),
+            "scheduler routes {model} to Candle, but the worker has no native route (would stub)",
+        );
+
+        if let Some((_, expected)) = BESPOKE_BUILTIN_ROUTES
+            .iter()
+            .find(|(bespoke, _)| *bespoke == model)
+        {
+            assert_eq!(route, Some(*expected), "{model} bespoke route drifted");
+        } else {
+            assert_eq!(
+                route,
+                Some(CandleImageRoute::CandleTxt2Img),
+                "{model} should use the generic native txt2img route",
+            );
+        }
+    }
+}
+
+// The capability half above must remain independent of the scheduler oracle consumed by
+// `is_candle_engine`. Prove it rejects the exact regression shape: a newly scheduler-routed id with no
+// MODEL_TABLE row / registered Candle image descriptor.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn scheduler_only_unregistered_model_fails_native_generator_parity() {
+    let mut mutated_scheduler_models =
+        sceneworks_core::jobs_store::candle_routed_image_models().to_vec();
+    mutated_scheduler_models.push("synthetic_scheduler_only_model");
+
+    assert_eq!(
+        scheduler_models_without_native_candle_generator(
+            &mutated_scheduler_models,
+            &["bernini_image"],
+        ),
+        vec!["synthetic_scheduler_only_model"],
+    );
+}
+
 // sc-10134 (epic 8588): a `krea_2_turbo` job in a NON-edit mode carrying a `referenceAssetId` (the img2img
 // "Start from an image" tile) routes to the generic candle txt2img lane — NOT the Krea edit lane
 // (`edit_image`-only, `krea_edit_candle_mode`) nor the pose-control lane (needs `advanced.poses`).

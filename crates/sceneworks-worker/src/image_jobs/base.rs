@@ -4474,135 +4474,16 @@ async fn generate_stream(
     .await
 }
 
-/// Whether `model` is served by the candle (Windows/CUDA) backend's generic lane (txt2img, plus the
-/// Ideogram 4 in-lane edit, below). SDXL/RealVisXL (sc-3675) plus the four image families wired in
-/// sc-5096 — z-image, flux schnell/dev, flux2-klein, qwen-image — plus Lens / Lens-Turbo (sc-5126, the
-/// first candle family with quant + LoRA/LoKr) plus Ideogram 4 + Turbo (sc-6597/sc-6598, epic 6561) plus
-/// the two FLUX.2-klein weight variants (sc-7459: `_kv` / `_true_v2`, sharing the `flux2_klein_9b` loader).
-/// `realvisxl` (and the klein `_kv` / `_true_v2`) share an existing candle engine via a weights swap;
-/// every other id maps 1:1 to its
-/// `MODEL_TABLE` engine id. For the OTHER families, edit/control/reference shapes route to their bespoke
-/// candle lanes (checked before this gate in the dispatch) or to the Python torch worker; Ideogram is
-/// the exception — its img2img/mask edit is the SAME engine as its T2I, so `generate_candle_stream`
-/// resolves the edit conditioning in-lane (mirroring the MLX `generate_stream`), no separate stream.
-/// Lens is pure T2I; only quant + adapters, which `generate_candle_stream` resolves from the descriptor.
+/// Whether `model` is served by the Candle backend's generic built-in image lane.
+///
+/// The scheduler's generated catalog is the source of truth. `bernini_image` is the sole built-in
+/// exception: the scheduler routes it to Candle, but [`resolve_candle_image_route`] sends it through
+/// the dedicated still-image Bernini lane before reaching this gate. Dynamic `external_base_*` ids
+/// are likewise claimed by manifest-driven bespoke routes and never appear in the built-in catalog.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn is_candle_engine(model: &str) -> bool {
-    matches!(
-        model,
-        "sdxl"
-            | "realvisxl"
-            // Illustrious-XL (epic 10609): vanilla-SDXL anime finetunes on the shared candle `sdxl`
-            // engine. Their turnkeys are tiered, so the dense lanes resolve `bf16/` (dense_tier_subdir).
-            | "illustrious_xl_v1"
-            | "illustrious_xl_v2"
-            // RealVisXL Lightning (sc-7176): shares the candle `sdxl` engine via a weights swap; the
-            // few-step `lightning` sampler is forced in `generate_candle_stream`. txt2img-only (the
-            // router defers its conditioning shapes to torch), so it rides the base candle txt2img lane.
-            | "realvisxl_lightning"
-            | "z_image_turbo"
-            // Base (non-distilled, full-CFG) Z-Image (sc-8679, epic 8236): the registered candle
-            // `z_image` base generator (shift-6.0 / ~50-step / real CFG) rides the generic candle txt2img
-            // lane, the base sibling of `z_image_turbo`. Shares the `standard_tier_subdir` turnkey layout;
-            // `generate_candle_stream` resolves its own repo/steps/guidance/negative from the descriptor.
-            // txt2img only — edit / identity / strict-pose shapes have their own bespoke lanes (the
-            // `z_image` control lane is `advanced.poses`, branched out before this gate).
-            | "z_image"
-            | "flux_schnell"
-            | "flux_dev"
-            | "flux2_klein_9b"
-            // FLUX.2-klein weight variants (sc-7459): same candle `flux2_klein_9b` loader/arch, a
-            // weights swap. `_kv` loads its own full diffusers tree; `_true_v2` loads the locally
-            // converted diffusers dir (`modelPath` seam). txt2img only — `_kv`'s reference-edit /
-            // KV-cache accel and every edit/reference shape defer to torch (`image_request_candle_eligible`).
-            | "flux2_klein_9b_kv"
-            | "flux2_klein_9b_true_v2"
-            // FLUX.2-dev (sc-7458): the 32B flagship rides the generic candle txt2img lane like klein.
-            // `generate_candle_stream` resolves Q4 (manifest `mlx.quantize: 4` + the dev descriptor's
-            // `supported_quants`) so the dense snapshot is staged in CPU RAM and quantized onto the GPU
-            // at load. Edit/control/reference shapes route to their bespoke lanes or torch (story 4).
-            | "flux2_dev"
-            | "qwen_image"
-            | "chroma1_hd"
-            | "chroma1_base"
-            | "chroma1_flash"
-            | "lens"
-            | "lens_turbo"
-            | "kolors"
-            | "sensenova_u1_8b"
-            | "sensenova_u1_8b_infographic_v2"
-            | "sensenova_u1_8b_infographic_v3"
-            | "sensenova_u1_8b_fast"
-            | "sensenova_u1_8b_infographic_v2_fast"
-            | "sensenova_u1_8b_infographic_v3_fast"
-            | "ideogram_4"
-            | "ideogram_4_turbo"
-            // Boogu-Image-0.1 (sc-7524, epic 6831): Base + Turbo (txt2img) and the Edit checkpoint, all
-            // on the generic candle lane. Like Ideogram, `boogu_image_edit`'s instruction edit is in-lane
-            // (the engine resolves the source `Reference`), not a separate bespoke stream.
-            | "boogu_image"
-            | "boogu_image_turbo"
-            | "boogu_image_edit"
-            // Krea 2 Turbo (sc-7581, epic 7565 P4): txt2img + inference LoRA/LoKr on the generic candle
-            // lane (CFG-free 8-step). sc-9092: the candle lane now packed-loads the SAME
-            // `SceneWorks/krea-2-turbo-mlx` q8/q4 turnkey subdir the macOS path loads (candle-gen sc-9411
-            // packed-detect, via the shared `resolve_weights_dir`/`krea_model_subdir`) — the ad-hoc
-            // `candle_krea_repo` bf16 diffusers rehost is retired. The `candle-gen-krea` descriptor
-            // advertises supports_lora/supports_lokr (sc-7836), so `generate_candle_stream` resolves a
-            // `krea_2_raw`-trained adapter via `model.supports_adapters()`. No edit/reference/control
-            // shapes; on-the-fly quant stays descriptor-gated (`supported_quants` still `&[]` — the
-            // packed turnkey self-describes its tier at load).
-            | "krea_2_turbo"
-            // Krea 2 Raw (sc-9994, epic 9992): the UNDISTILLED full-CFG base sibling of Turbo, now a
-            // registered candle txt2img generator (`candle-gen-krea` `render_base` — two DiT forwards/step,
-            // 52 steps, resolution-dynamic mu). Arch-identical to Turbo (only the DiT weights differ), so it
-            // rides the SAME generic candle lane: `generate_candle_stream` resolves its repo/tier/steps/
-            // guidance/negative from the descriptor + the shared `krea_model_subdir` turnkey resolver, and
-            // the img2img `Reference` init (sc-10226 `render_base_img2img`). It is ALSO the LoRA-training
-            // base (Path 1). This entry was MISSING when epic 9992 landed the generator — the scheduler
-            // routes `krea_2_raw` to candle (`IMAGE_MODEL_CAPS` candle_routed=true, mirroring Turbo), but
-            // `resolve_candle_image_route`'s generic arm gates on THIS list, so plain Raw t2i fell through to
-            // `None` and the worker emitted a `procedural_preview` STUB gradient (`realModelInference:false`)
-            // instead of running the real model — the classic router/worker list skew. Turbo was unaffected
-            // (it was in the list); the Raw edit lane (`krea_edit_candle_available`, checked first) hid the
-            // gap for edit jobs, and there was no `krea_2_raw` t2i routing test to catch it.
-            | "krea_2_raw"
-            // Stable Diffusion 3.5 (sc-7880, epic 7982): Large / Large Turbo / Medium all ride the generic
-            // candle txt2img lane (the `candle-gen-sd3` provider). `generate_candle_stream` resolves Q4/Q8
-            // from the descriptor + manifest (`mlx.quantize` 8) — the dense MMDiT folds to Q4_0/Q8_0 at
-            // load (sc-7879). Pure txt2img; no edit/reference/control/LoRA candle path (those defer to
-            // torch via `image_request_candle_eligible`).
-            | "sd3_5_large"
-            | "sd3_5_large_turbo"
-            | "sd3_5_medium"
-            // SANA 1600M (sc-11780, epic 8485): NVIDIA's 1.6B Linear-DiT true-CFG txt2img rides the
-            // generic candle lane (the `candle-gen-sana` provider, candle-gen #495 — the off-Mac sibling
-            // of `mlx-gen-sana`). `generate_candle_stream` resolves the whole `Efficient-Large-Model/
-            // Sana_1600M_1024px_diffusers` diffusers snapshot (transformer/ + vae/ + text_encoder/) via the
-            // candle-sana branch in `resolve_weights_dir` — NOT the MLX-packed turnkey, NOT a tier subdir.
-            // Pure txt2img (20 steps / guidance 4.5 + negative prompt); no edit/reference/control/LoRA/quant
-            // candle path (those defer to torch via `image_request_candle_eligible`).
-            | "sana_1600m"
-            // SANA-Sprint 1.6B (sc-11781, epic 8485): NVIDIA's CFG-free few-step distill of SANA rides the
-            // generic candle lane too (the `candle-gen-sana` Sprint pipeline, candle-gen #498 — the off-Mac
-            // sibling of `mlx-gen-sana`'s Sprint id). `generate_candle_stream` resolves the whole
-            // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` diffusers snapshot (transformer/ +
-            // vae/ + text_encoder/) via the candle-sana branch in `resolve_weights_dir` — NOT the MLX-packed
-            // turnkey, NOT a tier subdir. Pure txt2img, CFG-free 1–4 step SCM/TrigFlow (guidance embedded,
-            // no negative-prompt second pass); no edit/reference/control/LoRA/quant candle path (the Sprint
-            // adapter rejects those — they defer to torch via `image_request_candle_eligible`).
-            | "sana_sprint_1600m"
-            // Anima 2B base / aesthetic / turbo (sc-10676, epic 10512): the candle port (sc-10525,
-            // GPU-validated sc-10625) rides the generic candle txt2img lane off-Mac. `generate_candle_\
-            // stream` dense-loads bf16 from the raw `circlestone-labs/Anima` split_files/ tree (no
-            // convert-at-install off-Mac) and FORCES the load Quant to None — the descriptor advertises
-            // Q4/Q8 but there is no packed tier off-Mac, and the loader rejects a quant against the dense
-            // DiT. Inference LoRA/LoKr folds onto the dense DiT (`supports_lora`/`supports_lokr`); quant +
-            // LoRA together stays rejected (sc-10578). Pure txt2img (no edit/reference/control shapes).
-            | "anima_base"
-            | "anima_aesthetic"
-            | "anima_turbo"
-    )
+    model != "bernini_image"
+        && sceneworks_core::jobs_store::candle_routed_image_models().contains(&model)
 }
 
 /// The per-asset `adapter` id recorded for a candle image engine (`candle_<family>`), the candle
@@ -5990,69 +5871,6 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("anima_base"), "candle_anima");
         assert_eq!(candle_adapter_label("anima_aesthetic"), "candle_anima");
         assert_eq!(candle_adapter_label("anima_turbo"), "candle_anima");
-    }
-
-    #[test]
-    fn is_candle_engine_covers_only_the_wired_txt2img_families() {
-        for model in [
-            "sdxl",
-            "realvisxl",
-            "realvisxl_lightning",
-            "z_image_turbo",
-            // Base (non-distilled, full-CFG) Z-Image txt2img (sc-8679): the base sibling of z_image_turbo.
-            "z_image",
-            "flux_schnell",
-            "flux_dev",
-            "flux2_klein_9b",
-            "flux2_dev",
-            // sc-7459: the two klein weight variants share the candle FLUX.2 engine.
-            "flux2_klein_9b_kv",
-            "flux2_klein_9b_true_v2",
-            "qwen_image",
-            "chroma1_hd",
-            "chroma1_base",
-            "chroma1_flash",
-            "lens",
-            "lens_turbo",
-            "kolors",
-            "sensenova_u1_8b",
-            "sensenova_u1_8b_fast",
-            "ideogram_4",
-            "ideogram_4_turbo",
-            // Boogu (sc-7524): Base + Turbo (txt2img) AND `boogu_image_edit` — unlike z_image_edit /
-            // qwen_image_edit (bespoke streams), Boogu's instruction edit is in-lane on the generic
-            // candle stream (like Ideogram), so `boogu_image_edit` IS a candle engine.
-            "boogu_image",
-            "boogu_image_turbo",
-            "boogu_image_edit",
-            // Krea 2 Turbo (sc-7581): pure txt2img on the generic candle lane.
-            "krea_2_turbo",
-            // Krea 2 Raw (sc-9994, epic 9992): the undistilled full-CFG base rides the SAME generic candle
-            // lane as Turbo (`render_base`). Was missing here, so plain Raw t2i stubbed a procedural gradient.
-            "krea_2_raw",
-            // SD3.5 (sc-7880): Large / Large Turbo / Medium ride the generic candle txt2img lane.
-            "sd3_5_large",
-            "sd3_5_large_turbo",
-            "sd3_5_medium",
-            // Anima 2B (sc-10676): base / aesthetic / turbo dense-load bf16 on the generic candle lane.
-            "anima_base",
-            "anima_aesthetic",
-            "anima_turbo",
-        ] {
-            assert!(is_candle_engine(model), "{model} should be a candle engine");
-        }
-        // Non-candle families + still-unwired variants (bespoke-stream edit ids) are not in the generic
-        // lane. (kolors / sensenova ARE candle engines now — sc-5576 — for their base txt2img shape;
-        // `boogu_image_edit` IS — sc-7524 — because its edit is in-lane, not bespoke; the klein
-        // `_kv` / `_true_v2` weight variants are candle engines too — sc-7459 — for txt2img.)
-        for model in [
-            "bernini_image",
-            "z_image_edit",
-            "qwen_image_edit",
-            "wan_2_2",
-        ] {
-            assert!(!is_candle_engine(model), "{model} must not be a candle engine");
-        }
     }
 
     /// sc-12090: the reject tail suggests only INSTALLED, smaller tiers — never the rejected tier, and
