@@ -108,18 +108,20 @@ pub(crate) async fn control_overlay_catalog(
 
 /// Resolve a selected control overlay id (`advanced.controlWeights.overlayId`, set by the Studio's
 /// ControlPanel picker) to what the worker strict-control lane (`ensure_krea_control_weights`) reads
-/// (sc-10165 B4 + sc-8466). An INSTALLED overlay resolves to its `.safetensors` path
-/// (`advanced.controlWeights.path`, studio-trained/registered or an already-cached hosted overlay); a
-/// hosted overlay not yet on disk (the built-in beta or any un-cached hosted entry) resolves to
-/// `advanced.controlWeights.{repo,filename}` so the worker lazy-downloads it on first use (the FLUX.2
-/// control precedent). A no-op when no overlay is selected. A selected-but-unknown overlay, or a
-/// training/local overlay that is not installed, is a clean 400 rather than a deep worker error. Mirrors
-/// the LoRA id→path resolution: one catalog snapshot, in-place `advanced` mutation.
+/// (sc-10165 B4 + sc-8466). A hosted overlay always resolves to its immutable
+/// `advanced.controlWeights.{repo,filename,revision}` tuple, even when the catalog normalization found
+/// something cached: `installState`/`installedPath` may be derived from a mutable `refs/main` entry and
+/// is not authority to replace the pinned snapshot. An installed training/local overlay resolves to its
+/// `.safetensors` path. A no-op when no overlay is selected. A selected-but-unknown overlay, a hosted
+/// overlay without a 40-hex revision, or a training/local overlay that is not installed is a clean 400
+/// rather than a deep worker error. Mirrors the LoRA id→path resolution: one catalog snapshot, in-place
+/// `advanced` mutation.
 pub(crate) async fn resolve_control_overlay_selection(
     state: &AppState,
     project_id: Option<&str>,
     job_payload: &mut JsonObject,
 ) -> Result<(), ApiError> {
+    validate_raw_control_weights(job_payload)?;
     let Some(overlay_id) = job_payload
         .get("advanced")
         .and_then(Value::as_object)
@@ -139,13 +141,71 @@ pub(crate) async fn resolve_control_overlay_selection(
         .into_iter()
         .find(|item| item.get("id").and_then(Value::as_str) == Some(overlay_id.as_str()))
         .ok_or_else(|| ApiError::bad_request(format!("Control overlay not found: {overlay_id}")))?;
+    if let (Some(model), Some(base_model)) = (
+        job_payload.get("model").and_then(Value::as_str),
+        overlay.get("baseModel").and_then(Value::as_str),
+    ) {
+        if model != base_model {
+            return Err(ApiError::bad_request(format!(
+                "Control overlay '{overlay_id}' is registered for {base_model}, not {model}"
+            )));
+        }
+    }
 
-    // What the worker resolves the overlay from: an installed local `.safetensors` (`controlWeights.path`
-    // — studio-trained/registered, or an already-cached hosted overlay), else a hosted repo/filename it
-    // lazy-downloads on first use (`controlWeights.{repo,filename}` — the built-in beta or any not-yet-
-    // cached hosted overlay). A training/local overlay that is not installed is a real 400.
+    let weights = authorized_overlay_weights(&overlay_id, &overlay)?;
+
+    let advanced = job_payload
+        .entry("advanced".to_owned())
+        .or_insert_with(|| Value::Object(JsonObject::new()));
+    if let Some(advanced) = advanced.as_object_mut() {
+        let control_weights = advanced
+            .entry("controlWeights".to_owned())
+            .or_insert_with(|| Value::Object(JsonObject::new()));
+        if let Some(control_weights) = control_weights.as_object_mut() {
+            // The catalog selection is authoritative. Remove every caller value
+            // before writing the registered location so a mixed payload cannot
+            // retain an injected repo, filename, path, revision, or internal bit.
+            control_weights.clear();
+            control_weights.insert("overlayId".to_owned(), Value::String(overlay_id));
+            control_weights.insert("_catalogAuthorized".to_owned(), Value::Bool(true));
+            for (key, value) in weights {
+                control_weights.insert(key.to_owned(), value);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Translate one catalog entry to the only worker location the API will authorize.
+///
+/// Hosted entries are checked first and always stay a pinned remote tuple. This deliberately
+/// disregards a normalized `installedPath`: only the worker's exact `snapshots/<revision>/<file>`
+/// resolver may turn the tuple into a local path. Local training entries retain their installed
+/// `.safetensors` behavior.
+fn authorized_overlay_weights(
+    overlay_id: &str,
+    overlay: &Value,
+) -> Result<Vec<(&'static str, Value)>, ApiError> {
+    let hosted = overlay
+        .pointer("/source/provider")
+        .or_else(|| overlay.get("provider"))
+        .and_then(Value::as_str)
+        == Some("huggingface");
+    if hosted {
+        let (repo, filename, revision) = hosted_overlay_repo_file(overlay).ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "Control overlay '{overlay_id}' must register one weights file and a pinned 40-hex source.revision"
+            ))
+        })?;
+        return Ok(vec![
+            ("repo", Value::String(repo)),
+            ("filename", Value::String(filename)),
+            ("revision", Value::String(revision)),
+        ]);
+    }
+
     let installed = overlay.get("installState").and_then(Value::as_str) == Some("installed");
-    let weights: Vec<(&str, String)> = if installed {
+    if installed {
         let installed_path = overlay
             .get("installedPath")
             .and_then(Value::as_str)
@@ -160,35 +220,17 @@ pub(crate) async fn resolve_control_overlay_selection(
                     "Control overlay '{overlay_id}' weights (.safetensors) not found under {installed_path}"
                 ))
             })?;
-        vec![("path", weights_path)]
-    } else if let Some((repo, filename)) = hosted_overlay_repo_file(&overlay) {
-        vec![("repo", repo), ("filename", filename)]
-    } else {
-        return Err(ApiError::bad_request(format!(
-            "Control overlay '{overlay_id}' is not installed"
-        )));
-    };
-
-    let advanced = job_payload
-        .entry("advanced".to_owned())
-        .or_insert_with(|| Value::Object(JsonObject::new()));
-    if let Some(advanced) = advanced.as_object_mut() {
-        let control_weights = advanced
-            .entry("controlWeights".to_owned())
-            .or_insert_with(|| Value::Object(JsonObject::new()));
-        if let Some(control_weights) = control_weights.as_object_mut() {
-            for (key, value) in weights {
-                control_weights.insert(key.to_owned(), Value::String(value));
-            }
-        }
+        return Ok(vec![("path", Value::String(weights_path))]);
     }
-    Ok(())
+    Err(ApiError::bad_request(format!(
+        "Control overlay '{overlay_id}' is not installed"
+    )))
 }
 
 /// The (repo, filename) of a hosted overlay entry (`source.provider="huggingface"` + `source.repo` +
 /// `files[0]`/`source.file`) — the worker lazy-downloads these when the overlay is not yet cached,
 /// mirroring the built-in default in `ensure_krea_control_weights`. `None` for a training/local overlay.
-fn hosted_overlay_repo_file(overlay: &Value) -> Option<(String, String)> {
+fn hosted_overlay_repo_file(overlay: &Value) -> Option<(String, String, String)> {
     let source = overlay.get("source").and_then(Value::as_object);
     let provider = source
         .and_then(|s| s.get("provider"))
@@ -213,7 +255,77 @@ fn hosted_overlay_repo_file(overlay: &Value) -> Option<(String, String)> {
         .map(str::trim)
         .filter(|v| !v.is_empty())?
         .to_owned();
-    Some((repo, filename))
+    let revision = source
+        .and_then(|s| s.get("revision"))
+        .or_else(|| overlay.get("revision"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|revision| {
+            revision.len() == 40
+                && revision
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })?
+        .to_owned();
+    Some((repo, filename, revision))
+}
+
+/// Reject raw remote/local control-weight locations before a job is queued.
+///
+/// A caller may omit `controlWeights` and use the shipped engine default, name
+/// an exact shipped repo/file tuple, or select a registered `overlayId`. It may
+/// not manufacture a catalog authorization bit or choose an arbitrary remote
+/// repository/path. The worker repeats the engine-specific exact-tuple check.
+fn validate_raw_control_weights(job_payload: &mut JsonObject) -> Result<(), ApiError> {
+    let Some(control_weights) = job_payload
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
+        .and_then(|advanced| advanced.get_mut("controlWeights"))
+        .and_then(Value::as_object_mut)
+    else {
+        return Ok(());
+    };
+
+    // Internal fields are derived only after a successful catalog lookup.
+    control_weights.remove("_catalogAuthorized");
+    control_weights.remove("revision");
+
+    let overlay_id = control_weights
+        .get("overlayId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if overlay_id.is_some() {
+        return Ok(());
+    }
+    if control_weights.contains_key("path") {
+        return Err(ApiError::bad_request(
+            "advanced.controlWeights.path requires a registered overlayId",
+        ));
+    }
+
+    let repo = control_weights
+        .get("repo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let file = control_weights
+        .get("filename")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (repo, file) {
+        (None, None) => Ok(()),
+        (Some(repo), Some(file))
+            if sceneworks_core::control_weights::shipped_control_weight_by_repo_file(repo, file)
+                .is_some() =>
+        {
+            Ok(())
+        }
+        _ => Err(ApiError::bad_request(
+            "advanced.controlWeights repo/filename must be an exact shipped artifact or come from a registered overlayId",
+        )),
+    }
 }
 
 /// The overlay's registered `installedPath` may be the overlay dir (the normalized `source.path`) or the
@@ -246,7 +358,8 @@ mod tests {
             "source": {
                 "provider": "huggingface",
                 "repo": "SceneWorks/krea2-pose-controlnet-beta",
-                "file": "should-not-win.safetensors"
+                "file": "should-not-win.safetensors",
+                "revision": "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac"
             },
             "files": ["control_step5000.safetensors"]
         });
@@ -254,7 +367,8 @@ mod tests {
             hosted_overlay_repo_file(&overlay),
             Some((
                 "SceneWorks/krea2-pose-controlnet-beta".to_owned(),
-                "control_step5000.safetensors".to_owned()
+                "control_step5000.safetensors".to_owned(),
+                "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac".to_owned()
             ))
         );
     }
@@ -262,11 +376,79 @@ mod tests {
     #[test]
     fn hosted_overlay_repo_file_falls_back_to_source_file() {
         let overlay = json!({
-            "source": { "provider": "huggingface", "repo": "acme/x", "file": "w.safetensors" }
+            "source": {
+                "provider": "huggingface",
+                "repo": "acme/x",
+                "file": "w.safetensors",
+                "revision": "0123456789abcdef0123456789abcdef01234567"
+            }
         });
         assert_eq!(
             hosted_overlay_repo_file(&overlay),
-            Some(("acme/x".to_owned(), "w.safetensors".to_owned()))
+            Some((
+                "acme/x".to_owned(),
+                "w.safetensors".to_owned(),
+                "0123456789abcdef0123456789abcdef01234567".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn hosted_overlay_requires_a_pinned_revision() {
+        let overlay = json!({
+            "source": { "provider": "huggingface", "repo": "acme/x", "file": "w.safetensors" }
+        });
+        assert_eq!(hosted_overlay_repo_file(&overlay), None);
+    }
+
+    #[test]
+    fn already_cached_hosted_overlay_still_requires_a_pinned_revision() {
+        let cache = tempfile::tempdir().expect("cache dir");
+        let mutable_main = cache.path().join("refs-main/w.safetensors");
+        std::fs::create_dir_all(mutable_main.parent().unwrap()).expect("cache parent");
+        std::fs::write(&mutable_main, b"cached").expect("cached weights");
+        let overlay = json!({
+            "installState": "installed",
+            "installedPath": mutable_main,
+            "source": {
+                "provider": "huggingface",
+                "repo": "acme/x",
+                "file": "w.safetensors"
+            }
+        });
+        assert!(
+            authorized_overlay_weights("cached-without-pin", &overlay).is_err(),
+            "a mutable cached path must not bypass the hosted revision requirement"
+        );
+    }
+
+    #[test]
+    fn installed_hosted_overlay_remains_an_immutable_remote_tuple() {
+        let overlay = json!({
+            "installState": "installed",
+            "installedPath": "/cache/models--acme--x/refs/main/w.safetensors",
+            "source": {
+                "provider": "huggingface",
+                "repo": "acme/x",
+                "file": "w.safetensors",
+                "revision": "0123456789abcdef0123456789abcdef01234567"
+            }
+        });
+        let weights = authorized_overlay_weights("cached-with-pin", &overlay).unwrap();
+        assert_eq!(
+            weights,
+            vec![
+                ("repo", Value::String("acme/x".to_owned())),
+                ("filename", Value::String("w.safetensors".to_owned())),
+                (
+                    "revision",
+                    Value::String("0123456789abcdef0123456789abcdef01234567".to_owned())
+                )
+            ]
+        );
+        assert!(
+            weights.iter().all(|(key, _)| *key != "path"),
+            "only the worker's pinned-snapshot resolver may produce a hosted local path"
         );
     }
 
@@ -279,5 +461,58 @@ mod tests {
             "files": ["overlay.safetensors"]
         });
         assert_eq!(hosted_overlay_repo_file(&overlay), None);
+    }
+
+    #[test]
+    fn raw_control_weights_accept_only_exact_shipped_artifacts() {
+        let mut shipped = json!({
+            "advanced": {
+                "controlWeights": {
+                    "repo": "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union",
+                    "filename": "FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors"
+                }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(validate_raw_control_weights(&mut shipped).is_ok());
+
+        for weights in [
+            json!({"repo": "attacker/payload", "filename": "model.safetensors"}),
+            json!({
+                "repo": "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union",
+                "filename": "other.safetensors"
+            }),
+            json!({"path": "/tmp/payload.safetensors"}),
+        ] {
+            let mut payload = json!({"advanced": {"controlWeights": weights}})
+                .as_object()
+                .unwrap()
+                .clone();
+            assert!(validate_raw_control_weights(&mut payload).is_err());
+        }
+    }
+
+    #[test]
+    fn raw_catalog_stamp_is_removed_before_overlay_lookup() {
+        let mut payload = json!({
+            "advanced": {
+                "controlWeights": {
+                    "overlayId": "registered",
+                    "repo": "attacker/payload",
+                    "filename": "payload.safetensors",
+                    "revision": "0123456789abcdef0123456789abcdef01234567",
+                    "_catalogAuthorized": true
+                }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        validate_raw_control_weights(&mut payload).unwrap();
+        let weights = payload["advanced"]["controlWeights"].as_object().unwrap();
+        assert!(!weights.contains_key("_catalogAuthorized"));
+        assert!(!weights.contains_key("revision"));
     }
 }

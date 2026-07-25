@@ -44,6 +44,72 @@ MANIFEST_PATH = ROOT / "config" / "manifests" / "builtin.models.jsonc"
 SCHEMA_PATH = ROOT / "packages" / "schemas" / "model-manifest.schema.json"
 ENGINE_TABLE_PATH = ROOT / "crates" / "sceneworks-worker" / "src" / "engines.rs"
 WORKER_SOURCE_PATH = ROOT / "crates" / "sceneworks-worker" / "src"
+CONTROL_WEIGHTS_PATH = ROOT / "crates" / "sceneworks-core" / "src" / "control_weights.rs"
+
+EXPECTED_SHIPPED_CONTROL_WEIGHTS = frozenset(
+    {
+        (
+            "flux1_dev_control",
+            "Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0",
+            "diffusion_pytorch_model.safetensors",
+            "5d700aaad96c5ddcdf8a38ef9b22a82aac2c38e5",
+        ),
+        (
+            "flux2_dev_control",
+            "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union",
+            "FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors",
+            "b3dcd7836a0e926248dac3ccba8fc0853495764b",
+        ),
+        (
+            "z_image_turbo_control",
+            "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1",
+            "Z-Image-Turbo-Fun-Controlnet-Union-2.1-8steps.safetensors",
+            "5155fc56d17821007d6f62ac192c09e0f0e72016",
+        ),
+        (
+            "z_image_control",
+            "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "Z-Image-Fun-Controlnet-Union-2.1.safetensors",
+            "755999a934909bd5832e20718bb7c639d2a63eb9",
+        ),
+        (
+            "z_image_control",
+            "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "diffusion_pytorch_model.safetensors",
+            "755999a934909bd5832e20718bb7c639d2a63eb9",
+        ),
+        (
+            "qwen_image_control",
+            "SceneWorks/qwen-image-2512-fun-controlnet-union",
+            "q4/model.safetensors",
+            "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca",
+        ),
+        (
+            "qwen_image_control",
+            "SceneWorks/qwen-image-2512-fun-controlnet-union",
+            "q8/model.safetensors",
+            "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca",
+        ),
+        (
+            "qwen_image_control",
+            "SceneWorks/qwen-image-2512-fun-controlnet-union",
+            "bf16/model.safetensors",
+            "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca",
+        ),
+        (
+            "kolors_control",
+            "Kwai-Kolors/Kolors-ControlNet-Pose",
+            "diffusion_pytorch_model.safetensors",
+            "83e35a8033a89d2e75044b412d0e2474111578f7",
+        ),
+        (
+            "krea_2_turbo_control",
+            "SceneWorks/krea2-pose-controlnet-beta",
+            "control_step5000.safetensors",
+            "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac",
+        ),
+    }
+)
 
 
 def _strip_jsonc_comments(body: str) -> str:
@@ -231,6 +297,146 @@ def test_builtin_models_do_not_declare_a_top_level_repo():
     )
 
 
+def _assert_exact_shipped_control_weight_registry(source: str) -> None:
+    """Audit the central strict-control authority without compiling target-specific lanes."""
+    table = source.split("pub const SHIPPED_CONTROL_WEIGHTS", maxsplit=1)[1].split(
+        "];", maxsplit=1
+    )[0]
+    rows: set[tuple[str, str, str, str]] = set()
+    blocks = re.findall(r"ShippedControlWeight\s*\{(.*?)\n\s*\},", table, flags=re.DOTALL)
+    for block in blocks:
+        fields = {}
+        for field in ("engine_id", "repo", "file", "revision"):
+            match = re.search(rf'{field}:\s*"([^"]+)"', block)
+            assert match, f"unparseable SHIPPED_CONTROL_WEIGHTS {field}:\n{block}"
+            fields[field] = match.group(1)
+        row = (fields["engine_id"], fields["repo"], fields["file"], fields["revision"])
+        assert row not in rows, f"duplicate shipped control-weight tuple: {row}"
+        rows.add(row)
+
+    assert rows == EXPECTED_SHIPPED_CONTROL_WEIGHTS, (
+        "central strict-control authority changed; audit exact engine/repo/file/revision tuples: "
+        f"added={sorted(rows - EXPECTED_SHIPPED_CONTROL_WEIGHTS)}, "
+        f"removed={sorted(EXPECTED_SHIPPED_CONTROL_WEIGHTS - rows)}"
+    )
+    for engine_id, repo, filename, revision in rows:
+        assert re.fullmatch(r"[0-9a-f]{40}", revision), (
+            f"{engine_id} {repo}/{filename}: revision must be an immutable lowercase 40-hex commit"
+        )
+
+
+def test_shipped_control_weight_registry_is_exact_complete_and_pinned():
+    """sc-13639: central authority replaces seven retired manifest repo/modelPath readers."""
+    _assert_exact_shipped_control_weight_registry(
+        CONTROL_WEIGHTS_PATH.read_text(encoding="utf-8")
+    )
+
+
+def _assert_strict_control_consumers_use_central_pinned_authority(
+    sources: dict[str, str],
+) -> None:
+    expected_consumers = {
+        "image_jobs/flux1_control.rs",
+        "image_jobs/flux1_control_candle.rs",
+        "image_jobs/flux2.rs",
+        "image_jobs/flux2_control_candle.rs",
+        "image_jobs/kolors_control.rs",
+        "image_jobs/krea_control.rs",
+        "image_jobs/krea_control_candle.rs",
+        "image_jobs/qwen.rs",
+        "image_jobs/qwen_control.rs",
+        "image_jobs/zimage.rs",
+        "image_jobs/zimage_control.rs",
+    }
+    actual_consumers = {
+        path
+        for path, source in sources.items()
+        if path != "image_jobs/strict_control.rs"
+        and "trusted_control_weight_revision(" in source
+    }
+    assert actual_consumers == expected_consumers, (
+        "strict-control central-authority consumer inventory changed; "
+        f"added={sorted(actual_consumers - expected_consumers)}, "
+        f"removed={sorted(expected_consumers - actual_consumers)}"
+    )
+    for path in expected_consumers:
+        assert "huggingface_pinned_snapshot_dir" in sources[path], (
+            f"{path}: central tuple must resolve only through snapshots/<revision>, "
+            "never a mutable repo cache root"
+        )
+
+    strict_control = sources["image_jobs/strict_control.rs"]
+    assert (
+        "sceneworks_core::control_weights::shipped_control_weight(engine_id, repo, file)"
+        in strict_control
+    ), "strict_control.rs must authorize the exact engine/repo/file tuple centrally"
+
+
+def test_strict_control_consumers_use_central_pinned_authority():
+    sources = {
+        path.relative_to(WORKER_SOURCE_PATH).as_posix(): path.read_text(encoding="utf-8")
+        for path in WORKER_SOURCE_PATH.rglob("*.rs")
+        if "tests" not in path.relative_to(WORKER_SOURCE_PATH).parts
+        and path.name != "tests.rs"
+    }
+    _assert_strict_control_consumers_use_central_pinned_authority(sources)
+
+
+def _must_fail_assertion(callback, message: str) -> None:
+    try:
+        callback()
+    except AssertionError:
+        return
+    raise AssertionError(message)
+
+
+def test_control_weight_authority_audit_detects_absence_and_fallback_mutations():
+    """Mutation guard: missing tuples/pins and bypassed central consumers must fail this audit."""
+    registry = CONTROL_WEIGHTS_PATH.read_text(encoding="utf-8")
+    table_start = registry.index("pub const SHIPPED_CONTROL_WEIGHTS")
+    missing_row = registry[:table_start] + re.sub(
+        r"\s*ShippedControlWeight\s*\{.*?\n\s*\},",
+        "",
+        registry[table_start:],
+        count=1,
+        flags=re.DOTALL,
+    )
+    _must_fail_assertion(
+        lambda: _assert_exact_shipped_control_weight_registry(missing_row),
+        "removing one central tuple must fail the exact registry audit",
+    )
+    mutable_pin = registry.replace(
+        "5d700aaad96c5ddcdf8a38ef9b22a82aac2c38e5", "main", 1
+    )
+    _must_fail_assertion(
+        lambda: _assert_exact_shipped_control_weight_registry(mutable_pin),
+        "replacing one immutable pin with a mutable revision must fail the registry audit",
+    )
+
+    sources = {
+        path.relative_to(WORKER_SOURCE_PATH).as_posix(): path.read_text(encoding="utf-8")
+        for path in WORKER_SOURCE_PATH.rglob("*.rs")
+        if "tests" not in path.relative_to(WORKER_SOURCE_PATH).parts
+        and path.name != "tests.rs"
+    }
+    bypassed = dict(sources)
+    bypassed["image_jobs/flux1_control_candle.rs"] = bypassed[
+        "image_jobs/flux1_control_candle.rs"
+    ].replace("trusted_control_weight_revision(", "bypassed_revision(")
+    _must_fail_assertion(
+        lambda: _assert_strict_control_consumers_use_central_pinned_authority(bypassed),
+        "removing one central-authority consumer must fail the inventory audit",
+    )
+    unpinned = dict(sources)
+    unpinned["image_jobs/krea_control.rs"] = unpinned["image_jobs/krea_control.rs"].replace(
+        "huggingface_pinned_snapshot_dir", "huggingface_repo_cache_path"
+    )
+    _must_fail_assertion(
+        lambda: _assert_strict_control_consumers_use_central_pinned_authority(unpinned),
+        "replacing an immutable snapshot resolver with a mutable fallback must fail",
+    )
+
+
 def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback():
     """sc-14476 lane inventory and regression guard.
 
@@ -241,22 +447,15 @@ def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback(
     """
     audited_lanes = {
         "image_jobs/base.rs": "model.default_repo()",
-        "image_jobs/flux1_control_candle.rs": "default_repo_for(&request.model)",
-        "image_jobs/flux2_control_candle.rs": "default_repo_for(&request.model)",
         "image_jobs/flux_ipadapter.rs": "flux_ipadapter_default_repo(&request.model)",
         "image_jobs/instantid.rs": "INSTANTID_SDXL_REPO",
-        "image_jobs/kolors_control.rs": "default_repo_for(&request.model)",
         "image_jobs/kolors_ipadapter.rs": "default_repo_for(&request.model)",
-        "image_jobs/krea_control.rs": "strict_control_default_repo(KREA_CONTROL_ENGINE_ID)",
-        "image_jobs/krea_control_candle.rs": "default_repo_for(&request.model)",
         "image_jobs/krea_edit_candle.rs": "default_repo_for(&request.model)",
         "image_jobs/pulid.rs": "PULID_FLUX_REPO",
         "image_jobs/pulid_candle.rs": "PULID_CANDLE_FLUX_REPO",
-        "image_jobs/qwen_control.rs": "default_repo_for(&request.model)",
         "image_jobs/qwen_edit_candle.rs": "crate::engines::MODEL_TABLE",
         "image_jobs/sdxl_edit_candle.rs": "sdxl_edit_candle_default_repo(&request.model)",
         "image_jobs/sdxl_ipadapter.rs": "sdxl_ipadapter_default_repo(&request.model)",
-        "image_jobs/zimage_control.rs": "zimage_control_base_default_repo(&request.model)",
         "image_jobs/zimage_edit_candle.rs": "default_repo_for(&request.model)",
         "image_jobs/zimage_identity_candle.rs": "default_repo_for(&request.model)",
         "sensenova_jobs.rs": "default_repo_for(&request.model)",
@@ -306,22 +505,41 @@ def test_manifest_model_path_is_only_an_optional_override():
     and continue to repo resolution (or decline an imported-only lane) when it
     is absent.
     """
-    readers = 0
+    expected_readers = {
+        "image_jobs/base.rs",
+        "image_jobs/flux_ipadapter.rs",
+        "image_jobs/instantid.rs",
+        "image_jobs/kolors_ipadapter.rs",
+        "image_jobs/krea_imported.rs",
+        "image_jobs/pulid.rs",
+        "image_jobs/pulid_candle.rs",
+        "image_jobs/qwen_edit_candle.rs",
+        "image_jobs/sdxl_edit_candle.rs",
+        "image_jobs/sdxl_imported.rs",
+        "image_jobs/sdxl_ipadapter.rs",
+        "image_jobs/zimage_edit_candle.rs",
+    }
+    actual_readers: list[str] = []
     for path in WORKER_SOURCE_PATH.rglob("*.rs"):
         source = path.read_text(encoding="utf-8").split("\n#[cfg(test)]", maxsplit=1)[0]
         for match in re.finditer(
             r'request\.model_manifest_entry\.get\("modelPath"\)',
             source,
         ):
-            readers += 1
+            relative_path = path.relative_to(WORKER_SOURCE_PATH).as_posix()
+            actual_readers.append(relative_path)
             prefix = source[max(0, match.start() - 500) : match.start()]
             assert "if let Some(path) = request" in prefix or "let Some(raw_path) = request" in prefix, (
-                f"{path.relative_to(WORKER_SOURCE_PATH)}: modelPath is no longer read through an "
+                f"{relative_path}: modelPath is no longer read through an "
                 "optional branch"
             )
-    assert readers == 19, (
-        "modelPath reader inventory changed; audit every new reader for an absence fallback "
-        f"(expected 19, found {readers})"
+    assert len(actual_readers) == len(set(actual_readers)), (
+        f"multiple production modelPath reads require individual fallback audit: {actual_readers}"
+    )
+    assert set(actual_readers) == expected_readers, (
+        "modelPath reader inventory changed; audit every added/removed reader for an absence "
+        f"fallback: added={sorted(set(actual_readers) - expected_readers)}, "
+        f"removed={sorted(expected_readers - set(actual_readers))}"
     )
 
 

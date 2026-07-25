@@ -5,9 +5,9 @@ use super::{
 use super::{
     gate_tier_key, gate_with_evict_reclaim, krea_model_subdir, lora_label, nvfp4_host_eligible,
     nvfp4_selected, pose_entries, resolve_adapters, resolve_advanced_or_manifest_u32,
-    resolve_text_style_gain, run_candle_strict_control, AdapterSpec, ApiClient, CancelFlag,
-    CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
-    Progress, Settings, Value, WorkerError, WorkerResult,
+    resolve_text_style_gain, run_candle_strict_control, trusted_control_weight_revision,
+    AdapterSpec, ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan, ImageRequest,
+    JobSnapshot, JsonObject, Path, PathBuf, Progress, Settings, Value, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -74,9 +74,10 @@ const KREA_CONTROL_OVERLAY_REPO: &str = "SceneWorks/krea2-pose-controlnet-beta";
 /// also carries the 4.5k for comparison).
 const KREA_CONTROL_OVERLAY_FILE: &str = "control_step5000.safetensors";
 /// Pinned revision for the default overlay repo (defense-in-depth: `main` moving under us can't swap the
-/// checkpoint we load — mirrors `FLUX2_CONTROL_CANDLE_REVISION` / sc-9879). Applied ONLY to the default
-/// repo; a `controlWeights.repo` override keeps `main`. `ensure_hf_cached_file` still verifies the file's
+/// checkpoint we load — mirrors `FLUX2_CONTROL_CANDLE_REVISION` / sc-9879). Registered overlays carry
+/// their own catalog-authorized immutable revision. `ensure_hf_cached_file` still verifies the file's
 /// `lfs.oid` from HF's tree API.
+#[cfg(test)]
 pub(super) const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac";
 
 /// The Krea control fit-ladder tier for the base directory the resolver will actually load.
@@ -184,7 +185,9 @@ fn krea_control_candle_steps(request: &ImageRequest) -> u32 {
 /// overrides (a not-yet-cached registered/hosted overlay the API passed through), else the default
 /// published beta overlay. Mirrors `flux2_control_candle_repo_file`; the filename must be a plain
 /// component (sc-8821 / F-019).
-fn krea_control_overlay_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
+pub(super) fn krea_control_overlay_repo_file(
+    request: &ImageRequest,
+) -> WorkerResult<(String, String)> {
     let cw = request
         .advanced
         .get("controlWeights")
@@ -197,13 +200,13 @@ fn krea_control_overlay_repo_file(request: &ImageRequest) -> WorkerResult<(Strin
             .unwrap_or(default)
             .to_owned()
     };
-    Ok((
-        pick("repo", KREA_CONTROL_OVERLAY_REPO),
-        safe_weight_filename(
-            &pick("filename", KREA_CONTROL_OVERLAY_FILE),
-            "advanced.controlWeights.filename",
-        )?,
-    ))
+    let repo = pick("repo", KREA_CONTROL_OVERLAY_REPO);
+    let file = safe_weight_filename(
+        &pick("filename", KREA_CONTROL_OVERLAY_FILE),
+        "advanced.controlWeights.filename",
+    )?;
+    trusted_control_weight_revision(request, KREA_CONTROL_ENGINE_ID, &repo, &file)?;
+    Ok((repo, file))
 }
 
 /// Confine a payload-supplied `advanced.controlWeights.path` to an app-managed root (sc-11168 / F-006).
@@ -267,7 +270,10 @@ async fn ensure_krea_control_weights(
     // 3. A hosted overlay: a `controlWeights.{repo,filename}` override (a not-yet-cached registered/hosted
     //    overlay the API passed through) or the default published beta overlay — HF cache, else download.
     let (repo, file) = krea_control_overlay_repo_file(request)?;
-    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, &repo) {
+    let revision = trusted_control_weight_revision(request, KREA_CONTROL_ENGINE_ID, &repo, &file)?;
+    if let Some(snapshot) =
+        crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, &repo, &revision)
+    {
         let f = snapshot.join(&file);
         if f.is_file() {
             return Ok(f);
@@ -288,14 +294,8 @@ async fn ensure_krea_control_weights(
         .join("controlnet-krea")
         .join(&file);
     // Pin the exact commit for the default overlay repo so `main` moving under us can't swap the
-    // checkpoint (sc-8466 / sc-9879). A `controlWeights.repo` override may carry its own layout, so only
-    // pin when we're on the default repo.
-    let revision = if repo == KREA_CONTROL_OVERLAY_REPO {
-        KREA_CONTROL_OVERLAY_REVISION
-    } else {
-        "main"
-    };
-    ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await?;
+    // checkpoint (sc-8466 / sc-9879). Registered overlays carry their own immutable pin.
+    ensure_hf_cached_file(&context, &repo, &revision, &file, &dst).await?;
     Ok(dst)
 }
 

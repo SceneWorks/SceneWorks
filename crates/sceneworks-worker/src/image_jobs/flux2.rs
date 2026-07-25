@@ -609,9 +609,10 @@ const FLUX2_CONTROL_FILE: &str = "FLUX.2-dev-Fun-Controlnet-Union-2602.safetenso
 /// Pinned revision for the default `alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union` control-weights repo
 /// (sc-9879, F-077 follow-up). Fetching the mutable `main` branch means a re-push (or a compromised token)
 /// could silently swap the ControlNet checkpoint we load; pin the exact commit for defense-in-depth
-/// (mirrors sc-8879/sc-9682). Applied ONLY to the default table repo — a manifest `controlWeights.repo`
-/// override carries its own revision layout, so it keeps `main`. HF's tree API still reports the file's
-/// `lfs.oid`, which `ensure_hf_cached_file` verifies the downloaded content against.
+/// (mirrors sc-8879/sc-9682). Registered overlays carry their own catalog-authorized immutable
+/// revision. HF's tree API still reports the file's `lfs.oid`, which `ensure_hf_cached_file` verifies
+/// the downloaded content against.
+#[cfg(test)]
 const FLUX2_CONTROL_REVISION: &str = "b3dcd7836a0e926248dac3ccba8fc0853495764b";
 /// The asset `adapter` id recorded on FLUX.2-dev strict-pose assets (the dev base MLX label).
 const FLUX2_CONTROL_ADAPTER_LABEL: &str = "mlx_flux2";
@@ -644,17 +645,20 @@ fn flux2_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, Stri
             .unwrap_or(default)
             .to_owned()
     };
+    let repo = pick(
+        "repo",
+        strict_control_default_repo(FLUX2_DEV_CONTROL_ENGINE_ID),
+    );
+    let file = safe_weight_filename(
+        &pick("filename", FLUX2_CONTROL_FILE),
+        "advanced.controlWeights.filename",
+    )?;
+    trusted_control_weight_revision(request, FLUX2_DEV_CONTROL_ENGINE_ID, &repo, &file)?;
     Ok((
         // Default repo from the shared strict-control table (single source of truth); the file stays
         // engine-specific.
-        pick(
-            "repo",
-            strict_control_default_repo(FLUX2_DEV_CONTROL_ENGINE_ID),
-        ),
-        safe_weight_filename(
-            &pick("filename", FLUX2_CONTROL_FILE),
-            "advanced.controlWeights.filename",
-        )?,
+        repo,
+        file,
     ))
 }
 
@@ -675,7 +679,11 @@ async fn ensure_flux2_control_weights(
             return Ok(p);
         }
     }
-    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, &repo) {
+    let revision =
+        trusted_control_weight_revision(request, FLUX2_DEV_CONTROL_ENGINE_ID, &repo, &file)?;
+    if let Some(snapshot) =
+        crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, &repo, &revision)
+    {
         let f = snapshot.join(&file);
         if f.is_file() {
             return Ok(f);
@@ -696,14 +704,8 @@ async fn ensure_flux2_control_weights(
         .join("controlnet-flux2")
         .join(&file);
     // Pin the exact commit for the default table control repo so `main` moving under us can't swap the
-    // ControlNet checkpoint (sc-9879). A manifest `controlWeights.repo` override may carry its own
-    // revision layout, so only pin when we're on the default repo.
-    let revision = if repo == strict_control_default_repo(FLUX2_DEV_CONTROL_ENGINE_ID) {
-        FLUX2_CONTROL_REVISION
-    } else {
-        "main"
-    };
-    crate::downloads::ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await
+    // ControlNet checkpoint (sc-9879). Registered overlays carry their own immutable pin.
+    crate::downloads::ensure_hf_cached_file(&context, &repo, &revision, &file, &dst).await
 }
 
 /// Pose ControlNet lock strength for FLUX.2-dev: `advanced.controlScale` (default 0.75, clamp [0,2]).

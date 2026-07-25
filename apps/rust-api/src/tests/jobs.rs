@@ -241,6 +241,105 @@ async fn retry_and_duplicate_reject_path_unsafe_merged_generation_model_before_c
     assert_eq!(jobs.as_array().expect("jobs array").len(), 3);
 }
 
+/// sc-13639: retry/duplicate are alternate image-job creation boundaries. Their shallow
+/// `payloadChanges` merge must not let a caller manufacture the catalog-only authorization bit,
+/// a hosted tuple, or an app-managed local path that the original typed image route would reject.
+#[tokio::test]
+async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_style_test_manifests(&temp_dir.path().join("config"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Control Retry Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "a fox",
+            "model": "img-model",
+            "count": 1,
+            "width": 1024,
+            "height": 1024
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id");
+
+    let forged_hosted = json!({
+        "advanced": {
+            "controlWeights": {
+                "overlayId": "forged-overlay",
+                "_catalogAuthorized": true,
+                "repo": "attacker/weights",
+                "filename": "payload.safetensors",
+                "revision": "0123456789abcdef0123456789abcdef01234567"
+            }
+        }
+    });
+    let forged_path = json!({
+        "advanced": {
+            "controlWeights": {
+                "path": temp_dir.path()
+                    .join("data/models/krea_2/control.safetensors")
+                    .display()
+                    .to_string(),
+                "_catalogAuthorized": true
+            }
+        }
+    });
+    for operation in ["retry", "duplicate"] {
+        for injection in [&forged_hosted, &forged_path] {
+            let (status, body) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": injection }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{operation} must reject {injection}: {body}"
+            );
+        }
+    }
+
+    // Legitimate operations retain their existing success semantics after the merged payload is
+    // canonicalized; rejected injections above must not have persisted hidden jobs.
+    for operation in ["retry", "duplicate"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({ "payloadChanges": { "prompt": format!("safe {operation}") } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {body}");
+        assert_eq!(
+            body["payload"]["prompt"],
+            format!("safe {operation}"),
+            "{operation} must persist the clean merged payload"
+        );
+    }
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        jobs.as_array().expect("jobs array").len(),
+        3,
+        "only the original and two clean operations may persist"
+    );
+}
+
 #[test]
 fn serialize_job_lora_carries_network_type_to_payload() {
     // A trained LoKr adapter records networkType (epic 2193); the generation

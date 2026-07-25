@@ -2,6 +2,18 @@
 use super::support::*;
 
 #[test]
+fn access_tokens_are_compared_as_fixed_size_hashes() {
+    use crate::auth::token_digest;
+
+    let short = token_digest(b"x");
+    let long = token_digest(&vec![b'y'; 4096]);
+    assert_eq!(short.len(), 32);
+    assert_eq!(long.len(), 32);
+    assert_ne!(short, long);
+    assert_eq!(token_digest(b"same"), token_digest(b"same"));
+}
+
+#[test]
 fn warns_only_on_open_bind_without_token() {
     use std::net::IpAddr;
     let v4 = |s: &str| s.parse::<IpAddr>().unwrap();
