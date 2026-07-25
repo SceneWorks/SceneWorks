@@ -5,7 +5,7 @@ use super::*;
 #[cfg(target_os = "macos")]
 use super::{bernini::*, ltx::*, mochi::*, scail2::*, svd::*, vace::*, wan::*};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::{bernini::*, mochi::*, wan::*};
+use super::{bernini::*, mochi::*, svd::*, wan::*};
 
 #[test]
 fn video_jobs_remains_split_into_real_engine_modules() {
@@ -209,8 +209,9 @@ fn candle_video_families_keep_explicit_cross_module_boundaries() {
         "Candle-shared VACE imports must not pull in macOS-only generation symbols"
     );
     assert!(
-        test_imports.contains("use super::{bernini::*, mochi::*, wan::*};")
-            && !test_imports.contains("use super::{bernini::*, mochi::*, vace::*, wan::*};"),
+        test_imports.contains("use super::{bernini::*, mochi::*, svd::*, wan::*};")
+            && !test_imports
+                .contains("use super::{bernini::*, mochi::*, svd::*, vace::*, wan::*};"),
         "Candle tests must not import the unused VACE family glob"
     );
     for dispatch in [
@@ -8217,6 +8218,88 @@ mod candle_video_label_tests {
     fn candle_video_engine_ids_map_svd() {
         assert_eq!(candle_video_engine_id("svd"), Some("svd_xt"));
         assert!(is_candle_video_engine("svd"));
+    }
+
+    /// sc-14492: the complete reduced recipe proven on 32 GB must still pass the real candle preflight
+    /// and retain the routing/recipe provenance required by the story.
+    #[test]
+    fn candle_svd_reduced_profile_preserves_provenance_after_vram_preflight() {
+        let request = request(json!({
+            "projectId": "p",
+            "model": "svd",
+            "mode": "image_to_video",
+            "width": 1024,
+            "height": 576,
+            "advanced": { "numFrames": 8, "decodeChunkSize": 1, "steps": 12 }
+        }));
+        let preflight = svd_vram_preflight(
+            &request,
+            "0",
+            crate::vram_gate::apply_vram_cap(None, Some(32.0)),
+        )
+        .expect("the real-hardware-validated reduced profile remains admitted");
+        assert_eq!(preflight.frames, 8);
+        assert_eq!(preflight.decode_chunk_size, 1);
+        assert_eq!(preflight.steps, 12);
+        assert_eq!(candle_video_engine_id(&request.model), Some("svd_xt"));
+        assert_eq!(candle_video_adapter_label("svd_xt"), "candle_svd");
+
+        let raw = svd_raw_settings(&request);
+        assert_eq!(raw["model"], json!("svd"));
+        assert_eq!(raw["numFrames"], json!(8));
+        assert_eq!(raw["decodeChunkSize"], json!(1));
+        assert_eq!(raw["steps"], json!(12));
+        assert_eq!(raw["realModelInference"], json!(true));
+    }
+
+    /// sc-14492's production-order pin: drive the real async candle arm under a synthetic 32 GB
+    /// hardware class. The default SVD recipe must return the actionable VRAM refusal before snapshot
+    /// resolution, source-image IO, or the supplied loader. A helper-only test would stay green if the
+    /// production call were deleted or moved below model load.
+    #[test]
+    fn generate_candle_svd_refuses_the_default_32gb_recipe_before_loading() {
+        let probe = ArmProbe::default();
+        let request = request(json!({
+            "projectId": "p",
+            "model": "svd",
+            "mode": "image_to_video",
+            "quality": "fast",
+            "width": 1024,
+            "height": 576
+        }));
+        let settings = offline_settings();
+        let job = mochi_job_snapshot();
+        let loader = probe.loader();
+        let out = temp_env_var(crate::vram_gate::CUDA_VRAM_CAP_ENV, "32", || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime builds")
+                .block_on(generate_candle_video_using(
+                    &ApiClient::new(&settings),
+                    &settings,
+                    &job,
+                    &request,
+                    std::path::Path::new(""),
+                    "candle",
+                    loader,
+                ))
+        });
+
+        let message = out
+            .err()
+            .expect("the default SVD recipe must be rejected on a 32 GB card")
+            .to_string();
+        assert!(
+            message.contains("rejected before model load")
+                && message.contains("decodeChunkSize=1")
+                && message.contains("12 steps"),
+            "the production arm must surface the complete actionable SVD preflight: {message}"
+        );
+        assert!(
+            !probe.loaded(),
+            "the SVD preflight must refuse before snapshot resolution and engine load"
+        );
     }
 
     #[test]

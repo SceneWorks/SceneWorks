@@ -399,6 +399,47 @@ pub(super) fn resolve_candle_video_conditioning(
     }])
 }
 
+/// The SVD pre-flight's gated result (sc-14492). The frame count used by the engine is obtainable only
+/// by passing the CUDA VRAM check, so the generation arm cannot accidentally bypass admission while
+/// still compiling.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SvdVramPreflight {
+    pub(super) frames: u32,
+    pub(super) decode_chunk_size: u32,
+    pub(super) steps: u32,
+}
+
+/// Refuse an SVD burst that exceeds the profile validated on this physical VRAM class before resolving
+/// the checkpoint or loading any component. `budget` is resolved by the caller so the decision stays
+/// deterministic under the `SCENEWORKS_CUDA_VRAM_CAP_GB` hardware-emulation lane.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn svd_vram_preflight(
+    request: &VideoRequest,
+    gpu_id: &str,
+    budget: Option<crate::vram_gate::VramBudget>,
+) -> WorkerResult<SvdVramPreflight> {
+    let frames = svd_i32(request, "numFrames", "numFrames", 25, 1, 25) as u32;
+    let decode_chunk_size = svd_i32(request, "decodeChunkSize", "decodeChunkSize", 8, 1, 64) as u32;
+    let steps = svd_steps(request);
+    match crate::vram_gate::svd_fit_error(
+        frames,
+        decode_chunk_size,
+        steps,
+        request.width,
+        request.height,
+        gpu_id,
+        budget,
+    ) {
+        Some(error) => Err(error),
+        None => Ok(SvdVramPreflight {
+            frames,
+            decode_chunk_size,
+            steps,
+        }),
+    }
+}
+
 /// The candle Mochi pre-flight's gated result (sc-12306): the tier's baked-in quant marker, obtainable
 /// ONLY by passing the VRAM fit gate.
 ///
@@ -486,9 +527,10 @@ pub(super) fn candle_wan_offload_policy(engine_id: &str) -> OffloadPolicy {
 /// tiers under-count by ~9-11 GiB (which is why a card that cannot fit the job is admitted and then
 /// OOMs — sc-12402's story) and the dense tier over-counts by ~44 GiB.
 ///
-/// `ltx`/`svd` carry no `candle` block and read `0` weights, so both paths return `None` and they are
-/// admitted unchanged — their on-disk bytes are not their loaded set either, so any byte-derived floor
-/// would wall-reject working cards (recorded on `vram_gate::wan_weight_components`; sc-12397).
+/// `ltx`/`svd` carry no `candle` block and read `0` weights, so both paths return `None` in this
+/// Wan-specific helper — their on-disk bytes are not their loaded set either, so any byte-derived floor
+/// would wall-reject working cards (recorded on `vram_gate::wan_weight_components`; sc-12397). SVD is
+/// independently protected by [`svd_vram_preflight`]'s frame-aware hardware-class gate (sc-14492).
 ///
 /// **Takes and returns `model_dir` rather than borrowing it**, so the gate cannot be deleted without
 /// breaking the build — the same "unskippable by construction" property [`MochiVramPreflight`] gets from
@@ -566,11 +608,11 @@ async fn candle_video_vram_budget(settings: &Settings) -> Option<crate::vram_gat
 /// conditioning, builds a `VideoGenInput`, and runs it through the shared [`generate_video`] streaming
 /// driver. Returns the decoded clip + the candle adapter label.
 ///
-/// Every engine passes a VRAM fit gate before the load: Mochi's frame-dependent decode gate (sc-12306),
-/// and the Wan gate — the tier's MEASURED `candle.vramGbByTier` peak where the manifest carries one
-/// (sc-12402), else sc-12344's on-disk weights floor. `ltx`/`svd` are explicitly EXEMPT from both: they
-/// carry no `candle` block AND their on-disk bytes are not their loaded set, so any byte-derived floor
-/// would wall-reject working cards; the reason is recorded on `vram_gate::wan_weight_components`.
+/// Admission is family-specific and happens before load: Mochi's frame-dependent decode gate
+/// (sc-12306), SVD's 32 GB / long-burst gate (sc-14492), and the Wan gate — the tier's MEASURED
+/// `candle.vramGbByTier` peak where the manifest carries one (sc-12402), else sc-12344's on-disk
+/// weights floor. LTX remains exempt because its on-disk bytes are not its loaded set and no measured
+/// peak exists; a byte-derived floor would wall-reject working cards.
 ///
 /// Mochi keeps its own gate rather than joining the Wan one: its AsymmVAE decode is UNTILED, so its peak
 /// grows linearly in clip length and no per-tier constant can express it (sc-12306). Wan's decode is
@@ -655,6 +697,19 @@ pub(super) async fn generate_candle_video_using(
         ensure_mochi_q8_present(api, settings, job, request).await?;
         ensure_mochi_bf16_present(api, settings, job, request).await?;
     }
+    // sc-14492: gate SVD before even resolving its already-installed snapshot. A full/default
+    // 25-frame burst OOMed twice on real 32 GB hardware, while the reduced 8-frame / chunk-1 / 12-step
+    // recipe completed. The returned recipe fields are the only ones the SVD generation arm can
+    // consume, making this check load-bearing.
+    let svd_preflight = if engine_id == "svd_xt" {
+        Some(svd_vram_preflight(
+            request,
+            &settings.gpu_id,
+            candle_video_vram_budget(settings).await,
+        )?)
+    } else {
+        None
+    };
     let snapshot_dir = if is_mochi {
         // Resolve-or-error; never a stub (the candle generic arm has no stub fallback once
         // `candle_video_engine_id` resolves the id).
@@ -697,7 +752,8 @@ pub(super) async fn generate_candle_video_using(
         // the sc-12090 lesson; `candle_wan_tier_key` derives the manifest key from the resolver's own
         // marker for exactly that reason) and BEFORE `ensure_wan_lightning_present` below, so a
         // card that cannot fit the job is refused without first paying for the Lightning fetch. A no-op
-        // for `ltx`/`svd`, which are exempt — see `vram_gate::wan_weight_components`.
+        // for `ltx`/`svd`, which are exempt from THIS Wan gate — SVD already passed its bespoke
+        // frame-aware hardware-class preflight above; see `vram_gate::wan_weight_components`.
         let dir = wan_vram_preflight(
             engine_id,
             &request.model_manifest_entry,
@@ -727,6 +783,11 @@ pub(super) async fn generate_candle_video_using(
     // conditioning_fps). Mirrors the MLX `generate_svd`; the conditioning is the source `Reference`
     // resolved above.
     if engine_id == "svd_xt" {
+        let SvdVramPreflight {
+            frames,
+            decode_chunk_size,
+            steps,
+        } = svd_preflight.expect("svd_xt must pass its VRAM preflight before model resolution");
         let input = VideoGenInput {
             sampler: None,
             scheduler: None,
@@ -735,9 +796,9 @@ pub(super) async fn generate_candle_video_using(
             conditioning,
             width: request.width,
             height: request.height,
-            frames: svd_i32(request, "numFrames", "numFrames", 25, 1, 25) as u32,
+            frames,
             fps: request.fps,
-            steps: Some(svd_steps(request)),
+            steps: Some(steps),
             seed: resolve_video_seed(request) as u64,
             motion_bucket_id: Some(
                 svd_i32(request, "motionBucketId", "motionBucketId", 127, 1, 255) as f32,
@@ -748,9 +809,7 @@ pub(super) async fn generate_candle_video_using(
                 "noiseAugStrength",
                 0.02,
             )),
-            decode_chunk_size: Some(
-                svd_i32(request, "decodeChunkSize", "decodeChunkSize", 8, 1, 64) as u32,
-            ),
+            decode_chunk_size: Some(decode_chunk_size),
             conditioning_fps: Some(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32),
             ..VideoGenInput::default()
         };
