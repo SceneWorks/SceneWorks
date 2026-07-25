@@ -1,16 +1,16 @@
 # SceneWorks Desktop
 
-SceneWorks Desktop packages the full SceneWorks AI image and video studio as a
-single native application — no Docker, no terminal, no Python to install. It is a
-[Tauri](https://tauri.app) shell (`net.trefry.sceneworks`, v0.7.3) that bundles
+SceneWorks Desktop packages the full SceneWorks AI image, video, and audio studio
+as a single native application — no Docker, no terminal, no Python to install. It
+is a [Tauri](https://tauri.app) shell (`net.trefry.sceneworks`, v0.7.3) that bundles
 the SceneWorks API and runs generation on a native, platform-specific engine:
 
 - **macOS** runs on Apple's **MLX** engine (Apple Silicon only).
 - **Windows** runs on the native **candle / CUDA** engine (NVIDIA only).
 - **Linux** runs on the native **candle / CUDA** engine (NVIDIA x86_64 only).
 
-There is **no Python virtual environment** on either platform — the generation
-engine is linked into the app, so first run starts straight on the native engine.
+There is **no Python virtual environment** on any platform — the generation engine
+is linked into the app, so first run starts straight on the native engine.
 
 > **Looking to run SceneWorks as a server instead?** See
 > [Desktop vs. server](#desktop-vs-server) below and the root
@@ -345,26 +345,39 @@ starting point is ~85–90% of total unified memory:
 SceneWorks advertises capabilities per device, so the UI only offers what the
 current machine can actually run.
 
-| Capability | macOS (MLX) | Windows (candle / CUDA) |
+Windows and Linux run the same `backend-candle` build, so they advertise the same
+capability set.
+
+| Capability | macOS (MLX) | Windows / Linux (candle / CUDA) |
 | --- | --- | --- |
 | Image generate / edit / detail | ✅ | ✅ |
 | Image VQA / interleave | ✅ | ✅ |
 | Video generate / extend / bridge | ✅ | ✅ |
-| Person replace (VACE) | ✅ (native MLX `wan_vace`) | ✅ (candle; legacy torch CUDA path) |
+| Audio generate (speech / SFX / music / voice clone) | ✅ | ✅ |
+| Person replace (VACE) | ✅ (native MLX `wan_vace`) | ✅ (native candle `wan_vace`) |
 | Pose / keypoint / person detect & track | ✅ | ✅ |
+| Person-track **segmentation** (replace masks) | ✅ (MLX SAM3, SAM2 opt-in) | ✅ (candle SAM3) |
 | Image / video upscale | ✅ | ✅ |
-| Image / person **segmentation** | ✅ | ⏳ not yet ported off-Mac |
+| Standalone **image segmentation** (`image_segment`) | ✅ | ⏳ not yet ported off-Mac |
 | LoRA training (image & video) | ✅ | ✅ (see Training Quickstart) |
 
 Notes:
 
 - **Person replacement (VACE).** On Mac this runs end-to-end on the native MLX
   `wan_vace` provider (validated on Apple Silicon, including character-LoRA runs).
-  On Windows it runs on the candle/CUDA path. The two engines are feature-parity
-  for replace-person.
-- **Segmentation** has not been ported to the candle worker yet; segmentation-based
-  features are Mac-only for now.
-- **LoRA training** is supported on both platforms. See
+  On Windows and Linux it runs the candle `wan_vace` provider in-process. Both are
+  native; there is no Python/torch worker to fall back to on any platform, so a
+  model or payload shape outside the native lane is refused with a reason rather
+  than silently downgraded. The candle VACE provider does not accept LoRAs or
+  on-the-fly quantization, so those shapes stay Mac-only.
+- **Audio** synthesis is candle-native and ships on every desktop build, including
+  the macOS one — speech, sound effects, music, and voice cloning run in-process on
+  all three platforms.
+- **Segmentation.** The SAM3 masks behind Replace-Person run on both lanes (native
+  MLX on Mac, candle off-Mac), so a person track carries real masks everywhere. The
+  standalone `image_segment` utility job is still Mac-only MLX, and the SAM2
+  box-prompt segmenter is a Mac-only opt-in.
+- **LoRA training** is supported on every platform. See
   [TRAINING_QUICKSTART.md](../../documents/TRAINING_QUICKSTART.md) for per-target
   notes, dataset sizes, and VRAM/disk guidance.
 
