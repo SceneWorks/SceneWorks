@@ -20,7 +20,7 @@ import {
 import { useAppContext } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "../macGating.js";
 import { documentModelUsable, downloadOffersFor } from "../modelEligibility.js";
-import { selectStackedJobs } from "./generationStudio.jsx";
+import { selectStackedJobs } from "../components/generationStudio.jsx";
 
 const MAX_IMAGES_DEFAULT = 6;
 const MAX_IMAGES_LIMIT = 10;

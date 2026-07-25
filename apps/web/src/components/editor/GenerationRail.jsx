@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Icon } from "../Icons.jsx";
-import { LoraPickerSection } from "../../screens/generationStudio.jsx";
+import { LoraPickerSection } from "../generationStudio.jsx";
 import { MOTIONS } from "./editorUtils.js";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../StudioUpdateNotice.jsx";
 

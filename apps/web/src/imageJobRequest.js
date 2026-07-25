@@ -1,5 +1,5 @@
 import { buildImageJobAdvanced } from "./imageJobAdvanced.js";
-import { effectiveFitMode } from "./components/FitModeControl.jsx";
+import { effectiveFitMode } from "./fitMode.js";
 import { upscaleEngineHasSoftness } from "./upscaleEngines.js";
 import { composeStyledPrompt } from "./styleComposer.js";
 import { injectStyleIntoCaption, isCaption, parseCaption, serializeCaption } from "./ideogramCaption.js";

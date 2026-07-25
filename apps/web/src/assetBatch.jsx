@@ -72,8 +72,9 @@ export function useAssetBatch() {
   // Per-item + aggregate progress for an in-flight/just-finished batch, read off the jobs feed.
   const batchItems = batch
     ? batch.items.map((item) => ({
-        asset: item.asset,
-        status: batchItemStatus(item.jobId, jobs, batchObservedJobsRef.current),
+      asset: item.asset,
+      status: batchItemStatus(item.jobId, jobs, batchObservedJobsRef.current),
+      error: item.error ?? null,
       }))
     : null;
   const batchProgress = batch
@@ -140,15 +141,15 @@ export function useAssetBatch() {
         if (op === "edit") {
           dims = await loadImageDims(asset);
           if (!dims) {
-            items.push({ asset, jobId: null });
+            items.push({ asset, jobId: null, error: "Could not read the source image dimensions." });
             continue;
           }
         }
         const { endpoint, body } = buildBatchJob({ op, asset, params, project: activeProject, requestedGpu, dims });
         const job = await apiFetch(endpoint, token, { method: "POST", body: JSON.stringify(body) });
         items.push({ asset, jobId: job?.id ?? null });
-      } catch {
-        items.push({ asset, jobId: null });
+      } catch (error) {
+        items.push({ asset, jobId: null, error: error?.message || "Could not start this batch item." });
       }
     }
     setBatch({ op, submitting: false, items });

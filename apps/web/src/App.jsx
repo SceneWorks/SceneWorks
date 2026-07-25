@@ -2628,9 +2628,6 @@ export function App() {
             </button>
           </div>
           <span className="topbar-divider" aria-hidden="true" />
-          <button className="icon-btn" title="Notifications" type="button">
-            <Icon.Bell />
-          </button>
           <AccentPicker accent={accent} onChange={changeAccent} />
           <button
             className="icon-btn"

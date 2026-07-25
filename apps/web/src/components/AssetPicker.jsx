@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AssetThumbnail, assetCanRenderAsImage, assetCanRenderAsVideo } from "./assetMedia.jsx";
-import { assetMatchesCharacter } from "../characterMembership.js";
+import { assetMatchesCharacter, characterAssetIdIndex } from "../characterMembership.js";
+import { FileDropzone } from "./FileDropzone.jsx";
 import { Modal } from "./Modal.jsx";
 
 const categoryOptions = [
@@ -307,9 +308,13 @@ function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSe
   }, [characters, characterId]);
 
   const selectedCharacter = characters.find((character) => character.id === characterId) ?? null;
+  const characterReferenceIds = useMemo(() => characterAssetIdIndex(characters), [characters]);
   const characterAssets = useMemo(
-    () => assets.filter((asset) => assetMatchesCharacter(asset, characterId, selectedCharacter)),
-    [assets, characterId, selectedCharacter],
+    () =>
+      assets.filter((asset) =>
+        assetMatchesCharacter(asset, characterId, selectedCharacter, characterReferenceIds.get(characterId)),
+      ),
+    [assets, characterId, selectedCharacter, characterReferenceIds],
   );
   // The Assets tab shows the project library *minus* images that already belong
   // to a character — those live on the Character tab. Splitting the library this
@@ -318,9 +323,12 @@ function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSe
   const nonCharacterAssets = useMemo(
     () =>
       assets.filter(
-        (asset) => !characters.some((character) => assetMatchesCharacter(asset, character.id, character)),
+        (asset) =>
+          !characters.some((character) =>
+            assetMatchesCharacter(asset, character.id, character, characterReferenceIds.get(character.id)),
+          ),
       ),
-    [assets, characters],
+    [assets, characters, characterReferenceIds],
   );
   const allCharacterAssetCount = assets.length - nonCharacterAssets.length;
   const tabAssets = tab === "character" ? characterAssets : nonCharacterAssets;
@@ -416,31 +424,17 @@ function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSe
       {tab === "assets" ? renderAssetGrid("No active project images match this view") : null}
 
       {tab === "upload" ? (
-        <div
-          className={dragActive ? "dataset-add-dropzone active" : "dataset-add-dropzone"}
-          onDragLeave={() => setDragActive(false)}
-          onDragOver={(event) => {
-            event.preventDefault();
-            setDragActive(true);
-          }}
+        <FileDropzone
+          accept="image/*"
+          active={dragActive}
+          busy={uploading}
+          hint={uploading ? "Importing image..." : "Drop an image here, or"}
+          onActiveChange={setDragActive}
           onDrop={handleDrop}
-        >
-          <p>{uploading ? "Importing image..." : "Drop an image here, or"}</p>
-          <label className="file-upload-button">
-            <input
-              accept="image/*"
-              disabled={uploading}
-              onChange={(event) => {
-                handleUpload(event.target.files?.[0] ?? null);
-                event.target.value = "";
-              }}
-              type="file"
-            />
-            {uploading ? "Importing" : "Browse files"}
-          </label>
-          {uploadError ? <p className="inline-warning">{uploadError}</p> : null}
-        </div>
+          onFiles={(files) => handleUpload(files?.[0] ?? null)}
+        />
       ) : null}
+      {tab === "upload" && uploadError ? <p className="inline-warning">{uploadError}</p> : null}
 
       {tab === "character" ? (
         <div className="dataset-add-character">
@@ -781,30 +775,16 @@ export function CharacterImportDialog({
       {tab === "videos" ? renderGrid("No project videos to import") : null}
 
       {tab === "upload" ? (
-        <div
-          className={dragActive ? "dataset-add-dropzone active" : "dataset-add-dropzone"}
-          onDragLeave={() => setDragActive(false)}
-          onDragOver={(event) => {
-            event.preventDefault();
-            setDragActive(true);
-          }}
+        <FileDropzone
+          accept="image/*,video/*"
+          active={dragActive}
+          busy={busy}
+          hint={busy ? "Importing…" : "Drop images or videos here, or"}
+          multiple
+          onActiveChange={setDragActive}
           onDrop={handleDrop}
-        >
-          <p>{busy ? "Importing…" : "Drop images or videos here, or"}</p>
-          <label className="file-upload-button">
-            <input
-              accept="image/*,video/*"
-              disabled={busy}
-              multiple
-              onChange={(event) => {
-                handleUploadFiles(event.target.files);
-                event.target.value = "";
-              }}
-              type="file"
-            />
-            {busy ? "Importing" : "Browse files"}
-          </label>
-        </div>
+          onFiles={handleUploadFiles}
+        />
       ) : null}
 
       {error ? <p className="inline-warning">{error}</p> : null}

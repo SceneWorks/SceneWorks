@@ -2,6 +2,7 @@ import React, { useMemo, useState } from "react";
 import { isLibraryAsset } from "../constants.js";
 import { assetMatchesCharacter } from "../characterMembership.js";
 import { AssetThumbnail, assetCanRenderAsImage } from "./assetMedia.jsx";
+import { FileDropzone } from "./FileDropzone.jsx";
 import { Modal } from "./Modal.jsx";
 
 function assetTitle(asset) {
@@ -153,30 +154,16 @@ export function DatasetAddDialog({
       </div>
 
       {tab === "file" ? (
-        <div
-          className={dragActive ? "dataset-add-dropzone active" : "dataset-add-dropzone"}
-          onDragLeave={() => setDragActive(false)}
-          onDragOver={(event) => {
-            event.preventDefault();
-            setDragActive(true);
-          }}
+        <FileDropzone
+          accept={fileAccept}
+          active={dragActive}
+          busy={importing}
+          hint={fileHint}
+          multiple={multiple}
+          onActiveChange={setDragActive}
           onDrop={handleDrop}
-        >
-          <p>{fileHint}</p>
-          <label className="file-upload-button">
-            <input
-              accept={fileAccept}
-              disabled={importing}
-              multiple={multiple}
-              onChange={(event) => {
-                onImport(event.target.files);
-                event.target.value = "";
-              }}
-              type="file"
-            />
-            {importing ? "Importing" : "Browse files"}
-          </label>
-        </div>
+          onFiles={onImport}
+        />
       ) : null}
 
       {tab === "library" ? (

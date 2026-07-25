@@ -56,7 +56,7 @@ import {
   useGenerationStudio,
   useQuantTierPicker,
   useSavePreset,
-} from "./generationStudio.jsx";
+} from "../components/generationStudio.jsx";
 import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
