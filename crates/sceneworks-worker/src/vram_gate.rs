@@ -21,6 +21,7 @@
 //! the wiring is in `generate_candle_stream` (image_jobs/base.rs).
 
 use super::*;
+#[cfg(test)]
 use serde_json::Value;
 
 use crate::fit_gate::BYTES_PER_GIB;

@@ -39,6 +39,7 @@
 
 use super::*;
 use gen_core::{OffloadPolicy, Quant};
+#[cfg(test)]
 use serde_json::Value;
 
 /// Fixed transient/runtime headroom (GB) added on top of the MEASURED control-lane peak
