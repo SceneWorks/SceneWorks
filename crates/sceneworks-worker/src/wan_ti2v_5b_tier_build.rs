@@ -39,6 +39,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::smoke_support::{report_tier, QUANT_TIERS};
 use mlx_rs::Array;
 
 /// The five files that make a TI2V-5B tier subdir COMPLETE for the load path
@@ -52,29 +53,8 @@ const TIER_FILES: &[&str] = &[
     "config.json",
 ];
 
-/// The two quantized tiers to derive from the bf16 output: `(subdir, bits)`. Group 64 (the canonical
-/// Wan/mflux default the load path `WanModelConfig::from_config_json` assumes and reconstructs).
-const QUANT_TIERS: &[(&str, i32)] = &[("q8", 8), ("q4", 4)];
-
 /// The Wan transformer quant group size (mflux/reference default; matches the A14B tiers).
 const GROUP_SIZE: i32 = 64;
-
-/// Recursively sum the byte size of every file under `dir` (the on-disk size of a built tier).
-fn dir_size_bytes(dir: &Path) -> u64 {
-    let mut total = 0;
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            total += dir_size_bytes(&path);
-        } else if let Ok(meta) = path.metadata() {
-            total += meta.len();
-        }
-    }
-    total
-}
 
 /// Resolve the `tokenizer.json` to copy into each tier: the explicit env override, then
 /// `<native>/tokenizer.json`, then the native `google/umt5-xxl/tokenizer.json` (where the upstream
@@ -128,15 +108,6 @@ fn assert_tier_complete(out_dir: &Path, tier: &str) {
             "built {tier} tier is missing {file}"
         );
     }
-}
-
-/// Print the machine-readable `[[TIER]]` line for backfilling the manifest sizes.
-fn report_tier(tier: &str, out_dir: &Path) {
-    let size = dir_size_bytes(out_dir);
-    eprintln!(
-        "[[TIER]] {{\"tier\":\"{tier}\",\"dir\":\"{}\",\"diskSizeBytes\":{size}}}",
-        out_dir.display()
-    );
 }
 
 /// Derive a quantized tier (`q8`/`q4`) from the already-built dense `bf16/` tier: quantize the DiT

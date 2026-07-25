@@ -186,6 +186,8 @@ function PersonTrackCorrections({ track, sourceClip, saveTrackCorrections }) {
       setDrafts(seeded);
       setFrameIndex((current) => (current < frames.length ? current : 0));
     }
+    // Stable track/correction identities avoid reseeding dirty drafts on catalog object refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [track?.id, correctionsSignature, frames.length]);
 
   useEffect(() => {

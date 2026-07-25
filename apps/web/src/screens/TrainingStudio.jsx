@@ -342,8 +342,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const updateDataset = updateTrainingDataset;
   const batchRenameDataset = batchRenameTrainingDataset;
   const createCaptionJob = createTrainingDatasetCaptionJob;
-  const trainingPresets = trainingPresetsCatalog?.presets ?? [];
-  const trainingTargets = trainingTargetsCatalog?.targets ?? [];
+  const trainingPresets = useMemo(
+    () => trainingPresetsCatalog?.presets ?? [],
+    [trainingPresetsCatalog?.presets],
+  );
+  const trainingTargets = useMemo(
+    () => trainingTargetsCatalog?.targets ?? [],
+    [trainingTargetsCatalog?.targets],
+  );
   const [activeDataset, setActiveDataset] = useState(null);
   const [datasetError, setDatasetError] = useState("");
   const [datasetMessage, setDatasetMessage] = useState("");
@@ -353,6 +359,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [uploadedDatasetAssets, setUploadedDatasetAssets] = useState([]);
   const [savingDataset, setSavingDataset] = useState(false);
+  const openDatasetRef = useRef(null);
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
   // Dataset Doctor readiness report (sc-6534), fetched server-side over the saved
   // dataset. `null` until the first fetch resolves; the loading flag keeps badges in
@@ -744,8 +751,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
       return;
     }
     if (studioLaunch.datasetId !== selectedDatasetId) {
-      openDataset(studioLaunch.datasetId);
+      openDatasetRef.current?.(studioLaunch.datasetId);
     }
+    // A persistent launch is one-shot by launch id; selection changes must not reopen the old dataset.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [datasetLibraryMode, studioLaunch?.id]);
 
   useEffect(() => {
@@ -814,6 +823,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setConfigError("");
     setConfigTriggerFollowsCaptions(true);
     setConfigPromptsFollowTrigger(true);
+    // Dataset/target identities own hydration; background object refreshes must preserve edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDataset?.id, selectedTarget?.id, trainingPresets]);
 
   useEffect(() => {
@@ -828,6 +839,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
       return { ...current, triggerWord: nextTriggerPhrase };
     });
     setConfigSnapshot(null);
+    // Target identity is sufficient; catalog object refreshes must not invalidate the draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [captionTriggerWords, configTriggerFollowsCaptions, selectedTarget?.id]);
 
   // Keep the sample-prompts draft in sync with the trigger phrase until the user
@@ -859,6 +872,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
       }
       return { ...current, requestedGpu: gpuOptions[0] ?? "" };
     });
+    // The stable key captures the complete option set without array-identity churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gpuOptionsKey]);
 
   // Live mirror of the unsaved-draft flag so imperative guards (the project-switch guard
@@ -931,6 +946,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setBusyDatasetId("");
     }
   }
+  openDatasetRef.current = openDataset;
 
   // Drops a member (or an unavailable/orphaned id) from the dataset selection.
   function removeUnavailableAsset(assetId) {

@@ -394,6 +394,8 @@ export function PresetManagerScreen() {
       setSelectedPresetId("");
       setEditing(false);
     }
+    // Catalog refreshes replace preset objects; identity alone controls selection validity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [presets, selectedPreset?.id]);
 
   useEffect(() => {
@@ -404,7 +406,9 @@ export function PresetManagerScreen() {
     setForm(next);
     setBaseline(next);
     setMessage({ tone: "neutral", text: "" });
-  }, [selectedPreset?.id, editing]);
+    // Hydrate only on edit/preset identity changes; model/preset object refreshes must not erase edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing, selectedPreset?.id]);
 
   // Model drives Workflow, not the other way round: when the chosen model can't serve the
   // current segment, fall back to the first one it does serve.
@@ -415,6 +419,8 @@ export function PresetManagerScreen() {
     if (!segmentAvailable(selectedModel, activeSegment) && segments.length) {
       setForm((current) => ({ ...current, segment: segments[0].key }));
     }
+    // Model identity and segment keys fully describe this correction without catalog object churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing, selectedModel?.id, activeSegment.key, segments.length]);
 
   function updateField(field, value) {

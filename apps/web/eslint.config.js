@@ -9,7 +9,7 @@ import globals from "globals";
 // enables the high-signal rules:
 //   - no-undef        → would have caught F-WEB-1 (modelLoraFamilies) and F-WEB-5
 //   - no-unused-vars  → flags dead imports
-//   - react-hooks/rules-of-hooks (error) and exhaustive-deps (warn; the codebase
+//   - react-hooks/rules-of-hooks and exhaustive-deps (errors; the codebase
 //     carries intentional eslint-disable-next-line exhaustive-deps comments).
 export default [
   {
@@ -34,7 +34,7 @@ export default [
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
-      "react-hooks/exhaustive-deps": "warn",
+      "react-hooks/exhaustive-deps": "error",
       // Without these, no-unused-vars treats JSX-only-used identifiers as unused:
       // jsx-uses-vars covers components rendered as <Foo/>; jsx-uses-react covers the
       // `React` import that the test files need (vitest uses the classic JSX runtime,

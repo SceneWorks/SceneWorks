@@ -1,130 +1,18 @@
-import { useCallback, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
-import { isCurrentProjectRequest } from "../appStateHelpers.js";
+import { useScopedCrudList } from "./useScopedCrudList.js";
 
-// Owns the recipe-preset list plus its scoped refresh/create/update/duplicate/delete
-// mutations. Extracted from App.jsx (sc-1651). Behavior unchanged — token, the active
-// project, and error reporting are passed in. App's bulk refreshData still seeds the
-// list via the returned setPresets (same React setter identity), and the project-load
-// effect calls refreshCharacters/refreshPresets exactly as before.
-export function usePresets({ token, activeProject, activeProjectRef, setError }) {
-  const [presets, setPresets] = useState([]);
-
-  const isCurrentPresetRequest = useCallback(
-    (projectId) =>
-      !projectId ||
-      isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId),
-    [activeProjectRef],
-  );
-
-  // sc-4194: actions wrapped in useCallback so their identity is stable across
-  // App's SSE-driven re-renders, enabling appContextValue to memoize.
-  const refreshPresets = useCallback(
-    async (projectId = activeProject?.id, { signal } = {}) => {
-      try {
-        const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-        const items = await apiFetch(`/api/v1/recipe-presets${query}`, token, { signal });
-        if (!isCurrentPresetRequest(projectId)) return [];
-        setPresets(items);
-        setError("");
-        return items;
-      } catch (err) {
-        if (isAbortError(err)) return [];
-        if (!isCurrentPresetRequest(projectId)) return [];
-        setError(err.message);
-        return [];
-      }
-    },
-    [token, activeProject, isCurrentPresetRequest, setError],
-  );
-
-  const presetQuery = useCallback(
-    (scope = null) => {
-      const params = new URLSearchParams();
-      if (scope) {
-        params.set("scope", scope);
-      }
-      if (scope === "project" && activeProject?.id) {
-        params.set("projectId", activeProject.id);
-      }
-      const value = params.toString();
-      return value ? `?${value}` : "";
-    },
-    [activeProject],
-  );
-
-  const createPreset = useCallback(
-    async (payload) => {
-      if (payload.scope === "project" && !activeProject) {
-        throw new Error("Create or open a project first.");
-      }
-      const created = await apiFetch(`/api/v1/recipe-presets${presetQuery(payload.scope)}`, token, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      // Refresh the caller's current catalog view even when the mutation itself
-      // targets a global preset: a project view contains both global and project
-      // presets. Capture the id so a later project switch can suppress this refetch.
-      const projectId = activeProject?.id ?? null;
-      if (isCurrentPresetRequest(projectId)) {
-        await refreshPresets(projectId);
-      }
-      return created;
-    },
-    [token, activeProject, isCurrentPresetRequest, presetQuery, refreshPresets],
-  );
-
-  const updatePreset = useCallback(
-    async (presetId, payload, scope = payload.scope) => {
-      const updated = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${presetQuery(scope)}`, token, {
-        method: "PATCH",
-        body: JSON.stringify(payload),
-      });
-      const projectId = activeProject?.id ?? null;
-      if (isCurrentPresetRequest(projectId)) {
-        await refreshPresets(projectId);
-      }
-      return updated;
-    },
-    [token, activeProject, isCurrentPresetRequest, presetQuery, refreshPresets],
-  );
-
-  const duplicatePreset = useCallback(
-    async (presetId, scope = null) => {
-      const duplicated = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}/duplicate${presetQuery(scope)}`, token, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      const projectId = activeProject?.id ?? null;
-      if (isCurrentPresetRequest(projectId)) {
-        await refreshPresets(projectId);
-      }
-      return duplicated;
-    },
-    [token, activeProject, isCurrentPresetRequest, presetQuery, refreshPresets],
-  );
-
-  const deletePreset = useCallback(
-    async (presetId, scope = null) => {
-      const archived = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${presetQuery(scope)}`, token, {
-        method: "DELETE",
-      });
-      const projectId = activeProject?.id ?? null;
-      if (isCurrentPresetRequest(projectId)) {
-        await refreshPresets(projectId);
-      }
-      return archived;
-    },
-    [token, activeProject, isCurrentPresetRequest, presetQuery, refreshPresets],
-  );
-
+export function usePresets(options) {
+  const catalog = useScopedCrudList({
+    ...options,
+    resourcePath: "/api/v1/recipe-presets",
+    projectRequiredMessage: "Create or open a project first.",
+  });
   return {
-    presets,
-    setPresets,
-    refreshPresets,
-    createPreset,
-    updatePreset,
-    duplicatePreset,
-    deletePreset,
+    presets: catalog.items,
+    setPresets: catalog.setItems,
+    refreshPresets: catalog.refresh,
+    createPreset: catalog.create,
+    updatePreset: catalog.update,
+    duplicatePreset: catalog.duplicate,
+    deletePreset: catalog.remove,
   };
 }

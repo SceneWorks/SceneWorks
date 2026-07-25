@@ -848,13 +848,18 @@ pub(crate) async fn run_prompt_refine_job(
                     .to_owned(),
             ));
         }
-        let mut refs = Vec::with_capacity(paths.len());
-        for path in &paths {
-            let safe_path =
-                normalize_app_managed_model_path(settings, path, "Vision reference image")?;
-            refs.push(load_caption_image_ref(&safe_path)?);
-        }
-        refs
+        let safe_paths = paths
+            .iter()
+            .map(|path| normalize_app_managed_model_path(settings, path, "Vision reference image"))
+            .collect::<WorkerResult<Vec<_>>>()?;
+        tokio::task::spawn_blocking(move || {
+            safe_paths
+                .iter()
+                .map(|path| load_caption_image_ref(path))
+                .collect::<WorkerResult<Vec<_>>>()
+        })
+        .await
+        .map_err(|error| task_join_error("vision reference image decode", error))??
     } else {
         Vec::new()
     };

@@ -169,6 +169,7 @@ import {
   macModelFeatureBlock,
 } from "../macGating.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
+import { probeImageDimensions } from "../imageDimensions.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
 import {
   availableUpscaleEngines as upscaleEnginesForPlatform,
@@ -613,13 +614,13 @@ export function ImageStudio() {
     setMode(nextMode);
   }
 
-  function handleUpscaleEngineChange(nextEngine) {
+  const handleUpscaleEngineChange = useCallback((nextEngine) => {
     setUpscaleEngine(nextEngine);
     const factors = upscaleFactorsForEngine(nextEngine);
     if (!factors.includes(upscaleFactor)) {
       setUpscaleFactor(factors[0]);
     }
-  }
+  }, [upscaleFactor]);
 
   // Engines offered in the picker; AuraSR is dropped on every platform (sc-3668 / sc-5499).
   const availableUpscaleEngines = upscaleEnginesForPlatform(macCapabilities);
@@ -640,7 +641,7 @@ export function ImageStudio() {
     if (usePid && upscaleEnabled) {
       setUsePid(false);
     }
-  }, [usePid, upscaleEnabled]);
+  }, [usePid, upscaleEnabled, setUsePid]);
 
   useEffect(() => {
     if (mode === "edit_image" && selectedAssetEditableSourceId) {
@@ -677,7 +678,7 @@ export function ImageStudio() {
     if (launchRequest.mode === "edit_image" && selectedAssetEditableSourceId) {
       setSourceAssetId(selectedAssetEditableSourceId);
     }
-  }, [launchRequest?.id, selectedAsset?.id, selectedAssetEditableSourceId]);
+  }, [launchRequest, selectedAsset?.id, selectedAssetEditableSourceId]);
 
   // Mac UI gating (sc-3486): on a Mac in MLX-required mode, hide torch-only models from the
   // picker so the user can't select something that would only error. Inert elsewhere.
@@ -834,7 +835,7 @@ export function ImageStudio() {
   // size changes so the user always re-confirms against the current count.
   useEffect(() => {
     setBatchConfirmPending(false);
-  }, [batchTotal]);
+  }, [batchTotal, setBatchConfirmPending]);
   // Whether the model exposes its built-in prompt upsampler ("Enhance prompt" toggle) — FLUX.2-dev.
   const promptEnhance = Boolean(selectedModel?.ui?.promptEnhance);
   // Whether the model ships a packed default + a hosted full-precision bf16 build, exposing the
@@ -1031,6 +1032,8 @@ export function ImageStudio() {
     // Clear a stale overlay pick so an id trained for a different backbone can't leak into a submit
     // (sc-10165 B4); the picker re-fetches for the new backbone.
     setControlOverlayId(null);
+    // Model identity owns this reset; a catalog refresh must not erase in-progress tuning.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model]);
   // sc-12034: On a FRESH mount (no restored snapshot) whose model catalog arrives AFTER mount, the
   // reset effect above ran once with an empty `ui` (the catalog hadn't surfaced the model yet) and
@@ -1064,7 +1067,7 @@ export function ImageStudio() {
     setTrueCfgScale(typeof ui.variationStrength?.default === "number" ? ui.variationStrength.default : 4.0);
     setControlScale(typeof ui.controlScale?.default === "number" ? ui.controlScale.default : null);
     setTextStyleGain(typeof ui.textStyleGain?.default === "number" ? ui.textStyleGain.default : 1.0);
-  }, [model, imageModels]);
+  }, [model, imageModels, setControlScale]);
   // Approved reference images for the selected character (the IP-Adapter identity
   // source). Resolve the full asset from the catalog so thumbnails render even when
   // the character payload only carries assetIds.
@@ -1167,20 +1170,7 @@ export function ImageStudio() {
     if (!img2imgReferenceAssetId) return;
     const asset = editImageAssets.find((item) => item.id === img2imgReferenceAssetId);
     const src = asset && assetUrl(asset);
-    if (!src || typeof Image === "undefined") return;
-    let cancelled = false;
-    const probe = new Image();
-    probe.onload = () => {
-      if (!cancelled && probe.naturalWidth && probe.naturalHeight) {
-        onReferenceImageLoaded(probe.naturalWidth, probe.naturalHeight);
-      }
-    };
-    probe.src = src;
-    return () => {
-      cancelled = true;
-      probe.onload = null;
-      probe.src = "";
-    };
+    return probeImageDimensions(src, onReferenceImageLoaded);
   }, [img2imgReferenceAssetId, editImageAssets, onReferenceImageLoaded]);
   // Sampler / scheduler menus declared by the model, gated to the ACTIVE backend
   // (epic 7114 P5): `macGatingActive` is the worker `mlx_required` master switch, so
@@ -1459,7 +1449,7 @@ export function ImageStudio() {
       setModel(launchRequest.presetModel);
     }
     setSelectedPresetId(launchRequest.presetId);
-  }, [launchRequest?.id]);
+  }, [launchRequest, setSelectedPresetId]);
   // A general-preset launch (epic 11949): toggle it into the stack without touching the model
   // or mode. The chip is available in every studio, so a Video-bound user can re-add it there.
   useEffect(() => {
@@ -1576,6 +1566,9 @@ export function ImageStudio() {
     if (typeof upscale?.softness === "number") {
       setUpscaleSoftness(upscale.softness);
     }
+  // The launch id owns this one-shot hydration. Including the local values this
+  // effect sets would replay a launch while applying that launch.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [launchRequest?.id]);
   const [dropdownWidth, dropdownHeight] = resolution.split("x").map((value) => Number(value));
   // A non-empty Width/Height override wins for that axis; empty falls back to the Aspect

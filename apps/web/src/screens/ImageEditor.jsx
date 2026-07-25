@@ -1151,6 +1151,7 @@ export function ImageEditor() {
   // handlers (a checkpoint captures the pre-operation stack; restore reuses the
   // live decoded images for unchanged layers and revokes the URLs it drops).
   const workingRef = useRef(null);
+  const mountedRef = useRef(false);
   // Live mirrors of the snapshot-relevant state so a synchronous checkpoint can
   // capture the pre-operation state without stale-closure surprises.
   const editsRef = useRef(edits);
@@ -1299,8 +1300,15 @@ export function ImageEditor() {
     return () => observer.disconnect();
   }, []);
 
-  // Revoke every live layer's object URL when the editor unmounts.
-  useEffect(() => () => revokeLayerUrls(workingRef.current?.layers), []);
+  // Revoke every live layer's object URL when the editor unmounts and mark
+  // in-flight terminal-result decodes as stale.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      revokeLayerUrls(workingRef.current?.layers);
+    };
+  }, []);
 
   const fitToView = useCallback(() => {
     if (!working || !stageSize.width || !stageSize.height) return;
@@ -2493,6 +2501,10 @@ export function ImageEditor() {
         if (!res.ok) throw new Error(`Failed to load result (${res.status})`);
         const blob = await res.blob();
         const prepared = await blobToEditorImage(blob);
+        if (!mountedRef.current) {
+          URL.revokeObjectURL(prepared.objectUrl);
+          return;
+        }
         checkpoint();
         // Active-layer op (same-size edit / detail) → write the result back into the
         // target layer, preserving the rest of the stack; document op (upscale /
@@ -2518,7 +2530,9 @@ export function ImageEditor() {
         if (edit) setEdits((prev) => [...prev, edit]);
         setDirty(true);
       } catch (err) {
-        setStatus({ loading: false, error: err.message || "The operation failed." });
+        if (mountedRef.current) {
+          setStatus({ loading: false, error: err.message || "The operation failed." });
+        }
       } finally {
         // Hand the purge to App (sc-8850): it owns the scratch registry, so it purges the
         // scratch + mask + result assets through the single survivor path. This also drops
