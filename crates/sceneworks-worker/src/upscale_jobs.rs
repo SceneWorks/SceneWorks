@@ -226,7 +226,11 @@ struct Upscaler {
     device: &'static str,
 }
 
-static UPSCALERS: OnceLock<Mutex<HashMap<u8, Upscaler>>> = OnceLock::new();
+static UPSCALERS: OnceLock<Mutex<HashMap<(u8, PathBuf), Upscaler>>> = OnceLock::new();
+
+fn upscaler_cache_key(factor: u8, onnx_path: &Path) -> (u8, PathBuf) {
+    (factor, onnx_path.to_path_buf())
+}
 
 fn ort_err<R>(e: ort::Error<R>) -> WorkerError {
     WorkerError::Engine(format!("onnxruntime: {e}"))
@@ -432,7 +436,7 @@ fn upscale_blocking(
         guard.clear();
         guard
     });
-    let upscaler = match guard.entry(factor) {
+    let upscaler = match guard.entry(upscaler_cache_key(factor, &onnx_path)) {
         Entry::Occupied(e) => e.into_mut(),
         Entry::Vacant(e) => e.insert(Upscaler::load(&onnx_path)?),
     };

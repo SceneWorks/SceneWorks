@@ -343,18 +343,18 @@ fn dwpose_zip_digests_are_pinned_sha256() {
 /// sc-8911: an env-pinned weight path that is set-but-missing must error, not silently
 /// fall through to the cache/download. Unset → `None`; set + existing → `Some(path)`.
 #[test]
-fn resolve_pinned_weight_errors_on_missing_env_path() {
+fn shared_resolve_env_file_pin_errors_on_missing_env_path() {
     use std::ffi::OsString;
 
     // Unset: fall through.
     assert_eq!(
-        resolve_pinned_weight("SCENEWORKS_DWPOSE_DET", None, DET_FILE).expect("unset ok"),
+        resolve_env_file_pin("SCENEWORKS_DWPOSE_DET", None, DET_FILE).expect("unset ok"),
         None,
         "an unset pin must fall through"
     );
 
     // Set but nonexistent: error (not a silent fall-through).
-    let missing = resolve_pinned_weight(
+    let missing = resolve_env_file_pin(
         "SCENEWORKS_DWPOSE_DET",
         Some(OsString::from("/nonexistent/dwpose/yolox.onnx")),
         DET_FILE,
@@ -368,7 +368,7 @@ fn resolve_pinned_weight_errors_on_missing_env_path() {
     let existing_path =
         std::env::temp_dir().join(format!("sw-dwpose-pin-test-{}.onnx", std::process::id()));
     std::fs::write(&existing_path, b"onnx").expect("write temp weight");
-    let resolved = resolve_pinned_weight(
+    let resolved = resolve_env_file_pin(
         "SCENEWORKS_DWPOSE_DET",
         Some(existing_path.as_os_str().to_owned()),
         DET_FILE,
