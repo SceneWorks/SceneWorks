@@ -148,6 +148,25 @@ reported `sm_80`, `sm_90`, and `sm_120` cubins plus `sm_120` PTX. This
 checks the shipped artifact, while the Docker build guard prevents future
 publications from dropping those targets unnoticed.
 
+### Measured GPU validation
+
+At `2026-07-25T01:32:36Z`, a fresh RunPod cold boot of
+`ghcr.io/sceneworks/sceneworks-runpod:manual-sc14427-4fe122b7dba3`
+(OCI index
+`sha256:376182ddbdf4c78d2a6f66a1e3ce66c573145b4c21b99300e42aeefba9f710ab`)
+passed on an NVIDIA RTX PRO 4500 Blackwell:
+
+- compute capability 12.0, driver 580.126.20, and 32,623 MiB VRAM;
+- an ONNX Runtime CUDA host-to-device-to-host round trip passed for 4,096 bytes;
+- the authenticated API was healthy with `authRequired=true`;
+- `/workers` reported an idle GPU child, `runpod-worker-0`, with GPU ID 0,
+  the measured GPU name and memory, and the `gpu`, `nvidia`, `candle`,
+  `image_generate`, and `video_generate` capability markers;
+- `/workers` also reported the idle `runpod-worker-cpu` utility child with
+  capabilities including `model_download`; and
+- the process tree contained the API, the supervisor, and exactly those two
+  children.
+
 This is an image-level support statement, not a promise that every model fits
 every supported card. Check the model's VRAM requirement separately. RunPod's
 GPU inventory also changes over time; confirm the exact product name and
