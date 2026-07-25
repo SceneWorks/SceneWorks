@@ -48,6 +48,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
+use crate::image_sampling::sample_rgb_bilinear;
 use image::RgbImage;
 use serde_json::{json, Value};
 
@@ -172,31 +173,6 @@ impl Letterbox {
     }
 }
 
-/// Bilinear sample of an RGB channel (0=R,1=G,2=B) at (x,y); out-of-bounds → `border`.
-/// cv2 INTER_LINEAR half-pixel convention is applied by the caller.
-#[inline]
-fn sample_rgb(img: &RgbImage, x: f32, y: f32, c: usize, border: f32) -> f32 {
-    let (w, h) = (img.width() as i64, img.height() as i64);
-    let x0 = x.floor() as i64;
-    let y0 = y.floor() as i64;
-    let fx = x - x0 as f32;
-    let fy = y - y0 as f32;
-    let get = |xi: i64, yi: i64| -> f32 {
-        if xi < 0 || yi < 0 || xi >= w || yi >= h {
-            border
-        } else {
-            img.get_pixel(xi as u32, yi as u32)[c] as f32
-        }
-    };
-    let v00 = get(x0, y0);
-    let v10 = get(x0 + 1, y0);
-    let v01 = get(x0, y0 + 1);
-    let v11 = get(x0 + 1, y0 + 1);
-    let top = v00 * (1.0 - fx) + v10 * fx;
-    let bot = v01 * (1.0 - fx) + v11 * fx;
-    top * (1.0 - fy) + bot * fy
-}
-
 /// Destination layout for the shared letterbox preprocessor: NHWC (the layout
 /// `runtime_macos::media::nn::conv2d` expects, macOS) or NCHW (the `yolo11m.onnx` export expects,
 /// off-Mac). The two backends' letterbox + cv2 half-pixel sampling are byte-identical;
@@ -247,15 +223,14 @@ fn preprocess_letterbox(img: &RgbImage, layout: InputLayout) -> (Vec<f32>, Lette
         for dx in 0..new_w {
             let src_x = (dx as f32 + 0.5) * sx - 0.5;
             let x = dx + pad_x;
-            for c in 0..3 {
-                let v = sample_rgb(
-                    img,
-                    src_x.clamp(0.0, w - 1.0),
-                    src_y.clamp(0.0, h - 1.0),
-                    c,
-                    0.0,
-                );
-                buf[layout.index(x, y, c)] = v / 255.0;
+            let rgb = sample_rgb_bilinear(
+                img,
+                src_x.clamp(0.0, w - 1.0),
+                src_y.clamp(0.0, h - 1.0),
+                0.0,
+            );
+            for (channel, value) in rgb.into_iter().enumerate() {
+                buf[layout.index(x, y, channel)] = value / 255.0;
             }
         }
     }

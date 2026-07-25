@@ -339,7 +339,7 @@ export function useGenerationStudio({
           presetMatchesWorkflow(preset, mode) &&
           presetMatchesModel(preset, selectedModel, models),
       ),
-    [mode, presets, selectedModel?.id, models],
+    [presets, mode, selectedModel, models],
   );
   // General (model-agnostic) presets are available on every model in every mode.
   const availableGeneralPresets = useMemo(
@@ -399,7 +399,7 @@ export function useGenerationStudio({
       const next = ids.filter((id) => availableGeneralPresets.some((preset) => preset.id === id));
       return next.length === ids.length ? ids : next;
     });
-  }, [presets.length, availableGeneralKey]);
+  }, [presets.length, availableGeneralKey, availableGeneralPresets]);
 
   // Add/remove a general preset from the stack. Toggling never touches the model, mode, or
   // the LoRA picker — general presets carry none of those. Composition into the prompt is
@@ -448,7 +448,7 @@ export function useGenerationStudio({
   // stale progress card never lingers.
   const localJobs = useMemo(
     () => selectStackedJobs(trackedLocalJobs, (job) => resultVisible(job) || completedWaitExpired(job)),
-    [trackedLocalJobs, resultVisible, completedWaitExpired, resultFallbackTick],
+    [trackedLocalJobs, resultVisible, completedWaitExpired],
   );
 
   // ---- LoRA selection (sc-4196: shared by Image + Video studios) ----
@@ -497,14 +497,14 @@ export function useGenerationStudio({
       return;
     }
     setSelectedLoraIds((ids) => ids.filter((id) => compatibleLoras.some((lora) => lora.id === id)));
-  }, [loras.length, selectedModel, compatibleLoraKey]);
+  }, [loras.length, selectedModel, compatibleLoraKey, compatibleLoras]);
   // Auto-open the advanced panel when an incompatible LoRA is selected so the
   // generate-blocking warning is visible.
   useEffect(() => {
     if (selectedLoraValidationResult.incompatible.length && !advancedOpen) {
       setAdvancedOpen(true);
     }
-  }, [advancedOpen, selectedLoraValidationResult.incompatible.length]);
+  }, [advancedOpen, selectedLoraValidationResult.incompatible.length, setAdvancedOpen]);
 
   function toggleLora(lora) {
     setSelectedLoraIds((ids) => {

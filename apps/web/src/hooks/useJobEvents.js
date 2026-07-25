@@ -382,7 +382,7 @@ export function useJobEvents({
       }
       setQueueSummary(summary);
       if (Array.isArray(summary.workers)) {
-        setWorkers(summary.workers.sort(sortWorkers));
+        setWorkers([...summary.workers].sort(sortWorkers));
       }
     }
 

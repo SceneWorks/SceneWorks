@@ -335,8 +335,17 @@ export function AudioStudio() {
 
   // The selected model's audio capabilities — the single source every field below reads from. Never
   // hardcoded: an absent sub-block simply hides the dependent control.
-  const audio = selectedModel?.audio && typeof selectedModel.audio === "object" ? selectedModel.audio : {};
-  const voices = Array.isArray(audio.voices) ? audio.voices : [];
+  const audio = useMemo(
+    () =>
+      selectedModel?.audio && typeof selectedModel.audio === "object"
+        ? selectedModel.audio
+        : {},
+    [selectedModel?.audio],
+  );
+  const voices = useMemo(
+    () => (Array.isArray(audio.voices) ? audio.voices : []),
+    [audio],
+  );
   const languages = Array.isArray(audio.languages) ? audio.languages : [];
   const editModes = Array.isArray(audio.editModes) ? audio.editModes : [];
   const sampleRates = Array.isArray(audio.sampleRates) ? audio.sampleRates : [];

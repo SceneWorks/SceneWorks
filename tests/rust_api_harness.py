@@ -11,7 +11,7 @@ of truth for those fixtures so they can't diverge again.
 from __future__ import annotations
 
 import json
-import socket
+import re
 import subprocess
 import threading
 import time
@@ -30,11 +30,28 @@ PNG_1X1 = (
 )
 
 
-def free_port() -> int:
-    """Bind an ephemeral loopback port and hand back its number for the API."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+LISTENING_ADDRESS_RE = re.compile(
+    r"""api_listening.*?address(?:\\?["']?\s*[:=]\s*\\?["']?)"""
+    r"""(?P<address>\[[0-9a-fA-F:]+\]|[0-9.]+):(?P<port>[0-9]+)"""
+)
+
+
+def listening_url_from_log(log: str) -> str | None:
+    """Extract the API's authoritative port-0 bound address from tracing output."""
+    match = LISTENING_ADDRESS_RE.search(log)
+    if not match:
+        return None
+    host = match.group("address")
+    if host in {"0.0.0.0", "[::]"}:
+        host = "127.0.0.1"
+    return f"http://{host}:{match.group('port')}"
+
+
+def enable_api_listening_log(env: dict[str, str]) -> None:
+    """Keep the authoritative port-0 event visible under restrictive ambient logs."""
+    directive = "sceneworks_rust_api::server=info"
+    ambient = env.get("RUST_LOG", "").strip()
+    env["RUST_LOG"] = f"{ambient},{directive}" if ambient else directive
 
 
 def safetensors_bytes() -> bytes:
@@ -60,11 +77,10 @@ class SpawnedProcess:
     fills (~64 KB) -- the test then hangs until its deadline and is mis-reported
     as "job did not reach status" rather than the real cause.
 
-    This wrapper sends ``stdout`` to ``DEVNULL`` (the previous code captured it
-    but never read it) and drains ``stderr`` on a background daemon thread into an
-    in-memory buffer, so the child can always make progress. ``stderr_text()``
-    returns everything captured so far for failure messages, preserving the
-    stderr-on-early-exit debuggability the callers relied on.
+    This wrapper drains both ``stdout`` and ``stderr`` on background daemon
+    threads into one in-memory buffer, so the child can always make progress.
+    SceneWorks tracing writes to stdout, while compiler/process failures use
+    stderr; port discovery and diagnostics therefore need both streams.
 
     It delegates the small slice of the ``Popen`` surface the tests use
     (``poll``/``returncode``/``terminate``/``wait``/``kill``) so it drops in for
@@ -75,13 +91,22 @@ class SpawnedProcess:
         self._popen = popen
         self._chunks: list[str] = []
         self._lock = threading.Lock()
-        self._thread = threading.Thread(
-            target=self._drain, name="spawned-stderr-drain", daemon=True
-        )
-        self._thread.start()
+        self._threads = [
+            threading.Thread(
+                target=self._drain,
+                args=(stream,),
+                name=f"spawned-{name}-drain",
+                daemon=True,
+            )
+            for name, stream in (
+                ("stdout", self._popen.stdout),
+                ("stderr", self._popen.stderr),
+            )
+        ]
+        for thread in self._threads:
+            thread.start()
 
-    def _drain(self) -> None:
-        stream = self._popen.stderr
+    def _drain(self, stream) -> None:
         if stream is None:
             return
         # Iterating a text-mode pipe yields lines until EOF (child exit/close),
@@ -91,13 +116,28 @@ class SpawnedProcess:
                 self._chunks.append(line)
 
     def stderr_text(self) -> str:
-        """Return the child's captured stderr. If the child has already exited,
-        wait briefly for the drain thread to consume the final buffered bytes so
-        the failure message is complete."""
+        """Return the child's captured output. If the child has already exited,
+        wait briefly for both drain threads to consume their final buffered bytes."""
         if self._popen.poll() is not None:
-            self._thread.join(timeout=5)
+            for thread in self._threads:
+                thread.join(timeout=5)
         with self._lock:
             return "".join(self._chunks)
+
+    def wait_for_listening_url(self, timeout_seconds: float = 30.0) -> str:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if url := listening_url_from_log(self.stderr_text()):
+                return url
+            if self.poll() is not None:
+                raise AssertionError(
+                    f"Rust API exited early with code {self.returncode}: {self.stderr_text()}"
+                )
+            time.sleep(0.05)
+        raise AssertionError(
+            "Rust API did not report its bound address within "
+            f"{timeout_seconds:.0f}s: {self.stderr_text()}"
+        )
 
     # -- Popen delegation (only what the tests touch) ------------------------
     def poll(self) -> int | None:
@@ -120,15 +160,14 @@ class SpawnedProcess:
 def spawn_process(command, *, cwd, env) -> SpawnedProcess:
     """Spawn an API/worker binary with non-blocking pipe handling (F-042).
 
-    ``stdout`` is discarded to ``DEVNULL`` (it was captured but never read) and
-    ``stderr`` is drained by a background thread -- neither can fill and block the
-    child, so a chatty binary can no longer hang the test. Returns a
+    ``stdout`` and ``stderr`` are drained by background threads -- neither can
+    fill and block the child, so a chatty binary can no longer hang the test. Returns a
     :class:`SpawnedProcess` that stands in for the old raw ``Popen`` handle."""
     popen = subprocess.Popen(
         command,
         cwd=cwd,
         env=env,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )

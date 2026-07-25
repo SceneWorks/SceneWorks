@@ -2939,6 +2939,12 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         ));
     }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
+    if payload.loras.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
+        return Err(ApiError::bad_request(format!(
+            "loras must contain at most {} entries",
+            sceneworks_core::lora_family::MAX_JOB_LORAS
+        )));
+    }
     if ![
         "text_to_image",
         "edit_image",
@@ -2977,10 +2983,10 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
 }
 
 fn validate_character_test_job(payload: &CharacterTestRequest) -> Result<(), ApiError> {
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > 4000 {
-        return Err(ApiError::bad_request(
-            "prompt must be between 1 and 4000 characters",
-        ));
+    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "prompt must be between 1 and {MAX_PROMPT_CHARS} characters"
+        )));
     }
     if !(1..=8).contains(&payload.count) {
         return Err(ApiError::bad_request("count must be between 1 and 8"));
@@ -3001,6 +3007,12 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         ));
     }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
+    if payload.loras.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
+        return Err(ApiError::bad_request(format!(
+            "loras must contain at most {} entries",
+            sceneworks_core::lora_family::MAX_JOB_LORAS
+        )));
+    }
     if ![
         "image_to_video",
         "text_to_video",

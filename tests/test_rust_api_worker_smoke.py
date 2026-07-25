@@ -21,8 +21,8 @@ from conftest import require_tool
 # file and test_rust_api_contract_snapshots.py.
 from rust_api_harness import (
     PNG_1X1,
+    enable_api_listening_log,
     SpawnedProcess,
-    free_port,
     minimal_safetensors as _minimal_safetensors,
     spawn_process,
     wait_for_health,
@@ -248,21 +248,21 @@ def rust_api(tmp_path):
         "SCENEWORKS_RUST_API_BINARY", "sceneworks-rust-api", "the Rust API smoke test"
     )
 
-    port = free_port()
-    base_url = f"http://127.0.0.1:{port}"
     env = os.environ.copy()
     env.update(
         {
             "SCENEWORKS_API_HOST": "127.0.0.1",
-            "SCENEWORKS_API_PORT": str(port),
+            "SCENEWORKS_API_PORT": "0",
             "SCENEWORKS_DATA_DIR": str(tmp_path / "data"),
             "SCENEWORKS_CONFIG_DIR": str(tmp_path / "config"),
             "SCENEWORKS_JOBS_DB_PATH": str(tmp_path / "cache" / "jobs.db"),
             "SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE": "1",
         }
     )
+    enable_api_listening_log(env)
     process = spawn_process(command, cwd=ROOT, env=env)
     try:
+        base_url = process.wait_for_listening_url()
         wait_for_health(base_url, process)
         yield base_url
     finally:

@@ -440,8 +440,10 @@ export function App() {
   // Scope project data during render, not in a passive effect. On A → B (or A
   // → no project), B's first render therefore cannot observe A's assets or raw
   // selection while B's catalog request is still pending.
-  const assets =
-    loadedAssetsProjectId === activeProject?.id ? loadedAssets : [];
+  const assets = useMemo(
+    () => (loadedAssetsProjectId === activeProject?.id ? loadedAssets : []),
+    [activeProject?.id, loadedAssets, loadedAssetsProjectId],
+  );
   const selectedAssetId =
     loadedAssetsProjectId === activeProject?.id ? storedSelectedAssetId : null;
   const [projectFilter, setProjectFilter] = useState("all");
@@ -475,10 +477,10 @@ export function App() {
     );
     setPreviewAsset(asset);
   }, []);
-  const closePreview = () => {
+  const closePreview = useCallback(() => {
     setPreviewScopeIds(null);
     setPreviewAsset(null);
-  };
+  }, []);
   const [studioLaunch, setStudioLaunch] = useState(null);
   // sc-8730: the launch channel INTO the Image Editor canvas (crop/upscale/refine
   // screen, activeView === "ImageEditor"). Mirrors studioLaunch but targets the
@@ -1330,6 +1332,8 @@ export function App() {
     refreshPersonTracksRef.current?.(activeProject.id, { signal });
     refreshTimelinesRef.current?.(activeProject.id, { signal });
     return () => controller.abort();
+    // Project identity owns this refresh; project-object churn must not restart every catalog request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProject?.id, ready, token]);
 
   // sc-11231 (F-037): useJobEvents captures whichever callback existed at subscribe time
@@ -1573,7 +1577,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token, activeProject, requestedGpu],
+    [token, activeProject?.id, activeProject?.name, requestedGpu, setError],
   );
 
   const createImageJob = useMemo(
@@ -1981,7 +1985,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
   );
 
   const updateAssetTags = useCallback(
@@ -1997,7 +2001,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
   );
 
   // A move endpoint returns the whole moved upscale-fold group (sc-10205) as an
@@ -2027,7 +2031,7 @@ export function App() {
         throw err;
       }
     },
-    [token, mergeMovedAssets],
+    [token, mergeMovedAssets, setError],
   );
 
   // Move an asset into a character's assets (sc-10200): the true-move twin of
@@ -2051,7 +2055,7 @@ export function App() {
         throw err;
       }
     },
-    [token, mergeMovedAssets],
+    [token, mergeMovedAssets, setError],
   );
 
   const deleteAsset = useCallback(
@@ -2068,7 +2072,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
   );
 
   const purgeAsset = useCallback(
@@ -2099,7 +2103,34 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
+  );
+  const deletePreviewAsset = useCallback(
+    async (asset) => {
+      const { previous, next } = previewNavigation;
+      const target =
+        previewDirectionRef.current === "previous" ? previous ?? next : next ?? previous;
+      await deleteAsset(asset);
+      if (target) {
+        setPreviewAsset(target);
+      } else {
+        closePreview();
+      }
+    },
+    [closePreview, deleteAsset, previewNavigation],
+  );
+  const previewAssetInDirection = useCallback((asset, direction) => {
+    if (direction) {
+      previewDirectionRef.current = direction;
+    }
+    setPreviewAsset(asset);
+  }, []);
+  const purgePreviewAsset = useCallback(
+    async (asset) => {
+      await purgeAsset(asset);
+      closePreview();
+    },
+    [closePreview, purgeAsset],
   );
   // Keep the ref current for the App-level scratch-op survivor (sc-8850), which purges
   // from the SSE/sweep path without re-subscribing. Published from a post-commit effect
@@ -2148,7 +2179,7 @@ export function App() {
         return null;
       }
     },
-    [token, activeProject],
+    [activeProject, setError, token],
   );
 
   const jobAction = useCallback(
@@ -2166,7 +2197,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
   );
 
   // Clear completed items from the queue (issue #1556 / sc-12231). The server
@@ -2192,7 +2223,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
   );
 
   // Cancel every pending (not-yet-started) item in the queue (sc-13448). The server
@@ -2218,7 +2249,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
   );
 
   // Clear a single completed item from the queue (issue #1556 / sc-12231) — the
@@ -2237,7 +2268,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
   );
 
   const titleInfo = viewTitles[activeView] ?? { title: activeView, blurb: "" };
@@ -2807,39 +2838,16 @@ export function App() {
       {previewedAsset ? (
         <FullscreenPreview
           asset={previewedAsset}
-          deleteAsset={async (asset) => {
-            // Stay in the preview and advance to the neighbour in the direction
-            // the user was scrolling (falling back to the other side, then to
-            // closing once nothing is left).
-            const { previous, next } = previewNavigation;
-            const target =
-              previewDirectionRef.current === "previous" ? previous ?? next : next ?? previous;
-            await deleteAsset(asset);
-            // Advance within the launch collection; close (and drop the scope)
-            // once it is exhausted.
-            if (target) {
-              setPreviewAsset(target);
-            } else {
-              closePreview();
-            }
-          }}
+          deleteAsset={deletePreviewAsset}
           nextAsset={previewNavigation.next}
           onClose={closePreview}
           onEditImage={sendAssetToImageEditor}
           onEditInStudio={sendAssetToImageEdit}
-          onPreviewAsset={(asset, direction) => {
-            if (direction) {
-              previewDirectionRef.current = direction;
-            }
-            setPreviewAsset(asset);
-          }}
+          onPreviewAsset={previewAssetInDirection}
           onUseRecipe={sendAssetRecipeToStudio}
           previousAsset={previewNavigation.previous}
           sourceAsset={previewSourceAsset}
-          purgeAsset={async (asset) => {
-            await purgeAsset(asset);
-            closePreview();
-          }}
+          purgeAsset={purgePreviewAsset}
           updateAssetStatus={updateAssetStatus}
         />
       ) : null}

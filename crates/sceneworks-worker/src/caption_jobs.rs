@@ -84,6 +84,17 @@ struct CaptionedItem {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+fn caption_destination(payload: &JsonObject) -> WorkerResult<(String, String)> {
+    Ok((
+        required_payload_string(payload, "projectId")?.to_owned(),
+        required_payload_string(payload, "datasetId")?.to_owned(),
+    ))
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) async fn run_training_caption_job(
     api: &ApiClient,
     settings: &Settings,
@@ -101,6 +112,10 @@ pub(crate) async fn run_training_caption_job(
         ));
     }
 
+    // Validate the persistence destination before reserving the GPU or loading weights.
+    // These fields used to be checked only after inference had completed, wasting a full
+    // caption run for a request that could never save its results.
+    let (project_id, dataset_id) = caption_destination(&job.payload)?;
     let items = caption_items(settings, &job.payload)?;
     if items.is_empty() {
         return Err(WorkerError::InvalidPayload(
@@ -380,8 +395,6 @@ pub(crate) async fn run_training_caption_job(
         ),
     )
     .await?;
-    let project_id = required_payload_string(&job.payload, "projectId")?;
-    let dataset_id = required_payload_string(&job.payload, "datasetId")?;
     let sidecars: Value = api
         .post_json(
             &format!(
@@ -400,7 +413,7 @@ pub(crate) async fn run_training_caption_job(
             &format!("Created captions for {} training item(s).", items.len()),
             Some(caption_result(
                 &model_name_or_path,
-                dataset_id,
+                &dataset_id,
                 items.len(),
                 sidecars,
             )),
@@ -775,6 +788,19 @@ mod tests {
         assert_eq!(options.sampling.temperature, 0.5);
         assert_eq!(options.sampling.top_p, 0.8);
         assert_eq!(options.sampling.max_new_tokens, 128);
+    }
+
+    #[test]
+    fn caption_destination_rejects_missing_ids_before_inference() {
+        let complete = serde_json::Map::from_iter([
+            ("projectId".to_owned(), json!("project-1")),
+            ("datasetId".to_owned(), json!("dataset-1")),
+        ]);
+        assert_eq!(
+            caption_destination(&complete).expect("destination"),
+            ("project-1".to_owned(), "dataset-1".to_owned())
+        );
+        assert!(caption_destination(&serde_json::Map::new()).is_err());
     }
 
     // ── sc-11189 (F-016): per-step token-progress coalescing (ported from the refine path) ────────

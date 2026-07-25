@@ -532,6 +532,8 @@ export function VideoStudio() {
     if (selectedAsset.type === "video") {
       setSourceClipAssetId(selectedAsset.id);
     }
+    // Asset object refreshes must not replay a user-selection transition.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAssetId, selectedAsset?.id, selectedAsset?.type]);
 
   useEffect(() => {
@@ -574,6 +576,8 @@ export function VideoStudio() {
     if (selectedAsset?.type === "image" || selectedAsset?.type === "frame") {
       setSourceAssetId(selectedAsset.id);
     }
+    // A persistent launch is applied once per launch/asset identity, not on catalog object refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [launchRequest?.id, selectedAsset?.id, selectedAsset?.type]);
 
   // Restore-time validation of the persisted asset selections (sc-11964). The snapshot seeds
@@ -627,6 +631,8 @@ export function VideoStudio() {
       const options = selectedModel.limits?.fps ?? [24, 25, 30];
       return options.includes(Number(current)) ? current : selectedModel.defaults?.fps ?? options[0];
     });
+    // Reconcile defaults only when model identity changes, not on catalog object refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedModel?.id]);
 
   // I2V: when the user picks a source image (or first/last frame) after mount,
@@ -649,6 +655,8 @@ export function VideoStudio() {
     if (!width || !height) return;
     const match = pickClosestResolution(width, height, selectedModel?.limits?.resolutions);
     if (match) setResolution(match);
+    // Source/model identities drive this probe; an unrelated asset catalog refresh does not.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [i2vSourceAssetId, mode, selectedModel?.id, assets]);
 
   // sc-12324: replay a recorded recipe — the viewer's "Use this recipe" on a video asset. Restores
@@ -1025,7 +1033,16 @@ export function VideoStudio() {
   const promptless = Boolean(selectedModel?.promptless);
   const [width, height] = resolution.split("x").map((value) => Number(value));
   const durationOptions = selectedModel?.limits?.durations ?? [4, 6, 8, 10];
-  const resolutionOptions = selectedModel?.limits?.resolutions ?? ["768x512", "640x640", "1280x720", "720x1280"];
+  const resolutionOptions = useMemo(
+    () =>
+      selectedModel?.limits?.resolutions ?? [
+        "768x512",
+        "640x640",
+        "1280x720",
+        "720x1280",
+      ],
+    [selectedModel?.limits?.resolutions],
+  );
 
   // Effective inputs once the general-preset stack folds in (epic 11949); drives the live
   // preview and (Phase 5) the client-authoritative submit.

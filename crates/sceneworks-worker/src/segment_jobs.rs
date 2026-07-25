@@ -18,10 +18,11 @@
 //! by the MLX worker (`gpu.rs mlx_gpu`), so a segment job never routes off-Mac. There is no
 //! torch/candle SAM3 image path yet (a Windows/Linux backport is tracked separately).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
+use crate::asset_media::resolve_asset_media;
 use crate::downloads::DownloadContext;
 use crate::person_segment_sam3::{
     ensure_segmenter_weights, segment_box_blocking, segment_points_blocking,
@@ -38,34 +39,6 @@ use sceneworks_core::project_store::ProjectStore;
 /// test): keep an instance when `σ(logit)·σ(presence) > THRESHOLD`, binarize its mask at `σ > MASK`.
 const SEGMENT_THRESHOLD: f32 = 0.5;
 const SEGMENT_MASK_THRESHOLD: f32 = 0.5;
-
-/// Resolve a `sourceAssetId` to its on-disk media path + the asset's `displayName` via the project
-/// sidecar (mirrors `upscale_jobs::resolve_source` / `image_adapters.find_asset_media_path`).
-fn resolve_source(
-    store: &ProjectStore,
-    project_id: &str,
-    asset_id: &str,
-    project_path: &Path,
-) -> Option<(PathBuf, Option<String>)> {
-    let asset = store.get_asset(project_id, asset_id).ok()?;
-    let rel = asset.get("file")?.get("path")?.as_str()?;
-    let mut path = project_path.to_path_buf();
-    for component in Path::new(rel).components() {
-        if let std::path::Component::Normal(value) = component {
-            path.push(value);
-        } else {
-            return None;
-        }
-    }
-    if !path.exists() {
-        return None;
-    }
-    let display = asset
-        .get("displayName")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    Some((path, display))
-}
 
 /// Parse `payload.box` (the box prompt in source-image pixel coords). Accepts either the canonical
 /// 4-array `[x1, y1, x2, y2]` or an `{x, y, width, height}` object (the editor's rect shape), so the
@@ -226,12 +199,14 @@ pub(crate) async fn run_image_segment_job(
         .get_project(&project_id)
         .map_err(|e| WorkerError::InvalidPayload(format!("project not found: {e}")))?;
     let project_path = PathBuf::from(project.path);
-    let (source_path, source_display) =
-        resolve_source(&store, &project_id, &source_asset_id, &project_path).ok_or_else(|| {
+    let source = resolve_asset_media(&store, &project_id, &source_asset_id, &project_path)
+        .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
                 "Source image asset not found or missing: {source_asset_id}."
             ))
         })?;
+    let source_path = source.path;
+    let source_display = source.display_name;
 
     update_job(
         api,

@@ -58,6 +58,16 @@ use uuid::Uuid;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod advanced;
 mod api_client;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod asset_media;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod image_sampling;
 // Shared one-child PNG persistence for upscale (Mac + candle) and smart-select (Mac).
 // Keep the include site on the callers' superset so the neither-backend lane does not
 // compile an otherwise dead helper.
