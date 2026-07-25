@@ -710,6 +710,10 @@ def collect_sse_events_during(runtime: ContractRuntime, action: Any, expected_ev
             lines = response.iter_lines()
             ready = read_sse_message(lines)
             assert ready == {"event": "ready", "data": {"status": "connected"}}
+            initial_jobs = read_sse_message(lines)
+            assert initial_jobs["event"] == "jobs.snapshot"
+            initial_queue = read_sse_message(lines)
+            assert initial_queue["event"] == "queue.updated"
             action_result = action()
             if action_result.status_code >= 400:
                 raise AssertionError(

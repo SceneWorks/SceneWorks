@@ -420,6 +420,52 @@ describe("SceneWorks app shell", () => {
     expect(queueChip()?.textContent).toContain("Queue 2");
   });
 
+  it("repairs cached queue counts from the authoritative snapshot after SSE reconnect", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<App />);
+      });
+      await settle();
+
+      const queueChip = () => [...document.body.querySelectorAll(".queue-chip")][0];
+      await act(async () => {
+        FakeEventSource.instances[0].listeners["queue.updated"]({
+          data: JSON.stringify({
+            counts: { active: 1, running: 1 },
+            activeJobs: [{ id: "job-completed-during-api-restart" }],
+          }),
+        });
+      });
+      expect(queueChip()?.textContent).toContain("Queue 1");
+
+      await act(async () => {
+        FakeEventSource.instances[0].onerror();
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+      await settle();
+      expect(FakeEventSource.instances).toHaveLength(2);
+
+      // The server sends this authoritative queue.updated immediately after
+      // `ready` on every connection. It must replace, not merge with, the
+      // pre-restart cached summary.
+      await act(async () => {
+        FakeEventSource.instances[1].listeners["queue.updated"]({
+          data: JSON.stringify({
+            counts: { active: 0, completed: 1 },
+            activeJobs: [],
+          }),
+        });
+      });
+      await settle();
+      expect(queueChip()?.textContent).toContain("Queue 0");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("re-probes health on SSE open and error transitions", async () => {
     let healthOnline = true;
     let healthRequests = 0;

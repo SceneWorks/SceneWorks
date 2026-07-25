@@ -131,6 +131,8 @@ jobs:
       # so no npm install is needed on this path).
       - name: Stage desktop test sidecar placeholders
         run: node apps/desktop/scripts/stage-test-sidecars.mjs
+      - name: Run Windows project-registry fingerprint regression
+        run: cargo test -p sceneworks-core windows_registry_cache_detects_between_window_rewrite_with_restored_mtime
       - name: Run desktop Rust tests
         run: cargo test -p sceneworks-desktop
       - name: Check desktop Rust lint

@@ -18,6 +18,7 @@ import {
   parseSseJson,
   readStoredAccent,
   readStoredTheme,
+  reconcileAuthoritativeJobs,
 } from "./appHelpers.js";
 import { DEFAULT_ACCENT } from "./accents.js";
 
@@ -113,6 +114,62 @@ describe("job freshness + merge", () => {
     expect(byId.a.updatedAt).toBe("2026-01-02T00:00:00Z");
     // The client-only entry is retained.
     expect(byId["client-only"]).toBeTruthy();
+  });
+
+  it("reconciles a stale active row to the authoritative terminal snapshot", () => {
+    const current = [{
+      id: "job-1",
+      status: "running",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:01:00Z",
+    }];
+    const server = [{
+      id: "job-1",
+      status: "completed",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:02:00Z",
+    }];
+    expect(reconcileAuthoritativeJobs(current, server)).toEqual(server);
+  });
+
+  it("retains a newer durable client row when snapshot timestamps tie", () => {
+    const current = [{
+      id: "job-1",
+      status: "completed",
+      revision: 8,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:02:00Z",
+    }];
+    const staleServer = [{
+      ...current[0],
+      status: "running",
+      revision: 7,
+    }];
+    expect(reconcileAuthoritativeJobs(current, staleServer)).toEqual(current);
+  });
+
+  it("drops an active row absent from the authoritative active set but retains capped terminal history", () => {
+    const current = [
+      { id: "stale-active", status: "running", createdAt: "2026-01-02T00:00:00Z" },
+      { id: "local-history", status: "completed", createdAt: "2026-01-01T00:00:00Z" },
+    ];
+    expect(reconcileAuthoritativeJobs(current, [])).toEqual([current[1]]);
+  });
+
+  it("drops only explicitly cleared terminal history when the server snapshot is capped", () => {
+    const retained = { id: "retained", status: "completed", createdAt: "2026-01-01T00:00:00Z" };
+    const cleared = { id: "cleared", status: "failed", createdAt: "2025-12-31T00:00:00Z" };
+    expect(reconcileAuthoritativeJobs([retained, cleared], [], ["cleared"])).toEqual([retained]);
+  });
+
+  it("lets a clear tombstone win when the same server snapshot also contains the row", () => {
+    const cleared = {
+      id: "cleared",
+      status: "completed",
+      revision: 4,
+      createdAt: "2026-01-01T00:00:00Z",
+    };
+    expect(reconcileAuthoritativeJobs([cleared], [cleared], ["cleared"])).toEqual([]);
   });
 });
 

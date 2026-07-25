@@ -9,6 +9,9 @@ use serde_json::{json, Map, Value};
 
 use crate::jobs_store::routing::gaps::{classify_image_gap, classify_video_gap, UnsupportedReason};
 use crate::jobs_store::routing::mlx::{image_request_mlx_eligible, video_mode_is_mlx_eligible};
+use crate::jobs_store::routing::{
+    has_nonempty_array, has_nonempty_nested_array, has_nonempty_string, has_nonempty_string_array,
+};
 
 /// The user-facing affordance prefix the Mac UI shows in place of a control with no native Mac lane
 /// (sc-3486). Centralised so the API, the web client, and the gap docs read identically.
@@ -998,34 +1001,10 @@ pub(crate) fn imported_image_request_family_eligible(
     if !has_nonempty_path {
         return false;
     }
-    let has_nonempty_id = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
-    };
-    let has_reference_list = payload
-        .get("referenceAssetIds")
-        .and_then(Value::as_array)
-        .is_some_and(|ids| {
-            ids.iter()
-                .filter_map(Value::as_str)
-                .any(|id| !id.trim().is_empty())
-        });
-    let has_loras = payload
-        .get("loras")
-        .and_then(Value::as_array)
-        .is_some_and(|loras| !loras.is_empty());
-    let advanced = payload.get("advanced").and_then(Value::as_object);
-    let has_poses = advanced
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
-    let has_phases = advanced
-        .and_then(|advanced| advanced.get("phases"))
-        .and_then(Value::as_array)
-        .is_some_and(|phases| !phases.is_empty());
+    let has_reference_list = has_nonempty_string_array(payload, "referenceAssetIds");
+    let has_loras = has_nonempty_array(payload, "loras");
+    let has_poses = has_nonempty_nested_array(payload, "advanced", "poses");
+    let has_phases = has_nonempty_nested_array(payload, "advanced", "phases");
 
     // A fused SDXL checkpoint contains the complete denoiser + dual text encoders + VAE, so its
     // single-file lane is not Krea's bare-transformer assembly surface. Both native loaders accept
@@ -1035,22 +1014,22 @@ pub(crate) fn imported_image_request_family_eligible(
     if family == Some("sdxl") {
         return payload.get("mode").and_then(Value::as_str).map(str::trim) != Some("edit_image")
             && !has_reference_list
-            && !has_nonempty_id("referenceAssetId")
-            && !has_nonempty_id("sourceAssetId")
+            && !has_nonempty_string(payload, "referenceAssetId")
+            && !has_nonempty_string(payload, "sourceAssetId")
             && !has_poses
             && !has_phases
-            && !has_nonempty_id("maskAssetId")
-            && !has_nonempty_id("characterId")
-            && !has_nonempty_id("characterLookId");
+            && !has_nonempty_string(payload, "maskAssetId")
+            && !has_nonempty_string(payload, "characterId")
+            && !has_nonempty_string(payload, "characterLookId");
     }
 
     // Never on this bare-transformer lane, on any backend: strict pose, multi-phase, inpaint mask,
     // and character / look identity conditioning (all need base-tier components it does not stage).
     if has_poses
         || has_phases
-        || has_nonempty_id("maskAssetId")
-        || has_nonempty_id("characterId")
-        || has_nonempty_id("characterLookId")
+        || has_nonempty_string(payload, "maskAssetId")
+        || has_nonempty_string(payload, "characterId")
+        || has_nonempty_string(payload, "characterLookId")
     {
         return false;
     }
@@ -1067,15 +1046,15 @@ pub(crate) fn imported_image_request_family_eligible(
         // required `krea2_identity_edit` LoRA is enforced worker-side.
         return adapters_supported
             && (has_reference_list
-                || has_nonempty_id("referenceAssetId")
-                || has_nonempty_id("sourceAssetId"));
+                || has_nonempty_string(payload, "referenceAssetId")
+                || has_nonempty_string(payload, "sourceAssetId"));
     }
 
     // Non-edit t2i / img2img: img2img rides a single `referenceAssetId` (the worker's
     // `resolve_img2img_init_generic`, sc-14071). The plural set is the edit surface, and a bare
     // `sourceAssetId` is not read on the img2img path (it would silently render plain t2i), so both
     // are rejected outside edit mode — mirroring the worker's `krea_imported_available`.
-    if has_reference_list || has_nonempty_id("sourceAssetId") {
+    if has_reference_list || has_nonempty_string(payload, "sourceAssetId") {
         return false;
     }
     true

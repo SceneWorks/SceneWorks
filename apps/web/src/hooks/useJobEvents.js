@@ -1,12 +1,19 @@
 import { useEffect } from "react";
 import { apiFetch, eventUrl } from "../api.js";
-import { sortWorkers, upsertJobNewest } from "../sorters.js";
+import {
+  acceptsJobUpdate,
+  jobRevision,
+  MAX_TERMINAL_JOBS,
+  sortWorkers,
+  upsertJobNewest,
+} from "../sorters.js";
 import { terminalStatuses } from "../constants.js";
 import {
   failedJobNotice,
   generatedResultAssetCount,
   noticeKindForJob,
   parseSseJson,
+  reconcileAuthoritativeJobs,
 } from "../appHelpers.js";
 
 // Owns the live job/worker/queue SSE stream (the EventSource lifecycle: ticket mint,
@@ -31,6 +38,7 @@ export function useJobEvents({
   access,
   ready,
   token,
+  jobsRef,
   setJobs,
   setWorkers,
   setQueueSummary,
@@ -60,10 +68,90 @@ export function useJobEvents({
     let reconnectTimer = null;
     let reconnectAttempt = 0;
     let closed = false;
+    let snapshotRevision = 0;
+    let reconnectKnownJobIds = new Set();
+    let maxRetainedClearTombstones = MAX_TERMINAL_JOBS;
+    const appliedTerminalRevisionByJob = new Map();
+    // Clear tombstones protect against a job publication delayed past its clear
+    // event. Bound them to the reconnect's complete active set plus the same
+    // 200-row tail as visible terminal history instead of accumulating for the
+    // connection lifetime. Map insertion order is oldest -> newest, with the
+    // clear event revision used to preserve post-snapshot-barrier clears during
+    // authoritative replacement.
+    const clearedJobRevisionById = new Map();
 
-    function handleJobUpdated(event) {
-      const job = parseSseJson(event, "job");
-      if (!job) {
+    function pruneClearedJobs() {
+      while (clearedJobRevisionById.size > maxRetainedClearTombstones) {
+        clearedJobRevisionById.delete(clearedJobRevisionById.keys().next().value);
+      }
+    }
+
+    function growClearedJobLimit(visibleJobs) {
+      const activeJobCount = visibleJobs.filter(
+        (job) => !terminalStatuses.has(job.status),
+      ).length;
+      maxRetainedClearTombstones = Math.max(
+        maxRetainedClearTombstones,
+        activeJobCount + MAX_TERMINAL_JOBS,
+      );
+    }
+
+    function rememberClearedJob(jobId, revision) {
+      if (!jobId) {
+        return;
+      }
+      clearedJobRevisionById.delete(jobId);
+      clearedJobRevisionById.set(jobId, revision);
+      pruneClearedJobs();
+    }
+
+    function pruneAppliedTerminalRevisions(visibleJobs) {
+      const visibleIds = new Set(visibleJobs.map((job) => job.id));
+      for (const jobId of appliedTerminalRevisionByJob.keys()) {
+        if (!visibleIds.has(jobId)) {
+          appliedTerminalRevisionByJob.delete(jobId);
+        }
+      }
+    }
+
+    function applyJobUpdate(job) {
+      if (!job?.id || clearedJobRevisionById.has(job.id)) {
+        return;
+      }
+      const currentJobs = jobsRef?.current ?? [];
+      // State freshness is the first authority. A globally newer SSE publication
+      // can still carry an older durable job row; rejected state must never cause
+      // terminal effects.
+      if (!acceptsJobUpdate(currentJobs, job)) {
+        return;
+      }
+      const terminalRevision = jobRevision(job);
+      const previousTerminalRevision = appliedTerminalRevisionByJob.get(job.id);
+      const duplicateTerminalEffects =
+        terminalStatuses.has(job.status) &&
+        terminalRevision !== null &&
+        previousTerminalRevision !== undefined &&
+        previousTerminalRevision >= terminalRevision;
+      if (terminalStatuses.has(job.status) && terminalRevision !== null) {
+        appliedTerminalRevisionByJob.set(
+          job.id,
+          Math.max(previousTerminalRevision ?? terminalRevision, terminalRevision),
+        );
+      }
+      setJobs((items) => {
+        const next = upsertJobNewest(items, job);
+        growClearedJobLimit(next);
+        pruneAppliedTerminalRevisions(next);
+        if (jobsRef) {
+          jobsRef.current = next;
+        }
+        return next;
+      });
+      // A post-barrier publication can carry the exact terminal row already
+      // captured by the snapshot. Its global SSE id is newer, but replaying the
+      // same durable job revision would duplicate non-idempotent effects such as
+      // timeline mutation and user notices.
+      if (duplicateTerminalEffects) {
         return;
       }
       const hasGeneratedAssets = Boolean(job.result?.generationSetId || job.result?.assetIds?.length || job.result?.assets?.length);
@@ -76,7 +164,6 @@ export function useJobEvents({
         hasGeneratedAssets &&
         (resultAssetCount > previousRefresh.assetCount ||
           (resultAssetCount === 0 && generationSetId && generationSetId !== previousRefresh.generationSetId));
-      setJobs((items) => upsertJobNewest(items, job));
       if (hasGeneratedAssets) {
         if (job.result?.generationSetId) {
           setLatestGenerationSetId(job.result.generationSetId);
@@ -145,12 +232,147 @@ export function useJobEvents({
       }
     }
 
+    function handleJobUpdated(event) {
+      const revision = Number(event.lastEventId ?? 0);
+      if (Number.isFinite(revision) && revision > 0 && revision <= snapshotRevision) {
+        return;
+      }
+      const job = parseSseJson(event, "job");
+      if (job) {
+        applyJobUpdate(job);
+      }
+    }
+
     function handleWorkerUpdated(event) {
       const worker = parseSseJson(event, "worker");
       if (!worker) {
         return;
       }
       setWorkers((items) => [worker, ...items.filter((item) => item.id !== worker.id)].sort(sortWorkers));
+    }
+
+    function handleJobsSnapshot(event) {
+      const payload = parseSseJson(event, "jobs snapshot");
+      const snapshotJobs = Array.isArray(payload) ? payload : payload?.jobs;
+      if (!Array.isArray(snapshotJobs)) {
+        return;
+      }
+      const revision = Number(Array.isArray(payload) ? event.lastEventId : payload.revision);
+      if (Number.isFinite(revision) && revision > 0) {
+        snapshotRevision = Math.max(snapshotRevision, revision);
+      }
+      const snapshotClearedJobIds = Array.isArray(payload?.clearedJobIds)
+        ? payload.clearedJobIds
+        : [];
+      const barrierRevision =
+        Number.isFinite(revision) && revision > 0 ? revision : null;
+      const postBarrierClears = [...clearedJobRevisionById.entries()].filter(
+        ([, clearRevision]) =>
+          barrierRevision === null ||
+          (clearRevision !== null && clearRevision > barrierRevision),
+      );
+      // The snapshot is authoritative at its revision. Replace connection-old
+      // tombstones with the bounded subset relevant to the IDs carried by this
+      // reconnect, while retaining any live clear delivered after the barrier.
+      // Snapshot IDs preserve request order (newest visible jobs first), so insert
+      // the retained prefix in reverse to keep Map eviction oldest-first.
+      const relevantSnapshotClears = snapshotClearedJobIds
+        .filter((jobId) => reconnectKnownJobIds.has(jobId))
+        .slice(0, maxRetainedClearTombstones);
+      clearedJobRevisionById.clear();
+      for (const jobId of [...relevantSnapshotClears].reverse()) {
+        rememberClearedJob(jobId, barrierRevision);
+      }
+      for (const [jobId, clearRevision] of postBarrierClears) {
+        rememberClearedJob(jobId, clearRevision);
+      }
+      const authoritativeClearedJobIds = new Set([
+        ...snapshotClearedJobIds,
+        ...postBarrierClears.map(([jobId]) => jobId),
+      ]);
+      for (const jobId of authoritativeClearedJobIds) {
+        appliedTerminalRevisionByJob.delete(jobId);
+      }
+      const jobs = snapshotJobs.filter((job) => !authoritativeClearedJobIds.has(job.id));
+      const currentJobs = jobsRef?.current ?? [];
+      const currentById = new Map(currentJobs.map((job) => [job.id, job]));
+      const missedTerminalTransitions = jobs.filter((job) => {
+        const current = currentById.get(job.id);
+        return (
+          current &&
+          !terminalStatuses.has(current.status) &&
+          terminalStatuses.has(job.status) &&
+          acceptsJobUpdate([current], job)
+        );
+      });
+      const missedTerminalIds = new Set(missedTerminalTransitions.map((job) => job.id));
+      // Authoritative terminal rows that were already terminal locally are
+      // history, not transitions. Seed their durable revisions so a delayed
+      // post-barrier publication cannot replay effects.
+      for (const job of jobs) {
+        const revision = jobRevision(job);
+        if (
+          terminalStatuses.has(job.status) &&
+          revision !== null &&
+          !missedTerminalIds.has(job.id)
+        ) {
+          appliedTerminalRevisionByJob.set(
+            job.id,
+            Math.max(appliedTerminalRevisionByJob.get(job.id) ?? revision, revision),
+          );
+        }
+      }
+      setJobs((items) => {
+        const next = reconcileAuthoritativeJobs(items, jobs, [
+          ...authoritativeClearedJobIds,
+        ]);
+        growClearedJobLimit(next);
+        pruneAppliedTerminalRevisions(next);
+        if (jobsRef) {
+          jobsRef.current = next;
+        }
+        return next;
+      });
+      // Re-run the bounded effects a disconnected client missed when an active
+      // row became terminal: catalog refresh, per-project asset refresh, and
+      // timeline generation application use the same idempotent handlers as a
+      // live job.updated event. Historical terminal rows are not replayed.
+      for (const job of missedTerminalTransitions) {
+        applyJobUpdate(job);
+      }
+    }
+
+    function handleJobsCleared(event) {
+      const payload = parseSseJson(event, "cleared jobs");
+      if (!Array.isArray(payload?.ids)) {
+        return;
+      }
+      const revision = Number(event.lastEventId);
+      const clearRevision =
+        Number.isFinite(revision) && revision > 0 ? revision : null;
+      if (clearRevision !== null && clearRevision <= snapshotRevision) {
+        return;
+      }
+      const cleared = new Set(payload.ids);
+      const visibleJobIds = new Set((jobsRef?.current ?? []).map((job) => job.id));
+      for (const jobId of cleared) {
+        if (
+          visibleJobIds.has(jobId) ||
+          reconnectKnownJobIds.has(jobId) ||
+          clearedJobRevisionById.has(jobId)
+        ) {
+          rememberClearedJob(jobId, clearRevision);
+        }
+        appliedTerminalRevisionByJob.delete(jobId);
+      }
+      setJobs((items) => {
+        const next = items.filter((job) => !cleared.has(job.id));
+        pruneAppliedTerminalRevisions(next);
+        if (jobsRef) {
+          jobsRef.current = next;
+        }
+        return next;
+      });
     }
 
     function handleQueueUpdated(event) {
@@ -166,9 +388,33 @@ export function useJobEvents({
 
     async function connect() {
       let ticket = "";
+      // Carry the complete reconnect set in the authenticated POST body. The
+      // EventSource URL stays a bounded opaque ticket even for hundreds of jobs.
+      const activeJobIds = (jobsRef?.current ?? [])
+        .filter(
+          (job) =>
+            !terminalStatuses.has(job.status) &&
+            !clearedJobRevisionById.has(job.id),
+        )
+        .map((job) => job.id)
+        .filter(Boolean);
+      const knownTerminalJobIds = (jobsRef?.current ?? [])
+        .filter(
+          (job) =>
+            terminalStatuses.has(job.status) &&
+            !clearedJobRevisionById.has(job.id),
+        )
+        .map((job) => job.id)
+        .filter(Boolean);
+      reconnectKnownJobIds = new Set([...activeJobIds, ...knownTerminalJobIds]);
+      maxRetainedClearTombstones = activeJobIds.length + MAX_TERMINAL_JOBS;
+      pruneClearedJobs();
       try {
-        if (access.authRequired) {
-          const response = await apiFetch("/api/v1/jobs/events/ticket", token, { method: "POST" });
+        if (access.authRequired || activeJobIds.length > 0 || knownTerminalJobIds.length > 0) {
+          const response = await apiFetch("/api/v1/jobs/events/ticket", token, {
+            method: "POST",
+            body: JSON.stringify({ activeJobIds, knownTerminalJobIds }),
+          });
           ticket = response.ticket;
         }
       } catch (err) {
@@ -185,8 +431,13 @@ export function useJobEvents({
         return;
       }
 
+      // Event revisions are process-local. An API restart can reset the counter,
+      // so each newly opened source establishes its own snapshot baseline.
+      snapshotRevision = 0;
       const source = new EventSource(eventUrl("/api/v1/jobs/events", ticket));
       events = source;
+      source.addEventListener("jobs.snapshot", handleJobsSnapshot);
+      source.addEventListener("jobs.cleared", handleJobsCleared);
       source.addEventListener("job.updated", handleJobUpdated);
       source.addEventListener("worker.updated", handleWorkerUpdated);
       source.addEventListener("queue.updated", handleQueueUpdated);

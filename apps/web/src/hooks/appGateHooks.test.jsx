@@ -12,6 +12,7 @@ import { useAccessGate } from "./useAccessGate.js";
 import { useJobEvents } from "./useJobEvents.js";
 import { useTimelines } from "./useTimelines.js";
 import { apiFetch } from "../api.js";
+import { MAX_TERMINAL_JOBS } from "../sorters.js";
 
 // Controllable apiFetch: each call resolves with whatever the per-path map returns (or
 // rejects when the value is an Error), so a test can drive the /access probe, the
@@ -30,7 +31,13 @@ vi.mock("../api.js", async (importOriginal) => {
       }
       return Promise.resolve(value ?? {});
     }),
-    eventUrl: (path, ticket) => `${path}${ticket ? `?ticket=${ticket}` : ""}`,
+    eventUrl: (path, ticket) => {
+      const url = new URL(path, "http://localhost");
+      if (ticket) {
+        url.searchParams.set("ticket", ticket);
+      }
+      return `${url.pathname}${url.search}`;
+    },
     setMediaTicket: (...args) => setMediaTicketSpy(...args),
   };
 });
@@ -214,6 +221,7 @@ describe("useJobEvents (sc-9750)", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     apiResponders.clear();
+    apiFetch.mockClear();
     FakeEventSource.instances = [];
     window.EventSource = FakeEventSource;
     container = document.createElement("div");
@@ -232,6 +240,7 @@ describe("useJobEvents (sc-9750)", () => {
       access: { authRequired: false },
       ready: true,
       token: "",
+      jobsRef: { current: [] },
       setJobs: () => {},
       setWorkers: () => {},
       setQueueSummary: () => {},
@@ -304,6 +313,549 @@ describe("useJobEvents (sc-9750)", () => {
     expect(jobs.map((job) => job.id)).toContain("job-1");
     // A generation-set result with a new asset count triggers a project asset refresh.
     expect(refreshedProjects).toContain("proj-1");
+  });
+
+  it("reconciles stale active job state from jobs.snapshot on reconnect", async () => {
+    let jobs = [{
+      id: "job-1",
+      status: "running",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:01:00Z",
+    }];
+    const jobsRef = { current: jobs };
+    const props = baseProps({
+      jobsRef,
+      setJobs: (updater) => {
+        jobs = updater(jobs);
+        jobsRef.current = jobs;
+      },
+    });
+    mount(props);
+    await settle();
+
+    const source = FakeEventSource.instances[0];
+    expect(typeof source.listeners["jobs.snapshot"]).toBe("function");
+    act(() => {
+      source.listeners["jobs.snapshot"]({
+        data: JSON.stringify([{
+          id: "job-1",
+          status: "completed",
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:02:00Z",
+        }]),
+      });
+    });
+
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].status).toBe("completed");
+  });
+
+  it("rejects a globally newer delayed job event with an older per-job revision when updatedAt ties", async () => {
+    let jobs = [{
+      id: "job-1",
+      status: "running",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:01:00Z",
+    }];
+    const jobsRef = { current: jobs };
+    mount(baseProps({
+      jobsRef,
+      setJobs: (updater) => {
+        jobs = updater(jobs);
+        jobsRef.current = jobs;
+      },
+    }));
+    await settle();
+    const source = FakeEventSource.instances[0];
+
+    act(() => {
+      source.listeners["jobs.snapshot"]({
+        lastEventId: "10",
+        data: JSON.stringify({
+          revision: 10,
+          clearedJobIds: [],
+          jobs: [{
+            ...jobs[0],
+            status: "completed",
+            revision: 2,
+            updatedAt: "2026-01-01T00:01:00Z",
+          }],
+        }),
+      });
+      source.listeners["job.updated"]({
+        lastEventId: "11",
+        data: JSON.stringify({
+          ...jobs[0],
+          status: "running",
+          revision: 1,
+          updatedAt: "2026-01-01T00:01:00Z",
+        }),
+      });
+    });
+
+    expect(jobs[0].status).toBe("completed");
+  });
+
+  it("applies live and reconnect clear tombstones without dropping capped history", async () => {
+    let jobs = [
+      { id: "cleared-live", status: "completed", createdAt: "2026-01-03T00:00:00Z" },
+      { id: "cleared-offline", status: "failed", createdAt: "2026-01-02T00:00:00Z" },
+      { id: "retained-history", status: "completed", createdAt: "2026-01-01T00:00:00Z" },
+    ];
+    const jobsRef = { current: jobs };
+    mount(baseProps({
+      jobsRef,
+      setJobs: (updater) => {
+        jobs = updater(jobs);
+        jobsRef.current = jobs;
+      },
+    }));
+    await settle();
+    const source = FakeEventSource.instances[0];
+
+    act(() => {
+      source.listeners["jobs.cleared"]({
+        lastEventId: "11",
+        data: JSON.stringify({ ids: ["cleared-live"] }),
+      });
+      source.listeners["jobs.snapshot"]({
+        lastEventId: "12",
+        data: JSON.stringify({
+          revision: 12,
+          jobs: [],
+          clearedJobIds: ["cleared-live", "cleared-offline"],
+        }),
+      });
+    });
+
+    expect(jobs.map((job) => job.id)).toEqual(["retained-history"]);
+  });
+
+  it("bounds live clear tombstones and safely replaces them at the snapshot barrier", async () => {
+    const activeJobs = [
+      {
+        id: "active-1",
+        status: "running",
+        createdAt: "2026-01-02T00:00:00Z",
+        updatedAt: "2026-01-02T00:01:00Z",
+      },
+      {
+        id: "active-2",
+        status: "running",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:01:00Z",
+      },
+    ];
+    let jobs = activeJobs;
+    const jobsRef = { current: jobs };
+    mount(baseProps({
+      jobsRef,
+      setJobs: (updater) => {
+        jobs = updater(jobs);
+        jobsRef.current = jobs;
+      },
+    }));
+    await settle();
+    const source = FakeEventSource.instances[0];
+    const clearedJobs = Array.from(
+      { length: activeJobs.length + MAX_TERMINAL_JOBS + 1 },
+      (_, index) => ({
+        id: `cleared-${index}`,
+        type: "image_generate",
+        status: "failed",
+        revision: 1,
+        createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+        updatedAt: new Date(Date.UTC(2026, 0, 1, 1, 0, index)).toISOString(),
+        error: `failure-${index}`,
+      }),
+    );
+
+    act(() => {
+      clearedJobs.forEach((job, index) => {
+        source.listeners["job.updated"]({
+          lastEventId: String(index * 2 + 1),
+          data: JSON.stringify(job),
+        });
+        source.listeners["jobs.cleared"]({
+          lastEventId: String(index * 2 + 2),
+          data: JSON.stringify({ ids: [job.id] }),
+        });
+      });
+    });
+    expect(jobs).toEqual(activeJobs);
+
+    // The newest relevant clear remains protected after more than 200 clears.
+    act(() => {
+      source.listeners["job.updated"]({
+        lastEventId: "500",
+        data: JSON.stringify(clearedJobs.at(-1)),
+      });
+    });
+    expect(jobs).toEqual(activeJobs);
+
+    // The oldest no-longer-known tombstone was evicted at the terminal-history
+    // bound (complete active set + 200 terminal rows), so a genuinely newer
+    // publication for that ID can become visible.
+    act(() => {
+      source.listeners["job.updated"]({
+        lastEventId: "501",
+        data: JSON.stringify(clearedJobs[0]),
+      });
+    });
+    expect(jobs.map((job) => job.id)).toContain(clearedJobs[0].id);
+    expect(jobs).toHaveLength(activeJobs.length + 1);
+
+    act(() => {
+      source.listeners["jobs.cleared"]({
+        lastEventId: "502",
+        data: JSON.stringify({ ids: [clearedJobs[0].id] }),
+      });
+      source.listeners["jobs.snapshot"]({
+        lastEventId: "600",
+        data: JSON.stringify({
+          revision: 600,
+          jobs: activeJobs,
+          clearedJobIds: [],
+        }),
+      });
+      // The authoritative snapshot safely prunes connection-old tombstones:
+      // pre-barrier publications remain rejected by revision even without them.
+      source.listeners["job.updated"]({
+        lastEventId: "599",
+        data: JSON.stringify(clearedJobs[0]),
+      });
+    });
+    expect(jobs).toEqual(activeJobs);
+
+    act(() => {
+      source.listeners["job.updated"]({
+        lastEventId: "601",
+        data: JSON.stringify(clearedJobs[0]),
+      });
+    });
+    expect(jobs.map((job) => job.id)).toContain(clearedJobs[0].id);
+    expect(jobs).toHaveLength(activeJobs.length + 1);
+  });
+
+  it("replays each missed terminal revision exactly once across its snapshot and buffered event", async () => {
+    let jobs = [
+      {
+        id: "model-job",
+        type: "model_download",
+        status: "running",
+        createdAt: "2026-01-02T00:00:00Z",
+        updatedAt: "2026-01-02T00:01:00Z",
+      },
+      {
+        id: "image-job",
+        type: "image_generate",
+        projectId: "project-1",
+        status: "running",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:01:00Z",
+        result: {},
+      },
+      {
+        id: "failed-job",
+        type: "video_generate",
+        status: "running",
+        createdAt: "2025-12-31T00:00:00Z",
+        updatedAt: "2025-12-31T00:01:00Z",
+      },
+    ];
+    const jobsRef = { current: jobs };
+    const refreshData = vi.fn();
+    const refreshAssets = vi.fn();
+    const applyTimeline = vi.fn();
+    const pushNotice = vi.fn();
+    apiResponders.set("/api/v1/jobs/events/ticket", { ticket: "bounded-ticket" });
+    mount(baseProps({
+      jobsRef,
+      setJobs: (updater) => {
+        jobs = updater(jobs);
+        jobsRef.current = jobs;
+      },
+      refreshDataRef: { current: refreshData },
+      refreshAssetsRef: { current: refreshAssets },
+      enqueueTimelineGenerationApply: applyTimeline,
+      pushNotice,
+    }));
+    await settle();
+    const source = FakeEventSource.instances[0];
+    expect(source.url).toBe("/api/v1/jobs/events?ticket=bounded-ticket");
+    const mintCall = apiFetch.mock.calls.find(([path]) => path === "/api/v1/jobs/events/ticket");
+    expect(JSON.parse(mintCall[2].body)).toEqual({
+      activeJobIds: [
+      "model-job",
+      "image-job",
+      "failed-job",
+      ],
+      knownTerminalJobIds: [],
+    });
+
+    const completedModel = {
+      ...jobs[0],
+      status: "completed",
+      revision: 7,
+      updatedAt: "2026-01-02T00:02:00Z",
+    };
+    const completedImage = {
+      ...jobs[1],
+      status: "completed",
+      revision: 8,
+      updatedAt: "2026-01-01T00:02:00Z",
+      result: { generationSetId: "set-1", assetIds: ["asset-1"] },
+    };
+    const failedVideo = {
+      ...jobs[2],
+      status: "failed",
+      revision: 9,
+      updatedAt: "2025-12-31T00:02:00Z",
+      error: "renderer failed",
+    };
+    act(() => {
+      source.listeners["jobs.snapshot"]({
+        lastEventId: "20",
+        data: JSON.stringify({
+          revision: 20,
+          jobs: [completedModel, completedImage, failedVideo],
+          clearedJobIds: [],
+        }),
+      });
+      // These rows committed after the snapshot event barrier, so their SSE ids
+      // are newer even though the snapshot already captured the same durable
+      // per-job revisions. State may be upserted again, but terminal effects
+      // (especially timeline mutation) must not run twice.
+      source.listeners["job.updated"]({
+        lastEventId: "21",
+        data: JSON.stringify(completedModel),
+      });
+      source.listeners["job.updated"]({
+        lastEventId: "22",
+        data: JSON.stringify(completedImage),
+      });
+      source.listeners["job.updated"]({
+        lastEventId: "23",
+        data: JSON.stringify(failedVideo),
+      });
+    });
+
+    expect(refreshData).toHaveBeenCalledTimes(1);
+    expect(refreshAssets).toHaveBeenCalledTimes(1);
+    expect(refreshAssets).toHaveBeenCalledWith("project-1");
+    expect(applyTimeline).toHaveBeenCalledTimes(1);
+    expect(applyTimeline).toHaveBeenCalledWith(completedImage);
+    expect(pushNotice).toHaveBeenCalledTimes(1);
+    expect(pushNotice.mock.calls[0][1]).toContain("renderer failed");
+  });
+
+  it("keeps hundreds of active ids in the ticket POST while the EventSource URL stays bounded", async () => {
+    const jobs = Array.from({ length: 200 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      status: "running",
+      createdAt: "2026-01-01T00:00:00Z",
+    }));
+    apiResponders.set("/api/v1/jobs/events/ticket", { ticket: "short-ticket" });
+    mount(baseProps({ jobsRef: { current: jobs } }));
+    await settle();
+
+    const mintCall = apiFetch.mock.calls.find(([path]) => path === "/api/v1/jobs/events/ticket");
+    expect(JSON.parse(mintCall[2].body)).toEqual({
+      activeJobIds: jobs.map((job) => job.id),
+      knownTerminalJobIds: [],
+    });
+    expect(FakeEventSource.instances[0].url).toBe("/api/v1/jobs/events?ticket=short-ticket");
+    expect(FakeEventSource.instances[0].url).not.toContain("activeJobIds");
+  });
+
+  it("prunes terminal revision dedupe state with the visible terminal cap", async () => {
+    let jobs = [];
+    const jobsRef = { current: jobs };
+    const pushNotice = vi.fn();
+    mount(baseProps({
+      jobsRef,
+      setJobs: (updater) => {
+        jobs = updater(jobs);
+        jobsRef.current = jobs;
+      },
+      pushNotice,
+    }));
+    await settle();
+    const source = FakeEventSource.instances[0];
+    const terminalJobs = Array.from({ length: MAX_TERMINAL_JOBS + 1 }, (_, index) => ({
+      id: `failed-${index}`,
+      type: "image_generate",
+      status: "failed",
+      revision: 1,
+      createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+      updatedAt: new Date(Date.UTC(2026, 0, 1, 1, 0, index)).toISOString(),
+      error: `failure-${index}`,
+    }));
+
+    act(() => {
+      terminalJobs.forEach((job, index) => {
+        source.listeners["job.updated"]({
+          lastEventId: String(index + 1),
+          data: JSON.stringify(job),
+        });
+      });
+    });
+
+    expect(jobs).toHaveLength(MAX_TERMINAL_JOBS);
+    expect(jobs.some((job) => job.id === terminalJobs[0].id)).toBe(false);
+    expect(pushNotice).toHaveBeenCalledTimes(MAX_TERMINAL_JOBS + 1);
+
+    // The evicted row's revision bookkeeping must be gone too. If the private
+    // Map leaked one entry per terminal job, this same durable revision would be
+    // mistaken for an already-visible duplicate and suppress its effect.
+    act(() => {
+      source.listeners["job.updated"]({
+        lastEventId: String(MAX_TERMINAL_JOBS + 2),
+        data: JSON.stringify(terminalJobs[0]),
+      });
+    });
+
+    expect(jobs).toHaveLength(MAX_TERMINAL_JOBS);
+    expect(jobs.some((job) => job.id === terminalJobs[0].id)).toBe(false);
+    expect(pushNotice).toHaveBeenCalledTimes(MAX_TERMINAL_JOBS + 2);
+  });
+
+  it("seeds terminal snapshot revisions without replaying already-observed terminal effects", async () => {
+    const completed = {
+      id: "already-terminal",
+      type: "image_generate",
+      projectId: "project-1",
+      status: "completed",
+      revision: 7,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:02:00Z",
+      result: { generationSetId: "set-1", assetIds: ["asset-1"] },
+    };
+    let jobs = [completed];
+    const jobsRef = { current: jobs };
+    const refreshAssets = vi.fn();
+    const applyTimeline = vi.fn();
+    mount(baseProps({
+      jobsRef,
+      setJobs: (updater) => {
+        jobs = updater(jobs);
+        jobsRef.current = jobs;
+      },
+      refreshAssetsRef: { current: refreshAssets },
+      enqueueTimelineGenerationApply: applyTimeline,
+    }));
+    await settle();
+    const source = FakeEventSource.instances[0];
+
+    act(() => {
+      source.listeners["jobs.snapshot"]({
+        lastEventId: "20",
+        data: JSON.stringify({
+          revision: 20,
+          jobs: [completed],
+          clearedJobIds: [],
+        }),
+      });
+      source.listeners["job.updated"]({
+        lastEventId: "21",
+        data: JSON.stringify({
+          ...completed,
+          revision: 6,
+        }),
+      });
+      source.listeners["job.updated"]({
+        lastEventId: "22",
+        data: JSON.stringify(completed),
+      });
+    });
+
+    expect(jobs).toEqual([completed]);
+    expect(refreshAssets).not.toHaveBeenCalled();
+    expect(applyTimeline).not.toHaveBeenCalled();
+  });
+
+  it("does not run effects for a live terminal row rejected by durable state freshness", async () => {
+    const current = {
+      id: "newer-terminal",
+      type: "image_generate",
+      projectId: "project-1",
+      status: "completed",
+      revision: 8,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:02:00Z",
+      result: { generationSetId: "set-1", assetIds: ["asset-1"] },
+    };
+    let jobs = [current];
+    const jobsRef = { current: jobs };
+    const refreshAssets = vi.fn();
+    const applyTimeline = vi.fn();
+    mount(baseProps({
+      jobsRef,
+      setJobs: (updater) => {
+        jobs = updater(jobs);
+        jobsRef.current = jobs;
+      },
+      refreshAssetsRef: { current: refreshAssets },
+      enqueueTimelineGenerationApply: applyTimeline,
+    }));
+    await settle();
+
+    act(() => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        lastEventId: "40",
+        data: JSON.stringify({
+          ...current,
+          revision: 7,
+        }),
+      });
+    });
+
+    expect(jobs).toEqual([current]);
+    expect(refreshAssets).not.toHaveBeenCalled();
+    expect(applyTimeline).not.toHaveBeenCalled();
+  });
+
+  it("keeps a clear tombstone authoritative over a delayed terminal publication", async () => {
+    const completed = {
+      id: "cleared-terminal",
+      type: "image_generate",
+      projectId: "project-1",
+      status: "completed",
+      revision: 4,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:02:00Z",
+      result: { generationSetId: "set-1", assetIds: ["asset-1"] },
+    };
+    let jobs = [completed];
+    const jobsRef = { current: jobs };
+    const refreshAssets = vi.fn();
+    const applyTimeline = vi.fn();
+    mount(baseProps({
+      jobsRef,
+      setJobs: (updater) => {
+        jobs = updater(jobs);
+        jobsRef.current = jobs;
+      },
+      refreshAssetsRef: { current: refreshAssets },
+      enqueueTimelineGenerationApply: applyTimeline,
+    }));
+    await settle();
+    const source = FakeEventSource.instances[0];
+
+    act(() => {
+      source.listeners["jobs.cleared"]({
+        lastEventId: "30",
+        data: JSON.stringify({ ids: [completed.id] }),
+      });
+      source.listeners["job.updated"]({
+        lastEventId: "31",
+        data: JSON.stringify(completed),
+      });
+    });
+
+    expect(jobs).toEqual([]);
+    expect(refreshAssets).not.toHaveBeenCalled();
+    expect(applyTimeline).not.toHaveBeenCalled();
   });
 
   it("closes the EventSource on unmount", async () => {

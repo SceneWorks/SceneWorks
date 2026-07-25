@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -11,8 +12,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Number, Value};
 
 use crate::contracts::{
-    ContractNumber, GenerationMetrics, GenerationMetricsRow, JobSnapshot, JobStatus, JobType,
-    ProgressStage, QueueSummary, WorkerCapability, WorkerSnapshot, WorkerStatus,
+    ContractNumber, ExtraFields, GenerationMetrics, GenerationMetricsRow, JobSnapshot, JobStatus,
+    JobType, ProgressStage, QueueSummary, WorkerCapability, WorkerSnapshot, WorkerStatus,
     WorkerUtilizationSnapshot,
 };
 use crate::store_util::{ensure_column, parse_string_enum, random_hex};
@@ -48,6 +49,9 @@ pub const ACTIVE_STATUSES: &[&str] = &[
     "running",
     "saving",
 ];
+
+const PROGRESS_SIDE_EFFECT_RETRY_BASE_SECONDS: i64 = 5;
+const PROGRESS_SIDE_EFFECT_RETRY_MAX_SECONDS: i64 = 5 * 60;
 pub const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "canceled", "interrupted"];
 /// Pending (accepted-but-not-yet-worker-owned) statuses: a job in one of these is
 /// waiting in the queue with no worker to acknowledge a cancel, so it can be
@@ -365,12 +369,28 @@ pub struct ProgressUpdate {
     /// progress updates can't accidentally clear it. Drives the
     /// WorkerProgressCard arch pill.
     pub backend: Option<String>,
-    /// Id of the worker reporting this progress. When set, the store rejects
-    /// the update unless the job's `worker_id` still matches — a zombie worker
+    /// Id of the worker reporting this progress. The store rejects the update
+    /// unless this value and the job's `worker_id` are both present and match — a zombie worker
     /// whose job was swept to `interrupted` (worker_id cleared) or reclaimed by
     /// another worker can no longer resurrect or corrupt it (sc-4172). `None`
-    /// keeps legacy trusted-caller behavior.
+    /// is retained on the internal type so the wire contract can return the
+    /// ownership 409 instead of failing JSON deserialization.
     pub worker_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProgressUpdateOutcome {
+    pub job: JobSnapshot,
+    pub previous_status: JobStatus,
+    /// True only when this call won the ownership/terminal-state race and
+    /// committed the supplied progress. Same-status terminal retries return
+    /// the existing job with `applied == false`.
+    pub applied: bool,
+    /// A terminal progress report was accepted but its API-owned catalog /
+    /// project side effects have not yet been durably folded into `result_json`.
+    /// The owning worker may resume this idempotent work with a same-terminal
+    /// retry; competing terminal reporters may not.
+    pub side_effects_pending: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -457,6 +477,62 @@ impl JobsStore {
         // remains readable for historical rows. First-non-null wins so the WorkerProgressCard's
         // arch pill stays stable across the run.
         ensure_column(&transaction, "jobs", "backend", "text")?;
+        // Durable per-row ordering for SSE reconciliation. updated_at is
+        // intentionally second-granularity, so it cannot distinguish two
+        // commits in the same second. The trigger advances revision for every
+        // UPDATE without requiring each mutation site to remember the field.
+        ensure_column(
+            &transaction,
+            "jobs",
+            "revision",
+            "integer not null default 0",
+        )?;
+        transaction.execute_batch(
+            "
+            create trigger if not exists jobs_revision_after_update
+            after update on jobs
+            when new.revision = old.revision
+            begin
+              update jobs
+                 set revision = old.revision + 1
+               where id = new.id;
+            end;
+            ",
+        )?;
+        // Durable handoff between terminal progress acceptance and the API's
+        // idempotent catalog/project writes. The bit is set in the same
+        // transaction as terminal acceptance and cleared only by the guarded
+        // result CAS after those writes succeed.
+        ensure_column(
+            &transaction,
+            "jobs",
+            "progress_side_effects_pending",
+            "integer not null default 0",
+        )?;
+        // Persist retry scheduling with the handoff itself. Failed side effects
+        // leave the due set until their backoff expires, preventing a fixed
+        // oldest-first batch from hot-looping poison rows and starving newer
+        // handoffs after an API restart.
+        ensure_column(
+            &transaction,
+            "jobs",
+            "progress_side_effects_retry_count",
+            "integer not null default 0",
+        )?;
+        ensure_column(
+            &transaction,
+            "jobs",
+            "progress_side_effects_retry_at",
+            "integer not null default 0",
+        )?;
+        transaction.execute_batch(
+            "
+            create index if not exists idx_jobs_pending_side_effect_retry
+              on jobs(progress_side_effects_retry_at, updated_at, id)
+             where progress_side_effects_pending = 1
+               and status in ('completed', 'failed', 'canceled', 'interrupted');
+            ",
+        )?;
         // Soft-hide marker for the "Clear completed" queue action (sc-12231, issue #1556).
         // A cleared job is dropped from the operator's queue list + counts (see
         // `list_jobs` / `queue_summary`) but the row is deliberately kept: the
@@ -631,11 +707,12 @@ impl JobsStore {
             "update workers set status = 'offline', current_job_id = null where status != 'offline'",
             [],
         )?;
-        let updated_jobs = interrupted_ids
+        let updated_ids = interrupted_ids
             .iter()
             .chain(stranded_pending_ids.iter())
-            .map(|job_id| self.get_job_on_connection(&transaction, job_id))
-            .collect::<JobsStoreResult<Vec<_>>>()?;
+            .cloned()
+            .collect::<Vec<_>>();
+        let updated_jobs = self.jobs_by_ids(&transaction, &updated_ids)?;
         transaction.commit()?;
         Ok(updated_jobs)
     }
@@ -801,11 +878,77 @@ impl JobsStore {
         Ok(jobs)
     }
 
+    /// Bounded reconnect history ordered by the last durable mutation rather
+    /// than creation time. The SSE endpoint supplements this generic history
+    /// with every pre-disconnect active id named by the client, so correctness
+    /// does not depend on a terminal transition remaining inside this cap.
+    pub fn list_jobs_recently_updated(&self, limit: u32) -> JobsStoreResult<Vec<JobSnapshot>> {
+        let connection = self.open_connection()?;
+        let limit = limit.clamp(1, 500);
+        let mut statement = connection.prepare(
+            "select * from jobs
+              where cleared_at is null
+              order by updated_at desc, id desc
+              limit ?1",
+        )?;
+        let jobs = collect_jobs(statement.query_map(params![limit], row_to_job)?)?;
+        Ok(jobs)
+    }
+
+    /// Load every retained job named by a reconnecting client, preserving the
+    /// requested order and ignoring ids whose rows were already purged. This
+    /// supplements the bounded recent-history snapshot with the client's exact
+    /// pre-disconnect active set, so an older terminal transition cannot fall
+    /// outside that history window.
+    pub fn list_existing_jobs_by_ids(
+        &self,
+        job_ids: &[String],
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        if job_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.open_connection()?;
+        let ids_json = dumps(job_ids)?;
+        let mut statement = connection.prepare(
+            "select jobs.*
+               from json_each(?1) as requested
+               join jobs on jobs.id = requested.value
+              where jobs.cleared_at is null
+              order by cast(requested.key as integer)",
+        )?;
+        let jobs = collect_jobs(statement.query_map(params![ids_json], row_to_job)?)?;
+        Ok(jobs)
+    }
+
     pub fn get_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
         // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
         // (sc-8950 / F-148 — see list_jobs for the full rationale).
         let connection = self.open_connection()?;
         self.get_job_on_connection(&connection, job_id)
+    }
+
+    /// Return clear tombstones only for the reconnecting client's bounded known
+    /// rows. Tombstones live with retained jobs and disappear under normal
+    /// retention, but reconnect cost must never scale with the full retained
+    /// history (including deployments where retention is disabled).
+    pub fn cleared_job_ids_by_ids(&self, job_ids: &[String]) -> JobsStoreResult<Vec<String>> {
+        if job_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.open_connection()?;
+        let ids_json = dumps(job_ids)?;
+        let mut statement = connection.prepare(
+            "select jobs.id
+               from json_each(?1) as requested
+               join jobs on jobs.id = requested.value
+              where jobs.cleared_at is not null
+              order by cast(requested.key as integer)",
+        )?;
+        let ids = statement
+            .query_map(params![ids_json], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(JobsStoreError::from)?;
+        Ok(ids)
     }
 
     /// Upsert the structured generation metrics for a job (epic 10402). Called
@@ -1096,10 +1239,7 @@ impl JobsStore {
 
         // Re-read the updated snapshots (newest first) so callers broadcast the real
         // post-cancel state, not the stale pre-update rows.
-        let mut canceled = Vec::with_capacity(pending_ids.len());
-        for id in &pending_ids {
-            canceled.push(self.get_job_on_connection(&transaction, id)?);
-        }
+        let canceled = self.jobs_by_ids(&transaction, &pending_ids)?;
         transaction.commit()?;
         Ok(canceled)
     }
@@ -1441,10 +1581,11 @@ impl JobsStore {
         )?;
 
         let updated_workers = self.workers_by_ids(&transaction, &worker_ids)?;
-        let updated_jobs = active_jobs
+        let active_job_ids = active_jobs
             .iter()
-            .map(|job| self.get_job_on_connection(&transaction, &job.id))
-            .collect::<JobsStoreResult<Vec<_>>>()?;
+            .map(|job| job.id.clone())
+            .collect::<Vec<_>>();
+        let updated_jobs = self.jobs_by_ids(&transaction, &active_job_ids)?;
         transaction.commit()?;
         Ok(StaleSweep {
             workers: updated_workers,
@@ -1612,10 +1753,7 @@ impl JobsStore {
             )?;
             failed_ids.push(job.id.clone());
         }
-        let failed = failed_ids
-            .iter()
-            .map(|id| self.get_job_on_connection(&transaction, id))
-            .collect::<JobsStoreResult<Vec<_>>>()?;
+        let failed = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
         Ok(failed)
     }
@@ -1670,11 +1808,18 @@ impl JobsStore {
                 ",
                 params![now_text, reason.error_message(), job.id],
             )?;
-            let updated = self.get_job_on_connection(&transaction, &job.id)?;
-            failed.push((updated, reason));
+            failed.push((job.id, reason));
         }
+        let failed_ids = failed
+            .iter()
+            .map(|(job_id, _reason)| job_id.clone())
+            .collect::<Vec<_>>();
+        let updated_jobs = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
-        Ok(failed)
+        Ok(updated_jobs
+            .into_iter()
+            .zip(failed.into_iter().map(|(_job_id, reason)| reason))
+            .collect())
     }
 
     /// Off-Mac candle grace sweep (sc-5502, epic 5483) — the Windows/Linux twin of
@@ -1764,10 +1909,7 @@ impl JobsStore {
             )?;
             failed_ids.push(job.id.clone());
         }
-        let failed = failed_ids
-            .iter()
-            .map(|id| self.get_job_on_connection(&transaction, id))
-            .collect::<JobsStoreResult<Vec<_>>>()?;
+        let failed = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
         Ok(failed)
     }
@@ -1823,11 +1965,18 @@ impl JobsStore {
                 ",
                 params![now_text, reason.candle_error_message(), job.id],
             )?;
-            let updated = self.get_job_on_connection(&transaction, &job.id)?;
-            failed.push((updated, reason));
+            failed.push((job.id, reason));
         }
+        let failed_ids = failed
+            .iter()
+            .map(|(job_id, _reason)| job_id.clone())
+            .collect::<Vec<_>>();
+        let updated_jobs = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
-        Ok(failed)
+        Ok(updated_jobs
+            .into_iter()
+            .zip(failed.into_iter().map(|(_job_id, reason)| reason))
+            .collect())
     }
 
     pub fn claim_next_job(&self, worker_id: &str) -> JobsStoreResult<Option<JobSnapshot>> {
@@ -1944,6 +2093,28 @@ impl JobsStore {
         job_id: &str,
         update: ProgressUpdate,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.update_job_progress_internal(job_id, update, false)
+            .map(|outcome| outcome.job)
+    }
+
+    /// Accept progress for the HTTP API, durably marking terminal reports until
+    /// their API-owned catalog/project side effects and result augmentation
+    /// complete. Direct store callers use [`Self::update_job_progress`] and do
+    /// not participate in that API handoff.
+    pub fn update_job_progress_with_outcome(
+        &self,
+        job_id: &str,
+        update: ProgressUpdate,
+    ) -> JobsStoreResult<ProgressUpdateOutcome> {
+        self.update_job_progress_internal(job_id, update, true)
+    }
+
+    fn update_job_progress_internal(
+        &self,
+        job_id: &str,
+        update: ProgressUpdate,
+        track_terminal_side_effects: bool,
+    ) -> JobsStoreResult<ProgressUpdateOutcome> {
         if !JOB_STATUSES.contains(&update.status.as_str()) {
             return Err(JobsStoreError::InvalidStatus(
                 update.status.as_str().to_owned(),
@@ -1978,11 +2149,30 @@ impl JobsStore {
         // progress report — that's exactly the failure mode the heartbeat
         // machinery exists to handle.
         let current = self.get_job_on_connection(&transaction, job_id)?;
+        let previous_status = current.status.clone();
         if is_terminal_status(current.status.as_str()) {
+            let side_effects_pending =
+                self.progress_side_effects_pending_on_connection(&transaction, job_id)?;
             // Idempotent re-report of the same terminal status (e.g. a retried
-            // "canceled" POST) succeeds without touching the row.
+            // "canceled" POST) succeeds without touching the row, but it is
+            // still an authenticated worker operation. Clearing a terminal row
+            // only hides it from queue surfaces; it must not turn the no-op path
+            // into an ownership bypass.
             if current.status == update.status {
-                return Ok(current);
+                match (update.worker_id.as_deref(), current.worker_id.as_deref()) {
+                    (Some(reporter), Some(owner)) if reporter == owner => {}
+                    _ => {
+                        return Err(JobsStoreError::NotJobOwner {
+                            job_id: job_id.to_owned(),
+                        });
+                    }
+                }
+                return Ok(ProgressUpdateOutcome {
+                    job: current,
+                    previous_status,
+                    applied: false,
+                    side_effects_pending,
+                });
             }
             return Err(JobsStoreError::TerminalJobImmutable {
                 job_id: job_id.to_owned(),
@@ -1991,7 +2181,6 @@ impl JobsStore {
         }
         match (update.worker_id.as_deref(), current.worker_id.as_deref()) {
             (Some(reporter), Some(owner)) if reporter == owner => {}
-            (None, None) => {}
             _ => {
                 return Err(JobsStoreError::NotJobOwner {
                     job_id: job_id.to_owned(),
@@ -2001,6 +2190,8 @@ impl JobsStore {
         let now = utc_now();
         let completed_at = is_terminal_status(update.status.as_str()).then_some(now.clone());
         let canceled_at = (update.status == JobStatus::Canceled).then_some(now.clone());
+        let side_effects_pending =
+            track_terminal_side_effects && is_terminal_status(update.status.as_str());
         let progress = update.progress.clamp(0.0, 1.0);
         // Peaks are clamped to 0..100 and persisted as a running max so a stale
         // progress report (lower sample) can't ratchet the peak down (sc-2086).
@@ -2037,8 +2228,11 @@ impl JobsStore {
                        when ?12 is null then peak_gpu_load_pct
                        else max(coalesce(peak_gpu_load_pct, 0), ?12)
                    end,
-                   backend = coalesce(backend, ?13)
-             where id = ?14
+                   backend = coalesce(backend, ?13),
+                   progress_side_effects_pending = ?14,
+                   progress_side_effects_retry_count = 0,
+                   progress_side_effects_retry_at = 0
+             where id = ?15
             ",
             params![
                 update.status.as_str(),
@@ -2054,6 +2248,7 @@ impl JobsStore {
                 peak_memory,
                 peak_load,
                 update.backend,
+                side_effects_pending,
                 job_id,
             ],
         )?;
@@ -2067,7 +2262,168 @@ impl JobsStore {
             }
         }
         transaction.commit()?;
+        Ok(ProgressUpdateOutcome {
+            job,
+            previous_status,
+            applied: true,
+            side_effects_pending,
+        })
+    }
+
+    /// Re-check a durable terminal side-effect handoff immediately before the
+    /// API performs external writes. The API serializes this check + work within
+    /// one process; the database predicate preserves ownership across retries
+    /// and process restarts.
+    pub fn pending_terminal_progress_side_effects(
+        &self,
+        job_id: &str,
+        worker_id: Option<&str>,
+        status: JobStatus,
+    ) -> JobsStoreResult<Option<JobSnapshot>> {
+        let connection = self.open_connection()?;
+        let current = self.get_job_on_connection(&connection, job_id)?;
+        if current.status != status
+            || !self.progress_side_effects_pending_on_connection(&connection, job_id)?
+        {
+            return Ok(None);
+        }
+        match (worker_id, current.worker_id.as_deref()) {
+            (Some(reporter), Some(owner)) if reporter == owner => Ok(Some(current)),
+            _ => Err(JobsStoreError::NotJobOwner {
+                job_id: job_id.to_owned(),
+            }),
+        }
+    }
+
+    /// Return a bounded batch of terminal jobs whose API-owned side effects
+    /// still need recovery. The API drains this durable queue at startup and on
+    /// a background cadence, so recovery does not depend on a worker repeating
+    /// a terminal progress report after it already observed the committed
+    /// terminal state.
+    pub fn pending_terminal_progress_side_effect_job_ids(
+        &self,
+        limit: usize,
+    ) -> JobsStoreResult<Vec<String>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection.prepare(
+            "select id
+               from jobs
+              where progress_side_effects_pending = 1
+                and status in ('completed', 'failed', 'canceled', 'interrupted')
+                and progress_side_effects_retry_at <= ?1
+              order by progress_side_effects_retry_at asc, updated_at asc, id asc
+              limit ?2",
+        )?;
+        let ids = statement
+            .query_map(
+                params![now_unix_seconds(), i64::try_from(limit).unwrap_or(i64::MAX)],
+                |row| row.get(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
+    /// Persist a bounded retry after one terminal side-effect attempt fails.
+    /// Moving the row's due time forward rotates it out of the current batch,
+    /// while the durable count makes the exponential backoff survive restart.
+    pub fn defer_pending_terminal_progress_side_effects(
+        &self,
+        job_id: &str,
+    ) -> JobsStoreResult<bool> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let retry_count = transaction
+            .query_row(
+                "select progress_side_effects_retry_count
+                   from jobs
+                  where id = ?1 and progress_side_effects_pending = 1",
+                params![job_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(retry_count) = retry_count else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        let next_retry_count = retry_count.max(0).saturating_add(1);
+        let exponent = u32::try_from(next_retry_count.saturating_sub(1))
+            .unwrap_or(u32::MAX)
+            .min(16);
+        let delay = PROGRESS_SIDE_EFFECT_RETRY_BASE_SECONDS
+            .saturating_mul(1_i64.checked_shl(exponent).unwrap_or(i64::MAX))
+            .min(PROGRESS_SIDE_EFFECT_RETRY_MAX_SECONDS);
+        let retry_at = now_unix_seconds().saturating_add(delay);
+        let changed = transaction.execute(
+            "update jobs
+                set progress_side_effects_retry_count = ?1,
+                    progress_side_effects_retry_at = ?2
+              where id = ?3 and progress_side_effects_pending = 1",
+            params![next_retry_count, retry_at, job_id],
+        )?;
+        transaction.commit()?;
+        Ok(changed == 1)
+    }
+
+    /// Replace an accepted progress report's result with its post-acceptance
+    /// augmentation (catalog registration / persisted asset sidecars). The
+    /// compare-and-swap guards prevent a slower request from overwriting a
+    /// competing status or result update that committed in the meantime.
+    pub fn replace_job_result_after_progress(
+        &self,
+        job_id: &str,
+        worker_id: Option<&str>,
+        status: JobStatus,
+        expected_result: &Map<String, Value>,
+        result: &Map<String, Value>,
+        clear_terminal_side_effects: bool,
+    ) -> JobsStoreResult<JobSnapshot> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = self.get_job_on_connection(&transaction, job_id)?;
+        if current.worker_id.as_deref() != worker_id
+            || current.status != status
+            || &current.result != expected_result
+        {
+            return Ok(current);
+        }
+        transaction.execute(
+            "update jobs
+                set result_json = ?1,
+                    updated_at = ?2,
+                    progress_side_effects_pending =
+                      case when ?3 then 0 else progress_side_effects_pending end,
+                    progress_side_effects_retry_count =
+                      case when ?3 then 0 else progress_side_effects_retry_count end,
+                    progress_side_effects_retry_at =
+                      case when ?3 then 0 else progress_side_effects_retry_at end
+              where id = ?4",
+            params![
+                dumps(result)?,
+                utc_now(),
+                clear_terminal_side_effects,
+                job_id
+            ],
+        )?;
+        let job = self.get_job_on_connection(&transaction, job_id)?;
+        transaction.commit()?;
         Ok(job)
+    }
+
+    fn progress_side_effects_pending_on_connection(
+        &self,
+        connection: &Connection,
+        job_id: &str,
+    ) -> JobsStoreResult<bool> {
+        connection
+            .query_row(
+                "select progress_side_effects_pending from jobs where id = ?1",
+                params![job_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .ok_or_else(|| JobsStoreError::NotFound(job_id.to_owned()))
     }
 
     pub fn list_workers(&self) -> JobsStoreResult<Vec<WorkerSnapshot>> {
@@ -2336,6 +2692,36 @@ impl JobsStore {
         Ok(workers)
     }
 
+    /// Load a batch of jobs with one JSON-table join, then restore the caller's
+    /// id ordering. One JSON bind avoids SQLite's variable limit for large bulk
+    /// transitions while retaining the single-query behavior.
+    fn jobs_by_ids(
+        &self,
+        connection: &Connection,
+        job_ids: &[String],
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        if job_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut statement = connection.prepare(
+            "select jobs.* from jobs join json_each(?1) as requested on jobs.id = requested.value",
+        )?;
+        let ids_json = dumps(job_ids)?;
+        let jobs = collect_jobs(statement.query_map(params![ids_json], row_to_job)?)?;
+        let mut by_id = jobs
+            .into_iter()
+            .map(|job| (job.id.clone(), job))
+            .collect::<HashMap<_, _>>();
+        job_ids
+            .iter()
+            .map(|job_id| {
+                by_id
+                    .remove(job_id)
+                    .ok_or_else(|| JobsStoreError::NotFound(job_id.clone()))
+            })
+            .collect()
+    }
+
     fn get_job_on_connection(
         &self,
         connection: &Connection,
@@ -2382,6 +2768,9 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
     let job_type: JobType = parse_string_enum(&row.get::<_, String>("type")?);
     let payload = loads_object(row.get::<_, Option<String>>("payload_json")?.as_deref());
     let title = derive_job_title(&job_type, &payload);
+    let revision = row.get::<_, i64>("revision").unwrap_or_default().max(0);
+    let mut extra = ExtraFields::default();
+    extra.insert("revision".to_owned(), Value::from(revision));
     Ok(JobSnapshot {
         id: row.get("id")?,
         job_type,
@@ -2413,7 +2802,7 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
         peak_gpu_load_pct: peak_load.map(number_from_f64),
         backend,
         title,
-        extra: Default::default(),
+        extra,
     })
 }
 
@@ -2666,9 +3055,12 @@ where
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-fn dumps<T: serde::Serialize>(value: &T) -> JobsStoreResult<String> {
+fn dumps<T: serde::Serialize + ?Sized>(value: &T) -> JobsStoreResult<String> {
+    // Workspace feature unification can enable serde_json/preserve_order even
+    // though this crate does not request it. Sort recursively so the stored
+    // bytes stay compatible with Python's sort_keys=True in either build mode.
     let mut value = serde_json::to_value(value)?;
-    sort_json_value(&mut value);
+    value.sort_all_objects();
     serde_json::to_string(&value).map_err(Into::into)
 }
 
@@ -3608,29 +4000,6 @@ fn placeholders_from(start: usize, count: usize) -> String {
         .map(|index| format!("?{index}"))
         .collect::<Vec<_>>()
         .join(",")
-}
-
-fn sort_json_value(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            let mut entries = map
-                .iter_mut()
-                .map(|(key, value)| {
-                    sort_json_value(value);
-                    (key.clone(), value.clone())
-                })
-                .collect::<Vec<_>>();
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
-            map.clear();
-            map.extend(entries);
-        }
-        Value::Array(items) => {
-            for item in items {
-                sort_json_value(item);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-    }
 }
 
 #[cfg(test)]

@@ -605,7 +605,7 @@ pub(crate) async fn wait_for_prompt_refine_job_excluding(
         if let Some(id) = jobs.as_array().and_then(|items| {
             items
                 .iter()
-                .filter(|job| job["type"] == "prompt_refine")
+                .filter(|job| job["type"] == "prompt_refine" && job["status"] == "queued")
                 .find_map(|job| job["id"].as_str().filter(|id| Some(*id) != exclude))
         }) {
             return id.to_owned();
@@ -620,9 +620,56 @@ pub(crate) async fn wait_for_prompt_refine_job(app: &axum::Router) -> String {
     wait_for_prompt_refine_job_excluding(app, None).await
 }
 
-/// Complete a queued (unclaimed) magic-prompt job. The job has no owner, so the progress report omits
-/// a workerId (matching the store's `(None, None)` ownership rule); `result` carries the model reply.
+/// Register a production-shaped worker, claim the next compatible job, and
+/// assert that it is the target the test intends to drive.
+pub(crate) async fn claim_job_as_worker(
+    app: &axum::Router,
+    job_id: &str,
+    worker_id: &str,
+    capabilities: &[&str],
+) {
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": worker_id,
+            "gpuId": "test-gpu",
+            "gpuName": "Test GPU",
+            "capabilities": capabilities,
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": worker_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claimed["job"]["id"], job_id);
+}
+
+pub(crate) const TEST_TRAINING_WORKER_ID: &str = "test-training-worker";
+
+pub(crate) async fn claim_training_job(app: &axum::Router, job_id: &str) {
+    claim_job_as_worker(
+        app,
+        job_id,
+        TEST_TRAINING_WORKER_ID,
+        &["gpu", "lora_train", "lora_train_execute"],
+    )
+    .await;
+}
+
+/// Complete a magic-prompt job through the same claim + worker-owned progress
+/// shape production uses; `result` carries the model reply.
 pub(crate) async fn complete_prompt_refine_job(app: &axum::Router, job_id: &str, result: Value) {
+    const WORKER_ID: &str = "test-prompt-refine-worker";
+    claim_job_as_worker(app, job_id, WORKER_ID, &["gpu", "prompt_refine"]).await;
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -632,6 +679,7 @@ pub(crate) async fn complete_prompt_refine_job(app: &axum::Router, job_id: &str,
             "stage": "completed",
             "progress": 1,
             "message": "Caption ready.",
+            "workerId": WORKER_ID,
             "result": result
         }),
     )
@@ -666,7 +714,7 @@ pub(crate) async fn wait_for_job_out_of_pending_caption_or_refine(
         }
         if let Some(id) = items
             .iter()
-            .filter(|job| job["type"] == "prompt_refine")
+            .filter(|job| job["type"] == "prompt_refine" && job["status"] == "queued")
             .find_map(|job| job["id"].as_str().filter(|id| Some(*id) != exclude_refine))
         {
             return PendingOrRefine::Refine(id.to_owned());
@@ -877,6 +925,77 @@ pub(crate) async fn request_status_only(app: axum::Router, method: &str, uri: &s
         .await
         .expect("response returns")
         .status()
+}
+
+/// Connect to the never-ending SSE endpoint and collect its first `event_count`
+/// complete event blocks. This exercises the real router/body framing without
+/// waiting for the stream to close.
+pub(crate) async fn request_sse_prefix(
+    app: axum::Router,
+    uri: &str,
+    event_count: usize,
+) -> (StatusCode, Vec<(String, Value)>) {
+    let (status, detailed) = request_sse_prefix_with_ids(app, uri, event_count).await;
+    (
+        status,
+        detailed
+            .into_iter()
+            .map(|(event, _id, data)| (event, data))
+            .collect(),
+    )
+}
+
+pub(crate) async fn request_sse_prefix_with_ids(
+    app: axum::Router,
+    uri: &str,
+    event_count: usize,
+) -> (StatusCode, Vec<(String, Option<u64>, Value)>) {
+    let request = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Body::empty())
+        .expect("request builds");
+    let response = app.oneshot(request).await.expect("response returns");
+    let status = response.status();
+    let mut stream = response.into_body().into_data_stream();
+    let mut wire = String::new();
+    while wire.matches("\n\n").count() < event_count {
+        let chunk = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("SSE prefix arrives before timeout")
+            .expect("SSE stream remains open")
+            .expect("SSE body chunk reads");
+        wire.push_str(std::str::from_utf8(&chunk).expect("SSE is UTF-8"));
+        assert!(
+            wire.len() < 1024 * 1024,
+            "SSE prefix must stay bounded while collecting initial events"
+        );
+    }
+    let events = wire
+        .split("\n\n")
+        .filter(|block| !block.is_empty())
+        .take(event_count)
+        .map(|block| {
+            let mut event = None;
+            let mut id = None;
+            let mut data = None;
+            for line in block.lines() {
+                if let Some(value) = line.strip_prefix("event: ") {
+                    event = Some(value.to_owned());
+                } else if let Some(value) = line.strip_prefix("id: ") {
+                    id = Some(value.parse().expect("SSE id is an integer revision"));
+                } else if let Some(value) = line.strip_prefix("data: ") {
+                    data = Some(serde_json::from_str(value).expect("SSE event data is valid JSON"));
+                }
+            }
+            (
+                event.expect("SSE block has an event name"),
+                id,
+                data.expect("SSE block has event data"),
+            )
+        })
+        .collect();
+    (status, events)
 }
 
 /// Status-only variant of `request_with_peer_headers`: rmcp's non-auth error

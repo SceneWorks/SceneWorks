@@ -1451,6 +1451,68 @@ async fn worker_can_register_claim_and_complete_job_through_http() {
 }
 
 #[tokio::test]
+async fn authenticated_lan_caller_cannot_mutate_an_unclaimed_job_without_worker_id() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let auth = [("x-sceneworks-token", "secret-token")];
+    let peer = "192.168.1.44:50123";
+
+    let (status, created) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "mist" },
+            "requestedGpu": "auto"
+        }),
+        peer,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = created["id"].as_str().expect("job id");
+
+    let (status, rejected) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "ownerless completion"
+        }),
+        peer,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(rejected["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("no longer owns")));
+
+    let (status, unchanged) = request_with_peer_headers(
+        app,
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+        peer,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unchanged["status"], "queued");
+    assert!(unchanged["result"]
+        .as_object()
+        .is_some_and(serde_json::Map::is_empty));
+}
+
+#[tokio::test]
 async fn progress_ticks_only_republish_queue_on_status_change() {
     // sc-4203 (F-API-5): a pure progress tick (status unchanged) must not trigger the
     // full queue-summary recompute + queue.updated broadcast; a status transition must.
@@ -1533,6 +1595,109 @@ async fn progress_ticks_only_republish_queue_on_status_change() {
     assert!(
         done_events.iter().any(|name| name == "queue.updated"),
         "a status transition must republish the queue: {done_events:?}"
+    );
+}
+
+#[tokio::test]
+async fn cleared_terminal_noop_retry_is_owner_checked_and_emits_no_events() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": "GPU 0",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "mist" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let job_id = created["id"].as_str().expect("job id").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+    let terminal_payload = json!({
+        "status": "completed",
+        "stage": "completed",
+        "progress": 1,
+        "message": "done",
+        "result": {},
+        "workerId": "worker-1"
+    });
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        terminal_payload.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["status"], "completed");
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut events = state.events.subscribe();
+    let (status, retry) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        terminal_payload,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(retry["status"], "completed");
+    assert!(
+        drain_event_names(&mut events).await.is_empty(),
+        "an unapplied, unaugmented same-terminal retry must publish no event"
+    );
+
+    let (status, rejected) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "stale retry",
+            "workerId": "worker-2"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(rejected["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("no longer owns")));
+    assert!(
+        drain_event_names(&mut events).await.is_empty(),
+        "an unauthorized same-terminal retry must publish no event"
     );
 }
 
@@ -1896,6 +2061,77 @@ async fn clear_single_job_soft_hides_only_that_terminal_job() {
 }
 
 #[tokio::test]
+async fn clear_publishes_a_live_tombstone_and_retains_it_for_reconnect() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    let (_, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "done" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/cancel"),
+        Value::Null,
+    )
+    .await;
+
+    let mut events = state.events.subscribe();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let names = drain_event_names(&mut events).await;
+    assert!(
+        names.iter().any(|name| name == "jobs.cleared"),
+        "connected peers need an explicit clear tombstone: {names:?}"
+    );
+
+    let (status, ticket) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        json!({ "knownTerminalJobIds": [job_id] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ticket = ticket["ticket"].as_str().expect("event ticket");
+    let (status, reconnect) =
+        request_sse_prefix(app, &format!("/api/v1/jobs/events?ticket={ticket}"), 3).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        reconnect[1].1["jobs"]
+            .as_array()
+            .expect("snapshot jobs")
+            .iter()
+            .all(|job| job["id"] != json!(job_id)),
+        "a requested soft-hidden row must not be composed back into the snapshot"
+    );
+    assert!(
+        reconnect[1].1["clearedJobIds"]
+            .as_array()
+            .expect("clear tombstones array")
+            .iter()
+            .any(|id| id == &json!(job_id)),
+        "a peer reconnecting after the live event must receive the persistent tombstone"
+    );
+}
+
+#[tokio::test]
 async fn clear_single_job_rejects_a_non_terminal_job() {
     // sc-12231: clearing an active (queued) job is a 400 — the × only appears on
     // terminal cards, and the server refuses to soft-hide a live job.
@@ -2133,8 +2369,7 @@ async fn ideogram_plain_text_job_returns_immediately_in_pending_caption() {
     );
     assert_eq!(refine_job["payload"]["aspectRatio"], "1:1");
 
-    // Complete the expansion with a rich caption. The unclaimed job has no owner, so the progress
-    // report omits a workerId (matching the store's `(None, None)` ownership rule).
+    // Complete the expansion with a rich caption through a real worker claim.
     let caption = r#"{"high_level_description": "a red fox", "compositional_deconstruction": {"background": "a snowy forest at golden hour", "elements": []}}"#;
     complete_prompt_refine_job(&app, &refine_id, json!({ "refinedPrompt": caption })).await;
 
@@ -2172,6 +2407,8 @@ async fn ideogram_plain_text_job_degrades_to_original_prompt_when_expansion_fail
     let image_job_id = image_job["id"].as_str().expect("job id").to_owned();
 
     let refine_id = wait_for_prompt_refine_job(&app).await;
+    const WORKER_ID: &str = "test-prompt-refine-worker";
+    claim_job_as_worker(&app, &refine_id, WORKER_ID, &["gpu", "prompt_refine"]).await;
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -2181,7 +2418,8 @@ async fn ideogram_plain_text_job_degrades_to_original_prompt_when_expansion_fail
             "stage": "failed",
             "progress": 0,
             "message": "Expansion failed.",
-            "error": "prompt-refine model not staged"
+            "error": "prompt-refine model not staged",
+            "workerId": WORKER_ID
         }),
     )
     .await;

@@ -35,7 +35,6 @@ use sceneworks_core::jobs_store::{
     candle_supported, mac_capabilities, mac_rust_supported, model_mac_support, CreateJob,
     DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
     RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
-    TERMINAL_STATUSES,
 };
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, canonical_lora_family, detect_lora_family, detect_model_family,
@@ -148,23 +147,24 @@ use workers::{
 mod events;
 use events::{create_event_ticket, job_events, EventHub, EventMessage};
 mod tickets;
-use tickets::{create_media_ticket, TicketResponse, TicketStore};
+use tickets::{create_media_ticket, EventTicketContext, TicketResponse, TicketStore};
 mod dto;
 use dto::{
     AccessResponse, AssetPurgeQuery, AssetsQuery, AudioJobRequest, CatalogDeleteQuery,
     CharacterCreateRequest, CharacterLookRequest, CharacterLookUpdateRequest, CharacterLoraRequest,
     CharacterLoraUpdateRequest, CharacterReferenceRequest, CharacterReferenceUpdateRequest,
-    CharacterTestRequest, CharacterUpdateRequest, CharactersQuery, DatasetAnalysisJobRequest,
-    DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest, DatasetFaceRecordsBody,
-    DatasetImageFixBody, DatasetParquetImportJobRequest, DatasetRepointBody,
-    DatasetUpscaleJobRequest, DirectoriesResponse, EventsQuery, FaceLikenessCompareRequest,
-    FrameExtractRequest, HealthResponse, HostCapabilitiesResponse, ImageJobRequest,
-    InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest,
-    LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest, ModelImportRequest,
-    PersonDetectionJobRequest, PersonTrackCorrectionsRequest, PersonTrackJobRequest,
-    ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest, QualityAckBody, ReadinessQuery,
-    RecipePresetsQuery, SavedVoiceCreateRequest, TimelineCreateRequest, TimelineExportRequest,
-    TimelineSaveRequest, TrainingCaptionJobRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
+    CharacterTestRequest, CharacterUpdateRequest, CharactersQuery, CreateEventTicketRequest,
+    DatasetAnalysisJobRequest, DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest,
+    DatasetFaceRecordsBody, DatasetImageFixBody, DatasetParquetImportJobRequest,
+    DatasetRepointBody, DatasetUpscaleJobRequest, DirectoriesResponse, EventsQuery,
+    FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse, HostCapabilitiesResponse,
+    ImageJobRequest, InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest,
+    LoraUpdateRequest, LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest,
+    ModelImportRequest, PersonDetectionJobRequest, PersonTrackCorrectionsRequest,
+    PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest,
+    QualityAckBody, ReadinessQuery, RecipePresetsQuery, SavedVoiceCreateRequest,
+    TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest,
+    VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 use manifest::{
@@ -272,6 +272,15 @@ const DEFAULT_CORS_ORIGINS: &str = concat!(
 const EVENT_BUFFER_SIZE: usize = 100;
 // SSE tickets are single-use and consumed on connect, so a tight window suffices.
 const EVENT_TICKET_TTL_SECONDS: u64 = 30;
+// Reconnect context is bounded independently from the router-wide 10 MiB JSON
+// allowance. 1,024 active UUIDs preserves the tested 600-job reconnect case;
+// terminal IDs mirror the web client's 200-row retained-history cap.
+const MAX_EVENT_TICKET_ACTIVE_JOB_IDS: usize = 1024;
+const MAX_EVENT_TICKET_TERMINAL_JOB_IDS: usize = 200;
+const MAX_EVENT_TICKET_JOB_ID_BYTES: usize = 128;
+const MAX_EVENT_TICKET_CONTEXT_BYTES: usize = 48 * 1024;
+const MAX_EVENT_TICKET_BODY_BYTES: usize = 64 * 1024;
+const MAX_OUTSTANDING_EVENT_TICKETS: usize = 128;
 // Media tickets ride in <img>/<video>/<a download> URLs (headers impossible), so
 // they are multi-use; the web client re-arms the sliding ticket every TTL/3, and a
 // leaked URL dies at most one TTL after the last authenticated refresh (sc-8810).
@@ -977,7 +986,11 @@ pub(crate) fn create_app_with_state(
         jobs_store,
         project_store,
         events: Arc::new(EventHub::default()),
-        event_tickets: Arc::new(TicketStore::new(EVENT_TICKET_TTL_SECONDS)),
+        queue_snapshot_lock: Arc::new(AsyncMutex::new(())),
+        event_tickets: Arc::new(TicketStore::with_max_outstanding(
+            EVENT_TICKET_TTL_SECONDS,
+            MAX_OUTSTANDING_EVENT_TICKETS,
+        )),
         media_tickets: Arc::new(TicketStore::new(MEDIA_TICKET_TTL_SECONDS)),
         auth_throttle: Arc::new(AuthThrottle::default()),
         manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
@@ -989,6 +1002,17 @@ pub(crate) fn create_app_with_state(
         )),
         http_client: reqwest::Client::new(),
         interrupted_jobs_on_startup,
+        progress_side_effects_lock: Arc::new(AsyncMutex::new(())),
+        #[cfg(test)]
+        progress_before_accept_once: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        sse_snapshot_before_subscribe_once: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        progress_side_effects_fail_once: Arc::new(Mutex::new(false)),
+        #[cfg(test)]
+        progress_side_effects_fail_job_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        #[cfg(test)]
+        progress_side_effects_attempts: Arc::new(Mutex::new(HashMap::new())),
     };
     let cors = cors_layer(&state.settings);
     let returned_state = state.clone();
@@ -1868,6 +1892,7 @@ async fn create_generation_job_with_status(
 }
 
 async fn publish_queue(state: &AppState) -> Result<(), ApiError> {
+    let _snapshot_guard = state.queue_snapshot_lock.lock().await;
     let queue = queue_summary_snapshot(state.clone()).await?;
     publish(state, "queue.updated", &queue);
     Ok(())
@@ -1878,6 +1903,7 @@ async fn publish_queue(state: &AppState) -> Result<(), ApiError> {
 /// only right after a `mark_stale_workers_interrupted` call — otherwise stale
 /// workers won't be reaped on this refresh.
 async fn publish_queue_skip_sweep(state: &AppState) -> Result<(), ApiError> {
+    let _snapshot_guard = state.queue_snapshot_lock.lock().await;
     let queue = queue_summary_snapshot_inner(state.clone(), true).await?;
     publish(state, "queue.updated", &queue);
     Ok(())
@@ -1889,6 +1915,7 @@ fn publish<T: Serialize>(state: &AppState, event: &str, data: &T) {
         state.events.publish(EventMessage {
             event: event.to_owned(),
             data,
+            revision: 0,
         });
     }
 }

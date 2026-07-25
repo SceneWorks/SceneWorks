@@ -1,7 +1,13 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 use parking_lot::{Mutex, ReentrantMutexGuard};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -86,6 +92,12 @@ pub const KEYPOINT_UPLOADS_CACHE_DIR: &str = "keypoint-uploads";
 /// [`KEYPOINT_UPLOADS_CACHE_DIR`]): API staging route, startup sweep, and the worker's
 /// `pose sourcePath` confinement + post-detect cleanup.
 pub const POSE_UPLOADS_CACHE_DIR: &str = "pose-uploads";
+
+/// `recent-projects.json` contains only one small metadata record per project.
+/// Eight MiB accommodates many thousands of projects even with long paths while
+/// bounding every cache fingerprint/read if the file is externally corrupted
+/// or replaced with an unexpectedly large payload.
+const MAX_REGISTRY_BYTES: u64 = 8 * 1024 * 1024;
 
 /// One resolved angle preset for generation (sc-4450): the kps to draw + a display name + (for
 /// built-ins) the canonical angle name that drives prompt augmentation. User presets have
@@ -248,7 +260,7 @@ pub struct ProjectFile {
     pub content_type: String,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct RegistryItem {
     id: Option<String>,
     name: Option<String>,
@@ -257,13 +269,161 @@ struct RegistryItem {
     extra: Map<String, Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegistryFingerprint {
+    modified: SystemTime,
+    len: u64,
+    // `modified + len` misses in-place same-length rewrites when a tool
+    // preserves mtime. Unix ctime is the filesystem change revision; dev+ino
+    // also distinguish atomic replacement by another process.
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+    // Stable Rust does not expose the filesystem ChangeTime on Windows, and
+    // this workspace forbids unsafe Win32 calls. File identity covers atomic
+    // replacement; a fixed-size digest from the same open handle covers every
+    // in-place rewrite even when length and last-write time are restored.
+    #[cfg(windows)]
+    volume_serial_number: u64,
+    #[cfg(windows)]
+    file_index: u64,
+    #[cfg(windows)]
+    content_sha256: [u8; 32],
+}
+
+#[derive(Debug, Default)]
+struct RegistryCache {
+    fingerprint: Option<RegistryFingerprint>,
+    items: Vec<RegistryItem>,
+    loaded: bool,
+    #[cfg(test)]
+    disk_reads: usize,
+}
+
+fn registry_fingerprint(path: &Path) -> ProjectStoreResult<Option<RegistryFingerprint>> {
+    match fs::File::open(path) {
+        Ok(file) => {
+            #[cfg(windows)]
+            let mut file = file;
+            let metadata = file.metadata()?;
+            ensure_registry_size(metadata.len())?;
+            #[cfg(windows)]
+            let file_information = winapi_util::file::information(&file)?;
+            #[cfg(windows)]
+            let content_sha256 = registry_content_sha256(&mut file)?;
+            Ok(Some(RegistryFingerprint {
+                modified: metadata.modified()?,
+                len: metadata.len(),
+                #[cfg(unix)]
+                device: metadata.dev(),
+                #[cfg(unix)]
+                inode: metadata.ino(),
+                #[cfg(unix)]
+                changed_seconds: metadata.ctime(),
+                #[cfg(unix)]
+                changed_nanoseconds: metadata.ctime_nsec(),
+                #[cfg(windows)]
+                volume_serial_number: file_information.volume_serial_number(),
+                #[cfg(windows)]
+                file_index: file_information.file_index(),
+                #[cfg(windows)]
+                content_sha256,
+            }))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn ensure_registry_size(len: u64) -> ProjectStoreResult<()> {
+    if len > MAX_REGISTRY_BYTES {
+        return Err(ProjectStoreError::Io(registry_size_error(len)));
+    }
+    Ok(())
+}
+
+fn registry_size_error(len: u64) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "recent-projects.json is {len} bytes; the maximum supported size is \
+             {MAX_REGISTRY_BYTES} bytes"
+        ),
+    )
+}
+
+#[derive(Default)]
+struct RegistrySizeCounter {
+    len: u64,
+}
+
+impl Write for RegistrySizeCounter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let next_len = self
+            .len
+            .saturating_add(u64::try_from(buffer.len()).unwrap_or(u64::MAX));
+        if next_len > MAX_REGISTRY_BYTES {
+            return Err(registry_size_error(next_len));
+        }
+        self.len = next_len;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn ensure_registry_serialized_size(value: &Value) -> ProjectStoreResult<()> {
+    let mut counter = RegistrySizeCounter::default();
+    serde_json::to_writer_pretty(&mut counter, value)?;
+    counter.write_all(b"\n")?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn registry_content_sha256(file: &mut fs::File) -> ProjectStoreResult<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    let mut limited = file.take(MAX_REGISTRY_BYTES + 1);
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let read = limited.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        ensure_registry_size(total)?;
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn read_registry_payload(path: &Path) -> ProjectStoreResult<String> {
+    let file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    ensure_registry_size(len)?;
+    let mut payload = String::with_capacity(
+        usize::try_from(len).expect("registry byte ceiling fits every supported target"),
+    );
+    file.take(MAX_REGISTRY_BYTES + 1)
+        .read_to_string(&mut payload)?;
+    ensure_registry_size(u64::try_from(payload.len()).unwrap_or(u64::MAX))?;
+    Ok(payload)
+}
+
 #[derive(Debug)]
 pub struct ProjectStore {
     data_dir: PathBuf,
     app_version: String,
     /// Guards recent-project registry reads/writes only; project DB and project-file mutations
     /// rely on SQLite transactions and filesystem operations for their own serialization.
-    lock: Mutex<()>,
+    lock: Mutex<RegistryCache>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,7 +438,7 @@ impl ProjectStore {
         Self {
             data_dir: data_dir.into(),
             app_version: app_version.into(),
-            lock: Mutex::new(()),
+            lock: Mutex::new(RegistryCache::default()),
         }
     }
 
@@ -291,10 +451,10 @@ impl ProjectStore {
     }
 
     pub fn list_projects(&self) -> ProjectStoreResult<Vec<ProjectSummary>> {
-        let _guard = self.lock.lock();
+        let mut registry_cache = self.lock.lock();
         self.ensure_data_dirs()?;
         let mut projects = Vec::new();
-        for item in self.load_registry()? {
+        for item in self.load_registry(&mut registry_cache)? {
             // The reserved global pose + keypoint libraries are addressable by id but
             // hidden from the project switcher (epic 2282 / epic 4422).
             if matches!(
@@ -339,7 +499,7 @@ impl ProjectStore {
             ));
         }
 
-        let _guard = self.lock.lock();
+        let mut registry_cache = self.lock.lock();
         self.ensure_data_dirs()?;
         // Fail fast with an actionable error if the workspace folder rejects writes,
         // rather than surfacing an opaque SQLITE_READONLY from deep in provisioning
@@ -362,7 +522,7 @@ impl ProjectStore {
                 .join(format!("{slug}-{suffix}.sceneworks"));
         }
 
-        self.provision_project_locked(&project_id, name, &project_path)
+        self.provision_project_locked(&project_id, name, &project_path, &mut registry_cache)
     }
 
     /// Provision a project directory (folders + project file + db + registry entry)
@@ -373,6 +533,7 @@ impl ProjectStore {
         project_id: &str,
         name: &str,
         project_path: &Path,
+        registry_cache: &mut RegistryCache,
     ) -> ProjectStoreResult<ProjectSummary> {
         fs::create_dir_all(project_path)?;
         for folder in PROJECT_FOLDERS {
@@ -404,7 +565,7 @@ impl ProjectStore {
         }
 
         let mut registry = self
-            .load_registry()?
+            .load_registry(registry_cache)?
             .into_iter()
             .filter(|item| item.id.as_deref() != Some(project_id))
             .collect::<Vec<_>>();
@@ -417,7 +578,7 @@ impl ProjectStore {
                 extra: Map::new(),
             },
         );
-        self.save_registry(&registry)?;
+        self.save_registry(&registry, registry_cache)?;
 
         read_project_summary(project_path)
     }
@@ -425,7 +586,7 @@ impl ProjectStore {
     /// Ensure the reserved global pose library project exists (idempotent), returning
     /// its summary. Created lazily on first pose write/list (epic 2282, sc-2284).
     pub fn ensure_global_poses_project(&self) -> ProjectStoreResult<ProjectSummary> {
-        let _guard = self.lock.lock();
+        let mut registry_cache = self.lock.lock();
         self.ensure_data_dirs()?;
         let project_path = self.projects_dir().join("global-poses.sceneworks");
         if project_path.exists() {
@@ -435,13 +596,14 @@ impl ProjectStore {
             GLOBAL_POSES_PROJECT_ID,
             GLOBAL_POSES_PROJECT_NAME,
             &project_path,
+            &mut registry_cache,
         )
     }
 
     /// Ensure the reserved global Key Point Library project exists (idempotent), returning its
     /// summary. Created lazily on first preset/collection write (epic 4422, sc-4434).
     pub fn ensure_global_keypoints_project(&self) -> ProjectStoreResult<ProjectSummary> {
-        let _guard = self.lock.lock();
+        let mut registry_cache = self.lock.lock();
         self.ensure_data_dirs()?;
         let project_path = self.projects_dir().join("global-keypoints.sceneworks");
         if project_path.exists() {
@@ -451,6 +613,7 @@ impl ProjectStore {
             GLOBAL_KEYPOINTS_PROJECT_ID,
             GLOBAL_KEYPOINTS_PROJECT_NAME,
             &project_path,
+            &mut registry_cache,
         )
     }
 
@@ -793,8 +956,8 @@ impl ProjectStore {
     /// total number of rows pruned across all projects.
     pub fn prune_all_orphaned_assets(&self) -> ProjectStoreResult<usize> {
         let project_paths: Vec<PathBuf> = {
-            let _guard = self.lock.lock();
-            self.load_registry()?
+            let mut registry_cache = self.lock.lock();
+            self.load_registry(&mut registry_cache)?
                 .into_iter()
                 .filter_map(|item| item.path.map(PathBuf::from))
                 // Only touch projects that have been opened at least once (a DB
@@ -2736,20 +2899,47 @@ impl ProjectStore {
         Ok(())
     }
 
-    fn load_registry(&self) -> ProjectStoreResult<Vec<RegistryItem>> {
+    fn load_registry(
+        &self,
+        registry_cache: &mut RegistryCache,
+    ) -> ProjectStoreResult<Vec<RegistryItem>> {
         let registry_path = self.registry_path();
-        if !registry_path.exists() {
-            return Ok(Vec::new());
+        let fingerprint = registry_fingerprint(&registry_path)?;
+        if registry_cache.loaded && registry_cache.fingerprint == fingerprint {
+            return Ok(registry_cache.items.clone());
         }
-        let payload = fs::read_to_string(registry_path)?;
-        Ok(serde_json::from_str(&payload)?)
+        let items = if fingerprint.is_some() {
+            #[cfg(test)]
+            {
+                registry_cache.disk_reads += 1;
+            }
+            let payload = read_registry_payload(&registry_path)?;
+            serde_json::from_str(&payload)?
+        } else {
+            Vec::new()
+        };
+        registry_cache.fingerprint = fingerprint;
+        registry_cache.items = items.clone();
+        registry_cache.loaded = true;
+        Ok(items)
     }
 
-    fn save_registry(&self, projects: &[RegistryItem]) -> ProjectStoreResult<()> {
+    fn save_registry(
+        &self,
+        projects: &[RegistryItem],
+        registry_cache: &mut RegistryCache,
+    ) -> ProjectStoreResult<()> {
         fs::create_dir_all(&self.data_dir)?;
         // `write_json` stages to a unique temp and renames atomically (sc-1633),
         // so the registry write no longer needs its own intermediate temp file.
-        write_json(&self.registry_path(), &serde_json::to_value(projects)?)
+        let registry_path = self.registry_path();
+        let registry_value = serde_json::to_value(projects)?;
+        ensure_registry_serialized_size(&registry_value)?;
+        write_json(&registry_path, &registry_value)?;
+        registry_cache.fingerprint = registry_fingerprint(&registry_path)?;
+        registry_cache.items = projects.to_vec();
+        registry_cache.loaded = true;
+        Ok(())
     }
 
     /// Resolves the project path and acquires the per-project file lock, so the
@@ -2766,8 +2956,8 @@ impl ProjectStore {
     }
 
     fn find_project_path(&self, project_id: &str) -> ProjectStoreResult<PathBuf> {
-        let _guard = self.lock.lock();
-        for item in self.load_registry()? {
+        let mut registry_cache = self.lock.lock();
+        for item in self.load_registry(&mut registry_cache)? {
             if item.id.as_deref() == Some(project_id) {
                 let Some(path) = item.path else {
                     break;
@@ -4789,15 +4979,233 @@ mod tests {
         apply_project_migrations, backfill_upscale_variant_lineage, build_generated_asset_sidecar,
         connect_project_db, ensure_project_db_ready, find_timeline_file, guess_mime_from_filename,
         index_timeline, is_safe_relative_path, is_safe_upload_extension, normalize_asset_tags,
-        read_json, sniff_image_format, upload_extension, upscale_lineage_group, AssetScope,
-        CharacterCreateInput, CharacterLookInput, CharacterReferenceInput, ProjectStore,
-        ProjectStoreError, UploadAsset, ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID,
-        GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
+        read_json, read_registry_payload, sniff_image_format, upload_extension,
+        upscale_lineage_group, AssetScope, CharacterCreateInput, CharacterLookInput,
+        CharacterReferenceInput, ProjectStore, ProjectStoreError, UploadAsset,
+        ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID,
+        MAX_REGISTRY_BYTES, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
         UPSCALE_LINEAGE_QUERY,
     };
     use rusqlite::{params, Connection, OptionalExtension};
     use serde_json::{json, Value};
     use std::sync::Arc;
+
+    #[test]
+    fn recent_project_registry_cache_reuses_reads_and_invalidates_on_external_change() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let writer = ProjectStore::new(&data_dir, "test-version");
+        let created = writer.create_project("Cached").expect("project creates");
+
+        let reader = ProjectStore::new(&data_dir, "test-version");
+        assert_eq!(
+            reader.list_projects().expect("first list"),
+            vec![created.clone()]
+        );
+        assert_eq!(reader.lock.lock().disk_reads, 1);
+        assert_eq!(
+            reader.list_projects().expect("cached list"),
+            vec![created.clone()]
+        );
+        assert_eq!(
+            reader.lock.lock().disk_reads,
+            1,
+            "an unchanged registry should not be reread"
+        );
+
+        let registry_path = reader.registry_path();
+        let mut registry = std::fs::read(&registry_path).expect("registry reads");
+        registry.push(b'\n');
+        std::fs::write(&registry_path, registry).expect("external registry change writes");
+
+        assert_eq!(
+            reader.list_projects().expect("invalidated list"),
+            vec![created]
+        );
+        assert_eq!(
+            reader.lock.lock().disk_reads,
+            2,
+            "a changed registry fingerprint must invalidate the cache"
+        );
+    }
+
+    #[test]
+    fn oversized_recent_project_registry_fails_before_fingerprinting_or_parsing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir creates");
+        let registry_path = data_dir.join("recent-projects.json");
+        std::fs::File::create(&registry_path)
+            .expect("registry creates")
+            .set_len(MAX_REGISTRY_BYTES + 1)
+            .expect("oversized sparse registry creates");
+
+        let assert_size_error = |error: ProjectStoreError| match error {
+            ProjectStoreError::Io(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+                assert!(
+                    error.to_string().contains("maximum supported size"),
+                    "size failure should be actionable: {error}"
+                );
+            }
+            other => panic!("expected deterministic registry size error, got {other}"),
+        };
+
+        assert_size_error(
+            read_registry_payload(&registry_path)
+                .expect_err("bounded registry reader must reject oversized input"),
+        );
+        assert_size_error(
+            ProjectStore::new(&data_dir, "test-version")
+                .list_projects()
+                .expect_err("cache fingerprint must reject oversized input before parsing"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recent_project_registry_cache_detects_same_size_rewrite_with_restored_mtime() {
+        use std::fs::{File, FileTimes, OpenOptions};
+        use std::io::Write;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let writer = ProjectStore::new(&data_dir, "test-version");
+        writer.create_project("Cached").expect("project creates");
+
+        let reader = ProjectStore::new(&data_dir, "test-version");
+        reader.list_projects().expect("first list");
+        assert_eq!(reader.lock.lock().disk_reads, 1);
+
+        let registry_path = reader.registry_path();
+        let metadata = std::fs::metadata(&registry_path).expect("registry metadata");
+        let original = std::fs::read_to_string(&registry_path).expect("registry reads");
+        let rewritten = original.replacen("\"Cached\"", "\"Mutate\"", 1);
+        assert_ne!(rewritten, original, "test must rewrite registry content");
+        assert_eq!(
+            rewritten.len(),
+            original.len(),
+            "test rewrite must preserve file length"
+        );
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&registry_path)
+            .expect("registry opens for rewrite");
+        file.write_all(rewritten.as_bytes())
+            .expect("same-size registry rewrite");
+        file.sync_all().expect("registry rewrite syncs");
+        File::open(&registry_path)
+            .expect("registry reopens")
+            .set_times(
+                FileTimes::new()
+                    .set_accessed(metadata.accessed().expect("accessed time"))
+                    .set_modified(metadata.modified().expect("modified time")),
+            )
+            .expect("mtime restores");
+
+        reader.list_projects().expect("invalidated list");
+        let cache = reader.lock.lock();
+        assert_eq!(
+            cache.disk_reads, 2,
+            "filesystem change revision must invalidate same-size same-mtime rewrites"
+        );
+        assert_eq!(
+            cache.items[0].name.as_deref(),
+            Some("Mutate"),
+            "cache must contain the externally rewritten registry"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_registry_cache_detects_between_window_rewrite_with_restored_mtime() {
+        use std::fs::{FileTimes, OpenOptions};
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let writer = ProjectStore::new(&data_dir, "test-version");
+        let created = writer.create_project("Cached").expect("project creates");
+        let registry_path = writer.registry_path();
+
+        // Trailing JSON whitespace makes the registry large enough for a
+        // localized interior rewrite without changing its parsed contents.
+        let mut original = std::fs::read(&registry_path).expect("registry reads");
+        let json_len = original.len();
+        original.resize(16 * 1024, b' ');
+        std::fs::write(&registry_path, &original).expect("padded registry writes");
+
+        let reader = ProjectStore::new(&data_dir, "test-version");
+        assert_eq!(
+            reader.list_projects().expect("first list"),
+            vec![created.clone()]
+        );
+        assert_eq!(reader.lock.lock().disk_reads, 1);
+        let metadata = std::fs::metadata(&registry_path).expect("registry metadata");
+
+        let mutation_index = json_len + (original.len() - json_len) / 2;
+        let mut rewritten = original.clone();
+        assert_eq!(rewritten[mutation_index], b' ');
+        rewritten[mutation_index] = b'\n';
+        assert_eq!(rewritten.len(), original.len());
+
+        std::fs::write(&registry_path, rewritten).expect("same-size registry rewrite");
+        OpenOptions::new()
+            .write(true)
+            .open(&registry_path)
+            .expect("registry opens to restore timestamps")
+            .set_times(
+                FileTimes::new()
+                    .set_accessed(metadata.accessed().expect("accessed time"))
+                    .set_modified(metadata.modified().expect("modified time")),
+            )
+            .expect("mtime restores");
+        assert_eq!(
+            std::fs::metadata(&registry_path)
+                .expect("restored metadata")
+                .modified()
+                .expect("restored mtime"),
+            metadata.modified().expect("original mtime"),
+            "fixture must restore last-write time exactly"
+        );
+
+        assert_eq!(
+            reader.list_projects().expect("invalidated list"),
+            vec![created]
+        );
+        assert_eq!(
+            reader.lock.lock().disk_reads,
+            2,
+            "the exact Windows content fingerprint must invalidate a same-size \
+             restored-mtime edit at any byte"
+        );
+    }
+
+    #[test]
+    fn recent_project_registry_cache_serializes_concurrent_initial_reads() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let writer = ProjectStore::new(&data_dir, "test-version");
+        let created = writer
+            .create_project("Concurrent")
+            .expect("project creates");
+        let reader = Arc::new(ProjectStore::new(&data_dir, "test-version"));
+
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let reader = Arc::clone(&reader);
+                std::thread::spawn(move || reader.list_projects().expect("project list"))
+            })
+            .collect();
+        for thread in threads {
+            assert_eq!(thread.join().expect("thread joins"), vec![created.clone()]);
+        }
+        assert_eq!(
+            reader.lock.lock().disk_reads,
+            1,
+            "the synchronized cache should perform one disk read"
+        );
+    }
 
     /// sc-2022 added `training_datasets.character_id` to the migration without
     /// bumping `PROJECT_SCHEMA_VERSION`, so DBs already stamped at the prior
