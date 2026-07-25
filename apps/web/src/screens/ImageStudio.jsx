@@ -1181,8 +1181,7 @@ export function ImageStudio() {
       probe.onload = null;
       probe.src = "";
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [img2imgReferenceAssetId, editImageAssets]);
+  }, [img2imgReferenceAssetId, editImageAssets, onReferenceImageLoaded]);
   // Sampler / scheduler menus declared by the model, gated to the ACTIVE backend
   // (epic 7114 P5): `macGatingActive` is the worker `mlx_required` master switch, so
   // it picks the manifest's `mlx.limits` override on Mac/MLX and the `candle.limits`

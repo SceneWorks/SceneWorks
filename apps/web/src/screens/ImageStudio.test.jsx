@@ -1920,6 +1920,28 @@ describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-1019
   const KREA_IMG2IMG = { ...Z_IMAGE, id: "krea_2_turbo", name: "Krea 2 Turbo", ui: { img2img: true } };
   const tileByText = (text) =>
     [...document.body.querySelectorAll("button")].find((b) => b.textContent.includes(text));
+  function installFakeImageProbes() {
+    const originalImage = global.Image;
+    const probes = [];
+    class FakeImageProbe {
+      constructor() {
+        this.naturalWidth = 0;
+        this.naturalHeight = 0;
+        this.onload = null;
+        probes.push(this);
+      }
+
+      set src(value) {
+        this._src = value;
+      }
+
+      get src() {
+        return this._src;
+      }
+    }
+    global.Image = FakeImageProbe;
+    return { probes, restore: () => { global.Image = originalImage; } };
+  }
 
   it("hides the 'Image reference' tile for a plain t2i model without ui.img2img", async () => {
     // sc-10195: img2img is its own tile, gated purely on `ui.img2img`. A plain model with no captioner
@@ -1971,25 +1993,7 @@ describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-1019
   });
 
   it("ignores a superseded reference probe that loads after the newer image", async () => {
-    const originalImage = global.Image;
-    const probes = [];
-    class FakeImageProbe {
-      constructor() {
-        this.naturalWidth = 0;
-        this.naturalHeight = 0;
-        this.onload = null;
-        probes.push(this);
-      }
-
-      set src(value) {
-        this._src = value;
-      }
-
-      get src() {
-        return this._src;
-      }
-    }
-    global.Image = FakeImageProbe;
+    const { probes, restore } = installFakeImageProbes();
     const portrait = {
       id: "portrait",
       type: "image",
@@ -2042,7 +2046,77 @@ describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-1019
       });
       expect(field(container, "Aspect").value).toBe("1536x1024");
     } finally {
-      global.Image = originalImage;
+      restore();
+    }
+  });
+
+  it("restarts a pending reference probe when the model resolution options change", async () => {
+    const { probes, restore } = installFakeImageProbes();
+    const portrait = {
+      id: "portrait",
+      type: "image",
+      projectId: "project_1",
+      displayName: "Portrait reference",
+      url: "/portrait.png",
+      status: {},
+    };
+    const oldCatalogModel = {
+      ...KREA_IMG2IMG,
+      defaults: { resolution: "1024x1536" },
+      limits: { resolutions: ["1024x1536", "1536x1024"] },
+    };
+    const updatedCatalogModel = {
+      ...oldCatalogModel,
+      // The old bucket remains valid, but the refreshed catalog adds an exact
+      // 3:4 match that must win for a 900x1200 reference.
+      limits: { resolutions: ["1024x1536", "768x1024", "1536x1024"] },
+    };
+    const assets = [portrait];
+
+    try {
+      await render(
+        baseContext({
+          assets,
+          imageModels: [oldCatalogModel],
+          models: [oldCatalogModel],
+        }),
+      );
+      await click(tileByText("Image reference"));
+      await click(tileByText("Select reference image"));
+      await click(document.body.querySelector(".asset-picker-card"));
+      await click(tileByText("Use Selection"));
+      expect(probes).toHaveLength(1);
+      const staleOnload = probes[0].onload;
+      expect(field(container, "Aspect").value).toBe("1024x1536");
+
+      // Keep the same asset and selected model id while refreshing its declared
+      // resolution buckets. The in-flight probe must be cancelled and restarted
+      // because its callback otherwise closes over the old options.
+      await render(
+        baseContext({
+          assets,
+          imageModels: [updatedCatalogModel],
+          models: [updatedCatalogModel],
+        }),
+      );
+      expect(probes).toHaveLength(2);
+      expect(field(container, "Aspect").value).toBe("1024x1536");
+
+      probes[1].naturalWidth = 900;
+      probes[1].naturalHeight = 1200;
+      await act(async () => {
+        probes[1].onload();
+      });
+      expect(field(container, "Aspect").value).toBe("768x1024");
+
+      probes[0].naturalWidth = 900;
+      probes[0].naturalHeight = 1200;
+      await act(async () => {
+        staleOnload();
+      });
+      expect(field(container, "Aspect").value).toBe("768x1024");
+    } finally {
+      restore();
     }
   });
 });
