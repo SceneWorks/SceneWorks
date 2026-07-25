@@ -1,6 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import { apiFetch } from "./api.js";
-import { batchEligibleAssets, batchItemStatus, buildBatchJob, summarizeBatchProgress } from "./batchOps.js";
+import {
+  batchEligibleAssets,
+  batchItemStatusForItem,
+  buildBatchJob,
+  summarizeBatchProgress,
+} from "./batchOps.js";
 import { terminalStatuses } from "./constants.js";
 import { upscaledFromAssetId } from "./assetVariants.js";
 import { assetSupportsCharacterLink } from "./components/assetPanels.jsx";
@@ -72,9 +77,9 @@ export function useAssetBatch() {
   // Per-item + aggregate progress for an in-flight/just-finished batch, read off the jobs feed.
   const batchItems = batch
     ? batch.items.map((item) => ({
-      asset: item.asset,
-      status: batchItemStatus(item.jobId, jobs, batchObservedJobsRef.current),
-      error: item.error ?? null,
+        asset: item.asset,
+        status: batchItemStatusForItem(item, jobs, batchObservedJobsRef.current),
+        error: item.error ?? null,
       }))
     : null;
   const batchProgress = batch
@@ -133,7 +138,7 @@ export function useAssetBatch() {
     if (!activeProject || !eligibleSelected.length) return;
     batchObservedJobsRef.current.clear();
     const targets = eligibleSelected;
-    setBatch({ op, submitting: true, items: targets.map((asset) => ({ asset, jobId: null })) });
+    setBatch({ op, submitting: true, items: targets.map((asset) => ({ asset, jobId: null, pending: true })) });
     const items = [];
     for (const asset of targets) {
       try {
@@ -147,7 +152,10 @@ export function useAssetBatch() {
         }
         const { endpoint, body } = buildBatchJob({ op, asset, params, project: activeProject, requestedGpu, dims });
         const job = await apiFetch(endpoint, token, { method: "POST", body: JSON.stringify(body) });
-        items.push({ asset, jobId: job?.id ?? null });
+        if (!job?.id) {
+          throw new Error("The job response did not include an id.");
+        }
+        items.push({ asset, jobId: job.id });
       } catch (error) {
         items.push({ asset, jobId: null, error: error?.message || "Could not start this batch item." });
       }
