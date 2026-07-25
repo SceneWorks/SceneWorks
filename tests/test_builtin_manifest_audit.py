@@ -666,7 +666,11 @@ def test_schema_rejects_unknown_model_type():
     entry["type"] = "hologram"
     manifest = {"schemaVersion": 1, "models": [entry]}
     errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
-    assert any("hologram" in error.message or "enum" in error.message for error in errors)
+    assert any(
+        error.validator == "enum"
+        and list(error.absolute_path) == ["models", 0, "type"]
+        for error in errors
+    ), "the model type must fail the enum validator exactly at models/0/type"
 
 
 # The seeded audio catalog (sc-13402, epic 13400). Each id is a live candle-audio

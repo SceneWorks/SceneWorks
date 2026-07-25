@@ -5,6 +5,7 @@
 //! is deliberately NO direct path into the engine/DB from the MCP server, so the
 //! tools inherit exactly the behavior (and fixes) of the routes the web UI uses.
 
+use futures_util::StreamExt;
 use serde_json::Value;
 
 /// Connect timeout for every MCP tool's API call: bounds the TCP/TLS handshake so an
@@ -147,10 +148,14 @@ impl ApiClient {
         Ok(response.json::<Value>().await?)
     }
 
-    /// GET raw bytes from `path` (project media via
-    /// `GET /api/v1/projects/:id/files/*rel`). Returns the body plus the
-    /// response `Content-Type` (parameters stripped) when the server sent one.
-    pub async fn get_bytes(&self, path: &str) -> Result<(Vec<u8>, Option<String>), ApiClientError> {
+    /// GET raw bytes from `path` without ever buffering more than `max_bytes`.
+    /// `None` means the body exceeded the cap, whether declared by Content-Length or discovered
+    /// while streaming. The response is dropped immediately in either case, aborting the download.
+    pub async fn get_bytes_bounded(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<(Option<Vec<u8>>, Option<String>), ApiClientError> {
         let request = self.client.get(format!("{}{}", self.base_url, path));
         let response = self.send_checked(request).await?;
         let content_type = response
@@ -159,7 +164,24 @@ impl ApiClient {
             .and_then(|value| value.to_str().ok())
             .map(|value| value.split(';').next().unwrap_or("").trim().to_owned())
             .filter(|value| !value.is_empty());
-        Ok((response.bytes().await?.to_vec(), content_type))
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Ok((None, content_type));
+        }
+
+        let capacity = response.content_length().unwrap_or(0).min(max_bytes as u64) as usize;
+        let mut bytes = Vec::with_capacity(capacity);
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if chunk.len() > max_bytes.saturating_sub(bytes.len()) {
+                return Ok((None, content_type));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok((Some(bytes), content_type))
     }
 
     /// Attach the auth header, send, and turn any non-2xx into

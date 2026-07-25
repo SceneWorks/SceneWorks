@@ -464,14 +464,23 @@ impl SceneWorksMcp {
             let Some(media_path) = asset_media_path(asset) else {
                 continue;
             };
+            let remaining_total = MAX_INLINE_TOTAL_BYTES.saturating_sub(total_bytes);
+            let body_limit = MAX_INLINE_IMAGE_BYTES.min(remaining_total);
             let (bytes, header_mime) = self
                 .api
-                .get_bytes(&format!(
-                    "/api/v1/projects/{project_id}/files/{}",
-                    encode_media_path(&media_path)
-                ))
+                .get_bytes_bounded(
+                    &format!(
+                        "/api/v1/projects/{project_id}/files/{}",
+                        encode_media_path(&media_path)
+                    ),
+                    body_limit,
+                )
                 .await
                 .map_err(api_error)?;
+            let Some(bytes) = bytes else {
+                let link_base = self.request_link_base(&extensions);
+                return self.job_result_links(&job_id, &job, link_base).await;
+            };
             let mime_type = image_mime_type(
                 &media_path,
                 asset.pointer("/file/mimeType").and_then(Value::as_str),
@@ -484,11 +493,7 @@ impl SceneWorksMcp {
             // get_job_result ticketed-link shape (bytes downloaded so far are
             // simply dropped). The ticket links reach the same media without
             // inlining, so no result is lost.
-            total_bytes = total_bytes.saturating_add(bytes.len());
-            if bytes.len() > MAX_INLINE_IMAGE_BYTES || total_bytes > MAX_INLINE_TOTAL_BYTES {
-                let link_base = self.request_link_base(&extensions);
-                return self.job_result_links(&job_id, &job, link_base).await;
-            }
+            total_bytes += bytes.len();
             summary_assets.push(json!({
                 "id": asset.get("id").cloned().unwrap_or(Value::Null),
                 "path": &media_path,

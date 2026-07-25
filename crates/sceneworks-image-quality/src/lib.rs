@@ -121,6 +121,15 @@ pub fn extract_tier0_scalars(path: &Path, bucket_edge: u32) -> image::ImageResul
 
 /// Extract Tier-0 scalars from an already-decoded image — the testable core, no IO.
 pub fn scalars_from_image(image: &DynamicImage, bucket_edge: u32) -> Tier0Scalars {
+    if image.width() == 0 || image.height() == 0 {
+        return Tier0Scalars {
+            blur_variance: 0.0,
+            shadow_clip: 0.0,
+            highlight_clip: 0.0,
+            well_exposed_fraction: 0.0,
+            phash: Vec::new(),
+        };
+    }
     let phash = dataset_hasher().hash_image(image).as_bytes().to_vec();
 
     // Measure sharpness + exposure on exactly what the trainer feeds in. (If the metrics below
@@ -194,7 +203,14 @@ pub fn compute_readiness(
                     extracted.push((item.item_id.clone(), scalars.clone()));
                     Some(scalars)
                 }
-                Err(_) => {
+                Err(error) => {
+                    tracing::warn!(
+                        event = "dataset_quality_image_decode_failed",
+                        itemId = %item.item_id,
+                        path = %path.display(),
+                        error = %error,
+                        "Dataset Doctor could not decode an image"
+                    );
                     decode_failed.push(item.item_id.clone());
                     None
                 }
@@ -1173,6 +1189,21 @@ mod tests {
             .find(|i| i.item_id == "broken")
             .expect("broken");
         assert!(broken.flags.iter().any(|f| f.check == QualityCheck::Decode));
+    }
+
+    #[test]
+    fn zero_dimension_image_returns_zeroed_scalars_without_crop_underflow() {
+        for image in [
+            DynamicImage::ImageRgb8(RgbImage::new(0, 4)),
+            DynamicImage::ImageRgb8(RgbImage::new(4, 0)),
+        ] {
+            let scalars = scalars_from_image(&image, 64);
+            assert_eq!(scalars.blur_variance, 0.0);
+            assert_eq!(scalars.shadow_clip, 0.0);
+            assert_eq!(scalars.highlight_clip, 0.0);
+            assert_eq!(scalars.well_exposed_fraction, 0.0);
+            assert!(scalars.phash.is_empty());
+        }
     }
 
     #[test]
