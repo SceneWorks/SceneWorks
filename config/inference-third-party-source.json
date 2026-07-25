@@ -1,7 +1,7 @@
 {
   "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
-  "inferenceRevision": "8b0534512add4007cf6034f5d200e5649ed9b5f0",
-  "auditDigest": "9f4ad94d5f5a6aafb2dd9932fca7c0f039c897c374fe0008b8679db5fd5bfb38",
+  "inferenceRevision": "56712e6b94f3f68b2e15848c3d425fd58d4fea2b",
+  "auditDigest": "8bc843eb9b5a8a5bbc74dde31a1b49f3a908e959e57737bb534ee4e4f82b10ad",
   "artifacts": [
     {
       "id": "cmudict",
@@ -13,24 +13,16 @@
       "evidence": "CMUdict is third-party dictionary data; its complete BSD-2 notice is rendered by component cmudict."
     }
   ],
-  "prospectiveDisclosures": [
-    {
-      "id": "cephes",
-      "component": "cephes",
-      "firstInferenceRevision": "4dd518a5",
-      "source": "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs",
-      "evidence": "Current inference main, but not the pinned revision above, contains the Cephes port. The notice is pre-staged so the future pin cannot ship without disclosure."
-    }
-  ],
+  "prospectiveDisclosures": [],
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "8b0534512add4007cf6034f5d200e5649ed9b5f0",
+    "revision": "56712e6b94f3f68b2e15848c3d425fd58d4fea2b",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from (case-insensitive)",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 520,
-    "populationSha256": "e1d7c40b613cb17f29780fcfb7fde2113ed743d9a767d0d3153e8b690640fb8b"
+    "matchedFiles": 538,
+    "populationSha256": "80351e7c0dadb5d0712b52c6f343119226797679aaa90eff0b5835cc6739c4df"
   },
   "portedSourceAreas": [
     {
@@ -606,6 +598,25 @@
       "provenance": "InstantID keypoint rasterizers faithfully port OpenCV drawing primitives and the literal SinTable.",
       "disposition": "about-license",
       "component": "opencv-source"
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-mage",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-mage/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are mapped in the About manifest (the microsoft/Mage MIT component); the candidate inventory pins the exact source blob and normalized provenance markers.",
+      "excludePaths": [
+        "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs"
+      ]
+    },
+    {
+      "id": "cephes-source",
+      "paths": [
+        "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs"
+      ],
+      "provenance": "The Mage latent module transcribes the Cephes ndtri/erf/erfc routines and coefficient tables (Stephen L. Moshier, BSD-3-Clause).",
+      "disposition": "about-license",
+      "component": "cephes"
     }
   ],
   "includeSites": [

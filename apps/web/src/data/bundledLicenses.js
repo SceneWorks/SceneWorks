@@ -95,6 +95,7 @@ import realEsrganBSD3Clause from "../../../desktop/licenses/real-esrgan/BSD-3-Cl
 import qwen3VlCaptionApache20 from "../../../desktop/licenses/qwen3-vl-caption/Apache-2.0.txt?raw";
 // Production third-party source/data compiled into the inference runtimes (sc-14403).
 import cephesBsd3Clause from "../../../desktop/licenses/cephes/BSD-3-Clause.txt?raw";
+import mageMit from "../../../desktop/licenses/mage/MIT.txt?raw";
 import cmudictBsd2Clause from "../../../desktop/licenses/cmudict/BSD-2-Clause.txt?raw";
 
 // Maps a manifest document `key` to its imported text. New components: add the
@@ -159,6 +160,7 @@ const DOCUMENT_TEXT = {
   "real-esrgan-bsd-3-clause": realEsrganBSD3Clause,
   "qwen3-vl-caption-apache": qwen3VlCaptionApache20,
   "cephes-bsd-3-clause": cephesBsd3Clause,
+  "mage-mit": mageMit,
   "cmudict-bsd-2-clause": cmudictBsd2Clause,
 };
 
