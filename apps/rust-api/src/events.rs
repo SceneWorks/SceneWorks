@@ -78,11 +78,24 @@ pub(crate) async fn job_events(
             "Invalid or expired event stream ticket",
         ));
     }
-    Ok(Sse::new(sse_event_stream(state.events.subscribe())))
+    // Subscribe before reading the snapshot so a queue transition that races
+    // the read remains buffered behind it. Every connection starts with the
+    // authoritative aggregate, which repairs clients after an API restart or
+    // any event they missed while disconnected; live events then continue on
+    // the same subscription.
+    let messages = state.events.subscribe();
+    let queue = queue_summary_snapshot(state).await?;
+    let initial_queue = EventMessage {
+        event: "queue.updated".to_owned(),
+        data: serde_json::to_string(&queue)
+            .map_err(|error| ApiError::internal(format!("Could not serialize queue: {error}")))?,
+    };
+    Ok(Sse::new(sse_event_stream(messages, initial_queue)))
 }
 
 fn sse_event_stream(
     messages: ReceiverStream<EventMessage>,
+    initial_queue: EventMessage,
 ) -> impl futures_util::Stream<Item = Result<Event, Infallible>> {
     let mut heartbeat = tokio::time::interval_at(
         TokioInstant::now() + Duration::from_secs(15),
@@ -90,17 +103,31 @@ fn sse_event_stream(
     );
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     futures_util::stream::unfold(
-        (messages, heartbeat, true),
-        |(mut messages, mut heartbeat, send_ready)| async move {
+        (messages, heartbeat, true, Some(initial_queue)),
+        |(mut messages, mut heartbeat, send_ready, initial_queue)| async move {
             if send_ready {
-                return Some((Ok(ready_event()), (messages, heartbeat, false)));
+                return Some((
+                    Ok(ready_event()),
+                    (messages, heartbeat, false, initial_queue),
+                ));
+            }
+            if let Some(initial_queue) = initial_queue {
+                return Some((
+                    Ok(sse_message_event(initial_queue)),
+                    (messages, heartbeat, false, None),
+                ));
             }
             tokio::select! {
                 message = messages.next() => {
-                    message.map(|message| (Ok(sse_message_event(message)), (messages, heartbeat, false)))
+                    message.map(|message| {
+                        (
+                            Ok(sse_message_event(message)),
+                            (messages, heartbeat, false, None),
+                        )
+                    })
                 }
                 _ = heartbeat.tick() => {
-                    Some((Ok(heartbeat_event()), (messages, heartbeat, false)))
+                    Some((Ok(heartbeat_event()), (messages, heartbeat, false, None)))
                 }
             }
         },

@@ -2376,6 +2376,22 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_su
         0,
         "queue counts must remain converged after recovery"
     );
+    let (status, reconnect_events) =
+        request_sse_prefix(restarted_app.clone(), "/api/v1/jobs/events", 2).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reconnect_events[0].0, "ready");
+    assert_eq!(reconnect_events[1].0, "queue.updated");
+    assert_eq!(
+        reconnect_events[1].1["activeJobs"]
+            .as_array()
+            .expect("reconnect active jobs array")
+            .iter()
+            .filter(|job| job["id"] == json!(job_id))
+            .count(),
+        0,
+        "a reconnect after crash recovery must receive an authoritative queue snapshot even \
+         though the original terminal event and the same-terminal retry emitted no usable refresh"
+    );
 
     assert_eq!(
         crate::jobs::recover_pending_terminal_progress_side_effects_once(&restarted_state)

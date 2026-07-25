@@ -229,6 +229,43 @@ async fn sse_event_ticket_is_single_use_at_the_endpoint() {
 }
 
 #[tokio::test]
+async fn sse_connection_starts_with_authoritative_queue_snapshot() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "mist" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, events) = request_sse_prefix(app, "/api/v1/jobs/events", 2).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        events[0],
+        ("ready".to_owned(), json!({ "status": "connected" }))
+    );
+    assert_eq!(events[1].0, "queue.updated");
+    assert_eq!(events[1].1["counts"]["queued"], 1);
+    assert!(
+        events[1].1["activeJobs"]
+            .as_array()
+            .expect("active jobs array")
+            .iter()
+            .any(|job| job["id"] == created["id"]),
+        "the initial stream snapshot must include jobs created before this connection"
+    );
+}
+
+#[tokio::test]
 async fn media_tickets_authenticate_project_file_urls() {
     // sc-8810: element-driven media requests (<img>/<video>/<a download>) cannot
     // attach the token header, so the files route honors a short-lived query-param

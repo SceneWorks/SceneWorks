@@ -927,6 +927,58 @@ pub(crate) async fn request_status_only(app: axum::Router, method: &str, uri: &s
         .status()
 }
 
+/// Connect to the never-ending SSE endpoint and collect its first `event_count`
+/// complete event blocks. This exercises the real router/body framing without
+/// waiting for the stream to close.
+pub(crate) async fn request_sse_prefix(
+    app: axum::Router,
+    uri: &str,
+    event_count: usize,
+) -> (StatusCode, Vec<(String, Value)>) {
+    let request = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Body::empty())
+        .expect("request builds");
+    let response = app.oneshot(request).await.expect("response returns");
+    let status = response.status();
+    let mut stream = response.into_body().into_data_stream();
+    let mut wire = String::new();
+    while wire.matches("\n\n").count() < event_count {
+        let chunk = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("SSE prefix arrives before timeout")
+            .expect("SSE stream remains open")
+            .expect("SSE body chunk reads");
+        wire.push_str(std::str::from_utf8(&chunk).expect("SSE is UTF-8"));
+        assert!(
+            wire.len() < 1024 * 1024,
+            "SSE prefix must stay bounded while collecting initial events"
+        );
+    }
+    let events = wire
+        .split("\n\n")
+        .filter(|block| !block.is_empty())
+        .take(event_count)
+        .map(|block| {
+            let mut event = None;
+            let mut data = None;
+            for line in block.lines() {
+                if let Some(value) = line.strip_prefix("event: ") {
+                    event = Some(value.to_owned());
+                } else if let Some(value) = line.strip_prefix("data: ") {
+                    data = Some(serde_json::from_str(value).expect("SSE event data is valid JSON"));
+                }
+            }
+            (
+                event.expect("SSE block has an event name"),
+                data.expect("SSE block has event data"),
+            )
+        })
+        .collect();
+    (status, events)
+}
+
 /// Status-only variant of `request_with_peer_headers`: rmcp's non-auth error
 /// bodies (e.g. the 406 below) are plain text, so the JSON-parsing helpers
 /// don't apply.
