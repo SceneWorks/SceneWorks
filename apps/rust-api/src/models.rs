@@ -3769,6 +3769,15 @@ fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHealth {
             } else if is_mage && !diffusers_component_safetensors_are_valid(snapshot, component) {
                 missing.push(format!("{component}/<weights> (malformed safetensors)"));
             }
+        } else if is_mage && component == "tokenizer" {
+            // Mage's Qwen3-VL AutoProcessor is a logical `tokenizer` component in model_index.json,
+            // but the published diffusers snapshots colocate its tokenizer + vision processor
+            // configs under `text_encoder/` beside the Qwen3-VL weights.
+            for config in ["tokenizer_config.json", "preprocessor_config.json"] {
+                if !path_is_valid_json_object(&snapshot.join("text_encoder").join(config)) {
+                    missing.push(format!("text_encoder/{config}"));
+                }
+            }
         } else if !diffusers_component_has_valid_config_file(snapshot, component) {
             // Weightless auxiliary components (scheduler, tokenizer, feature
             // extractors, and image/video/composite processors) ship config
@@ -4987,7 +4996,7 @@ mod variant_install_tests {
                 "repo": repo,
                 "variant": variant,
                 "files": [
-                    "model_index.json", "scheduler/*", "text_encoder/*", "tokenizer/*",
+                    "model_index.json", "scheduler/*", "text_encoder/*",
                     "transformer/*", "vae/*"
                 ]
             })
@@ -5004,7 +5013,7 @@ mod variant_install_tests {
                 "provider": "huggingface",
                 "repo": repo,
                 "files": [
-                    "model_index.json", "scheduler/*", "text_encoder/*", "tokenizer/*",
+                    "model_index.json", "scheduler/*", "text_encoder/*",
                     "transformer/*", "vae/*"
                 ]
             }]
@@ -5066,8 +5075,12 @@ mod variant_install_tests {
                 json!({"_class_name": "FlowMatchEulerDiscreteScheduler"}),
             );
             write_json(
-                &snapshot.join("tokenizer/tokenizer.json"),
+                &snapshot.join("text_encoder/tokenizer_config.json"),
                 json!({"version": "1.0"}),
+            );
+            write_json(
+                &snapshot.join("text_encoder/preprocessor_config.json"),
+                json!({"size": 384}),
             );
             snapshot
         }
@@ -5104,10 +5117,24 @@ mod variant_install_tests {
                 "scheduler/scheduler_config.json",
                 true,
             ),
-            ("tokenizer config absent", "tokenizer/tokenizer.json", false),
+            (
+                "tokenizer config absent",
+                "text_encoder/tokenizer_config.json",
+                false,
+            ),
             (
                 "tokenizer config malformed",
-                "tokenizer/tokenizer.json",
+                "text_encoder/tokenizer_config.json",
+                true,
+            ),
+            (
+                "vision processor config absent",
+                "text_encoder/preprocessor_config.json",
+                false,
+            ),
+            (
+                "vision processor config malformed",
+                "text_encoder/preprocessor_config.json",
                 true,
             ),
             (

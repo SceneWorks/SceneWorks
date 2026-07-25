@@ -3574,6 +3574,35 @@ fn boogu_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
     Vec::new()
 }
 
+/// Mage Edit always conditions on the required primary source first, followed by the optional
+/// `referenceAssetIds` exactly in client order.
+#[cfg(target_os = "macos")]
+fn mage_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if request.mode != "edit_image" {
+        return Vec::new();
+    }
+    let Some(source) = request
+        .source_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Vec::new();
+    };
+    let mut ids = Vec::with_capacity(1 + request.reference_asset_ids.len());
+    ids.push(source.to_owned());
+    ids.extend(request.reference_asset_ids.iter().cloned());
+    ids
+}
+
+#[cfg(target_os = "macos")]
+fn is_mage_edit_model(model: &str) -> bool {
+    matches!(
+        model,
+        "mage_flow_edit_base" | "mage_flow_edit" | "mage_flow_edit_turbo"
+    )
+}
+
 /// Resolve the Boogu instruction-edit sources: the `N ∈ [1, 5]` reference images (plural
 /// `referenceAssetIds`, else the single `sourceAssetId` — [`boogu_edit_reference_ids`]), each fit to the
 /// output W×H (so it satisfies the engine's multiple-of-16 guard and aligns to the target aspect).
@@ -3606,6 +3635,26 @@ fn resolve_boogu_edit(
         let source = load_reference_image(&settings.data_dir, &request.project_id, id, project_path)?;
         let source = fit_engine_image(source, request.width, request.height, &request.fit_mode)?;
         references.push(source);
+    }
+    Ok(references)
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_mage_edit(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Vec<Image>> {
+    let ids = mage_edit_reference_ids(request);
+    let mut references = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let source = load_reference_image(&settings.data_dir, &request.project_id, id, project_path)?;
+        references.push(fit_engine_image(
+            source,
+            request.width,
+            request.height,
+            &request.fit_mode,
+        )?);
     }
     Ok(references)
 }
@@ -4288,6 +4337,8 @@ async fn generate_stream(
     // `MultiReference` (2–5). No mask / IP-Adapter (the descriptor accepts only Reference/MultiReference).
     let boogu_refs: Vec<Image> = if request.model == "boogu_image_edit" {
         resolve_boogu_edit(request, settings, project_path)?
+    } else if is_mage_edit_model(&request.model) {
+        resolve_mage_edit(request, settings, project_path)?
     } else {
         Vec::new()
     };

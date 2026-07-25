@@ -895,6 +895,9 @@ export function ImageStudio() {
   // multi-select reference picker (plural `referenceAssetIds`) instead of the single source picker.
   // FLUX.2-dev only (its DiT sequence-gated chunking keeps the multi-reference edit under 96 GB).
   const multiReference = Boolean(selectedModel?.ui?.multiReference);
+  // Mage Edit keeps its required source distinct from its optional ordered reference set. Unlike
+  // `multiReference`, this never replaces `sourceAssetId`; it adds `referenceAssetIds` alongside it.
+  const sourceWithMultiReference = Boolean(selectedModel?.ui?.sourceWithMultiReference);
   // Krea-style two-reference edit (epic 10871 P1.3): a model whose `ui.editReferences` adds an optional
   // SECOND source to the single-source edit — any two images, image 1 (required) + image 2 (optional),
   // fixed order. Only in single-source edit mode (never alongside the flat `multiReference`
@@ -1992,6 +1995,7 @@ export function ImageStudio() {
       characterId,
       characterLookId,
       multiReference,
+      sourceWithMultiReference,
       editSecondPair,
       sourceAssetId,
       controlPreprocessSourceId,
@@ -2763,6 +2767,18 @@ export function ImageStudio() {
                           <p className="field-hint">{editReferences.secondaryHint}</p>
                         ) : null}
                       </>
+                    ) : null}
+                    {sourceWithMultiReference ? (
+                      <AssetPickerField
+                        assets={editImageAssets}
+                        buttonLabel="Select references"
+                        changeLabel="Edit references"
+                        emptyLabel="No additional references selected (optional)"
+                        label="Additional references (optional)"
+                        multiple
+                        onChange={setReferenceAssetIds}
+                        values={referenceAssetIds}
+                      />
                     ) : null}
                   </>
                 )}
