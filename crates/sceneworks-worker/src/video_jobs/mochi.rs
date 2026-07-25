@@ -433,10 +433,26 @@ pub(super) fn resolve_mochi_model_dir(
 /// DEFAULTS to `image_to_video` when the payload omits one, so a mode check is what keeps a
 /// conditioning-shaped Mochi job out of the route rather than letting it reach the engine's
 /// `validate_request` (or, worse, an unrelated arm of the ladder).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+pub(super) fn validate_mochi_mode(request: &VideoRequest) -> WorkerResult<()> {
+    if request.mode == "text_to_video" {
+        Ok(())
+    } else {
+        Err(WorkerError::InvalidPayload(format!(
+            "{} supports text_to_video only; mode '{}' requires conditioning Mochi does not implement",
+            request.model, request.mode
+        )))
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub(super) fn mochi_available(request: &VideoRequest, settings: &Settings) -> bool {
     mochi_engine_id(&request.model).is_some()
-        && request.mode == "text_to_video"
+        && validate_mochi_mode(request).is_ok()
         && resolve_mochi_model_dir(settings, request).is_ok()
 }
 

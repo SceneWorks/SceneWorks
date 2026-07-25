@@ -68,7 +68,7 @@ fn is_sdxl_ipadapter_model(model: &str) -> bool {
 /// `repo` key, and no built-in model declares one (the manifest carries `downloads[].repo` and
 /// `paths.model`, which are different keys; `resolve_model_manifest_entry` injects only `modelPath`).
 /// So this is not a fallback, it is the only branch — and after the Group-B cutover (sc-8746) it
-/// named repos the installer no longer stages, silently routing every candle IP-Adapter job to torch.
+/// named repos the installer no longer stages, leaving every candle IP-Adapter job unserved.
 ///
 /// The tier descent still applies on top: sc-10813 serves the request's q4/q8 tier via
 /// `standard_tier_subdir`, and `dense_tier_subdir` (sc-10614) takes the non-standard branch.
@@ -80,7 +80,7 @@ pub(super) fn sdxl_ipadapter_default_repo(model: &str) -> &'static str {
 
 /// Resolve the SDXL base snapshot for the IP-Adapter route: an explicit `modelPath` dir (advanced or
 /// manifest) wins, else the HF cache snapshot for the manifest `repo` (default by model id). `None`
-/// means the base is not present locally, so the job is not candle-runnable (falls through to torch).
+/// means the base is not present locally, so the candle lane refuses the job and no fallback is attempted.
 fn resolve_sdxl_ipadapter_base(
     request: &ImageRequest,
     settings: &Settings,

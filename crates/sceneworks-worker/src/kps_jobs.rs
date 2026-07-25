@@ -9,8 +9,7 @@
 //! reuse it on any character.
 //!
 //! Native-MLX SCRFD in-process (the same `scrfd_10g` detector the InstantID face stack
-//! already runs), so the capability is Python-free on Mac (epic 3482); the Python worker
-//! keeps the InsightFace path for Windows/Linux. macOS-only here.
+//! already runs) on Mac (epic 3482), with the candle SCRFD/ArcFace stack off-Mac.
 //!
 //! Normalization mirrors the engine's centered square letterbox (`kps::letterbox`): a
 //! detected pixel `(px, py)` in a `w×h` image maps to the square-normalized point

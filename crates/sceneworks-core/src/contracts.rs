@@ -228,22 +228,22 @@ string_enum! {
         // it through the audio registry to the `Modality::Audio` generator.
         AudioGenerate => "audio_generate",
         // Whole-body DWPose keypoint detection (photo -> body/hands/face) for the
-        // Pose Library (epic 2282). onnxruntime-backed like person_detect; advertised
-        // by the Python worker, routed via requested_gpu (not in NON_GPU_JOB_TYPES).
+        // Pose Library (epic 2282). onnxruntime-backed like person_detect; advertised by
+        // the native MLX/candle workers and routed via requested_gpu (not in NON_GPU_JOB_TYPES).
         PoseDetect => "pose_detect",
         // SCRFD 5-point face-landmark extraction from one image (Key Point Library,
         // epic 4422 / sc-4433): photo -> normalized [left_eye, right_eye, nose,
         // mouth_left, mouth_right] in square-canvas [0,1], consumable as an InstantID
-        // angle/framing preset (pass-in kps via generate_with_kps). Native-MLX SCRFD on
-        // the Rust worker (zero-Python, epic 3482); InsightFace on the Python worker.
+        // angle/framing preset (pass-in kps via generate_with_kps). Native-MLX SCRFD on Mac
+        // and the candle SCRFD/ArcFace stack off-Mac.
         // GPU-routed like pose_detect (not in NON_GPU_JOB_TYPES).
         KpsExtract => "kps_extract",
         // Standalone upscale of an existing image asset (Image Editor, epic 2427).
-        // Torch-backed (Real-ESRGAN / AuraSR), GPU-required like generation; reuses
-        // the upscale engines that previously only ran as a generation post-step.
+        // Native Real-ESRGAN / SeedVR2, GPU-required like generation; reuses the
+        // upscale engines that previously only ran as a generation post-step.
         ImageUpscale => "image_upscale",
         // Standalone tile-ControlNet detail refine of an existing image asset (Image
-        // Editor, epic 2427; spike sc-2437). Torch-backed SDXL/RealVisXL img2img + a
+        // Editor, epic 2427; spike sc-2437). Native MLX SDXL/RealVisXL img2img + a
         // tile ControlNet run over feathered tiles to add micro-texture; GPU-required
         // like generation. Composes after image_upscale (creative upscale).
         ImageDetail => "image_detail",
@@ -251,14 +251,14 @@ string_enum! {
         // / sc-6105): a box prompt → a binary inpaint mask asset (white-on-black PNG at
         // source dims) the editor loads into the sc-2436 mask layer. Native-MLX SAM3 on
         // the macOS Rust worker (zero-Python, the box-PVS path of the sc-4926 SAM3 stack);
-        // GPU-required like generation, mac-only (no torch SAM3 image path yet).
+        // GPU-required like generation, mac-only (no off-Mac standalone image-segment lane).
         ImageSegment => "image_segment",
         // Standalone upscale of an existing VIDEO asset (Video Studio, epic 4811 /
         // sc-4816) — SceneWorks' first video upscaler. Native-MLX SeedVR2 one-step
         // super-resolution on the macOS Rust worker (zero-Python, epic 3482): decode
         // the source clip -> temporal-chunked 5D upscale -> re-encode + source-audio
         // passthrough. GPU-required like generation; native MLX on Mac and
-        // candle/CUDA off-Mac (no torch fallback).
+        // candle/CUDA off-Mac, with no alternate fallback.
         VideoUpscale => "video_upscale",
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",
@@ -280,6 +280,13 @@ string_enum! {
         // `lora_train`/`lora_train_execute` capabilities (no new WorkerCapability).
         ControlTraining => "control_training",
         TrainingCaption => "training_caption",
+        // Materialize a URL/caption Parquet source (LAION-style `URL`/`TEXT`) into an empty
+        // SceneWorks training dataset. Pure I/O/CPU: the utility worker streams bounded public
+        // image downloads into a job staging directory, then atomically asks the API to replace
+        // the empty dataset with the successful image/caption items. Kept separate from
+        // `control_training` so retries resume independently and Dataset Doctor can inspect the
+        // materialized targets before an expensive control-branch run.
+        DatasetParquetImport => "dataset_parquet_import",
         // CLIP image-embedding pass over a training dataset for Dataset Doctor analysis
         // (epic 6529 P2, sc-6535): set-level near-duplicate / diversity / aesthetic findings.
         // GPU-routed (MLX `clip_vit_l14`; in job_requires_gpu, not in NON_GPU_JOB_TYPES),
@@ -867,10 +874,10 @@ pub struct ProgressRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak_gpu_load_pct: Option<ContractNumber>,
     /// Runtime backend the worker actually executed this job on
-    /// ("mlx" / "mps" / "cuda" / "cpu"). Distinct from the worker's
-    /// device-architecture heuristic — the same Apple-Silicon worker can
-    /// serve both MLX and MPS-Diffusers jobs, and the WorkerProgressCard's
-    /// arch pill should reflect which one ran. First non-null value sticks.
+    /// ("mlx" / "mps" / "cuda" / "cpu"). The `mps` value is retained for historical rows and
+    /// compatibility fixtures; current Apple-Silicon execution uses the native MLX lane. Distinct
+    /// from the device-architecture heuristic; the WorkerProgressCard reflects what actually ran.
+    /// First non-null value sticks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     /// Id of the worker reporting this progress. When present, the server
@@ -923,9 +930,9 @@ pub struct JobSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak_gpu_load_pct: Option<ContractNumber>,
     /// Runtime backend the worker actually used to execute the job
-    /// ("mlx" / "mps" / "cuda" / "cpu"). Surfaced by the WorkerProgressCard
-    /// arch pill so an MLX run and a Diffusers-on-MPS run on the same worker
-    /// read differently.
+    /// ("mlx" / "mps" / "cuda" / "cpu"). `mps` remains readable for historical rows and synthetic
+    /// compatibility fixtures; current Apple-Silicon work runs on native MLX. Surfaced by the
+    /// WorkerProgressCard arch pill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     /// Human-readable job title derived server-side from job type + payload
@@ -1012,7 +1019,8 @@ pub struct GenerationMetrics {
     /// Best-effort peak GPU load percentage sampled during the run (0..100).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak_gpu_load_pct: Option<ContractNumber>,
-    /// Runtime backend the run executed on ("mlx" / "mps" / "cuda" / "cpu").
+    /// Runtime backend the run executed on ("mlx" / "mps" / "cuda" / "cpu"); `mps` is retained
+    /// for historical rows and compatibility fixtures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     #[serde(flatten)]

@@ -24,6 +24,12 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # ControlNet. Pure-Rust + cross-platform (the renderer + its tests run everywhere;
 # only the MLX control generation is macOS-gated). Pinned to the image 0.25 line.
 imageproc = { version = "0.25", default-features = false }
+# URL/caption and prepared-image Parquet ingest for bring-your-own ControlNet
+# datasets (sc-10898/sc-10899). Keep Arrow disabled: the record reader lets us
+# stream only the bounded import window without pulling the full Arrow compute
+# stack into every worker binary. `snap` is required for LAION's
+# `*.snappy.parquet` shards.
+parquet = { version = "53.4", default-features = false, features = ["snap"] }
 nix = { version = "0.29", default-features = false, features = ["process", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 sceneworks-core = { path = "../sceneworks-core" }

@@ -5,6 +5,7 @@ pub mod base_weights;
 pub mod builtin_manifests;
 pub mod character_store;
 pub mod contracts;
+pub mod control_weights;
 pub mod credentials;
 pub mod dataset_quality;
 pub mod external_roots;

@@ -4,6 +4,7 @@ import { AssetThumbnail } from "../../components/assetMedia.jsx";
 import { CompactSelector } from "../../components/CompactSelector.jsx";
 import { DatasetAddDialog } from "../../components/DatasetAddDialog.jsx";
 import { DatasetCaptionDialog } from "../../components/DatasetCaptionDialog.jsx";
+import { DatasetParquetImportDialog } from "../../components/DatasetParquetImportDialog.jsx";
 import { Icon } from "../../components/Icons.jsx";
 import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { ValidationSummary } from "../../validation/Validation.jsx";
@@ -91,6 +92,7 @@ export function DatasetEditorPanel({
     setAddDialogOpen, renamePrefix, setRenamePrefix, renaming, memberAssets,
     applyOrderedNames, setCaptionDialog, health, canSave, saveValidity, saveDataset,
     savingDataset, unavailableAssetIds, removeUnavailableAsset,
+    onImportParquet,
   } = datasetSession;
   const {
     captionDraftById, onPreview, updateCaption, captioning, addDialogOpen,
@@ -111,6 +113,20 @@ export function DatasetEditorPanel({
   // the (otherwise chrome-less) name input rather than opening anything.
   const nameInputRef = React.useRef(null);
   const [captionFilter, setCaptionFilter] = React.useState("all");
+  const [parquetDialogOpen, setParquetDialogOpen] = React.useState(false);
+  const [parquetImporting, setParquetImporting] = React.useState(false);
+  const parquetImportDisabled = !activeDataset?.id || memberAssets.length > 0 || parquetImporting;
+
+  async function runParquetImport(settings) {
+    if (typeof onImportParquet !== "function" || parquetImporting) return;
+    setParquetImporting(true);
+    try {
+      await onImportParquet(settings);
+      setParquetDialogOpen(false);
+    } finally {
+      setParquetImporting(false);
+    }
+  }
   // sc-8564: resolve a near-dup cluster's item ids (server dataset-item ids — the readiness report's
   // `itemId` / flag `peers`) back to member assets, so the cluster view can render each sibling's
   // thumbnail. `activeDataset.items` carry both the server `id` and the `assetId` (the member-asset key).
@@ -284,6 +300,22 @@ export function DatasetEditorPanel({
             </button>
             <button
               className="secondary-action"
+              disabled={parquetImportDisabled}
+              onClick={() => setParquetDialogOpen(true)}
+              title={
+                !activeDataset?.id
+                  ? "Create the empty dataset first"
+                  : memberAssets.length
+                    ? "Parquet import currently requires an empty dataset"
+                    : "Import URL/caption rows from local Parquet shards"
+              }
+              type="button"
+            >
+              <Icon.Folder size={14} />
+              Import Parquet
+            </button>
+            <button
+              className="secondary-action"
               disabled={!memberAssets.length}
               onClick={() => setCaptionDialog({ type: "all" })}
               type="button"
@@ -401,7 +433,9 @@ export function DatasetEditorPanel({
 
         <div className="training-caption-grid" aria-label="Dataset images and captions">
           {!memberAssets.length ? (
-            <div className="empty-panel compact-panel">No images yet — use “Add images” to build this dataset.</div>
+            <div className="empty-panel compact-panel">
+              No images yet — use “Add images” or “Import Parquet” to build this dataset.
+            </div>
           ) : !visibleAssets.length ? (
             <div className="empty-panel compact-panel">
               {captionFilter === "missing"
@@ -520,6 +554,13 @@ export function DatasetEditorPanel({
                 : { type: "all" }
           }
           settings={captionSettings}
+        />
+      ) : null}
+      {parquetDialogOpen ? (
+        <DatasetParquetImportDialog
+          onClose={() => !parquetImporting && setParquetDialogOpen(false)}
+          onRun={runParquetImport}
+          running={parquetImporting}
         />
       ) : null}
     </>

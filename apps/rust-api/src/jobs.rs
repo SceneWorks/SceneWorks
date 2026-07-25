@@ -131,7 +131,7 @@ pub(crate) async fn claim_job(
             // Off-Mac candle-required (sc-5502, epic 5483): the Windows/Linux twins of the two
             // sweeps above — fail any candle-eligible job stranded with no live candle worker, and
             // (enforce) any queued job the candle/CUDA flow can't serve. Both no-op when the flag
-            // is off (the default), so a deployment still keeping the torch worker is unaffected.
+            // is off (the default), so normal capability routing is unaffected.
             let candle_stranded = store.fail_stranded_candle_jobs(candle_required, timeout)?;
             let candle_unsupported =
                 store.fail_unsupported_candle_jobs(candle_required, candle_enforce)?;
@@ -166,17 +166,17 @@ pub(crate) async fn claim_job(
         emit_route_decision(decision);
     }
     if let Some(job) = &response {
-        // Warn-only (sc-3484): an unsupported job the torch worker just claimed on a Mac —
-        // log the gap once so the inventory materializes while the job still runs on torch.
+        // Warn-only (sc-3484): an unsupported job claimed by a non-MLX GPU descriptor on a Mac —
+        // log the gap once so the inventory materializes.
         // In enforce mode such a job was already failed above and never reaches here.
         if mlx_required && !enforce_unsupported {
             if let Err(reason) = mac_rust_supported(job) {
                 emit_mlx_unsupported(job, &reason, "warn");
             }
         }
-        // Warn-only (sc-5502): the off-Mac candle twin — log the gap once while the job still
-        // runs on the co-resident torch worker, so the off-Mac port-or-drop inventory
-        // materializes. In enforce mode such a job was already failed above and never reaches here.
+        // Warn-only (sc-5502): the off-Mac candle twin — log the gap once if a non-candle GPU
+        // descriptor claims it, so the off-Mac port-or-drop inventory materializes. In enforce mode
+        // such a job was already failed above and never reaches here.
         if candle_required && !candle_enforce {
             if let Err(reason) = candle_supported(job) {
                 emit_candle_unsupported(job, &reason, "warn");
@@ -205,8 +205,8 @@ pub(crate) async fn claim_job(
 
 /// Emit the macOS `mlx_unsupported` gap event (epic 3482 / sc-3484) as a structured JSON line
 /// for the desktop stdout capture + headless `GET /api/v1/logs` buffer (sc-3447/3451/3453).
-/// `mode` is `"enforce"` (the job was failed terminal) or `"warn"` (logged but still run on
-/// torch). The body is the feature-precise [`UnsupportedReason`] — model/feature/detail/
+/// `mode` is `"enforce"` (the job was failed terminal) or `"warn"` (logged while it remains
+/// queued for a compatible native worker). The body is the feature-precise [`UnsupportedReason`] — model/feature/detail/
 /// suggestedEpic — so the Logs surface and the gap inventory name the exact port-or-drop work.
 fn emit_mlx_unsupported(job: &JobSnapshot, reason: &UnsupportedReason, mode: &str) {
     let mut value = serde_json::to_value(reason).unwrap_or_else(|_| json!({}));
@@ -231,7 +231,8 @@ fn emit_mlx_unsupported(job: &JobSnapshot, reason: &UnsupportedReason, mode: &st
 /// the desktop's stdout capture + the headless `GET /api/v1/logs` buffer (sc-3447/3451/3453).
 /// Mirrors [`emit_route_decision`]: this is the System → Logs surface that turns "no MLX
 /// worker took the job" into a named, actionable line instead of a job silently stuck or
-/// run on MPS (sc-3483). `reason` carries the full actionable error set on the job.
+/// entering the legacy MPS compatibility branch (sc-3483). `reason` carries the full actionable
+/// error set on the job.
 fn emit_mlx_unavailable(job: &JobSnapshot) {
     let model = job.payload.get("model").and_then(Value::as_str);
     sceneworks_core::observability::emit_event(
@@ -248,7 +249,7 @@ fn emit_mlx_unavailable(job: &JobSnapshot) {
 
 /// Emit the off-Mac `candle_unsupported` gap event (sc-5502, epic 5483) — the candle twin of
 /// [`emit_mlx_unsupported`]. `mode` is `"enforce"` (the job was failed terminal) or `"warn"`
-/// (logged but still run on the co-resident torch worker). The body is the feature-precise
+/// (logged if a non-candle GPU descriptor claimed it). The body is the feature-precise
 /// [`UnsupportedReason`] so the Logs surface + the off-Mac gap inventory name the exact
 /// port-or-drop work.
 fn emit_candle_unsupported(job: &JobSnapshot, reason: &UnsupportedReason, mode: &str) {
@@ -332,8 +333,13 @@ pub(crate) async fn retry_job(
     Path(job_id): Path<String>,
     request: AxumRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let payload = retry_job_request_from_body(request).await?;
-    validate_merged_generation_model(&state, &job_id, &payload.payload_changes).await?;
+    let mut payload = retry_job_request_from_body(request).await?;
+    payload.payload_changes = validate_and_canonicalize_merged_generation_payload(
+        &state,
+        &job_id,
+        &payload.payload_changes,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.retry_job(
             &job_id,
@@ -364,9 +370,14 @@ async fn retry_job_request_from_body(request: AxumRequest) -> Result<RetryJobReq
 pub(crate) async fn duplicate_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
-    ApiJson(payload): ApiJson<DuplicateJobRequest>,
+    ApiJson(mut payload): ApiJson<DuplicateJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    validate_merged_generation_model(&state, &job_id, &payload.payload_changes).await?;
+    payload.payload_changes = validate_and_canonicalize_merged_generation_payload(
+        &state,
+        &job_id,
+        &payload.payload_changes,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.duplicate_job(
             &job_id,
@@ -382,22 +393,34 @@ pub(crate) async fn duplicate_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
-/// Validate the exact payload a retry/duplicate will enqueue. Existing job payloads are
-/// immutable, so reading and merging before the create transaction cannot race with a payload
-/// update; importantly, validation still happens before the new row is persisted or published.
-async fn validate_merged_generation_model(
+/// Validate and canonicalize the exact payload a retry/duplicate will enqueue. Existing job
+/// payloads are immutable, so reading and merging before the create transaction cannot race with a
+/// payload update. Returning the complete merged payload is intentional: the store's shallow merge
+/// then persists this canonical object rather than allowing a nested `advanced.controlWeights`
+/// replacement to bypass the typed image route's authorization boundary.
+async fn validate_and_canonicalize_merged_generation_payload(
     state: &AppState,
     job_id: &str,
     payload_changes: &JsonObject,
-) -> Result<(), ApiError> {
+) -> Result<JsonObject, ApiError> {
     let job_id = job_id.to_owned();
     let job = store_call(state.clone(), move |store, _timeout| store.get_job(&job_id)).await?;
-    if !generation_job_model_is_path_backed(&job.job_type) {
-        return Ok(());
-    }
+    let job_type = job.job_type.clone();
+    let project_id = job.project_id.clone();
     let mut merged = job.payload;
     merged.extend(payload_changes.clone());
-    validate_payload_model(&merged)
+    if generation_job_model_is_path_backed(&job_type) {
+        validate_payload_model(&merged)?;
+    }
+    if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        crate::control_overlays::resolve_control_overlay_selection(
+            state,
+            project_id.as_deref(),
+            &mut merged,
+        )
+        .await?;
+    }
+    Ok(merged)
 }
 
 /// Jobs created through the raw queue route do not pass a typed request validator. Keep this

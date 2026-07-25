@@ -173,7 +173,7 @@ fn z_image_reference_without_poses_is_eligible() {
 #[test]
 fn z_image_reference_with_poses_stays_on_mlx() {
     // The strict pose ControlNet tier lives only on MLX, so a reference+pose
-    // job must route to the mlx worker, not torch (which would drop the poses).
+    // job must route to the mlx worker; a generic claimant could otherwise drop the poses.
     assert!(z_image_mlx_eligible(&object(json!({
         "referenceAssetId": "asset_1",
         "advanced": { "poses": [{ "id": "pose_1" }] }
@@ -294,11 +294,11 @@ fn qwen_edit_routes_edit_and_reference_flows_to_mlx() {
 
 #[test]
 fn qwen_edit_without_reference_falls_back_to_torch() {
-    // edit_image with nothing to edit (no source, no reference) → torch.
+    // edit_image with nothing to edit (no source, no reference) is refused and remains queued.
     assert!(!qwen_edit_mlx_eligible(&object(
         json!({ "mode": "edit_image" })
     )));
-    // character_image without a reference → torch (the edit model needs a reference).
+    // character_image without a reference is refused and remains queued (the edit model needs a reference).
     assert!(!qwen_edit_mlx_eligible(&object(
         json!({ "mode": "character_image" })
     )));
@@ -742,7 +742,7 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
         "first_last_frame"
     ));
     assert!(video_mode_is_mlx_eligible("wan_2_2", "first_last_frame"));
-    // FLF stays torch on the 14B Wan MoE engines (no engine Keyframe path).
+    // FLF remains queued on the 14B Wan MoE engines (no native engine Keyframe path).
     assert!(!video_mode_is_mlx_eligible(
         "wan_2_2_t2v_14b",
         "first_last_frame"
@@ -757,7 +757,7 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
         assert!(video_mode_is_mlx_eligible("ltx_2_3", mode));
         assert!(video_mode_is_mlx_eligible("ltx_2_3_eros", mode));
         assert!(video_mode_is_mlx_eligible("wan_2_2", mode));
-        // The 14B Wan MoE engines have no `Keyframe` path → torch.
+        // The 14B Wan MoE engines have no `Keyframe` path, so the request is refused.
         assert!(!video_mode_is_mlx_eligible("wan_2_2_t2v_14b", mode));
         assert!(!video_mode_is_mlx_eligible("wan_2_2_i2v_14b", mode));
     }

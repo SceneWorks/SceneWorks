@@ -45,8 +45,9 @@ const KREA_CONTROL_OVERLAY_REPO: &str = "SceneWorks/krea2-pose-controlnet-beta";
 /// `*.weight_p1` norm convention verbatim, sc-8465), so there is no separate MLX artifact to host.
 const KREA_CONTROL_OVERLAY_FILE: &str = "control_step5000.safetensors";
 /// Pinned revision for the default overlay repo (defense-in-depth, parity with the candle lane's
-/// `KREA_CONTROL_OVERLAY_REVISION` — a repo re-push can't swap the checkpoint under us). Applied ONLY to
-/// the default repo; a `controlWeights.repo` override keeps `main`.
+/// `KREA_CONTROL_OVERLAY_REVISION` — a repo re-push can't swap the checkpoint under us). Registered
+/// overlays carry their own catalog-authorized immutable revision.
+#[cfg(test)]
 const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac";
 /// The `SceneWorks/krea-2-turbo-mlx` turnkey (q8 default / q4 / bf16 self-contained subdirs) — the SAME
 /// base the txt2img lane loads. The pose-control lane falls back here (via the shared [`krea_model_subdir`])
@@ -92,13 +93,13 @@ fn resolve_krea_control_base(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| strict_control_default_repo(KREA_CONTROL_ENGINE_ID));
-    // The manifest `repo` (or the `krea_2_turbo_control` catalog default) resolved to a cached snapshot.
+        .unwrap_or(KREA_CONTROL_MLX_REPO);
+    // The manifest `repo` (or the packed Krea MLX default) resolved to a cached snapshot.
     // Two on-disk shapes share this arm: a LEGACY dense diffusers tree (`krea/Krea-2-Turbo` — `tokenizer/
     // text_encoder/ transformer/ vae/` AT THE ROOT), or the current turnkey `SceneWorks/krea-2-turbo-mlx`
     // (q8/q4/bf16 tier SUBDIRS, nothing loadable at the root). CRUCIAL divergence from the candle twin: the
-    // MLX `krea_2_turbo_control` catalog default (`strict_control_default_repo`) is the TIERED repo, whereas
-    // candle's step-3 default is the dense `krea/Krea-2-Turbo`. So the common MLX case lands the tiered
+    // MLX `KREA_CONTROL_MLX_REPO` default is the TIERED repo, whereas candle's step-3 default is the
+    // dense `krea/Krea-2-Turbo`. So the common MLX case lands the tiered
     // turnkey here — and returning its root un-descended made `KreaText::from_snapshot` look for
     // `<root>/tokenizer/tokenizer.json` on the tier-less root and fail with "tokenizer: No such file or
     // directory" (sc-11853). Only a genuine dense tree (tokenizer at the root) is the base as-is; a turnkey
@@ -161,13 +162,13 @@ fn krea_control_overlay_repo_file(request: &ImageRequest) -> WorkerResult<(Strin
             .unwrap_or(default)
             .to_owned()
     };
-    Ok((
-        pick("repo", KREA_CONTROL_OVERLAY_REPO),
-        safe_weight_filename(
-            &pick("filename", KREA_CONTROL_OVERLAY_FILE),
-            "advanced.controlWeights.filename",
-        )?,
-    ))
+    let repo = pick("repo", KREA_CONTROL_OVERLAY_REPO);
+    let file = safe_weight_filename(
+        &pick("filename", KREA_CONTROL_OVERLAY_FILE),
+        "advanced.controlWeights.filename",
+    )?;
+    trusted_control_weight_revision(request, KREA_CONTROL_ENGINE_ID, &repo, &file)?;
+    Ok((repo, file))
 }
 
 /// Confine a payload-supplied `advanced.controlWeights.path` to an app-managed root (sc-11168 / F-006).
@@ -223,7 +224,11 @@ async fn ensure_krea_control_weights(
         }
     }
     let (repo, file) = krea_control_overlay_repo_file(request)?;
-    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, &repo) {
+    let revision =
+        trusted_control_weight_revision(request, KREA_CONTROL_ENGINE_ID, &repo, &file)?;
+    if let Some(snapshot) =
+        crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, &repo, &revision)
+    {
         let f = snapshot.join(&file);
         if f.is_file() {
             return Ok(f);
@@ -244,13 +249,8 @@ async fn ensure_krea_control_weights(
         .join("controlnet-krea")
         .join(&file);
     // Pin the exact commit for the default overlay repo so `main` moving under us can't swap the
-    // checkpoint (parity with the candle lane); a `controlWeights.repo` override carries its own layout.
-    let revision = if repo == KREA_CONTROL_OVERLAY_REPO {
-        KREA_CONTROL_OVERLAY_REVISION
-    } else {
-        "main"
-    };
-    ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await?;
+    // checkpoint (parity with the candle lane). Registered overlays carry their own immutable pin.
+    ensure_hf_cached_file(&context, &repo, &revision, &file, &dst).await?;
     Ok(dst)
 }
 
@@ -400,7 +400,7 @@ async fn generate_krea_control_stream(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| strict_control_default_repo(KREA_CONTROL_ENGINE_ID))
+        .unwrap_or(KREA_CONTROL_MLX_REPO)
         .to_owned();
 
     // Shared strict-control driver: validate the requested ControlKind against the engine's

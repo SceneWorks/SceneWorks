@@ -4129,7 +4129,7 @@ fn flux2_control_scale_defaults_and_clamps() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn flux2_control_repo_file_defaults_and_overrides() {
+fn flux2_control_repo_file_defaults_and_rejects_arbitrary_overrides() {
     let (repo, file) =
         flux2_control_repo_file(&request(json!({ "projectId": "p" }))).expect("defaults resolve");
     // The default repo now comes from the shared strict-control table (single source of truth).
@@ -4139,14 +4139,12 @@ fn flux2_control_repo_file_defaults_and_overrides() {
     );
     assert_eq!(repo, "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union");
     assert_eq!(file, FLUX2_CONTROL_FILE);
-    // `advanced.controlWeights` overrides repo + filename (parity with the Z-Image resolver).
-    let (repo, file) = flux2_control_repo_file(&request(json!({
+    let error = flux2_control_repo_file(&request(json!({
         "projectId": "p",
         "advanced": { "controlWeights": { "repo": "me/custom", "filename": "x.safetensors" } }
     })))
-    .expect("plain override filename resolves");
-    assert_eq!(repo, "me/custom");
-    assert_eq!(file, "x.safetensors");
+    .expect_err("arbitrary payload repo must be rejected");
+    assert!(error.to_string().contains("is not trusted"));
 }
 
 /// sc-8821 / F-019: a payload `controlWeights.filename` that is not a plain component (traversal,
@@ -4193,14 +4191,175 @@ fn mlx_control_weight_filenames_reject_traversal() {
             );
         }
     }
-    // A plain filename still passes validation on the Option-returning resolvers (whether it maps to
-    // Some or None then depends only on the local HF cache, not on confinement).
+    // A plain but non-shipped filename is still untrusted.
     let plain = request(json!({
         "projectId": "p",
         "advanced": { "controlWeights": { "filename": "custom.safetensors" } }
     }));
-    assert!(resolve_control_weights(&plain, &settings).is_ok());
-    assert!(resolve_qwen_control_weights(&plain, &settings).is_ok());
+    assert!(resolve_control_weights(&plain, &settings).is_err());
+    assert!(resolve_qwen_control_weights(&plain, &settings).is_err());
+}
+
+/// sc-13639 / F-054: every MLX strict-control resolver rejects an arbitrary
+/// payload repository; exact shipped artifacts remain valid.
+#[cfg(target_os = "macos")]
+#[test]
+fn mlx_control_weight_repositories_are_exactly_trusted() {
+    let settings = Settings::from_env();
+    let arbitrary = request(json!({
+        "projectId": "p",
+        "advanced": {
+            "controlWeights": {
+                "repo": "alibaba-pai/not-a-shipped-control",
+                "filename": "model.safetensors"
+            }
+        }
+    }));
+    for (label, result) in [
+        (
+            "z-image turbo",
+            resolve_control_weights(&arbitrary, &settings).map(|_| ()),
+        ),
+        (
+            "z-image base",
+            resolve_base_control_weights(&arbitrary, &settings).map(|_| ()),
+        ),
+        (
+            "qwen",
+            resolve_qwen_control_weights(&arbitrary, &settings).map(|_| ()),
+        ),
+        ("flux1", flux1_control_repo_file(&arbitrary).map(|_| ())),
+        ("flux2", flux2_control_repo_file(&arbitrary).map(|_| ())),
+        (
+            "krea",
+            krea_control_overlay_repo_file(&arbitrary).map(|_| ()),
+        ),
+    ] {
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("is not trusted"),
+            "{label}: {error}"
+        );
+    }
+
+    for artifact in sceneworks_core::control_weights::SHIPPED_CONTROL_WEIGHTS {
+        assert!(
+            trusted_control_weight_revision(
+                &request(json!({"projectId": "p"})),
+                artifact.engine_id,
+                artifact.repo,
+                artifact.file,
+            )
+            .is_ok(),
+            "{} {}",
+            artifact.engine_id,
+            artifact.file
+        );
+    }
+}
+
+/// A mutable refs/main cache entry must not shadow the immutable artifact pin.
+#[cfg(target_os = "macos")]
+#[test]
+fn mlx_control_weight_cache_reads_only_the_pinned_revision() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+
+    let artifact = sceneworks_core::control_weights::shipped_control_weight(
+        ZIMAGE_CONTROL_ENGINE_ID,
+        strict_control_default_repo(ZIMAGE_CONTROL_ENGINE_ID),
+        ZIMAGE_CONTROL_FILE,
+    )
+    .unwrap();
+    let cache = hub.join(format!("models--{}", artifact.repo.replace('/', "--")));
+    std::fs::create_dir_all(cache.join("refs")).unwrap();
+    std::fs::write(cache.join("refs/main"), "stale-main").unwrap();
+    for (revision, contents) in [
+        ("stale-main", b"untrusted".as_slice()),
+        (artifact.revision, b"trusted".as_slice()),
+    ] {
+        let path = cache.join("snapshots").join(revision).join(artifact.file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    let resolved = resolve_control_weights(
+        &request(json!({"projectId": "p", "model": "z_image_turbo"})),
+        &settings,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        resolved,
+        cache
+            .join("snapshots")
+            .join(artifact.revision)
+            .join(artifact.file)
+    );
+}
+
+/// Registered user/project overlays remain supported, but only after the API
+/// canonicalized an overlayId and supplied an immutable revision.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn registered_control_overlay_requires_catalog_authority_and_pin() {
+    let authorized = request(json!({
+        "projectId": "p",
+        "advanced": {
+            "controlWeights": {
+                "overlayId": "custom_pose",
+                "repo": "acme/custom-control",
+                "filename": "weights.safetensors",
+                "revision": "0123456789abcdef0123456789abcdef01234567",
+                "_catalogAuthorized": true
+            }
+        }
+    }));
+    assert_eq!(
+        trusted_control_weight_revision(
+            &authorized,
+            "krea_2_turbo_control",
+            "acme/custom-control",
+            "weights.safetensors",
+        )
+        .unwrap(),
+        "0123456789abcdef0123456789abcdef01234567"
+    );
+
+    for weights in [
+        json!({
+            "overlayId": "custom_pose",
+            "repo": "acme/custom-control",
+            "filename": "weights.safetensors",
+            "revision": "0123456789abcdef0123456789abcdef01234567"
+        }),
+        json!({
+            "overlayId": "custom_pose",
+            "repo": "acme/custom-control",
+            "filename": "weights.safetensors",
+            "revision": "main",
+            "_catalogAuthorized": true
+        }),
+    ] {
+        let untrusted = request(json!({
+            "projectId": "p",
+            "advanced": { "controlWeights": weights }
+        }));
+        assert!(trusted_control_weight_revision(
+            &untrusted,
+            "krea_2_turbo_control",
+            "acme/custom-control",
+            "weights.safetensors",
+        )
+        .is_err());
+    }
 }
 
 /// sc-11168 / F-006: the Krea strict-pose lanes accept a payload-supplied `advanced.controlWeights.path`
@@ -10308,8 +10467,7 @@ fn candle_control_providers_resolve_models_and_repos() {
 
 /// sc-8821 / F-019: a payload `controlWeights.filename` that is not a plain component (traversal,
 /// absolute, sub-path) is REJECTED with an `InvalidPayload` pointing at the field — never joined
-/// under the HF snapshot / app cache — on every candle control resolver. A plain override filename
-/// still resolves.
+/// under the HF snapshot / app cache — on every candle control resolver.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_control_weight_filenames_reject_traversal() {
@@ -10358,9 +10516,69 @@ fn candle_control_weight_filenames_reject_traversal() {
         "projectId": "p",
         "advanced": { "controlWeights": { "repo": "me/custom", "filename": "x.safetensors" } }
     }));
-    let (repo, file) = kolors_control_repo_file(&plain).expect("plain override filename resolves");
-    assert_eq!(repo, "me/custom");
-    assert_eq!(file, "x.safetensors");
+    assert!(kolors_control_repo_file(&plain).is_err());
+}
+
+/// sc-13639 / F-054: every Candle strict-control resolver rejects an arbitrary
+/// payload repository; exact shipped artifacts remain valid.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_control_weight_repositories_are_exactly_trusted() {
+    let empty_data = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = empty_data.path().to_path_buf();
+    let arbitrary = request(json!({
+        "projectId": "p",
+        "advanced": {
+            "controlWeights": {
+                "repo": "alibaba-pai/not-a-shipped-control",
+                "filename": "model.safetensors"
+            }
+        }
+    }));
+    let arbitrary_base = request(json!({
+        "projectId": "p",
+        "model": "z_image",
+        "advanced": {
+            "controlWeights": {
+                "repo": "alibaba-pai/not-a-shipped-control",
+                "filename": "model.safetensors"
+            }
+        }
+    }));
+    for (label, result) in [
+        (
+            "qwen",
+            qwen_control_repo_file(&arbitrary, &settings).map(|_| ()),
+        ),
+        ("kolors", kolors_control_repo_file(&arbitrary).map(|_| ())),
+        (
+            "z-image turbo",
+            zimage_control_repo_file(&arbitrary).map(|_| ()),
+        ),
+        (
+            "z-image base",
+            zimage_control_repo_file(&arbitrary_base).map(|_| ()),
+        ),
+        (
+            "flux1",
+            flux1_control_candle_repo_file(&arbitrary).map(|_| ()),
+        ),
+        (
+            "flux2",
+            flux2_control_candle_repo_file(&arbitrary).map(|_| ()),
+        ),
+        (
+            "krea",
+            krea_control_overlay_repo_file(&arbitrary).map(|_| ()),
+        ),
+    ] {
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("is not trusted"),
+            "{label}: {error}"
+        );
+    }
 }
 
 /// The trait routes each provider: each lane's `CandleStrictControl` impl reports the right engine id

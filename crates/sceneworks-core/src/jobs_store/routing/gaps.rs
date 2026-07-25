@@ -39,7 +39,7 @@ pub(crate) fn job_is_any_mlx_eligible(job: &JobSnapshot) -> bool {
 /// ([`JobsStore::fail_stranded_candle_jobs`]). Deliberately excludes the unsupported-pose shapes
 /// the candle worker only *owns to reject* ([`image_job_candle_pose_reject`]) — those are gaps,
 /// not served, so they must strand/enforce-fail rather than wait for a candle worker. Training
-/// (sc-7817) is included only for the candle-trainable kernels; the rest stay on the torch worker.
+/// (sc-7817) is included only for the candle-trainable kernels; unsupported kernels remain queued.
 pub(crate) fn job_is_any_candle_eligible(job: &JobSnapshot) -> bool {
     image_job_is_candle_eligible(job)
         || video_job_is_candle_eligible(job)
@@ -260,7 +260,7 @@ impl UnsupportedReason {
 
 /// macOS "can the Rust/MLX flow run this?" oracle (sc-3484). `Ok(())` = the in-process mlx
 /// worker — or an MLX-agnostic in-process path (downloads, ffmpeg, prompt refine) — runs it
-/// with no Python torch dependency. `Err` names the exact Python-torch gap. This is the epic's
+/// natively. `Err` names the exact native gap. This is the epic's
 /// *forcing function*: under mlx-required **enforce** mode an `Err` job fails terminal with
 /// `mlx_unsupported`, and the set of `Err`s IS the port-or-drop roadmap. Consistent with
 /// routing by construction — anything `job_is_any_mlx_eligible` accepts is `Ok`.
@@ -270,7 +270,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
     }
     let model = job.payload.get("model").and_then(Value::as_str);
     match job.job_type {
-        // In-process macOS job types with no Python torch dependency: MLX-agnostic metadata/utility
+        // In-process macOS job types with native implementations: MLX-agnostic metadata/utility
         // work + ffmpeg, plus prompt refine — now served by the native MLX `prompt_refine` TextLlm
         // provider (sc-5552, the mlx twin of the candle sc-5525 cutover), so the worker advertises +
         // claims it and this `Ok` is backed by a real capability (no longer the pre-sc-5552 strand).
@@ -282,24 +282,25 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::FrameExtract
         | JobType::TimelineExport
         | JobType::PromptRefine
+        | JobType::DatasetParquetImport
         // sc-6535: dataset_analysis is a native Rust/MLX job (the CLIP image embedder), not a
-        // Python-torch gap — so it's `Ok` here. Its real capability is gated by the worker's
+        // native-flow gap — so it's `Ok` here. Its real capability is gated by the worker's
         // advertisement once `mlx-gen-clip` is linked; until then it queues, never enforce-fails.
         | JobType::DatasetAnalysis
         // sc-6539: dataset_upscale runs the Real-ESRGAN ONNX engine natively in the Rust worker
-        // (the same engine as image_upscale) — not a Python-torch gap. Its real availability is the
+        // (the same engine as image_upscale) — not a native-flow gap. Its real availability is the
         // worker's capability advertisement, so it queues rather than enforce-fails here.
         | JobType::DatasetUpscale
         // sc-6538: dataset_face_analysis runs the native SCRFD+ArcFace stack (mlx-gen-face) in the Rust
-        // worker — not a Python-torch gap. Gated by the worker's capability advertisement, so it queues
+        // worker — not a native-flow gap. Gated by the worker's capability advertisement, so it queues
         // rather than enforce-fails here.
         | JobType::DatasetFaceAnalysis
         // sc-4415: face_likeness_compare runs the same native SCRFD+ArcFace stack to score two existing
-        // assets on demand — a native Rust/MLX job, not a Python-torch gap. Gated by the worker's
+        // assets on demand — a native Rust/MLX job, not a native-flow gap. Gated by the worker's
         // capability advertisement, so it queues rather than enforce-fails here.
         | JobType::FaceLikenessCompare => Ok(()),
 
-        // Forward-compat: an unrecognized job type isn't a known Python-torch gap, so don't
+        // Forward-compat: an unrecognized job type isn't a known native-flow gap, so don't
         // enforce-fail it (it would otherwise break a newer job type this build doesn't model).
         JobType::Unknown(_) => Ok(()),
 
@@ -341,7 +342,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // replace_person → native Wan-VACE (the replace-capable models) or native SCAIL-2
         // (scail2_14b, sc-5452) is MLX-eligible (handled by the early `job_is_any_mlx_eligible` Ok
         // above). This arm is only reached for a replace_person job on a model with no MLX video
-        // engine — that stays torch.
+        // engine — that remains unsupported on Mac.
         JobType::PersonReplace => Err(UnsupportedReason::new(
             model,
             "replace_person",
@@ -352,9 +353,8 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // Person detection + tracking are now ported to the Rust worker (epic 3482,
         // sc-3488): native-MLX YOLO11 detection (sc-3633), SORT/ByteTrack track assembly
         // (sc-3634), and SAM2 per-frame segmentation (sc-3709) all run in-process on the
-        // macOS MLX worker, so the Replace-Person detect → track → mask flow is
-        // Python-free. (replace_person end-to-end still needs the video-gen/inpaint half,
-        // a tracked torch gap on `PersonReplace` below — epic 3040.)
+        // macOS MLX worker, so the Replace-Person detect → track → mask flow is native.
+        // Eligible replacement then runs through native Wan-VACE or SCAIL-2.
         JobType::PersonDetect | JobType::PersonTrack => Ok(()),
 
         // DWPose pose detection is now ported to the Rust worker (sc-3487): RTMW
@@ -371,13 +371,13 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt
         // segmentation runs in-process on the macOS Rust worker (the box-PVS path of the
         // sc-4926 SAM3 stack — `segment_jobs::run_image_segment_job`), so the Image Editor
-        // smart-select tool is Python-free on Mac. Mac-only by construction: the capability
-        // is advertised only by `mlx_gpu`, so no torch/candle worker ever claims it.
+        // smart-select tool is native on Mac. Mac-only by construction: the capability
+        // is advertised only by `mlx_gpu`, so no other native worker claims it.
         JobType::ImageSegment => Ok(()),
 
         // Pure audio synthesis (SceneWorks Audio Studio, epic 13400 / sc-13404): Kokoro TTS runs
         // in-process on the runtime's candle audio lane (`catalog().audio()`, shipped default-on in
-        // `runtime-macos`) — audio is candle-native on every platform, so it is not a Python-torch
+        // `runtime-macos`) — audio is candle-native on every platform, so it is not a native-flow
         // gap. Its real availability is the worker's `audio_generate` capability advertisement, so it
         // queues rather than enforce-fails here.
         JobType::AudioGenerate => Ok(()),
@@ -385,10 +385,10 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // Real-ESRGAN image upscaling is ported to the Rust worker (sc-3489) and SeedVR2 (the
         // native-MLX one-step diffusion upscaler, epic 4811 / sc-4815) runs in-process via
         // `mlx-gen-seedvr2`, so the upscale tool runs Python-free. The AuraSR engine (`aura-sr`,
-        // a 617M-param torch-only GigaGAN) was DROPPED on Mac after the sc-3668 port-or-drop
+        // a 617M-param legacy GigaGAN) was DROPPED on Mac after the sc-3668 port-or-drop
         // spike (no viable Rust path; only a marginal, ~35-50x-slower quality difference vs
         // Real-ESRGAN x4) and is now dropped as an offered engine off-Mac too (sc-5499 — the
-        // Python torch backend that served it is retired in Phase 7). The UI hides the AuraSR
+        // historical Python backend that served it has been retired). The UI hides the AuraSR
         // engine option on every platform, so this Err is a defensive submit-time guard.
         JobType::ImageUpscale => {
             if upscale_job_is_mlx_eligible(job) {
@@ -404,7 +404,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         }
 
         // Video upscaling is net-new on Mac (epic 4811 / sc-4816): the native-MLX SeedVR2
-        // engine is the only path (there is no torch video upscaler), so a SeedVR2 job is
+        // engine is the only path, so a SeedVR2 job is
         // supported and anything else has no in-process engine. Eligible jobs early-return
         // `Ok` above via `job_is_any_mlx_eligible`; this arm is the defensive guard.
         JobType::VideoUpscale => {
@@ -426,7 +426,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
 
         // ControlNet Training Studio (epic 10159): the control-branch trainer is candle-only — there is
         // no MLX control trainer yet (that is B5/sc-10177) — so a `control_training` job stranded on Mac
-        // with no candle worker is a real gap, not a torch fallback.
+        // with no candle worker is a real gap, not a fallback.
         JobType::ControlTraining => Err(UnsupportedReason::new(
             None,
             "ControlNet branch training",
@@ -445,19 +445,19 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
 
 /// Off-Mac "can the candle/CUDA flow run this?" oracle (sc-5502, epic 5483) — the Windows/Linux
 /// twin of [`mac_rust_supported`]. `Ok(())` = the candle worker (or an MLX-agnostic in-process
-/// Rust path: downloads, ffmpeg, prompt refine — sc-5525) runs it with zero torch; `Err` names the
-/// exact torch gap. Under `candle_required` **enforce** an `Err` job fails terminal with
+/// Rust path: downloads, ffmpeg, prompt refine — sc-5525) runs it natively; `Err` names the
+/// exact native gap. Under `candle_required` **enforce** an `Err` job fails terminal with
 /// `candle_unsupported`, so the set of `Err`s is the off-Mac port-or-drop roadmap. Consistent with
 /// routing by construction — anything [`job_is_any_candle_eligible`] accepts is `Ok`.
 ///
 /// **Scope (this slice):** biased toward `Ok` exactly like the MLX oracle ("never over-gate a
 /// valid combination"). It enforce-fails only the **generation** gaps that have crisp candle
 /// eligibility predicates — the shapes that would otherwise silently mis-serve as an unconditioned
-/// torch T2I (the sc-5968 concern, generalized from poses to the whole image/video surface). The
+/// T2I (the sc-5968 concern, generalized from poses to the whole image/video surface). The
 /// CV-aux / segment / detail / training / convert / infra job types route by capability and their
 /// candle parity is still landing (Phase 5, epic 5482; the training cutover); they stay `Ok` here
-/// so the enforce sweep never kills a job the co-resident torch worker still serves. Each converts
-/// to an `Err` arm as its phase epic closes and torch is retired for that surface (sc-5503).
+/// so capability routing can leave unsupported work queued rather than force-failing it. Each
+/// converts to an `Err` arm when that surface's enforcement contract is explicit (sc-5503).
 pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
     if job_is_any_candle_eligible(job) {
         return Ok(());
@@ -465,7 +465,7 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
     let model = job.payload.get("model").and_then(Value::as_str);
     match job.job_type {
         // Reached only for an ineligible image shape (the eligible candle lanes early-return `Ok`
-        // above): a torch-only family, or a conditioned shape with no candle lane — incl. the
+        // above): an unsupported family, or a conditioned shape with no candle lane — incl. the
         // sc-5968 strict-pose-on-an-unwired-family trap.
         JobType::ImageGenerate | JobType::ImageEdit => Err(classify_candle_image_gap(&job.payload)),
 
@@ -527,12 +527,10 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         )),
 
         // Not enforce-failed by this slice (biased to `Ok`). The MLX-agnostic in-process job types
-        // (downloads, model import/convert, ffmpeg, prompt refine — sc-5525) run with zero torch
-        // off-Mac. The CV-aux / segment / tile-detail / training surfaces route by capability and
-        // are still co-served by the Python torch worker until their phase epics close (Phase 5
-        // epic 5482 for person/pose/kps; the candle SAM3 segment of sc-5062; the training cutover
-        // for lora_train) — leaving them `Ok` keeps the enforce sweep from killing a job torch
-        // still serves. An unrecognized job type is never a known gap (forward-compat).
+        // (downloads, model import/convert, ffmpeg, prompt refine — sc-5525) run natively off-Mac.
+        // The CV-aux / segment / tile-detail / training surfaces route by capability; leaving them
+        // `Ok` lets unsupported work remain queued instead of being force-failed. An unrecognized
+        // job type is never a known gap (forward-compat).
         JobType::Placeholder
         | JobType::ModelDownload
         | JobType::ModelImport
@@ -542,6 +540,7 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::FrameExtract
         | JobType::TimelineExport
         | JobType::PromptRefine
+        | JobType::DatasetParquetImport
         | JobType::ImageDetail
         | JobType::PersonDetect
         | JobType::PersonTrack
@@ -613,7 +612,7 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
 }
 
 /// Name the precise gap for a candle-ineligible `video_generate` job (sc-5502) — the candle-worded
-/// twin of [`classify_video_gap`]: a torch-only video model or an advanced/conditioned mode with no
+/// twin of [`classify_video_gap`]: an unsupported video model or an advanced/conditioned mode with no
 /// candle lane.
 pub(crate) fn classify_candle_video_gap(payload: &Map<String, Value>) -> UnsupportedReason {
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
@@ -637,15 +636,15 @@ pub(crate) fn classify_candle_video_gap(payload: &Map<String, Value>) -> Unsuppo
     )
 }
 
-/// Name the precise gap for an ineligible `image_generate` / `image_edit` job: a torch-only
-/// model, or a torch-only feature on an otherwise-MLX family. Mirrors the per-family
+/// Name the precise gap for an ineligible `image_generate` / `image_edit` job: an unsupported
+/// model, or an unsupported feature on an otherwise-MLX family. Mirrors the per-family
 /// `*_mlx_eligible` gates so the reason matches why routing refused it.
 pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return UnsupportedReason::new(None, "image generation", "no model specified.", None);
     };
     if !MLX_ROUTED_MODELS.contains(&model) {
-        // No whole-model torch-only image family remains: every one was ported to MLX and moved
+        // No whole-model legacy-only image family remains: every one was ported to MLX and moved
         // into `MLX_ROUTED_MODELS`, so anything reaching here is an unported model with no port
         // epic yet. Kolors (epic 3090 / sc-3875), InstantID (epic 3109 / sc-3345), PuLID-FLUX
         // (epic 3069 / sc-3344), z_image_edit (epic 3529 / sc-3923), Chroma (epic 3531 /
@@ -653,7 +652,7 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
         // / sc-5105 — the LAST one) all routed. Models with a partial surface (e.g. InstantID
         // pose-library, PuLID reference-less) are named per-feature below, not here. The old
         // `torch_only_image_model_epic` seam was retired once it became permanently `None`
-        // (sc-8951); a future torch-only image model reintroduces per-model epic mapping here.
+        // (sc-8951); a future unsupported image model reintroduces per-model epic mapping here.
         // Keep in sync with `docs/mac-rust-gaps.md` §1.
         return UnsupportedReason::new(
             Some(model),
@@ -740,7 +739,7 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
     }
 }
 
-/// Name the precise gap for an ineligible `video_generate` job: a torch-only model (incl. SVD) or
+/// Name the precise gap for an ineligible `video_generate` job: an unsupported model (incl. SVD) or
 /// an advanced mode. Mirrors `video_job_is_mlx_eligible`. (Third-party LyCORIS and LoKr-on-Wan now
 /// apply on the MLX Wan/LTX paths — epic 3641 sc-3671 — so neither is a video gap anymore.)
 pub(crate) fn classify_video_gap(payload: &Map<String, Value>) -> UnsupportedReason {

@@ -474,12 +474,10 @@ async fn generate_sdxl_advanced_stream(
 // InstantID identity-preserving character image (macOS, epic 3109 engine / sc-3345
 // integration): the production `instantid_realvisxl` model — InstantID on RealVisXL +
 // the stock SDXL IdentityNet ControlNet + the native MLX face stack (SCRFD + ArcFace),
-// all in-process with zero Python. Two modes only (torch parity): a single-identity
-// `character_image` (the reference's natural head pose) and the 11-view Character-Studio
-// angle set. Pose-library mode (`advanced.poses`) + face-restore (`advanced.faceRestore`)
-// are NOT handled here — they stay on the torch `InstantIDAdapter` (engine sc-3117 /
-// sc-3380 not yet ported), gated out by `instantid_available` so the torch worker claims
-// them. fp16 only for now (the validated envelope); Q8/Q4 ride explicit `mlxQuantize`
+// all in-process with zero Python. It serves single-identity `character_image`, the 11-view
+// Character-Studio angle set, pose-library mode (`advanced.poses`), and face restore
+// (`advanced.faceRestore`) through the native InstantID provider. fp16 only for now (the
+// validated envelope); Q8/Q4 ride explicit `mlxQuantize`
 // (unvalidated at 1024², gated by sc-3329 follow-up). The provider is the bespoke
 // `runtime_macos::providers::instantid::InstantId` (not an inventory `Generator`), so this is a dedicated
 // stream parallel to `generate_sdxl_advanced_stream`, not an MLX_MODELS row.

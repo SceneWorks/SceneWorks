@@ -378,7 +378,7 @@ fn wan_quant_bits(request: &VideoRequest) -> Option<i64> {
 ///
 /// The video lane deliberately does NOT take epic 10721's app-wide **Q8** default (sc-10726); it keeps
 /// the pre-sc-10726 q4-first default (sc-10859). Rationale: the MLX video lane has no user Q8 lever
-/// (Video Studio's quant control is the GGUF/torch path), so a silent Q8 default gives no UI-accessible
+/// (Video Studio's quant control targets the GGUF import path), so a silent Q8 default gives no UI-accessible
 /// quality benefit and only ever surfaces as an *accidental* default when the Q8 tier landed on disk via
 /// a side lane — where it risks a video-runtime OOM at heavy res/frame counts (the install-fit clamp
 /// doesn't help: the sc-8516 budget is 1024²-image-calibrated). Q8/bf16 stay reachable on an explicit

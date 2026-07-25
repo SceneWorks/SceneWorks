@@ -1,6 +1,8 @@
 use super::*;
 use axum::extract::ConnectInfo;
+use sha2::{Digest, Sha256};
 use std::net::{IpAddr, SocketAddr};
+use subtle::ConstantTimeEq;
 
 // sc-8870 (F-068): failed-attempt throttle for the token oracle. `POST
 // /api/v1/auth/verify` is public and returns `{ok}` for any candidate token, and
@@ -313,10 +315,9 @@ pub(crate) fn is_authorized(headers: &HeaderMap, settings: &Settings) -> bool {
     if settings.access_token.is_empty() {
         return true;
     }
-    constant_time_eq(
-        token_from_headers(headers).as_bytes(),
-        settings.access_token.as_bytes(),
-    )
+    let candidate = token_digest(token_from_headers(headers).as_bytes());
+    let expected = token_digest(settings.access_token.as_bytes());
+    candidate.ct_eq(&expected).into()
 }
 
 fn token_from_headers(headers: &HeaderMap) -> String {
@@ -338,12 +339,6 @@ fn token_from_headers(headers: &HeaderMap) -> String {
         .to_owned()
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right.iter())
-        .fold(0, |difference, (left, right)| difference | (left ^ right))
-        == 0
+pub(crate) fn token_digest(token: &[u8]) -> [u8; 32] {
+    Sha256::digest(token).into()
 }

@@ -313,6 +313,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     updateTrainingDataset,
     batchRenameTrainingDataset,
     createTrainingDatasetCaptionJob,
+    createTrainingDatasetParquetImportJob,
     createTrainingDatasetUpscaleJob,
     createTrainingDatasetAnalysisJob,
     createTrainingDatasetFaceAnalysisJob,
@@ -1261,6 +1262,28 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
   }
 
+  async function importParquetDataset(settings) {
+    setDatasetError("");
+    setDatasetMessage("");
+    try {
+      if (!activeDataset?.id) {
+        throw new Error("Create the empty dataset before importing Parquet metadata.");
+      }
+      if (memberAssets.length) {
+        throw new Error("Parquet import currently requires an empty dataset.");
+      }
+      const saved = await persistDataset([], activeDataset);
+      const job = await createTrainingDatasetParquetImportJob(saved.id, settings);
+      setDatasetMessage(
+        `Parquet import queued${job?.id ? ` (${job.id})` : ""}. Track it in the Queue, then refresh this dataset when it finishes.`,
+      );
+      return job;
+    } catch (err) {
+      setDatasetError(err.message);
+      throw err;
+    }
+  }
+
   // Queue a Joy Caption job for the dialog's scope: a single image (Re-Caption)
   // or every item ("Caption all" / "Re-caption all"). Saves first so the job
   // sees the live items, then targets them via the itemIds filter.
@@ -1602,7 +1625,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   dirty, discardDraft, setAddDialogOpen, renamePrefix, setRenamePrefix,
                   renaming, memberAssets, applyOrderedNames, setCaptionDialog, health,
                   canSave, saveValidity, saveDataset, savingDataset, unavailableAssetIds,
-                  removeUnavailableAsset,
+                  removeUnavailableAsset, onImportParquet: importParquetDataset,
                 }}
                 captionSession={{
                   captionDraftById, onPreview, updateCaption, captioning, addDialogOpen,

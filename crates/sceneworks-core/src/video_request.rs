@@ -11,9 +11,9 @@
 //! / `person_track`) are parsed and carried so the asset fact + routing layer see
 //! them. The MLX video path now consumes them for the cutover modes: `first_last_frame`
 //! (two keyframes, sc-3520) and `replace_person` (the `source_clip` + `person_track` +
-//! character refs → native Wan-VACE, sc-3521). `extend_clip` / `video_bridge` still stay
-//! on the Python torch worker for now (sc-3522). The MLX-vs-Python routing decision is
-//! sc-3036.
+//! character refs → native Wan-VACE, sc-3521), plus `extend_clip` / `video_bridge` on LTX and Wan
+//! TI2V-5B (sc-3522 / sc-3357). Unsupported modes are refused and remain queued. The native-worker
+//! routing decision is sc-3036.
 
 use serde_json::Value;
 
@@ -86,7 +86,7 @@ pub struct VideoRequest {
     /// to the same `fit_engine_image` helper the image-edit lane uses so a square
     /// source no longer silently stretches into an off-aspect output.
     pub fit_mode: String,
-    // --- Advanced-mode fields: parsed + carried, but Python-routed (sc-3036). ---
+    // --- Advanced-mode fields parsed and carried into the native MLX/candle dispatch paths. ---
     pub person_track_id: Option<String>,
     pub replacement_mode: String,
     pub last_frame_asset_id: Option<String>,

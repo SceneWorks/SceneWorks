@@ -191,6 +191,16 @@ image LoRAs selectable in Image Studio, video LoRAs in Video Studio.
   dataset. Trained overlays register in the ControlNet picker and can be selected
   at generation time, alongside the built-in hosted pose overlay.
 
+Large metadata datasets can be materialized directly from local Parquet shards.
+Create an empty dataset in **Data Sets**, choose **Import Parquet**, and select a
+`.parquet` file or directory. LAION's `URL` and `TEXT` columns are the defaults;
+the importer scans a bounded window, filters dimensions and optional
+case-insensitive caption include/exclude terms before download, safely fetches
+public images, and resumes from its job staging directory after interruption.
+The final images and imported captions become an ordinary SceneWorks dataset, so
+Dataset Doctor and ControlNet condition preparation work without a separate
+dataset format.
+
 Some targets are Apple-Silicon/MLX-only and some run on both backends; see
 [documents/TRAINING_QUICKSTART.md](documents/TRAINING_QUICKSTART.md) for the
 per-target backend matrix, a step-by-step first run, recommended dataset sizes

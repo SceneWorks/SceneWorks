@@ -8,8 +8,7 @@ pub(crate) const MAX_MOOD_BOARD_IMAGES: usize = 6;
 
 /// Enqueue a `prompt_refine` job: a lightweight, non-GPU job that asks an
 /// OpenAI-compatible LLM to rewrite the user's prompt to follow the selected
-/// model's prompt guide. The job runs in the Python worker (which reuses the
-/// vendored Lens reasoner's calling approach) and the client reads the refined
+/// model's prompt guide. The job runs through a native TextLlm provider, and the client reads the refined
 /// prompt from the completed job's `result.refinedPrompt`.
 pub(crate) async fn create_prompt_refine_job(
     State(state): State<AppState>,

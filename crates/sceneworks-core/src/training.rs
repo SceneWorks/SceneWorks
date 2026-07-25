@@ -1,10 +1,9 @@
 //! Rust-owned contracts for SceneWorks native LoRA training.
 //!
 //! SceneWorks owns its training product surface: dataset storage, manifests,
-//! validation, queue semantics, the target registry, and LoRA registration all
-//! live in Rust. Python is a narrow execution kernel that consumes a fully
-//! normalized [`TrainingPlan`] and produces weights — it never reads SceneWorks
-//! storage, config defaults, or this registry directly.
+//! validation, queue semantics, the target registry, LoRA registration, and
+//! execution all live in Rust. Native MLX/candle trainers consume a normalized
+//! [`TrainingPlan`]; unsupported backend/target combinations remain queued.
 //!
 //! These contracts are intentionally generic over `modality`, `output kind`,
 //! and `family` so the same shapes serve future image, video, and audio
@@ -182,7 +181,7 @@ pub struct TrainingTarget {
     /// Optional source repository for the base model weights.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_model_repo: Option<String>,
-    /// Identifier of the Python execution kernel that runs this target.
+    /// Identifier of the native execution kernel that runs this target.
     pub kernel: String,
     /// Visible (simple-panel) config defaults for this target.
     pub defaults: TrainingConfig,
@@ -270,7 +269,7 @@ pub struct TrainingConfig {
     /// knobs live here: `sampleEvery` (cadence in steps; 0 disables), `sampleSteps`,
     /// `sampleGuidanceScale`, `sampleCount` (images per step; default 4), and
     /// `samplePrompts` (string array; the UI prefills trigger-derived defaults).
-    /// All backends (torch/Lens/candle/MLX) cap the prompt pool at `sampleCount`
+    /// All native backends cap the prompt pool at `sampleCount`
     /// (one preview per prompt, truncated — never padded).
     pub advanced: JsonObject,
     #[serde(flatten)]
@@ -1307,9 +1306,8 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "resolutions": [512, 768, 1024],
             "batchSize": [1, 4],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-            // Network parameterization for the adapter. `lora` is the universal
-            // default; `lokr` (LyCORIS Kronecker) is a torch/PEFT-only option
-            // advertised on the validated image backends (epic 2193).
+            // Network parameterization for the adapter. `lora` is the universal default; `lokr`
+            // (LyCORIS Kronecker) is advertised on the validated native image backends (epic 2193).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"]
@@ -1441,10 +1439,10 @@ fn lens_turbo_lora_target() -> TrainingTarget {
 /// time by **family match, no base-model gating** (`lora_family.rs` gates only `wan-video`). The
 /// Turbo manifest declares `loraCompatibility.families: [krea_2]`.
 ///
-/// Rust-native, **no torch trainer** — but NOT Apple-Silicon-only (sc-8614): the `krea_lora` kernel
+/// Rust-native and NOT Apple-Silicon-only (sc-8614): the `krea_lora` kernel
 /// runs the in-process `mlx-gen-krea` trainer on Apple Silicon AND the `candle-gen-krea` trainer on
 /// Windows/Linux NVIDIA (a functional-autograd flow-match velocity loop on the single-stream DiT).
-/// There is no torch path, so `MLX_ONLY_TRAINING_KERNELS` keeps it off the torch worker while
+/// `MLX_ONLY_TRAINING_KERNELS` keeps it on native workers while
 /// `CANDLE_ROUTED_TRAINING_KERNELS` admits it on candle. The `appleSiliconOnly`/`requiresBackend`
 /// mlx-only markers are therefore omitted (matching the candle-capable z-image/lens targets);
 /// `MacTrainingSupport::supported_kernels` already lists `krea_lora` and is inert off-Mac.
@@ -1528,7 +1526,7 @@ fn krea_raw_lora_target() -> TrainingTarget {
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"]
             // No `requiresBackend`/`appleSiliconOnly` markers: a Rust trainer runs on BOTH backends
-            // (mlx on Apple Silicon, candle on Windows/Linux NVIDIA — sc-8614), no torch path.
+            // (mlx on Apple Silicon, candle on Windows/Linux NVIDIA — sc-8614).
         })),
         ui: object(json!({
             "label": "Krea 2 LoRA",
@@ -1545,8 +1543,8 @@ fn krea_raw_lora_target() -> TrainingTarget {
 /// ([`TrainingOutputKind::ControlBranch`]), not a LoRA: the `krea_control` kernel trains a frozen-base
 /// conditioning branch on the Krea 2 Raw DiT that applies at Krea 2 Turbo inference — the off-Mac
 /// candle `krea_2_control` trainer (`engine_trainer_id`; candle-gen-krea `ControlTrainer`). It is
-/// **candle-only** today (no torch/MLX control trainer — the MLX lane is B5/sc-10177), so it is in
-/// [`CANDLE_ROUTED_TRAINING_KERNELS`] + [`MLX_ONLY_TRAINING_KERNELS`] (no-torch-fallback) but NOT
+/// **candle-only** today (no MLX control trainer — the MLX lane is B5/sc-10177), so it is in
+/// [`CANDLE_ROUTED_TRAINING_KERNELS`] + [`MLX_ONLY_TRAINING_KERNELS`] but NOT
 /// [`MLX_ROUTED_TRAINING_KERNELS`]. `defaults.advanced.controlType` selects the preprocessor/condition
 /// (pose first; canny/depth are Phase C, added by extending `controlTypes` once each trains through the
 /// studio). Gradient checkpointing is forced on (`candle_requires_gradient_checkpointing`) — the dense
@@ -1640,7 +1638,7 @@ fn krea_control_target() -> TrainingTarget {
 /// `mlx-gen-sd3` `register_trainer` id `sd3_5_large`, T2 sc-7883) and apply back at `sd3_5_large`
 /// — and the family-arch-identical `sd3_5_large_turbo` — inference via the `sd3` LoRA family
 /// (no base-model gating; the family match alone gates eligibility, mirroring Krea Raw→Turbo).
-/// Native MLX only (no torch SD3 trainer; off-Mac/candle is epic 7982), so Apple-Silicon-gated.
+/// Native MLX only (off-Mac/candle is epic 7982), so Apple-Silicon-gated.
 fn sd3_large_lora_target() -> TrainingTarget {
     TrainingTarget {
         id: "sd3_5_large_lora".to_owned(),
@@ -1715,7 +1713,7 @@ fn sd3_large_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Native MLX trainer — no torch SD3 path (mirrors the Krea / LTX MLX targets).
+            // Native MLX trainer, mirroring the Krea / LTX MLX targets.
             "requiresBackend": "mlx",
             "appleSiliconOnly": true
         })),
@@ -1905,10 +1903,11 @@ fn ltx_video_lora_target() -> TrainingTarget {
 /// encodes to a single Wan-VAE latent frame, `numFrames: 1`) with a flow-matching
 /// velocity loop on the `WanTransformer3DModel` attention projections
 /// (`to_q`/`to_k`/`to_v`/`to_out.0`). The trainer is per-platform: off-Mac the
-/// `wan_lora` kernel is torch/diffusers (CUDA), while on macOS the job routes to
-/// the native in-process MLX trainer (`mlx-gen-wan`'s `wan2_2_ti2v_5b`), which
+/// `wan_lora` kernel has a native in-process MLX trainer on macOS
+/// (`mlx-gen-wan`'s `wan2_2_ti2v_5b`), which
 /// loads the installed `SceneWorks/wan2.2-ti2v-5b-mlx` turnkey's dense bf16 tier —
-/// NOT torch/MPS (sc-13878). The output registers as a `wan-video` family LoRA the
+/// is selected instead of the retired backend (sc-13878). Off-Mac, this dense-5B shape has no
+/// candle trainer and remains queued. The output registers as a `wan-video` family LoRA the
 /// Wan video adapter loads at generation. This dense 5B target is the base the 14B
 /// (A14B MoE) trainer extends for the two-expert (high/low-noise) case.
 fn wan_lora_target() -> TrainingTarget {
@@ -1920,13 +1919,10 @@ fn wan_lora_target() -> TrainingTarget {
         family: "wan-video".to_owned(),
         base_model: "wan_2_2".to_owned(),
         // sc-13860: intentionally the `Wan-AI/Wan2.2-TI2V-5B-Diffusers` diffusers snapshot, NOT the
-        // `SceneWorks/wan2.2-ti2v-5b-mlx` turnkey. The off-Mac `wan_lora` kernel is torch/diffusers, so it
-        // needs DIFFUSERS weights — not the MLX-packed turnkey. On Windows/Linux the catalog installs
-        // exactly this repo as the `bf16` variant (builtin.models.jsonc), so the install gate finds it
-        // there (that torch/CUDA path is where #1694 was reported). This is NOT the epic-8506 mis-naming
-        // class the sibling targets hit — the repo is correct — so pointing at the MLX turnkey would only
-        // hand the off-Mac torch trainer weights it can't load. The diffusers download is gated to
-        // Windows/Linux; on macOS the job runs the native MLX trainer against the installed
+        // `SceneWorks/wan2.2-ti2v-5b-mlx` turnkey. This diffusers repository remains the canonical
+        // off-Mac install artifact, although the dense-5B training shape currently has no candle
+        // trainer and remains queued. This is NOT the epic-8506 mis-naming class the sibling targets
+        // hit — the repo is correct. On macOS the job runs the native MLX trainer against the installed
         // `SceneWorks/wan2.2-ti2v-5b-mlx` turnkey instead, which the platform-aware training gate +
         // base-path resolver select (apps/rust-api/src/training.rs `macos_wan_*`, sc-13878) — so
         // `base_model_repo` stays the diffusers repo and is simply not consulted on macOS.
@@ -1942,9 +1938,8 @@ fn wan_lora_target() -> TrainingTarget {
             resolution: 512,
             save_every: 250,
             seed: 42,
-            // torch AdamW: cross-platform (CUDA + MPS). adamw8bit is CUDA-only
-            // (bitsandbytes) and falls back to AdamW elsewhere, so the default
-            // stays plain adamw like the LTX video target.
+            // Plain AdamW is the portable contract default; accelerator-specific optimizers can be
+            // selected explicitly, so the default stays aligned with the LTX video target.
             optimizer: "adamw".to_owned(),
             trigger_word: None,
             advanced: object(json!({
@@ -1984,10 +1979,9 @@ fn wan_lora_target() -> TrainingTarget {
             "resolutions": [512, 768],
             "batchSize": [1, 2],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-            // Wan2.2 TI2V-5B is a torch/diffusers backend: the PEFT LoKr trainer
-            // (sc-2196) applies and the diffusers video inference loads it via PEFT
-            // injection (sc-2197/2211). MLX video has no Kronecker merge yet, so a
-            // LoKr Wan job falls back to the torch path (sc-2211; native MLX is sc-2213).
+            // Wan2.2 TI2V-5B offers LoRA and LoKr plans. The MLX trainer has no Kronecker
+            // merge yet, so a LoKr Wan job is refused by that lane and remains queued for
+            // a compatible native trainer (sc-2211; native MLX work was tracked in sc-2213).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"]
@@ -2008,9 +2002,9 @@ fn wan_lora_target() -> TrainingTarget {
 /// low-noise expert (`transformer_2`), so the `wan_moe_lora` kernel trains a
 /// separate LoRA on each, split at the pipeline `boundary_ratio` (0.875), and
 /// saves two `wan-video` family files. Same flow-matching recipe as the dense 5B
-/// `wan_lora` target (still-image dataset), and the same per-platform backend split —
-/// off-Mac torch/diffusers (CUDA), on macOS the native MLX trainer against the
-/// installed `SceneWorks/wan2.2-{t2v,i2v}-a14b-mlx` turnkey's dense tier (sc-13878).
+/// `wan_lora` target (still-image dataset). On macOS it uses the native MLX trainer against the
+/// installed `SceneWorks/wan2.2-{t2v,i2v}-a14b-mlx` turnkey's dense tier (sc-13878). Off-Mac,
+/// candle serves the T2V A14B trainer; the unsupported I2V shape remains queued.
 /// The A14B bf16 base is GPU-only (~56GB of transformers); the Q8_0 GGUF base path
 /// fits memory-bound hosts. `base_model` records the specific A14B variant so the
 /// inference loader gates the LoRA to the matching model (not the 5B).
@@ -2069,8 +2063,8 @@ fn wan_moe_lora_target(
             "resolutions": [512, 768],
             "batchSize": [1, 2],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-            // Wan is a torch backend, but epic 2193 v1 validates LoKr on the
-            // image backends (Z-Image/SDXL) first; video stays `lora`-only.
+            // Wan video training currently stays `lora`-only; epic 2193 v1 validates LoKr on the
+            // image backends (Z-Image/SDXL) first.
             "networkTypes": ["lora"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"]
@@ -2181,7 +2175,7 @@ fn sdxl_lora_target() -> TrainingTarget {
             "batchSize": [1, 4],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             // See the Z-Image target: `lokr` (LyCORIS Kronecker) is advertised on
-            // the validated torch/PEFT image backends (epic 2193).
+            // the validated native image backends (epic 2193).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"]
@@ -2412,8 +2406,8 @@ fn kolors_lora_target() -> TrainingTarget {
             "resolutions": [768, 1024],
             "batchSize": [1, 4],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-            // Kolors is an SDXL-architecture torch/PEFT backend, so it advertises
-            // `lokr` like the SDXL target — inherited from the shared SDXL backend's
+            // Kolors uses the SDXL-architecture adapter contract, so it advertises
+            // `lokr` like the SDXL target — inherited from the shared backend's
             // LoKr save + PEFT-injection inference path (epic 2193, sc-2217).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
@@ -2731,7 +2725,7 @@ fn validate_lr_scheduler(config: &TrainingConfig) -> Result<(), TrainingPlanErro
 /// 10512, sc-10522). Trained on the undistilled `anima_base` (like Krea Raw→Turbo / SD3 Large→turbo);
 /// the family-arch-identical aesthetic/turbo variants apply the same adapter back via
 /// `apply_anima_adapters`. The native `mlx-gen-anima` trainer trains the 448 DiT targets **and** the
-/// 60 `llm_adapter` conditioner targets (508 total). mlx-only (no torch/candle Anima trainer). NB the
+/// 60 `llm_adapter` conditioner targets (508 total). MLX-only (no candle Anima trainer). NB the
 /// `mlx-gen-anima` trainer does not yet honor gradient checkpointing or preview sampling (dense-only,
 /// no in-training previews), so those advanced knobs default off here — that parity work (gradient
 /// checkpointing + OOM guard, in-training preview, mid-run resume, and the >1024 resolution ceiling)

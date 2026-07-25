@@ -21,9 +21,9 @@
 
 /// One Fun-Union strict-control engine: its registry id, default control-weights repo, and the set of
 /// [`ControlKind`]s it accepts. THE authority for `supported_kinds` (sc-8244 manifest / sc-8245 web
-/// picker consume the same notion). `repo` is the *default* Fun-Union control repo for the engine; the
-/// per-engine stream still honors an `advanced.controlWeights.{repo,filename}` override when resolving
-/// the actual checkpoint (this row is the catalog default, not a hard pin).
+/// picker consume the same notion). `repo` is the shipped Fun-Union control repo for the engine.
+/// Per-engine streams accept only an exact shipped tuple or an API-canonicalized registered overlay
+/// carrying explicit catalog authority and an immutable revision.
 #[derive(Clone, Copy, Debug)]
 struct StrictControlEngine {
     /// The mlx-gen registry id (`crate::inference_runtime::load(engine_id, spec)`).
@@ -104,10 +104,10 @@ const STRICT_CONTROL_ENGINES: &[StrictControlEngine] = &[
         // `controlMode = canny | depth` request is REJECTED (not silently rendered as pose). `repo` here
         // is INFORMATIONAL for Krea: neither lane resolves its base from this row. The MLX lane
         // (`krea_control.rs`) loads the packed `SceneWorks/krea-2-turbo-mlx` turnkey tier subdir (sc-11796);
-        // the candle lane keeps its own dense `krea/Krea-2-Turbo` const; both resolve the overlay from
-        // env / `advanced.controlWeights` / the hosted beta (sc-8466).
+        // the candle lane keeps its own dense `krea/Krea-2-Turbo` const. `repo` names the actual hosted
+        // overlay artifact both lanes load, not either backend's base-model repository.
         engine_id: "krea_2_turbo_control",
-        repo: "SceneWorks/krea-2-turbo-mlx",
+        repo: "SceneWorks/krea2-pose-controlnet-beta",
         supported_kinds: &[ControlKind::Pose],
     },
 ];
@@ -121,16 +121,74 @@ fn strict_control_engine(engine_id: &str) -> Option<&'static StrictControlEngine
 }
 
 /// The catalog DEFAULT control-weights repo for a Fun-Union strict-control engine — the single source of
-/// truth each engine's `controlWeights.repo`-override resolver falls back to. Panics on a non-Fun-Union
+/// truth each engine's control-weight resolver falls back to. Panics on a non-Fun-Union
 /// engine id (a programming error: only the three registry strict-control streams call this with their
 /// own engine id). Off-Mac the candle strict-control lanes keep their own per-lane default-repo constants
 /// (the qwen candle lane now resolves the table's 2512-Fun row, sc-8350), so this is unused on the candle
 /// lane.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn strict_control_default_repo(engine_id: &str) -> &'static str {
-    strict_control_engine(engine_id)
-        .unwrap_or_else(|| panic!("{engine_id} is not a Fun-Union strict-control engine"))
-        .repo
+    let catalog_repo = strict_control_engine(engine_id)
+        .unwrap_or_else(|| panic!("{engine_id} is not a strict-control engine"))
+        .repo;
+    let artifact_repo = sceneworks_core::control_weights::default_control_repo(engine_id)
+        .unwrap_or_else(|| panic!("{engine_id} has no shipped control-weight artifact"));
+    debug_assert_eq!(catalog_repo, artifact_repo);
+    artifact_repo
+}
+
+/// Resolve the immutable revision for a remote strict-control artifact.
+///
+/// Shipped artifacts must match the exact engine/repository/file registry tuple.
+/// A non-shipped artifact is accepted only when the Rust API resolved an
+/// `overlayId` from the user/project control-overlay catalog, replaced all
+/// caller-supplied location fields, and stamped the internal authorization bit
+/// plus a pinned 40-hex revision. The public jobs API always removes a
+/// caller-supplied stamp before performing that lookup, so raw payloads cannot
+/// turn this into a generic repository escape hatch.
+fn trusted_control_weight_revision(
+    request: &ImageRequest,
+    engine_id: &str,
+    repo: &str,
+    file: &str,
+) -> WorkerResult<String> {
+    if let Some(artifact) =
+        sceneworks_core::control_weights::shipped_control_weight(engine_id, repo, file)
+    {
+        return Ok(artifact.revision.to_owned());
+    }
+
+    let control = request
+        .advanced
+        .get("controlWeights")
+        .and_then(Value::as_object);
+    let catalog_authorized = control
+        .and_then(|weights| weights.get("_catalogAuthorized"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let overlay_id = control
+        .and_then(|weights| weights.get("overlayId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let revision = control
+        .and_then(|weights| weights.get("revision"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| {
+            value.len() == 40
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        });
+    if let (true, Some(_), Some(revision)) = (catalog_authorized, overlay_id, revision) {
+        return Ok(revision.to_owned());
+    }
+
+    Err(WorkerError::InvalidPayload(format!(
+        "advanced.controlWeights repo/file is not trusted for {engine_id}: \
+         select a registered overlayId or use the shipped {engine_id} artifact"
+    )))
 }
 
 /// Validate a requested [`ControlKind`] against an engine's `supported_kinds` (the [`STRICT_CONTROL_ENGINES`]
@@ -453,4 +511,3 @@ fn build_control_conditioning(
     }
     conditioning
 }
-

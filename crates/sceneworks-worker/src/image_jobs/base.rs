@@ -430,9 +430,9 @@ enum CandleImageRoute {
 /// `resolve_candle_image_route` `matches!` guard, the handler comment, and the reject error string, which
 /// had already drifted (the handler comment omitted `krea_2_turbo`). (sc-11171, F-008.)
 ///
-/// NOTE: deliberately DISTINCT from the router's `model_has_candle_pose_lane` (sceneworks-core), which
-/// omits `krea_2_turbo` so the co-resident torch worker declines krea pose jobs and candle reliably wins
-/// them — do not conflate the two lists.
+/// NOTE: deliberately DISTINCT from the router's `model_has_candle_pose_lane` (sceneworks-core),
+/// which omits `krea_2_turbo` so other GPU descriptors decline Krea pose jobs and candle reliably
+/// owns the request — do not conflate the two lists.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const WIRED_CANDLE_POSE_FAMILIES: &[&str] = &[
     "qwen_image",
@@ -4733,8 +4733,8 @@ async fn gate_with_evict_reclaim<D>(
 /// Quant + LoRA/LoKr are **descriptor-gated** (sc-5126): resolved (via the same `resolve_quant` /
 /// `resolve_adapters` the MLX path uses) only when the linked candle descriptor advertises them — i.e.
 /// for Lens (Q4/Q8 + LoRA/LoKr); the sc-3675/sc-5096 families advertise neither, so they stay dense +
-/// adapter-free exactly as before. No reference/img2img/control — those shapes fall back to the Python
-/// worker upstream (`image_request_candle_eligible`). Reached only when `backend_candle_enabled`
+/// adapter-free exactly as before. No reference/img2img/control — unsupported shapes are refused
+/// upstream and remain queued (`image_request_candle_eligible`). Reached only when `backend_candle_enabled`
 /// (default off → production routing unchanged until parity).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_stream(

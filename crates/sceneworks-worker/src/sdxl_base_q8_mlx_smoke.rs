@@ -7,7 +7,7 @@
 //! Purpose: this is the on-device evidence that CLOSES the stale sc-1975 Q8-on-SDXL loop. sc-1975
 //! recorded that **Apple's vendored `mlx-examples` Python Q8 recipe** produced an ALL-ZERO (degenerate)
 //! decode on SDXL base 1.0, so the manifest deferred a Q8 default. That vendored in-process MLX-SDXL
-//! adapter was RETIRED by sc-3060 (the Python worker always routes torch for SDXL now); MLX-SDXL is the
+//! adapter was RETIRED by sc-3060; MLX-SDXL is now the
 //! Rust `mlx-gen-sdxl` path, whose Q4/Q8 quantization was FIXED + MERGED by mlx-gen PR #62 (sc-2641,
 //! "SDXL Q4/Q8 quantization — both hold parity on base-1.0"). This smoke asserts the Q8 render is (a)
 //! non-degenerate (per-pixel std well above the degenerate floor) and (b) SPECIFICALLY NOT all-zero —

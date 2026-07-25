@@ -102,6 +102,7 @@ conditional/partial.
 | `lora_train` | ⚠️ MLX / candle, native trainable families only | `run_utility_job` → `run_lora_train_job`; `training_job_is_mlx_eligible`; `training_job_is_candle_eligible` |
 | `control_training` | ⚠️ candle ControlNet trainer only | `run_utility_job` → `run_control_training_job`; `required_capability`; `is_real_training_job`; `training_job_is_candle_eligible` |
 | `training_caption` | ⚠️ MLX / candle JoyCaption only | `run_utility_job` → `run_training_caption_job`; `caption_job_is_mlx_eligible` |
+| `dataset_parquet_import` | ✅ CPU utility (Parquet scan + public image fetch) | `run_utility_job` → `run_dataset_parquet_import_job`; `NON_GPU_JOB_TYPES`; `mac_rust_supported`; `candle_supported` |
 | `dataset_analysis` | ⚠️ MLX CLIP lane when linked; no candle CLIP lane yet | `run_utility_job` → `run_dataset_analysis_job`; `mlx_gpu`; `mac_rust_supported` |
 | `dataset_upscale` | ✅ MLX/CoreML on Mac / candle/CUDA off-Mac | `run_utility_job` → `run_dataset_upscale_job`; `mlx_gpu`; `with_candle_capabilities` |
 | `dataset_face_analysis` | ✅ MLX face stack on Mac / candle face stack off-Mac | `run_utility_job` → `run_dataset_face_analysis_job`; `mlx_gpu`; `with_candle_capabilities` |

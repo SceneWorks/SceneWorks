@@ -73,9 +73,9 @@ fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
 /// Resolve the 2512-Fun-Controlnet-Union checkpoint to a single `.safetensors` in the HF cache
 /// (sc-9870). Default: the SceneWorks packed tier (repo from the shared `STRICT_CONTROL_ENGINES` row —
 /// single source of truth) at `<tier>/model.safetensors`, where `<tier>` tracks the selected transformer
-/// quant via [`qwen_control_tier_subdir`]. `advanced.controlWeights.{repo,filename}` overrides still
-/// address a flat repo with a plain-component file (sc-8821 / F-019); when a `filename` override is
-/// present the tier subdir is NOT applied. `Ok(None)` when the file is absent (the download flow /
+/// quant via [`qwen_control_tier_subdir`]. Registered overlays may address a catalog-authorized
+/// repo/file/revision tuple; when a filename is present the tier subdir is NOT applied. `Ok(None)` when
+/// the file is absent (the download flow /
 /// on-demand fetch provisions it ahead of generation, like base weights).
 fn resolve_qwen_control_weights(
     request: &ImageRequest,
@@ -95,19 +95,39 @@ fn resolve_qwen_control_weights(
     };
     let repo =
         override_field("repo").unwrap_or_else(|| strict_control_default_repo(QWEN_CONTROL_ENGINE_ID).to_owned());
-    let snapshot = huggingface_snapshot_dir(&settings.data_dir, &repo);
+    let default_revision = (repo == strict_control_default_repo(QWEN_CONTROL_ENGINE_ID)).then(|| {
+        sceneworks_core::control_weights::default_control_revision(QWEN_CONTROL_ENGINE_ID)
+            .expect("shipped Qwen control revision")
+    });
+    let snapshot = default_revision.and_then(|revision| {
+        crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, &repo, revision)
+    });
     // Repo-relative path: an explicit override filename (plain component, no tier subdir) else the packed
     // tier subdir `<tier>/model.safetensors` selected by `advanced.mlxQuantize` — whose DEFAULT tier is
     // clamped to the installed overlay (`snapshot`) so a plain default job never forces a new fetch
     // (sc-10726).
     let rel = match override_field("filename") {
+        Some(name)
+            if sceneworks_core::control_weights::shipped_control_weight(
+                QWEN_CONTROL_ENGINE_ID,
+                &repo,
+                &name,
+            )
+            .is_some() =>
+        {
+            name
+        }
         Some(name) => safe_weight_filename(&name, "advanced.controlWeights.filename")?,
         None => format!(
             "{}/{QWEN_CONTROL_FILE}",
             qwen_control_tier_subdir(request, snapshot.as_deref())
         ),
     };
-    let Some(snapshot) = snapshot else {
+    let revision =
+        trusted_control_weight_revision(request, QWEN_CONTROL_ENGINE_ID, &repo, &rel)?;
+    let Some(snapshot) =
+        crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, &repo, &revision)
+    else {
         return Ok(None);
     };
     let path = snapshot.join(rel);

@@ -211,7 +211,10 @@ export const viewTitles = {
   Queue: { title: "Queue", blurb: "All running and recent jobs across workers." },
   Stats: { title: "Generation Stats", blurb: "Compare runs by model, quant, settings, timing and memory." },
   Logs: { title: "Logs", blurb: "This session's activity — routing decisions, worker phases and errors." },
-  Settings: { title: "Settings", blurb: "Paths, service tokens, and detected GPU." },
+  Settings: {
+    title: "Settings",
+    blurb: "Appearance, generation defaults, storage, credentials and this machine.",
+  },
   Licenses: {
     title: "Licenses",
     blurb: "Third-party components bundled with SceneWorks and their license notices.",
@@ -796,6 +799,7 @@ export function App() {
     batchRenameTrainingDataset,
     writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob,
+    createTrainingDatasetParquetImportJob,
     createTrainingDatasetUpscaleJob,
     createTrainingDatasetAnalysisJob,
     createTrainingDatasetFaceAnalysisJob,
@@ -2426,6 +2430,7 @@ export function App() {
     batchRenameTrainingDataset,
     writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob,
+    createTrainingDatasetParquetImportJob,
     createTrainingDatasetUpscaleJob,
     createTrainingDatasetAnalysisJob,
     createTrainingDatasetFaceAnalysisJob,
@@ -2495,7 +2500,7 @@ export function App() {
     trainingDatasets, trainingDatasetsProjectId, trainingDatasetsError, loadingTrainingDatasets,
     refreshTrainingDatasets, loadTrainingDataset, loadTrainingDatasetReadiness, setTrainingDatasetItemQualityAck, createTrainingDataset, uploadTrainingDatasetItem,
     updateTrainingDataset, batchRenameTrainingDataset, writeTrainingDatasetCaptionSidecars,
-    createTrainingDatasetCaptionJob, createTrainingDatasetUpscaleJob, createTrainingDatasetAnalysisJob, createTrainingDatasetFaceAnalysisJob, smartCropTrainingDataset, stripExifTrainingDataset, createTrainingJob, trainingPresets, trainingPresetsError,
+    createTrainingDatasetCaptionJob, createTrainingDatasetParquetImportJob, createTrainingDatasetUpscaleJob, createTrainingDatasetAnalysisJob, createTrainingDatasetFaceAnalysisJob, smartCropTrainingDataset, stripExifTrainingDataset, createTrainingJob, trainingPresets, trainingPresetsError,
     trainingTargets, trainingTargetsError, setActiveView, registerLeaveGuard, registerProjectSwitchGuard,
     trackEditorScratchOp, releaseEditorScratchOp, registerEditorScratchClaim,
     savedVoices, refreshSavedVoices, createSavedVoice, deleteSavedVoice, characters,
@@ -2694,7 +2699,18 @@ export function App() {
         {activeView === "Library" ? <LibraryScreen /> : null}
         {activeView === "Queue" ? <QueueScreen /> : null}
         {activeView === "Models" ? <ModelManagerScreen /> : null}
-        {activeView === "Settings" ? <SettingsScreen /> : null}
+        {/* Accent + the Simple-mode default live in App state alongside the sidebar's mode
+            switch (they are not on the app context), so Settings receives them as props —
+            the same pair SimpleShell gets, writing through to the same ui-preferences store. */}
+        {activeView === "Settings" ? (
+          <SettingsScreen
+            accent={accent}
+            lockedToSimple={uiModeLocked}
+            onAccentChange={changeAccent}
+            onSimpleDefaultChange={changeSimpleUiDefault}
+            simpleDefault={simpleUiDefault}
+          />
+        ) : null}
         {activeView === "Stats" ? <StatsScreen /> : null}
         {activeView === "Logs" ? <LogsScreen /> : null}
         {activeView === "Licenses" ? <LicensesScreen /> : null}

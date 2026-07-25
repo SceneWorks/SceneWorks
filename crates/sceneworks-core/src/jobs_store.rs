@@ -78,6 +78,7 @@ pub const NON_GPU_JOB_TYPES: &[&str] = &[
     "model_convert",
     "lora_import",
     "lora_download",
+    "dataset_parquet_import",
 ];
 pub const MAX_JOB_ATTEMPTS: u32 = 5;
 
@@ -452,9 +453,9 @@ impl JobsStore {
         // along with progress so a completed row shows the peak the run reached.
         ensure_column(&transaction, "jobs", "peak_gpu_memory_pct", "real")?;
         ensure_column(&transaction, "jobs", "peak_gpu_load_pct", "real")?;
-        // Runtime backend label written by the worker ("mlx" / "mps" / "cuda"
-        // / "cpu"). First-non-null wins so the WorkerProgressCard's arch pill
-        // stays stable across the run.
+        // Runtime backend label written by the worker ("mlx" / "mps" / "cuda" / "cpu"); `mps`
+        // remains readable for historical rows. First-non-null wins so the WorkerProgressCard's
+        // arch pill stays stable across the run.
         ensure_column(&transaction, "jobs", "backend", "text")?;
         // Soft-hide marker for the "Clear completed" queue action (sc-12231, issue #1556).
         // A cleared job is dropped from the operator's queue list + counts (see
@@ -1519,14 +1520,14 @@ impl JobsStore {
     }
 
     /// macOS "MLX-required" grace sweep (epic 3482 / sc-3483). When `mlx_required`, the
-    /// non-mlx (MPS) worker never claims an MLX-eligible job — it defers unconditionally
+    /// synthetic non-mlx descriptor never claims an MLX-eligible job — it defers unconditionally
     /// to the in-process `mlx` worker (see `should_defer_*`). If no **live** `mlx` worker
     /// claims such a job within the grace window — because the worker is down, never
     /// started, or has been crashed longer than the supervisor's auto-restart can
     /// self-heal — the job would otherwise sit queued forever. This fails those jobs
     /// terminal (`status = failed`) with an actionable `mlx_unavailable` error naming the
     /// model + job type, so the failure is loud and points at the real gap instead of
-    /// silently falling back to MPS.
+    /// entering the legacy MPS compatibility branch.
     ///
     /// "Live `mlx` worker" = a `gpu_id = 'mlx'` worker that is not offline and has
     /// heartbeat within the grace window. While one exists (even if it is merely busy),
@@ -1622,13 +1623,13 @@ impl JobsStore {
     /// macOS "MLX-unsupported" enforce sweep (epic 3482 / sc-3484). When `mlx_required` AND
     /// `enforce`, fails every queued job the Rust/MLX flow can't run (`mac_rust_supported`
     /// returns `Err`) terminal with a feature-precise `mlx_unsupported` error — the forcing
-    /// function that turns "still on torch" into a loud, named failure instead of a silent
-    /// fallback. Unlike the stranded sweep there is no grace window: an unsupported job is
+    /// function that turns an unsupported native gap into a loud, named failure instead of leaving
+    /// it queued. Unlike the stranded sweep there is no grace window: an unsupported job is
     /// permanently unsupported until its surface is ported or dropped, so it fails immediately.
     ///
-    /// Default mode is **warn** (`enforce == false`) → this is a no-op and the gap is logged
-    /// at claim time instead (the job still runs on torch), so flipping `mlx_required` on for
-    /// observation surfaces the gap list without breaking anything. Off (`!mlx_required`) →
+    /// Default mode is **warn** (`enforce == false`) → this sweep is a no-op; normal capability
+    /// routing either finds a capable native worker or leaves the job queued. Flipping
+    /// `mlx_required` on for observation surfaces the gap list. Off (`!mlx_required`) →
     /// immediate no-op, so Windows/Linux/Docker are unaffected. MLX-*eligible* jobs are
     /// `Ok` here and handled by `fail_stranded_mlx_jobs`/routing — the two sweeps partition
     /// the queue and never touch the same job. Returns `(job, reason)` pairs so the caller can
@@ -1679,7 +1680,7 @@ impl JobsStore {
     /// Off-Mac candle grace sweep (sc-5502, epic 5483) — the Windows/Linux twin of
     /// [`Self::fail_stranded_mlx_jobs`]. When `candle_required`, fails any candle-eligible job left
     /// queued past the grace window when no live candle worker exists, terminal with
-    /// `candle_unavailable` — so a retired-torch deployment fails loudly instead of queuing forever.
+    /// `candle_unavailable` — so a deployment can fail loudly instead of queuing forever.
     ///
     /// "Live candle worker" = a worker advertising the `candle` marker capability that is not
     /// offline and has a heartbeat within `grace_seconds` (the marker is a fixed JSON string in
@@ -1687,8 +1688,8 @@ impl JobsStore {
     /// index, not the `mlx` sentinel, so it can't be matched by `gpu_id`; see [`worker_is_candle`]).
     /// While one exists (even merely busy) this is a no-op and candle-eligible jobs wait, so a
     /// transient candle crash the supervisor restarts inside the window never fails a job. Off
-    /// (`!candle_required`) it returns immediately, so a deployment still keeping the Python torch
-    /// worker is completely unaffected. Returns the jobs it failed so the caller can surface the
+    /// (`!candle_required`) it returns immediately, leaving normal capability routing unaffected.
+    /// Returns the jobs it failed so the caller can surface the
     /// structured event and publish their updates.
     pub fn fail_stranded_candle_jobs(
         &self,
@@ -1774,15 +1775,15 @@ impl JobsStore {
     /// Off-Mac "candle-unsupported" enforce sweep (sc-5502, epic 5483) — the Windows/Linux twin of
     /// [`Self::fail_unsupported_mlx_jobs`]. When `candle_required` AND `enforce`, fails every queued
     /// job the candle/CUDA flow can't run ([`candle_supported`] returns `Err`) terminal with a
-    /// feature-precise `candle_unsupported` error — the forcing function that turns "still on torch"
-    /// into a loud, named failure instead of a silent fallback. Unlike the stranded sweep there is
+    /// feature-precise `candle_unsupported` error — the forcing function that turns an unsupported
+    /// native gap into a loud, named failure instead of leaving it queued. Unlike the stranded sweep there is
     /// no grace window: an unsupported job is permanently unsupported until its surface is ported or
     /// dropped, so it fails immediately.
     ///
-    /// Default mode is **warn** (`enforce == false`) → no-op, and the gap is logged at claim time
-    /// instead (the job still runs on torch), so flipping `candle_required` on for observation
-    /// surfaces the gap list without breaking anything. Off (`!candle_required`) → immediate no-op,
-    /// so a deployment still keeping the torch worker is unaffected. Candle-*eligible* jobs are `Ok`
+    /// Default mode is **warn** (`enforce == false`) → this sweep is a no-op; normal capability
+    /// routing either finds a capable native worker or leaves the job queued. Flipping
+    /// `candle_required` on for observation surfaces the gap list. Off (`!candle_required`) →
+    /// immediate no-op. Candle-*eligible* jobs are `Ok`
     /// here and handled by routing / [`Self::fail_stranded_candle_jobs`] — the two sweeps partition
     /// the queue and never touch the same job. Returns `(job, reason)` pairs so the caller can emit
     /// the structured event.
@@ -1833,9 +1834,9 @@ impl JobsStore {
         Ok(self.claim_next_job_routed(worker_id, false)?.0)
     }
 
-    /// Like [`Self::claim_next_job`], but also reports the MLX↔torch routing decision
+    /// Like [`Self::claim_next_job`], but also reports the native-GPU routing decision
     /// so the caller (the API claim handler) can log *why* a job landed where it did —
-    /// the single most useful line for diagnosing "MLX-eligible job ran on torch"
+    /// the single most useful line for diagnosing an MLX-eligible job claimed elsewhere
     /// (sc-3449). A `None` decision means the claim was routing-neutral: no job was
     /// available, an unrelated balancing deferral fired, or the job is one no `mlx`
     /// worker would ever want.
@@ -2169,7 +2170,7 @@ impl JobsStore {
         // database lock. rusqlite's default busy timeout is 0ms, so any cross-process
         // overlap — e.g. a sidecar restart where the old process hasn't fully released the
         // db, or a concurrent claim/heartbeat — surfaces as `database is locked` and the
-        // job loses its claim (MLX-eligible jobs then fall through to the torch worker).
+        // job loses its claim (the job then remains available for another capable worker).
         // A 5s wait lets the holder finish; paired with BEGIN IMMEDIATE on write
         // transactions (below), writers queue cleanly rather than deadlocking on lock upgrade.
         connection.busy_timeout(Duration::from_millis(5000))?;
@@ -2540,6 +2541,12 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
                 .unwrap_or("(unnamed dataset)")
                 .to_owned();
             Some(format!("Dataset Captioning — {subject}"))
+        }
+        JobType::DatasetParquetImport => {
+            let subject = first_str(payload, &["datasetName", "datasetId"])
+                .unwrap_or("(unnamed dataset)")
+                .to_owned();
+            Some(format!("Parquet Dataset Import - {subject}"))
         }
         JobType::DatasetAnalysis => {
             let subject = first_str(payload, &["datasetName", "datasetId"])
@@ -2913,11 +2920,11 @@ fn should_defer_auto_gpu_claim(
     // The in-process `mlx` worker is the designated home for the jobs it claims
     // (a non-mlx worker defers MLX-eligible jobs to it via
     // `should_defer_image_to_mlx_worker` & siblings). It must never hand one of
-    // those jobs to a "healthier" non-mlx GPU through this health-based dispatch:
-    // on Apple Silicon the `mlx` and `mps` workers share the same physical GPU,
-    // and that worker would only defer the job straight back, deadlocking it in
-    // the queue. Keeping the mlx worker out of the auto-GPU health comparison
-    // breaks that cycle regardless of whether it reports utilization.
+    // those jobs to a "healthier" non-mlx GPU through this health-based dispatch. The synthetic
+    // MPS compatibility descriptor used by legacy tests represents the same physical Apple GPU
+    // and would defer the job straight back, deadlocking it in the queue. Production runs the
+    // supported job on the native mlx lane. Keeping mlx out of the auto-GPU health comparison
+    // breaks the compatibility-path cycle regardless of utilization reporting.
     if worker.gpu_id.eq_ignore_ascii_case("mlx") {
         return Ok(false);
     }
@@ -2967,8 +2974,8 @@ fn should_defer_auto_gpu_claim(
 /// jobs. A non-mlx GPU worker defers an `auto` `image_generate` job the mlx
 /// worker can run when an idle `mlx` worker exists, so the fast NAX path claims
 /// it. When no mlx worker is registered (Windows/Linux, or the mlx worker is
-/// down), nothing defers and the torch worker is the fallback — a job is never
-/// stuck. An explicit (non-`auto`) GPU choice is always honoured, never deferred.
+/// down), nothing defers; normal capability routing either finds another capable worker or
+/// leaves the job queued. An explicit (non-`auto`) GPU choice is never soft-deferred.
 fn should_defer_image_to_mlx_worker(
     connection: &Connection,
     job: &JobSnapshot,
@@ -2978,18 +2985,18 @@ fn should_defer_image_to_mlx_worker(
     if worker.gpu_id.eq_ignore_ascii_case("mlx") || !job_is_mlx_eligible(job) {
         return Ok(false);
     }
-    // macOS "MLX-required" (epic 3482 / sc-3483): the non-mlx (MPS) worker NEVER claims
+    // macOS "MLX-required" (epic 3482 / sc-3483): a synthetic non-mlx descriptor NEVER claims
     // an MLX-eligible job — it yields unconditionally, even when no idle `mlx` worker is
     // ready *right now*. The job waits for the `mlx` worker and, if none takes it within
     // the grace window, `fail_stranded_mlx_jobs` fails it terminal with `mlx_unavailable`
-    // rather than letting MPS silently run it. This covers explicit-GPU pins too: "never
-    // MPS" is absolute on Mac.
+    // rather than entering the legacy MPS compatibility branch. This covers explicit-GPU pins too:
+    // production has no MPS fallback.
     if mlx_required {
         return Ok(true);
     }
-    // Off (Windows/Linux/Docker, and Mac pre-cutover): unchanged — defer only an `auto`
-    // job to an actually-idle `mlx` worker; otherwise the torch worker is the fallback and
-    // an explicit (non-`auto`) GPU choice is always honoured.
+    // Off (Windows/Linux/Docker, and Mac pre-cutover): defer only an `auto` job to an
+    // actually-idle `mlx` worker; otherwise normal capability routing decides. An explicit
+    // (non-`auto`) GPU choice is never soft-deferred.
     if job.requested_gpu != "auto" {
         return Ok(false);
     }
@@ -3022,10 +3029,9 @@ fn should_defer_video_to_mlx_worker(
 /// Training sibling of [`should_defer_image_to_mlx_worker`] (epic 3039): a non-mlx
 /// GPU worker defers an `auto` MLX-eligible `lora_train` job when an idle `mlx`
 /// worker can run it, so the native Rust trainer (`mlx_gen::load_trainer`) claims
-/// it. Same fallback guarantees — no mlx worker registered (Windows/Linux, or the
-/// mlx worker is down) → nothing defers and the Python torch trainer runs it; an
-/// explicit (non-`auto`) GPU choice is always honoured. The torch trainers stay
-/// the cross-platform path + the Mac fallback (sc-3049), so a job is never stuck.
+/// it. With no mlx worker registered (Windows/Linux, or the mlx worker is down), nothing
+/// defers; only a worker advertising a compatible native trainer may claim it. An explicit
+/// (non-`auto`) GPU choice is never soft-deferred.
 fn should_defer_training_to_mlx_worker(
     connection: &Connection,
     job: &JobSnapshot,
@@ -3047,8 +3053,8 @@ fn should_defer_training_to_mlx_worker(
 
 /// Captioning sibling of [`should_defer_image_to_mlx_worker`] (sc-3556): a non-mlx
 /// GPU worker defers JoyCaption dataset-caption jobs to an idle mlx worker, so the
-/// native Rust captioner (`mlx_gen::load_captioner`) can run them. Windows/Linux and
-/// explicit non-auto GPU requests keep the existing Python torch captioner fallback.
+/// native Rust captioner (`mlx_gen::load_captioner`) can run them. Without a compatible
+/// native captioner, the job remains queued; explicit non-auto requests are not soft-deferred.
 fn should_defer_caption_to_mlx_worker(
     connection: &Connection,
     job: &JobSnapshot,
@@ -3069,8 +3075,8 @@ fn should_defer_caption_to_mlx_worker(
 
 /// Understanding sibling of [`should_defer_image_to_mlx_worker`] (sc-3905): a non-mlx GPU worker
 /// defers an `auto` MLX-eligible SenseNova-U1 `image_vqa` / `image_interleave` job to an idle mlx
-/// worker, so the in-process `T2iModel` (`vqa` / `interleave_gen`) claims it. Windows/Linux and
-/// explicit non-auto GPU requests keep the Python torch SenseNova path.
+/// worker, so the in-process `T2iModel` (`vqa` / `interleave_gen`) claims it. Without a compatible
+/// native understanding worker, the job remains queued; explicit non-auto requests are not soft-deferred.
 fn should_defer_understanding_to_mlx_worker(
     connection: &Connection,
     job: &JobSnapshot,
@@ -3165,12 +3171,12 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     if job_requires_gpu(&job.job_type) && worker.gpu_id.eq_ignore_ascii_case("cpu") {
         return false;
     }
-    // Epic 3039 (sc-3049): a training kernel with no torch fallback (the retired Python
-    // MLX LTX trainer) runs only on a Rust worker — a non-mlx worker must refuse it
+    // Epic 3039 (sc-3049): a native-only training kernel (the retired Python MLX LTX trainer)
+    // runs only on a Rust worker — a non-mlx worker must refuse it
     // (leaving it queued for the mlx worker) instead of claiming it and failing. The
-    // exception (sc-8614): `krea_lora` is no-torch-fallback AND has a candle trainer, so a
+    // exception (sc-8614): `krea_lora` has a candle trainer, so a
     // candle worker it is candle-eligible for must NOT be refused here (the candle training
-    // gate below admits it); only torch (and any non-candle non-mlx worker) still defers.
+    // gate below admits it); any non-candle, non-mlx worker still defers.
     if !worker.gpu_id.eq_ignore_ascii_case("mlx")
         && training_kernel_is_mlx_only(job)
         && !(worker_is_candle(worker) && training_job_is_candle_eligible(job))
@@ -3178,15 +3184,15 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         return false;
     }
     // Epic 3018/3041 + sc-3036: the in-process MLX worker (gpu_id "mlx") serves a fixed
-    // set of model families. It must not claim a job that needs the torch path — a family
-    // not yet ported, an unsupported shape, or a third-party LyCORIS LoRA — those stay on
-    // the Python worker. Non-mlx workers are unaffected here; the *preference* to route
+    // set of model families. It must not claim an unsupported family or request shape; those
+    // remain queued unless another capable native worker registers. Non-mlx workers are
+    // unaffected here; the *preference* to route
     // eligible jobs to an idle mlx worker is a soft deferral in the claim path.
     if worker.gpu_id.eq_ignore_ascii_case("mlx") {
         // Image: sc-3026 txt2img/LoRA + sc-3060 reference/edit/inpaint/outpaint +
         // image_detail + sc-3513 the `image_edit` job type (plain Image Edit). A
-        // torch-only edit model (kolors/lens/pulid) is not MLX-eligible, so the mlx
-        // worker refuses it and it stays on torch. (z_image_edit was ported to MLX,
+        // non-MLX edit model (kolors/lens/pulid) is not MLX-eligible, so the mlx
+        // worker refuses it. (z_image_edit was ported to MLX,
         // epic 3529 / sc-3923; instantid + sensenova are MLX-routed too.)
         if matches!(
             job.job_type,
@@ -3202,7 +3208,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // (LTX IC-LoRA, sc-3522), and `person_replace` → native Wan-VACE (sc-3521). The
         // per-(model, mode) gate in `video_job_is_mlx_eligible` keeps each mode to its
         // capable engines; everything it rejects — a non-MLX model, Wan extend/bridge
-        // (no IC-LoRA keyframe-append path), LoKr-on-Wan — stays on the Python worker.
+        // (no IC-LoRA keyframe-append path), LoKr-on-Wan — is refused by this worker.
         if matches!(
             job.job_type,
             JobType::VideoGenerate
@@ -3215,7 +3221,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         }
         // Training (epic 3039): the mlx worker trains only the MLX-native families
         // (z_image / sdxl / kolors / wan / ltx) via `mlx_gen::load_trainer`. `lens_lora`
-        // (sidecar, no mlx-gen crate) and LoKr-on-Wan stay on the Python torch worker.
+        // (sidecar, no mlx-gen crate) and LoKr-on-Wan are refused by this worker.
         // Applies to both dry-run and real runs.
         if matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining)
             && !training_job_is_mlx_eligible(job)
@@ -3233,13 +3239,12 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         }
         // Image upscale (sc-3489): the mlx worker runs Real-ESRGAN (the default engine) via
         // `ort`/CoreML and SeedVR2 via in-process `mlx-gen-seedvr2` (sc-4815). `aura-sr` has no
-        // Rust path, so the mlx worker refuses it and it stays on the Python torch worker.
+        // Rust path, so the mlx worker refuses it and it remains queued.
         if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_mlx_eligible(job) {
             return false;
         }
         // Video upscale (epic 4811 / sc-4816): the mlx worker runs the native SeedVR2 engine
-        // (`mlx-gen-seedvr2`). Any non-SeedVR2 engine is refused; since there is no torch
-        // video-upscale backend, this is mac-only by construction.
+        // (`mlx-gen-seedvr2`). Any non-SeedVR2 engine is refused; this is mac-only by construction.
         if matches!(job.job_type, JobType::VideoUpscale) && !video_upscale_job_is_mlx_eligible(job)
         {
             return false;
@@ -3247,19 +3252,19 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // SenseNova-U1 understanding (sc-3905): the mlx worker serves `image_vqa` /
         // `image_interleave` only for the SenseNova-U1 ids (the sole in-process understanding
         // path). A non-SenseNova understanding job is not MLX-eligible, so the mlx worker
-        // refuses it and it stays on the Python torch worker.
+        // refuses it and it remains queued.
         if matches!(job.job_type, JobType::ImageVqa | JobType::ImageInterleave)
             && !understanding_job_is_mlx_eligible(job)
         {
             return false;
         }
     }
-    // No-silent-T2I / no-torch-fallback (sc-5968, epic 5483): the co-resident Python torch worker (a
-    // non-candle, non-mlx GPU worker) must DECLINE the unsupported-pose shapes the candle worker
-    // owns-to-reject (a `advanced.poses` job on a candle model with no pose lane, e.g. sdxl) — so torch
-    // can't claim + silently render an unconditioned T2I image, and the candle worker reliably wins
+    // No-silent-T2I / no-fallback (sc-5968, epic 5483): any non-candle, non-mlx GPU descriptor must
+    // DECLINE the unsupported-pose shapes the candle worker owns-to-reject (an `advanced.poses` job
+    // on a candle model with no pose lane, e.g. sdxl), so no generic claimant can silently render an
+    // unconditioned T2I image and the candle worker reliably wins
     // them (then rejects with a typed error). Mac is unaffected: those shapes are MLX-served there
-    // (model_mac_support pose), so the `mlx` worker still claims them and only torch/`mps` declines.
+    // (model_mac_support pose), so the `mlx` worker still claims them and other descriptors decline.
     if !worker_is_candle(worker)
         && !worker.gpu_id.eq_ignore_ascii_case("mlx")
         && image_job_candle_pose_reject(job)
@@ -3270,19 +3275,19 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     // sc-5097): the candle worker advertises `image_generate` (+ `video_generate` once video engines
     // are wired) and serves gated, narrow **txt2img / txt2video-only** lanes. It must refuse every
     // other shape — a non-candle family, or a conditioned (img2img/edit/reference/inpaint/pose/
-    // i2v/extend/bridge/replace) / LoRA request — so those transparently fall back to the Python torch
-    // worker that co-resides on the box. Identified by the `candle` marker capability (not `gpu_id`,
+    // i2v/extend/bridge/replace) / LoRA request — so unsupported work remains queued unless another
+    // capable native worker registers. Identified by the `candle` marker capability (not `gpu_id`,
     // which is a real CUDA index here). When candle is disabled the marker is absent and this is inert,
     // so production routing is unchanged until the lane is turned on.
     if worker_is_candle(worker) {
         // ImageGenerate + ImageEdit: claim the candle-served shapes (incl. the sc-5487
         // SdxlEdit/Flux2Edit/QwenEdit `image_edit` lanes) AND the unsupported-pose shapes the candle
         // worker must OWN to reject (a `advanced.poses` job on a candle model with no pose lane, e.g.
-        // sdxl) — so those fail loudly on candle instead of falling back to torch + silently rendering
-        // an unconditioned T2I image (sc-5968, the no-torch-fallback / no-silent-T2I directive). Every
-        // other shape candle declines, staying on the co-resident torch worker. `image_edit` is gated
+        // sdxl) — so those fail loudly on candle instead of silently rendering an unconditioned T2I
+        // image (sc-5968, the no-fallback / no-silent-T2I directive). Every other unsupported shape is
+        // declined and remains queued. `image_edit` is gated
         // here too (mirroring the mlx `JobType::ImageGenerate | JobType::ImageEdit` claim arm): without
-        // it a torch-only edit model would be claimed by candle and fail instead of falling back.
+        // it an unsupported edit model would be claimed by candle and fail instead of remaining queued.
         if matches!(job.job_type, JobType::ImageGenerate | JobType::ImageEdit)
             && !(image_job_is_candle_eligible(job) || image_job_candle_pose_reject(job))
         {
@@ -3302,11 +3307,11 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         }
         // Training (sc-7817, epic 5164): the candle worker trains only the candle-native families
         // (sdxl / z_image / lens / the Wan A14B T2V MoE) via `gen_core::load_trainer`. Everything
-        // else — Kolors, LTX, the dense Wan 5B, the Wan I2V A14B — has no candle trainer and stays on
-        // the co-resident Python torch worker. WITHOUT this gate the candle worker would claim a real
+        // else — Kolors, LTX, the dense Wan 5B, the Wan I2V A14B — has no candle trainer and remains
+        // queued. WITHOUT this gate the candle worker would claim a real
         // training job it can't execute (the `lora_train_execute` advertisement is coarse — it lights
         // up whenever ANY candle trainer is registered) and fail it terminally instead of leaving it
-        // for torch. Applies to both dry-run and real runs; mirrors the mlx training gate above.
+        // queued. Applies to both dry-run and real runs; mirrors the mlx training gate above.
         if matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining)
             && !training_job_is_candle_eligible(job)
         {
@@ -3316,7 +3321,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
             return false;
         }
         // Dataset captioning (sc-5098): the candle worker serves only JoyCaption (the candle
-        // captioner provider). A non-`joy_caption` caption job stays on the Python torch worker.
+        // captioner provider). A non-`joy_caption` caption job is refused and remains queued.
         // Eligibility is backend-neutral (captioner == joy_caption), so reuse the mlx gate.
         if matches!(job.job_type, JobType::TrainingCaption) && !caption_job_is_mlx_eligible(job) {
             return false;
@@ -3325,7 +3330,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // `image_interleave` only for the SenseNova-U1 ids (via the concrete candle `T2iModel::{vqa,
         // interleave_gen}` — the off-Mac sibling of the MLX understanding path). Eligibility is
         // backend-neutral (the model is SenseNova-U1), so reuse the understanding gate; a
-        // non-SenseNova understanding job stays on the Python torch worker.
+        // non-SenseNova understanding job is refused and remains queued.
         if matches!(job.job_type, JobType::ImageVqa | JobType::ImageInterleave)
             && !understanding_job_is_mlx_eligible(job)
         {
@@ -3333,8 +3338,8 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         }
         // Image upscale (sc-5928 SeedVR2 + sc-5499 Real-ESRGAN, epic 4811 / epic 5482): the candle
         // worker serves Real-ESRGAN (`ort`/CUDA, sc-5499) AND SeedVR2 (`candle-gen-seedvr2`, the
-        // Windows/CUDA sibling of mlx-gen-seedvr2). Only `aura-sr` has no candle path — it is refused
-        // and runs on the Python torch worker until Phase 7.
+        // Windows/CUDA sibling of mlx-gen-seedvr2). Only `aura-sr` has no candle path, so it is
+        // refused and remains queued.
         if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_candle_eligible(job) {
             return false;
         }
@@ -3346,12 +3351,12 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
             return false;
         }
     }
-    // SeedVR2 upscaling has NO torch backend — it runs on the native MLX worker (Mac) or the candle
-    // worker (Windows/Linux). A plain torch GPU/CPU worker (neither `mlx` nor candle) must refuse a
+    // SeedVR2 upscaling runs on the native MLX worker (Mac) or the candle worker (Windows/Linux).
+    // Any generic GPU/CPU descriptor (neither `mlx` nor candle) must refuse a
     // SeedVR2 `image_upscale` job so it stays queued for the mlx/candle worker instead of being
     // claimed and failing with "no generator registered". This is the inverse of the AuraSR gate
-    // (torch-only → mlx/candle refuse it). `video_upscale` is candle/mlx-only by capability (a torch
-    // worker never advertises it), so it needs no torch guard here.
+    // (unsupported by native lanes → mlx/candle refuse it). `video_upscale` is candle/mlx-only by
+    // capability, so it needs no extra generic-worker guard here.
     if !worker.gpu_id.eq_ignore_ascii_case("mlx")
         && !worker_is_candle(worker)
         && upscale_job_requests_seedvr2(job)
@@ -3371,7 +3376,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     // capability, which a worker advertises only when its inference backend is
     // available. Dry-run plan validation needs just the base `lora_train`
     // capability. This keeps a real run queued for a capable worker instead of
-    // failing terminally after a torch-less worker claims it.
+    // failing terminally after a worker without a matching native engine claims it.
     if is_real_training_job(job) {
         return advertises(WorkerCapability::LoraTrainExecute.as_str());
     }
@@ -3392,7 +3397,7 @@ fn is_real_training_job(job: &JobSnapshot) -> bool {
 }
 
 /// The worker capability a job requires. Person detection/tracking default to
-/// the real, model-backed capability served by the Python GPU worker; an
+/// the real, model-backed capability served by a native GPU worker; an
 /// explicit `preview: true` payload requests the Rust utility worker's
 /// procedural preview capability instead — so a real job never routes to the
 /// placeholder. Mirrors the dry-run training capability split.

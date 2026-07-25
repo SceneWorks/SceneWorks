@@ -398,9 +398,10 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
             .unwrap_or(Value::Null)
     };
     // Unported image model (no Rust/MLX engine) → unsupported on Mac, with a gap reason. No real
-    // image model is torch-only anymore: every family was ported to MLX — Kolors (sc-3875),
+    // image model is unsupported solely because of a retired backend anymore: every family was
+    // ported to MLX — Kolors (sc-3875),
     // PuLID-FLUX (sc-3344), and finally Lens / Lens-Turbo (epic 3164 / sc-5105, the last one) — so
-    // the torch-only gating is demonstrated with a synthetic unported id, which has no dedicated
+    // unsupported gating is demonstrated with a synthetic unported id, which has no dedicated
     // port epic (suggestedEpic absent → "needs an epic", epic 3482 policy).
     let torch_only = by_id("unported_image_model");
     assert_eq!(torch_only["macSupport"]["supported"], false);
@@ -3310,7 +3311,7 @@ fn builtin_manifest_registers_wan_a14b_lightning_corequisite() {
             lightning["repo"], "lightx2v/Wan2.2-Lightning",
             "{model_id} coRequisite points at the lightx2v Lightning repo"
         );
-        // macOS-only (the native MLX path is Mac; Windows/Linux use the torch adapter).
+        // macOS-only because this co-requisite is consumed by the native MLX path.
         let platforms: Vec<&str> = lightning["platforms"]
             .as_array()
             .expect("coRequisite platforms array")

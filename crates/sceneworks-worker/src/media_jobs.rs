@@ -446,6 +446,15 @@ pub(crate) async fn run_person_detect_job(
 
 /// The largest seek (seconds) a person-detect frame extraction will ever accept.
 const PERSON_DETECT_MAX_TIMESTAMP_SECONDS: f64 = 3600.0;
+pub(crate) const PERSON_DETECTOR_MODEL: &str = "yolo11m";
+#[cfg(target_os = "macos")]
+pub(crate) const PERSON_DETECTOR_ADAPTER: &str = "yolo11_mlx";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const PERSON_DETECTOR_ADAPTER: &str = "yolo11_ort";
+#[cfg(target_os = "macos")]
+pub(crate) const PERSON_DETECTOR_BACKEND: &str = "mlx";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const PERSON_DETECTOR_BACKEND: &str = "ort";
 
 /// Clamp the requested `sourceTimestamp` into a seek that lands inside the source clip.
 ///
@@ -544,10 +553,14 @@ pub(crate) async fn run_person_detect(
                     .await?;
                     (
                         boxes,
-                        "yolo11m".to_owned(),
-                        "yolo11_mlx",
+                        PERSON_DETECTOR_MODEL.to_owned(),
+                        PERSON_DETECTOR_ADAPTER,
                         true,
-                        json!({ "backend": "mlx", "device": device, "model": "yolo11m" }),
+                        json!({
+                            "backend": PERSON_DETECTOR_BACKEND,
+                            "device": device,
+                            "model": PERSON_DETECTOR_MODEL
+                        }),
                     )
                 };
             let asset = json!({
@@ -628,8 +641,8 @@ pub(crate) async fn run_person_detect(
 /// Run the YOLO11 person detector on a rendered frame, returning the normalized detection
 /// array (Python `run_person_detect` shape) + the device the model ran on. Available on Mac
 /// (native MLX, epic 3482 / sc-3633) AND the off-Mac candle GPU-worker lane (`ort`/CUDA,
-/// sc-5498); identical body — the platform backend is chosen inside `person_jobs`. On a
-/// candle-disabled box the Python Ultralytics path serves Windows/Linux (the stub below).
+/// sc-5498); identical body — the platform backend is chosen inside `person_jobs`. A
+/// candle-disabled off-Mac build refuses the job (the stub below).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -695,7 +708,7 @@ async fn run_yolo11_person_detect(
 /// `ffmpeg -ss duration` accurate seek then yields no output and fails the whole track.
 /// 0.2 s clears one frame for any clip ≥ 5 fps without meaningfully moving the sample.
 /// Available on Mac AND the off-Mac candle lane, like its sole caller
-/// `assemble_real_person_track` (the Python Win/Linux path samples/extracts separately).
+/// `assemble_real_person_track`.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -803,9 +816,9 @@ struct PersonTrackBackend {
 /// the boxes into track identities with the pure-Rust SORT/ByteTrack tracker, resample the chosen
 /// identity onto the sample cadence (sc-3634), then fill per-frame masks with the SAM segmenter.
 ///
-/// One cfg-free orchestrator shared by the macOS (native-MLX) and off-Mac candle lanes (sc-8833);
-/// the Python Ultralytics path is the fallback on a candle-disabled box. The only per-backend seams
-/// are the `backend` descriptor (device/backend/segmenter labels) and the `run_segmenter` closure —
+/// One cfg-free orchestrator shared by the macOS (native-MLX) and off-Mac candle lanes (sc-8833).
+/// A candle-disabled off-Mac build refuses the job. The only per-backend seams are the `backend`
+/// descriptor (device/backend/segmenter labels) and the `run_segmenter` closure —
 /// every rendered frame's real device overrides `device_default`, so the default only shows through
 /// in the (unreachable) zero-frame case. The work dir is cleaned up on both the not-found error path
 /// and the success path.
@@ -1465,8 +1478,7 @@ async fn assemble_real_person_track(
 
 /// Off-Mac candle GPU-worker entry point for [`assemble_real_person_track_shared`] (sc-5498 /
 /// sc-8833): supplies the candle backend descriptor (device `cuda`, SAM3-only segmenter, sc-6247)
-/// and the candle SAM3 segmenter closure. The Python Ultralytics path is the fallback on a
-/// candle-disabled box.
+/// and the candle SAM3 segmenter closure. A candle-disabled build has no person-track lane.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[allow(clippy::too_many_arguments)]
 async fn assemble_real_person_track(
@@ -3152,12 +3164,34 @@ pub(crate) async fn run_ffmpeg(
     run_ffmpeg_capture_stderr(args, context).await.map(|_| ())
 }
 
+/// Run FFmpeg while streaming pre-split binary chunks into stdin. The chunks are consumed one at a
+/// time, so callers can move already-owned frame buffers into the writer without concatenating or
+/// cloning a second whole-video buffer. Heartbeat, cancellation, binary resolution, stderr bounds,
+/// and kill-on-drop behavior are identical to [`run_ffmpeg`].
+pub(crate) async fn run_ffmpeg_with_stdin_chunks(
+    args: Vec<String>,
+    chunks: Vec<Vec<u8>>,
+    context: Option<FfmpegContext<'_>>,
+) -> WorkerResult<()> {
+    run_ffmpeg_capture_stderr_inner(args, context, Some(chunks))
+        .await
+        .map(|_| ())
+}
+
 /// Run FFmpeg with the shared heartbeat/cancellation lifecycle and return its stderr on success.
 /// Most callers use [`run_ffmpeg`]; media probes need FFmpeg's progress/stream metadata without
 /// introducing an `ffprobe` dependency (the desktop bundle ships only FFmpeg).
 pub(crate) async fn run_ffmpeg_capture_stderr(
     args: Vec<String>,
     context: Option<FfmpegContext<'_>>,
+) -> WorkerResult<String> {
+    run_ffmpeg_capture_stderr_inner(args, context, None).await
+}
+
+async fn run_ffmpeg_capture_stderr_inner(
+    args: Vec<String>,
+    context: Option<FfmpegContext<'_>>,
+    stdin_chunks: Option<Vec<Vec<u8>>>,
 ) -> WorkerResult<String> {
     let Some((program, arguments)) = args.split_first() else {
         return Err(WorkerError::InvalidPayload(
@@ -3179,10 +3213,17 @@ pub(crate) async fn run_ffmpeg_capture_stderr(
     // no-op for a plain binary and on every other platform.
     let resolved_program =
         sceneworks_core::media_convert::resolve_ffmpeg_program(&configured_program);
-    let mut child = Command::new(resolved_program.as_ref())
+    let mut command = Command::new(resolved_program.as_ref());
+    command
         .args(arguments)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if stdin_chunks.is_some() {
+        command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
+    let mut child = command
         // sc-8804 (F-003): if the heartbeat/cancel `?` below returns early (a transient POST
         // failure or a 409 stale-sweep reclaim), `child` is dropped without an explicit kill. A
         // tokio child is not reaped on drop by default, so ffmpeg would keep running and writing a
@@ -3195,6 +3236,18 @@ pub(crate) async fn run_ffmpeg_capture_stderr(
             ))
         })?;
 
+    let mut stdin_task = stdin_chunks.map(|chunks| {
+        let mut stdin = child
+            .stdin
+            .take()
+            .expect("piped FFmpeg stdin is available after spawn");
+        tokio::spawn(async move {
+            for chunk in chunks {
+                stdin.write_all(&chunk).await?;
+            }
+            stdin.shutdown().await
+        })
+    });
     let mut stderr = child.stderr.take();
     let stderr_task = tokio::spawn(async move {
         let mut bytes = Vec::new();
@@ -3211,10 +3264,25 @@ pub(crate) async fn run_ffmpeg_capture_stderr(
             tokio::select! {
                 status = child.wait() => break status?,
                 _ = interval.tick() => {
-                    heartbeat(context.api, context.settings, WorkerStatus::Busy, Some(context.job_id)).await?;
+                    if let Err(error) = heartbeat(
+                        context.api,
+                        context.settings,
+                        WorkerStatus::Busy,
+                        Some(context.job_id),
+                    ).await {
+                        if let Some(task) = stdin_task.take() {
+                            task.abort();
+                            let _ = task.await;
+                        }
+                        return Err(error);
+                    }
                     if cancel_requested_peek(context.api, context.job_id).await {
                         let _ = child.kill().await;
                         let _ = child.wait().await;
+                        if let Some(task) = stdin_task.take() {
+                            task.abort();
+                            let _ = task.await;
+                        }
                         mark_job_canceled(context.api, context.job_id, context.cancel_message).await?;
                         return Err(WorkerError::Canceled(context.cancel_message.to_owned()));
                     }
@@ -3230,7 +3298,16 @@ pub(crate) async fn run_ffmpeg_capture_stderr(
         .map_err(|error| task_join_error("ffmpeg stderr reader task", error))?;
     let stderr = String::from_utf8_lossy(&stderr);
     if status.success() {
+        if let Some(task) = stdin_task {
+            task.await
+                .map_err(|error| task_join_error("ffmpeg stdin writer task", error))?
+                .map_err(WorkerError::Io)?;
+        }
         return Ok(stderr.into_owned());
+    }
+    if let Some(task) = stdin_task {
+        task.abort();
+        let _ = task.await;
     }
     let bounded = bounded_tail(&stderr, 10, 2000);
     if bounded.trim().is_empty() {

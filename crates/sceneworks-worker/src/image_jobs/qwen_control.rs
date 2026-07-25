@@ -5,9 +5,10 @@ use super::{
 };
 use super::{
     pose_entries, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
-    run_candle_strict_control, ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, QwenFunControl,
-    QwenFunControlPaths, QwenFunControlRequest, Settings, Value, WorkerError, WorkerResult,
+    run_candle_strict_control, trusted_control_weight_revision, ApiClient, CancelFlag,
+    CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
+    Progress, QwenFunControl, QwenFunControlPaths, QwenFunControlRequest, Settings, Value,
+    WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -45,10 +46,10 @@ const QWEN_CONTROL_REPO: &str = "SceneWorks/qwen-image-2512-fun-controlnet-union
 /// Pinned revision for the default `QWEN_CONTROL_REPO` (sc-9879, F-077 follow-up). Fetching the mutable
 /// `main` branch means a re-push (or a compromised token) could silently swap the ControlNet overlay we
 /// load; pin the exact commit for defense-in-depth (mirrors the other candle control lanes, e.g.
-/// `FLUX1_CONTROL_CANDLE_REVISION`). Applied ONLY to the default repo — a manifest/user
-/// `controlWeights.repo` override keeps `main`. The pin is the packed-tier repo's `main` HEAD as of the
-/// sc-9870 repoint. HF's tree API still reports each tier file's `lfs.oid`, which `ensure_hf_cached_file`
-/// verifies against.
+/// `FLUX1_CONTROL_CANDLE_REVISION`). Registered overlays carry their own catalog-authorized immutable
+/// revision. The pin is the packed-tier repo's `main` HEAD as of the sc-9870 repoint. HF's tree API still
+/// reports each tier file's `lfs.oid`, which `ensure_hf_cached_file` verifies against.
+#[cfg(test)]
 pub(super) const QWEN_CONTROL_REVISION: &str = "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca";
 /// The single packed control file inside each tier subdir (`q4/`, `q8/`, `bf16/`). Deterministic —
 /// the packed tier ships exactly one `model.safetensors` per subdir, so the sc-8350 two-overlay
@@ -79,7 +80,7 @@ fn is_qwen_control_model(model: &str) -> bool {
 
 /// Resolve the Qwen-Image-2512 base (diffusers) snapshot: an explicit `modelPath` (advanced or manifest) →
 /// the HF cache snapshot for the manifest `repo` (default `Qwen/Qwen-Image-2512`, sc-8350). `None` ⇒ not
-/// present locally (the job is not candle-runnable, falls through to torch). Mirrors
+/// present locally (the candle lane refuses the job; no fallback is attempted). Mirrors
 /// `resolve_kolors_ipadapter_base`.
 fn resolve_qwen_control_base(
     request: &ImageRequest,
@@ -191,9 +192,8 @@ fn qwen_control_installed_default_tier(snapshot: Option<&Path>) -> &'static str 
 /// `<tier>/model.safetensors` where `<tier>` is [`qwen_control_tier_subdir`] (per `advanced.mlxQuantize`).
 /// Deterministic single-file resolution — each tier subdir ships exactly one `model.safetensors`.
 ///
-/// Override: `advanced.controlWeights.{repo,filename}` still points at a flat repo with a plain-component
-/// weight file (sc-8821 / F-019 — the filename must have no path separators). When a `filename` override
-/// is present the tier subdir is NOT applied (the override addresses a specific file directly).
+/// A registered overlay may provide a catalog-authorized repo/file/revision tuple. When a filename is
+/// present the tier subdir is NOT applied (the tuple addresses a specific file directly).
 pub(super) fn qwen_control_repo_file(
     request: &ImageRequest,
     settings: &Settings,
@@ -212,18 +212,42 @@ pub(super) fn qwen_control_repo_file(
     let repo = pick("repo").unwrap_or_else(|| QWEN_CONTROL_REPO.to_owned());
     let file = match pick("filename") {
         // Explicit override — a plain-component file in the override repo (no tier subdir).
+        Some(name)
+            if sceneworks_core::control_weights::shipped_control_weight(
+                QWEN_CONTROL_ENGINE_ID,
+                &repo,
+                &name,
+            )
+            .is_some() =>
+        {
+            name
+        }
         Some(name) => safe_weight_filename(&name, "advanced.controlWeights.filename")?,
         // Default packed tier — `<tier>/model.safetensors` selected by `advanced.mlxQuantize`, whose
         // DEFAULT tier is clamped to the installed overlay so a plain default job never forces a new
         // fetch (sc-10726).
         None => {
-            let snapshot = huggingface_snapshot_dir(&settings.data_dir, &repo);
+            let snapshot = (repo == QWEN_CONTROL_REPO)
+                .then(|| {
+                    sceneworks_core::control_weights::default_control_revision(
+                        QWEN_CONTROL_ENGINE_ID,
+                    )
+                    .expect("shipped Qwen control revision")
+                })
+                .and_then(|revision| {
+                    crate::model_jobs::huggingface_pinned_snapshot_dir(
+                        &settings.data_dir,
+                        &repo,
+                        revision,
+                    )
+                });
             format!(
                 "{}/{QWEN_CONTROL_FILE}",
                 qwen_control_tier_subdir(request, snapshot.as_deref())
             )
         }
     };
+    trusted_control_weight_revision(request, QWEN_CONTROL_ENGINE_ID, &repo, &file)?;
     Ok((repo, file))
 }
 
@@ -243,7 +267,10 @@ async fn ensure_qwen_control_weights(
             return Ok(p);
         }
     }
-    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, &repo) {
+    let revision = trusted_control_weight_revision(request, QWEN_CONTROL_ENGINE_ID, &repo, &file)?;
+    if let Some(snapshot) =
+        crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, &repo, &revision)
+    {
         let f = snapshot.join(&file);
         if f.is_file() {
             return Ok(f);
@@ -267,14 +294,8 @@ async fn ensure_qwen_control_weights(
     // ControlNet overlay (sc-9879). sc-9870 (merged concurrently) repointed `QWEN_CONTROL_REPO` from
     // `alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union` to the first-party SceneWorks PACKED tier
     // (`SceneWorks/qwen-image-2512-fun-controlnet-union`, per-quant `<tier>/model.safetensors`); the pin
-    // below is that repo's verified `main` HEAD. A manifest/user `controlWeights.repo` override may carry
-    // its own revision layout, so only pin when we're on the default repo.
-    let revision = if repo == QWEN_CONTROL_REPO {
-        QWEN_CONTROL_REVISION
-    } else {
-        "main"
-    };
-    ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await?;
+    // below is that repo's verified `main` HEAD. Registered overlays carry their own immutable pin.
+    ensure_hf_cached_file(&context, &repo, &revision, &file, &dst).await?;
     Ok(dst)
 }
 

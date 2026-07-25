@@ -2936,7 +2936,7 @@ fn apply_gating_fields(object: &mut JsonObject) {
 }
 
 // Mac UI gating (sc-3486): per-model Rust/MLX support so the web client can hide/
-// disable a torch-only model in the pickers, plus (macOS only) the MLX availability +
+// disable a model with no native Mac lane in the pickers, plus (macOS only) the MLX availability +
 // conversion status for models that declare an `mlx` variant. Additive fields the
 // web/Docker build ignores; the client only acts on macSupport when the capabilities
 // endpoint reports `macGatingActive`, so non-Mac pickers are untouched.

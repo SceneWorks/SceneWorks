@@ -43,7 +43,8 @@ fn is_zimage_edit_candle_model(model: &str) -> bool {
 
 /// Resolve the Z-Image base (diffusers) snapshot: an explicit `modelPath` (advanced or manifest) → the
 /// HF cache snapshot for the manifest `repo` (default `Tongyi-MAI/Z-Image-Turbo`). `None` ⇒ not present
-/// locally (the job is not candle-runnable, falls through to torch). Mirrors `resolve_zimage_control_base`.
+/// locally (the candle lane refuses the job; no fallback is attempted). Mirrors
+/// `resolve_zimage_control_base`.
 pub(super) fn resolve_zimage_edit_candle_base(
     request: &ImageRequest,
     settings: &Settings,

@@ -49,6 +49,114 @@ async fn training_presets_route_returns_builtin_registry() {
 }
 
 #[tokio::test]
+async fn parquet_import_job_queues_for_empty_dataset_and_finalizes_staged_items() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Parquet Import Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let project_path = std::path::PathBuf::from(project["path"].as_str().expect("project path"));
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({ "name": "LAION subset", "items": [] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dataset_id = dataset["id"].as_str().expect("dataset id");
+    let source = temp_dir.path().join("laion-metadata");
+    std::fs::create_dir_all(&source).expect("source directory creates");
+    std::fs::write(source.join("part-00000.snappy.parquet"), b"PAR1")
+        .expect("placeholder shard writes");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/parquet-import-jobs"
+        ),
+        json!({
+            "sourcePath": source,
+            "maxItems": 25,
+            "minEdge": 384,
+            "concurrency": 8,
+            "captionIncludes": ["portrait", "person"],
+            "captionExcludes": ["logo"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["type"], "dataset_parquet_import");
+    assert_eq!(job["payload"]["urlColumn"], "URL");
+    assert_eq!(job["payload"]["captionColumn"], "TEXT");
+    assert_eq!(job["payload"]["maxItems"], 25);
+    assert_eq!(job["payload"]["minEdge"], 384);
+    assert_eq!(job["payload"]["concurrency"], 8);
+    assert_eq!(
+        job["payload"]["captionIncludes"],
+        json!(["portrait", "person"])
+    );
+    assert_eq!(job["payload"]["captionExcludes"], json!(["logo"]));
+
+    let job_id = job["id"].as_str().expect("job id");
+    let staging = project_path
+        .join("training")
+        .join("datasets")
+        .join(dataset_id)
+        .join("parquet-imports")
+        .join(job_id);
+    std::fs::create_dir_all(&staging).expect("staging creates");
+    std::fs::write(staging.join("pq_abc.png"), b"png-bytes").expect("staged image writes");
+    let relative = format!("training/datasets/{dataset_id}/parquet-imports/{job_id}/pq_abc.png");
+    let (status, finalized) = request(
+        app,
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/parquet-import-finalize"
+        ),
+        json!({
+            "jobId": job_id,
+            "datasetVersion": dataset["version"],
+            "items": [{
+                "id": "pq_abc",
+                "path": relative,
+                "displayName": "pq_abc.png",
+                "caption": {
+                    "text": "a cinematic portrait",
+                    "source": "imported",
+                    "triggerWords": []
+                },
+                "width": 1024,
+                "height": 768
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(finalized["version"], 2);
+    assert_eq!(finalized["items"][0]["id"], "pq_abc");
+    assert_eq!(
+        finalized["items"][0]["caption"]["text"],
+        "a cinematic portrait"
+    );
+    assert_eq!(finalized["items"][0]["caption"]["source"], "imported");
+    assert!(project_path
+        .join("training")
+        .join("datasets")
+        .join(dataset_id)
+        .join("images")
+        .join("pq_abc.png")
+        .exists());
+}
+
+#[tokio::test]
 async fn training_dataset_routes_persist_and_validate_project_assets() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);

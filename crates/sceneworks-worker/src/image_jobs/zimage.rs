@@ -43,6 +43,7 @@ fn zimage_base_control_available(request: &ImageRequest, settings: &Settings) ->
 fn resolve_control_weights_for(
     request: &ImageRequest,
     settings: &Settings,
+    engine_id: &'static str,
     default_repo: &'static str,
     default_file: &'static str,
 ) -> WorkerResult<Option<PathBuf>> {
@@ -64,7 +65,10 @@ fn resolve_control_weights_for(
         &str_field("filename", default_file),
         "advanced.controlWeights.filename",
     )?;
-    let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, &repo) else {
+    let revision = trusted_control_weight_revision(request, engine_id, &repo, &filename)?;
+    let Some(snapshot) =
+        crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, &repo, &revision)
+    else {
         return Ok(None);
     };
     let path = snapshot.join(filename);
@@ -81,6 +85,7 @@ fn resolve_control_weights(
     resolve_control_weights_for(
         request,
         settings,
+        ZIMAGE_CONTROL_ENGINE_ID,
         strict_control_default_repo(ZIMAGE_CONTROL_ENGINE_ID),
         ZIMAGE_CONTROL_FILE,
     )
@@ -96,6 +101,7 @@ fn resolve_base_control_weights(
     resolve_control_weights_for(
         request,
         settings,
+        ZIMAGE_BASE_CONTROL_ENGINE_ID,
         strict_control_default_repo(ZIMAGE_BASE_CONTROL_ENGINE_ID),
         ZIMAGE_BASE_CONTROL_FILE,
     )

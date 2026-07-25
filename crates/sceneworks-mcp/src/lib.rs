@@ -69,6 +69,7 @@ pub fn streamable_http_service_with_hosts(
     allowed_hosts: Vec<String>,
 ) -> McpHttpService {
     let api = ApiClient::new(config);
+    let forwarded_hosts = allowed_hosts.clone();
     let transport_config = if allowed_hosts.is_empty() {
         // Empty ⇒ allow any Host (rmcp semantics). Only reached for the wildcard
         // LAN bind with no operator override; the access token is the control there.
@@ -77,10 +78,47 @@ pub fn streamable_http_service_with_hosts(
         StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts)
     };
     StreamableHttpService::new(
-        move || Ok(SceneWorksMcp::new(api.clone()).with_job_wait(job_wait.clone())),
+        move || {
+            Ok(SceneWorksMcp::new(api.clone())
+                .with_job_wait(job_wait.clone())
+                .with_allowed_hosts(forwarded_hosts.clone()))
+        },
         Arc::new(LocalSessionManager::default()),
         transport_config,
     )
+}
+
+/// Match an HTTP authority against the MCP Host allow-list using the same
+/// host/optional-port semantics as rmcp. Unlike rmcp's inbound-host fallback,
+/// an empty list admits no forwarded authority: wildcard deployments must
+/// explicitly configure `SCENEWORKS_MCP_ALLOWED_HOSTS` before forwarded headers
+/// can influence ticket-bearing URLs.
+pub(crate) fn forwarded_authority_is_allowed(authority: &str, allowed_hosts: &[String]) -> bool {
+    let Ok(authority) = http::uri::Authority::try_from(authority.trim()) else {
+        return false;
+    };
+    let host = authority
+        .host()
+        .trim_matches(['[', ']'])
+        .to_ascii_lowercase();
+    let port = authority.port_u16();
+    !allowed_hosts.is_empty()
+        && allowed_hosts.iter().any(|allowed| {
+            let allowed = allowed.trim();
+            let (allowed_host, allowed_port) =
+                if let Ok(authority) = http::uri::Authority::try_from(allowed) {
+                    (
+                        authority
+                            .host()
+                            .trim_matches(['[', ']'])
+                            .to_ascii_lowercase(),
+                        authority.port_u16(),
+                    )
+                } else {
+                    (allowed.trim_matches(['[', ']']).to_ascii_lowercase(), None)
+                };
+            allowed_host == host && allowed_port.map_or(true, |allowed| port == Some(allowed))
+        })
 }
 
 /// The loopback host set always accepted for `/mcp`: `localhost`, `127.0.0.1`,
@@ -154,7 +192,7 @@ pub fn mcp_allowed_hosts(host: &str, port: u16, extra: &[String]) -> Vec<String>
 
 #[cfg(test)]
 mod tests {
-    use super::mcp_allowed_hosts;
+    use super::{forwarded_authority_is_allowed, mcp_allowed_hosts};
 
     const LOOPBACK: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 
@@ -224,5 +262,30 @@ mod tests {
                 "box.lan"
             ],
         );
+    }
+
+    #[test]
+    fn forwarded_authority_requires_an_exact_configured_host() {
+        let allowed = vec![
+            "studio.example.com:443".to_owned(),
+            "scenebox.local".to_owned(),
+        ];
+        assert!(forwarded_authority_is_allowed(
+            "studio.example.com:443",
+            &allowed
+        ));
+        assert!(!forwarded_authority_is_allowed(
+            "studio.example.com:444",
+            &allowed
+        ));
+        assert!(forwarded_authority_is_allowed(
+            "scenebox.local:8000",
+            &allowed
+        ));
+        assert!(!forwarded_authority_is_allowed(
+            "attacker.example",
+            &allowed
+        ));
+        assert!(!forwarded_authority_is_allowed("studio.example.com", &[]));
     }
 }

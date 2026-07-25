@@ -11,9 +11,8 @@
 //! Available on macOS (CoreML EP) AND the off-Mac candle GPU-worker lane (sc-5496,
 //! epic 5482): the Windows/Linux/CUDA sibling runs the SAME RTMW detector + the SAME
 //! pure pre/post math — only the `ort` execution provider differs (CoreML on Mac, CUDA
-//! with a CPU fallback off-Mac). On a candle-disabled box the Python rtmlib path stays
-//! the Windows/Linux backend; the candle worker advertises `pose_detect` while the
-//! Python path stays a co-resident fallback (retired wholesale in Phase 7, epic 5483).
+//! with a CPU fallback off-Mac). On a candle-disabled box the capability is not advertised and the
+//! job remains queued; the candle worker is the off-Mac native `pose_detect` lane.
 //! The keypoint conversion + geometry (`wholebody_to_openpose`, `squareify`,
 //! facing/bbox) are pure and unit-tested without the onnx weights; only the
 //! onnxruntime inference is gated.

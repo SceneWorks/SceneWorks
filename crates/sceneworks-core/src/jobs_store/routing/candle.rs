@@ -27,8 +27,8 @@ pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &["wan_2_2_t2v_14b", "wan_2
 /// `generate_candle_stream` drives plain text-to-image, and the bespoke lanes branched out below add
 /// the conditioned shapes ported under epic 5480 — SDXL/FLUX.2/Qwen `edit_image` (sc-5487), IP-Adapter
 /// reference (sc-5488/sc-5872), InstantID/PuLID identity (sc-5491/sc-5492), and strict-pose ControlNet
-/// (sc-5489). Anything still without a candle lane (a torch-only family, an unported shape, a LoRA on a
-/// non-Lens family) falls back to the Python torch worker, so the candle worker refuses it here.
+/// (sc-5489). Anything still without a candle lane (an unsupported family or shape, or a LoRA on a
+/// non-Lens family) is refused here and remains queued for a capable native worker.
 ///
 /// Like the MLX twin [`image_job_is_mlx_eligible`], this accepts BOTH `image_generate` and the distinct
 /// `image_edit` job type (the Image Studio/Editor "plain Image Edit": `mode == "edit_image"` +
@@ -279,8 +279,9 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty())
     };
-    // Any conditioning asset (img2img source, IP-Adapter reference, or inpaint mask) → torch. Applies
-    // to EVERY candle family including Lens (pure T2I — no conditioning shapes in the Lens port).
+    // Any conditioning asset (img2img source, IP-Adapter reference, or inpaint mask) is refused by
+    // this base lane. Applies to EVERY candle family including Lens (pure T2I — no conditioning
+    // shapes in the Lens port).
     if has_nonempty_id("sourceAssetId")
         || has_nonempty_id("referenceAssetId")
         || has_nonempty_id("maskAssetId")
@@ -307,7 +308,7 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
     {
         return false;
     }
-    // Strict-pose ControlNet (`advanced.poses`, object-shaped entries) → torch.
+    // Strict-pose ControlNet (`advanced.poses`, object-shaped entries) is refused by this base lane.
     let has_poses = payload
         .get("advanced")
         .and_then(Value::as_object)
@@ -317,9 +318,9 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
     if has_poses {
         return false;
     }
-    // On-the-fly quantization (`advanced.mlxQuantize` > 0) → torch UNLESS the family advertises quant.
+    // On-the-fly quantization (`advanced.mlxQuantize` > 0) is refused UNLESS the family advertises quant.
     // The sc-3675/sc-5096 candle providers advertise `supported_quants: &[]` (dense bf16/fp16 only), so
-    // an explicit quant request can't be honored — route to Python rather than silently running dense
+    // an explicit quant request can't be honored — refuse it rather than silently running dense
     // (sc-5099). Lens (sc-5126), SD3.5 (sc-7880), Krea (sc-9607/sc-9983), the Ideogram/Boogu packed
     // families (sc-9607), and Qwen-Image (sc-11020) advertise Q4/Q8, so their quant requests stay on
     // candle. For the packed families
@@ -352,8 +353,8 @@ pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
 /// text-to-video, the 14B I2V's single source-image conditioning (sc-5175), SVD image→video (sc-5493),
 /// **and** the Wan-VACE advanced modes — replace_person / extend / bridge (sc-5494, the `PersonReplace`
 /// / `VideoExtend` / `VideoBridge` job types → the candle `wan_vace` engine). Every other shape
-/// (reference/mask/first-last-frame conditioning, LoRAs) must fall back to the Python torch worker, so
-/// the candle worker refuses it here. SCAIL-2 (`scail2_14b`) adds a DISTINCT candle engine off-Mac —
+/// (reference/mask/first-last-frame conditioning, LoRAs) is refused here and remains queued for a
+/// capable native worker. SCAIL-2 (`scail2_14b`) adds a DISTINCT candle engine off-Mac —
 /// `animate_character` + `replace_person` (sc-6837, epic 6563) — gated separately (it is not a VACE
 /// model). Bernini (`bernini`) adds another DISTINCT candle engine off-Mac — t2v + the editing/
 /// reference/multi-source video modes (sc-10997, epic 6562) — also gated separately. The per-model
@@ -401,7 +402,7 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     };
     if CANDLE_VIDEO_I2V_ROUTED_MODELS.contains(&model) {
         // Wan 14B I2V is image→video ONLY (sc-5175): require the `image_to_video` mode + a source
-        // image. A txt2video shape (no source) is rejected so a mis-picked text job stays on torch.
+        // image. A txt2video shape (no source) is rejected and remains queued.
         if payload.get("mode").and_then(Value::as_str) != Some("image_to_video") {
             return false;
         }
@@ -420,7 +421,7 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
         }
     }
     // Reference / inpaint-mask conditioning is never in the candle video lane (i2v needs only the
-    // single source image; reference + mask are the character / inpaint shapes that stay on torch).
+    // single source image; reference + mask are unsupported character / inpaint shapes).
     if has_nonempty_id("referenceAssetId") || has_nonempty_id("maskAssetId") {
         return false;
     }
@@ -428,7 +429,7 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     // engines (`wan_2_2_t2v_14b` / `wan_2_2_i2v_14b`) advertise `supports_lora` and their worker path
     // (`candle_resolve_wan_adapters`) applies each `request.loras` entry from its file path — so a wan-14B
     // job carrying user LoRAs stays on candle. Every other candle video provider (wan-5B TI2V, LTX, SVD)
-    // advertises no LoRA slot, so a LoRA there is refused here (no torch fallback — epic 8283). sc-10539.
+    // advertises no LoRA slot, so a LoRA there is refused here and remains queued (epic 8283). sc-10539.
     if !CANDLE_VIDEO_LORA_MODELS.contains(&model)
         && payload
             .get("loras")
@@ -437,7 +438,7 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     {
         return false;
     }
-    // On-the-fly quantization → torch (the candle video providers are dense; sc-5099).
+    // On-the-fly quantization is refused (the candle video providers are dense; sc-5099).
     if candle_request_wants_quant(payload) {
         return false;
     }
@@ -507,7 +508,7 @@ pub(crate) fn video_request_candle_vace_eligible(
 /// (`referenceAssetId` / `referenceAssetIds` / `sourceAssetId`) + a driving clip (`sourceClipAssetId`).
 /// Inference LoRA / LoKr / LoHa + the Bias-Aware DPO LoRA + the lightx2v lightning diff-patch ARE on the
 /// candle path now (sc-6838 — the provider merges them into the dense DiT), so a LoRA-bearing animate job
-/// stays on candle. On-the-fly quantization is still torch (the candle provider is dense). Mirrors the
+/// stays on candle. On-the-fly quantization is refused and remains queued (the provider is dense). Mirrors the
 /// MLX `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape, expressed as a candle-claim
 /// gate. Factored out so the routing tests can probe it (parity with [`video_request_candle_eligible`]).
 pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
@@ -539,7 +540,7 @@ pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, 
         return false;
     }
     // Inference LoRA (DPO / lightning / user adapter) merges into the candle DiT (sc-6838), so a
-    // LoRA-bearing animate job is candle-eligible — only on-the-fly quant still falls back to torch.
+    // LoRA-bearing animate job is candle-eligible — only on-the-fly quant is still refused.
     if candle_request_wants_quant(payload) {
         return false;
     }
@@ -933,7 +934,7 @@ pub(crate) fn sdxl_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bo
 /// Kolors IP-Adapter-Plus candle-routing conditions (sc-5488, epic 5480). The candle `IpAdapterKolors`
 /// provider serves PURE reference (image-prompt) conditioning on the `kolors` family — the same payload
 /// shape as the SDXL IP lane: a `referenceAssetId` with NO img2img source / inpaint mask and NOT an
-/// `edit_image` (those advanced Kolors shapes are sc-5487, still torch). Mirrors the worker's
+/// `edit_image` (those advanced Kolors shapes are refused and remain queued). Mirrors the worker's
 /// `kolors_ipadapter_available` gate (minus the local weight-resolve check) so the router and worker
 /// agree on the lane boundary. Candle-only — the macOS Kolors IP path is the registry `Reference` route,
 /// not a separate candle-eligible gate.
@@ -953,7 +954,7 @@ pub(crate) fn kolors_ipadapter_candle_eligible(payload: &Map<String, Value>) -> 
 /// FLUX XLabs IP-Adapter candle-routing conditions (sc-5872, epic 5480). The candle `IpAdapterFlux`
 /// provider serves PURE reference (image-prompt) conditioning on the `flux_dev`/`flux_schnell` families
 /// — the same payload shape as the SDXL/Kolors IP lanes: a `referenceAssetId` with NO img2img source /
-/// inpaint mask and NOT an `edit_image` (those advanced FLUX shapes are sc-5487, still torch). Mirrors
+/// inpaint mask and NOT an `edit_image` (those advanced FLUX shapes are refused and remain queued). Mirrors
 /// the worker's `flux_ipadapter_available` gate (minus the local weight-resolve check) so the router and
 /// worker agree on the lane boundary. Candle-only — the macOS FLUX IP path is the registry `Reference`
 /// route (epic 3621), not a separate candle-eligible gate.
@@ -1157,14 +1158,14 @@ pub(crate) fn model_has_candle_pose_lane(model: &str) -> bool {
 
 /// A strict-pose (`advanced.poses`) job on a **candle-routed model with no candle pose lane** —
 /// `sdxl` / `realvisxl` / `chroma*` / `flux*` / `lens*` / `sensenova*` (everything but the three wired
-/// pose families), not `edit_image` (sc-5968, epic 5483). Neither candle nor the co-resident torch
-/// worker has a pose path for these models off-Mac (the torch `sdxl` adapter's OpenPose lives only in
-/// the `instantid_realvisxl` adapter), so torch would silently drop the poses → an unconditioned T2I
+/// pose families), not `edit_image` (sc-5968, epic 5483). No native lane has a pose path for these
+/// models off-Mac (the historical `sdxl` adapter's OpenPose lived only in
+/// the `instantid_realvisxl` adapter), so a generic claimant could silently drop the poses and render an unconditioned T2I
 /// image. The candle worker therefore CLAIMS these (`worker_supports_job`) to REJECT them with a typed
-/// error in the handler, and the co-resident torch worker DECLINES them (below) so candle reliably wins
+/// error in the handler, while every other GPU descriptor declines them so candle reliably wins
 /// and nothing silently mis-serves them. **Mac is unaffected:** `sdxl + poses` is MLX-served there
-/// (`model_mac_support("sdxl").features.pose`), so the MLX worker claims it and only the torch/`mps`
-/// worker declines. Pairs with the worker's `candle_unsupported_pose_reject` dispatch guard.
+/// (`model_mac_support("sdxl").features.pose`), so the MLX worker claims it and other descriptors
+/// decline. Pairs with the worker's `candle_unsupported_pose_reject` dispatch guard.
 pub(crate) fn image_request_candle_pose_reject(model: &str, payload: &Map<String, Value>) -> bool {
     if !CANDLE_ROUTED_MODELS.contains(&model) || model_has_candle_pose_lane(model) {
         return false;
@@ -1205,12 +1206,12 @@ pub(crate) fn worker_is_candle(worker: &WorkerSnapshot) -> bool {
 }
 
 /// Epic 5164 / sc-7817 routing — does this `lora_train` job belong on the candle (Windows/CUDA +
-/// Linux/NVIDIA) worker (vs the Python torch worker)? The training sibling of
+/// Linux/NVIDIA) worker? The training sibling of
 /// [`image_job_is_candle_eligible`]/[`video_job_is_candle_eligible`]: the candle engine has a native
 /// trainer for the family. Both dry-run and real runs are eligible (the dry-run validates the same
 /// resolved plan). `wan_moe_lora` is candle-eligible ONLY for the **T2V** A14B base model
 /// (`wan_2_2_t2v_14b`) — the candle Wan trainer is registered under `wan2_2_t2v_14b` only; the I2V
-/// A14B and the dense `wan_lora` 5B have no candle trainer, so they stay on torch. UNLIKE the mlx Wan
+/// A14B and the dense `wan_lora` 5B have no candle trainer, so they are refused and remain queued. UNLIKE the mlx Wan
 /// path, the candle Wan trainer DOES support LoKr (its `build_lokr_targets` merge), so there is no
 /// LoKr-on-Wan exclusion here. The resolved plan is stamped into the payload at submit (apps/rust-api
 /// training.rs), so the kernel + base model are readable without touching the dataset or weights.
@@ -1233,7 +1234,7 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
         return true;
     }
     // The A14B MoE: candle registers only the T2V trainer (`wan2_2_t2v_14b`). The I2V A14B base
-    // model has no candle trainer, so it stays on torch.
+    // model has no candle trainer, so it is refused and remains queued.
     if kernel == "wan_moe_lora" {
         let base_model = target
             .and_then(|target| target.get("baseModel"))
@@ -1249,9 +1250,8 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
 /// the Mac CoreML path — sc-5499) AND **SeedVR2** (`candle-gen-seedvr2`, sc-5928) off-Mac. This now
 /// mirrors `upscale_job_is_mlx_eligible` exactly (the default `real-esrgan` engine + `seedvr2`);
 /// `aura-sr` was dropped as an offered engine (sc-3668 Mac / sc-5499 off-Mac) so it has no candle
-/// path — a candle worker refuses it (it runs only on the Python torch worker until Phase 7). Note
-/// Real-ESRGAN keeps its torch path as a co-resident fallback (the torch worker is NOT refused it,
-/// unlike SeedVR2), so a Real-ESRGAN job may run on whichever worker claims it first.
+/// path — a candle worker refuses it, so it remains queued. Real-ESRGAN is candle-eligible, while
+/// SeedVR2 is admitted only by its explicit native lanes.
 pub(crate) fn upscale_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     upscale_job_is_mlx_eligible(job)
 }

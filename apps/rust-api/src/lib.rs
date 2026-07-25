@@ -114,10 +114,11 @@ mod training;
 use training::{
     batch_rename_training_dataset_items, create_training_dataset,
     create_training_dataset_analysis_job, create_training_dataset_caption_job,
-    create_training_dataset_face_analysis_job, create_training_dataset_upscale_job,
-    create_training_job, delete_training_dataset, get_training_dataset,
-    get_training_dataset_readiness, list_training_datasets, list_training_presets,
-    list_training_targets, repoint_training_dataset_items, resolve_control_overlay_output_location,
+    create_training_dataset_face_analysis_job, create_training_dataset_parquet_import_job,
+    create_training_dataset_upscale_job, create_training_job, delete_training_dataset,
+    finalize_training_dataset_parquet_import, get_training_dataset, get_training_dataset_readiness,
+    list_training_datasets, list_training_presets, list_training_targets,
+    repoint_training_dataset_items, resolve_control_overlay_output_location,
     resolve_training_output_location, set_training_dataset_item_quality_ack,
     smart_crop_training_dataset_items, strip_exif_training_dataset_items, trusted_adapter_files,
     update_training_dataset, upload_training_dataset_item, validate_lora_id_component,
@@ -155,15 +156,15 @@ use dto::{
     CharacterLoraUpdateRequest, CharacterReferenceRequest, CharacterReferenceUpdateRequest,
     CharacterTestRequest, CharacterUpdateRequest, CharactersQuery, DatasetAnalysisJobRequest,
     DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest, DatasetFaceRecordsBody,
-    DatasetImageFixBody, DatasetRepointBody, DatasetUpscaleJobRequest, DirectoriesResponse,
-    EventsQuery, FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse,
-    HostCapabilitiesResponse, ImageJobRequest, InterleaveJobRequest, JobsQuery,
-    LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest, LorasQuery, MetricsQuery,
-    ModelConvertRequest, ModelDownloadRequest, ModelImportRequest, PersonDetectionJobRequest,
-    PersonTrackCorrectionsRequest, PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery,
-    PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery,
-    SavedVoiceCreateRequest, TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest,
-    TrainingCaptionJobRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
+    DatasetImageFixBody, DatasetParquetImportJobRequest, DatasetRepointBody,
+    DatasetUpscaleJobRequest, DirectoriesResponse, EventsQuery, FaceLikenessCompareRequest,
+    FrameExtractRequest, HealthResponse, HostCapabilitiesResponse, ImageJobRequest,
+    InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest,
+    LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest, ModelImportRequest,
+    PersonDetectionJobRequest, PersonTrackCorrectionsRequest, PersonTrackJobRequest,
+    ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest, QualityAckBody, ReadinessQuery,
+    RecipePresetsQuery, SavedVoiceCreateRequest, TimelineCreateRequest, TimelineExportRequest,
+    TimelineSaveRequest, TrainingCaptionJobRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 use manifest::{
@@ -293,6 +294,7 @@ const DEFAULT_API_HOST: &str = "127.0.0.1";
 // person-track corrections) while shrinking the per-request ceiling ~200x. The large
 // limit is re-attached per-route ONLY to the multipart/upload endpoints below.
 const MAX_JSON_BODY_BYTES: usize = 10 * 1024 * 1024;
+const MAX_PARQUET_FINALIZE_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
 const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
@@ -1098,6 +1100,15 @@ pub(crate) fn create_app_with_state(
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/caption-jobs",
             post(create_training_dataset_caption_job),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/parquet-import-jobs",
+            post(create_training_dataset_parquet_import_job),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/parquet-import-finalize",
+            post(finalize_training_dataset_parquet_import)
+                .layer(DefaultBodyLimit::max(MAX_PARQUET_FINALIZE_BODY_BYTES)),
         )
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/analysis-jobs",

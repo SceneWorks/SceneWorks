@@ -82,7 +82,7 @@ fn sdxl_edit_candle_mode(request: &ImageRequest) -> Option<SdxlEditCandleMode> {
 
 /// Resolve the SDXL base snapshot for the edit route: an explicit `modelPath` dir (advanced or manifest)
 /// wins, else the HF cache snapshot for the manifest `repo` (default by model id). `None` means the base
-/// is not present locally, so the job is not candle-runnable (falls through to torch). Mirrors
+/// is not present locally, so the candle lane refuses the job and no fallback is attempted. Mirrors
 /// `resolve_sdxl_ipadapter_base`.
 fn resolve_sdxl_edit_candle_base(
     request: &ImageRequest,

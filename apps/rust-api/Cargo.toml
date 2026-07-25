@@ -25,6 +25,8 @@ sceneworks-mcp = { path = "../../crates/sceneworks-mcp" }
 sceneworks-worker = { path = "../../crates/sceneworks-worker" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
+subtle = "2.6"
 tokio = { version = "1.40", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = { workspace = true }
