@@ -436,7 +436,11 @@ impl SceneWorksMcp {
             .and_then(Value::as_str)
             .unwrap_or(&args.project_id)
             .to_owned();
-        let project_path_segment = encode_path_segment(&project_id);
+        if !valid_project_id(&project_id) {
+            return tool_error(format!(
+                "Image job {job_id} returned an invalid project id, so its files cannot be located."
+            ));
+        }
         let assets: Vec<&Value> = job
             .pointer("/result/assets")
             .and_then(Value::as_array)
@@ -463,7 +467,7 @@ impl SceneWorksMcp {
             let (bytes, header_mime) = self
                 .api
                 .get_bytes(&format!(
-                    "/api/v1/projects/{project_path_segment}/files/{}",
+                    "/api/v1/projects/{project_id}/files/{}",
                     encode_media_path(&media_path)
                 ))
                 .await
@@ -644,6 +648,11 @@ impl SceneWorksMcp {
                  cannot be located."
             ));
         };
+        if !valid_project_id(project_id) {
+            return tool_error(format!(
+                "Job {job_id} returned an invalid project id, so its files cannot be located."
+            ));
+        }
         let assets: Vec<(&Value, String)> = job
             .pointer("/result/assets")
             .and_then(Value::as_array)
@@ -683,10 +692,9 @@ impl SceneWorksMcp {
 
         let mut blocks = Vec::with_capacity(assets.len() + 1);
         let mut summary_assets = Vec::with_capacity(assets.len());
-        let project_path_segment = encode_path_segment(project_id);
         for (asset, media_path) in assets {
             let relative_url = format!(
-                "/api/v1/projects/{project_path_segment}/files/{}?ticket={ticket}",
+                "/api/v1/projects/{project_id}/files/{}?ticket={ticket}",
                 encode_media_path(&media_path)
             );
             let url = format!("{link_base}{relative_url}");
@@ -1154,9 +1162,19 @@ pub(crate) fn encode_media_path(path: &str) -> String {
         .join("/")
 }
 
-/// Percent-encode one untrusted URL path segment, including `/` so a project id
-/// cannot escape its route slot.
-pub(crate) fn encode_path_segment(segment: &str) -> String {
+/// Project identifiers are filesystem and URL route identifiers, not arbitrary path segments.
+/// Match the core store's safe-id contract before interpolating a job-supplied id into either the
+/// inline file request or a ticket-bearing result URL. Rejecting `%` also prevents a downstream
+/// decoder from turning single- or double-encoded traversal into route separators.
+pub(crate) fn valid_project_id(project_id: &str) -> bool {
+    !project_id.trim().is_empty()
+        && project_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+}
+
+/// Percent-encode one untrusted media-path segment.
+fn encode_path_segment(segment: &str) -> String {
     use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
     const SEGMENT: &AsciiSet = &CONTROLS
         .add(b' ')
@@ -1891,12 +1909,19 @@ mod tests {
     }
 
     #[test]
-    fn encode_project_id_cannot_escape_its_route_segment() {
-        assert_eq!(encode_path_segment("project_123"), "project_123");
-        assert_eq!(
-            encode_path_segment("../other?ticket=stolen"),
-            "..%2Fother%3Fticket=stolen"
-        );
+    fn project_id_validation_rejects_normalization_and_encoding_escapes() {
+        assert!(valid_project_id("project_123-ABC"));
+        for invalid in [
+            ".",
+            "..",
+            "..\\other",
+            "../other",
+            "project/other",
+            "%2e%2e",
+            "%252e%252e",
+        ] {
+            assert!(!valid_project_id(invalid), "{invalid:?} must be rejected");
+        }
     }
 
     #[test]

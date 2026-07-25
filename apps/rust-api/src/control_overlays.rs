@@ -108,13 +108,14 @@ pub(crate) async fn control_overlay_catalog(
 
 /// Resolve a selected control overlay id (`advanced.controlWeights.overlayId`, set by the Studio's
 /// ControlPanel picker) to what the worker strict-control lane (`ensure_krea_control_weights`) reads
-/// (sc-10165 B4 + sc-8466). An INSTALLED overlay resolves to its `.safetensors` path
-/// (`advanced.controlWeights.path`, studio-trained/registered or an already-cached hosted overlay); a
-/// hosted overlay not yet on disk (the built-in beta or any un-cached hosted entry) resolves to
-/// `advanced.controlWeights.{repo,filename}` so the worker lazy-downloads it on first use (the FLUX.2
-/// control precedent). A no-op when no overlay is selected. A selected-but-unknown overlay, or a
-/// training/local overlay that is not installed, is a clean 400 rather than a deep worker error. Mirrors
-/// the LoRA id→path resolution: one catalog snapshot, in-place `advanced` mutation.
+/// (sc-10165 B4 + sc-8466). A hosted overlay always resolves to its immutable
+/// `advanced.controlWeights.{repo,filename,revision}` tuple, even when the catalog normalization found
+/// something cached: `installState`/`installedPath` may be derived from a mutable `refs/main` entry and
+/// is not authority to replace the pinned snapshot. An installed training/local overlay resolves to its
+/// `.safetensors` path. A no-op when no overlay is selected. A selected-but-unknown overlay, a hosted
+/// overlay without a 40-hex revision, or a training/local overlay that is not installed is a clean 400
+/// rather than a deep worker error. Mirrors the LoRA id→path resolution: one catalog snapshot, in-place
+/// `advanced` mutation.
 pub(crate) async fn resolve_control_overlay_selection(
     state: &AppState,
     project_id: Option<&str>,
@@ -151,49 +152,7 @@ pub(crate) async fn resolve_control_overlay_selection(
         }
     }
 
-    // What the worker resolves the overlay from: an installed local `.safetensors` (`controlWeights.path`
-    // — studio-trained/registered, or an already-cached hosted overlay), else a hosted repo/filename it
-    // lazy-downloads on first use (`controlWeights.{repo,filename}` — the built-in beta or any not-yet-
-    // cached hosted overlay). A training/local overlay that is not installed is a real 400.
-    let installed = overlay.get("installState").and_then(Value::as_str) == Some("installed");
-    let weights: Vec<(&str, Value)> = if installed {
-        let installed_path = overlay
-            .get("installedPath")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                ApiError::bad_request(format!(
-                    "Control overlay '{overlay_id}' has no installed weights"
-                ))
-            })?;
-        let weights_path = resolve_overlay_weights_file(installed_path, overlay.get("files"))
-            .ok_or_else(|| {
-                ApiError::bad_request(format!(
-                    "Control overlay '{overlay_id}' weights (.safetensors) not found under {installed_path}"
-                ))
-            })?;
-        vec![("path", Value::String(weights_path))]
-    } else if overlay
-        .pointer("/source/provider")
-        .or_else(|| overlay.get("provider"))
-        .and_then(Value::as_str)
-        == Some("huggingface")
-    {
-        let (repo, filename, revision) =
-            hosted_overlay_repo_file(&overlay).ok_or_else(|| {
-                ApiError::bad_request(format!(
-                    "Control overlay '{overlay_id}' must register one weights file and a pinned 40-hex source.revision"
-                ))
-            })?;
-        vec![
-            ("repo", Value::String(repo)),
-            ("filename", Value::String(filename)),
-            ("revision", Value::String(revision)),
-        ]
-    } else {
-        return Err(ApiError::bad_request(format!(
-            "Control overlay '{overlay_id}' is not installed"
-        )));
-    };
+    let weights = authorized_overlay_weights(&overlay_id, &overlay)?;
 
     let advanced = job_payload
         .entry("advanced".to_owned())
@@ -215,6 +174,57 @@ pub(crate) async fn resolve_control_overlay_selection(
         }
     }
     Ok(())
+}
+
+/// Translate one catalog entry to the only worker location the API will authorize.
+///
+/// Hosted entries are checked first and always stay a pinned remote tuple. This deliberately
+/// disregards a normalized `installedPath`: only the worker's exact `snapshots/<revision>/<file>`
+/// resolver may turn the tuple into a local path. Local training entries retain their installed
+/// `.safetensors` behavior.
+fn authorized_overlay_weights(
+    overlay_id: &str,
+    overlay: &Value,
+) -> Result<Vec<(&'static str, Value)>, ApiError> {
+    let hosted = overlay
+        .pointer("/source/provider")
+        .or_else(|| overlay.get("provider"))
+        .and_then(Value::as_str)
+        == Some("huggingface");
+    if hosted {
+        let (repo, filename, revision) = hosted_overlay_repo_file(overlay).ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "Control overlay '{overlay_id}' must register one weights file and a pinned 40-hex source.revision"
+            ))
+        })?;
+        return Ok(vec![
+            ("repo", Value::String(repo)),
+            ("filename", Value::String(filename)),
+            ("revision", Value::String(revision)),
+        ]);
+    }
+
+    let installed = overlay.get("installState").and_then(Value::as_str) == Some("installed");
+    if installed {
+        let installed_path = overlay
+            .get("installedPath")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "Control overlay '{overlay_id}' has no installed weights"
+                ))
+            })?;
+        let weights_path = resolve_overlay_weights_file(installed_path, overlay.get("files"))
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "Control overlay '{overlay_id}' weights (.safetensors) not found under {installed_path}"
+                ))
+            })?;
+        return Ok(vec![("path", Value::String(weights_path))]);
+    }
+    Err(ApiError::bad_request(format!(
+        "Control overlay '{overlay_id}' is not installed"
+    )))
 }
 
 /// The (repo, filename) of a hosted overlay entry (`source.provider="huggingface"` + `source.repo` +
@@ -389,6 +399,57 @@ mod tests {
             "source": { "provider": "huggingface", "repo": "acme/x", "file": "w.safetensors" }
         });
         assert_eq!(hosted_overlay_repo_file(&overlay), None);
+    }
+
+    #[test]
+    fn already_cached_hosted_overlay_still_requires_a_pinned_revision() {
+        let cache = tempfile::tempdir().expect("cache dir");
+        let mutable_main = cache.path().join("refs-main/w.safetensors");
+        std::fs::create_dir_all(mutable_main.parent().unwrap()).expect("cache parent");
+        std::fs::write(&mutable_main, b"cached").expect("cached weights");
+        let overlay = json!({
+            "installState": "installed",
+            "installedPath": mutable_main,
+            "source": {
+                "provider": "huggingface",
+                "repo": "acme/x",
+                "file": "w.safetensors"
+            }
+        });
+        assert!(
+            authorized_overlay_weights("cached-without-pin", &overlay).is_err(),
+            "a mutable cached path must not bypass the hosted revision requirement"
+        );
+    }
+
+    #[test]
+    fn installed_hosted_overlay_remains_an_immutable_remote_tuple() {
+        let overlay = json!({
+            "installState": "installed",
+            "installedPath": "/cache/models--acme--x/refs/main/w.safetensors",
+            "source": {
+                "provider": "huggingface",
+                "repo": "acme/x",
+                "file": "w.safetensors",
+                "revision": "0123456789abcdef0123456789abcdef01234567"
+            }
+        });
+        let weights = authorized_overlay_weights("cached-with-pin", &overlay).unwrap();
+        assert_eq!(
+            weights,
+            vec![
+                ("repo", Value::String("acme/x".to_owned())),
+                ("filename", Value::String("w.safetensors".to_owned())),
+                (
+                    "revision",
+                    Value::String("0123456789abcdef0123456789abcdef01234567".to_owned())
+                )
+            ]
+        );
+        assert!(
+            weights.iter().all(|(key, _)| *key != "path"),
+            "only the worker's pinned-snapshot resolver may produce a hosted local path"
+        );
     }
 
     #[test]

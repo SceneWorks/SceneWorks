@@ -332,8 +332,13 @@ pub(crate) async fn retry_job(
     Path(job_id): Path<String>,
     request: AxumRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let payload = retry_job_request_from_body(request).await?;
-    validate_merged_generation_model(&state, &job_id, &payload.payload_changes).await?;
+    let mut payload = retry_job_request_from_body(request).await?;
+    payload.payload_changes = validate_and_canonicalize_merged_generation_payload(
+        &state,
+        &job_id,
+        &payload.payload_changes,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.retry_job(
             &job_id,
@@ -364,9 +369,14 @@ async fn retry_job_request_from_body(request: AxumRequest) -> Result<RetryJobReq
 pub(crate) async fn duplicate_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
-    ApiJson(payload): ApiJson<DuplicateJobRequest>,
+    ApiJson(mut payload): ApiJson<DuplicateJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    validate_merged_generation_model(&state, &job_id, &payload.payload_changes).await?;
+    payload.payload_changes = validate_and_canonicalize_merged_generation_payload(
+        &state,
+        &job_id,
+        &payload.payload_changes,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.duplicate_job(
             &job_id,
@@ -382,22 +392,34 @@ pub(crate) async fn duplicate_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
-/// Validate the exact payload a retry/duplicate will enqueue. Existing job payloads are
-/// immutable, so reading and merging before the create transaction cannot race with a payload
-/// update; importantly, validation still happens before the new row is persisted or published.
-async fn validate_merged_generation_model(
+/// Validate and canonicalize the exact payload a retry/duplicate will enqueue. Existing job
+/// payloads are immutable, so reading and merging before the create transaction cannot race with a
+/// payload update. Returning the complete merged payload is intentional: the store's shallow merge
+/// then persists this canonical object rather than allowing a nested `advanced.controlWeights`
+/// replacement to bypass the typed image route's authorization boundary.
+async fn validate_and_canonicalize_merged_generation_payload(
     state: &AppState,
     job_id: &str,
     payload_changes: &JsonObject,
-) -> Result<(), ApiError> {
+) -> Result<JsonObject, ApiError> {
     let job_id = job_id.to_owned();
     let job = store_call(state.clone(), move |store, _timeout| store.get_job(&job_id)).await?;
-    if !generation_job_model_is_path_backed(&job.job_type) {
-        return Ok(());
-    }
+    let job_type = job.job_type.clone();
+    let project_id = job.project_id.clone();
     let mut merged = job.payload;
     merged.extend(payload_changes.clone());
-    validate_payload_model(&merged)
+    if generation_job_model_is_path_backed(&job_type) {
+        validate_payload_model(&merged)?;
+    }
+    if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        crate::control_overlays::resolve_control_overlay_selection(
+            state,
+            project_id.as_deref(),
+            &mut merged,
+        )
+        .await?;
+    }
+    Ok(merged)
 }
 
 /// Jobs created through the raw queue route do not pass a typed request validator. Keep this
