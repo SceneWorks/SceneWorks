@@ -1714,7 +1714,24 @@ fn ensure_grid_thumbnail(source_path: &FsPath, cache_root: &FsPath) -> Result<Pa
     }
 
     std::fs::create_dir_all(cache_root).map_err(|error| error.to_string())?;
-    let decoded = image::open(source_path).map_err(|error| error.to_string())?;
+    let decoded = match image::open(source_path) {
+        Ok(decoded) => decoded,
+        Err(decode_error) => {
+            // Project imports normalize these formats today, but old projects
+            // can still contain AVIF/HEIC/HEIF (and other platform-decodable
+            // raster files). Reuse the worker's cross-platform compatibility
+            // path before declaring the thumbnail unavailable.
+            let converted =
+                cache_root.join(format!("{key}.{}.converted.png", Uuid::new_v4().simple()));
+            let transcode_result =
+                sceneworks_core::media_convert::transcode_to_png(source_path, &converted);
+            let decoded = transcode_result
+                .map_err(|error| format!("{decode_error}; {error}"))
+                .and_then(|()| image::open(&converted).map_err(|error| error.to_string()));
+            let _ = std::fs::remove_file(&converted);
+            decoded?
+        }
+    };
     let thumbnail = decoded.thumbnail(GRID_THUMBNAIL_SIZE, GRID_THUMBNAIL_SIZE);
     let temporary = cache_root.join(format!("{key}.{}.tmp", Uuid::new_v4().simple()));
     thumbnail
