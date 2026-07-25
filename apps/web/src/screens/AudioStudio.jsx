@@ -63,7 +63,7 @@ const MODE_LABELS = {
   voiceclone: "Voice Clone",
 };
 
-// Per-mode prompt placeholder. Named so the shell reads sensibly before C1 wires generation.
+// Per-mode prompt placeholder for each fully wired generation surface.
 const MODE_PLACEHOLDER = {
   speech: "Type the words to speak…",
   sfx: "Describe the sound — a door creak, distant thunder, footsteps on gravel…",
@@ -482,7 +482,7 @@ export function AudioStudio() {
   // Generate is guarded (never a silent no-op): a run needs a wired mode, generation content (a
   // non-empty prompt, or — for a multi-speaker model — at least one non-empty script turn), an
   // installed model, and no run already in flight. The empty-content guard is the DoD's "disable on
-  // empty prompt"; the WIRED_MODES gate keeps the still-scaffold tabs (Music / Voice Clone) inert.
+  // empty prompt"; the WIRED_MODES gate keeps any future display-only mode inert.
   const scriptReady = scriptSegmentsForSubmit(script).length > 0;
   // Multi-speaker Speech submits the script instead of the prompt, so its content signal is a
   // non-empty script; every other mode (and single-voice Speech) still requires a prompt.
@@ -632,8 +632,8 @@ export function AudioStudio() {
     if (submitting) {
       return;
     }
-    // Only the wired modes submit (Speech C1 sc-13408, Sound FX C2 sc-13409); Music / Voice Clone
-    // keep the C0 scaffold, so their submit is intentionally inert. `canGenerate` also covers the
+    // All four current modes are wired; WIRED_MODES remains the authoritative guard if a future
+    // display-only mode is added. `canGenerate` also covers the
     // empty-prompt / no-model / in-flight guards, so a direct form submit can never slip past them.
     if (!canGenerate) {
       return;

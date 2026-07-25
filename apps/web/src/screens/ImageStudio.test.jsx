@@ -1969,6 +1969,82 @@ describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-1019
       ),
     ).toBe(true);
   });
+
+  it("ignores a superseded reference probe that loads after the newer image", async () => {
+    const originalImage = global.Image;
+    const probes = [];
+    class FakeImageProbe {
+      constructor() {
+        this.naturalWidth = 0;
+        this.naturalHeight = 0;
+        this.onload = null;
+        probes.push(this);
+      }
+
+      set src(value) {
+        this._src = value;
+      }
+
+      get src() {
+        return this._src;
+      }
+    }
+    global.Image = FakeImageProbe;
+    const portrait = {
+      id: "portrait",
+      type: "image",
+      projectId: "project_1",
+      displayName: "Portrait reference",
+      url: "/portrait.png",
+      status: {},
+    };
+    const landscape = {
+      id: "landscape",
+      type: "image",
+      projectId: "project_1",
+      displayName: "Landscape reference",
+      url: "/landscape.png",
+      status: {},
+    };
+    const model = {
+      ...KREA_IMG2IMG,
+      defaults: { resolution: "1024x1024" },
+      limits: { resolutions: ["1024x1536", "1536x1024"] },
+    };
+
+    try {
+      await render(baseContext({ assets: [portrait, landscape], imageModels: [model], models: [model] }));
+      await click(tileByText("Image reference"));
+      await click(tileByText("Select reference image"));
+      let cards = [...document.body.querySelectorAll(".asset-picker-card")];
+      await click(cards.find((card) => card.textContent.includes("Portrait reference")));
+      await click(tileByText("Use Selection"));
+      expect(probes).toHaveLength(1);
+      const staleOnload = probes[0].onload;
+
+      await click(tileByText("Change"));
+      cards = [...document.body.querySelectorAll(".asset-picker-card")];
+      await click(cards.find((card) => card.textContent.includes("Landscape reference")));
+      await click(tileByText("Use Selection"));
+      expect(probes).toHaveLength(2);
+
+      probes[1].naturalWidth = 1600;
+      probes[1].naturalHeight = 900;
+      await act(async () => {
+        probes[1].onload();
+      });
+      expect(field(container, "Aspect").value).toBe("1536x1024");
+
+      probes[0].naturalWidth = 900;
+      probes[0].naturalHeight = 1600;
+      await act(async () => {
+        staleOnload();
+      });
+      expect(field(container, "Aspect").value).toBe("1536x1024");
+    } finally {
+      global.Image = originalImage;
+    }
+  });
 });
 
 describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {

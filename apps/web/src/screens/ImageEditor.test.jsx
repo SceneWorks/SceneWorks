@@ -80,6 +80,7 @@ import {
   tintMaskRgbaInPlace,
   MASK_PREVIEW_RGBA,
   editReferenceIds,
+  importEditorReferenceFiles,
   MAX_EDIT_REFERENCES,
   leaveGuardMessage,
   leaveGuardArming,
@@ -1434,6 +1435,24 @@ describe("reference conditioning (sc-6107)", () => {
     expect(editReferenceIds("", ["a", "b"])).toEqual(["a", "b"]);
     expect(editReferenceIds("", [])).toEqual([]);
     expect(editReferenceIds("work", null)).toEqual(["work"]);
+  });
+
+  it("keeps successful reference imports and counts every rejected or invalid result", async () => {
+    const files = [new File(["a"], "a.png"), new File(["b"], "b.png"), new File(["c"], "c.png")];
+    const importAsset = vi
+      .fn()
+      .mockResolvedValueOnce({ id: "asset-a" })
+      .mockRejectedValueOnce(new Error("bad image"))
+      .mockResolvedValueOnce(null);
+
+    await expect(importEditorReferenceFiles(files, importAsset)).resolves.toEqual({
+      assets: [{ id: "asset-a" }],
+      failureCount: 2,
+    });
+    expect(importAsset).toHaveBeenCalledTimes(3);
+    expect(importAsset).toHaveBeenNthCalledWith(1, files[0], { throwOnError: true });
+    expect(importAsset).toHaveBeenNthCalledWith(2, files[1], { throwOnError: true });
+    expect(importAsset).toHaveBeenNthCalledWith(3, files[2], { throwOnError: true });
   });
 });
 

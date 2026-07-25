@@ -130,14 +130,21 @@ export function LibraryScreen() {
   });
 
   async function handleImport(event) {
-    const [file] = event.target.files;
+    const input = event.currentTarget;
+    const [file] = input.files;
     if (!file) {
       return;
     }
     setIsImporting(true);
-    await importAsset(file);
-    setIsImporting(false);
-    event.target.value = "";
+    try {
+      await importAsset(file);
+    } catch {
+      // importAsset owns the user-facing request error; always restore this
+      // screen's file control even when an injected importer rejects.
+    } finally {
+      setIsImporting(false);
+      input.value = "";
+    }
   }
 
   const imageCount = libraryAssets.filter((asset) => asset.type === "image").length;

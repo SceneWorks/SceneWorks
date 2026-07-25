@@ -753,7 +753,6 @@ export function CharacterStudio() {
 
               <CharacterLooks
                 approvedReferences={approvedReferences}
-                createCharacterLook={createCharacterLook}
                 deleteCharacterLook={deleteCharacterLook}
                 lookDraft={lookDraft}
                 selectedCharacter={selectedCharacter}

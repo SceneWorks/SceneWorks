@@ -431,6 +431,25 @@ export function editReferenceIds(sourceAssetId, refIds, max = MAX_EDIT_REFERENCE
   return Array.from(new Set(ids)).slice(0, max);
 }
 
+// Import every selected reference independently so one bad file does not discard
+// the successful imports. importAsset normally reports request errors itself; the
+// dialog still needs an exact failure count instead of silently filtering them.
+export async function importEditorReferenceFiles(files, importAsset) {
+  const results = await Promise.allSettled(
+    Array.from(files ?? []).map((file) => importAsset(file, { throwOnError: true })),
+  );
+  const assets = [];
+  let failureCount = 0;
+  for (const result of results) {
+    if (result.status === "fulfilled" && result.value?.id) {
+      assets.push(result.value);
+    } else {
+      failureCount += 1;
+    }
+  }
+  return { assets, failureCount };
+}
+
 // Output aspect presets for the editor's canvas-extend / outpaint control (sc-2556).
 // "match" keeps the working size, so the fit mode then has no border to act on.
 export const EDIT_OUTPUT_ASPECTS = [
@@ -3587,14 +3606,21 @@ export function ImageEditor() {
           onImport={async (files) => {
             // Upload dropped images into the project, then attach them as references (sc-6107).
             setRefPickerOpen(false);
-            const imported = await Promise.all(
-              Array.from(files ?? []).map((file) => importAsset(file).catch(() => null)),
-            );
-            const ids = imported.filter(Boolean).map((asset) => asset.id);
+            const { assets: imported, failureCount } = await importEditorReferenceFiles(files, importAsset);
+            const ids = imported.map((asset) => asset.id);
             if (ids.length) {
               setRefAssetIds((prev) =>
                 Array.from(new Set([...prev, ...ids])).slice(0, MAX_EDIT_REFERENCES - 1),
               );
+            }
+            if (failureCount > 0) {
+              const added = ids.length
+                ? `Added ${ids.length} reference image${ids.length === 1 ? "" : "s"}. `
+                : "";
+              setStatus({
+                loading: false,
+                error: `${added}Could not import ${failureCount} reference image${failureCount === 1 ? "" : "s"}.`,
+              });
             }
           }}
           title="Add reference image"

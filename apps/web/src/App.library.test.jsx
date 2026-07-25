@@ -1100,6 +1100,88 @@ describe("SceneWorks app shell", () => {
     expect(document.body.querySelector(".studio-form")).toBeNull();
   });
 
+  it("restores Library import controls when an import rejects", async () => {
+    const importAsset = vi.fn(() => Promise.reject(new Error("upload failed")));
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [],
+            importAsset,
+            deleteAsset: vi.fn(),
+            purgeAsset: vi.fn(),
+            setPreviewAsset: vi.fn(),
+            sendAssetToImage: vi.fn(),
+            sendAssetToVideo: vi.fn(),
+            selectedAsset: null,
+            setSelectedAssetId: vi.fn(),
+            setActiveView: vi.fn(),
+            updateAssetStatus: vi.fn(),
+          },
+          <LibraryScreen />,
+        ),
+      );
+    });
+    const input = document.body.querySelector('.file-upload-button input[type="file"]');
+    const file = new File(["broken"], "broken.png", { type: "image/png" });
+    Object.defineProperty(input, "files", { configurable: true, value: [file] });
+    await act(async () => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle();
+
+    expect(importAsset).toHaveBeenCalledWith(file);
+    expect(input.disabled).toBe(false);
+    expect(input.closest("label").textContent).toContain("Import");
+    expect(input.closest("label").textContent).not.toContain("Importing");
+  });
+
+  it("restores Document Studio submit controls when job creation rejects", async () => {
+    const createInterleaveJob = vi.fn(() => Promise.reject(new Error("queue failed")));
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [],
+            createInterleaveJob,
+            documentLocalJobs: [],
+            gpuOptions: ["auto"],
+            imageModels: [
+              {
+                id: "sensenova_u1_8b",
+                name: "SenseNova-U1 8B",
+                type: "image",
+                capabilities: ["text_to_image", "interleave"],
+              },
+            ],
+            jobAction: vi.fn(),
+            rememberLocalGenerationJob: vi.fn(),
+            setActiveView: vi.fn(),
+            requestedGpu: "auto",
+            setRequestedGpu: vi.fn(),
+          },
+          <DocumentStudio />,
+        ),
+      );
+    });
+    await changeField(document.body.querySelector("textarea"), "An illustrated failure case");
+    const submit = [...document.body.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("Compose document"),
+    );
+    await act(async () => {
+      submit.closest("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+
+    expect(createInterleaveJob).toHaveBeenCalledTimes(1);
+    expect(submit.disabled).toBe(false);
+    expect(submit.textContent).toContain("Compose document");
+  });
+
   it("DocumentStudio renders an interleaved document and submits a compose job", async () => {
     const createInterleaveJob = vi.fn(() =>
       Promise.resolve({ id: "job-il-new", type: "image_interleave", status: "queued" }),
