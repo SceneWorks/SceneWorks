@@ -440,6 +440,45 @@ pub(super) fn svd_vram_preflight(
     }
 }
 
+/// Build the exact SVD input consumed by the production arm after admission. Keeping this in one
+/// helper makes the measured fit gate inseparable from the sequential residency policy it was
+/// measured under; the SVD arm returns before the generic Wan/LTX input builder below.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn candle_svd_input(
+    engine_id: &'static str,
+    model_dir: PathBuf,
+    conditioning: Vec<Conditioning>,
+    request: &VideoRequest,
+    preflight: SvdVramPreflight,
+) -> VideoGenInput {
+    VideoGenInput {
+        sampler: None,
+        scheduler: None,
+        engine_id,
+        model_dir,
+        conditioning,
+        width: request.width,
+        height: request.height,
+        frames: preflight.frames,
+        fps: request.fps,
+        steps: Some(preflight.steps),
+        seed: resolve_video_seed(request) as u64,
+        motion_bucket_id: Some(
+            svd_i32(request, "motionBucketId", "motionBucketId", 127, 1, 255) as f32,
+        ),
+        noise_aug_strength: Some(svd_f32(
+            request,
+            "noiseAugStrength",
+            "noiseAugStrength",
+            0.02,
+        )),
+        decode_chunk_size: Some(preflight.decode_chunk_size),
+        conditioning_fps: Some(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32),
+        offload_policy: candle_video_offload_policy(engine_id),
+        ..VideoGenInput::default()
+    }
+}
+
 /// The candle Mochi pre-flight's gated result (sc-12306): the tier's baked-in quant marker, obtainable
 /// ONLY by passing the VRAM fit gate.
 ///
@@ -504,11 +543,17 @@ pub(super) fn mochi_vram_preflight(
 /// (sc-12757, `render_sequential`) and the model is now sized by its MEASURED sequential
 /// `candle.vramGbByTier` peak (see the `wan_2_2` candle block) instead of the ~46 GiB RESIDENT peak
 /// sc-12631 (PR #1598) shipped — so a ~24 GB card can run the 5B where the resident gate needed ~48.
-/// `ltx`/`svd` carry no offload lifecycle and stay resident.
+///
+/// SVD-XT joins that same contract in sc-14625: the provider stages image encoder + source VAE
+/// encode → UNet → VAE decode, so selecting `Sequential` here is what activates its proven
+/// one-phase-at-a-time residency and memory-aware decode. LTX still has no offload lifecycle and
+/// remains resident.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) fn candle_wan_offload_policy(engine_id: &str) -> OffloadPolicy {
+pub(super) fn candle_video_offload_policy(engine_id: &str) -> OffloadPolicy {
     match engine_id {
-        "wan2_2_ti2v_5b" | "wan2_2_t2v_14b" | "wan2_2_i2v_14b" => OffloadPolicy::Sequential,
+        "svd_xt" | "wan2_2_ti2v_5b" | "wan2_2_t2v_14b" | "wan2_2_i2v_14b" => {
+            OffloadPolicy::Sequential
+        }
         _ => OffloadPolicy::Resident,
     }
 }
@@ -784,36 +829,13 @@ pub(super) async fn generate_candle_video_using(
     // conditioning_fps). Mirrors the MLX `generate_svd`; the conditioning is the source `Reference`
     // resolved above.
     if engine_id == "svd_xt" {
-        let SvdVramPreflight {
-            frames,
-            decode_chunk_size,
-            steps,
-        } = svd_preflight.expect("svd_xt must pass its VRAM preflight before model resolution");
-        let input = VideoGenInput {
-            sampler: None,
-            scheduler: None,
+        let input = candle_svd_input(
             engine_id,
             model_dir,
             conditioning,
-            width: request.width,
-            height: request.height,
-            frames,
-            fps: request.fps,
-            steps: Some(steps),
-            seed: resolve_video_seed(request) as u64,
-            motion_bucket_id: Some(
-                svd_i32(request, "motionBucketId", "motionBucketId", 127, 1, 255) as f32,
-            ),
-            noise_aug_strength: Some(svd_f32(
-                request,
-                "noiseAugStrength",
-                "noiseAugStrength",
-                0.02,
-            )),
-            decode_chunk_size: Some(decode_chunk_size),
-            conditioning_fps: Some(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32),
-            ..VideoGenInput::default()
-        };
+            request,
+            svd_preflight.expect("svd_xt must pass its VRAM preflight before model resolution"),
+        );
         let mut raw_settings = svd_raw_settings(request);
         if let Value::Object(map) = &mut raw_settings {
             map.insert("repo".to_owned(), Value::String(repo.clone()));
@@ -892,8 +914,9 @@ pub(super) async fn generate_candle_video_using(
         text_encoder_dir: ltx_gemma_dir,
         // The candle A14B renders with sequential component offload + MoE expert-swap (sc-12631): the
         // residency the measured `candle.vramGbByTier` peak was taken under, so the gate's admission
-        // number is only truthful when the load actually takes it. `Resident` for the 5B + ltx + svd.
-        offload_policy: candle_wan_offload_policy(engine_id),
+        // number is only truthful when the load actually takes it. The 5B and SVD-XT also take their
+        // own sequential lifecycles; only LTX remains resident.
+        offload_policy: candle_video_offload_policy(engine_id),
         ..VideoGenInput::default()
     };
     let raw_settings = candle_video_raw_settings(request, &repo);
@@ -1188,7 +1211,7 @@ pub(super) async fn generate_candle_wan_comfyui(
         guidance: None,
         seed: resolve_video_seed(request) as u64,
         conditioning: Vec::new(),
-        offload_policy: candle_wan_offload_policy(WAN_COMFYUI_T2V_ENGINE),
+        offload_policy: candle_video_offload_policy(WAN_COMFYUI_T2V_ENGINE),
         comfyui: Some(ComfyuiWanExperts::new(
             paths.high, paths.low, paths.te, paths.vae, false,
         )),

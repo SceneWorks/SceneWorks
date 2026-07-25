@@ -413,15 +413,14 @@ fn mochi_too_big_error(
 
 /// Pure SVD CUDA admission decision for the candle lane.
 ///
-/// A 32 GB RTX PRO 4500 completed an 8-frame, decode-chunk-1, 12-step 1024x576 render but OOMed the
-/// supported/default 25-frame render, including a retry with `decodeChunkSize=2`. Until the provider
-/// gains a measured, shape-dependent peak model, only that complete proven profile (or lower settings)
-/// is admitted below the recommended 48 GB card class. Missing telemetry admits, matching every other
-/// fit gate: no invented signal means no rejection.
+/// A 32 GB RTX PRO 4500 completed the supported/default 25-frame, decode-chunk-8, 25-step 1024x576
+/// render after sc-14625's sequential CFG/residency and live-free VAE tiling changes. That complete
+/// measured profile (or lower settings) is admitted on 32 GB; requests beyond any measured dimension
+/// remain rejected on that card class. Missing telemetry admits, matching every other fit gate: no
+/// invented signal means no rejection.
 ///
 /// The check keys off physical `total_gb`, not momentary `free_gb`. This story establishes a hardware
-/// incompatibility even on an otherwise available 32 GB card; it does not establish a trustworthy
-/// transient-working-set threshold for larger but busy cards.
+/// boundary, not a trustworthy transient-working-set threshold for a busy card.
 pub(crate) fn svd_fit_error(
     frames: u32,
     decode_chunk_size: u32,
@@ -436,23 +435,29 @@ pub(crate) fn svd_fit_error(
         frames,
         decode_chunk_size,
         steps,
+        width,
+        height,
         budget.total_gb,
     ) {
         return None;
     }
     Some(WorkerError::InvalidPayload(format!(
         "Stable Video Diffusion's {frames}-frame, decode-chunk-{decode_chunk_size}, {steps}-step \
-         {width}x{height} CUDA profile is not supported on \
-         GPU {gpu_id}'s {total} GB VRAM class: the default 25-frame profile OOMed on real 32 GB \
-         hardware, while the validated reduced profile completed with {validated_frames} frames, \
-         decodeChunkSize={validated_chunk}, and {validated_steps} steps. Use that complete reduced \
-         profile (or lower settings), or use a GPU with at least {recommended} GB VRAM (the recommended \
-         minimum for other SVD recipes). The job was rejected before model load.",
+         {width}x{height} CUDA profile is outside the measured admission envelope on \
+         GPU {gpu_id}'s {total} GB VRAM class. A real 32 GB RTX PRO 4500 completed up to \
+         {validated_width}x{validated_height}, {validated_frames} frames, \
+         decodeChunkSize={validated_chunk}, and {validated_steps} steps at a 17.521 GiB peak, so \
+         even that bounded profile requires at least an {minimum} GB physical-card class. Requests \
+         beyond any measured dimension remain unvalidated through 32 GB. Use a card and recipe \
+         inside that measured envelope, or choose a larger GPU. The job was rejected before model \
+         load.",
         total = budget.total_gb.round() as i64,
+        validated_width = crate::fit_gate::SVD_32GB_VALIDATED_MAX_WIDTH,
+        validated_height = crate::fit_gate::SVD_32GB_VALIDATED_MAX_HEIGHT,
         validated_frames = crate::fit_gate::SVD_32GB_VALIDATED_MAX_FRAMES,
         validated_chunk = crate::fit_gate::SVD_32GB_VALIDATED_MAX_DECODE_CHUNK,
         validated_steps = crate::fit_gate::SVD_32GB_VALIDATED_MAX_STEPS,
-        recommended = crate::fit_gate::SVD_LONG_BURST_RECOMMENDED_VRAM_GB.round() as i64,
+        minimum = crate::fit_gate::SVD_VALIDATED_PROFILE_MIN_VRAM_GB.round() as i64,
     )))
 }
 
@@ -823,38 +828,44 @@ mod tests {
         assert_eq!(apply_vram_cap(None, None), None);
     }
 
-    /// sc-14492: the default 25-frame SVD CUDA profile OOMed twice on a real 32 GB RTX PRO 4500,
-    /// while the reduced `(8 frames, chunk 1, 12 steps)` profile completed on that exact card at a
-    /// 19.0 GB observed peak. The admission decision must distinguish that complete recipe rather than
-    /// wall-rejecting SVD wholesale or generalizing one setting beyond the evidence.
+    /// sc-14625: the complete default tuple passed on a real 32 GB RTX PRO 4500. Admit exactly that
+    /// measured boundary without generalizing any one setting or retaining the old 48 GB guess.
     #[test]
-    fn svd_cuda_preflight_requires_the_complete_validated_32gb_recipe() {
+    fn svd_cuda_preflight_admits_the_complete_validated_32gb_recipe() {
         let card_32 = apply_vram_cap(None, Some(32.0));
-        let full = svd_fit_error(25, 8, 15, 1024, 576, "0", card_32)
-            .expect("the default 25-frame profile must be rejected before model load on 32 GB");
-        let message = full.to_string();
         assert!(
-            message.contains("48 GB")
-                && message.contains("8 frames")
-                && message.contains("decodeChunkSize=1")
-                && message.contains("12 steps"),
-            "rejection must recommend the minimum card and the complete reduced profile: {message}"
+            svd_fit_error(25, 8, 25, 1024, 576, "0", card_32).is_none(),
+            "the real-hardware-validated default profile must be admitted on 32 GB"
+        );
+        let too_small = svd_fit_error(25, 8, 25, 1024, 576, "0", apply_vram_cap(None, Some(16.0)))
+            .expect("the 17.521 GiB measured peak cannot be admitted on a 16 GB card");
+        assert!(
+            too_small.to_string().contains("at least an 18 GB"),
+            "the rejection must explain the measured minimum: {too_small}"
+        );
+        let over = svd_fit_error(26, 8, 25, 1024, 576, "0", card_32)
+            .expect("a recipe beyond the measured frame boundary must still reject on 32 GB");
+        let message = over.to_string();
+        assert!(
+            !message.contains("48 GB")
+                && message.contains("1024x576")
+                && message.contains("25 frames")
+                && message.contains("decodeChunkSize=8")
+                && message.contains("25 steps"),
+            "rejection must report only the complete measured 32 GB boundary: {message}"
         );
         assert!(
-            svd_fit_error(8, 1, 12, 1024, 576, "0", card_32).is_none(),
-            "the real-hardware-validated reduced recipe must remain runnable on 32 GB"
+            svd_fit_error(25, 9, 25, 1024, 576, "0", card_32).is_some()
+                && svd_fit_error(25, 8, 26, 1024, 576, "0", card_32).is_some()
+                && svd_fit_error(25, 8, 25, 1025, 576, "0", card_32).is_some(),
+            "changing any unproven setting must reject instead of extrapolating the measured tuple"
         );
         assert!(
-            svd_fit_error(8, 2, 12, 1024, 576, "0", card_32).is_some()
-                && svd_fit_error(8, 1, 13, 1024, 576, "0", card_32).is_some(),
-            "changing either unproven setting must reject instead of extrapolating the measured tuple"
+            svd_fit_error(26, 9, 26, 1025, 577, "0", apply_vram_cap(None, Some(48.0))).is_none(),
+            "larger cards remain admitted without claiming an unmeasured minimum"
         );
         assert!(
-            svd_fit_error(25, 8, 15, 1024, 576, "0", apply_vram_cap(None, Some(48.0))).is_none(),
-            "the documented full burst is admitted at the recommended 48 GB minimum"
-        );
-        assert!(
-            svd_fit_error(25, 8, 15, 1024, 576, "0", None).is_none(),
+            svd_fit_error(26, 9, 26, 1025, 577, "0", None).is_none(),
             "missing telemetry must preserve the fit-gate convention: admit without invented evidence"
         );
     }

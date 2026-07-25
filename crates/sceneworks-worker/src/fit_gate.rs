@@ -170,40 +170,59 @@ pub(crate) fn mochi_needed_gb(
 
 /// Largest SVD burst validated on a real 32 GB RTX PRO 4500.
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-pub(crate) const SVD_32GB_VALIDATED_MAX_FRAMES: u32 = 8;
+pub(crate) const SVD_32GB_VALIDATED_MAX_FRAMES: u32 = 25;
 
 /// Largest SVD VAE decode chunk validated on a real 32 GB RTX PRO 4500.
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-pub(crate) const SVD_32GB_VALIDATED_MAX_DECODE_CHUNK: u32 = 1;
+pub(crate) const SVD_32GB_VALIDATED_MAX_DECODE_CHUNK: u32 = 8;
 
 /// Largest SVD denoise step count validated on a real 32 GB RTX PRO 4500.
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-pub(crate) const SVD_32GB_VALIDATED_MAX_STEPS: u32 = 12;
+pub(crate) const SVD_32GB_VALIDATED_MAX_STEPS: u32 = 25;
 
-/// Recommended physical-card class for longer SVD bursts.
+/// Largest SVD output geometry validated on a real 32 GB RTX PRO 4500.
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-pub(crate) const SVD_LONG_BURST_RECOMMENDED_VRAM_GB: f64 = 48.0;
+pub(crate) const SVD_32GB_VALIDATED_MAX_WIDTH: u32 = 1024;
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) const SVD_32GB_VALIDATED_MAX_HEIGHT: u32 = 576;
 
-/// Whether the requested SVD recipe crosses the only real-hardware boundary currently established:
-/// above 8 frames, a decode chunk above 1, or more than 12 steps on a physical card below the
-/// recommended 48 GB class.
+/// Physical-card class on which the complete SVD boundary was measured.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) const SVD_VALIDATED_VRAM_GB: f64 = 32.0;
+
+/// Smallest physical-card class that can contain the measured default-profile high-water mark.
 ///
-/// This intentionally does not invent a linear activation formula from the two measured outcomes.
-/// The same 32 GB card completed the full `(8 frames, chunk 1, 12 steps)` tuple at a 19.0 GB observed
-/// peak and OOMed the 25-frame profile twice. Admitting an arbitrary mixture of one proven setting
-/// with unproven defaults would turn the measured tuple into evidence it does not provide.
+/// The real run reached 17.521 GiB in the UNet stage. Rounding that observation up to 18 GB avoids
+/// claiming the validated tuple can run on a 16 GB card while leaving room for cards between the
+/// measured peak and the 32 GB validation card.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) const SVD_VALIDATED_PROFILE_MIN_VRAM_GB: f64 = 18.0;
+
+/// Whether a request on a 32 GB-or-smaller card crosses the real-hardware boundary established by
+/// sc-14625: 1024x576, 25 frames, decode chunk 8, and 25 steps.
+///
+/// This intentionally does not invent a linear activation formula. The exact default tuple completed
+/// on an RTX PRO 4500 after sequential CFG/residency and live-free VAE tiling, with per-stage
+/// `CU_MEMPOOL_ATTR_USED_MEM_HIGH` peaks of 7.245 GiB conditioning, 17.521 GiB UNet, and 15.071 GiB
+/// decode. Larger cards remain admitted without claiming an unmeasured minimum such as the old
+/// conservative 48 GB recommendation.
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 pub(crate) fn svd_profile_needs_larger_card(
     frames: u32,
     decode_chunk_size: u32,
     steps: u32,
+    width: u32,
+    height: u32,
     total_vram_gb: f64,
 ) -> bool {
     let exceeds_validated_profile = frames > SVD_32GB_VALIDATED_MAX_FRAMES
         || decode_chunk_size > SVD_32GB_VALIDATED_MAX_DECODE_CHUNK
-        || steps > SVD_32GB_VALIDATED_MAX_STEPS;
-    exceeds_validated_profile
-        && total_vram_gb.round() + f64::EPSILON < SVD_LONG_BURST_RECOMMENDED_VRAM_GB
+        || steps > SVD_32GB_VALIDATED_MAX_STEPS
+        || width > SVD_32GB_VALIDATED_MAX_WIDTH
+        || height > SVD_32GB_VALIDATED_MAX_HEIGHT;
+    let physical_card_gb = total_vram_gb.round();
+    physical_card_gb + f64::EPSILON < SVD_VALIDATED_PROFILE_MIN_VRAM_GB
+        || (exceeds_validated_profile && physical_card_gb <= SVD_VALIDATED_VRAM_GB + f64::EPSILON)
 }
 
 #[cfg(test)]
@@ -294,13 +313,17 @@ mod tests {
         assert!(mochi_needed_gb(1, 151, 848, 480, 2.0).is_some());
     }
 
-    /// sc-14492's discriminating real-hardware outcomes: do not collapse them into a model-wide ban.
+    /// sc-14625's discriminating real-hardware outcome: admit exactly the measured default tuple on
+    /// 32 GB without extrapolating its independent settings or restoring the old 48 GB guess.
     #[test]
     fn svd_cuda_boundary_requires_the_complete_validated_32gb_profile() {
-        assert!(svd_profile_needs_larger_card(25, 8, 15, 32.0));
-        assert!(svd_profile_needs_larger_card(8, 2, 12, 32.0));
-        assert!(svd_profile_needs_larger_card(8, 1, 13, 32.0));
-        assert!(!svd_profile_needs_larger_card(8, 1, 12, 32.0));
-        assert!(!svd_profile_needs_larger_card(25, 8, 15, 48.0));
+        assert!(!svd_profile_needs_larger_card(25, 8, 25, 1024, 576, 32.0));
+        assert!(svd_profile_needs_larger_card(25, 8, 25, 1024, 576, 16.0));
+        assert!(!svd_profile_needs_larger_card(25, 8, 25, 1024, 576, 24.0));
+        assert!(svd_profile_needs_larger_card(26, 8, 25, 1024, 576, 32.0));
+        assert!(svd_profile_needs_larger_card(25, 9, 25, 1024, 576, 32.0));
+        assert!(svd_profile_needs_larger_card(25, 8, 26, 1024, 576, 32.0));
+        assert!(svd_profile_needs_larger_card(25, 8, 25, 1025, 576, 32.0));
+        assert!(!svd_profile_needs_larger_card(26, 9, 26, 1025, 577, 48.0));
     }
 }

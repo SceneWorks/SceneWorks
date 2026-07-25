@@ -322,7 +322,7 @@ fn comfyui_wan_a14b_gate_rejects_32gb_and_admits_large_card() {
         "larger-card behavior remains admitted"
     );
     assert_eq!(
-        candle_wan_offload_policy(WAN_COMFYUI_T2V_ENGINE),
+        candle_video_offload_policy(WAN_COMFYUI_T2V_ENGINE),
         OffloadPolicy::Sequential
     );
     std::fs::remove_dir_all(&root).ok();
@@ -6948,20 +6948,26 @@ fn video_load_spec_threads_text_encoder_dir() {
     );
 }
 
-/// sc-12631 / sc-13175: the candle Wan engines the manifest sizes by a MEASURED sequential
+/// sc-12631 / sc-13175 / sc-14625: the candle video engines that require the provider's sequential
 /// `candle.vramGbByTier` peak load with `OffloadPolicy::Sequential` — the A14B (T2V + I2V) so its two
 /// 14B experts swap one-resident-at-a-time, and the dense TI2V-5B (sc-13175) so its UMT5 TE + z48 VAE
 /// are flushed off-GPU around the denoise. That residency is the coupling that makes the gate's
-/// admission number truthful. `ltx`/`svd` carry no offload lifecycle and stay `Resident`. Both halves
-/// are pinned: the policy predicate AND that `video_load_spec` actually threads it onto the `LoadSpec`
+/// admission number truthful. SVD-XT stages conditioner → UNet → VAE decode, while LTX has no
+/// offload lifecycle and stays `Resident`. Both halves are pinned: the policy predicate AND that
+/// `video_load_spec` actually threads it onto the `LoadSpec`
 /// (a decoupled predicate that never reached the spec would silently OOM on the resident path the gate
 /// did not size for).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn candle_wan_sequential_engines_offload_others_resident() {
-    for id in ["wan2_2_ti2v_5b", "wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
+fn candle_sequential_video_engines_offload_others_resident() {
+    for id in [
+        "svd_xt",
+        "wan2_2_ti2v_5b",
+        "wan2_2_t2v_14b",
+        "wan2_2_i2v_14b",
+    ] {
         assert_eq!(
-            candle_wan_offload_policy(id),
+            candle_video_offload_policy(id),
             OffloadPolicy::Sequential,
             "{id} must offload (sized by its measured sequential peak, not the resident load)"
         );
@@ -6970,7 +6976,7 @@ fn candle_wan_sequential_engines_offload_others_resident() {
         // makes the sequential-peak gate truthful).
         let input = VideoGenInput {
             engine_id: id,
-            offload_policy: candle_wan_offload_policy(id),
+            offload_policy: candle_video_offload_policy(id),
             ..VideoGenInput::default()
         };
         assert_eq!(
@@ -6979,24 +6985,58 @@ fn candle_wan_sequential_engines_offload_others_resident() {
             "{id}: video_load_spec must thread Sequential onto the LoadSpec"
         );
     }
-    // ltx/svd carry no offload lifecycle — forcing them sequential would be a no-op that misleads.
-    for id in ["ltx_2_3_distilled", "svd_xt"] {
-        assert_eq!(
-            candle_wan_offload_policy(id),
-            OffloadPolicy::Resident,
-            "{id} must stay resident"
-        );
-        let input = VideoGenInput {
-            engine_id: id,
-            offload_policy: candle_wan_offload_policy(id),
-            ..VideoGenInput::default()
-        };
-        assert_eq!(
-            video_load_spec(&input).offload_policy,
-            OffloadPolicy::Resident,
-            "{id}: video_load_spec must keep Resident"
-        );
-    }
+    // LTX carries no offload lifecycle — forcing it sequential would be a no-op that misleads.
+    let id = "ltx_2_3_distilled";
+    assert_eq!(
+        candle_video_offload_policy(id),
+        OffloadPolicy::Resident,
+        "{id} must stay resident"
+    );
+    let input = VideoGenInput {
+        engine_id: id,
+        offload_policy: candle_video_offload_policy(id),
+        ..VideoGenInput::default()
+    };
+    assert_eq!(
+        video_load_spec(&input).offload_policy,
+        OffloadPolicy::Resident,
+        "{id}: video_load_spec must keep Resident"
+    );
+}
+
+/// The SVD production arm returns before the generic Wan/LTX input builder. Exercise the exact
+/// builder that arm calls so moving Sequential only onto the later generic input cannot silently
+/// restore the resident/OOM path.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_svd_production_input_threads_sequential_into_load_spec() {
+    let request = request(json!({
+        "projectId": "p",
+        "model": "svd",
+        "mode": "image_to_video",
+        "width": 1024,
+        "height": 576,
+        "fps": 7,
+        "seed": 42,
+        "advanced": { "numFrames": 25, "decodeChunkSize": 8, "steps": 25 }
+    }));
+    let input = candle_svd_input(
+        "svd_xt",
+        PathBuf::from("/models/svd"),
+        Vec::new(),
+        &request,
+        SvdVramPreflight {
+            frames: 25,
+            decode_chunk_size: 8,
+            steps: 25,
+        },
+    );
+    assert_eq!(input.offload_policy, OffloadPolicy::Sequential);
+    assert_eq!(
+        video_load_spec(&input).offload_policy,
+        OffloadPolicy::Sequential,
+        "the exact production SVD input must load the measured sequential lifecycle"
+    );
 }
 
 /// Q8 opt-in detection (sc-5679): `advanced.mlxQuantize: 8` (int or string) → true; absent / Q4
@@ -7215,6 +7255,156 @@ fn svd_real_weights_image_to_video() {
         .frames
         .iter()
         .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize));
+}
+
+/// sc-14625's SceneWorks-side real route: load the CUDA provider through the pinned runtime bundle
+/// with sequential offload, render a one-step 25-frame 1024x576 clip, run the same libx264 encoder
+/// used by production, and verify both the physical MP4 and routing/provenance facts. The full
+/// 25-step memory gate lives in inference's ignored smoke; one step here keeps this independent
+/// worker/encoder/provenance gate practical while retaining the same peak shapes and decode recipe.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[ignore = "loads real SVD-XT weights and requires CUDA plus ffmpeg/ffprobe"]
+#[test]
+fn svd_cuda_real_weights_encode_h264_and_preserve_provenance() {
+    let model_dir = PathBuf::from(
+        std::env::var("SCENEWORKS_CUDA_SVD_DIR")
+            .expect("set SCENEWORKS_CUDA_SVD_DIR to the complete SVD-XT snapshot"),
+    );
+    assert!(
+        svd_dir_is_complete(&model_dir),
+        "SCENEWORKS_CUDA_SVD_DIR is not a complete SVD-XT snapshot"
+    );
+
+    let (source_w, source_h) = (64u32, 64u32);
+    let mut source_pixels = vec![0u8; (source_w * source_h * 3) as usize];
+    for y in 0..source_h {
+        for x in 0..source_w {
+            let i = ((y * source_w + x) * 3) as usize;
+            source_pixels[i] = (x * 255 / source_w) as u8;
+            source_pixels[i + 1] = (y * 255 / source_h) as u8;
+            source_pixels[i + 2] = ((x + y) % 251) as u8;
+        }
+    }
+
+    let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
+        engine_id: "svd_xt",
+        model_dir,
+        width: 1024,
+        height: 576,
+        frames: 25,
+        fps: 7,
+        steps: Some(1),
+        seed: 42,
+        conditioning: vec![Conditioning::Reference {
+            image: Image {
+                width: source_w,
+                height: source_h,
+                pixels: source_pixels,
+            },
+            strength: None,
+        }],
+        motion_bucket_id: Some(127.0),
+        noise_aug_strength: Some(0.02),
+        decode_chunk_size: Some(8),
+        conditioning_fps: Some(7),
+        ..VideoGenInput::default()
+    };
+    let spec = LoadSpec::new(WeightsSource::Dir(input.model_dir.clone()))
+        .with_offload_policy(OffloadPolicy::Sequential);
+    let generator = crate::inference_runtime::load("svd_xt", &spec)
+        .expect("load pinned candle SVD provider sequentially");
+    assert!(
+        generator
+            .descriptor()
+            .capabilities
+            .supports_sequential_offload
+    );
+
+    let cancel = CancelFlag::new();
+    let mut progress_events = 0usize;
+    let decoded =
+        run_loaded_video_generation(generator.as_ref(), input, &cancel, &mut |_progress| {
+            progress_events += 1
+        })
+        .expect("real CUDA SVD generation");
+    assert_eq!(decoded.frames.len(), 25);
+    assert_eq!(decoded.fps, 7);
+    assert!(decoded.audio.is_none());
+    assert!(progress_events > 0);
+    assert!(decoded
+        .frames
+        .iter()
+        .all(|frame| (frame.width, frame.height) == (1024, 576)));
+
+    let clip = EncodedClip::measure(&decoded);
+    let temp = tempfile::tempdir().expect("temp output dir");
+    let media_path = temp.path().join("svd-real.mp4");
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(encode_media(&media_path, decoded, None))
+        .expect("SceneWorks libx264 encode");
+
+    let probe = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,width,height,avg_frame_rate,nb_read_frames",
+            "-of",
+            "json",
+        ])
+        .arg(&media_path)
+        .output()
+        .expect("run ffprobe");
+    assert!(
+        probe.status.success(),
+        "ffprobe failed: {}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let probe: Value = serde_json::from_slice(&probe.stdout).expect("ffprobe JSON");
+    let stream = &probe["streams"][0];
+    assert_eq!(stream["codec_name"], json!("h264"));
+    assert_eq!(stream["width"], json!(1024));
+    assert_eq!(stream["height"], json!(576));
+    assert_eq!(stream["avg_frame_rate"], json!("7/1"));
+    assert_eq!(stream["nb_read_frames"], json!("25"));
+
+    let request = request(json!({
+        "projectId": "p",
+        "model": "svd",
+        "mode": "image_to_video",
+        "width": 1024,
+        "height": 576,
+        "fps": 7,
+        "seed": 42,
+        "advanced": { "numFrames": 25, "decodeChunkSize": 8, "steps": 1 }
+    }));
+    let plan = VideoPlan::new(&request, temp.path());
+    let fact = video_asset_fact(
+        &plan,
+        resolve_video_seed(&request),
+        candle_video_adapter_label("svd_xt"),
+        svd_raw_settings(&request),
+        None,
+        clip,
+    );
+    let raw = &fact["rawAdapterSettings"];
+    assert_eq!(candle_video_engine_id(&request.model), Some("svd_xt"));
+    assert_eq!(candle_video_adapter_label("svd_xt"), "candle_svd");
+    assert_eq!(fact["seed"], json!(42));
+    assert_eq!(fact["model"], json!("svd"));
+    assert_eq!(fact["adapter"], json!("candle_svd"));
+    assert_eq!(raw["model"], json!("svd"));
+    assert_eq!(raw["frameCount"], json!(25));
+    assert_eq!(raw["fps"], json!(7));
+    assert_eq!(raw["realModelInference"], json!(true));
 }
 
 /// SeedVR2 video upscale (epic 4811 / sc-4816) end-to-end against the real 3B weights:
@@ -8366,44 +8556,43 @@ mod candle_video_label_tests {
         assert!(is_candle_video_engine("svd"));
     }
 
-    /// sc-14492: the complete reduced recipe proven on 32 GB must still pass the real candle preflight
-    /// and retain the routing/recipe provenance required by the story.
+    /// sc-14625: the complete default recipe proven on 32 GB must pass the real candle preflight and
+    /// retain the routing/recipe provenance required by the story.
     #[test]
-    fn candle_svd_reduced_profile_preserves_provenance_after_vram_preflight() {
+    fn candle_svd_default_profile_preserves_provenance_after_vram_preflight() {
         let request = request(json!({
             "projectId": "p",
             "model": "svd",
             "mode": "image_to_video",
             "width": 1024,
             "height": 576,
-            "advanced": { "numFrames": 8, "decodeChunkSize": 1, "steps": 12 }
+            "advanced": { "numFrames": 25, "decodeChunkSize": 8, "steps": 25 }
         }));
         let preflight = svd_vram_preflight(
             &request,
             "0",
             crate::vram_gate::apply_vram_cap(None, Some(32.0)),
         )
-        .expect("the real-hardware-validated reduced profile remains admitted");
-        assert_eq!(preflight.frames, 8);
-        assert_eq!(preflight.decode_chunk_size, 1);
-        assert_eq!(preflight.steps, 12);
+        .expect("the real-hardware-validated default profile is admitted");
+        assert_eq!(preflight.frames, 25);
+        assert_eq!(preflight.decode_chunk_size, 8);
+        assert_eq!(preflight.steps, 25);
         assert_eq!(candle_video_engine_id(&request.model), Some("svd_xt"));
         assert_eq!(candle_video_adapter_label("svd_xt"), "candle_svd");
 
         let raw = svd_raw_settings(&request);
         assert_eq!(raw["model"], json!("svd"));
-        assert_eq!(raw["numFrames"], json!(8));
-        assert_eq!(raw["decodeChunkSize"], json!(1));
-        assert_eq!(raw["steps"], json!(12));
+        assert_eq!(raw["numFrames"], json!(25));
+        assert_eq!(raw["decodeChunkSize"], json!(8));
+        assert_eq!(raw["steps"], json!(25));
         assert_eq!(raw["realModelInference"], json!(true));
     }
 
-    /// sc-14492's production-order pin: drive the real async candle arm under a synthetic 32 GB
-    /// hardware class. The default SVD recipe must return the actionable VRAM refusal before snapshot
-    /// resolution, source-image IO, or the supplied loader. A helper-only test would stay green if the
-    /// production call were deleted or moved below model load.
+    /// The production-order pin remains discriminating after admitting the measured default: a recipe
+    /// just beyond the measured boundary must still refuse before snapshot resolution, source-image
+    /// IO, or the supplied loader.
     #[test]
-    fn generate_candle_svd_refuses_the_default_32gb_recipe_before_loading() {
+    fn generate_candle_svd_refuses_an_unvalidated_32gb_recipe_before_loading() {
         let probe = ArmProbe::default();
         let request = request(json!({
             "projectId": "p",
@@ -8411,7 +8600,8 @@ mod candle_video_label_tests {
             "mode": "image_to_video",
             "quality": "fast",
             "width": 1024,
-            "height": 576
+            "height": 576,
+            "advanced": { "numFrames": 25, "decodeChunkSize": 9, "steps": 25 }
         }));
         let settings = offline_settings();
         let job = mochi_job_snapshot();
@@ -8434,13 +8624,14 @@ mod candle_video_label_tests {
 
         let message = out
             .err()
-            .expect("the default SVD recipe must be rejected on a 32 GB card")
+            .expect("the over-limit SVD recipe must be rejected on a 32 GB card")
             .to_string();
         assert!(
             message.contains("rejected before model load")
-                && message.contains("decodeChunkSize=1")
-                && message.contains("12 steps"),
-            "the production arm must surface the complete actionable SVD preflight: {message}"
+                && message.contains("decode-chunk-9")
+                && message.contains("decodeChunkSize=8")
+                && message.contains("25 steps"),
+            "the production arm must surface the measured SVD boundary: {message}"
         );
         assert!(
             !probe.loaded(),
