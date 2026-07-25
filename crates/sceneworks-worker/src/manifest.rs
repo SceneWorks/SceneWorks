@@ -203,7 +203,10 @@ pub(crate) async fn write_json_value(path: &Path, value: &Value) -> WorkerResult
             .and_then(|extension| extension.to_str())
             .unwrap_or("json")
     ));
-    tokio::fs::write(&tmp_path, output).await?;
+    let mut file = tokio::fs::File::create(&tmp_path).await?;
+    file.write_all(&output).await?;
+    file.sync_all().await?;
+    drop(file);
     tokio::fs::rename(tmp_path, path).await?;
     Ok(())
 }

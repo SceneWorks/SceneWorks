@@ -42,11 +42,14 @@ use serde_json::{json, Map, Value};
 
 use crate::api_client::{ApiClient, ApiClientError};
 
-/// How many consecutive `GET /api/v1/jobs/:id` failures the blocking poll loop
-/// tolerates before giving up (sc-10279). A single network blip / brief API
-/// restart must not throw away a possibly-20-minute render that is still running
-/// server-side; only a sustained failure streak surfaces as an error.
-const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 5;
+/// How long a continuous `GET /api/v1/jobs/:id` outage is tolerated. Counting
+/// failures made tolerance accidentally depend on the configured poll cadence:
+/// a faster poller abandoned the same server outage much sooner.
+const MAX_POLL_OUTAGE: Duration = Duration::from_secs(15);
+
+fn poll_outage_exceeded(outage_started: tokio::time::Instant, now: tokio::time::Instant) -> bool {
+    now.duration_since(outage_started) >= MAX_POLL_OUTAGE
+}
 
 /// F-041 (sc-11236) — inline-payload caps for `generate_image`. The tool
 /// base64-inlines every produced image into the JSON-RPC tool result. base64
@@ -349,7 +352,7 @@ impl SceneWorksMcp {
         reporter.report(&submitted).await;
 
         let started = tokio::time::Instant::now();
-        let mut consecutive_poll_errors: u32 = 0;
+        let mut poll_outage_started: Option<tokio::time::Instant> = None;
         let job = loop {
             // Cooperative cancellation (sc-10276): rmcp cancels `ctx.ct` when the
             // client sends `notifications/cancelled` (it does NOT abort the tool
@@ -380,12 +383,13 @@ impl SceneWorksMcp {
                 .await
             {
                 Ok(job) => {
-                    consecutive_poll_errors = 0;
+                    poll_outage_started = None;
                     job
                 }
                 Err(error) => {
-                    consecutive_poll_errors += 1;
-                    if consecutive_poll_errors >= MAX_CONSECUTIVE_POLL_ERRORS {
+                    let now = tokio::time::Instant::now();
+                    let outage_started = *poll_outage_started.get_or_insert(now);
+                    if poll_outage_exceeded(outage_started, now) {
                         return Err(api_error(error));
                     }
                     if started.elapsed() >= self.job_wait.timeout {
@@ -1963,6 +1967,16 @@ mod tests {
         let c = JobWaitConfig::clamped(Duration::from_secs(10), Duration::from_secs(3));
         assert_eq!(c.poll_interval, Duration::from_secs(10));
         assert_eq!(c.timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn poll_outage_tolerance_is_elapsed_time_based() {
+        let started = tokio::time::Instant::now();
+        assert!(!poll_outage_exceeded(
+            started,
+            started + MAX_POLL_OUTAGE - Duration::from_millis(1)
+        ));
+        assert!(poll_outage_exceeded(started, started + MAX_POLL_OUTAGE));
     }
 
     #[test]

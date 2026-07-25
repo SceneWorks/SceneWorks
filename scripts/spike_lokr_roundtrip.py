@@ -124,17 +124,25 @@ def run(kind):
             "reload_match": reload_match, "delta": delta_vs_base}
 
 
-lokr = run("lokr")
-lora = run("lora")
+def main():
+    lokr = run("lokr")
+    lora = run("lora")
 
-print("\n===== SUMMARY =====")
-print(f"  LoRA  params={lora['params']:,}  bytes={lora['bytes']:,}")
-print(f"  LoKr  params={lokr['params']:,}  bytes={lokr['bytes']:,}")
-ratio = lora["bytes"] / max(lokr["bytes"], 1)
-print(f"  LoKr is {ratio:.2f}x smaller on disk than LoRA at r={RANK}")
-print(f"  LoKr inference-reload OK: {lokr['reload_match']}   LoRA inference-reload OK: {lora['reload_match']}")
-print("\n  Why load_lora_weights() can't consume LoKr:")
-print(f"    LoRA keys look like:  {lora['keys'][0]}")
-print(f"    LoKr keys look like:  {lokr['keys'][0]}")
-print("    diffusers' converter expects lora_A/lora_B (or kohya lora_down/lora_up);")
-print("    LoKr emits lokr_w1/lokr_w2/lokr_t2 -> unrecognized -> must use PEFT injection.")
+    print("\n===== SUMMARY =====")
+    print(f"  LoRA  params={lora['params']:,}  bytes={lora['bytes']:,}")
+    print(f"  LoKr  params={lokr['params']:,}  bytes={lokr['bytes']:,}")
+    ratio = lora["bytes"] / max(lokr["bytes"], 1)
+    print(f"  LoKr is {ratio:.2f}x smaller on disk than LoRA at r={RANK}")
+    print(
+        "  LoKr inference-reload OK: "
+        f"{lokr['reload_match']}   LoRA inference-reload OK: {lora['reload_match']}"
+    )
+    print("\n  Why load_lora_weights() can't consume LoKr:")
+    print(f"    LoRA keys look like:  {lora['keys'][0]}")
+    print(f"    LoKr keys look like:  {lokr['keys'][0]}")
+    print("    diffusers' converter expects lora_A/lora_B (or kohya lora_down/lora_up);")
+    print("    LoKr emits lokr_w1/lokr_w2/lokr_t2 -> unrecognized -> must use PEFT injection.")
+
+
+if __name__ == "__main__":
+    main()

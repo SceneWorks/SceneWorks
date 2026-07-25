@@ -467,4 +467,46 @@ describe("video recipe replay (sc-12324)", () => {
     // while also adopting the replayed clip as its own source clip.
     expect(activeMode()).toBe("First → Last");
   });
+
+  it("does not replay a persistent asset launch when the asset catalog refreshes", async () => {
+    const asset = {
+      id: "asset-image",
+      type: "image",
+      displayName: "Source",
+      file: { path: "source.png" },
+    };
+    const context = {
+      assets: [asset],
+      selectedAsset: asset,
+      selectedAssetId: asset.id,
+      studioLaunch: {
+        id: "launch-asset",
+        view: "Video",
+        assetId: asset.id,
+        mode: "image_to_video",
+      },
+    };
+    await launch(context);
+    expect(activeMode()).toBe("Image → Video");
+
+    await act(async () => {
+      [...document.body.querySelectorAll(".mode-tab")]
+        .find((button) => button.textContent.trim() === "Text → Video")
+        .click();
+    });
+    expect(activeMode()).toBe("Text → Video");
+
+    await act(async () => {
+      const refreshedAsset = { ...asset };
+      root.render(
+        renderStudio({
+          ...context,
+          assets: [refreshedAsset],
+          selectedAsset: refreshedAsset,
+        }),
+      );
+    });
+    await settle();
+    expect(activeMode()).toBe("Text → Video");
+  });
 });

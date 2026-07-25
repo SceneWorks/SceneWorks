@@ -186,7 +186,12 @@ impl KpsExtraction {
 /// `pose_jobs::DETECTOR` / `person_segment_sam3::WEIGHTS` (poison-recovery: a poisoned lock drops the
 /// cached value and rebuilds). macOS only; `Weights` is the MLX weight container.
 #[cfg(target_os = "macos")]
-static WEIGHTS: OnceLock<Mutex<Option<Weights>>> = OnceLock::new();
+static WEIGHTS: OnceLock<Mutex<Option<(PathBuf, Weights)>>> = OnceLock::new();
+
+#[cfg(any(target_os = "macos", test))]
+fn cached_path_matches<T>(cached: Option<&(PathBuf, T)>, path: &Path) -> bool {
+    cached.map(|(cached_path, _)| cached_path.as_path()) == Some(path)
+}
 
 thread_local! {
     /// The built [`Scrfd`] detector cached per blocking thread, keyed by weight path (sc-8910 /
@@ -235,12 +240,13 @@ fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtra
                     *guard = None;
                     guard
                 });
-                if guard.is_none() {
-                    *guard = Some(Weights::from_file(scrfd_path).map_err(|error| {
+                if !cached_path_matches(guard.as_ref(), scrfd_path) {
+                    let weights = Weights::from_file(scrfd_path).map_err(|error| {
                         WorkerError::Engine(format!("SCRFD weights {scrfd_path:?}: {error}"))
-                    })?);
+                    })?;
+                    *guard = Some((scrfd_path.to_path_buf(), weights));
                 }
-                let scrfd = Scrfd::from_weights(guard.as_ref().expect("weights loaded"))
+                let scrfd = Scrfd::from_weights(&guard.as_ref().expect("weights loaded").1)
                     .map_err(|error| WorkerError::Engine(format!("SCRFD load: {error}")))?;
                 *cell.borrow_mut() = Some((scrfd_path.to_path_buf(), scrfd));
             }
@@ -477,6 +483,19 @@ pub(crate) async fn run_kps_extract_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn weights_cache_identity_includes_the_resolved_path() {
+        let cached = (PathBuf::from("/weights/a.safetensors"), "weights");
+        assert!(cached_path_matches(
+            Some(&cached),
+            Path::new("/weights/a.safetensors")
+        ));
+        assert!(!cached_path_matches(
+            Some(&cached),
+            Path::new("/weights/b.safetensors")
+        ));
+    }
 
     /// A queued `kps_extract` job carrying `payload` (mirrors `jobs_store`'s test constructor).
     fn kps_job(payload: Value) -> JobSnapshot {

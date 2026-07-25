@@ -41,6 +41,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use crate::asset_media::resolve_asset_media;
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use crate::generator_cache::with_cached_generator;
 use crate::single_child_asset::{write_single_child_asset, SingleChildAssetSpec};
@@ -858,38 +859,6 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// source resolution (mirrors image_adapters.find_asset_media_path / _source_display_name)
-// ---------------------------------------------------------------------------
-
-/// Resolve a `sourceAssetId` to its on-disk media path (native resolution) + the
-/// asset's `displayName`, via the project sidecar — mirrors `find_asset_media_path`.
-fn resolve_source(
-    store: &ProjectStore,
-    project_id: &str,
-    asset_id: &str,
-    project_path: &Path,
-) -> Option<(PathBuf, Option<String>)> {
-    let asset = store.get_asset(project_id, asset_id).ok()?;
-    let rel = asset.get("file")?.get("path")?.as_str()?;
-    let mut path = project_path.to_path_buf();
-    for component in Path::new(rel).components() {
-        if let std::path::Component::Normal(value) = component {
-            path.push(value);
-        } else {
-            return None;
-        }
-    }
-    if !path.exists() {
-        return None;
-    }
-    let display = asset
-        .get("displayName")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    Some((path, display))
-}
-
-// ---------------------------------------------------------------------------
 // job handler
 // ---------------------------------------------------------------------------
 
@@ -987,12 +956,14 @@ pub(crate) async fn run_image_upscale_job(
         .get_project(&project_id)
         .map_err(|e| WorkerError::InvalidPayload(format!("project not found: {e}")))?;
     let project_path = PathBuf::from(project.path);
-    let (source_path, source_display) =
-        resolve_source(&store, &project_id, &source_asset_id, &project_path).ok_or_else(|| {
+    let source = resolve_asset_media(&store, &project_id, &source_asset_id, &project_path)
+        .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
                 "Source image asset not found or missing: {source_asset_id}."
             ))
         })?;
+    let source_path = source.path;
+    let source_display = source.display_name;
 
     // Decode the source off the async runtime thread (sc-8909 / F-107): the full read + decode is
     // blocking and would otherwise stall the heartbeat before the upscale even starts.

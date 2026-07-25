@@ -121,13 +121,21 @@ pub fn validate_public_ip(address: IpAddr) -> Result<(), LoraUrlError> {
 }
 
 fn blocked_ipv4(address: Ipv4Addr) -> bool {
+    let [a, b, c, _] = address.octets();
     address.is_private()
         || address.is_loopback()
         || address.is_link_local()
         || address.is_broadcast()
         || address.is_documentation()
-        || address.octets()[0] == 0
-        || address.octets()[0] >= 224
+        || a == 0
+        || a >= 224
+        // RFC 6598 shared address space.
+        || (a == 100 && (64..=127).contains(&b))
+        // IETF protocol assignments and the deprecated 6to4 relay anycast.
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 88 && c == 99)
+        // RFC 2544 benchmark networks.
+        || (a == 198 && (18..=19).contains(&b))
 }
 
 fn blocked_ipv6(address: Ipv6Addr) -> bool {
@@ -209,5 +217,29 @@ mod tests {
             parse_lora_source_url("https://example.com/style.safetensors%00.txt").unwrap_err(),
             LoraUrlError::UnsafeFilename
         );
+    }
+
+    #[test]
+    fn validate_public_ip_blocks_reserved_ipv4_ranges() {
+        for blocked in [
+            "100.64.0.1",
+            "100.127.255.254",
+            "192.0.0.1",
+            "192.88.99.1",
+            "198.18.0.1",
+            "198.19.255.254",
+        ] {
+            assert_eq!(
+                validate_public_ip(blocked.parse().expect("valid IP")),
+                Err(LoraUrlError::BlockedHost),
+                "{blocked} must be blocked"
+            );
+        }
+        for public in ["100.63.255.254", "100.128.0.1", "192.0.1.1", "198.20.0.1"] {
+            assert!(
+                validate_public_ip(public.parse().expect("valid IP")).is_ok(),
+                "{public} must remain allowed"
+            );
+        }
     }
 }

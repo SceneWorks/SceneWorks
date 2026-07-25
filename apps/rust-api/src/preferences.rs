@@ -90,14 +90,6 @@ fn load_preferences(path: &std::path::Path) -> UiPreferences {
         .unwrap_or_default()
 }
 
-fn save_preferences(path: &std::path::Path, prefs: &UiPreferences) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let body = serde_json::to_string_pretty(prefs)?;
-    std::fs::write(path, body)
-}
-
 /// The valid stored theme for `input`, or `None` if it isn't one we recognize.
 fn normalize_theme(input: Option<&str>) -> Option<String> {
     match input.map(str::trim) {
@@ -151,22 +143,34 @@ pub(crate) async fn get_ui_preferences(
 ) -> Result<Json<UiPreferences>, ApiError> {
     // sc-4202 (F-API-3): keep the preferences-file read off the async executor.
     let path = preferences_path(&state);
-    let prefs = tokio::task::spawn_blocking(move || {
-        let mut prefs = load_preferences(&path);
+    let lock = manifest_write_lock(&state, &path);
+    let _guard = lock.lock().await;
+    let load_path = path.clone();
+    let (mut prefs, migrated_body) = tokio::task::spawn_blocking(move || {
+        let mut prefs = load_preferences(&load_path);
         // One-time migration (epic 10721 R3): flip a stored `q8` (the old forced default, predating the
         // `auto` option) to `auto` and persist — see `migrate_quality_to_auto`. Only writes on a change.
         if migrate_quality_to_auto(&mut prefs) {
-            let _ = save_preferences(&path, &prefs);
+            let body = serde_json::to_string_pretty(&prefs).ok();
+            return (prefs, body);
         }
-        // Always hand the web a concrete value to seed (`auto` when unset/invalid), so the durable
-        // value survives a desktop relaunch even before the user changes it.
-        prefs.default_generation_quality = Some(normalize_generation_quality(
-            prefs.default_generation_quality.as_deref(),
-        ));
-        prefs
+        (prefs, None)
     })
     .await
     .map_err(|err| ApiError::internal(format!("UI preferences load task failed: {err}")))?;
+    if let Some(body) = migrated_body {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|error| {
+                ApiError::internal(format!("Failed to create preferences directory: {error}"))
+            })?;
+        }
+        write_manifest_atomic(&path, &body).await?;
+    }
+    // Always hand the web a concrete value to seed (`auto` when unset/invalid), so the durable
+    // value survives a desktop relaunch even before the user changes it.
+    prefs.default_generation_quality = Some(normalize_generation_quality(
+        prefs.default_generation_quality.as_deref(),
+    ));
     Ok(Json(prefs))
 }
 
@@ -179,8 +183,11 @@ pub(crate) async fn set_ui_preferences(
     // sc-4202 (F-API-3): the read-modify-write of the preferences file runs on the
     // blocking pool so it can't stall a tokio worker thread.
     let path = preferences_path(&state);
-    let prefs = tokio::task::spawn_blocking(move || -> std::io::Result<UiPreferences> {
-        let mut prefs = load_preferences(&path);
+    let lock = manifest_write_lock(&state, &path);
+    let _guard = lock.lock().await;
+    let load_path = path.clone();
+    let (prefs, body) = tokio::task::spawn_blocking(move || -> Result<_, serde_json::Error> {
+        let mut prefs = load_preferences(&load_path);
         if let Some(theme) = normalize_theme(payload.theme.as_deref()) {
             prefs.theme = Some(theme);
         }
@@ -209,12 +216,18 @@ pub(crate) async fn set_ui_preferences(
         if let Some(per_model_tier) = payload.per_model_tier {
             prefs.per_model_tier = Some(per_model_tier);
         }
-        save_preferences(&path, &prefs)?;
-        Ok(prefs)
+        let body = serde_json::to_string_pretty(&prefs)?;
+        Ok((prefs, body))
     })
     .await
     .map_err(|err| ApiError::internal(format!("UI preferences save task failed: {err}")))?
-    .map_err(|error| ApiError::internal(format!("Failed to save UI preferences: {error}")))?;
+    .map_err(|error| ApiError::internal(format!("Failed to encode UI preferences: {error}")))?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            ApiError::internal(format!("Failed to create preferences directory: {error}"))
+        })?;
+    }
+    write_manifest_atomic(&path, &body).await?;
     Ok(Json(prefs))
 }
 

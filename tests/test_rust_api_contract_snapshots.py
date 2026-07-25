@@ -21,7 +21,7 @@ import pytest
 # between this file and test_rust_api_worker_smoke.py.
 from rust_api_harness import (
     PNG_1X1,
-    free_port,
+    enable_api_listening_log,
     safetensors_bytes,
     spawn_process,
     wait_for_health,
@@ -188,19 +188,18 @@ class ServerApiHarness:
         self.root = root
         self.runtime = "rust"
         write_contract_manifests(root / "config")
-        port = free_port()
-        self.base_url = f"http://127.0.0.1:{port}"
         env = os.environ.copy()
         env.update(
             {
                 "SCENEWORKS_API_HOST": "127.0.0.1",
-                "SCENEWORKS_API_PORT": str(port),
+                "SCENEWORKS_API_PORT": "0",
                 "SCENEWORKS_DATA_DIR": str(root / "data"),
                 "SCENEWORKS_CONFIG_DIR": str(root / "config"),
                 "SCENEWORKS_JOBS_DB_PATH": str(root / "data" / "cache" / "jobs.db"),
                 "SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE": "1",
             }
         )
+        enable_api_listening_log(env)
         rust_binary = os.getenv("SCENEWORKS_RUST_API_BINARY")
         command = (
             [rust_binary]
@@ -208,6 +207,7 @@ class ServerApiHarness:
             else ["cargo", "run", "-q", "-p", "sceneworks-rust-api"]
         )
         self.process = spawn_process(command, cwd=ROOT, env=env)
+        self.base_url = self.process.wait_for_listening_url()
         wait_for_health(self.base_url, self.process, "rust")
         self.client = httpx.Client(base_url=self.base_url, timeout=10)
 

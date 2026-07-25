@@ -124,7 +124,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "name", "type"],
+        "required": ["id", "name", "family", "type"],
         "additionalProperties": false,
         "allOf": [
           {

@@ -687,10 +687,6 @@ mod tests {
     /// pin its `revision` instead. Kept in lockstep with the identical Python audit
     /// allowlist in tests/test_builtin_manifest_audit.py.
     const COREQUISITE_REVISION_MIGRATION_PENDING: &[(&str, &str)] = &[
-        (
-            "qwen_image",
-            "SceneWorks/qwen-image-2512-fun-controlnet-union",
-        ),
         // ("ltx_2_3", "SceneWorks/ltx-2.3-mlx") pinned in sc-13683 (the gemma coRequisite now carries the
         // full 40-hex LTX_BUNDLE_REVISION), so its migration row was removed here + in the Python twin.
         (
@@ -699,10 +695,6 @@ mod tests {
         ),
         ("wan_2_2_t2v_14b", "lightx2v/Wan2.2-Lightning"),
         ("wan_2_2_i2v_14b", "lightx2v/Wan2.2-Lightning"),
-        ("pid_qwenimage", "SceneWorks/gemma-2-2b-it"),
-        ("pid_flux", "SceneWorks/gemma-2-2b-it"),
-        ("pid_flux2", "SceneWorks/gemma-2-2b-it"),
-        ("pid_sdxl", "SceneWorks/gemma-2-2b-it"),
     ];
 
     /// Every `(model_id, repo)` co-requisite pair in the live manifest that is NOT

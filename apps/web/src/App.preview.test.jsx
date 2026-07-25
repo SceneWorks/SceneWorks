@@ -223,6 +223,28 @@ describe("SceneWorks app shell", () => {
     });
 
     expect(document.body.querySelector(".preview-modal img").getAttribute("src")).toContain("original.png");
+
+    const refreshedOriginal = { ...original };
+    const refreshedUpscaled = { ...upscaled };
+    refreshedUpscaled.variants = {
+      original: refreshedOriginal,
+      upscaled: refreshedUpscaled,
+    };
+    await act(async () => {
+      root.render(
+        <FullscreenPreview
+          asset={refreshedUpscaled}
+          deleteAsset={noop}
+          nextAsset={null}
+          onClose={noop}
+          onPreviewAsset={noop}
+          previousAsset={null}
+          purgeAsset={noop}
+          updateAssetStatus={noop}
+        />,
+      );
+    });
+    expect(document.body.querySelector(".preview-modal img").getAttribute("src")).toContain("original.png");
   });
 
   it("toggles a side-by-side Original↔Edited compare for edits with a resolvable source", async () => {

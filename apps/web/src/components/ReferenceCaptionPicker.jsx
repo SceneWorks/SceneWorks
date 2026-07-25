@@ -16,6 +16,7 @@ import React, { useEffect, useState } from "react";
 import { AssetPickerField, ImageEditSourcePickerField } from "./AssetPicker.jsx";
 import { assetUrl } from "./assetMedia.jsx";
 import { ModelAvailabilityGate } from "./ModelAvailabilityGate.jsx";
+import { probeImageDimensions } from "../imageDimensions.js";
 
 export default function ReferenceCaptionPicker({
   // Run the vision job for the picked asset and resolve to a result (the parent parses:
@@ -66,20 +67,6 @@ export default function ReferenceCaptionPicker({
     .filter((id) => id && id !== referenceAssetId)
     .slice(0, Math.max(0, moodBoardMax - 1));
 
-  // Feed the uploaded image's natural dimensions to the sc-8109 auto-preset seam.
-  function reportReferenceDimensions(asset) {
-    if (typeof onReferenceImageLoaded !== "function" || !asset) return;
-    const src = assetUrl(asset);
-    if (!src || typeof Image === "undefined") return;
-    const probe = new Image();
-    probe.onload = () => {
-      if (probe.naturalWidth && probe.naturalHeight) {
-        onReferenceImageLoaded(probe.naturalWidth, probe.naturalHeight);
-      }
-    };
-    probe.src = src;
-  }
-
   function handleReferenceChange(assetId) {
     setReferenceAssetId(assetId);
     setError("");
@@ -91,11 +78,10 @@ export default function ReferenceCaptionPicker({
   // the id and the list re-runs once the asset resolves, covering select / import / drag / character
   // paths uniformly.
   useEffect(() => {
-    if (!referenceAssetId) return;
+    if (!referenceAssetId) return undefined;
     const asset = referenceAssets.find((item) => item.id === referenceAssetId);
-    if (asset) reportReferenceDimensions(asset);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [referenceAssetId, referenceAssets]);
+    return probeImageDimensions(asset && assetUrl(asset), onReferenceImageLoaded);
+  }, [onReferenceImageLoaded, referenceAssetId, referenceAssets]);
 
   async function handleCaption() {
     if (typeof onCaption !== "function" || !referenceAssetId || busy) return;

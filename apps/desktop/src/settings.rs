@@ -888,13 +888,17 @@ pub fn reset_setup() -> Result<(), String> {
 /// Generic folder picker for the splash storage step (workspace + HF cache
 /// pickers). Returns the chosen absolute path, or `None` if the dialog was
 /// dismissed.
-#[tauri::command]
-pub async fn choose_folder(app: AppHandle) -> Option<String> {
+fn pick_folder(app: &AppHandle) -> Option<String> {
     app.dialog()
         .file()
         .blocking_pick_folder()
         .and_then(|file| file.into_path().ok())
         .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn choose_folder(app: AppHandle) -> Option<String> {
+    pick_folder(&app)
 }
 
 #[tauri::command]
@@ -907,11 +911,7 @@ pub fn set_data_dir(path: String) -> Result<AppSettings, String> {
 
 #[tauri::command]
 pub async fn choose_data_dir(app: AppHandle) -> Option<String> {
-    app.dialog()
-        .file()
-        .blocking_pick_folder()
-        .and_then(|file| file.into_path().ok())
-        .map(|path| path.to_string_lossy().into_owned())
+    pick_folder(&app)
 }
 
 #[tauri::command]

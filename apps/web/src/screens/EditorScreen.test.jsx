@@ -351,6 +351,25 @@ describe("EditorScreen keep-alive keydown gating (sc-13589)", () => {
     expect(setActiveTimeline.mock.calls[0][0].tracks[0].items).toHaveLength(0);
   });
 
+  it("undo restores the pre-commit timeline snapshot", () => {
+    const { setActiveTimeline } = renderEditor(true);
+    selectClipAndPressDelete();
+    act(() => {
+      window.dispatchEvent(
+        new window.KeyboardEvent("keydown", {
+          key: "z",
+          code: "KeyZ",
+          metaKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+
+    expect(setActiveTimeline).toHaveBeenCalledTimes(2);
+    expect(setActiveTimeline.mock.calls[1][0].tracks[0].items).toHaveLength(1);
+    expect(setActiveTimeline.mock.calls[1][0].tracks[0].items[0].id).toBe("item_1");
+  });
+
   it("ignores Delete while the editor is HIDDEN under keep-alive", () => {
     const { setActiveTimeline } = renderEditor(false);
     selectClipAndPressDelete();

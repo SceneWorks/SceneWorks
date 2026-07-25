@@ -581,11 +581,16 @@ fn append_log(path: &Path, line: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-    {
+        .ok();
+    append_log_with_handle(path, line, file.as_mut());
+}
+
+fn append_log_with_handle(path: &Path, line: &str, file: Option<&mut std::fs::File>) {
+    if let Some(file) = file {
         let _ = file.write_all(line.as_bytes());
         let _ = file.flush();
     }
@@ -1663,25 +1668,39 @@ fn supervise_worker(
                 continue;
             }
             let started = Instant::now();
+            // Keep one append handle for this worker lifetime. Stdout/stderr can
+            // emit thousands of events per generation; reopening the same file
+            // for every chunk needlessly hits the filesystem hot path.
+            let mut log_file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .ok();
             loop {
                 match tauri::async_runtime::block_on(events.recv()) {
                     Some(CommandEvent::Stdout(bytes)) | Some(CommandEvent::Stderr(bytes)) => {
-                        append_log(&log_path, &String::from_utf8_lossy(&bytes));
+                        append_log_with_handle(
+                            &log_path,
+                            &String::from_utf8_lossy(&bytes),
+                            log_file.as_mut(),
+                        );
                     }
                     Some(CommandEvent::Terminated(payload)) => {
-                        append_log(
+                        append_log_with_handle(
                             &log_path,
                             &format!(
                                 "[desktop] {label} worker terminated: code={:?} signal={:?}\n",
                                 payload.code, payload.signal
                             ),
+                            log_file.as_mut(),
                         );
                         break;
                     }
                     Some(CommandEvent::Error(error)) => {
-                        append_log(
+                        append_log_with_handle(
                             &log_path,
                             &format!("[desktop] {label} worker error: {error}\n"),
+                            log_file.as_mut(),
                         );
                         break;
                     }

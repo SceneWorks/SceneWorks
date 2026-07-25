@@ -47,7 +47,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id"],
+        "required": ["id", "name", "family"],
         "additionalProperties": false,
         "properties": {
           "id": {

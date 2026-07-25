@@ -28,7 +28,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use crate::asset_media::resolve_asset_media;
 use crate::downloads::{ensure_cached_file, verify_file_sha256, DownloadContext};
+use crate::image_sampling::sample_rgb_bilinear;
 use image::RgbImage;
 #[cfg(not(target_os = "macos"))]
 use ort::execution_providers::CUDAExecutionProvider;
@@ -133,32 +135,6 @@ const COCO_TO_OPENPOSE: [(usize, usize); 17] = [
 // pure detector math (ported from the spike crate; unit-tested without weights)
 // ---------------------------------------------------------------------------
 
-/// Bilinear sample of a BGR channel from an RgbImage; out-of-bounds → `border`.
-/// `c` is the BGR channel index (0=B,1=G,2=R); RgbImage stores RGB so we remap.
-#[inline]
-fn sample_bgr(img: &RgbImage, x: f32, y: f32, c: usize, border: f32) -> f32 {
-    let (w, h) = (img.width() as i64, img.height() as i64);
-    let x0 = x.floor() as i64;
-    let y0 = y.floor() as i64;
-    let fx = x - x0 as f32;
-    let fy = y - y0 as f32;
-    let rgb_c = [2usize, 1, 0][c];
-    let get = |xi: i64, yi: i64| -> f32 {
-        if xi < 0 || yi < 0 || xi >= w || yi >= h {
-            border
-        } else {
-            img.get_pixel(xi as u32, yi as u32)[rgb_c] as f32
-        }
-    };
-    let v00 = get(x0, y0);
-    let v10 = get(x0 + 1, y0);
-    let v01 = get(x0, y0 + 1);
-    let v11 = get(x0 + 1, y0 + 1);
-    let top = v00 * (1.0 - fx) + v10 * fx;
-    let bot = v01 * (1.0 - fx) + v11 * fx;
-    top * (1.0 - fy) + bot * fy
-}
-
 #[derive(Clone, Copy)]
 struct Box4 {
     x1: f32,
@@ -181,14 +157,13 @@ fn yolox_preprocess(img: &RgbImage) -> (Vec<f32>, f32) {
             let src_y = (dy as f32 + 0.5) * sy - 0.5; // cv2 INTER_LINEAR half-pixel
             for dx in 0..new_w {
                 let src_x = (dx as f32 + 0.5) * sx - 0.5;
-                let v = sample_bgr(
+                let rgb = sample_rgb_bilinear(
                     img,
                     src_x.clamp(0.0, w - 1.0),
                     src_y.clamp(0.0, h - 1.0),
-                    c,
                     0.0,
                 );
-                chw[plane + dy * DET + dx] = v;
+                chw[plane + dy * DET + dx] = rgb[2 - c];
             }
         }
     }
@@ -261,7 +236,8 @@ fn pose_preprocess(img: &RgbImage, b: &Box4) -> (Vec<f32>, f32, f32, f32, f32) {
             let src_y = y0 + dy as f32 * sh / PH as f32; // affine inverse (no half-pixel)
             for dx in 0..PW {
                 let src_x = x0 + dx as f32 * sw / PW as f32;
-                chw[plane + dy * PW + dx] = (sample_bgr(img, src_x, src_y, c, 0.0) - m) / sd;
+                let rgb = sample_rgb_bilinear(img, src_x, src_y, 0.0);
+                chw[plane + dy * PW + dx] = (rgb[2 - c] - m) / sd;
             }
         }
     }
@@ -1013,12 +989,12 @@ fn resolve_source(
     }
     // asset id resolved against the originating project (Create tab sends ids)
     if let (Some(id), Some(pid), Some(proj)) = (&asset_id, project_id, project_path) {
-        if let Some(path) = resolve_asset_path(store, pid, id, proj) {
+        if let Some(asset) = resolve_asset_media(store, pid, id, proj) {
             return Ok(PoseSource {
                 asset_id,
-                display_name,
+                display_name: display_name.or(asset.display_name),
                 temp,
-                path: Some(path),
+                path: Some(asset.path),
             });
         }
     }
@@ -1059,25 +1035,6 @@ fn join_project_relative(project_path: &Path, raw: &str) -> Option<PathBuf> {
         }
     }
     Some(path)
-}
-
-fn resolve_asset_path(
-    store: &ProjectStore,
-    project_id: &str,
-    asset_id: &str,
-    project_path: &Path,
-) -> Option<PathBuf> {
-    let asset = store.get_asset(project_id, asset_id).ok()?;
-    let rel = asset.get("file")?.get("path")?.as_str()?;
-    let mut path = project_path.to_path_buf();
-    for component in Path::new(rel).components() {
-        if let std::path::Component::Normal(value) = component {
-            path.push(value);
-        } else {
-            return None;
-        }
-    }
-    path.exists().then_some(path)
 }
 
 // ---------------------------------------------------------------------------

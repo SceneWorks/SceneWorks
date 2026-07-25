@@ -1,5 +1,17 @@
 use super::*;
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn extend_capabilities_unique(
+    target: &mut Vec<WorkerCapability>,
+    capabilities: impl IntoIterator<Item = WorkerCapability>,
+) {
+    for capability in capabilities {
+        if !target.contains(&capability) {
+            target.push(capability);
+        }
+    }
+}
+
 pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
     let requested_gpu_id = settings.gpu_id.as_str();
     if requested_gpu_id == "cpu" {
@@ -68,11 +80,7 @@ fn with_candle_capabilities(
     if settings.backend_candle_enabled && gpu.capabilities.contains(&WorkerCapability::Gpu) {
         let derived = crate::engines::registry_capabilities(settings);
         if !derived.is_empty() {
-            for capability in derived {
-                if !gpu.capabilities.contains(&capability) {
-                    gpu.capabilities.push(capability);
-                }
-            }
+            extend_capabilities_unique(&mut gpu.capabilities, derived);
             // Plain Image Edit (sc-5487, epic 5480): the distinct `image_edit` job type
             // (`mode == "edit_image"` + `sourceAssetId`, epic 2427) runs the bespoke candle edit lanes
             // (SdxlEdit / Flux2Edit / QwenEdit) via `run_image_generate_job`, which dispatches by payload
@@ -82,23 +90,20 @@ fn with_candle_capabilities(
             // API enforce-fails it `candle_unsupported`. The routing gate confines the claim to the
             // candle-eligible edit models (`image_job_is_candle_eligible`); unsupported edit models
             // are refused and remain queued.
-            if !gpu.capabilities.contains(&WorkerCapability::ImageEdit) {
-                gpu.capabilities.push(WorkerCapability::ImageEdit);
-            }
+            extend_capabilities_unique(&mut gpu.capabilities, [WorkerCapability::ImageEdit]);
             // SenseNova-U1 VQA + Document-Studio interleave (sc-5501) run off the `Generator`
             // registry via the concrete candle `T2iModel::{vqa, interleave_gen}` (their text /
             // text+image output the neutral contract can't express), so they are NOT in
             // `registry_capabilities`. Advertise them explicitly — the candle SenseNova provider is
             // owned by `runtime-cuda`, and the routing gate confines them to the
             // SenseNova-U1 ids (`understanding_job_is_mlx_eligible`).
-            for capability in [
-                WorkerCapability::ImageVqa,
-                WorkerCapability::ImageInterleave,
-            ] {
-                if !gpu.capabilities.contains(&capability) {
-                    gpu.capabilities.push(capability);
-                }
-            }
+            extend_capabilities_unique(
+                &mut gpu.capabilities,
+                [
+                    WorkerCapability::ImageVqa,
+                    WorkerCapability::ImageInterleave,
+                ],
+            );
             // Image + video upscaling (sc-5928 SeedVR2 + sc-5499 Real-ESRGAN, epic 4811 / epic 5482):
             // off-Mac the candle worker serves `image_upscale` for BOTH Real-ESRGAN (`ort`/CUDA in
             // `upscale_jobs`, the off-Mac sibling of the Mac CoreML path — sc-5499) and SeedVR2
@@ -108,53 +113,44 @@ fn with_candle_capabilities(
             // routing gate (`upscale_job_is_candle_eligible` / `video_upscale_job_is_candle_eligible`)
             // admits Real-ESRGAN + SeedVR2; only `aura-sr` has no candle path (dropped as an offered
             // engine, sc-3668 / sc-5499) and remains queued if submitted defensively.
-            for capability in [
-                WorkerCapability::ImageUpscale,
-                WorkerCapability::VideoUpscale,
-                WorkerCapability::DatasetUpscale,
-            ] {
-                if !gpu.capabilities.contains(&capability) {
-                    gpu.capabilities.push(capability);
-                }
-            }
+            extend_capabilities_unique(
+                &mut gpu.capabilities,
+                [
+                    WorkerCapability::ImageUpscale,
+                    WorkerCapability::VideoUpscale,
+                    WorkerCapability::DatasetUpscale,
+                ],
+            );
             // SCRFD 5-point face-landmark extraction (sc-5497, epic 5482): the candle SCRFD/ArcFace face
             // stack (`candle-gen-face`, the InstantID/PuLID detector reused directly from kps_jobs.rs)
             // serves `kps_extract` for the Key Point Library "extract kps from this image" flow — the
             // off-Mac sibling of the native-MLX path. A job-type capability (not a generation modality),
             // so it isn't in `registry_capabilities`; advertise it explicitly. The candle face stack is
             // the off-Mac native path, so a build without it leaves the job queued.
-            if !gpu.capabilities.contains(&WorkerCapability::KpsExtract) {
-                gpu.capabilities.push(WorkerCapability::KpsExtract);
-            }
+            extend_capabilities_unique(&mut gpu.capabilities, [WorkerCapability::KpsExtract]);
             // Dataset Doctor face pass (sc-6538): the off-Mac sibling of the macOS face stack — the
             // candle SCRFD/ArcFace stack (`candle-gen-face`, reused from kps_jobs.rs) embeds the largest
             // face of each Person-dataset image. A job-type capability (not a generation modality), so
             // it isn't in `registry_capabilities`; advertise it explicitly, like kps_extract.
-            if !gpu
-                .capabilities
-                .contains(&WorkerCapability::DatasetFaceAnalysis)
-            {
-                gpu.capabilities.push(WorkerCapability::DatasetFaceAnalysis);
-            }
+            extend_capabilities_unique(
+                &mut gpu.capabilities,
+                [WorkerCapability::DatasetFaceAnalysis],
+            );
             // On-demand face-likeness compare (sc-4415): the off-Mac sibling of the macOS face stack —
             // the candle SCRFD/ArcFace stack scores a candidate asset against a source identity
             // reference. A job-type capability (not a generation modality), so it isn't in
             // `registry_capabilities`; advertise it explicitly, like dataset_face_analysis.
-            if !gpu
-                .capabilities
-                .contains(&WorkerCapability::FaceLikenessCompare)
-            {
-                gpu.capabilities.push(WorkerCapability::FaceLikenessCompare);
-            }
+            extend_capabilities_unique(
+                &mut gpu.capabilities,
+                [WorkerCapability::FaceLikenessCompare],
+            );
             // DWPose whole-body pose detection (sc-5496, epic 5482): the off-Mac sibling of the macOS
             // `ort`/CoreML path (sc-3487) — the same RTMW detector via `pose_jobs::run_pose_detect_job`
             // with the CUDA execution provider, serving `pose_detect` for the Pose Library "create from
             // photo" flow + InstantID pose conditioning. A job-type capability (not a generation modality),
             // so it isn't in `registry_capabilities`; advertise it explicitly. The candle RTMW stack is
             // the off-Mac native path, so a build without it leaves the job queued.
-            if !gpu.capabilities.contains(&WorkerCapability::PoseDetect) {
-                gpu.capabilities.push(WorkerCapability::PoseDetect);
-            }
+            extend_capabilities_unique(&mut gpu.capabilities, [WorkerCapability::PoseDetect]);
             // YOLO11 person detection + selected-person ByteTrack tracking (sc-5498, epic 5482):
             // the off-Mac sibling of the macOS native-MLX path (sc-3633/sc-3634) — `yolo11m.onnx`
             // via `ort`/CUDA in `person_jobs` + the pure-Rust SORT/ByteTrack in `person_track`,
@@ -164,24 +160,24 @@ fn with_candle_capabilities(
             // YOLO11/ByteTrack stack is the off-Mac native path, and `media_jobs::run_candle_segmenter`
             // adds SAM3 masks to tracked people (sc-8847 / sc-8833), so off-Mac tracks are not
             // box-only.
-            for capability in [
-                WorkerCapability::PersonDetect,
-                WorkerCapability::PersonTrack,
-            ] {
-                if !gpu.capabilities.contains(&capability) {
-                    gpu.capabilities.push(capability);
-                }
-            }
+            extend_capabilities_unique(
+                &mut gpu.capabilities,
+                [
+                    WorkerCapability::PersonDetect,
+                    WorkerCapability::PersonTrack,
+                ],
+            );
             // Pure audio synthesis (SceneWorks Audio Studio, epic 13400 / sc-13404): audio is
             // candle-native on every platform, and `runtime-cuda` ships the same audio lane default-on
             // as `runtime-macos` — so the off-Mac candle worker serves `audio_generate` too when the
             // lane is linked (`inference_runtime::audio()`). Advertised explicitly like the mlx worker's
             // carve-out (the audio generators live in a separate registry from the media graph
             // `registry_capabilities` iterates); a build without the lane never advertises it.
-            if crate::inference_runtime::audio().is_some()
-                && !gpu.capabilities.contains(&WorkerCapability::AudioGenerate)
-            {
-                gpu.capabilities.push(WorkerCapability::AudioGenerate);
+            if crate::inference_runtime::audio().is_some() {
+                extend_capabilities_unique(
+                    &mut gpu.capabilities,
+                    [WorkerCapability::AudioGenerate],
+                );
             }
             // The lane marker the routing gate keys off (mirrors the existing `nvidia` marker).
             gpu.capabilities

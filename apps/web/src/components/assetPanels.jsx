@@ -103,7 +103,7 @@ export async function emptyTrash(trashedAssets, purgeAsset) {
     return;
   }
   for (const asset of items) {
-    // eslint-disable-next-line no-await-in-loop -- sequential keeps state updates predictable
+    // Sequential awaits keep state updates predictable.
     await purgeAsset(asset);
   }
 }
@@ -869,7 +869,7 @@ function PreviewContextMenu({ x, y, items, submenu, onClose }) {
   );
 }
 
-export function FullscreenPreview({
+function FullscreenPreviewComponent({
   asset,
   deleteAsset,
   nextAsset,
@@ -887,6 +887,8 @@ export function FullscreenPreview({
   const [variantMode, setVariantMode] = React.useState("upscaled");
   React.useEffect(() => {
     setVariantMode(asset.variants?.upscaled ? "upscaled" : "original");
+    // Variant identity controls reset; catalog object refreshes must preserve the user's mode.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [asset.id, asset.variants?.upscaled?.id]);
   const displayedAsset = hasUpscaleVariants ? asset.variants[variantMode] : asset;
 
@@ -1321,3 +1323,5 @@ export function FullscreenPreview({
     </Modal>
   );
 }
+
+export const FullscreenPreview = React.memo(FullscreenPreviewComponent);
