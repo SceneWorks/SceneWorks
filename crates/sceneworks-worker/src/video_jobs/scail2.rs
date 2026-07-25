@@ -1,9 +1,13 @@
 #[allow(unused_imports)]
 use super::prelude::*;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use super::wan::scail2_sampling;
 #[cfg(target_os = "macos")]
 use super::wan::{
-    generate_video, resolve_scail2_adapters, scail2_adapters_have_lightning, scail2_sampling,
-    VideoGenInput,
+    generate_video, resolve_scail2_adapters, scail2_adapters_have_lightning, VideoGenInput,
 };
 #[cfg(target_os = "macos")]
 use super::{
@@ -29,7 +33,10 @@ use super::{
 pub(super) const SCAIL2_ADAPTER: &str = "mlx_scail2";
 
 /// SceneWorks SCAIL-2 model id → mlx-gen registry id, or `None` if `model` is not SCAIL-2.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn scail2_engine_id(model: &str) -> Option<&'static str> {
     (model == "scail2_14b").then_some("scail2_14b")
 }
@@ -215,7 +222,10 @@ async fn ensure_scail2_tier_present(
 /// lightx2v lightning LoRA is applied (`lightning`, sc-5700), records the effective step-distill recipe
 /// the worker dispatched — so the chosen steps/CFG/shift is inspectable on the asset, not silent
 /// (mirrors `wan_raw_settings`).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn scail2_raw_settings(request: &VideoRequest, lightning: bool) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
@@ -245,7 +255,10 @@ pub(super) fn scail2_raw_settings(request: &VideoRequest, lightning: bool) -> Va
 /// Map a SceneWorks video mode to the SCAIL-2 engine `video_mode` task string. `replace_person`
 /// (cross-identity, sc-5452) flips the engine `replace_flag`; everything else (`animate_character`)
 /// is plain animation.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn scail2_engine_video_mode(mode: &str) -> &'static str {
     match mode {
         "replace_person" => "replacement",

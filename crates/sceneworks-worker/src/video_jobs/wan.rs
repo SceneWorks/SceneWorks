@@ -285,7 +285,7 @@ pub(super) const WAN_TI2V_5B_REVISION: &str = "bb1b055249614cf9d7cf4373fbdbc184b
 
 /// Pinned commit revision for the A14B Lightning distill-LoRA repo `lightx2v/Wan2.2-Lightning` (sc-11168 /
 /// F-007 — completes the sc-9879 rollout). Both the MLX (`ensure_wan_lightning_present`) and candle
-/// (`candle_ensure_wan_lightning_present`) self-heal fetches were pulling the mutable `main` branch, so an
+/// (formerly separate) self-heal fetches were pulling the mutable `main` branch, so an
 /// upstream re-push (or a compromised token) could silently swap the high/low distill weights we load.
 /// Pin the exact commit for defense-in-depth (the native downloader still verifies each file's own hash on
 /// download). Shared by BOTH lanes so the twins agree. Gated to the lanes that actually fetch it (macOS
@@ -295,6 +295,22 @@ pub(super) const WAN_TI2V_5B_REVISION: &str = "bb1b055249614cf9d7cf4373fbdbc184b
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) const WAN_LIGHTNING_REVISION: &str = "18bccf8884ec0a078eed79785eb4ef13ea16ce1e";
+
+/// Architecture-specific directory in `lightx2v/Wan2.2-Lightning`.
+///
+/// This mapping is shared by both backends and by both the cache-healing and resolution paths so a
+/// new architecture cannot silently fetch one pair and load another.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn wan_lightning_subdir(engine_id: &str) -> Option<&'static str> {
+    match engine_id {
+        "wan2_2_t2v_14b" => Some("Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1"),
+        "wan2_2_i2v_14b" => Some("Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1"),
+        _ => None,
+    }
+}
 
 /// The files that make an **A14B** (dual-expert MoE) Wan tier subdir COMPLETE: both experts + the T5
 /// encoder + VAE + tokenizer + `config.json`.
@@ -471,7 +487,10 @@ pub(super) async fn ensure_wan_tier_present(
 /// non-A14B engine, or when the pair is already cached. A pair still missing after the fetch makes
 /// resolve surface the clear "fetch it via the model manager" error. Fails loud on a real download error —
 /// fast, before any compute.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) async fn ensure_wan_lightning_present(
     api: &ApiClient,
     settings: &Settings,
@@ -486,11 +505,8 @@ pub(super) async fn ensure_wan_lightning_present(
         return Ok(());
     }
     // Per-architecture subdir (NOT cross-compatible, sc-4997); must match `resolve_lightning_loras`.
-    let subdir = match engine_id {
-        "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
-        "wan2_2_i2v_14b" => "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
-        // Only the A14B MoE models bake Lightning — every other engine needs nothing here.
-        _ => return Ok(()),
+    let Some(subdir) = wan_lightning_subdir(engine_id) else {
+        return Ok(());
     };
     const REPO: &str = "lightx2v/Wan2.2-Lightning";
     // Fast path: both halves already materialized in the hub cache (the common case after install).
@@ -522,7 +538,10 @@ pub(super) async fn ensure_wan_lightning_present(
 /// (`lightx2v/Wan2.2-Lightning`, the rank-64 Seko distill). The subdir is architecture-specific:
 /// T2V-A14B (V1.1) and I2V-A14B (V1) ship distinct LoRAs that are NOT cross-compatible (sc-4997).
 /// Errors if not downloaded / the per-architecture subdir is missing.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn resolve_lightning_loras(
     settings: &Settings,
     engine_id: &str,
@@ -534,15 +553,11 @@ pub(super) fn resolve_lightning_loras(
                  downloaded — fetch it via the model manager"
             ))
         })?;
-    let base = match engine_id {
-        "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
-        "wan2_2_i2v_14b" => "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
-        other => {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{other}: no Lightning distill LoRA — only the A14B MoE models bake Lightning"
-            )))
-        }
-    };
+    let base = wan_lightning_subdir(engine_id).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "{engine_id}: no Lightning distill LoRA — only the A14B MoE models bake Lightning"
+        ))
+    })?;
     let high = snapshot.join(base).join("high_noise_model.safetensors");
     let low = snapshot.join(base).join("low_noise_model.safetensors");
     for file in [&high, &low] {
@@ -559,7 +574,10 @@ pub(super) fn resolve_lightning_loras(
 /// The `.low_noise.safetensors` sibling of a Wan A14B MoE high-noise LoRA file, or
 /// `None` when the file is not the high-noise half of a pair (port of the Python
 /// `wan_moe_low_noise_sibling`; case-insensitive `.high_noise.safetensors` suffix).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn wan_moe_low_noise_sibling(primary: &Path) -> Option<PathBuf> {
     const HIGH: &str = ".high_noise.safetensors";
     let name = primary.file_name()?.to_str()?;
@@ -578,7 +596,10 @@ pub(super) fn wan_moe_low_noise_sibling(primary: &Path) -> Option<PathBuf> {
 /// single-file LoRA is shared (both experts on MoE, the single model on the 5B). peft LoKr AND
 /// third-party LyCORIS (LoHa / non-peft LoKr) both apply on the MLX Wan/LTX paths now (epic 3641,
 /// sc-3671) — `classify_adapter` returns `Lora` for third-party and the engine detects + merges it.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn resolve_wan_adapters(
     settings: &Settings,
     request: &VideoRequest,
@@ -600,12 +621,22 @@ pub(super) fn resolve_wan_adapters(
     // below are honored in both states. The subdir is resolved per architecture (not cross-compatible).
     if is_moe && wan_lightning_on(engine_id, request) {
         let (high, low) = resolve_lightning_loras(settings, engine_id)?;
-        specs.push(moe_adapter(high, 1.0, AdapterKind::Lora, MoeExpert::High));
-        specs.push(moe_adapter(low, 1.0, AdapterKind::Lora, MoeExpert::Low));
+        specs.push(moe_adapter(
+            high,
+            1.0,
+            gen_core::AdapterKind::Lora,
+            gen_core::MoeExpert::High,
+        ));
+        specs.push(moe_adapter(
+            low,
+            1.0,
+            gen_core::AdapterKind::Lora,
+            gen_core::MoeExpert::Low,
+        ));
     }
 
     for lora in &request.loras {
-        let path = lora_path(lora).ok_or_else(|| {
+        let path = crate::image_jobs::lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
         })?;
         let file = resolve_lora_file(
@@ -613,14 +644,14 @@ pub(super) fn resolve_wan_adapters(
             path,
             crate::image_jobs::declared_adapter_file(lora),
         )?;
-        let kind = classify_adapter(&file)?;
+        let kind = crate::image_jobs::classify_adapter(&file)?;
         let scale = lora_scale(lora);
         match (is_moe, wan_moe_low_noise_sibling(&file)) {
             (true, Some(low)) => {
                 // A MoE pair → high half to the high-noise expert, the sibling to the low.
-                let low_kind = classify_adapter(&low)?;
-                specs.push(moe_adapter(file, scale, kind, MoeExpert::High));
-                specs.push(moe_adapter(low, scale, low_kind, MoeExpert::Low));
+                let low_kind = crate::image_jobs::classify_adapter(&low)?;
+                specs.push(moe_adapter(file, scale, kind, gen_core::MoeExpert::High));
+                specs.push(moe_adapter(low, scale, low_kind, gen_core::MoeExpert::Low));
             }
             _ => {
                 // Single-file → shared (both experts on MoE; the dense single model on the 5B).
@@ -637,12 +668,15 @@ pub(super) fn resolve_wan_adapters(
     Ok(specs)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn moe_adapter(
     path: PathBuf,
     scale: f32,
-    kind: AdapterKind,
-    expert: MoeExpert,
+    kind: gen_core::AdapterKind,
+    expert: gen_core::MoeExpert,
 ) -> AdapterSpec {
     AdapterSpec {
         path,
@@ -678,7 +712,10 @@ pub(super) fn resolve_wan_vace_adapters(
 /// "lightning" LoRA installs via the engine's in-place diff-patch merge (sc-5684); selecting it makes
 /// the worker apply the step-distill recipe (`scail2_sampling`, sc-5700). Delegates to the shared
 /// [`resolve_dense_adapters`] (sc-8830) — the MLX Wan-VACE / SCAIL-2 twin.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn resolve_scail2_adapters(
     settings: &Settings,
     request: &VideoRequest,
@@ -969,7 +1006,10 @@ pub(super) fn resolve_wan_quant(request: &VideoRequest) -> Option<Quant> {
 /// (no 5B distill exists, so dropping it would hurt prompt adherence); the user can still dial
 /// `steps`/`guidanceScale` lower from VideoStudio, and the engine pre-flight guard (sc-4986) is
 /// the memory backstop. The full few-step / no-CFG preset lands once the 5B distill LoRA exists.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const WAN5B_INTERIM_STEPS: u32 = 20;
 
 /// An optional positive-integer `advanced` knob (`steps`); accepts a number or a numeric string.
@@ -1009,7 +1049,10 @@ pub(super) fn advanced_opt_f32(request: &VideoRequest, key: &str) -> Option<f32>
 /// bake Lightning — for every other engine (the dense 5B, non-Wan) this is irrelevant and returns
 /// `false`. Backward compatible: an absent flag on an A14B job defaults to `true` (the prior
 /// always-on behavior). A strict-bool `false` opts out; `true` (or absent) opts in.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn wan_lightning_on(engine_id: &str, request: &VideoRequest) -> bool {
     let is_moe = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
     if !is_moe {
@@ -1034,7 +1077,10 @@ pub(super) fn wan_lightning_on(engine_id: &str, request: &VideoRequest) -> bool 
 /// The dense TI2V-5B has no distill LoRA yet (sc-4999) and no toggle: honor an explicit user
 /// `steps`/`guidanceScale`, else apply the interim default ([`WAN5B_INTERIM_STEPS`], CFG retained).
 /// `None` ⇒ the engine config default.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn wan_sampling(engine_id: &str, request: &VideoRequest) -> (Option<u32>, Option<f32>) {
     if engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b" {
         if wan_lightning_on(engine_id, request) {
@@ -1056,11 +1102,20 @@ pub(super) fn wan_sampling(engine_id: &str, request: &VideoRequest) -> (Option<u
 }
 
 /// The lightx2v lightning step-distill recipe (sc-5684 / sc-5700): 8 steps, CFG off, scheduler shift 1.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const SCAIL2_LIGHTNING_STEPS: u32 = 8;
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const SCAIL2_LIGHTNING_GUIDANCE: f32 = 1.0;
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const SCAIL2_LIGHTNING_SHIFT: f32 = 1.0;
 
 /// SCAIL-2 sampling recipe `(steps, guidance, scheduler_shift)`. When a lightx2v diff-patch
@@ -1071,7 +1126,10 @@ const SCAIL2_LIGHTNING_SHIFT: f32 = 1.0;
 /// all-`None` so the engine's quality defaults (40 steps, guide 5.0, shift 5.0) stand exactly as before
 /// — this path is unchanged. The chosen knobs are recorded as `effective*` in [`scail2_raw_settings`]
 /// so what actually ran is inspectable on the asset (mirrors [`wan_raw_settings`]).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn scail2_sampling(
     request: &VideoRequest,
     lightning: bool,

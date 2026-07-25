@@ -30,7 +30,10 @@ use super::wan::{generate_video, VideoGenInput};
 pub(super) const BERNINI_ADAPTER: &str = "mlx_bernini";
 
 /// SceneWorks Bernini model id → mlx-gen registry id, or `None` if `model` is not the Bernini family.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn bernini_engine_id(model: &str) -> Option<&'static str> {
     (model == "bernini").then_some("bernini")
 }
@@ -254,7 +257,10 @@ pub(crate) async fn ensure_bernini_tier_present(
 }
 
 /// Raw-settings recorded on a real MLX Bernini asset (mirrors `wan_raw_settings`).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn bernini_raw_settings(request: &VideoRequest) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
@@ -271,7 +277,10 @@ pub(super) fn bernini_raw_settings(request: &VideoRequest) -> Value {
 /// Map a SceneWorks video mode to the Bernini engine `video_mode` task string (which selects the
 /// renderer guidance mode). The engine also infers the mode from the supplied conditioning, but the
 /// explicit task keeps the mapping unambiguous. Unknown / `text_to_video` ⇒ plain `t2v`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn bernini_engine_video_mode(mode: &str) -> &'static str {
     match mode {
         "video_to_video" => "v2v",
@@ -461,48 +470,6 @@ pub(super) async fn generate_bernini(
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) const CANDLE_BERNINI_ADAPTER: &str = "candle_bernini";
 
-/// SceneWorks Bernini model id → candle registry id, or `None` if `model` is not the Bernini video
-/// family. The candle sibling of the macOS `bernini_engine_id`; drives the `CandleVideoRoute::Bernini`
-/// arm (routed on the model id, not weight availability).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) fn candle_bernini_engine_id(model: &str) -> Option<&'static str> {
-    (model == "bernini").then_some("bernini")
-}
-
-/// Map a SceneWorks video mode to the Bernini engine `video_mode` task string (which selects the
-/// renderer guidance mode). The candle sibling of the macOS `bernini_engine_video_mode` — the identical
-/// mapping so the two lanes render the same mode for the same request. Unknown / `text_to_video` ⇒
-/// plain `t2v`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) fn candle_bernini_engine_video_mode(mode: &str) -> &'static str {
-    match mode {
-        "video_to_video" => "v2v",
-        "reference_to_video" => "r2v",
-        "reference_video_to_video" => "rv2v",
-        // Multi-source-video modes (sc-5425): mv2v (multiple source clips) and ads2v (source video +
-        // reference video + reference images). Both resolve to the engine's `V2vApg` guidance; they
-        // differ only in the supplied media.
-        "multi_video_to_video" => "mv2v",
-        "ads2v" => "ads2v",
-        _ => "t2v",
-    }
-}
-
-/// Raw-settings recorded on a real candle Bernini VIDEO asset (mirrors the macOS `bernini_raw_settings`).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) fn candle_bernini_raw_settings(request: &VideoRequest) -> Value {
-    let mut raw = request.advanced.clone();
-    raw.insert("realModelInference".to_owned(), Value::Bool(true));
-    raw.insert("model".to_owned(), Value::String(request.model.clone()));
-    raw.insert("fps".to_owned(), json!(request.fps));
-    // The engine guidance task the SceneWorks mode resolved to (lineage / observability).
-    raw.insert(
-        "berniniTask".to_owned(),
-        Value::String(candle_bernini_engine_video_mode(&request.mode).to_owned()),
-    );
-    Value::Object(raw)
-}
-
 /// Resolve the source media for a candle Bernini editing/reference request into the planner
 /// conditioning — the candle sibling of the macOS `resolve_bernini_conditioning`. Source clips →
 /// [`Conditioning::VideoClip`] (the edit structure, VAE/ViT-encoded by the engine) and subject
@@ -608,7 +575,7 @@ async fn resolve_candle_bernini_conditioning(
 
 /// Real candle Bernini video generation (sc-10997 / epic 6562): build the `VideoGenInput` and run the
 /// shared [`generate_video`] path. The SceneWorks mode resolves to the engine `video_mode` task
-/// ([`candle_bernini_engine_video_mode`]) and the source media into the planner conditioning
+/// ([`bernini_engine_video_mode`]) and the source media into the planner conditioning
 /// ([`resolve_candle_bernini_conditioning`]) — empty for t2v, one or more `VideoClip`s for
 /// v2v/mv2v/rv2v/ads2v, and `MultiReference` for r2v/rv2v/ads2v. The converted `SceneWorks/bernini`
 /// snapshot descends into the requested quant tier subfolder (`bf16/`|`q8/`|`q4/`, sc-11003) via the
@@ -651,7 +618,7 @@ pub(super) async fn generate_candle_bernini(
         frames: wan_frame_count(request.raw_frame_count()),
         fps: request.fps,
         seed: resolve_video_seed(request) as u64,
-        video_mode: Some(candle_bernini_engine_video_mode(&request.mode).to_owned()),
+        video_mode: Some(bernini_engine_video_mode(&request.mode).to_owned()),
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, &request.advanced, input).await
