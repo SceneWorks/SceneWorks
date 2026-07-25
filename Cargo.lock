@@ -6278,6 +6278,7 @@ dependencies = [
  "imageproc",
  "sceneworks-core",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -6286,6 +6287,7 @@ version = "0.8.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "futures-util",
  "http",
  "percent-encoding",
  "reqwest 0.12.28",

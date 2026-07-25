@@ -19,6 +19,7 @@ image_hasher = "3"
 # Temp PNG holding ground for the transcode backstop (a valid-but-unsupported AVIF/HEIC/TIFF source
 # is converted to PNG before decode — see `decode_transcoding`).
 tempfile = "3.13"
+tracing = { workspace = true }
 
 [lints]
 workspace = true

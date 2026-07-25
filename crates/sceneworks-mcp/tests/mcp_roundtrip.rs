@@ -5,15 +5,17 @@
 //! session handshake, tool discovery, catalog calls, the `X-SceneWorks-Token`
 //! header on the upstream API call, and error surfacing on an upstream 401.
 
+mod common;
+
 use axum::extract::Query;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
-use rmcp::model::{CallToolRequestParams, ClientInfo};
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::ServiceExt;
+use rmcp::model::CallToolRequestParams;
+use sceneworks_mcp::JobWaitConfig;
 use serde_json::{json, Value};
+
+use common::{call_args, connect_mcp, result_json, spawn, TestClient};
 
 const STUB_TOKEN: &str = "test-secret-token";
 
@@ -86,49 +88,14 @@ fn stub_api_router() -> Router {
         )
 }
 
-async fn spawn(router: Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind stub listener");
-    let addr = listener.local_addr().expect("stub addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, router).await;
-    });
-    format!("http://{addr}")
-}
-
 /// Spin up stub API + mounted MCP service, return a connected MCP client.
 async fn connect_client(
     access_token: Option<String>,
-) -> rmcp::service::RunningService<rmcp::RoleClient, ClientInfo> {
+) -> rmcp::service::RunningService<rmcp::RoleClient, TestClient> {
     let api_base = spawn(stub_api_router()).await;
-    let mcp_service = sceneworks_mcp::streamable_http_service(sceneworks_mcp::ApiClientConfig {
-        base_url: api_base,
-        access_token,
-    });
-    let mcp_base = spawn(Router::new().nest_service("/mcp", mcp_service)).await;
-
-    let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(format!("{mcp_base}/mcp")),
-    );
-    ClientInfo::default()
-        .serve(transport)
+    connect_mcp(api_base, access_token, JobWaitConfig::default(), TestClient)
         .await
-        .expect("MCP client initializes against the mounted /mcp service")
-}
-
-fn content_json(result: &rmcp::model::CallToolResult) -> Value {
-    let text = result
-        .content
-        .first()
-        .and_then(|block| block.as_text())
-        .map(|text| text.text.as_str())
-        .expect("tool result has one text content block");
-    serde_json::from_str(text).expect("tool content is JSON")
-}
-
-fn call_args(value: Value) -> serde_json::Map<String, Value> {
-    value.as_object().expect("args are an object").clone()
+        .1
 }
 
 #[tokio::test]
@@ -155,7 +122,7 @@ async fn mcp_client_lists_tools_and_calls_catalog_tools() {
         .expect("list_projects succeeds");
     assert_ne!(result.is_error, Some(true));
     assert_eq!(
-        content_json(&result),
+        result_json(&result),
         json!([{ "id": "p1", "name": "My Film", "createdAt": "2026-07-07T00:00:00Z" }])
     );
 
@@ -165,7 +132,7 @@ async fn mcp_client_lists_tools_and_calls_catalog_tools() {
         .await
         .expect("list_models succeeds");
     assert_ne!(result.is_error, Some(true));
-    let models = content_json(&result);
+    let models = result_json(&result);
     assert_eq!(models[0]["id"], "z_image_turbo");
     assert_eq!(models[0]["defaults"]["steps"], 8);
     assert_eq!(models[0]["resolutions"], json!(["1024x1024"]));
@@ -183,7 +150,7 @@ async fn mcp_client_lists_tools_and_calls_catalog_tools() {
         .await
         .expect("list_loras succeeds");
     assert_ne!(result.is_error, Some(true));
-    let loras = content_json(&result);
+    let loras = result_json(&result);
     assert_eq!(loras[0]["id"], "lora-for-sdxl");
     assert_eq!(loras[0]["compatibleFamilies"], json!(["sdxl"]));
 
