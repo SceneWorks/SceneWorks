@@ -1450,6 +1450,80 @@ async fn worker_can_register_claim_and_complete_job_through_http() {
     assert_eq!(queue["workers"][0]["status"], "idle");
 }
 
+/// sc-13842: the audio streaming pump may have a Running progress POST already in flight when the
+/// cancel watcher commits terminal Canceled. Hold that nonterminal report immediately before the
+/// authoritative store transition, let Canceled win, then prove the delayed report receives 409
+/// and cannot resurrect the terminal row.
+#[tokio::test]
+async fn in_flight_running_progress_cannot_resurrect_a_canceled_job() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "payload": { "prompt": "streaming race" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = created["id"].as_str().expect("job id").to_owned();
+    claim_job_as_worker(&app, &job_id, "stream-worker", &["image_detail"]).await;
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    *state.progress_before_accept_once.lock() = Some(barrier.clone());
+    let progress_app = app.clone();
+    let progress_job_id = job_id.clone();
+    let progress = tokio::spawn(async move {
+        request(
+            progress_app,
+            "POST",
+            &format!("/api/v1/jobs/{progress_job_id}/progress"),
+            json!({
+                "status": "running",
+                "stage": "generating",
+                "progress": 0.5,
+                "message": "Streaming audio…",
+                "workerId": "stream-worker"
+            }),
+        )
+        .await
+    });
+
+    barrier.wait().await;
+    let (cancel_status, canceled) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "canceled",
+            "stage": "canceled",
+            "progress": 1,
+            "message": "Canceled by user.",
+            "workerId": "stream-worker"
+        }),
+    )
+    .await;
+    assert_eq!(cancel_status, StatusCode::OK);
+    assert_eq!(canceled["status"], "canceled");
+    barrier.wait().await;
+
+    let (progress_status, _) = progress.await.expect("progress request joins");
+    assert_eq!(
+        progress_status,
+        StatusCode::CONFLICT,
+        "a nonterminal progress report accepted after cancellation must receive 409"
+    );
+    let (status, job) = request(app, "GET", &format!("/api/v1/jobs/{job_id}"), Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(job["status"], "canceled");
+}
+
 #[tokio::test]
 async fn authenticated_lan_caller_cannot_mutate_an_unclaimed_job_without_worker_id() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");

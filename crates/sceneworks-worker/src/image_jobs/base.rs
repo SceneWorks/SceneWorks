@@ -2694,9 +2694,9 @@ fn resolve_sdxl_components(
         crate::model_jobs::resolve_co_requisites(&descriptor, &manifest_value, settings)?;
     let mut take = |id: &str| -> WorkerResult<WeightsSource> {
         components.remove(id).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "SDXL requires the '{id}' component, but its catalog entry declares no matching \
-                 `coRequisite` download — the model manifest entry is misconfigured"
+            WorkerError::Engine(format!(
+                "the registered candle SDXL descriptor does not advertise its required '{id}' \
+                 component — the SceneWorks inference runtime pin is incompatible with this worker"
             ))
         })
     };

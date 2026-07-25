@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { appConfirm } from "../appConfirm.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
@@ -274,6 +275,8 @@ export function AudioStudio() {
   // selected reference clip, an in-flight guard, and the post-register notice (dedup warning / info).
   const [savedVoiceName, setSavedVoiceName] = useState("");
   const [registeringVoice, setRegisteringVoice] = useState(false);
+  const [deletingVoiceId, setDeletingVoiceId] = useState("");
+  const deletingVoiceRef = useRef("");
   const [savedVoiceNotice, setSavedVoiceNotice] = useState(null);
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [guideOpen, setGuideOpen] = useState(false);
@@ -456,9 +459,26 @@ export function AudioStudio() {
   }
 
   async function handleDeleteSavedVoice(voice) {
-    if (!deleteSavedVoice) return;
-    await deleteSavedVoice(voice.id);
-    setSavedVoiceNotice(null);
+    if (!deleteSavedVoice || deletingVoiceRef.current) return;
+    deletingVoiceRef.current = voice.id;
+    setDeletingVoiceId(voice.id);
+    try {
+      const proceed = await appConfirm({
+        title: "Delete saved voice?",
+        message: `Permanently delete “${voice.name}” from this project’s saved voices? This cannot be undone.`,
+        confirmLabel: "Delete permanently",
+        cancelLabel: "Cancel",
+        tone: "danger",
+      });
+      if (!proceed) return;
+      const deleted = await deleteSavedVoice(voice.id);
+      if (deleted) {
+        setSavedVoiceNotice(null);
+      }
+    } finally {
+      deletingVoiceRef.current = "";
+      setDeletingVoiceId("");
+    }
   }
 
   // Segmented-script editor handlers (sc-13676). Each edits a single { speaker, text } turn; the
@@ -666,6 +686,7 @@ export function AudioStudio() {
           // fixed voice bank; it maps the per-segment [S1]/[S2] labels to its own voices. The prompt is
           // left empty; the script carries the text. The worker passes the script to the generator and
           // the gen-core floor gates it on supports_multi_speaker / maxSpeakers (never a hardcoded id).
+          payload.prompt = "";
           payload.script = scriptSegmentsForSubmit(script);
         } else {
           // Single-voice Speech (Kokoro) ships a voice bank; omitted when unset so it falls back to af_heart.
@@ -1156,6 +1177,7 @@ export function AudioStudio() {
                             type="button"
                             className="saved-voice-delete"
                             aria-label={`Delete saved voice ${voice.name}`}
+                            disabled={Boolean(deletingVoiceId)}
                             title="Delete saved voice"
                             onClick={() => handleDeleteSavedVoice(voice)}
                           >

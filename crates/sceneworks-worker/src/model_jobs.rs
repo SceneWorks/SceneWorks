@@ -1641,8 +1641,16 @@ pub(crate) fn huggingface_pinned_snapshot_dir(
     // seam, `resolve_co_requisites` / `resolve_optional_component`), which is unvalidated over the LAN
     // jobs API (epic 4484). A `..`/absolute revision would otherwise join OUTSIDE `snapshots/` — a dir
     // that passes `is_dir()` and, on Windows, gets its symlinks rewritten to hardlinks by
-    // `materialize_snapshot_hardlinks`. A pinned revision is a single 40-hex commit component, so
-    // confine it with `safe_join`; a traversal value yields `None` ("not installed") (sc-13583).
+    // `materialize_snapshot_hardlinks`. A pinned revision is exactly one lowercase 40-hex commit
+    // component. Enforce that runtime contract before confinement because the manifest schema is not
+    // authoritative for the copy embedded in an untrusted job payload (sc-13842 / sc-13583).
+    if revision.len() != 40
+        || !revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
     let dir = safe_join(
         &huggingface_repo_cache_path(data_dir, repo)?.join("snapshots"),
         revision,
@@ -1755,11 +1763,74 @@ pub(crate) fn resolve_co_requisites(
                 }
                 gen_core::WeightsSource::File(path)
             }
-            _ => gen_core::WeightsSource::Dir(snapshot),
+            [] => gen_core::WeightsSource::Dir(snapshot),
+            _ => {
+                // Multi-file components are staged as directories because providers join their own
+                // internal paths, but the pre-load all-or-nothing contract still requires every
+                // manifest-declared file or pattern to be present.
+                for file in &files {
+                    if !snapshot_contains_declared_file(&snapshot, file)? {
+                        return Err(WorkerError::InvalidPayload(format!(
+                            "{model_id}: the '{component_id}' component file {repo}/{file} is missing \
+                             from the cached snapshot — reinstall {model_id} to repair it"
+                        )));
+                    }
+                }
+                gen_core::WeightsSource::Dir(snapshot)
+            }
         };
         components.insert(component_id.to_owned(), source);
     }
     Ok(components)
+}
+
+fn snapshot_contains_declared_file(snapshot: &Path, declared: &str) -> WorkerResult<bool> {
+    if !declared.contains(['*', '?', '[']) {
+        return Ok(safe_join(snapshot, declared)?.is_file());
+    }
+    let relative = Path::new(declared);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "model component file pattern `{declared}` must stay within its cached snapshot"
+        )));
+    }
+    let pattern = glob::Pattern::new(declared).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "invalid model component file pattern `{declared}`: {error}"
+        ))
+    })?;
+    Ok(snapshot_tree_contains(snapshot, &|path| {
+        path.strip_prefix(snapshot)
+            .is_ok_and(|relative| pattern.matches_path(relative))
+    }))
+}
+
+fn snapshot_tree_contains(dir: &Path, predicate: &impl Fn(&Path) -> bool) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(file_type) if file_type.is_dir() => {
+                if snapshot_tree_contains(&path, predicate) {
+                    return true;
+                }
+            }
+            Ok(_) if predicate(&path) => return true,
+            Ok(_) | Err(_) => {}
+        }
+    }
+    false
 }
 
 /// Resolve an OPTIONAL, on-demand model component the caller stages only for specific requests — the
@@ -1979,7 +2050,7 @@ fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathB
     // empty/torn one, not dummy fixture weights from real ones.
     if let Ok(rev) = std::fs::read_to_string(repo_dir.join("refs").join("main")) {
         let candidate = snapshots.join(rev.trim());
-        if snapshot_file_count(&candidate) > 0 {
+        if snapshot_has_any_file(&candidate) {
             return Some(candidate);
         }
     }
@@ -1994,6 +2065,13 @@ fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathB
         .filter(|(count, _)| *count > 0)
         .max_by_key(|(count, _)| *count)
         .map(|(_, path)| path)
+}
+
+/// Short-circuiting presence probe for the hot `refs/main` path. Unlike
+/// [`snapshot_file_count`], it stops at the first file instead of walking a large snapshot tree on
+/// every model resolve.
+fn snapshot_has_any_file(dir: &Path) -> bool {
+    snapshot_tree_contains(dir, &|_| true)
 }
 
 /// Recursively count regular files under `dir` (symlinks counted as files — HF snapshots link into
@@ -4256,6 +4334,64 @@ mod co_requisite_tests {
             None,
             "a `..` revision must not resolve to a dir outside snapshots/"
         );
+        for invalid in [
+            "abc123",
+            "5BB1F6EE58E50C3B8D408BC82A6D3740C2DB6E18",
+            "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e1g",
+        ] {
+            assert_eq!(
+                huggingface_pinned_snapshot_dir(data_dir.path(), repo, invalid),
+                None,
+                "a pinned revision must be exactly 40 lowercase hex characters: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_co_requisites_rejects_a_torn_multi_file_component() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let repo = "owner/multi-component";
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        stage_snapshot_file(data_dir.path(), repo, revision, "weights/a.bin");
+        let descriptor = gen_core::ModelDescriptor {
+            id: "multi_model",
+            family: "multi",
+            backend: "candle",
+            modality: gen_core::Modality::Audio,
+            capabilities: gen_core::Capabilities::default(),
+            required_components: &["bundle"],
+        };
+        let manifest = json!({
+            "id": "multi_model",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": repo,
+                "revision": revision,
+                "coRequisite": true,
+                "componentId": "bundle",
+                "files": ["weights/a.bin", "weights/b.bin"]
+            }]
+        });
+        let settings = settings_at(data_dir.path().to_path_buf());
+
+        let error = resolve_co_requisites(&descriptor, &manifest, &settings)
+            .expect_err("a missing member makes the component incomplete");
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(ref message) if message.contains("weights/b.bin")),
+            "the repair error must identify the missing member, got {error:?}"
+        );
+
+        stage_snapshot_file(data_dir.path(), repo, revision, "weights/b.bin");
+        assert!(
+            matches!(
+                resolve_co_requisites(&descriptor, &manifest, &settings)
+                    .expect("the complete component resolves")
+                    .get("bundle"),
+                Some(gen_core::WeightsSource::Dir(path)) if path.ends_with(revision)
+            ),
+            "a complete multi-file component stages its snapshot root"
+        );
     }
 
     /// sc-13583 (co-requisite seam): a single-entry `files: ["<../.. path>"]` in the payload
@@ -4688,11 +4824,32 @@ mod co_requisite_tests {
         for &(model_id, family, repo, revision, file) in MOSS_CODEC_SNAPSHOTS {
             let _env = isolate_hf_cache();
             let data_dir = tempfile::tempdir().expect("temp data dir");
-            stage_snapshot_file(data_dir.path(), repo, revision, file);
+            let manifest = builtin_manifest_entry(model_id);
+            let codec_download = manifest["downloads"]
+                .as_array()
+                .expect("downloads array")
+                .iter()
+                .find(|download| {
+                    download.get("componentId").and_then(Value::as_str) == Some("codec")
+                })
+                .expect("codec co-requisite");
+            let declared_files: Vec<&str> = codec_download["files"]
+                .as_array()
+                .expect("codec files")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            assert!(
+                declared_files.contains(&file),
+                "{model_id}: fixture anchor must remain in the live codec file set"
+            );
+            for declared in declared_files {
+                stage_snapshot_file(data_dir.path(), repo, revision, declared);
+            }
 
             let components = resolve_co_requisites(
                 &moss_descriptor(model_id, family),
-                &builtin_manifest_entry(model_id),
+                &manifest,
                 &settings_at(data_dir.path().to_path_buf()),
             )
             .unwrap_or_else(|error| {
