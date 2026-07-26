@@ -100,11 +100,13 @@
       "mlx": {
         "quantize": 4
       },
-      // Shared by all six Mage rows. Conservative byte-derived bounds for the dense Qwen/VAE plus
-      // the quantized DiT and render workspace; the CUDA real-weight lane validates the physical peak.
+      // Shared provisional ceiling across all six Mage rows: byte-derived from the dense Qwen/VAE,
+      // tiered DiT, and render workspace. `measured:false` is deliberate until the sc-14053 CUDA lane
+      // records and asserts all three physical peaks; do not cite these rows as calibrated measurements.
       "candle": {
         "minMemoryGb": 17,
-        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 }
+        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 },
+        "measured": false
       },
       "ui": {
         "label": "Mage-Flow Edit-Base",
@@ -212,7 +214,8 @@
       },
       "candle": {
         "minMemoryGb": 17,
-        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 }
+        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 },
+        "measured": false
       },
       "ui": {
         "label": "Mage-Flow Edit",
@@ -320,7 +323,8 @@
       },
       "candle": {
         "minMemoryGb": 17,
-        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 }
+        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 },
+        "measured": false
       },
       "ui": {
         "label": "Mage-Flow Edit-Turbo",
@@ -395,7 +399,8 @@
       "mlx": { "quantize": 4 },
       "candle": {
         "minMemoryGb": 17,
-        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 }
+        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 },
+        "measured": false
       },
       "ui": {
         "label": "Mage-Flow Base",
@@ -464,7 +469,8 @@
       "mlx": { "quantize": 4 },
       "candle": {
         "minMemoryGb": 17,
-        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 }
+        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 },
+        "measured": false
       },
       "ui": {
         "label": "Mage-Flow RL",
@@ -533,7 +539,8 @@
       "mlx": { "quantize": 4 },
       "candle": {
         "minMemoryGb": 17,
-        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 }
+        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 },
+        "measured": false
       },
       "ui": {
         "label": "Mage-Flow Turbo",

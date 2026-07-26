@@ -340,6 +340,9 @@ enum CandleImageRoute {
     QwenEdit,
     /// Z-Image img2img / edit (sc-6595).
     ZimageEdit,
+    /// Mage-Flow Base/RL/Turbo instruction edit. Uses the generic registry stream, but requires
+    /// source-first ordered multi-reference conditioning rather than the plain T2I request shape.
+    MageEdit,
     /// Krea 2 Kontext-style dual-conditioned image-edit — `krea_2_raw` + `edit_image` + a source, with
     /// the required `krea2_identity_edit` LoRA (epic 10871).
     KreaEdit,
@@ -493,6 +496,14 @@ fn resolve_candle_image_route(
         Some(CandleImageRoute::QwenEdit)
     } else if zimage_edit_candle_available(request, settings) {
         Some(CandleImageRoute::ZimageEdit)
+    } else if is_mage_edit_model(&request.model)
+        && request.mode == "edit_image"
+        && request
+            .source_asset_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+    {
+        Some(CandleImageRoute::MageEdit)
     } else if zimage_identity_candle_available(request, settings) {
         Some(CandleImageRoute::ZimageIdentity)
     } else if sdxl_ipadapter_available(request, settings) {
@@ -593,7 +604,7 @@ fn resolve_candle_image_route(
         } else {
             Some(CandleImageRoute::PoseReject)
         }
-    } else if is_candle_engine(&request.model) {
+    } else if is_candle_engine(&request.model) && request.mode != "edit_image" {
         Some(CandleImageRoute::CandleTxt2Img)
     } else {
         None
@@ -3576,7 +3587,10 @@ fn boogu_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
 
 /// Mage Edit always conditions on the required primary source first, followed by the optional
 /// `referenceAssetIds` exactly in client order.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn mage_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
     if request.mode != "edit_image" {
         return Vec::new();
@@ -3595,7 +3609,10 @@ fn mage_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
     ids
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn is_mage_edit_model(model: &str) -> bool {
     matches!(
         model,
@@ -3639,7 +3656,10 @@ fn resolve_boogu_edit(
     Ok(references)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn resolve_mage_edit(
     request: &ImageRequest,
     settings: &Settings,
@@ -4075,8 +4095,8 @@ fn resolve_generic_lane_conditioning(
             ..Default::default()
         })
     } else {
-        // Boogu instruction edit resolves its (1..5) references separately into `boogu_refs` below —
-        // it uses the `MultiReference`-capable path, not the single `identity_init` reference.
+        // Multi-reference instruction editors resolve their ordered references into `edit_refs` below;
+        // they use the `MultiReference`-capable path, not the single `identity_init` reference.
         Ok(LaneConditioning::default())
     }
 }
@@ -4331,11 +4351,10 @@ async fn generate_stream(
         flux_true_cfg,
         ideogram_edit_mask,
     } = resolve_generic_lane_conditioning(request, settings, project_path, has_reference)?;
-    // Boogu instruction edit (epic 6387, multi-reference sc-7645): resolve the 1..5 source references
-    // (the Qwen3-VL vision tower reads each + they VAE-encode into the DiT spatial sequence); the prompt
-    // is the edit instruction. Threaded to `generate_one` as `Conditioning::Reference` (one reference) /
-    // `MultiReference` (2–5). No mask / IP-Adapter (the descriptor accepts only Reference/MultiReference).
-    let boogu_refs: Vec<Image> = if request.model == "boogu_image_edit" {
+    // Registry instruction edits: Boogu resolves 1..5 sources; Mage resolves its required primary
+    // source followed by every optional reference in client order. Both thread through `generate_one`
+    // as `Reference` (one) / `MultiReference` (many), never the single img2img-init slot.
+    let edit_refs: Vec<Image> = if request.model == "boogu_image_edit" {
         resolve_boogu_edit(request, settings, project_path)?
     } else if is_mage_edit_model(&request.model) {
         resolve_mage_edit(request, settings, project_path)?
@@ -4437,7 +4456,7 @@ async fn generate_stream(
                         guidance,
                         negative_prompt.clone(),
                         identity_init.as_ref(),
-                        &boogu_refs,
+                        &edit_refs,
                         ideogram_edit_mask.as_ref(),
                         true_cfg,
                         sampler.as_deref(),
@@ -4560,6 +4579,12 @@ fn candle_adapter_label(model: &str) -> &'static str {
         | "sensenova_u1_8b_infographic_v3_fast" => "candle_sensenova",
         "ideogram_4" | "ideogram_4_turbo" => "candle_ideogram",
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => "candle_boogu",
+        "mage_flow_base"
+        | "mage_flow"
+        | "mage_flow_turbo"
+        | "mage_flow_edit_base"
+        | "mage_flow_edit"
+        | "mage_flow_edit_turbo" => "candle_mage",
         "krea_2_turbo" | "krea_2_raw" => "candle_krea",
         // Stable Diffusion 3.5 (sc-7880): Large / Large Turbo / Medium share the candle SD3.5 engine.
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => "candle_sd3",
@@ -4907,12 +4932,12 @@ async fn generate_candle_stream(
     } else {
         (None, None)
     };
-    // Boogu instruction edit (sc-7524, multi-reference sc-7645): resolve the 1..5 references here (each
-    // read by the Qwen3-VL vision tower + VAE-encoded into the DiT spatial sequence) — the
-    // `MultiReference`-capable path, not the single `edit_reference`. Threaded to `generate_one` as
-    // `Conditioning::Reference` (one) / `MultiReference` (2–5). Empty for non-Boogu / non-edit jobs.
-    let boogu_refs: Vec<Image> = if request.model == "boogu_image_edit" {
+    // Registry instruction edits: resolve Boogu's 1..5 sources or Mage's source-first ordered list.
+    // Each uses the `MultiReference`-capable path, not the single `edit_reference` img2img slot.
+    let edit_refs: Vec<Image> = if request.model == "boogu_image_edit" {
         resolve_boogu_edit(request, settings, project_path)?
+    } else if is_mage_edit_model(&request.model) {
+        resolve_mage_edit(request, settings, project_path)?
     } else {
         Vec::new()
     };
@@ -4923,10 +4948,10 @@ async fn generate_candle_stream(
     // for distilled families, two-forward CFG for the base ones like Krea Raw `render_base_img2img`,
     // sc-10226). Model-agnostic here — the candle router gates which ids reach this lane with a reference
     // (`krea_2_turbo`/`krea_2_raw`, SD3.5, Z-Image, Boogu, Ideogram all wired). Disjoint from the Ideogram
-    // `edit_reference` (edit_image vs text_to_image) and Boogu's
-    // `multi_references` (guarded here so a future overlap never double-drives the single `reference` slot).
+    // `edit_reference` (edit_image vs text_to_image) and the registry editors' `edit_refs` (guarded here
+    // so a future overlap never double-drives the single `reference` slot).
     let img2img_reference = if edit_reference.is_none()
-        && boogu_refs.is_empty()
+        && edit_refs.is_empty()
         && request.mode != "edit_image"
         && model_supports_img2img(request)
     {
@@ -5275,7 +5300,7 @@ async fn generate_candle_stream(
                         // mutually exclusive by mode/family; whichever resolved seeds the single
                         // `Conditioning::Reference` slot.
                         edit_reference.as_ref().or(img2img_reference.as_ref()),
-                        &boogu_refs,
+                        &edit_refs,
                         edit_mask.as_ref(),
                         true_cfg,
                         // Per-payload sampler / scheduler / schedule-shift (sc-7127), already N3-guarded
@@ -5847,6 +5872,38 @@ mod candle_label_tests {
     use super::*;
 
     #[test]
+    fn mage_edit_preserves_primary_then_ordered_extra_references() {
+        let request = ImageRequest::from_payload(
+            json!({
+                "mode": "edit_image",
+                "model": "mage_flow_edit_turbo",
+                "sourceAssetId": "primary",
+                "referenceAssetIds": ["second", "third"]
+            })
+            .as_object()
+            .unwrap(),
+        );
+        assert_eq!(
+            mage_edit_reference_ids(&request),
+            ["primary", "second", "third"]
+        );
+
+        let missing_primary = ImageRequest::from_payload(
+            json!({
+                "mode": "edit_image",
+                "model": "mage_flow_edit",
+                "referenceAssetIds": ["orphan"]
+            })
+            .as_object()
+            .unwrap(),
+        );
+        assert!(
+            mage_edit_reference_ids(&missing_primary).is_empty(),
+            "Mage edit must not reinterpret an optional reference as its required primary source"
+        );
+    }
+
+    #[test]
     fn candle_image_adapter_labels_are_per_family() {
         assert_eq!(candle_adapter_label("z_image_turbo"), "candle_z_image");
         assert_eq!(candle_adapter_label("flux_schnell"), "candle_flux");
@@ -5877,6 +5934,16 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("boogu_image"), "candle_boogu");
         assert_eq!(candle_adapter_label("boogu_image_turbo"), "candle_boogu");
         assert_eq!(candle_adapter_label("boogu_image_edit"), "candle_boogu");
+        for model in [
+            "mage_flow_base",
+            "mage_flow",
+            "mage_flow_turbo",
+            "mage_flow_edit_base",
+            "mage_flow_edit",
+            "mage_flow_edit_turbo",
+        ] {
+            assert_eq!(candle_adapter_label(model), "candle_mage");
+        }
         // Krea 2 Turbo (sc-7581): the candle asset stamp.
         assert_eq!(candle_adapter_label("krea_2_turbo"), "candle_krea");
         assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
