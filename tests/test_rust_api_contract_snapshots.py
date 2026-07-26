@@ -350,6 +350,8 @@ def _normalize_contract(
             return "<event-ticket>"
         if normalized == "rust":
             return "<runtime>"
+        if path.endswith(".startupMaintenance.status"):
+            return "<maintenance-status>"
         return normalized
     if path.endswith(".loc[1]") and isinstance(value, int):
         return "<json-error-offset>"

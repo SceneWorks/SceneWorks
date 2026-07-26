@@ -215,6 +215,15 @@ pub(crate) struct HealthResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) directories: Option<DirectoriesResponse>,
     pub(crate) interrupted_jobs_on_startup: usize,
+    pub(crate) readiness: StartupReadinessResponse,
+    pub(crate) startup_maintenance: crate::startup::StartupMaintenanceResponse,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StartupReadinessResponse {
+    pub(crate) status: &'static str,
+    pub(crate) criticality: &'static str,
 }
 
 #[derive(Debug, Serialize)]
