@@ -21,7 +21,7 @@
 // `defaultTierSelection`, which honors it whenever the sticky tier is still installed and otherwise
 // falls through to the base default — so a stale/uninstalled sticky is safely ignored (clamped).
 
-import { apiFetch } from "./api.js";
+import { putUiPreferences } from "./uiPreferences.js";
 
 const STORAGE_KEY = "sceneworks-last-tier";
 
@@ -29,12 +29,11 @@ const STORAGE_KEY = "sceneworks-last-tier";
 // localStorage alone does NOT survive a desktop relaunch — the shell's `127.0.0.1:<port>` origin changes
 // every launch, wiping origin-keyed storage — so a pick would be forgotten each session without this.
 // Best-effort + fire-and-forget: the localStorage write already succeeded, so a failed PUT only means the
-// pick isn't durable this once. Public route, empty token — mirrors the global default-quality PUT.
+// pick isn't durable this once. The PUT is a GATED write, so it goes through `putUiPreferences`, which
+// attaches the access token (sc-15136) — sending it credential-less 401'd on every remote-auth
+// deployment, silently costing the sticky on the one shell whose localStorage cannot carry it.
 function persistToServer(map) {
-  apiFetch("/api/v1/ui-preferences", "", {
-    method: "PUT",
-    body: JSON.stringify({ perModelTier: map }),
-  }).catch(() => {});
+  putUiPreferences({ perModelTier: map }).catch(() => {});
 }
 
 // Seed the localStorage instant-paint cache from the durable server copy on launch (App.jsx, after

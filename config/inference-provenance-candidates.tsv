@@ -306,7 +306,7 @@ crates/media/mlx-gen/mlx-gen-bernini/src/vae_preprocess.rs	71c936dcc3237093f4052
 crates/media/mlx-gen/mlx-gen-bernini/src/vision.rs	40468b7f4798fd3287b5a1d218412efe444cd0ee	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-bernini
 crates/media/mlx-gen/mlx-gen-bernini/src/vit_preprocess.rs	d5091be4888371b9ef9bf2574f7a6ab385bc06b1	f4413622eb241e4d77273950d8273fe010962298ce53426fe99f5cef3f90aa3c	architecture:crates/media/mlx-gen/mlx-gen-bernini
 crates/media/mlx-gen/mlx-gen-boogu/src/pipeline.rs	dfc0d8dd69f4d6a75c65957107356ec2048939ae	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-boogu
-crates/media/mlx-gen/mlx-gen-boogu/src/vision/mod.rs	fab6187f9579cf006fb0966aa5c323af310f349b	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-boogu
+crates/media/mlx-gen/mlx-gen-boogu/src/vision/mod.rs	a5348be4e2e6ef2287cbaaac62db05f80a9977fe	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-boogu
 crates/media/mlx-gen/mlx-gen-boogu/src/vision/preprocess.rs	43849c034f82bddec8836a022280e79066407201	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-boogu
 crates/media/mlx-gen/mlx-gen-chroma/src/loader.rs	4bbf9d02b5c64dcf2ca1c25868069d2b8a465124	dbaef6b9ce774cf1864e35d17a7aa1674787eea632e3e5a1766a6a5db2225c63	architecture:crates/media/mlx-gen/mlx-gen-chroma
 crates/media/mlx-gen/mlx-gen-chroma/src/text.rs	ec1fc6c302e01e5da47101242d0bfb126fd73ea3	a6883d9b84643003942411d7702ff6b039e58ea34bc42623db862b7308bb36d8	architecture:crates/media/mlx-gen/mlx-gen-chroma
@@ -388,7 +388,7 @@ crates/media/mlx-gen/mlx-gen-ltx/src/vae.rs	f679a204d3b6cccb3b025afa4459150bfcaa
 crates/media/mlx-gen/mlx-gen-ltx/src/vocoder.rs	b05af8e5b9589899c3636ddbd3e13184d441e600	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-ltx
 crates/media/mlx-gen/mlx-gen-mage/src/attention.rs	9a5c22642494c998ddfde12e9d518584ed28d674	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-mage
 crates/media/mlx-gen/mlx-gen-mage/src/config.rs	1b3690cdb031811b8d3d154390eebab08bfaa6c3	b2774d85c922f57111069c0fbc8149cc263b7b9267bf5705092528896374f5ee	architecture:crates/media/mlx-gen/mlx-gen-mage
-crates/media/mlx-gen/mlx-gen-mage/src/convert.rs	e944d91f2cc36db4b29c719b745ae159be13bf30	b6d25a3c22c29b04cc4113f036f7ae77e9c70fc564ffbb9785ae0659bce562f3	architecture:crates/media/mlx-gen/mlx-gen-mage
+crates/media/mlx-gen/mlx-gen-mage/src/convert.rs	fb2796906a7edf48513ce77838bee27fd1b56383	b6d25a3c22c29b04cc4113f036f7ae77e9c70fc564ffbb9785ae0659bce562f3	architecture:crates/media/mlx-gen/mlx-gen-mage
 crates/media/mlx-gen/mlx-gen-mage/src/feed_forward.rs	6b250289726ebf1f1109faee0fc2670181275064	a6883d9b84643003942411d7702ff6b039e58ea34bc42623db862b7308bb36d8	architecture:crates/media/mlx-gen/mlx-gen-mage
 crates/media/mlx-gen/mlx-gen-mage/src/latent.rs	8209cc3da76ba1bdf20d7ccb0ddc40ca244bfec6	6428a7d28e017090e4418e9e5f9e9969d1f60144413d953210012ae38defc217	cephes-source
 crates/media/mlx-gen/mlx-gen-mage/src/lib.rs	6985040e6b82a3c2114063b77723eb45a6c8bc14	a6883d9b84643003942411d7702ff6b039e58ea34bc42623db862b7308bb36d8	architecture:crates/media/mlx-gen/mlx-gen-mage
@@ -398,8 +398,8 @@ crates/media/mlx-gen/mlx-gen-mage/src/text_encoder/attention.rs	72dc27fcb1d4644e
 crates/media/mlx-gen/mlx-gen-mage/src/text_encoder/encode.rs	6c4c16d875489cd3c0ea3adc7c6c7dabf5bc1a78	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-mage
 crates/media/mlx-gen/mlx-gen-mage/src/text_encoder/encoder.rs	48faa8e19b17e87d3cf3eed56d769a34dfb43d48	20df8f5bae53e0247b26d02b11bcb62b828265f417de08936c6ea20d6aa48fbc	architecture:crates/media/mlx-gen/mlx-gen-mage
 crates/media/mlx-gen/mlx-gen-mage/src/text_encoder/layer.rs	8d57a2f28aff9f36b5930956982f422fcdb55bbe	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-mage
-crates/media/mlx-gen/mlx-gen-mage/src/text_encoder/load.rs	85d8da6178fefabb0f2fa277e21eb255d1d284a1	a6883d9b84643003942411d7702ff6b039e58ea34bc42623db862b7308bb36d8	architecture:crates/media/mlx-gen/mlx-gen-mage
-crates/media/mlx-gen/mlx-gen-mage/src/text_encoder/mod.rs	46e3344a2de93de80dd0968bf3af5c50bde17e06	bd0594847547d78405dbd19311b9087eaae9352c00b4def1ec6fe798216de5b1	architecture:crates/media/mlx-gen/mlx-gen-mage
+crates/media/mlx-gen/mlx-gen-mage/src/text_encoder/load.rs	349d6bfdc77ab94e0b5c79c80152a88aa55d81c7	a6883d9b84643003942411d7702ff6b039e58ea34bc42623db862b7308bb36d8	architecture:crates/media/mlx-gen/mlx-gen-mage
+crates/media/mlx-gen/mlx-gen-mage/src/text_encoder/mod.rs	2e125f06eb3e6d88482a9a7940108d9fbd72e6a0	bd0594847547d78405dbd19311b9087eaae9352c00b4def1ec6fe798216de5b1	architecture:crates/media/mlx-gen/mlx-gen-mage
 crates/media/mlx-gen/mlx-gen-mage/src/text_encoder/rope.rs	8a47ec3ee55c7df18c6d32acfcc588d1f39d58b2	afea29b999af7860d9b96feb24152b9d680f1cd6361986f9e5ade479d2f90522	architecture:crates/media/mlx-gen/mlx-gen-mage
 crates/media/mlx-gen/mlx-gen-mage/src/training.rs	f31f6bb6e7220d3c587012d54d6c19ecba97eb7b	781ec9f1451d59e001c933571721795e3e28ba85c297d0eda893125d88e24fba	architecture:crates/media/mlx-gen/mlx-gen-mage
 crates/media/mlx-gen/mlx-gen-mage/src/transformer_block.rs	96bf1f6a9b6553ea84bac10ba7a201cd0bb321d1	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-mage

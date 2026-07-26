@@ -201,6 +201,9 @@ enum VideoRoute {
     Bernini(&'static str),
     /// SCAIL-2 standalone character animation (epic 5439). Carries the resolved engine id.
     Scail2(&'static str),
+    /// Krea Realtime 14B autoregressive video (epic 8431 / sc-8443). t2v + i2v (`Reference`) + v2v
+    /// (`VideoClip`); mac-only. Carries the resolved engine id.
+    KreaRealtime(&'static str),
     /// Mochi 1 text-to-video (epic 1788 / sc-11992). Carries the resolved engine id. t2v ONLY —
     /// [`mochi_available`] gates the mode, since `conditioning: []` means there is no other shape.
     Mochi(&'static str),
@@ -249,6 +252,14 @@ fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRout
         scail2_engine_id(&request.model).filter(|_| scail2_available(request, settings))
     {
         VideoRoute::Scail2(engine_id)
+    } else if let Some(engine_id) = krea_realtime_engine_id(&request.model)
+        .filter(|_| krea_realtime_available(request, settings))
+    {
+        // Krea Realtime 14B (epic 8431 / sc-8443 S10). `krea_realtime_engine_id` matches only
+        // `krea_realtime_14b`, and no earlier predicate can match that id, so routing for every
+        // pre-existing model stays byte-identical. Weights unresolved ⇒ falls to Stub, whose fail-loud
+        // gate refuses rather than handing back a procedural fake clip.
+        VideoRoute::KreaRealtime(engine_id)
     } else if let Some(engine_id) =
         mochi_engine_id(&request.model).filter(|_| mochi_available(request, settings))
     {
@@ -453,6 +464,19 @@ pub(crate) async fn run_video_generate_job(
                 .to_owned(),
         ));
     }
+    // Krea Realtime 14B (epic 8431 / sc-8443) is `mac_only` (descriptor) and has NO candle engine, so
+    // an off-Mac job must fail honestly here rather than fall through to the candle stub / a different
+    // backend — the same silent-degradation trap the VACE-Fun guard above closes. The full candle port
+    // is out of this story's scope.
+    #[cfg(not(target_os = "macos"))]
+    if request.model == "krea_realtime_14b" {
+        return Err(WorkerError::InvalidPayload(
+            "krea_realtime_14b: the native Krea Realtime engine is macOS-only (there is no candle \
+             backend). The job will not be routed to a different backend. Choose another model on \
+             this platform."
+                .to_owned(),
+        ));
+    }
     // Generate: real MLX on macOS for Wan (sc-3034) / LTX+audio (sc-3035) models with
     // resolvable weights, else the procedural stub (non-macOS or missing weights = stub).
     // replace_person (sc-3521) always routes to the native Wan-VACE provider regardless of the
@@ -645,6 +669,28 @@ pub(crate) async fn run_video_generate_job(
                     decoded,
                     SCAIL2_ADAPTER,
                     scail2_raw_settings(&request, lightning),
+                    None,
+                )
+            }
+            VideoRoute::KreaRealtime(engine_id) => {
+                // Krea Realtime 14B (epic 8431 / sc-8443 S10): autoregressive self-forcing video whose
+                // shipped checkpoint is Wan 2.1 T2V 14B weight-for-weight. `generate_krea_realtime` maps
+                // the supplied media to the engine conditioning (a reference still → i2v `Reference`,
+                // strength no-op; a source clip → v2v `VideoClip`, strength honored; else t2v) and drives
+                // the shared `generate_video` heartbeat funnel. CFG off; dense bf16; no LoRA yet (S15).
+                (
+                    generate_krea_realtime(
+                        api,
+                        settings,
+                        job,
+                        &request,
+                        &project_path,
+                        engine_id,
+                        backend,
+                    )
+                    .await?,
+                    KREA_REALTIME_ADAPTER,
+                    krea_realtime_raw_settings(&request),
                     None,
                 )
             }
@@ -1517,6 +1563,12 @@ use scail2::{
 };
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use scail2::{scail2_engine_id, scail2_raw_settings};
+mod krea_realtime;
+#[cfg(target_os = "macos")]
+use krea_realtime::{
+    generate_krea_realtime, krea_realtime_available, krea_realtime_engine_id,
+    krea_realtime_raw_settings, KREA_REALTIME_ADAPTER,
+};
 pub(crate) mod ltx;
 #[cfg(target_os = "macos")]
 use ltx::{generate_ltx, ltx_available, ltx_engine_id, ltx_raw_settings, LTX_ADAPTER};

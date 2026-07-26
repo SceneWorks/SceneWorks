@@ -534,11 +534,17 @@ describe("SettingsScreen default generation quality (sc-10728)", () => {
     // cache alone does NOT survive a relaunch (the origin changes), so the change must also PUT to the
     // durable ui-preferences store — same contract as theme/accent in App.jsx. Sending only this field
     // relies on the endpoint MERGING, so theme/accent can't be clobbered.
+    //
+    // The PUT must carry the access token (sc-15136): it is a GATED route — only the pre-auth GET is
+    // public — so the credential-less write this used to send 401'd on every remote-auth deployment and
+    // the preference never reached disk. A non-empty token is pinned on purpose: this assertion
+    // used to read `""`, which is what let the defect sit green here — it passes either way.
+    window.localStorage.setItem("sceneworks-token", "lan-password-1");
     await render();
     await chooseQuality("Q4");
     expect(apiFetch).toHaveBeenCalledWith(
       "/api/v1/ui-preferences",
-      "",
+      "lan-password-1",
       expect.objectContaining({
         method: "PUT",
         body: JSON.stringify({ defaultGenerationQuality: "q4" }),
