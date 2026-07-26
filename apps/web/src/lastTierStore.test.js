@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("./api.js", () => ({ apiFetch: vi.fn(() => Promise.resolve({})) }));
 
 import { apiFetch } from "./api.js";
+import { ACCESS_TOKEN_KEY } from "./accessToken.js";
 import { readLastTier, seedLastTiersFromServer, writeLastTier } from "./lastTierStore.js";
 import { defaultTierSelection } from "./quantTier.js";
 
@@ -149,9 +150,8 @@ describe("lastTierStore — durable server persistence (epic 10721 R1)", () => {
 
     // Every write PUTs the FULL map (so the server can replace wholesale — no deep-merge needed).
     expect(apiFetch).toHaveBeenCalledTimes(3);
-    const [path, token, opts] = apiFetch.mock.calls.at(-1);
+    const [path, , opts] = apiFetch.mock.calls.at(-1);
     expect(path).toBe("/api/v1/ui-preferences");
-    expect(token).toBe(""); // public route
     expect(opts.method).toBe("PUT");
     expect(JSON.parse(opts.body)).toEqual({
       perModelTier: {
@@ -175,5 +175,25 @@ describe("lastTierStore — durable server persistence (epic 10721 R1)", () => {
     expect(readLastTier("image", "sana_sprint_1600m")).toBe("bf16");
     // Seeding is a read-only cache prime — it must not echo a redundant PUT back to the server.
     expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  // sc-15136: the ui-preferences PUT is GATED (only its GET is public), so a credential-less
+  // write 401s on every remote-auth deployment — and this store's `.catch(() => {})` swallowed
+  // it, so the tier sticky silently never reached disk for LAN browsers. The token is pinned to
+  // a NON-EMPTY value on purpose: asserting the "" default would pass with the fix reverted.
+  it("carries the stored access token on the durable PUT (remote-auth deployments)", () => {
+    window.localStorage.setItem(ACCESS_TOKEN_KEY, "lan-password-1");
+    writeLastTier("image", "model_x", "q4");
+    const [, token] = apiFetch.mock.calls.at(-1);
+    expect(token).toBe("lan-password-1");
+  });
+
+  // Desktop/loopback: nothing stored, so the write stays credential-less and
+  // `SCENEWORKS_TRUST_LOOPBACK` carries it. Guards against a fix that hard-fails without a token.
+  it("still PUTs with an empty token when no access token is stored (desktop/loopback)", () => {
+    writeLastTier("image", "model_x", "q4");
+    const [path, token] = apiFetch.mock.calls.at(-1);
+    expect(path).toBe("/api/v1/ui-preferences");
+    expect(token).toBe("");
   });
 });

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
-import { apiFetch } from "../api.js";
+import { putUiPreferences } from "../uiPreferences.js";
 import { useAppContext } from "../context/AppContext.js";
 import { ACCENTS } from "../accents.js";
 import {
@@ -49,12 +49,11 @@ export function SimpleSettings({ accent, onAccentChange, simpleDefault, onSimple
   function changeQuality(next) {
     const value = writeDefaultGenerationQuality(next);
     setQuality(value);
-    // ui-preferences is a public route (like /health) and MERGES partial updates, so
-    // sending only this field can't disturb theme/accent — same contract as App.jsx.
-    apiFetch("/api/v1/ui-preferences", "", {
-      method: "PUT",
-      body: JSON.stringify({ defaultGenerationQuality: value }),
-    }).catch(() => {});
+    // The endpoint MERGES partial updates, so sending only this field can't disturb
+    // theme/accent — same contract as App.jsx. `putUiPreferences` attaches the access token:
+    // the ui-preferences GET is public but the disk-writing PUT is gated (sc-8869, F-067),
+    // so a credential-less write 401s on any remote-auth deployment (sc-15136).
+    putUiPreferences({ defaultGenerationQuality: value }).catch(() => {});
     toast(`Default quality set to ${generationQualityLabel(value)}`);
   }
 
