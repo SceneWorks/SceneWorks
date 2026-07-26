@@ -1011,4 +1011,194 @@ mod tests {
             serde_json::json!(["krea_2"])
         );
     }
+
+    #[test]
+    fn mage_flow_family_ships_six_variants_as_load_time_quant_tiers() {
+        // sc-14059 (epic 14034, P6): pin the shipped Mage-Flow catalog shape that the desktop
+        // provisioning + per-tier download/delete flows depend on. This is the manifest-contract
+        // guard that keeps two shipped behaviors HONEST, and it discriminates a real regression
+        // from the current state rather than asserting a code default:
+        //
+        //   1. Per-tier delete honesty (closes sc-14046's delegated acceptance). Mage's three
+        //      q4/q8/bf16 tiers are LOAD-TIME MLX quant choices over ONE dense diffusers snapshot,
+        //      not physically-distinct on-disk artifacts. The overlap-safe tier delete in
+        //      apps/rust-api (delete_model_variant) only reclaims zero bytes and preserves the
+        //      shared snapshot BECAUSE every tier declares the SAME repo+revision+files. If a future
+        //      edit gave the tiers distinct file predicates (e.g. z-image-style `q4/*` subdirs) that
+        //      per-tier delete would begin removing real bytes another logical tier still needs and
+        //      corrupt the snapshot — so the identical-predicate invariant is load-bearing, not
+        //      cosmetic. The absence of `mlx.standardTierLayout` (which z_image_turbo DOES set to
+        //      route to physical `<tier>/` subdirs) is the discriminating marker that Mage is
+        //      on-the-fly quant, not a physical tier matrix.
+        //   2. Resume/retry skip (sc-13614 pattern). Because the three tier download jobs carry
+        //      identical repo+revision+files, downloading a second tier of an already-installed
+        //      variant re-verifies but never re-fetches bytes (downloads.rs size-equals-expected
+        //      skip), and installing one tier marks all three installed.
+        //
+        // It also proves the P6 model guide (apps/web/public/prompt-guides/mage-flow.md) is wired to
+        // every variant.
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let models = manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array");
+        let find = |id: &str| {
+            models
+                .iter()
+                .find(|model| model["id"].as_str() == Some(id))
+                .unwrap_or_else(|| panic!("{id} present in the builtin models catalog"))
+        };
+
+        // Every Mage-Flow row in the catalog, by family — so a dropped or extra variant fails here.
+        let mage_ids: Vec<&str> = models
+            .iter()
+            .filter(|model| model["family"].as_str() == Some("mage-flow"))
+            .map(|model| model["id"].as_str().unwrap_or_default())
+            .collect();
+        let mut sorted_ids = mage_ids.clone();
+        sorted_ids.sort_unstable();
+        assert_eq!(
+            sorted_ids,
+            vec![
+                "mage_flow",
+                "mage_flow_base",
+                "mage_flow_edit",
+                "mage_flow_edit_base",
+                "mage_flow_edit_turbo",
+                "mage_flow_turbo",
+            ],
+            "the six Mage-Flow gen+edit variants ship in the catalog"
+        );
+
+        // (id, capability, steps, guidance) — the per-variant defaults from the epic Ground-Truth
+        // Reference (Base 30/5, RL 20/5, Turbo 4/1(off), Edit-Base 30/5, Edit 30/5, Edit-Turbo 4/1).
+        // These are manifest DATA (not code defaults), so pinning them discriminates a manifest edit.
+        let expected: &[(&str, &str, u64, f64)] = &[
+            ("mage_flow_base", "text_to_image", 30, 5.0),
+            ("mage_flow", "text_to_image", 20, 5.0),
+            ("mage_flow_turbo", "text_to_image", 4, 1.0),
+            ("mage_flow_edit_base", "edit_image", 30, 5.0),
+            ("mage_flow_edit", "edit_image", 30, 5.0),
+            ("mage_flow_edit_turbo", "edit_image", 4, 1.0),
+        ];
+
+        for (id, capability, steps, guidance) in expected {
+            let model = find(id);
+            assert_eq!(
+                model["type"].as_str(),
+                Some("image"),
+                "{id} is an image model"
+            );
+            assert_eq!(
+                model["adapter"].as_str(),
+                Some("mlx_mage"),
+                "{id} routes to the mlx_mage adapter"
+            );
+            assert!(
+                model["capabilities"]
+                    .as_array()
+                    .is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some(capability))),
+                "{id} advertises the {capability} capability"
+            );
+            assert_eq!(
+                model["defaults"]["steps"].as_u64(),
+                Some(*steps),
+                "{id} default steps"
+            );
+            assert_eq!(
+                model["defaults"]["guidanceScale"].as_f64(),
+                Some(*guidance),
+                "{id} default guidance (Turbo/Edit-Turbo are CFG-off at 1.0)"
+            );
+            assert_eq!(
+                model["ui"]["promptGuide"]["path"].as_str(),
+                Some("/prompt-guides/mage-flow.md"),
+                "{id} points at the P6 Mage-Flow model guide"
+            );
+
+            // Load-time quant marker, and NOT a physical per-tier layout.
+            assert_eq!(
+                model["mlx"]["quantize"].as_u64(),
+                Some(4),
+                "{id} declares the image-lane load-time quant default tier"
+            );
+            assert!(
+                model["mlx"]["standardTierLayout"].is_null(),
+                "{id} must NOT declare standardTierLayout — its q4/q8/bf16 are on-the-fly quant over \
+                 one dense snapshot, not physical <tier>/ subdirs (that flag is what makes per-tier \
+                 delete reclaim real bytes, which would corrupt Mage's shared snapshot)"
+            );
+
+            // The three tiers must share ONE repo+revision+file predicate (the overlap invariant).
+            let downloads = model["downloads"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} has a downloads array"));
+            let tier_of = |variant: &str| {
+                downloads
+                    .iter()
+                    .find(|d| {
+                        d["variant"]
+                            .as_str()
+                            .is_some_and(|v| v.eq_ignore_ascii_case(variant))
+                    })
+                    .unwrap_or_else(|| panic!("{id} declares a {variant} tier"))
+            };
+            let (q4, q8, bf16) = (tier_of("q4"), tier_of("q8"), tier_of("bf16"));
+            assert_eq!(
+                downloads.len(),
+                3,
+                "{id} declares exactly the q4/q8/bf16 tiers (no co-requisites today)"
+            );
+            assert_eq!(
+                q4["default"].as_bool(),
+                Some(true),
+                "{id} q4 is the default install tier"
+            );
+            assert!(
+                q8["default"].as_bool() != Some(true) && bf16["default"].as_bool() != Some(true),
+                "{id} marks only one default tier"
+            );
+            for field in ["repo", "revision", "files"] {
+                assert_eq!(
+                    q4[field], q8[field],
+                    "{id} q4 and q8 must share an identical {field} (load-time quant overlap invariant)"
+                );
+                assert_eq!(
+                    q4[field], bf16[field],
+                    "{id} q4 and bf16 must share an identical {field} (load-time quant overlap invariant)"
+                );
+            }
+            // The shared predicate is the COMPLETE flat diffusers snapshot the mlx_mage adapter loads
+            // (required_components: &[] — it reads the whole dir, so every component must be fetched).
+            let files: Vec<&str> = q4["files"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} q4 declares a files predicate"))
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            for required in [
+                "model_index.json",
+                "scheduler/*",
+                "text_encoder/*",
+                "transformer/*",
+                "vae/*",
+            ] {
+                assert!(
+                    files.contains(&required),
+                    "{id} must fetch {required} for a complete loadable snapshot; got {files:?}"
+                );
+            }
+            // The mirror lives under our own HF org (never microsoft/*), pinned to an immutable SHA.
+            let repo = q4["repo"].as_str().unwrap_or_default();
+            assert!(
+                repo.starts_with("SceneWorks/Mage-Flow"),
+                "{id} pulls from the SceneWorks org mirror, not upstream; got {repo:?}"
+            );
+            assert!(
+                q4["revision"].as_str().is_some_and(is_full_sha_revision),
+                "{id} pins a full 40-hex mirror revision"
+            );
+        }
+    }
 }
