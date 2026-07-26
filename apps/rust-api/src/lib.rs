@@ -1202,6 +1202,10 @@ fn create_app_with_state_mode(
         },
         progress_side_effects_lock: Arc::new(AsyncMutex::new(())),
         #[cfg(test)]
+        catalog_scan_before_driver_start_once: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        catalog_scan_stop_after_pass_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        #[cfg(test)]
         progress_before_accept_once: Arc::new(Mutex::new(None)),
         #[cfg(test)]
         sse_snapshot_before_subscribe_once: Arc::new(Mutex::new(None)),

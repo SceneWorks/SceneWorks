@@ -18,6 +18,8 @@ use std::collections::HashMap;
 use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -320,6 +322,12 @@ pub struct AppState {
     /// idempotent catalog/project writes. A retry re-checks the DB after taking
     /// this lock, so two overlapping terminal reports cannot duplicate work.
     pub(crate) progress_side_effects_lock: Arc<AsyncMutex<()>>,
+    /// Deterministic catalog scheduler seams. Production has no hook fields or
+    /// branch overhead.
+    #[cfg(test)]
+    pub(crate) catalog_scan_before_driver_start_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_stop_after_pass_once: Arc<AtomicBool>,
     /// Deterministic race hook for progress acceptance tests. Production builds
     /// contain no hook or synchronization overhead.
     #[cfg(test)]

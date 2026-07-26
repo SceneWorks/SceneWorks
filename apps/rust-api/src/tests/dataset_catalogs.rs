@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use parquet::data_type::{ByteArray, ByteArrayType, Int32Type};
@@ -93,7 +94,7 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
     let config_dir = settings.config_dir.clone();
     let catalog_root = temporary.path().join("external-catalog");
     let source = temporary.path().join("source.parquet");
-    std::fs::write(&source, b"fixture").unwrap();
+    write_catalog_parquet(&source, 0);
     let app = create_app(settings).expect("app creates");
 
     let (status, created) = request(
@@ -118,6 +119,22 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
     assert_eq!(created["counts"]["recordCount"], 0);
     assert!(created["storage"]["totalBytes"].as_u64().unwrap() > 0);
     let catalog_id = created["id"].as_str().unwrap().to_owned();
+    let mut initial_scan_completed = false;
+    for _ in 0..100 {
+        let (_, status_body) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{catalog_id}/status"),
+            Value::Null,
+        )
+        .await;
+        if status_body["processing"]["state"] == "completed" {
+            initial_scan_completed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(initial_scan_completed, "empty fixture scan completes");
 
     let registry = CatalogRegistry::new(&config_dir);
     let mut catalog = registry.open_attached(&catalog_id).unwrap();
@@ -600,6 +617,154 @@ async fn parquet_create_pause_resume_and_completion_run_through_public_api_sched
 }
 
 #[tokio::test]
+async fn interrupted_bounded_driver_is_reconciled_and_public_restart_completes() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 30_000);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    state
+        .catalog_scan_stop_after_pass_once
+        .store(true, Ordering::SeqCst);
+
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Interrupted bounded scan",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": { "batchSize": 100 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap();
+
+    let mut failed = None;
+    for _ in 0..2_000 {
+        let (_, status_body) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if status_body["processing"]["state"] == "failed" {
+            failed = Some(status_body);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let failed = failed.expect("driver interruption between passes reconciles to failed");
+    assert_eq!(failed["processing"]["processedCount"], 25_000);
+    assert!(failed["processing"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("interrupted")));
+
+    let revision = failed["processingControl"]["revision"].as_u64().unwrap();
+    let (status, restarted) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({ "expectedRevision": revision }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restarted}");
+    assert_eq!(restarted["processing"]["state"], "failed");
+    assert_eq!(restarted["processingControl"]["desiredState"], "running");
+
+    let mut completed = None;
+    for _ in 0..2_000 {
+        let (_, status_body) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if status_body["processing"]["state"] == "completed" {
+            completed = Some(status_body);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let completed = completed.expect("public restart resumes the durable checkpoint");
+    assert_eq!(completed["counts"]["recordCount"], 30_000);
+}
+
+#[tokio::test]
+async fn transient_prestart_read_lease_cannot_strand_scheduled_processing() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 1_000);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    let before_start = Arc::new(tokio::sync::Barrier::new(2));
+    *state.catalog_scan_before_driver_start_once.lock() = Some(Arc::clone(&before_start));
+
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Lease race",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": {}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap();
+    let catalog = CatalogRegistry::new(temporary.path().join("config"))
+        .open_attached(id)
+        .unwrap();
+    let transient_read_lease = CatalogProcessingLease::try_acquire(&catalog).unwrap();
+    before_start.wait().await;
+
+    let (status, during_race) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(during_race["processing"]["state"], "idle");
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    drop(transient_read_lease);
+    catalog.close();
+
+    let mut completed = None;
+    for _ in 0..1_000 {
+        let (_, status_body) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if status_body["processing"]["state"] == "completed" {
+            completed = Some(status_body);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(
+        completed.expect("scheduler retries after transient read lease")["counts"]["recordCount"],
+        1_000
+    );
+}
+
+#[tokio::test]
 async fn unsupported_automatic_catalog_source_is_actionable() {
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
@@ -670,5 +835,114 @@ async fn unsupported_automatic_catalog_source_is_actionable() {
     assert_eq!(
         control.revision, 0,
         "invalid resume does not advance intent"
+    );
+}
+
+#[tokio::test]
+async fn invalid_parquet_options_are_rejected_before_create_or_control_cas() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let config_dir = settings.config_dir.clone();
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 10);
+    let app = create_app(settings).expect("app creates");
+
+    for (index, options) in [
+        json!({"batchSize": 0}),
+        json!({"minWidth": 100, "maxWidth": 99}),
+        json!({"urlColumn": "missing_column"}),
+        json!({"captionIncludes": [""]}),
+        json!({"unknownOption": true}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let catalog_root = temporary.path().join(format!("invalid-{index}"));
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/catalogs",
+            json!({
+                "name": format!("Invalid {index}"),
+                "path": catalog_root,
+                "sourceConfig": {
+                    "kind": "parquet",
+                    "paths": [source.clone()],
+                    "options": options
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(
+            !catalog_root.exists(),
+            "invalid plan must not persist catalog {index}"
+        );
+    }
+
+    let catalog_root = temporary.path().join("zero-budget");
+    let (status, error) = tokio::time::timeout(
+        Duration::from_secs(2),
+        request(
+            app.clone(),
+            "POST",
+            "/api/v1/catalogs",
+            json!({
+                "name": "Zero budget",
+                "path": catalog_root,
+                "sourceConfig": {
+                    "kind": "parquet",
+                    "paths": [source.clone()],
+                    "options": { "maxRows": 0 }
+                }
+            }),
+        ),
+    )
+    .await
+    .expect("zero maxRows is rejected synchronously rather than scheduling a loop");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(error["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("scheduler-managed")));
+    assert!(!catalog_root.exists());
+
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Invalid resume",
+            "path": temporary.path().join("resume-catalog")
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+    let catalog = CatalogRegistry::new(config_dir).open_attached(id).unwrap();
+    let mut contract = catalog.contract_state().unwrap();
+    contract.source_config = Some(CatalogSourceConfig {
+        kind: "parquet".to_owned(),
+        paths: vec![source],
+        options: json!({"batchSize": 0}),
+    });
+    contract.processing.state = CatalogProcessingState::Failed;
+    contract.processing.updated_at = catalog_timestamp_now();
+    catalog.set_contract_state(&contract).unwrap();
+    catalog.close();
+
+    let (status, error) = request(
+        app,
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({ "expectedRevision": 0 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    let catalog = CatalogRegistry::new(temporary.path().join("config"))
+        .open_attached(id)
+        .unwrap();
+    assert_eq!(catalog.processing_control().unwrap().revision, 0);
+    assert_eq!(
+        catalog.contract_state().unwrap().processing.state,
+        CatalogProcessingState::Failed
     );
 }

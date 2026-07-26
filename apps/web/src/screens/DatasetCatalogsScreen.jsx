@@ -10,7 +10,7 @@ import { persistNavigationPreferences } from "../uiPreferences.js";
 const EMPTY_CREATE = {
   name: "",
   path: "",
-  sourceKind: "filesystem",
+  sourceKind: "parquet",
   sourcePath: "",
 };
 
@@ -399,12 +399,13 @@ export function DatasetCatalogsScreen() {
             <label className="settings-field">
               <span>Source type</span>
               <select
+                aria-describedby="catalog-source-support"
                 onChange={(event) => setCreateDraft((draft) => ({ ...draft, sourceKind: event.target.value }))}
                 value={createDraft.sourceKind}
               >
-                <option value="filesystem">Image folder</option>
                 <option value="parquet">Parquet dataset folder</option>
               </select>
+              <small className="muted" id="catalog-source-support">Automatic catalog processing currently supports Parquet sources.</small>
             </label>
             <label className="settings-field">
               <span>Source folder <small>(optional)</small></span>

@@ -24,6 +24,9 @@ const DEFAULT_BATCH_SIZE: usize = 1_000;
 const MAX_BATCH_SIZE: usize = 10_000;
 const MAX_CAPTION_CHARS: usize = 2_048;
 const MAX_IMAGE_EDGE: u32 = 16_384;
+const MAX_COLUMN_NAME_CHARS: usize = 256;
+const MAX_FILTER_TERMS: usize = 100;
+const MAX_FILTER_TERM_CHARS: usize = 256;
 
 #[derive(Debug)]
 pub enum CatalogParquetScanError {
@@ -79,7 +82,7 @@ impl From<serde_json::Error> for CatalogParquetScanError {
 pub type CatalogParquetScanResult<T> = Result<T, CatalogParquetScanError>;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct CatalogParquetScanOptions {
     pub url_column: Option<String>,
     pub caption_column: Option<String>,
@@ -153,6 +156,46 @@ pub struct CatalogParquetScanReport {
     pub paused: bool,
 }
 
+/// An attached scanner session that retains the shared processing lease across
+/// every bounded pass. This prevents status reconciliation or lifecycle calls
+/// from observing a lease-free gap while durable progress still says running.
+pub struct AttachedCatalogParquetScanDriver {
+    catalog: Catalog,
+    _lease: CatalogProcessingLease,
+}
+
+impl AttachedCatalogParquetScanDriver {
+    pub fn try_start(
+        registry: &CatalogRegistry,
+        catalog_id: &str,
+    ) -> CatalogParquetScanResult<Self> {
+        let catalog = registry.open_attached(catalog_id)?;
+        let lease = CatalogProcessingLease::try_acquire(&catalog).map_err(|error| match error {
+            CatalogError::Conflict(_) => CatalogParquetScanError::Busy(format!(
+                "Catalog {} already has active processing.",
+                catalog.descriptor().id
+            )),
+            error => CatalogParquetScanError::Catalog(error),
+        })?;
+        Ok(Self {
+            catalog,
+            _lease: lease,
+        })
+    }
+
+    pub fn scan_pass(
+        &mut self,
+        source: &Path,
+        options: &CatalogParquetScanOptions,
+    ) -> CatalogParquetScanResult<CatalogParquetScanReport> {
+        let result = scan_parquet_catalog_under_lease(&mut self.catalog, source, options);
+        if result.is_err() {
+            publish_scan_failure(&self.catalog);
+        }
+        result
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SemanticOptions<'a> {
@@ -180,10 +223,11 @@ pub fn scan_attached_parquet_catalog(
     source: &Path,
     options: &CatalogParquetScanOptions,
 ) -> CatalogParquetScanResult<CatalogParquetScanReport> {
-    let mut catalog = registry.open_attached(catalog_id)?;
-    scan_parquet_catalog(&mut catalog, source, options)
+    let mut driver = AttachedCatalogParquetScanDriver::try_start(registry, catalog_id)?;
+    driver.scan_pass(source, options)
 }
 
+#[cfg(test)]
 fn scan_parquet_catalog(
     catalog: &mut Catalog,
     source: &Path,
@@ -198,15 +242,19 @@ fn scan_parquet_catalog(
     })?;
     let result = scan_parquet_catalog_under_lease(catalog, source, options);
     if result.is_err() {
-        if let Ok(mut progress) = catalog.contract_state().map(|state| state.processing) {
-            progress.state = CatalogProcessingState::Failed;
-            progress.message =
-                Some("Parquet scan failed; inspect the worker logs for details".to_owned());
-            progress.updated_at = catalog_timestamp_now();
-            let _ = catalog.set_processing_progress(&progress);
-        }
+        publish_scan_failure(catalog);
     }
     result
+}
+
+fn publish_scan_failure(catalog: &Catalog) {
+    if let Ok(mut progress) = catalog.contract_state().map(|state| state.processing) {
+        progress.state = CatalogProcessingState::Failed;
+        progress.message =
+            Some("Parquet scan failed; inspect the worker logs for details".to_owned());
+        progress.updated_at = catalog_timestamp_now();
+        let _ = catalog.set_processing_progress(&progress);
+    }
 }
 
 fn scan_parquet_catalog_under_lease(
@@ -281,8 +329,8 @@ fn scan_parquet_catalog_under_lease(
                         publish_progress(
                             catalog,
                             &checkpoint,
-                            CatalogProcessingState::Idle,
-                            Some("Parquet scan yielded after its bounded pass"),
+                            CatalogProcessingState::Running,
+                            Some("Parquet scan queued for its next bounded pass"),
                         )?;
                     }
                     return Ok(CatalogParquetScanReport {
@@ -427,11 +475,86 @@ pub(crate) fn parquet_shards(source: &Path) -> CatalogParquetScanResult<Vec<Path
     Ok(shards)
 }
 
+/// Validates the complete source/options plan without mutating a catalog.
+///
+/// API callers use this before creating a catalog or advancing desired
+/// processing state, so semantic errors are synchronous rather than background
+/// failures after a successful lifecycle response.
+pub fn validate_catalog_parquet_scan_plan(
+    source: &Path,
+    options: &CatalogParquetScanOptions,
+) -> CatalogParquetScanResult<()> {
+    validate_options(options)?;
+    let shards = parquet_shards(source)?;
+    for shard in shards {
+        let reader = SerializedFileReader::new(File::open(shard)?)?;
+        let available_columns = reader
+            .metadata()
+            .file_metadata()
+            .schema_descr()
+            .columns()
+            .iter()
+            .map(|column| column.name().to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        for (field, requested) in [
+            ("urlColumn", options.url_column.as_deref()),
+            ("captionColumn", options.caption_column.as_deref()),
+        ] {
+            if let Some(requested) = requested {
+                if !available_columns.contains(&requested.trim().to_ascii_lowercase()) {
+                    return Err(CatalogParquetScanError::InvalidSource(format!(
+                        "{field} does not exist in every Parquet shard."
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_options(options: &CatalogParquetScanOptions) -> CatalogParquetScanResult<()> {
     if options.batch_size == 0 || options.batch_size > MAX_BATCH_SIZE {
         return Err(CatalogParquetScanError::InvalidSource(format!(
             "Parquet catalog batch size must be between 1 and {MAX_BATCH_SIZE}."
         )));
+    }
+    if options.max_rows == Some(0) {
+        return Err(CatalogParquetScanError::InvalidSource(
+            "Parquet catalog row budget must be positive.".to_owned(),
+        ));
+    }
+    for (field, column) in [
+        ("urlColumn", options.url_column.as_deref()),
+        ("captionColumn", options.caption_column.as_deref()),
+    ] {
+        if column.is_some_and(|column| {
+            let column = column.trim();
+            column.is_empty()
+                || column.chars().count() > MAX_COLUMN_NAME_CHARS
+                || column.chars().any(char::is_control)
+        }) {
+            return Err(CatalogParquetScanError::InvalidSource(format!(
+                "{field} must be a non-empty column name of at most {MAX_COLUMN_NAME_CHARS} characters."
+            )));
+        }
+    }
+    for (field, terms) in [
+        ("captionIncludes", &options.caption_includes),
+        ("captionExcludes", &options.caption_excludes),
+    ] {
+        if terms.len() > MAX_FILTER_TERMS {
+            return Err(CatalogParquetScanError::InvalidSource(format!(
+                "{field} accepts at most {MAX_FILTER_TERMS} terms."
+            )));
+        }
+        if terms.iter().any(|term| {
+            let term = term.trim();
+            term.is_empty() || term.chars().count() > MAX_FILTER_TERM_CHARS
+        }) {
+            return Err(CatalogParquetScanError::InvalidSource(format!(
+                "{field} terms must contain 1 to {MAX_FILTER_TERM_CHARS} characters."
+            )));
+        }
     }
     for (name, value) in [
         ("maxUnsafeScore", options.max_unsafe_score),
@@ -447,6 +570,15 @@ fn validate_options(options: &CatalogParquetScanOptions) -> CatalogParquetScanRe
         ("width", options.min_width, options.max_width),
         ("height", options.min_height, options.max_height),
     ] {
+        if [minimum, maximum]
+            .into_iter()
+            .flatten()
+            .any(|value| value == 0 || value > MAX_IMAGE_EDGE)
+        {
+            return Err(CatalogParquetScanError::InvalidSource(format!(
+                "Parquet catalog {name} bounds must be between 1 and {MAX_IMAGE_EDGE}."
+            )));
+        }
         if minimum
             .zip(maximum)
             .is_some_and(|(minimum, maximum)| minimum > maximum)
@@ -1375,6 +1507,13 @@ mod tests {
             (0, 1, 1)
         );
         assert_eq!(first.checkpoint.counts.accepted, 3);
+        let yielded_catalog = registry.open_attached(&catalog_id).unwrap();
+        assert_eq!(
+            yielded_catalog.contract_state().unwrap().processing.state,
+            CatalogProcessingState::Running,
+            "incomplete bounded work remains durably recoverable as running"
+        );
+        yielded_catalog.close();
 
         let mismatch = scan_attached_parquet_catalog(
             &registry,
@@ -1557,6 +1696,22 @@ mod tests {
             },
             CatalogParquetScanOptions {
                 max_unsafe_score: Some(1.1),
+                ..CatalogParquetScanOptions::default()
+            },
+            CatalogParquetScanOptions {
+                batch_size: 0,
+                ..CatalogParquetScanOptions::default()
+            },
+            CatalogParquetScanOptions {
+                max_rows: Some(0),
+                ..CatalogParquetScanOptions::default()
+            },
+            CatalogParquetScanOptions {
+                url_column: Some(" ".to_owned()),
+                ..CatalogParquetScanOptions::default()
+            },
+            CatalogParquetScanOptions {
+                caption_includes: vec![String::new()],
                 ..CatalogParquetScanOptions::default()
             },
         ] {

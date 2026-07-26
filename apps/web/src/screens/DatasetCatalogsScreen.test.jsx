@@ -244,8 +244,10 @@ describe("DatasetCatalogsScreen", () => {
     expect(requests.find((item) => item.path === "/api/v1/catalogs" && item.options.method === "POST")?.body).toEqual({
       name: "Created",
       path: "C:\\catalogs\\created",
-      sourceConfig: { kind: "filesystem", paths: ["C:\\sources\\photos"], options: {} },
+      sourceConfig: { kind: "parquet", paths: ["C:\\sources\\photos"], options: {} },
     });
+    expect(createForm.textContent).toContain("currently supports Parquet sources");
+    expect(createForm.textContent).not.toContain("Image folder");
 
     const attachForm = container.querySelector("form[aria-label='Attach catalog']");
     await act(async () => set(attachForm.querySelector("input"), "C:\\catalogs\\existing"));
