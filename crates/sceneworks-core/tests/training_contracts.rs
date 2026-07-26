@@ -113,7 +113,7 @@ fn builtin_targets_gate_network_types() {
     // natively, and the Turbo inference loader applies LoKr through the shared adapter seam
     // (sc-7911). SD3.5 Large + Medium (epic 7841 T3 sc-7884) are likewise native-MLX LoKr
     // targets — the `mlx-gen-sd3` trainer reports `supports_lokr` and the `apply_sd3_adapters`
-    // seam loads both. The older MLX-only LTX and the Wan MoE targets stay lora-only.
+    // seam loads both. LTX (on both native backends) and the Wan MoE targets stay lora-only.
     let lokr_targets: Vec<&str> = registry
         .targets
         .iter()
@@ -798,12 +798,13 @@ fn builtin_registry_exposes_ltx_video_target() {
     assert_eq!(target.defaults.rank, 32);
     assert_eq!(target.defaults.resolution, 768);
     assert_eq!(target.defaults.optimizer, "adamw");
-    // Apple-Silicon/MLX-only marker the capability gate (story 1538) and the
-    // frontend key off.
-    assert_eq!(
-        target.limits.get("appleSiliconOnly"),
-        Some(&serde_json::Value::Bool(true))
+    assert!(
+        target.limits.get("appleSiliconOnly").is_none()
+            && target.limits.get("requiresBackend").is_none(),
+        "LTX training is available on native MLX and candle/CUDA"
     );
+    assert!(target.ui.get("appleSiliconOnly").is_none());
+    assert!(target.ui.get("backend").is_none());
 }
 
 #[test]

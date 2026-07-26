@@ -112,7 +112,7 @@ for traceability (all ✅ Ported; see also §6):
 ## 4. Training (`lora_train`)
 
 `MLX_ROUTED_TRAINING_KERNELS` = `z_image_lora`, `sdxl_lora`, `kolors_lora`, `lens_lora`, `wan_lora`,
-`wan_moe_lora`, `ltx_mlx_lora` (the last is MLX-only). Gaps:
+`wan_moe_lora`, `ltx_mlx_lora`. LTX also has a candle/CUDA trainer off-Mac. Gaps:
 
 | Kernel | Status | Closing work |
 |---|---|---|

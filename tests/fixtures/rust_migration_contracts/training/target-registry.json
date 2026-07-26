@@ -1076,13 +1076,12 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
-          "backend": "mlx",
           "cacheLatents": true,
           "loraTargetModules": [
             "to_q",
             "to_k",
             "to_v",
-            "to_out"
+            "to_out.0"
           ],
           "lrScheduler": "constant",
           "mixedPrecision": "bf16",
@@ -1099,7 +1098,6 @@
           1,
           128
         ],
-        "appleSiliconOnly": true,
         "batchSize": [
           1,
           2
@@ -1120,7 +1118,6 @@
           4,
           128
         ],
-        "requiresBackend": "mlx",
         "resolutions": [
           512,
           768,
@@ -1132,10 +1129,8 @@
         ]
       },
       "ui": {
-        "appleSiliconOnly": true,
-        "backend": "mlx",
         "datasetModality": "image",
-        "description": "Train an LTX-2.3 video LoRA from still images. Apple Silicon only (native MLX).",
+        "description": "Train an LTX-2.3 video LoRA from still images. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA).",
         "label": "LTX-2.3 Video LoRA",
         "recommendedFor": [
           "character",

@@ -772,9 +772,10 @@ pub(crate) const VIDEO_ENGINE_IDS: &[&str] = &[
 /// of these. Trainer descriptors DO carry `backend` (sc-4906), so the derivation gates per-backend
 /// — a candle trainer lights training up only under `backend_candle_enabled`, an mlx one only under
 /// `backend_mlx_enabled` (see the gate in `registry_capabilities`). `lens` is the mlx (sc-5148) +
-/// candle (sc-7817) Lens trainer. The mlx backend registers all of these; the candle backend only
-/// the subset {`sdxl`, `z_image_turbo`, `lens`, `wan2_2_t2v_14b`} (the Wan 5B / I2V A14B + Kolors /
-/// LTX have no candle trainer — `jobs_store::training_job_is_candle_eligible` keeps them off candle).
+/// candle (sc-7817) Lens trainer. The mlx backend registers all of these; the candle backend includes
+/// {`sdxl`, `z_image_turbo`, `lens`, `krea_2_raw`, `ltx_2_3`, `wan2_2_t2v_14b`} (the Wan 5B /
+/// I2V A14B + Kolors have no candle trainer — `jobs_store::training_job_is_candle_eligible` keeps
+/// them off candle).
 pub(crate) const TRAINER_IDS: &[&str] = &[
     "z_image_turbo",
     "sdxl",

@@ -9,7 +9,9 @@
 //      state (sc-8508), so a user can have lens q4 installed for gen while the training base is absent.
 //   2. Otherwise the DENSE `bf16` tier (Krea 2 Raw quant-matrix re-host, epic 9992): generation may
 //      have installed only the q8 default, but training needs full-precision weights.
-//   3. Otherwise undefined — a non-matrix base (z-image / sdxl) trains on its single default tier.
+//   3. LTX-2.3 is the packed-training exception: both native trainers run QLoRA directly from the
+//      turnkey `q4/` tier, with its sibling `gemma/` text encoder.
+//   4. Otherwise undefined — a non-matrix base (z-image / sdxl) trains on its single default tier.
 export function trainingBaseTier(base) {
   const variants = base?.variants;
   if (!Array.isArray(variants)) {
@@ -19,6 +21,9 @@ export function trainingBaseTier(base) {
   // never the bf16 inference tier.
   if (variants.some((variant) => variant?.variant === "training")) {
     return "training";
+  }
+  if (base?.id === "ltx_2_3" && variants.some((variant) => variant?.variant === "q4")) {
+    return "q4";
   }
   if (variants.some((variant) => variant?.variant === "bf16")) {
     return "bf16";

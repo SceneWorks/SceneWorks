@@ -45,8 +45,8 @@ pub(super) const CANDLE_MOCHI_ADAPTER: &str = "candle_mochi";
 
 /// Default HuggingFace repos the candle video providers load (overridable via the manifest `repo`).
 /// The candle wan providers read a Wan2.2 diffusers snapshot — the TI2V-5B, or the T2V-A14B /
-/// I2V-A14B 14B MoE (sc-5175); ltx reads the LTX-2.3 checkpoint plus a separate Gemma-3-12B encoder
-/// snapshot (`LTX_GEMMA_DIR`).
+/// I2V-A14B 14B MoE (sc-5175); base LTX reads the shared SceneWorks packed q4 + sibling Gemma
+/// turnkey (sc-13870).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) const CANDLE_WAN_5B_REPO: &str = "Wan-AI/Wan2.2-TI2V-5B-Diffusers";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -54,7 +54,7 @@ const CANDLE_WAN_T2V_14B_REPO: &str = "Wan-AI/Wan2.2-T2V-A14B-Diffusers";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_WAN_I2V_14B_REPO: &str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_LTX_REPO: &str = "Lightricks/LTX-2.3";
+const CANDLE_LTX_REPO: &str = "SceneWorks/ltx-2.3-mlx";
 // The `ltx_2_3_eros` weights repo (sc-5495): a full dense LTX-2.3 fine-tune (the candle provider
 // loads its bf16 single-file checkpoint like the base; same architecture, same Gemma encoder).
 // The pinned checkpoint version is manifest-driven (`downloads[].files` / `mlx.convertSourceFile`),
@@ -281,6 +281,22 @@ fn candle_wan_tier_key(quant: Option<Quant>) -> &'static str {
     }
 }
 
+/// Resolve the base LTX packed-q4 turnkey tier shared by generation and training. Eros remains on
+/// its dense standalone checkpoint, so the SceneWorks model id is part of the guard.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn candle_ltx_tier_subdir(
+    root: &Path,
+    engine_id: &str,
+    model: &str,
+) -> Option<(PathBuf, Option<Quant>)> {
+    if engine_id != "ltx_2_3_distilled" || model != "ltx_2_3" {
+        return None;
+    }
+    let q4 = root.join("q4");
+    (q4.join("transformer.safetensors").is_file() && q4.join("quantize_config.json").is_file())
+        .then_some((q4, Some(Quant::Q4)))
+}
+
 /// (sc-10027) Resolve the candle wan quant tier subdir (`q4`/`q8`/`bf16`) + its quant marker under a
 /// `SceneWorks/wan2.2-*-candle` snapshot `root`, per `advanced.mlxQuantize` (default **q8** when
 /// installed, clamping to q4 — epic 10721 / sc-10726 — falling back through the tier order), or `None`
@@ -324,16 +340,13 @@ pub(super) fn candle_wan_tier_subdir(
 /// Resolve the Gemma-3-12B encoder snapshot dir for the candle LTX provider (sc-8827). Returns the
 /// HF-cache snapshot path so the caller can thread it onto `LoadSpec::text_encoder` — no more mutating
 /// the process-global `$LTX_GEMMA_DIR` at job time on the multithreaded runtime (the old `set_var`
-/// seam was unsound, F-025). Honors an explicit operator `$LTX_GEMMA_DIR` (returns `None` so the
-/// provider reads the env override itself). Best-effort: if the Gemma snapshot isn't in the HF cache
-/// we return `None` so the provider tries its `<root>/text_encoder` fallback and emits its own clear
-/// "set LTX_GEMMA_DIR …" error.
+/// seam was unsound, F-025). An explicit complete operator `$LTX_GEMMA_DIR` wins and is threaded on
+/// the spec; the provider no longer reads process-global env itself. Best-effort: if neither source
+/// resolves, the provider emits its required-`LoadSpec::text_encoder` error.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn resolve_ltx_gemma_dir(settings: &Settings) -> Option<PathBuf> {
-    if std::env::var_os("LTX_GEMMA_DIR").is_some() {
-        return None; // honor an explicit operator override (the provider reads the env var).
-    }
-    huggingface_snapshot_dir(&settings.data_dir, CANDLE_LTX_GEMMA_REPO)
+    super::ltx::ltx_gemma_override_path(std::env::var_os("LTX_GEMMA_DIR"))
+        .or_else(|| huggingface_snapshot_dir(&settings.data_dir, CANDLE_LTX_GEMMA_REPO))
 }
 
 /// Raw-settings recorded on a candle video asset (mirrors `wan_raw_settings`, trimmed to the
@@ -769,10 +782,12 @@ pub(super) async fn generate_candle_video_using(
     // linear in frames, so gating on the raw request would size the check against a length that never
     // renders. (The SVD arm below returns before this is read; it derives its own model-fixed burst.)
     let frames = video_frame_count(&request.model, request.raw_frame_count());
-    // Wan quant-matrix tier-select (sc-10027): a candle wan tier repo (`SceneWorks/wan2.2-*-candle`) ships
+    // Packed-tier select: base LTX QLoRA/inference shares the turnkey `q4/` tier on every native
+    // backend; Wan quant-matrix repos select q4/q8/bf16 below.
     // q4/q8/bf16 subdirs — resolve the one matching `advanced.mlxQuantize` (default q4) and load from it
     // (the packed-detect seam reads the baked-in quant). A flat/dense repo (no subdirs, e.g. the
     // `Wan-AI/*-Diffusers` fallback) stays as-is with no quant marker.
+    let is_ltx = engine_id == "ltx_2_3_distilled";
     let (model_dir, wan_quant) = if is_mochi {
         // `resolve_mochi_model_dir` already returned the TIER dir. The VRAM fit gate (sc-12306) runs
         // here, and the quant marker comes back OUT of it — see `mochi_vram_preflight` for why the
@@ -787,6 +802,10 @@ pub(super) async fn generate_candle_video_using(
             candle_video_vram_budget(settings).await,
         )?;
         (snapshot_dir, quant)
+    } else if let Some((dir, quant)) =
+        candle_ltx_tier_subdir(&snapshot_dir, engine_id, &request.model)
+    {
+        (dir, quant)
     } else {
         let (dir, quant) = match candle_wan_tier_subdir(&snapshot_dir, engine_id, request) {
             Some((tier_dir, quant)) => (tier_dir, quant),
@@ -812,9 +831,9 @@ pub(super) async fn generate_candle_video_using(
     };
     // ltx needs the separate Gemma-3-12B encoder (its only conditioning input). Resolve its snapshot
     // dir here and thread it onto the LoadSpec below (sc-8827) instead of mutating `$LTX_GEMMA_DIR`.
-    let is_ltx = engine_id == "ltx_2_3_distilled";
     let ltx_gemma_dir = if is_ltx {
-        resolve_ltx_gemma_dir(settings)
+        super::ltx::resolve_bundled_ltx_gemma_dir(&model_dir)
+            .or_else(|| resolve_ltx_gemma_dir(settings))
     } else {
         None
     };

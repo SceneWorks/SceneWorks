@@ -3111,6 +3111,76 @@ fn resolve_base_model_path_descends_into_hf_snapshot() {
 }
 
 #[test]
+fn ltx_training_resolves_and_requires_the_turnkey_q4_tier() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let target = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "ltx_video_lora")
+        .expect("LTX training target");
+    let repo = target.base_model_repo.as_deref().expect("turnkey repo");
+    let repo_root = huggingface_repo_cache_path(&data_dir, repo).expect("repo cache path");
+    let revision = "ltx-q4-training";
+    let snapshot = repo_root.join("snapshots").join(revision);
+    let q4 = snapshot.join("q4");
+    std::fs::create_dir_all(&q4).expect("q4 tier");
+    for file in [
+        "quantize_config.json",
+        "transformer.safetensors",
+        "connector.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+    ] {
+        std::fs::write(q4.join(file), "x").expect("q4 training component");
+    }
+    let gemma = snapshot.join("gemma");
+    std::fs::create_dir_all(&gemma).expect("Gemma co-requisite");
+    std::fs::write(gemma.join("config.json"), "{}").expect("Gemma config");
+    std::fs::write(gemma.join("tokenizer.json"), "{}").expect("Gemma tokenizer");
+    std::fs::write(
+        gemma.join("model.safetensors.index.json"),
+        r#"{"weight_map":{"model.embed_tokens.weight":"model-00001-of-00001.safetensors"}}"#,
+    )
+    .expect("Gemma shard index");
+    std::fs::write(gemma.join("model-00001-of-00001.safetensors"), "x").expect("Gemma shard");
+    // A bf16 tier existing beside q4 must not divert the packed QLoRA trainer.
+    std::fs::create_dir_all(snapshot.join("bf16")).expect("bf16 tier");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("refs/main");
+
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Ready
+    );
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        q4.display().to_string()
+    );
+
+    std::fs::remove_file(q4.join("vae_encoder.safetensors")).expect("tear q4 training tier");
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::TrainingTierMissing
+    );
+    std::fs::write(q4.join("vae_encoder.safetensors"), "x").expect("repair q4 training tier");
+    std::fs::remove_file(gemma.join("model-00001-of-00001.safetensors"))
+        .expect("tear Gemma co-requisite");
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::TrainingTierMissing,
+        "a torn Gemma co-requisite must block the real run before the worker claims it"
+    );
+    let message = training_base_unavailable_message(
+        TrainingBaseStatus::TrainingTierMissing,
+        &target.base_model,
+    )
+    .expect("missing tier blocks");
+    assert!(message.contains("packed q4"), "{message}");
+}
+
+#[test]
 fn huggingface_snapshot_dirs_ranks_materialized_over_torn_refs_main() {
     // sc-13915: a torn/empty `refs/main` (or a partial download) must not front an empty snapshot over a
     // fully-materialized sibling — the `.into_iter().next()` callers (training gate/resolver, model

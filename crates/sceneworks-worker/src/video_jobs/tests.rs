@@ -8708,12 +8708,36 @@ mod candle_video_label_tests {
         );
         assert_eq!(
             candle_video_default_repo("ltx_2_3_distilled"),
-            "Lightricks/LTX-2.3"
+            "SceneWorks/ltx-2.3-mlx"
         );
         // SVD-XT loads the stock diffusers img2vid-xt snapshot directly (sc-5493).
         assert_eq!(
             candle_video_default_repo("svd_xt"),
             "stabilityai/stable-video-diffusion-img2vid-xt"
+        );
+    }
+
+    #[test]
+    fn candle_ltx_resolves_the_shared_q4_turnkey_tier_only_for_the_base_model() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let q4 = temp.path().join("q4");
+        std::fs::create_dir_all(&q4).expect("q4");
+        std::fs::write(q4.join("transformer.safetensors"), "x").expect("transformer");
+        std::fs::write(q4.join("quantize_config.json"), "{}").expect("quant config");
+
+        let (resolved, quant) = candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3")
+            .expect("base LTX q4 tier");
+        assert_eq!(resolved, q4);
+        assert_eq!(quant, Some(Quant::Q4));
+        assert!(
+            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3_eros").is_none(),
+            "Eros stays on its dense standalone checkpoint"
+        );
+
+        std::fs::remove_file(q4.join("quantize_config.json")).expect("tear tier");
+        assert!(
+            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3").is_none(),
+            "a partial q4 tier is never selected"
         );
     }
 

@@ -1179,8 +1179,8 @@ pub(crate) const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
 /// map straight from kernel, while `wan_moe_lora` is base-model gated (handled in
 /// [`training_job_is_candle_eligible`]). Krea is in BOTH this set and
 /// [`MLX_ONLY_TRAINING_KERNELS`] (Rust-only: mlx OR candle). The dense Wan 5B + the I2V A14B have no
-/// candle trainer yet (sc-5167 follow-ups), and Kolors/LTX none at all; unsupported kernels remain
-/// queued off-Mac.
+/// candle trainer yet (sc-5167 follow-ups), and Kolors has none; unsupported kernels remain queued
+/// off-Mac. LTX uses its historical `ltx_mlx_lora` kernel name on both native backends.
 /// `krea_control` (epic 10159, B2 sc-10163 / B1 sc-10162) is the Krea 2 pose-ControlNet branch trainer
 /// (candle-gen-krea `ControlTrainer`, dispatched under `krea_2_control`); it has no MLX trainer, so —
 /// like `krea_lora` — it is also in [`MLX_ONLY_TRAINING_KERNELS`] but NOT
@@ -1191,19 +1191,17 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "lens_lora",
     "krea_lora",
     "krea_control",
+    "ltx_mlx_lora",
 ];
 
 /// Native-only training kernels — only a Rust worker can run them, so a generic worker descriptor
 /// must refuse the job (leaving it queued for a Rust worker) rather than claim it and fail with "no
-/// training kernel". `ltx_mlx_lora` was Apple-Silicon-only MLX-Python; epic 3039 (sc-3049) retired
-/// that Python trainer, leaving the native Rust LTX trainer as the sole path. Kernels that have an
-/// alternate native trainer are deliberately NOT listed here. `krea_lora` (epic 7565) is Rust-native — but
-/// UNLIKE LTX/SD3 it now ALSO has a candle trainer (sc-8614, P4), so it is the one member that runs
-/// on EITHER Rust backend (mlx in-process on Mac, candle off-Mac); the [`worker_supports_job`] gate
-/// exempts a candle worker for a `krea_lora` job it is candle-eligible for (it is also in
-/// [`CANDLE_ROUTED_TRAINING_KERNELS`]), while a generic worker is refused. `sd3_lora` (epic 7841 T3
+/// training kernel". Despite the constant's historical name, this means native-Rust-only rather than
+/// MLX-backend-only: LTX and Krea have both MLX and candle trainers. Their candle workers are admitted
+/// by the [`worker_supports_job`] exception when the kernel is also in
+/// [`CANDLE_ROUTED_TRAINING_KERNELS`], while a generic worker remains refused. `sd3_lora` (epic 7841 T3
 /// sc-7884) is MLX-native with no candle trainer yet (the off-Mac/candle SD3.5 trainer is epic
-/// 7982), so — like LTX — only an mlx worker runs it today. `mage_flow_lora` was registered as a
+/// 7982), so only an mlx worker runs it today. `mage_flow_lora` was registered as a
 /// training-target contract in sc-14054 ahead of its native trainer; the `mlx-gen-mage` trainer
 /// landed in sc-14055 (LoRA/LoKr) and sc-14056 (full base fine-tune), and sc-14056 added the kernel
 /// to [`MLX_ROUTED_TRAINING_KERNELS`] so an mlx worker finally claims it. It stays here because there
@@ -1498,6 +1496,7 @@ mod tests {
         "lens_lora",
         "krea_lora",
         "krea_control",
+        "ltx_mlx_lora",
     ];
 
     const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &[

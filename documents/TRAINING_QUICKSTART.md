@@ -197,17 +197,21 @@ under-fit; use earlier checkpoints if a 3000-step balanced run starts overfittin
 > model. Watch the worker `training_lora_weight_norm` event: a growing `loraBNorm`
 > across checkpoints confirms the adapter is learning.
 
-> **Apple Silicon — LTX-2.3 video LoRA:** the `ltx_mlx_lora` kernel
-> (`target.kernel`, gated to Apple Silicon) trains an LTX-2.3 *video* LoRA
-> natively in MLX from the same still-image dataset, registered under the
-> `ltx-video` family. Validated recipe: rank 32 / alpha 32 / lr 1e-4 / weight
+> **LTX-2.3 video LoRA:** the stable `ltx_mlx_lora` kernel trains an LTX-2.3
+> *video* LoRA from the same still-image dataset, using native MLX on Apple
+> Silicon or candle/CUDA on Windows/Linux NVIDIA. Both use the
+> `SceneWorks/ltx-2.3-mlx` packed q4 tier plus its sibling Gemma encoder and
+> register the adapter under the `ltx-video` family. Validated MLX recipe:
+> rank 32 / alpha 32 / lr 1e-4 / weight
 > decay 0.01 / res 512 with short trigger-focused captions
 > (`"a photo of <trigger>"`), ~1500 steps
 > (~1.35 s/step). The gemma text encoder (~28 GB) is freed after caption
-> caching, so the training loop peaks ~27 GB; the whole-run ceiling is the
+> caching on MLX, so the training loop peaks ~27 GB; the whole-run ceiling is the
 > dataset-caching phase at ~42 GB (text encoder still resident), which fits a
-> **48 GB Mac** (64 GB+ comfortable). Generation peaks ~34 GB. Set `sampleEvery`
-> to render a preview clip from the in-progress adapter at intervals — the loss
+> **48 GB Mac** (64 GB+ comfortable). Generation peaks ~34 GB. Candle normalizes
+> LTX training to f32 and forces gradient checkpointing for the 22B DiT even when
+> a legacy/user plan disables it. Set `sampleEvery` to render a preview clip from
+> the in-progress adapter at intervals — the loss
 > alone won't tell you if it's working — but previews reload the full inference
 > stack (peak rises to ~46 GB; a 64 GB+ Mac is recommended with them on), and the
 > distilled sampler ignores `sampleSteps`/`sampleGuidanceScale`.

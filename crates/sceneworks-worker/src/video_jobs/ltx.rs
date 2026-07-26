@@ -43,10 +43,10 @@ pub(super) const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
 /// hard-coded const (no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches), so
 /// pulling the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load.
 /// Pin the exact commit for defense-in-depth (mirrors the SeedVR2/Real-ESRGAN pins, sc-8879/sc-9682).
-/// The native downloader still verifies each file's own hash on download. Bumped to the commit that added the
-/// dense `bf16/` tier (sc-8513) — a superset of the prior commit, so the q8 fetch is unaffected.
+/// The native downloader still verifies each file's own hash on download. Bumped in sc-13870 to the
+/// packed-q4 + Gemma revision validated by the candle training and inference round-trip.
 #[cfg(target_os = "macos")]
-pub(super) const LTX_BUNDLE_REVISION: &str = "01df27d308466533aa09d251e3aebdcc627d07eb";
+pub(super) const LTX_BUNDLE_REVISION: &str = "254989c3ca7ee691187647f350b112c0c448789d";
 
 /// Whether `dir` is a converted LTX snapshot **complete for the current engine** — it must
 /// carry the audio `vocoder` + I2V `vae_encoder` + single `upsampler`/`vae_decoder` the
@@ -70,7 +70,10 @@ pub(super) fn ltx_dir_is_complete(dir: &Path) -> bool {
 /// Cheap structural validation for one safetensors file. It reads only the bounded JSON header,
 /// verifies at least one tensor entry, and checks every declared byte range against the file length.
 /// This rejects placeholder/truncated files without reading multi-gigabyte tensor bodies.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn safetensors_file_is_structurally_valid(path: &Path) -> bool {
     use std::io::Read;
 
@@ -135,7 +138,10 @@ fn safetensors_file_is_structurally_valid(path: &Path) -> bool {
     tensor_count > 0
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn json_object_file_satisfies(path: &Path, predicate: impl FnOnce(&JsonObject) -> bool) -> bool {
     std::fs::read(path)
         .ok()
@@ -148,7 +154,10 @@ fn json_object_file_satisfies(path: &Path, predicate: impl FnOnce(&JsonObject) -
 /// non-empty config and tokenizer JSON, plus a structurally valid single safetensors file or every
 /// structurally valid shard mapped by a non-empty index. Used so runtime option discovery and eros
 /// provisioning never accept filename-only placeholders or half-downloaded snapshots.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn ltx_gemma_dir_is_complete(dir: &Path) -> bool {
     if !json_object_file_satisfies(&dir.join("config.json"), |object| !object.is_empty())
         || !json_object_file_satisfies(&dir.join("tokenizer.json"), |object| {
@@ -314,7 +323,10 @@ pub(super) fn resolve_ltx_model_dir(
 /// that valid managed layout still resolves one `LoadSpec::text_encoder` (sc-14377). A local/legacy
 /// conversion is not under a `snapshots/` directory and therefore keeps the old sibling-only
 /// behavior.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
     let selected_snapshot = model_dir.parent()?;
     let gemma = selected_snapshot.join("gemma");
@@ -346,14 +358,20 @@ pub(super) fn bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
 /// source — so the worker must resolve the override HERE and thread it onto the spec, rather than
 /// returning `None` and deferring to the deleted `$LTX_GEMMA_DIR` / HF-cache fallback. A set-but-incomplete
 /// override yields `None` so a good bundled / cache gemma still wins (a bad override never shadows it).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn ltx_gemma_override_path(raw: Option<std::ffi::OsString>) -> Option<PathBuf> {
     let dir = PathBuf::from(raw?);
     ltx_gemma_dir_is_complete(&dir).then_some(dir)
 }
 
 /// [`ltx_gemma_override_path`] applied to the live `$LTX_GEMMA_DIR`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn ltx_gemma_env_override() -> Option<PathBuf> {
     ltx_gemma_override_path(std::env::var_os("LTX_GEMMA_DIR"))
 }
@@ -370,7 +388,10 @@ fn ltx_gemma_env_override() -> Option<PathBuf> {
 ///
 /// `pub(crate)` so the LoRA trainer path reuses it (sc-9989): training resolves the TE identically to
 /// inference, so a self-contained install trains without a separate `mlx-community/gemma` download.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn resolve_bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
     ltx_gemma_env_override().or_else(|| bundled_ltx_gemma_dir(model_dir))
 }
