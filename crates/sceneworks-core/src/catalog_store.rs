@@ -201,7 +201,7 @@ impl Default for CatalogProcessingProgress {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogContractState {
     pub source_config: Option<CatalogSourceConfig>,
@@ -210,17 +210,6 @@ pub struct CatalogContractState {
     #[serde(default)]
     pub checkpoints: BTreeMap<String, Value>,
     pub processing: CatalogProcessingProgress,
-}
-
-impl Default for CatalogContractState {
-    fn default() -> Self {
-        Self {
-            source_config: None,
-            analyzer_versions: BTreeMap::new(),
-            checkpoints: BTreeMap::new(),
-            processing: CatalogProcessingProgress::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
