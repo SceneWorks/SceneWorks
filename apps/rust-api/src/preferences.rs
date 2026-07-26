@@ -4,8 +4,15 @@
 //! `http://127.0.0.1:<port>` origin, where both Tauri IPC and origin-keyed
 //! `localStorage` are unreliable across launches (the port — and so the origin —
 //! changes every launch). Routing through the API, the same channel the rest of
-//! the app already uses, makes the choice durable. Non-sensitive, so the routes
-//! are public like `/health`.
+//! the app already uses, makes the choice durable.
+//!
+//! AUTH IS METHOD-ASYMMETRIC here — the routes are NOT simply public (sc-8869, F-067; see
+//! `auth::requires_token`). The GET is public because the theme has to paint before the
+//! access gate to avoid a flash, and the value is non-sensitive. The PUT writes this file to
+//! DISK, so it is gated like every other write (epic 4484): an unauthenticated LAN caller
+//! must not be able to overwrite it. A client that sends the PUT without the access token
+//! gets a 401 on every remote-auth deployment — exactly the bug sc-15136 fixed, after this
+//! doc's older "the routes are public" wording had been echoed into six web call sites.
 
 use super::*;
 
