@@ -13,12 +13,11 @@ publish = false
 fs2 = "0.4"
 futures-util = "0.3"
 glob = "0.3"
-# PNG encoding for generated image assets (epic 3018, sc-3020). png-only keeps the
-# dependency small and cross-platform (the image-job pipeline + its tests run on every
-# platform; only real MLX inference is macOS-gated).
-# png to encode generated assets (sc-3020); jpeg/webp to decode reference/source
-# images for the FLUX.2 edit path (sc-3029) — uploads aren't only PNG.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# png to encode generated assets (epic 3018, sc-3020); jpeg/webp to decode reference/source
+# images for the FLUX.2 edit path (sc-3029) — uploads aren't only PNG. Pure-Rust and
+# cross-platform (the image-job pipeline + its tests run everywhere; only real MLX inference
+# is macOS-gated). Feature set is the workspace union (sc-15052) — it always effectively was.
+image = { workspace = true }
 # CPU raster for DWPose skeleton rendering (epic 3018, sc-3028): filled polygons
 # (rotated-ellipse limbs), circles (joints/points), for the Z-Image strict-pose
 # ControlNet. Pure-Rust + cross-platform (the renderer + its tests run everywhere;
