@@ -21,8 +21,8 @@ imagesize = "0.13"
 # bounded payload instead of trusting the sibling `.poster.jpg` filename. Only the
 # pure-Rust JPEG codec is used here; the feature set is the workspace union (sc-15052)
 # because Cargo unifies it anyway — this crate never got a jpeg-only `image` in a real
-# build. `default-features = false` there still keeps the native AVIF chain
-# (libdav1d/nasm/meson) out, which would break the Windows candle lane.
+# build. The union's `default-features = false` also keeps `avif` off, and with it the
+# nasm-dependent encoder chain that would break the Windows candle lane.
 image = { workspace = true }
 # sc-6531: SHA-256 of stored bytes = exact-duplicate key + the cache key for Tier-1
 # embeddings (epic 6529 §6.3). Pinned to the workspace's existing 0.10 line (worker + desktop)

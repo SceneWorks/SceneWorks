@@ -28,6 +28,14 @@ use std::path::Path;
 /// workspace-wide act: update the root `Cargo.toml` and this list together.
 const EXPECTED_FEATURES: &[&str] = &["bmp", "gif", "jpeg", "png", "tiff", "webp"];
 
+/// The members sc-15052 hoisted `image` for, as paths in the root `[workspace] members`.
+const EXPECTED_IMAGE_MEMBERS: &[&str] = &[
+    "apps/rust-api",
+    "crates/sceneworks-core",
+    "crates/sceneworks-image-quality",
+    "crates/sceneworks-worker",
+];
+
 // ---------------------------------------------------------------------------------------------
 // Minimal TOML reading. Deliberately dependency-free (same reasoning as candle_kernels_patch_guard:
 // a build guard should not need a parser in the graph). It handles what these manifests use —
@@ -174,23 +182,41 @@ fn check_root(root: &str) -> Result<(), String> {
             ))
         }
     }
-    let features = value
-        .find("features")
-        .map(|_| ())
-        .and_then(|()| inline_field(&value, "features"))
+    let mut features = inline_field(&value, "features")
         .map(|list| quoted_strings(&list))
         .ok_or("workspace `image` declares no `features` list")?;
-    if features != EXPECTED_FEATURES {
+    // Compared as sets: reordering the root list is cosmetic and must not read as a union change.
+    features.sort();
+    let mut expected: Vec<String> = EXPECTED_FEATURES.iter().map(|f| f.to_string()).collect();
+    expected.sort();
+    if features != expected {
         return Err(format!(
-            "workspace `image` features {features:?} != the union this guard pins \
-             {EXPECTED_FEATURES:?}. Every member compiles against this list — if the change is \
-             intended, update EXPECTED_FEATURES and the compiled-format test together."
+            "workspace `image` features {features:?} != the union this guard pins {expected:?}. \
+             Every member compiles against this list — if the change is intended, update \
+             EXPECTED_FEATURES and the compiled-format test together."
         ));
     }
     Ok(())
 }
 
+/// Fields that re-specify the dependency instead of inheriting it. Any of these on a member's
+/// `image` is the drift this guard exists to stop.
+const FORBIDDEN_FIELDS: &[&str] = &["default-features", "features", "version"];
+
+fn mirror_error(member: &str, section: &str, field: &str) -> String {
+    format!(
+        "{member}/Cargo.toml declares `image` in [{section}] with its own `{field}`. That is a \
+         mirror of the workspace union, not the union itself — Cargo will still build this crate \
+         against the union, so a per-crate `cargo test -p` would stop being representative of what \
+         ships (sc-15028 / sc-15052). Use `image = {{ workspace = true }}`."
+    )
+}
+
 /// Whether `member` declares `image`, erroring if it declares it as anything but workspace-inherited.
+///
+/// Cargo accepts three spellings and this checks all of them, because a guard that only knows the
+/// one currently in the tree just redirects the next regression through the other two:
+/// `image = { .. }`, the dotted `image.features = [..]`, and the `[dependencies.image]` sub-table.
 fn check_member(member: &str, manifest: &str) -> Result<bool, String> {
     let entries = manifest_entries(manifest);
     let mut declares = false;
@@ -201,15 +227,9 @@ fn check_member(member: &str, manifest: &str) -> Result<bool, String> {
         .filter(|(section, key, _)| key == "image" && section.ends_with("dependencies"))
     {
         declares = true;
-        for forbidden in ["default-features", "features", "version"] {
-            if inline_field(value, forbidden).is_some() {
-                return Err(format!(
-                    "{member}/Cargo.toml declares `image` in [{section}] with its own \
-                     `{forbidden}`. That is a mirror of the workspace union, not the union itself \
-                     — Cargo will still build this crate against the union, so a per-crate \
-                     `cargo test -p` would stop being representative of what ships (sc-15028 / \
-                     sc-15052). Use `image = {{ workspace = true }}`."
-                ));
+        for field in FORBIDDEN_FIELDS {
+            if inline_field(value, field).is_some() {
+                return Err(mirror_error(member, section, field));
             }
         }
         if inline_field(value, "workspace").as_deref() != Some("true") {
@@ -220,16 +240,54 @@ fn check_member(member: &str, manifest: &str) -> Result<bool, String> {
         }
     }
 
+    // Dotted-key form: `image.workspace = true`, `image.features = [..]`. This is the likeliest
+    // way the hoist gets undone by hand — it is already this repo's house style for
+    // `version.workspace` / `edition.workspace` / `rust-version.workspace` in every member.
+    let dotted: Vec<(&str, &str, &str)> = entries
+        .iter()
+        .filter(|(section, key, _)| section.ends_with("dependencies") && key.starts_with("image."))
+        .map(|(section, key, value)| {
+            (
+                section.as_str(),
+                key.trim_start_matches("image."),
+                value.as_str(),
+            )
+        })
+        .collect();
+    for (section, field, value) in &dotted {
+        declares = true;
+        if FORBIDDEN_FIELDS.contains(field) {
+            return Err(mirror_error(member, section, field));
+        }
+        if *field == "workspace" && value.trim() != "true" {
+            return Err(format!(
+                "{member}/Cargo.toml sets `image.workspace = {value}` in [{section}]; it must be \
+                 `true` (sc-15052)."
+            ));
+        }
+    }
+    if let Some((section, ..)) = dotted.first() {
+        if !dotted.iter().any(|(_, field, _)| *field == "workspace") {
+            return Err(format!(
+                "{member}/Cargo.toml declares `image.*` keys in [{section}] without \
+                 `image.workspace = true`, so it does not inherit the workspace union (sc-15052)."
+            ));
+        }
+    }
+
     // `[dependencies.image]` sub-table form — same rule, different spelling.
-    for (section, key, _) in entries
+    for (section, key, value) in entries
         .iter()
         .filter(|(section, _, _)| section.ends_with("dependencies.image"))
     {
         declares = true;
-        if key != "workspace" {
+        if FORBIDDEN_FIELDS.contains(&key.as_str()) {
+            return Err(mirror_error(member, section, key));
+        }
+        if key != "workspace" || value.trim() != "true" {
             return Err(format!(
-                "{member}/Cargo.toml declares `image` as a [{section}] sub-table with `{key}`: \
-                 only `workspace = true` may appear there (sc-15052)."
+                "{member}/Cargo.toml declares `image` as a [{section}] sub-table with \
+                 `{key} = {value}`: only `workspace = true` may appear there (sc-15052)."
             ));
         }
     }
@@ -273,13 +331,16 @@ fn image_is_declared_once_for_the_whole_workspace() {
             Err(msg) => panic!("{msg}"),
         }
     }
-    // Without this the guard would go green if `image` vanished from every member — a pass that
-    // proves nothing. sc-15052 hoisted it for four of them.
-    assert!(
-        declaring.len() >= 4,
-        "only {declaring:?} inherit the workspace `image`; sc-15052 hoisted it for four members \
-         (rust-api, core, image-quality, worker). If a member genuinely dropped the dependency, \
-         lower this floor deliberately."
+    declaring.sort();
+    // Pin the identity, not a count: without this the guard would go green if `image` vanished from
+    // every member — a pass that proves nothing — and a count alone would also accept four
+    // DIFFERENT members inheriting it.
+    assert_eq!(
+        declaring, EXPECTED_IMAGE_MEMBERS,
+        "the set of members inheriting the workspace `image` changed. If a member is missing here \
+         but still uses `image`, the likely cause is a hand-written re-declaration this scan did \
+         not recognise as inheritance — check its Cargo.toml before touching this list. Only edit \
+         EXPECTED_IMAGE_MEMBERS when a member genuinely gained or dropped the dependency."
     );
 }
 
@@ -454,9 +515,49 @@ fn guard_rejects_a_target_gated_re_declaration() {
 }
 
 #[test]
+fn guard_rejects_the_dotted_key_form() {
+    // The spelling a developer reaches for by muscle memory, since every member already writes
+    // `version.workspace = true`. Reviewed as the live hole in the first cut of this guard: it
+    // reproduced the sc-15028 divergence (`-p sceneworks-core` back to jpeg alone) while the
+    // declaration check saw nothing.
+    let member = GOOD_MEMBER.replacen(
+        "image = { workspace = true }",
+        "image.version = \"0.25\"\nimage.default-features = false\nimage.features = [\"jpeg\"]",
+        1,
+    );
+    let err = check_member("demo", &member).unwrap_err();
+    assert!(err.contains("its own `version`"), "{err}");
+    assert!(err.contains("[dependencies]"), "{err}");
+}
+
+#[test]
+fn guard_accepts_the_dotted_inheritance_form() {
+    // `image.workspace = true` is legal and equivalent — it must pass, or the guard would be
+    // pushing people away from a correct spelling.
+    let member = GOOD_MEMBER.replacen("image = { workspace = true }", "image.workspace = true", 1);
+    assert_eq!(check_member("demo", &member), Ok(true));
+}
+
+#[test]
+fn guard_rejects_dotted_keys_without_inheritance() {
+    // No forbidden field, but no `workspace = true` either — still not inheriting the union.
+    let member = GOOD_MEMBER.replacen("image = { workspace = true }", "image.optional = true", 1);
+    let err = check_member("demo", &member).unwrap_err();
+    assert!(err.contains("without `image.workspace = true`"), "{err}");
+}
+
+#[test]
+fn guard_accepts_the_sub_table_inheritance_form() {
+    let member = GOOD_MEMBER.replacen("image = { workspace = true }", "", 1)
+        + "\n[dependencies.image]\nworkspace = true\n";
+    assert_eq!(check_member("demo", &member), Ok(true));
+}
+
+#[test]
 fn guard_rejects_the_sub_table_form() {
     let member = GOOD_MEMBER.replacen("image = { workspace = true }", "", 1)
         + "\n[dependencies.image]\nversion = \"0.25\"\n";
     let err = check_member("demo", &member).unwrap_err();
-    assert!(err.contains("sub-table"), "{err}");
+    assert!(err.contains("[dependencies.image]"), "{err}");
+    assert!(err.contains("its own `version`"), "{err}");
 }
