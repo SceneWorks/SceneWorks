@@ -17,20 +17,51 @@ import { MAX_TERMINAL_JOBS } from "../sorters.js";
 // Controllable apiFetch: each call resolves with whatever the per-path map returns (or
 // rejects when the value is an Error), so a test can drive the /access probe, the
 // media-ticket mint, and /auth/verify independently. setMediaTicket is a spy.
+//
+// sc-15105: the mock reproduces the one behavior of the real `apiFetch` that the hook
+// depends on — a 401 notifies the handler registered via `setUnauthorizedHandler` before
+// the rejection propagates. (That api.js contract is pinned directly in api.test.js;
+// here it is the seam under test.) `unauthorizedHandler` is captured rather than left in
+// the real module so a test can also assert whether one was registered at all.
 const apiResponders = new Map();
 const setMediaTicketSpy = vi.fn();
+let unauthorizedHandler = null;
+// Build the rejection the API produces for a stale token, using the real ApiError.
+async function unauthorizedError() {
+  const { ApiError } = await vi.importActual("../api.js");
+  return new ApiError("SceneWorks access token required", {
+    status: 401,
+    detail: "SceneWorks access token required",
+    authRequired: true,
+  });
+}
 vi.mock("../api.js", async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
-    apiFetch: vi.fn((path) => {
+    apiFetch: vi.fn((path, token) => {
       const responder = apiResponders.get(path);
       const value = typeof responder === "function" ? responder() : responder;
       if (value instanceof Error) {
+        // Mirrors api.js: only a 401 on a request that actually presented the token
+        // reaches the handler, and the handler's boolean lands on the error. A test can
+        // opt a specific error out of the notify to isolate a caller-side seam.
+        if (value.status === 401 && token && value.notifyGate !== false) {
+          value.reauthenticating = unauthorizedHandler?.(value) === true;
+        }
         return Promise.reject(value);
       }
       return Promise.resolve(value ?? {});
     }),
+    setUnauthorizedHandler: (handler) => {
+      const next = typeof handler === "function" ? handler : null;
+      unauthorizedHandler = next;
+      return () => {
+        if (unauthorizedHandler === next) {
+          unauthorizedHandler = null;
+        }
+      };
+    },
     eventUrl: (path, ticket) => {
       const url = new URL(path, "http://localhost");
       if (ticket) {
@@ -83,6 +114,7 @@ describe("useAccessGate (sc-9750)", () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     apiResponders.clear();
     setMediaTicketSpy.mockClear();
+    unauthorizedHandler = null;
     window.localStorage.clear();
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -96,25 +128,41 @@ describe("useAccessGate (sc-9750)", () => {
   function mount() {
     let latest = null;
     const notices = [];
+    // Every push, including ones a later dismiss removes from `notices`. Asserting on the
+    // surviving array alone cannot see a notice that is raised and then swept away by the
+    // gate coming up one render later — which is exactly the misleading flash sc-15105's
+    // mint seam exists to prevent.
+    const pushed = [];
+    // Every gateStatus this hook has rendered. A mid-session demotion is a transient the
+    // final state cannot show: the shell blocks, then re-opens if the re-verify passes.
+    const statuses = [];
+    // App feeds these three in identity-stable (useCallback with []), and the hook's
+    // header documents that contract — its effect dependency arrays are built on it.
+    // Declared outside the component so the harness honors it too: fresh closures per
+    // render would re-run the mint / re-verify effects on every unrelated state change,
+    // which is a property of the harness, not of the hook (sc-15105).
+    const deps = {
+      setError: () => {},
+      pushNotice: (kind, message) => {
+        pushed.push({ kind, message });
+        notices.push({ kind, message });
+      },
+      dismissNoticeKind: (kind) => {
+        for (let i = notices.length - 1; i >= 0; i -= 1) {
+          if (notices[i].kind === kind) notices.splice(i, 1);
+        }
+      },
+    };
     function Harness() {
       const [, setN] = useState(0);
-      latest = {
-        api: useAccessGate({
-          setError: () => {},
-          pushNotice: (kind, message) => notices.push({ kind, message }),
-          dismissNoticeKind: (kind) => {
-            for (let i = notices.length - 1; i >= 0; i -= 1) {
-              if (notices[i].kind === kind) notices.splice(i, 1);
-            }
-          },
-        }),
-        rerender: () => setN((n) => n + 1),
-      };
+      const api = useAccessGate(deps);
+      statuses.push(api.gateStatus);
+      latest = { api, rerender: () => setN((n) => n + 1) };
       return null;
     }
     root = createRoot(container);
     act(() => root.render(<Harness />));
-    return { get: () => latest, notices };
+    return { get: () => latest, notices, pushed, statuses };
   }
 
   it("resolves authenticated+ready with no auth required and mints no media ticket", async () => {
@@ -291,6 +339,251 @@ describe("useAccessGate (sc-9750)", () => {
     });
   });
 
+  // sc-15105: the same token can go stale WHILE the tab is open — the host rotates its
+  // password under Settings → Remote access and restarts the API. sc-15102 re-verified
+  // only at startup, so an already-open remote tab kept `authenticated` true, 401'd every
+  // request into the notice bands, and never re-prompted.
+  describe("mid-session 401 (sc-15105)", () => {
+    // Take a stored token all the way to an unlocked session so the 401 below arrives
+    // against tokenStatus "accepted" — the state the bug lived in.
+    async function mountUnlocked({ verify, ticket } = {}) {
+      window.localStorage.setItem("sceneworks-token", "old-password");
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", verify ?? { ok: true });
+      apiResponders.set(
+        "/api/v1/files/ticket",
+        ticket ?? { ticket: "media-1", expiresInSeconds: 300 },
+      );
+      const mounted = mount();
+      await settle();
+      return mounted;
+    }
+
+    // Fire `count` 401s the way a real gated route does — concurrently, as a page full of
+    // screens would when the host restarts under them. The token argument matters: api.js
+    // only routes a 401 to the gate when the request actually presented a credential.
+    async function fire401(count = 1, token = "old-password") {
+      const stale = await unauthorizedError();
+      apiResponders.set("/api/v1/jobs", () => stale);
+      await act(async () => {
+        await Promise.all(
+          Array.from({ length: count }, () =>
+            apiFetch("/api/v1/jobs", token).catch(() => {}),
+          ),
+        );
+      });
+      await settle();
+    }
+
+    const verifyCount = () =>
+      apiFetch.mock.calls.filter((call) => call[0] === "/api/v1/auth/verify").length;
+
+    it("re-prompts an already-open tab when the re-verify rejects the token", async () => {
+      let verify = { ok: true };
+      const { get } = await mountUnlocked({ verify: () => verify });
+      expect(get().api.gateStatus).toBe("open");
+
+      // The host rotated its password and restarted: the live token is now wrong.
+      verify = { ok: false };
+      await fire401();
+
+      // No reload needed — the full-page blocker takes over and asks for the new one.
+      expect(get().api.gateStatus).toBe("locked");
+      expect(get().api.token).toBe("");
+      expect(get().api.authError).toContain("no longer works");
+      expect(window.localStorage.getItem("sceneworks-token")).toBeNull();
+    });
+
+    it("unlocks with the new password after a mid-session rotation", async () => {
+      let verify = { ok: true };
+      const { get } = await mountUnlocked({ verify: () => verify });
+      verify = { ok: false };
+      await fire401();
+      expect(get().api.gateStatus).toBe("locked");
+
+      verify = { ok: true };
+      act(() => get().api.setPasswordDraft("new-password"));
+      await act(async () => {
+        await get().api.saveToken({ preventDefault: () => {} });
+      });
+      await settle();
+
+      expect(get().api.gateStatus).toBe("open");
+      expect(get().api.token).toBe("new-password");
+      expect(window.localStorage.getItem("sceneworks-token")).toBe("new-password");
+    });
+
+    it("does not log the user out when the re-verify still passes", async () => {
+      const { get, statuses } = await mountUnlocked({ verify: { ok: true } });
+      const before = verifyCount();
+      statuses.length = 0;
+
+      await fire401();
+
+      // The 401 really was adjudicated — asserting only the end state would pass just as
+      // well with no handler registered at all, since "nothing happened" looks identical.
+      expect(verifyCount() - before).toBe(1);
+      expect(statuses).toContain("unlocking");
+      // ...and one unlucky endpoint did not evict a session the host still accepts.
+      expect(statuses[statuses.length - 1]).toBe("open");
+      expect(get().api.token).toBe("old-password");
+      expect(window.localStorage.getItem("sceneworks-token")).toBe("old-password");
+      // The session is fully live again, not merely unblocked.
+      expect(get().api.ready).toBe(true);
+    });
+
+    it("ignores a 401 from a request that presented no token", async () => {
+      // Several callers hit gated routes with an empty token on purpose (the
+      // `PUT /api/v1/ui-preferences` writes) and swallow the rejection. Those 401s say
+      // nothing about the session, and must not drag the blocker over a live app.
+      const { get, statuses } = await mountUnlocked({ verify: { ok: true } });
+      const before = verifyCount();
+      statuses.length = 0;
+
+      await fire401(1, "");
+
+      expect(verifyCount()).toBe(before);
+      expect(statuses.every((status) => status === "open")).toBe(true);
+      expect(get().api.token).toBe("old-password");
+    });
+
+    it("leaves an already-locked gate alone instead of stranding it on 'unlocking'", async () => {
+      // tokenStatus "none" means the gate is up with no token to check. Demoting it to
+      // "pending" would render "unlocking" forever: the re-verify effect bails on an empty
+      // token, so nothing would ever move it off that state.
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      const { get } = mount();
+      await settle();
+      expect(get().api.gateStatus).toBe("locked");
+
+      await fire401(1, "whatever-stale-token");
+
+      expect(get().api.gateStatus).toBe("locked");
+    });
+
+    it("issues exactly one /auth/verify for a storm of concurrent 401s", async () => {
+      const { get } = await mountUnlocked({ verify: { ok: true } });
+      const before = verifyCount();
+
+      await fire401(8);
+
+      // The guard is a ref, not state: all eight land before React flushes.
+      expect(verifyCount() - before).toBe(1);
+      expect(get().api.gateStatus).toBe("open");
+
+      // And the storm is not a one-shot fuse — a later rotation is still detected.
+      apiResponders.set("/api/v1/auth/verify", { ok: false });
+      await fire401(3);
+      expect(get().api.gateStatus).toBe("locked");
+    });
+
+    it("reports a throttled host as a lockout, not as an unreachable one", async () => {
+      // A rotation storm can trip the API's per-IP attempt throttle, which answers 429 —
+      // including on the public verify route. "Couldn't reach the host" sends the user
+      // hunting a network fault instead of waiting out a lockout that clears itself.
+      const { ApiError } = await vi.importActual("../api.js");
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set(
+        "/api/v1/auth/verify",
+        () => new ApiError("Too many attempts", { status: 429 }),
+      );
+      const { get } = mount();
+      await settle();
+
+      act(() => get().api.setPasswordDraft("new-password"));
+      await act(async () => {
+        await get().api.saveToken({ preventDefault: () => {} });
+      });
+      await settle();
+
+      expect(get().api.authError).toContain("Too many password attempts");
+    });
+
+    it("surrenders the media-ticket mint to the gate instead of retrying forever", async () => {
+      const stale = await unauthorizedError();
+      // The tab unlocked on the old password (first verify), then the host rotated it —
+      // so the mint's 401 is the first thing that notices, and the re-verify it triggers
+      // finds the token rejected.
+      let verifyCalls = 0;
+      const { get, pushed } = await mountUnlocked({
+        verify: () => (verifyCalls++ === 0 ? { ok: true } : { ok: false }),
+        // The mint is itself a gated route, so it 401s along with everything else.
+        ticket: () => stale,
+      });
+
+      expect(get().api.gateStatus).toBe("locked");
+      // The "retrying in the background" notice is never raised: nothing is retrying, and
+      // the gate is what the user needs to see. NOTE: this assertion holds with and
+      // without the mint's own `isReauthenticating` early return, because `act` flushes
+      // the demotion (and so the effect teardown that sets `closed`) before the rejection
+      // continuation runs, and the pre-existing `closed` check then short-circuits the
+      // catch. A real browser resolves that race the other way — the catch runs first —
+      // which is what the early return is actually for. The outcome below is the
+      // regression guard; the ordering itself is not reproducible under `act`.
+      expect(pushed.some((n) => n.kind === "media-ticket")).toBe(false);
+      expect(get().api.ready).toBe(false);
+    });
+
+    it("raises no media-ticket notice for a 401 the gate has claimed", async () => {
+      // The mint's own seam, isolated from the demotion. `notifyGate:false` keeps the gate
+      // from demoting (so the effect is never torn down and its `closed` short-circuit
+      // cannot mask the result), while `reauthenticating` marks the error as claimed —
+      // exactly the state a real browser is in when the rejection lands before React
+      // commits the teardown.
+      const stale = await unauthorizedError();
+      stale.notifyGate = false;
+      stale.reauthenticating = true;
+      const { get, pushed } = await mountUnlocked({
+        verify: { ok: true },
+        ticket: () => stale,
+      });
+
+      // No "retrying in the background" lie, and no backoff mint armed behind the gate.
+      expect(pushed.some((n) => n.kind === "media-ticket")).toBe(false);
+      expect(get().api.gateStatus).toBe("open");
+    });
+
+    it("still degrades media normally for a 401 the gate did not claim", async () => {
+      const stale = await unauthorizedError();
+      stale.notifyGate = false;
+      const { get, pushed } = await mountUnlocked({
+        verify: { ok: true },
+        ticket: () => stale,
+      });
+
+      // Unclaimed ⇒ the pre-existing sc-9063 behavior: degraded media, a notice, and the
+      // app still usable. Surrendering here would silently break thumbnails instead.
+      expect(pushed.some((n) => n.kind === "media-ticket")).toBe(true);
+      expect(get().api.ready).toBe(true);
+    });
+
+    it("declines a 401 on a deployment that requires no password", async () => {
+      // A host that answers /api/v1/access with authRequired:false cannot produce a 401
+      // a password prompt would fix — it disagrees with itself. Claiming it would silence
+      // the caller's own error handling behind a gate that will never appear.
+      apiResponders.set("/api/v1/access", { authRequired: false });
+      const { get } = mount();
+      await settle();
+      expect(get().api.gateStatus).toBe("open");
+
+      const stale = await unauthorizedError();
+      apiResponders.set("/api/v1/jobs", () => stale);
+      const err = await act(async () =>
+        apiFetch("/api/v1/jobs", "some-token").catch((caught) => caught),
+      );
+
+      expect(err.reauthenticating).toBe(false);
+      expect(get().api.gateStatus).toBe("open");
+    });
+
+    it("registers a 401 handler in remote-browser mode", async () => {
+      await mountUnlocked({ verify: { ok: true } });
+      // The desktop counterpart (no handler at all) is pinned in
+      // useAccessGate.desktop.test.jsx, which mocks isDesktop true.
+      expect(typeof unauthorizedHandler).toBe("function");
+    });
+  });
+
   // sc-15102: `gateStatus` is the single blocking decision App branches on.
   describe("gateStatus", () => {
     it("stays open while the first access probe is in flight, then blocks once it fails", async () => {
@@ -324,6 +617,7 @@ describe("useJobEvents (sc-9750)", () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     apiResponders.clear();
     apiFetch.mockClear();
+    unauthorizedHandler = null;
     FakeEventSource.instances = [];
     window.EventSource = FakeEventSource;
     container = document.createElement("div");
@@ -374,6 +668,50 @@ describe("useJobEvents (sc-9750)", () => {
     act(() => root.render(<Harness />));
     return { setProps: (next) => act(() => setProps(next)) };
   }
+
+  // sc-15105: the SSE ticket POST is a gated route, so a mid-session password rotation
+  // 401s it too. It used to push the raw "SceneWorks access token required" into the error
+  // band and arm an exponential-backoff reconnect that could never succeed.
+  it("surrenders the SSE ticket to the access gate on a claimed 401", async () => {
+    const stale = await unauthorizedError();
+    // No gate is mounted in this describe, so mark the error claimed directly and opt it
+    // out of the mock's notify (which would otherwise overwrite the flag with false).
+    stale.notifyGate = false;
+    stale.reauthenticating = true;
+    const errors = [];
+    apiResponders.set("/api/v1/jobs/events/ticket", () => stale);
+    mount(
+      baseProps({
+        access: { authRequired: true },
+        token: "old-password",
+        setError: (message) => errors.push(message),
+      }),
+    );
+    await settle();
+
+    // No error-band copy and no EventSource: the gate is taking over, and `ready` will
+    // drop out from under this effect.
+    expect(errors).toEqual([]);
+    expect(FakeEventSource.instances.length).toBe(0);
+  });
+
+  it("still reports a 401 the gate did not claim as an ordinary ticket failure", async () => {
+    const stale = await unauthorizedError();
+    const errors = [];
+    apiResponders.set("/api/v1/jobs/events/ticket", () => stale);
+    mount(
+      baseProps({
+        access: { authRequired: true },
+        token: "old-password",
+        setError: (message) => errors.push(message),
+      }),
+    );
+    await settle();
+
+    // `reauthenticating` false (no gate registered, or the gate declined) ⇒ the pre-existing
+    // notice + backoff behavior, not silence.
+    expect(errors).toEqual(["SceneWorks access token required"]);
+  });
 
   it("does not open an EventSource until ready is true", async () => {
     const { setProps } = mount(baseProps({ ready: false }));
