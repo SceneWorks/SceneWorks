@@ -38,6 +38,16 @@ const SOURCE_CONFIG_METADATA_KEY: &str = "source_config";
 const ANALYZER_VERSIONS_METADATA_KEY: &str = "analyzer_versions";
 const CHECKPOINTS_METADATA_KEY: &str = "checkpoints";
 const PROGRESS_METADATA_KEY: &str = "processing_progress";
+const CATALOG_ID_METADATA_KEY: &str = "catalog_id";
+const CATALOG_NAME_METADATA_KEY: &str = "name";
+const CATALOG_CREATED_AT_METADATA_KEY: &str = "created_at";
+const CATALOG_SCHEMA_VERSION_METADATA_KEY: &str = "schema_version";
+const RESERVED_CATALOG_METADATA_KEYS: &[&str] = &[
+    CATALOG_ID_METADATA_KEY,
+    CATALOG_NAME_METADATA_KEY,
+    CATALOG_CREATED_AT_METADATA_KEY,
+    CATALOG_SCHEMA_VERSION_METADATA_KEY,
+];
 
 pub type CatalogResult<T> = Result<T, CatalogError>;
 
@@ -1179,7 +1189,7 @@ fn validate_metadata_key(key: &str) -> CatalogResult<()> {
 
 fn validate_metadata_entry(key: &str, value: &str) -> CatalogResult<()> {
     validate_metadata_key(key)?;
-    if matches!(key, "catalogId" | "schemaVersion") {
+    if RESERVED_CATALOG_METADATA_KEYS.contains(&key) {
         return Err(CatalogError::InvalidCatalog(
             "Catalog identity metadata is read-only".to_owned(),
         ));
@@ -1521,9 +1531,12 @@ fn write_database_metadata(
         .unchecked_transaction()
         .map_err(|error| map_sqlite_error(database_path, error))?;
     for (key, value) in [
-        ("catalog_id", descriptor.id.as_str()),
-        ("name", descriptor.name.as_str()),
-        ("created_at", descriptor.created_at.as_str()),
+        (CATALOG_ID_METADATA_KEY, descriptor.id.as_str()),
+        (CATALOG_NAME_METADATA_KEY, descriptor.name.as_str()),
+        (
+            CATALOG_CREATED_AT_METADATA_KEY,
+            descriptor.created_at.as_str(),
+        ),
     ] {
         transaction
             .execute(
@@ -1543,9 +1556,12 @@ fn validate_database_metadata(
     descriptor: &CatalogDescriptor,
 ) -> CatalogResult<()> {
     for (key, expected) in [
-        ("catalog_id", descriptor.id.as_str()),
-        ("name", descriptor.name.as_str()),
-        ("created_at", descriptor.created_at.as_str()),
+        (CATALOG_ID_METADATA_KEY, descriptor.id.as_str()),
+        (CATALOG_NAME_METADATA_KEY, descriptor.name.as_str()),
+        (
+            CATALOG_CREATED_AT_METADATA_KEY,
+            descriptor.created_at.as_str(),
+        ),
     ] {
         let actual: Option<String> = connection
             .query_row(
@@ -2205,6 +2221,56 @@ mod tests {
             registry.open_attached("00000000000000000000000000000000"),
             Err(CatalogError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn atomic_scanner_metadata_cannot_overwrite_catalog_identity() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        let mut catalog = Catalog::create(&root, "Reserved metadata").expect("catalog creates");
+        let descriptor = catalog.descriptor().clone();
+        let original = RESERVED_CATALOG_METADATA_KEYS
+            .iter()
+            .map(|key| {
+                (
+                    *key,
+                    catalog
+                        .metadata(key)
+                        .expect("reserved metadata reads before attempted write"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (index, (key, expected)) in original.iter().enumerate() {
+            let record_id = format!("reserved-{index}");
+            let attempted_record = record(&record_id);
+            assert!(
+                matches!(
+                    catalog.append_records_and_metadata(&[attempted_record], &[(*key, "tampered")]),
+                    Err(CatalogError::InvalidCatalog(_))
+                ),
+                "{key} must be read-only"
+            );
+            assert_eq!(
+                catalog.metadata(key).expect("reserved metadata rereads"),
+                *expected,
+                "{key} must remain unchanged"
+            );
+            assert!(
+                !catalog
+                    .contains_record_id(&record_id)
+                    .expect("record existence checks"),
+                "record and metadata writes must fail atomically for {key}"
+            );
+        }
+        catalog.close();
+
+        let reopened = Catalog::open(&root).expect("catalog remains reopenable");
+        assert_eq!(reopened.descriptor(), &descriptor);
+        assert_eq!(reopened.storage_accounting().unwrap().record_count, 0);
+        for (key, expected) in original {
+            assert_eq!(reopened.metadata(key).unwrap(), expected);
+        }
     }
 
     #[test]
