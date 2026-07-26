@@ -215,12 +215,33 @@ pub(crate) async fn delete_lora(
         None
     };
     let cleanup_source = manifest_entry.as_ref().unwrap_or(&lora);
-    let removal = remove_owned_artifacts(
+    let mut removal = remove_owned_artifacts(
         lora_artifact_paths(cleanup_source, &default_root),
         &allowed_roots,
         permanent,
     )
     .await?;
+    // Sweep any preview-sample directory a training run parked under the owning project (see
+    // `lora_preview_sample_paths`). Run for every scope, not just `global`: it costs one readdir,
+    // and keying it off the scope string would leak previews the moment that metadata drifts. These
+    // paths get their OWN narrow allowed root — `<data>/projects` must not widen what a
+    // manifest-supplied artifact path is allowed to remove.
+    let preview_paths = lora_preview_sample_paths(&state.settings.data_dir, &lora_id).await;
+    if !preview_paths.is_empty() {
+        let preview_removal = remove_owned_artifacts(
+            preview_paths,
+            &[state.settings.data_dir.join("projects")],
+            permanent,
+        )
+        .await?;
+        removal.removed_paths.extend(preview_removal.removed_paths);
+        removal
+            .retained_paths
+            .extend(preview_removal.retained_paths);
+        removal
+            .trash_failed_paths
+            .extend(preview_removal.trash_failed_paths);
+    }
     if !permanent && !removal.trash_failed_paths.is_empty() {
         return Ok(Json(json!({
             "id": lora_id,
@@ -1574,6 +1595,41 @@ pub(crate) fn lora_artifact_paths(lora: &Value, default_root: &FsPath) -> Vec<Pa
         });
     }
     unique_paths(paths)
+}
+
+/// Preview-sample directories a training run may have parked OUTSIDE the LoRA's own output dir.
+///
+/// A global-scope training run writes its adapter to `<data>/loras/<lora_id>` but its step previews
+/// to `<project>/training/samples/<lora_id>` — they have to live inside a project tree or the
+/// Training Studio cannot render them (media is only served from
+/// `GET /api/v1/projects/:project_id/files/*`; see `resolve_sample_root` in
+/// crates/sceneworks-worker/src/training_jobs.rs). Nothing in the global LoRA manifest entry records
+/// which project ran the training, so deleting the LoRA would otherwise orphan those PNGs forever.
+/// `lora_id` is a unique generated id, so scanning the projects tree for that exact directory name
+/// is unambiguous — at most one project owns it, and a stale match is impossible.
+///
+/// Returns only paths this function built itself from `data_dir` + a real directory entry + a fixed
+/// tail, never a caller-supplied path. A `lora_id` that is not a single plain path component is
+/// refused outright (the id reaches us from the request URL), and the caller still confines every
+/// returned path to `<data>/projects` before removing it.
+async fn lora_preview_sample_paths(data_dir: &FsPath, lora_id: &str) -> Vec<PathBuf> {
+    let mut components = FsPath::new(lora_id).components();
+    let single_plain = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if !single_plain || lora_id.contains('/') || lora_id.contains('\\') {
+        return Vec::new();
+    }
+    let Ok(mut entries) = tokio::fs::read_dir(data_dir.join("projects")).await else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let candidate = entry.path().join("training").join("samples").join(lora_id);
+        if tokio::fs::symlink_metadata(&candidate).await.is_ok() {
+            paths.push(candidate);
+        }
+    }
+    paths
 }
 
 pub(crate) fn lora_huggingface_cached_file(lora: &Value, data_dir: &FsPath) -> Option<PathBuf> {
