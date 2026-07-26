@@ -6722,17 +6722,171 @@ fn ltx_bundle_subdir_picks_quant_and_finds_gemma() {
 /// index, and the shards it maps. Mirrors the real bundle `gemma/` so the completeness +
 /// eros-resolution tests are hermetic.
 #[cfg(target_os = "macos")]
+fn write_tiny_safetensors(path: &Path) {
+    let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend_from_slice(header);
+    bytes.push(0);
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[cfg(target_os = "macos")]
 fn write_complete_gemma_dir(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
-    std::fs::write(dir.join("config.json"), b"{}").unwrap();
-    std::fs::write(dir.join("tokenizer.json"), b"{}").unwrap();
+    std::fs::write(dir.join("config.json"), br#"{"model_type":"gemma3_text"}"#).unwrap();
+    std::fs::write(dir.join("tokenizer.json"), br#"{"model":{"type":"BPE"}}"#).unwrap();
     std::fs::write(
             dir.join("model.safetensors.index.json"),
             br#"{"weight_map":{"a":"model-00001-of-00002.safetensors","b":"model-00002-of-00002.safetensors"}}"#,
         )
         .unwrap();
-    std::fs::write(dir.join("model-00001-of-00002.safetensors"), b"x").unwrap();
-    std::fs::write(dir.join("model-00002-of-00002.safetensors"), b"x").unwrap();
+    write_tiny_safetensors(&dir.join("model-00001-of-00002.safetensors"));
+    write_tiny_safetensors(&dir.join("model-00002-of-00002.safetensors"));
+}
+
+#[cfg(target_os = "macos")]
+fn advanced_object(value: Value) -> JsonObject {
+    value.as_object().expect("advanced object").clone()
+}
+
+/// sc-13800: the public option list is generic/stable, but the operator-staged alternate is only
+/// enumerated after the shared completeness resolver says it is available.
+#[cfg(target_os = "macos")]
+#[test]
+fn ltx_text_encoder_options_hide_unstaged_alternate() {
+    let default_only = ltx_text_encoder_options(false);
+    assert_eq!(
+        default_only
+            .iter()
+            .map(|option| option.id)
+            .collect::<Vec<_>>(),
+        vec![DEFAULT_TEXT_ENCODER_ID]
+    );
+    assert!(default_only[0].is_default);
+
+    let staged = ltx_text_encoder_options(true);
+    assert_eq!(
+        staged.iter().map(|option| option.id).collect::<Vec<_>>(),
+        vec![DEFAULT_TEXT_ENCODER_ID, AMORAL_TEXT_ENCODER_ID]
+    );
+    assert!(!staged[1].is_default);
+}
+
+/// sc-13800: the stable selector generalizes the raw boolean without weakening compatibility.
+/// Unknown/non-string/conflicting choices are validation errors, never silent defaults.
+#[cfg(target_os = "macos")]
+#[test]
+fn ltx_text_encoder_selector_is_strict_and_legacy_compatible() {
+    assert_eq!(
+        selected_ltx_text_encoder(&advanced_object(json!({}))).unwrap(),
+        LtxTextEncoderSelection::Default
+    );
+    assert_eq!(
+        selected_ltx_text_encoder(&advanced_object(json!({
+            "textEncoderModel": AMORAL_TEXT_ENCODER_ID
+        })))
+        .unwrap(),
+        LtxTextEncoderSelection::Amoral
+    );
+    assert_eq!(
+        selected_ltx_text_encoder(&advanced_object(json!({
+            "useUncensoredEnhancer": true
+        })))
+        .unwrap(),
+        LtxTextEncoderSelection::Amoral
+    );
+
+    for bad in [
+        json!({ "textEncoderModel": "unknown_encoder" }),
+        json!({ "textEncoderModel": 7 }),
+        json!({
+            "textEncoderModel": DEFAULT_TEXT_ENCODER_ID,
+            "useUncensoredEnhancer": true
+        }),
+        json!({
+            "textEncoderModel": AMORAL_TEXT_ENCODER_ID,
+            "useUncensoredEnhancer": false
+        }),
+        json!({ "useUncensoredEnhancer": "true" }),
+    ] {
+        assert!(
+            matches!(
+                selected_ltx_text_encoder(&advanced_object(bad)),
+                Err(WorkerError::InvalidPayload(_))
+            ),
+            "invalid selector input must fail as a user-facing payload error"
+        );
+    }
+}
+
+/// A selected alternate must both be active (prompt enhancement on) and fully staged before model
+/// load. The returned directory is the one later placed in LoadSpec.components, so this assertion is
+/// mutation-sensitive to the non-default choice.
+#[cfg(target_os = "macos")]
+#[test]
+fn selected_ltx_text_encoder_fails_early_or_stages_exact_alternate() {
+    let advanced = advanced_object(json!({
+        "enhancePrompt": true,
+        "textEncoderModel": AMORAL_TEXT_ENCODER_ID
+    }));
+    let staged = PathBuf::from("/operator/staged/amoral-gemma");
+    let (use_alternate, resolved) =
+        resolve_selected_ltx_text_encoder(&advanced, Some(staged.clone())).unwrap();
+    assert!(use_alternate);
+    assert_eq!(resolved.as_deref(), Some(staged.as_path()));
+
+    let missing = resolve_selected_ltx_text_encoder(&advanced, None)
+        .expect_err("a selected but unstaged alternate must fail");
+    assert!(matches!(missing, WorkerError::InvalidPayload(_)));
+    assert!(missing.to_string().contains("not staged"));
+
+    let disabled = advanced_object(json!({
+        "enhancePrompt": false,
+        "textEncoderModel": AMORAL_TEXT_ENCODER_ID
+    }));
+    let error = resolve_selected_ltx_text_encoder(&disabled, Some(staged))
+        .expect_err("an alternate that would be ignored must not silently pass");
+    assert!(error.to_string().contains("prompt enhancement is off"));
+
+    let (use_alternate, resolved) =
+        resolve_selected_ltx_text_encoder(&advanced_object(json!({})), None).unwrap();
+    assert!(!use_alternate);
+    assert!(resolved.is_none());
+}
+
+/// Keep selector rejection ahead of every expensive or externally visible phase, and keep the
+/// resolved directory wired into the engine input. This source-order guard complements the pure
+/// resolver tests because the async generation seam otherwise requires real LTX weights.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_ltx_validates_and_stages_the_selector_before_side_effects() {
+    let source = include_str!("ltx.rs");
+    let generate = source
+        .split_once("pub(super) async fn generate_ltx(")
+        .expect("generate_ltx exists")
+        .1;
+    let selector = generate
+        .find("resolve_selected_ltx_text_encoder(")
+        .expect("selector resolution");
+    for side_effect in [
+        "resolve_video_clip_conditioning(",
+        "ensure_ltx_q8_present(",
+        "ensure_ltx_bf16_present(",
+        "ensure_ltx_gemma_present(",
+    ] {
+        assert!(
+            selector < generate.find(side_effect).expect("side-effect call"),
+            "selector validation must precede {side_effect}"
+        );
+    }
+    let input = generate
+        .split_once("let input = VideoGenInput {")
+        .expect("engine input")
+        .1;
+    assert!(
+        input.contains("uncensored_enhancer_dir,"),
+        "the resolved alternate directory must reach VideoGenInput"
+    );
 }
 
 /// `ltx_gemma_dir_is_complete`: needs config + tokenizer + every shard a non-empty index maps
@@ -6749,17 +6903,17 @@ fn ltx_gemma_completeness_requires_config_and_all_shards() {
     assert!(!ltx_gemma_dir_is_complete(&root));
 
     // Missing config.json → incomplete even with weights present.
-    std::fs::write(root.join("model-00002-of-00002.safetensors"), b"x").unwrap();
+    write_tiny_safetensors(&root.join("model-00002-of-00002.safetensors"));
     std::fs::remove_file(root.join("config.json")).unwrap();
     assert!(!ltx_gemma_dir_is_complete(&root));
 
     // Missing tokenizer.json → incomplete even with config + all weights present.
-    std::fs::write(root.join("config.json"), b"{}").unwrap();
+    std::fs::write(root.join("config.json"), br#"{"model_type":"gemma3_text"}"#).unwrap();
     std::fs::remove_file(root.join("tokenizer.json")).unwrap();
     assert!(!ltx_gemma_dir_is_complete(&root));
 
     // Empty or non-string weight maps must not pass vacuously.
-    std::fs::write(root.join("tokenizer.json"), b"{}").unwrap();
+    std::fs::write(root.join("tokenizer.json"), br#"{"model":{"type":"BPE"}}"#).unwrap();
     std::fs::write(
         root.join("model.safetensors.index.json"),
         br#"{"weight_map":{}}"#,
@@ -6776,10 +6930,23 @@ fn ltx_gemma_completeness_requires_config_and_all_shards() {
     // Single-file checkpoint (no index) is complete once config + tokenizer + weights exist.
     let single = std::env::temp_dir().join(format!("sw_gemma_1f_{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&single).unwrap();
-    std::fs::write(single.join("config.json"), b"{}").unwrap();
-    std::fs::write(single.join("tokenizer.json"), b"{}").unwrap();
+    std::fs::write(
+        single.join("config.json"),
+        br#"{"model_type":"gemma3_text"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        single.join("tokenizer.json"),
+        br#"{"model":{"type":"BPE"}}"#,
+    )
+    .unwrap();
     assert!(!ltx_gemma_dir_is_complete(&single));
     std::fs::write(single.join("model.safetensors"), b"x").unwrap();
+    assert!(
+        !ltx_gemma_dir_is_complete(&single),
+        "filename-only placeholder weights must not be advertised as loadable"
+    );
+    write_tiny_safetensors(&single.join("model.safetensors"));
     assert!(ltx_gemma_dir_is_complete(&single));
 
     let _ = std::fs::remove_dir_all(&root);

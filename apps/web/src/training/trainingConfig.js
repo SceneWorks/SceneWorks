@@ -33,9 +33,12 @@ export const optimizerLabels = {
 // Adapter network parameterization. `lora` is the universal default; `lokr`
 // (LyCORIS Kronecker) is offered only on targets whose `limits.networkTypes`
 // advertise it (epic 2193).
+// `full` is not an adapter at all (sc-14056): it trains every base weight and writes a fine-tuned
+// checkpoint. Only Mage-Flow targets advertise it in `limits.networkTypes`.
 export const networkTypeLabels = {
   lora: "LoRA",
   lokr: "LoKr (LyCORIS Kronecker)",
+  full: "Full base fine-tune",
 };
 // The quality vocabulary the built-in preset registry actually emits. Quality is an
 // attribute of a preset rather than a standalone hyperparameter — each tier is a

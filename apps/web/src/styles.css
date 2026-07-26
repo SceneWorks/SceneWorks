@@ -1531,7 +1531,6 @@ button:focus-visible {
 }
 
 /* ---------- Main content surface ---------- */
-.workspace > .auth-band,
 .workspace > .notice,
 .workspace > section[class*="-surface"],
 .workspace > section[class*="-layout"],
@@ -1549,7 +1548,6 @@ button:focus-visible {
   margin-bottom: 30px;
 }
 
-.workspace > .auth-band,
 .workspace > .notice {
   margin-top: 18px;
 }
@@ -1599,16 +1597,126 @@ button:focus-visible {
   border-color: color-mix(in oklch, var(--danger) 45%, transparent);
 }
 
-/* Cards / surfaces shared by screens */
-.auth-band {
-  display: grid;
-  align-content: start;
-  gap: var(--gap-4);
-  padding: var(--pad-panel);
+/* Remote-access blocker (sc-15102): the ONLY thing on screen until the host password
+   is accepted, so it owns the viewport rather than sitting inside .workspace. `fixed`
+   is belt-and-braces — App renders nothing else — so no stray shell can ever paint
+   through it. */
+.access-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px;
+  overflow: auto;
+  background: var(--bg);
+}
+
+.access-gate-card {
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+  padding: 40px 32px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  min-height: 0;
+  border-radius: 18px;
+  box-shadow: var(--shadow-glow);
+}
+
+.access-gate-mark {
+  display: inline-flex;
+}
+
+.access-gate-mark svg {
+  display: block;
+}
+
+.access-gate-card h1 {
+  margin: 0;
+  font-size: 1.4rem;
+  color: var(--text);
+}
+
+.access-gate-lede {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.access-gate-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  margin-top: 8px;
+  text-align: left;
+}
+
+.access-gate-form label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.access-gate-form input {
+  width: 100%;
+  padding: 11px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.access-gate-form input:focus {
+  outline: 2px solid var(--accent);
+  border-color: var(--accent);
+}
+
+.access-gate-cta {
+  padding: 11px 16px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: none;
+  border-radius: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.access-gate-cta:hover {
+  background: var(--accent-strong);
+}
+
+.access-gate-secondary {
+  padding: 8px 14px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.access-gate-secondary:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.access-gate-status,
+.access-gate-hint {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.access-gate-card .notice {
+  width: 100%;
+  margin: 0;
+  text-align: left;
 }
 
 /* ---------- Page-Frame standard (direction 1b, epic sc-10433) ----------
@@ -1841,8 +1949,7 @@ label {
 
 /* ---------- Buttons ---------- */
 .form-row button,
-.project-pill,
-.auth-band button {
+.project-pill {
   /* default button-like styling for raw buttons inside known regions */
 }
 

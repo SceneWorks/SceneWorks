@@ -16,13 +16,15 @@ serde_json = "1.0"
 mime_guess = "2.0"
 url = "2.5"
 # sc-6531 (Dataset Doctor): read image dimensions from the header without a full decode.
-# `imagesize` reads dataset dimensions without decoding. The poster verifier
-# below enables only the pure-Rust JPEG codec, avoiding native AVIF dependencies
-# (libdav1d/nasm/meson) that would break the Windows candle lane.
+# `imagesize` reads dataset dimensions without decoding.
 imagesize = "0.13"
 # Indexed video posters are served as image/jpeg, so indexing fully decodes the
-# bounded payload instead of trusting the sibling `.poster.jpg` filename.
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# bounded payload instead of trusting the sibling `.poster.jpg` filename. Only the
+# pure-Rust JPEG codec is used here; the feature set is the workspace union (sc-15052)
+# because Cargo unifies it anyway — this crate never got a jpeg-only `image` in a real
+# build. The union's `default-features = false` also keeps `avif` off, and with it the
+# nasm-dependent encoder chain that would break the Windows candle lane.
+image = { workspace = true }
 # sc-6531: SHA-256 of stored bytes = exact-duplicate key + the cache key for Tier-1
 # embeddings (epic 6529 §6.3). Pinned to the workspace's existing 0.10 line (worker + desktop)
 # so no new locked version appears.

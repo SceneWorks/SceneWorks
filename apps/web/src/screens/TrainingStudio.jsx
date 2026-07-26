@@ -612,6 +612,11 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const networkTypeOptions = rangeOptions(selectedTarget?.limits, "networkTypes");
   const showNetworkType = networkTypeOptions.length > 1;
   const isLokrNetwork = asText(configDraft.networkType).trim() === "lokr";
+  // sc-14056 — the full base fine-tune. Not an adapter: it trains every base weight. Gradient
+  // (activation) checkpointing has no full-tune implementation yet (sc-14989) and the engine hard-
+  // errors rather than ignoring the flag, so the worker clears it for a full run. Hide the checkbox
+  // here and say why, so the override is visible rather than a silent drop of a checked box.
+  const isFullFinetune = asText(configDraft.networkType).trim().toLowerCase() === "full";
   // Mac UI gating (sc-3486): the mlx Wan trainer can't merge a Kronecker (LoKr) adapter, so
   // disable the LoKr network type for Wan targets on a gated Mac (LoKr on Z-Image/SDXL/LTX is fine).
   const macLokrOnWanBlocked =
@@ -1823,6 +1828,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   networkTypeOptions={networkTypeOptions}
                   macLokrOnWanBlocked={macLokrOnWanBlocked}
                   isLokrNetwork={isLokrNetwork}
+                  isFullFinetune={isFullFinetune}
                   visibleOptimizerOptions={visibleOptimizerOptions}
                   visibleLrSchedulerOptions={visibleLrSchedulerOptions}
                   showTrainingAdapter={showTrainingAdapter}

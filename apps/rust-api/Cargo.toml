@@ -11,7 +11,7 @@ fs2 = "0.4"
 futures-util = "0.3"
 glob = "0.3"
 httpdate = "1"
-image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
+image = { workspace = true }
 parking_lot = "0.12"
 mime_guess = { version = "2", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

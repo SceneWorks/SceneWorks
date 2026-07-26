@@ -40,8 +40,12 @@ pub enum ImageKind {
 }
 
 impl ImageKind {
-    /// True when the worker's `png`/`jpeg`/`webp` `image` build can decode this directly; everything
-    /// else must be transcoded to PNG first.
+    /// True for the png/jpeg/webp set SceneWorks stores assets in; everything else is transcoded to
+    /// PNG on import.
+    ///
+    /// This is a storage policy, not a read of the compiled `image` features. The workspace build
+    /// also decodes bmp/gif/tiff (sc-15052), and those are still transcoded on purpose so stored
+    /// assets stay in three formats. Do not "fix" this list to match the feature union.
     pub fn is_natively_supported(self) -> bool {
         matches!(self, ImageKind::Png | ImageKind::Jpeg | ImageKind::WebP)
     }

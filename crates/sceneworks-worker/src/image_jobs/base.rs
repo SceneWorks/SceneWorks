@@ -2673,10 +2673,33 @@ fn attach_required_components(
         return Ok(spec);
     }
     let manifest_value = Value::Object(manifest_entry.clone());
-    let components = resolve_co_requisites(&descriptor, &manifest_value, settings)?;
+    // Mage-Flow's shared text encoder / VAE are themselves per-tier (sc-14980), so the co-requisite
+    // must match the tier actually resolved for the BACKBONE — not the tier the request asked for,
+    // which `standard_tier_subdir`'s completeness fallback may have stepped away from. Reading it
+    // back off the resolved weights dir keeps the two in lockstep by construction: a q4 request that
+    // fell back to q8 gets the q8 text encoder, never a mixed pair.
+    let tier = resolved_tier_name(&spec);
+    let components =
+        crate::model_jobs::resolve_co_requisites_for_tier(&descriptor, &manifest_value, settings, tier)?;
     Ok(components
         .into_iter()
         .fold(spec, |spec, (id, source)| spec.with_component(id, source)))
+}
+
+/// The tier a [`LoadSpec`]'s weights dir resolved to, for matching a per-tier `coRequisite`'s
+/// `variant` (sc-14980).
+///
+/// Delegates to [`tier_key_from_resolved_dir`] — the established "what tier is this dir" answer, so
+/// the co-requisite lookup cannot drift from the tier the backbone actually loads at. `None` for a
+/// flat snapshot (whose final segment is a commit sha), which keeps single-row co-requisites — every
+/// audio model, and Mage on a legacy flat install — on the tier-agnostic path. A `None` here against
+/// a model that DOES declare per-tier rows is refused loudly by `resolve_co_requisites_for_tier`
+/// rather than guessed, so an unrecognized layout can never silently pair mismatched weights.
+fn resolved_tier_name(spec: &LoadSpec) -> Option<&'static str> {
+    let WeightsSource::Dir(dir) = &spec.weights else {
+        return None;
+    };
+    tier_key_from_resolved_dir(dir)
 }
 
 /// Resolve SDXL's three caller-staged components (`tokenizer_clip_l` / `tokenizer_clip_bigg` /

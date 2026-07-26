@@ -123,6 +123,10 @@ use gpu::*;
 mod fit_gate;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
+// The full base fine-tune memory-envelope gate (sc-14056) lives beside the generation MLX fit gate
+// (it reuses that module's byte-summing + unified-memory budget probe). Re-exported for the rust-api
+// training submit gate, which calls it alongside `training_base_model_status`/`training_disk_space_error`.
+pub use mlx_fit_gate::full_finetune_memory_error;
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
 // into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
 // helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.
@@ -165,6 +169,7 @@ mod sensenova_jobs;
 use sensenova_jobs::*;
 mod video_jobs;
 use video_jobs::*;
+pub use video_jobs::{text_encoder_options_for_adapter, TextEncoderOption};
 // Pure audio generation — the SceneWorks Audio Studio job path (epic 13400 / sc-13404). Compiled on
 // every platform (the dispatch arm is uniform); the actual candle audio lane is resolved through
 // `inference_runtime::load_audio`, which errors clearly on a build that ships no audio registry (a
@@ -362,6 +367,14 @@ mod illustrious_train_apply_mlx_smoke;
 // non-degenerate (both transformer + gpt-oss MoE TE are packed per-tier; NOT a dense-TE model).
 #[cfg(all(test, target_os = "macos"))]
 mod lens_turbo_q4_mlx_smoke;
+
+// Real-weight MLX smoke for the Mage-Flow q4 worker lane (sc-14980 / sc-14979). Mage is the first
+// family whose tier subdir is NOT engine-complete — `<snapshot>/q4/` is DiT-only, and the shared text
+// encoder + VAE arrive as per-tier co-requisites — so this is the on-device proof that the manifest's
+// per-tier downloads and the pinned engine agree. It fails loudly against an engine pinned before the
+// sc-14979 split, which is exactly the ordering hazard the pin bump closes.
+#[cfg(all(test, target_os = "macos"))]
+mod mage_flow_q8_mlx_smoke;
 // Real-weight MLX smoke for the recovered base Lens Q4 worker lane (sc-8767, epic 8506 Group-B).
 // Test-only + macOS-only; drives `crate::inference_runtime::load("lens")` with a Q4 LoadSpec against the packed `q4/`
 // turnkey subdir. On-device evidence that the SceneWorks/lens-mlx pre-quantized q4 tier loads through the

@@ -10,6 +10,7 @@ import { pollJobToCompletion } from "./pollJob.js";
 import { AccentPicker } from "./components/AccentPicker.jsx";
 import { Icon } from "./components/Icons.jsx";
 import { lazyScreen } from "./components/LazyScreen.jsx";
+import { AccessGate } from "./components/AccessGate.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview, assetSeed } from "./components/assetPanels.jsx";
@@ -670,6 +671,7 @@ export function App() {
     setPasswordDraft,
     authError,
     authenticated,
+    gateStatus,
     ready,
     saveToken,
     lockRemote,
@@ -2840,15 +2842,12 @@ export function App() {
     authenticated &&
     !catalogBypassesProjectSetup;
   // The Simple shell replaces the workspace only once the app is actually usable. The
-  // first-run flows — the desktop setup wizard, the "create your first workspace" gate,
-  // and the remote-browser password band — stay on the existing shell that owns them, so
-  // Simple never renders studios whose Generate could only fail. Once past them the
-  // switch is live, and the Settings toggle + the sidebar switch both reach it.
-  const shellGated =
-    showSetupWizard ||
-    setupGateLoading ||
-    needsFirstProject ||
-    (access.authRequired && !isDesktopShell && !token);
+  // first-run flows — the desktop setup wizard and the "create your first workspace"
+  // gate — stay on the existing shell that owns them, so Simple never renders studios
+  // whose Generate could only fail. Once past them the switch is live, and the Settings
+  // toggle + the sidebar switch both reach it. (The remote-access gate used to be a
+  // clause here too; it now short-circuits BOTH shells from the early return below.)
+  const shellGated = showSetupWizard || setupGateLoading || needsFirstProject;
   const showSimpleShell = uiMode === SIMPLE_MODE && !shellGated;
 
   // sc-1651 Phase B: shared primitives screens read via useAppContext() instead of
@@ -3101,6 +3100,26 @@ export function App() {
     sendCharacterToImage, sendCharacterToVideo, sendPresetToStudio, openDatasetInLibrary, theme, changeTheme,
   ]);
 
+  // Remote-access blocker (sc-15102). Returned INSTEAD of either shell — no sidebar, no
+  // topbar, no screens — so a remote browser that hasn't unlocked the host cannot walk
+  // the nav tree through screens that are empty by design (every protected load is held
+  // until `authenticated`). It replaces the `.auth-band` banner that used to render above
+  // a fully live, fully empty shell. Placed after the providers' useMemos so the hook
+  // order is identical whether or not the gate is up.
+  if (gateStatus !== "open") {
+    return (
+      <AccessGate
+        authError={authError}
+        notices={notices}
+        onForget={lockRemote}
+        onSubmit={saveToken}
+        passwordDraft={passwordDraft}
+        setPasswordDraft={setPasswordDraft}
+        status={gateStatus}
+      />
+    );
+  }
+
   // Simple UI (design handoff): an ALTERNATIVE shell rendered in place of the workspace
   // below. It mounts INSIDE the same two providers, so its screens read the identical
   // catalogs, job feed and actions — there is no second data layer, and switching back
@@ -3244,28 +3263,6 @@ export function App() {
         {notices.map((notice) => (
           <p className="notice error" key={notice.kind}>{notice.message}</p>
         ))}
-
-        {/* Gate visibility keys off the token STATE (not a render-time localStorage
-            read), and the input edits a local draft — never the live token — so
-            typing can't flip `authenticated` or fire API/SSE traffic (sc-8808). */}
-        {access.authRequired && !isDesktopShell && !token ? (
-          <section className="auth-band">
-            <form onSubmit={saveToken}>
-              <label htmlFor="token">Password</label>
-              <div className="form-row">
-                <input
-                  id="token"
-                  onChange={(event) => setPasswordDraft(event.target.value)}
-                  placeholder="Enter the access password"
-                  type="password"
-                  value={passwordDraft}
-                />
-                <button type="submit">Unlock</button>
-              </div>
-              {authError ? <p className="notice error">{authError}</p> : null}
-            </form>
-          </section>
-        ) : null}
 
         {showSetupWizard ? (
           <SetupWizard
