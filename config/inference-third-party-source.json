@@ -1,7 +1,7 @@
 {
   "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
-  "inferenceRevision": "ecca83637862dc8eccbded27cfe616a8b9f11805",
-  "auditDigest": "6db37c6bcaf6c01f0b5b3fd7ea98f78c48affecff0bfad0fa793c0eb1f6cb9f2",
+  "inferenceRevision": "e137b0b97cb63cd87950c3f51ec17ec6dc3b0168",
+  "auditDigest": "63858746b7201e2f8165f2eae51f32ed1f03d939fb2aff901b68ea7aa0ece523",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,7 +17,7 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "ecca83637862dc8eccbded27cfe616a8b9f11805",
+    "revision": "e137b0b97cb63cd87950c3f51ec17ec6dc3b0168",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from (case-insensitive)",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
