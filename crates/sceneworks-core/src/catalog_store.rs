@@ -1,0 +1,1457 @@
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::Arc;
+use std::time::Duration;
+
+use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::store_util::lock_store_path;
+use crate::time::utc_now;
+
+pub const CATALOG_SCHEMA_VERSION: u32 = 1;
+pub const CATALOG_DATABASE_FILE: &str = "catalog.sqlite";
+pub const CATALOG_MANIFEST_FILE: &str = "catalog.json";
+pub const CATALOG_REGISTRY_FILE: &str = "attached-catalogs.json";
+pub const CATALOG_ARTIFACT_DIRECTORIES: &[&str] =
+    &["images", "thumbnails", "embeddings", "artifacts"];
+
+const CATALOG_APPLICATION_ID: i32 = 0x5343_5743;
+const REGISTRY_SCHEMA_VERSION: u32 = 1;
+const MAX_REGISTRY_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PAGE_SIZE: u32 = 10_000;
+
+pub type CatalogResult<T> = Result<T, CatalogError>;
+
+#[derive(Debug)]
+pub enum CatalogError {
+    Io(std::io::Error),
+    Sqlite(rusqlite::Error),
+    Json(serde_json::Error),
+    InvalidCatalog(String),
+    NotFound(String),
+    AlreadyExists(String),
+    Corrupt { path: PathBuf, detail: String },
+    Incompatible { found: u32, supported: u32 },
+}
+
+impl std::fmt::Display for CatalogError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "{error}"),
+            Self::Sqlite(error) => write!(formatter, "{error}"),
+            Self::Json(error) => write!(formatter, "{error}"),
+            Self::InvalidCatalog(detail) => write!(formatter, "{detail}"),
+            Self::NotFound(detail) => write!(formatter, "{detail}"),
+            Self::AlreadyExists(detail) => write!(formatter, "{detail}"),
+            Self::Corrupt { path, detail } => {
+                write!(
+                    formatter,
+                    "Catalog at {} is corrupt: {detail}",
+                    path.display()
+                )
+            }
+            Self::Incompatible { found, supported } => write!(
+                formatter,
+                "Catalog schema version {found} is newer than supported version {supported}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CatalogError {}
+
+impl From<std::io::Error> for CatalogError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<serde_json::Error> for CatalogError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogDescriptor {
+    pub id: String,
+    pub name: String,
+    pub path: PathBuf,
+    pub schema_version: u32,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachedCatalog {
+    pub id: String,
+    pub name: String,
+    pub path: PathBuf,
+    pub attached_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewCatalogRecord {
+    pub id: String,
+    pub image_path: String,
+    pub thumbnail_path: Option<String>,
+    pub embedding_path: Option<String>,
+    pub artifact_path: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogRecord {
+    pub id: String,
+    pub image_path: String,
+    pub thumbnail_path: Option<String>,
+    pub embedding_path: Option<String>,
+    pub artifact_path: Option<String>,
+    pub metadata: Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogRecordPage {
+    pub records: Vec<CatalogRecord>,
+    pub next_cursor: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatalogStorageAccounting {
+    pub database_bytes: u64,
+    pub manifest_bytes: u64,
+    pub artifact_bytes: u64,
+    pub total_bytes: u64,
+    pub record_count: u64,
+}
+
+#[derive(Debug)]
+pub struct Catalog {
+    root: PathBuf,
+    descriptor: CatalogDescriptor,
+    connection: Connection,
+}
+
+impl Catalog {
+    pub fn create(root: impl AsRef<Path>, name: impl Into<String>) -> CatalogResult<Self> {
+        let root = root.as_ref();
+        let name = validated_name(name.into())?;
+        prepare_new_root(root)?;
+        let root = fs::canonicalize(root)?;
+        for directory in CATALOG_ARTIFACT_DIRECTORIES {
+            fs::create_dir_all(root.join(directory))?;
+        }
+
+        let descriptor = CatalogDescriptor {
+            id: random_hex(16)?,
+            name,
+            path: root.clone(),
+            schema_version: CATALOG_SCHEMA_VERSION,
+            created_at: utc_now(),
+        };
+        write_manifest(&root, &descriptor)?;
+
+        let database_path = root.join(CATALOG_DATABASE_FILE);
+        let connection = Connection::open(&database_path)
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        configure_connection(&connection, &database_path)?;
+        connection
+            .pragma_update(None, "application_id", CATALOG_APPLICATION_ID)
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        migrate(&connection, &database_path)?;
+        write_database_metadata(&connection, &database_path, &descriptor)?;
+
+        Ok(Self {
+            root,
+            descriptor,
+            connection,
+        })
+    }
+
+    pub fn open(root: impl AsRef<Path>) -> CatalogResult<Self> {
+        let root = canonical_catalog_root(root.as_ref())?;
+        let descriptor = read_manifest(&root)?;
+        if descriptor.schema_version > CATALOG_SCHEMA_VERSION {
+            return Err(CatalogError::Incompatible {
+                found: descriptor.schema_version,
+                supported: CATALOG_SCHEMA_VERSION,
+            });
+        }
+
+        let database_path = root.join(CATALOG_DATABASE_FILE);
+        if !database_path.is_file() {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Catalog database is missing at {}",
+                database_path.display()
+            )));
+        }
+        let connection = Connection::open(&database_path)
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        configure_connection(&connection, &database_path)?;
+        let application_id: i32 = connection
+            .pragma_query_value(None, "application_id", |row| row.get(0))
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        if application_id != CATALOG_APPLICATION_ID {
+            return Err(CatalogError::Corrupt {
+                path: database_path,
+                detail: "database does not have the SceneWorks catalog application id".to_owned(),
+            });
+        }
+        migrate(&connection, &database_path)?;
+        validate_schema(&connection, &database_path)?;
+        validate_database_metadata(&connection, &database_path, &descriptor)?;
+
+        Ok(Self {
+            root,
+            descriptor,
+            connection,
+        })
+    }
+
+    pub fn descriptor(&self) -> &CatalogDescriptor {
+        &self.descriptor
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn database_path(&self) -> PathBuf {
+        self.root.join(CATALOG_DATABASE_FILE)
+    }
+
+    pub fn artifact_directory(&self, kind: &str) -> CatalogResult<PathBuf> {
+        if !CATALOG_ARTIFACT_DIRECTORIES.contains(&kind) {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Unknown catalog artifact kind: {kind}"
+            )));
+        }
+        Ok(self.root.join(kind))
+    }
+
+    pub fn append_records(&mut self, records: &[NewCatalogRecord]) -> CatalogResult<usize> {
+        for record in records {
+            validate_record(record)?;
+        }
+        let database_path = self.database_path();
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        {
+            let mut statement = transaction
+                .prepare_cached(
+                    "insert into catalog_records (
+                        id, image_path, thumbnail_path, embedding_path, artifact_path,
+                        metadata_json, created_at, updated_at
+                     ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                     on conflict(id) do update set
+                        image_path = excluded.image_path,
+                        thumbnail_path = excluded.thumbnail_path,
+                        embedding_path = excluded.embedding_path,
+                        artifact_path = excluded.artifact_path,
+                        metadata_json = excluded.metadata_json,
+                        updated_at = excluded.updated_at",
+                )
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+            for record in records {
+                let metadata = serde_json::to_string(&record.metadata)?;
+                statement
+                    .execute(params![
+                        record.id,
+                        record.image_path,
+                        record.thumbnail_path,
+                        record.embedding_path,
+                        record.artifact_path,
+                        metadata,
+                        utc_now(),
+                    ])
+                    .map_err(|error| map_sqlite_error(&database_path, error))?;
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        Ok(records.len())
+    }
+
+    pub fn page_records(&self, offset: u64, limit: u32) -> CatalogResult<Vec<CatalogRecord>> {
+        validate_page_size(limit)?;
+        if offset > i64::MAX as u64 {
+            return Err(CatalogError::InvalidCatalog(
+                "Catalog page offset is too large".to_owned(),
+            ));
+        }
+        let database_path = self.database_path();
+        let mut statement = self
+            .connection
+            .prepare_cached(
+                "select id, image_path, thumbnail_path, embedding_path, artifact_path,
+                        metadata_json, created_at, updated_at
+                 from catalog_records
+                 order by rowid
+                 limit ?1 offset ?2",
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let rows = statement
+            .query_map(params![limit, offset], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (
+                id,
+                image_path,
+                thumbnail_path,
+                embedding_path,
+                artifact_path,
+                metadata_json,
+                created_at,
+                updated_at,
+            ) = row.map_err(|error| map_sqlite_error(&database_path, error))?;
+            let metadata =
+                serde_json::from_str(&metadata_json).map_err(|error| CatalogError::Corrupt {
+                    path: database_path.clone(),
+                    detail: format!("record {id} contains invalid metadata JSON: {error}"),
+                })?;
+            records.push(CatalogRecord {
+                id,
+                image_path,
+                thumbnail_path,
+                embedding_path,
+                artifact_path,
+                metadata,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(records)
+    }
+
+    /// Reads a scale-stable page using SQLite's monotonically increasing rowid as
+    /// an opaque cursor. Unlike `OFFSET`, the index can seek directly to the next
+    /// row even when a catalog contains millions of records.
+    pub fn page_records_after(
+        &self,
+        after_cursor: Option<i64>,
+        limit: u32,
+    ) -> CatalogResult<CatalogRecordPage> {
+        validate_page_size(limit)?;
+        let database_path = self.database_path();
+        let cursor = after_cursor.unwrap_or(0);
+        if cursor < 0 {
+            return Err(CatalogError::InvalidCatalog(
+                "Catalog page cursor cannot be negative".to_owned(),
+            ));
+        }
+        let mut statement = self
+            .connection
+            .prepare_cached(
+                "select rowid, id, image_path, thumbnail_path, embedding_path, artifact_path,
+                        metadata_json, created_at, updated_at
+                 from catalog_records
+                 where rowid > ?1
+                 order by rowid
+                 limit ?2",
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let rows = statement
+            .query_map(params![cursor, limit], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            })
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let mut records = Vec::new();
+        let mut next_cursor = None;
+        for row in rows {
+            let (
+                rowid,
+                id,
+                image_path,
+                thumbnail_path,
+                embedding_path,
+                artifact_path,
+                metadata_json,
+                created_at,
+                updated_at,
+            ) = row.map_err(|error| map_sqlite_error(&database_path, error))?;
+            let metadata =
+                serde_json::from_str(&metadata_json).map_err(|error| CatalogError::Corrupt {
+                    path: database_path.clone(),
+                    detail: format!("record {id} contains invalid metadata JSON: {error}"),
+                })?;
+            next_cursor = Some(rowid);
+            records.push(CatalogRecord {
+                id,
+                image_path,
+                thumbnail_path,
+                embedding_path,
+                artifact_path,
+                metadata,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(CatalogRecordPage {
+            records,
+            next_cursor,
+        })
+    }
+
+    pub fn storage_accounting(&self) -> CatalogResult<CatalogStorageAccounting> {
+        let database_bytes = sqlite_storage_bytes(&self.root)?;
+        let manifest_bytes = fs::metadata(self.root.join(CATALOG_MANIFEST_FILE))?.len();
+        let total_bytes = directory_file_bytes(&self.root)?;
+        let artifact_bytes = total_bytes.saturating_sub(database_bytes + manifest_bytes);
+        let record_count = self
+            .connection
+            .query_row("select count(*) from catalog_records", [], |row| row.get(0))
+            .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
+        Ok(CatalogStorageAccounting {
+            database_bytes,
+            manifest_bytes,
+            artifact_bytes,
+            total_bytes,
+            record_count,
+        })
+    }
+
+    pub fn sqlite_setting(&self, pragma: &str) -> CatalogResult<String> {
+        if !matches!(
+            pragma,
+            "journal_mode" | "synchronous" | "busy_timeout" | "foreign_keys" | "temp_store"
+        ) {
+            return Err(CatalogError::InvalidCatalog(
+                "Unsupported SQLite setting".to_owned(),
+            ));
+        }
+        let value: rusqlite::types::Value = self
+            .connection
+            .pragma_query_value(None, pragma, |row| row.get(0))
+            .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
+        match value {
+            rusqlite::types::Value::Integer(value) => Ok(value.to_string()),
+            rusqlite::types::Value::Real(value) => Ok(value.to_string()),
+            rusqlite::types::Value::Text(value) => Ok(value),
+            rusqlite::types::Value::Null => Ok(String::new()),
+            rusqlite::types::Value::Blob(_) => Err(CatalogError::Corrupt {
+                path: self.database_path(),
+                detail: format!("SQLite pragma {pragma} returned a blob"),
+            }),
+        }
+    }
+
+    pub fn close(self) {}
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogRegistry {
+    registry_path: PathBuf,
+    #[cfg(test)]
+    fail_saves: Arc<AtomicBool>,
+}
+
+impl CatalogRegistry {
+    pub fn new(state_directory: impl AsRef<Path>) -> Self {
+        let state_directory = absolute_path(state_directory.as_ref());
+        Self {
+            registry_path: state_directory.join(CATALOG_REGISTRY_FILE),
+            #[cfg(test)]
+            fail_saves: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn registry_path(&self) -> &Path {
+        &self.registry_path
+    }
+
+    pub fn create_catalog(
+        &self,
+        root: impl AsRef<Path>,
+        name: impl Into<String>,
+    ) -> CatalogResult<Catalog> {
+        let catalog = Catalog::create(root, name)?;
+        self.attach_descriptor(catalog.descriptor())?;
+        Ok(catalog)
+    }
+
+    pub fn open_catalog(&self, root: impl AsRef<Path>) -> CatalogResult<Catalog> {
+        Catalog::open(root)
+    }
+
+    pub fn attach(&self, root: impl AsRef<Path>) -> CatalogResult<AttachedCatalog> {
+        let catalog = Catalog::open(root)?;
+        self.attach_descriptor(catalog.descriptor())
+    }
+
+    pub fn list(&self) -> CatalogResult<Vec<AttachedCatalog>> {
+        Ok(self.load()?.catalogs)
+    }
+
+    pub fn detach(&self, catalog_id: &str) -> CatalogResult<AttachedCatalog> {
+        let _guard = lock_store_path(&self.registry_path);
+        let mut registry = self.load()?;
+        let index = registry
+            .catalogs
+            .iter()
+            .position(|catalog| catalog.id == catalog_id)
+            .ok_or_else(|| {
+                CatalogError::NotFound(format!("Attached catalog not found: {catalog_id}"))
+            })?;
+        let detached = registry.catalogs.remove(index);
+        self.save(&registry)?;
+        Ok(detached)
+    }
+
+    pub fn delete_on_disk(&self, catalog_id: &str) -> CatalogResult<AttachedCatalog> {
+        let _guard = lock_store_path(&self.registry_path);
+        let mut registry = self.load()?;
+        let index = registry
+            .catalogs
+            .iter()
+            .position(|catalog| catalog.id == catalog_id)
+            .ok_or_else(|| {
+                CatalogError::NotFound(format!("Attached catalog not found: {catalog_id}"))
+            })?;
+        let attached = registry.catalogs[index].clone();
+        {
+            let catalog = Catalog::open(&attached.path)?;
+            if catalog.descriptor().id != catalog_id {
+                return Err(CatalogError::InvalidCatalog(format!(
+                    "Refusing to delete {} because its catalog identity changed",
+                    attached.path.display()
+                )));
+            }
+        }
+        registry.catalogs.remove(index);
+        self.save(&registry)?;
+        if let Err(error) = fs::remove_dir_all(&attached.path) {
+            registry.catalogs.push(attached.clone());
+            registry
+                .catalogs
+                .sort_by(|left, right| left.id.cmp(&right.id));
+            self.save(&registry)?;
+            return Err(CatalogError::Io(error));
+        }
+        Ok(attached)
+    }
+
+    fn attach_descriptor(&self, descriptor: &CatalogDescriptor) -> CatalogResult<AttachedCatalog> {
+        if self.registry_path.starts_with(&descriptor.path) {
+            return Err(CatalogError::InvalidCatalog(
+                "The SceneWorks catalog registry cannot be stored inside a catalog".to_owned(),
+            ));
+        }
+        let _guard = lock_store_path(&self.registry_path);
+        let mut registry = self.load()?;
+        let attached = AttachedCatalog {
+            id: descriptor.id.clone(),
+            name: descriptor.name.clone(),
+            path: descriptor.path.clone(),
+            attached_at: utc_now(),
+        };
+        registry
+            .catalogs
+            .retain(|existing| existing.id != attached.id && existing.path != attached.path);
+        registry.catalogs.push(attached.clone());
+        registry
+            .catalogs
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        self.save(&registry)?;
+        Ok(attached)
+    }
+
+    fn load(&self) -> CatalogResult<RegistryDocument> {
+        if !self.registry_path.exists() {
+            return Ok(RegistryDocument::default());
+        }
+        let metadata = fs::metadata(&self.registry_path)?;
+        if metadata.len() > MAX_REGISTRY_BYTES {
+            return Err(CatalogError::Corrupt {
+                path: self.registry_path.clone(),
+                detail: format!("registry exceeds {MAX_REGISTRY_BYTES} bytes"),
+            });
+        }
+        let payload = fs::read(&self.registry_path)?;
+        let registry: RegistryDocument =
+            serde_json::from_slice(&payload).map_err(|error| CatalogError::Corrupt {
+                path: self.registry_path.clone(),
+                detail: error.to_string(),
+            })?;
+        if registry.schema_version > REGISTRY_SCHEMA_VERSION {
+            return Err(CatalogError::Incompatible {
+                found: registry.schema_version,
+                supported: REGISTRY_SCHEMA_VERSION,
+            });
+        }
+        Ok(registry)
+    }
+
+    fn save(&self, registry: &RegistryDocument) -> CatalogResult<()> {
+        let mut payload = serde_json::to_vec_pretty(registry)?;
+        payload.push(b'\n');
+        if payload.len() as u64 > MAX_REGISTRY_BYTES {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Catalog registry exceeds its {MAX_REGISTRY_BYTES}-byte limit"
+            )));
+        }
+        #[cfg(test)]
+        if self.fail_saves.load(Ordering::SeqCst) {
+            return Err(CatalogError::Io(std::io::Error::other(
+                "injected registry save failure",
+            )));
+        }
+        atomic_write(&self.registry_path, &payload)
+    }
+
+    #[cfg(test)]
+    fn set_save_failure(&self, fail: bool) {
+        self.fail_saves.store(fail, Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistryDocument {
+    schema_version: u32,
+    catalogs: Vec<AttachedCatalog>,
+}
+
+impl Default for RegistryDocument {
+    fn default() -> Self {
+        Self {
+            schema_version: REGISTRY_SCHEMA_VERSION,
+            catalogs: Vec::new(),
+        }
+    }
+}
+
+fn prepare_new_root(root: &Path) -> CatalogResult<()> {
+    if root.exists() {
+        let metadata = fs::symlink_metadata(root)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Catalog location must be a real directory: {}",
+                root.display()
+            )));
+        }
+        if fs::read_dir(root)?.next().is_some() {
+            return Err(CatalogError::AlreadyExists(format!(
+                "Catalog location must be empty: {}",
+                root.display()
+            )));
+        }
+    } else {
+        fs::create_dir_all(root)?;
+    }
+    Ok(())
+}
+
+fn canonical_catalog_root(root: &Path) -> CatalogResult<PathBuf> {
+    if !root.exists() {
+        return Err(CatalogError::NotFound(format!(
+            "Catalog directory not found: {}",
+            root.display()
+        )));
+    }
+    let metadata = fs::symlink_metadata(root)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(CatalogError::InvalidCatalog(format!(
+            "Catalog location must be a real directory: {}",
+            root.display()
+        )));
+    }
+    Ok(fs::canonicalize(root)?)
+}
+
+fn validated_name(name: String) -> CatalogResult<String> {
+    let name = name.trim().to_owned();
+    if name.is_empty() || name.chars().count() > 200 {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog name must contain 1 to 200 characters".to_owned(),
+        ));
+    }
+    Ok(name)
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+fn validate_record(record: &NewCatalogRecord) -> CatalogResult<()> {
+    if record.id.trim().is_empty() || record.id.len() > 512 || record.id.contains('\0') {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog record id must contain 1 to 512 non-NUL bytes".to_owned(),
+        ));
+    }
+    if record.image_path.trim().is_empty() || record.image_path.contains('\0') {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog record image path is required".to_owned(),
+        ));
+    }
+    for path in [
+        record.thumbnail_path.as_deref(),
+        record.embedding_path.as_deref(),
+        record.artifact_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if path.trim().is_empty() || path.contains('\0') {
+            return Err(CatalogError::InvalidCatalog(
+                "Catalog artifact paths cannot be blank or contain NUL".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_page_size(limit: u32) -> CatalogResult<()> {
+    if limit == 0 || limit > MAX_PAGE_SIZE {
+        return Err(CatalogError::InvalidCatalog(format!(
+            "Catalog page size must be between 1 and {MAX_PAGE_SIZE}"
+        )));
+    }
+    Ok(())
+}
+
+fn configure_connection(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    connection
+        .pragma_update(None, "journal_mode", "wal")
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    connection
+        .pragma_update(None, "synchronous", "normal")
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    connection
+        .pragma_update(None, "temp_store", "memory")
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    connection
+        .pragma_update(None, "cache_size", -65_536)
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    connection
+        .pragma_update(None, "wal_autocheckpoint", 2_000)
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    Ok(())
+}
+
+fn migrate(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    if version > CATALOG_SCHEMA_VERSION {
+        return Err(CatalogError::Incompatible {
+            found: version,
+            supported: CATALOG_SCHEMA_VERSION,
+        });
+    }
+    if version < 1 {
+        connection
+            .execute_batch(
+                "begin immediate;
+                 create table if not exists catalog_metadata (
+                    key text primary key not null,
+                    value text not null
+                 ) strict;
+                 create table if not exists catalog_records (
+                    id text primary key not null,
+                    image_path text not null,
+                    thumbnail_path text,
+                    embedding_path text,
+                    artifact_path text,
+                    metadata_json text not null default '{}',
+                    created_at text not null,
+                    updated_at text not null
+                 ) strict;
+                 create index if not exists idx_catalog_records_image_path
+                    on catalog_records(image_path);
+                 pragma user_version = 1;
+                 commit;",
+            )
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+    }
+    Ok(())
+}
+
+fn validate_schema(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
+    validate_table_columns(
+        connection,
+        database_path,
+        "catalog_metadata",
+        &[("key", "TEXT", 1, 1), ("value", "TEXT", 1, 0)],
+    )?;
+    validate_table_columns(
+        connection,
+        database_path,
+        "catalog_records",
+        &[
+            ("id", "TEXT", 1_i64, 1_i64),
+            ("image_path", "TEXT", 1, 0),
+            ("thumbnail_path", "TEXT", 0, 0),
+            ("embedding_path", "TEXT", 0, 0),
+            ("artifact_path", "TEXT", 0, 0),
+            ("metadata_json", "TEXT", 1, 0),
+            ("created_at", "TEXT", 1, 0),
+            ("updated_at", "TEXT", 1, 0),
+        ],
+    )?;
+
+    let index_owner: Option<String> = connection
+        .query_row(
+            "select tbl_name from sqlite_master
+             where type = 'index' and name = 'idx_catalog_records_image_path'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    let mut index_statement = connection
+        .prepare("pragma index_info(idx_catalog_records_image_path)")
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    let indexed_columns = index_statement
+        .query_map([], |row| row.get::<_, String>("name"))
+        .map_err(|error| map_sqlite_error(database_path, error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    if index_owner.as_deref() != Some("catalog_records") || indexed_columns != ["image_path"] {
+        return Err(CatalogError::Corrupt {
+            path: database_path.to_path_buf(),
+            detail: "catalog_records image-path index has the wrong definition".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_table_columns(
+    connection: &Connection,
+    database_path: &Path,
+    table: &str,
+    expected_columns: &[(&str, &str, i64, i64)],
+) -> CatalogResult<()> {
+    let sql = format!("pragma table_info({table})");
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    let actual_columns = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>("name")?,
+                row.get::<_, String>("type")?,
+                row.get::<_, i64>("notnull")?,
+                row.get::<_, i64>("pk")?,
+            ))
+        })
+        .map_err(|error| map_sqlite_error(database_path, error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    let columns_match = actual_columns.len() == expected_columns.len()
+        && actual_columns
+            .iter()
+            .zip(expected_columns.iter())
+            .all(|(actual, expected)| {
+                actual.0 == expected.0
+                    && actual.1.eq_ignore_ascii_case(expected.1)
+                    && actual.2 == expected.2
+                    && actual.3 == expected.3
+            });
+    if !columns_match {
+        return Err(CatalogError::Corrupt {
+            path: database_path.to_path_buf(),
+            detail: format!("{table} table does not match schema version 1"),
+        });
+    }
+    Ok(())
+}
+
+fn write_database_metadata(
+    connection: &Connection,
+    database_path: &Path,
+    descriptor: &CatalogDescriptor,
+) -> CatalogResult<()> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    for (key, value) in [
+        ("catalog_id", descriptor.id.as_str()),
+        ("name", descriptor.name.as_str()),
+        ("created_at", descriptor.created_at.as_str()),
+    ] {
+        transaction
+            .execute(
+                "insert or replace into catalog_metadata(key, value) values (?1, ?2)",
+                params![key, value],
+            )
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(database_path, error))
+}
+
+fn validate_database_metadata(
+    connection: &Connection,
+    database_path: &Path,
+    descriptor: &CatalogDescriptor,
+) -> CatalogResult<()> {
+    for (key, expected) in [
+        ("catalog_id", descriptor.id.as_str()),
+        ("name", descriptor.name.as_str()),
+        ("created_at", descriptor.created_at.as_str()),
+    ] {
+        let actual: Option<String> = connection
+            .query_row(
+                "select value from catalog_metadata where key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+        if actual.as_deref() != Some(expected) {
+            return Err(CatalogError::Corrupt {
+                path: database_path.to_path_buf(),
+                detail: format!("manifest and database {key} values do not match"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn read_manifest(root: &Path) -> CatalogResult<CatalogDescriptor> {
+    let path = root.join(CATALOG_MANIFEST_FILE);
+    let payload = fs::read(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            CatalogError::InvalidCatalog(format!("Catalog manifest is missing: {}", path.display()))
+        } else {
+            CatalogError::Io(error)
+        }
+    })?;
+    let mut descriptor: CatalogDescriptor =
+        serde_json::from_slice(&payload).map_err(|error| CatalogError::Corrupt {
+            path: path.clone(),
+            detail: error.to_string(),
+        })?;
+    descriptor.path = root.to_path_buf();
+    Ok(descriptor)
+}
+
+fn write_manifest(root: &Path, descriptor: &CatalogDescriptor) -> CatalogResult<()> {
+    let mut payload = serde_json::to_vec_pretty(descriptor)?;
+    payload.push(b'\n');
+    atomic_write(&root.join(CATALOG_MANIFEST_FILE), &payload)
+}
+
+fn atomic_write(path: &Path, payload: &[u8]) -> CatalogResult<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let token = random_hex(8)?;
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("json");
+    let temporary = path.with_extension(format!("{extension}.{token}.tmp"));
+    let mut file = fs::File::create(&temporary)?;
+    file.write_all(payload)?;
+    file.sync_all()?;
+    drop(file);
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(CatalogError::Io(error));
+    }
+    Ok(())
+}
+
+fn random_hex(bytes: usize) -> CatalogResult<String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut buffer = vec![0; bytes];
+    getrandom::fill(&mut buffer)
+        .map_err(|error| CatalogError::Io(std::io::Error::other(error.to_string())))?;
+    let mut output = String::with_capacity(bytes * 2);
+    for byte in buffer {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(output)
+}
+
+fn map_sqlite_error(path: &Path, error: rusqlite::Error) -> CatalogError {
+    match &error {
+        rusqlite::Error::SqliteFailure(inner, _)
+            if matches!(
+                inner.code,
+                ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase
+            ) =>
+        {
+            CatalogError::Corrupt {
+                path: path.to_path_buf(),
+                detail: error.to_string(),
+            }
+        }
+        _ => CatalogError::Sqlite(error),
+    }
+}
+
+fn sqlite_storage_bytes(root: &Path) -> CatalogResult<u64> {
+    let mut bytes = 0_u64;
+    for name in [
+        CATALOG_DATABASE_FILE.to_owned(),
+        format!("{CATALOG_DATABASE_FILE}-wal"),
+        format!("{CATALOG_DATABASE_FILE}-shm"),
+    ] {
+        let path = root.join(name);
+        if let Ok(metadata) = fs::symlink_metadata(path) {
+            bytes = bytes.saturating_add(metadata.len());
+        }
+    }
+    Ok(bytes)
+}
+
+fn directory_file_bytes(root: &Path) -> CatalogResult<u64> {
+    let mut total = 0_u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if metadata.file_type().is_symlink() {
+                total = total.saturating_add(metadata.len());
+            } else if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn record(id: &str) -> NewCatalogRecord {
+        NewCatalogRecord {
+            id: id.to_owned(),
+            image_path: format!("images/{id}.jpg"),
+            thumbnail_path: Some(format!("thumbnails/{id}.jpg")),
+            embedding_path: Some(format!("embeddings/{id}.f32")),
+            artifact_path: None,
+            metadata: serde_json::json!({"caption": id}),
+        }
+    }
+
+    #[test]
+    fn catalog_lifecycle_is_independent_of_projects_and_jobs() {
+        let temporary = tempdir().expect("temp directory");
+        let state = temporary.path().join("state");
+        let root = temporary.path().join("selected").join("photos");
+        let registry = CatalogRegistry::new(&state);
+        fs::create_dir_all(&state).unwrap();
+        for operational_database in ["jobs.db", "project.db"] {
+            let connection = Connection::open(state.join(operational_database)).unwrap();
+            connection
+                .execute("create table sentinel(value text not null)", [])
+                .unwrap();
+            connection
+                .execute("insert into sentinel(value) values ('untouched')", [])
+                .unwrap();
+        }
+
+        let mut catalog = registry
+            .create_catalog(&root, "Photos")
+            .expect("catalog creates");
+        let id = catalog.descriptor().id.clone();
+        catalog
+            .append_records(&[record("one"), record("two")])
+            .expect("records append in a batch");
+        catalog.close();
+
+        let reopened = registry.open_catalog(&root).expect("catalog reopens");
+        assert_eq!(reopened.page_records(0, 10).expect("page").len(), 2);
+        assert!(root.join(CATALOG_DATABASE_FILE).is_file());
+        for operational_database in ["jobs.db", "project.db"] {
+            let connection = Connection::open(state.join(operational_database)).unwrap();
+            let tables: Vec<String> = connection
+                .prepare("select name from sqlite_master where type = 'table' order by name")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(tables, ["sentinel"]);
+            assert_eq!(
+                connection
+                    .query_row("select value from sentinel", [], |row| row
+                        .get::<_, String>(0))
+                    .unwrap(),
+                "untouched"
+            );
+        }
+        reopened.close();
+
+        let moved = temporary.path().join("moved-catalog");
+        fs::rename(&root, &moved).expect("catalog directory moves while closed");
+        let attached = registry.attach(&moved).expect("moved catalog reattaches");
+        assert_eq!(attached.id, id);
+        assert_eq!(registry.list().expect("list").len(), 1);
+        assert_eq!(
+            registry.list().expect("list")[0].path,
+            fs::canonicalize(&moved).unwrap()
+        );
+
+        registry.detach(&id).expect("catalog detaches");
+        assert!(moved.exists(), "detach must not delete catalog files");
+        assert!(registry.list().expect("list").is_empty());
+        assert_eq!(
+            Catalog::open(&moved)
+                .expect("detached catalog remains independently openable")
+                .page_records(0, 10)
+                .expect("page")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn explicit_delete_removes_only_a_valid_attached_catalog() {
+        let temporary = tempdir().expect("temp directory");
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let root = temporary.path().join("catalog");
+        let catalog = registry
+            .create_catalog(&root, "Delete me")
+            .expect("catalog creates");
+        let id = catalog.descriptor().id.clone();
+        catalog.close();
+
+        registry
+            .delete_on_disk(&id)
+            .expect("explicit delete succeeds");
+        assert!(!root.exists());
+        assert!(registry.list().expect("list").is_empty());
+    }
+
+    #[test]
+    fn registry_failure_does_not_delete_catalog_files() {
+        let temporary = tempdir().expect("temp directory");
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let root = temporary.path().join("catalog");
+        let catalog = registry
+            .create_catalog(&root, "Keep me")
+            .expect("catalog creates");
+        let id = catalog.descriptor().id.clone();
+        catalog.close();
+
+        registry.set_save_failure(true);
+        assert!(registry.delete_on_disk(&id).is_err());
+        assert!(root.join(CATALOG_DATABASE_FILE).is_file());
+        assert_eq!(registry.list().expect("registry remains readable").len(), 1);
+    }
+
+    #[test]
+    fn registry_contains_paths_not_catalog_records() {
+        let temporary = tempdir().expect("temp directory");
+        let registry = CatalogRegistry::new(temporary.path().join("normal-state"));
+        let root = temporary.path().join("catalog");
+        let mut catalog = registry
+            .create_catalog(&root, "Registry boundary")
+            .expect("catalog creates");
+        catalog
+            .append_records(&[record("private-record")])
+            .expect("record appends");
+
+        let registry_json =
+            fs::read_to_string(registry.registry_path()).expect("registry is readable");
+        assert!(registry_json.contains("Registry boundary"));
+        assert!(!registry_json.contains("private-record"));
+        assert!(
+            fs::metadata(registry.registry_path()).unwrap().len() < 4096,
+            "registry remains lightweight"
+        );
+
+        let connection = Connection::open(root.join(CATALOG_DATABASE_FILE)).unwrap();
+        let column_types: Vec<String> = connection
+            .prepare("pragma table_info(catalog_records)")
+            .unwrap()
+            .query_map([], |row| row.get(2))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(column_types.iter().all(|kind| kind == "TEXT"));
+    }
+
+    #[test]
+    fn sqlite_is_tuned_for_batched_writes_and_concurrent_reads() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        let mut writer = Catalog::create(&root, "Large catalog").expect("catalog creates");
+        let reader = Catalog::open(&root).expect("second read connection opens");
+        assert_eq!(writer.sqlite_setting("journal_mode").unwrap(), "wal");
+        assert_eq!(writer.sqlite_setting("busy_timeout").unwrap(), "5000");
+        assert_eq!(writer.sqlite_setting("foreign_keys").unwrap(), "1");
+
+        let records = (0..2_500)
+            .map(|index| record(&format!("record-{index:04}")))
+            .collect::<Vec<_>>();
+        writer
+            .append_records(&records)
+            .expect("large batch appends");
+        assert_eq!(reader.page_records(100, 75).expect("paged read").len(), 75);
+        assert_eq!(
+            writer
+                .storage_accounting()
+                .expect("accounting")
+                .record_count,
+            2_500
+        );
+
+        let mut cursor = None;
+        let mut ids = Vec::new();
+        loop {
+            let page = reader
+                .page_records_after(cursor, 137)
+                .expect("keyset page reads");
+            if page.records.is_empty() {
+                break;
+            }
+            cursor = page.next_cursor;
+            ids.extend(page.records.into_iter().map(|record| record.id));
+        }
+        assert_eq!(ids.len(), 2_500);
+        ids.sort();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            2_500,
+            "keyset pages neither skip nor repeat rows"
+        );
+    }
+
+    #[test]
+    fn storage_accounting_includes_externalized_artifacts() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        let catalog = Catalog::create(&root, "Accounting").expect("catalog creates");
+        fs::write(
+            catalog
+                .artifact_directory("images")
+                .unwrap()
+                .join("large.bin"),
+            vec![7_u8; 16_384],
+        )
+        .expect("artifact writes");
+
+        let accounting = catalog.storage_accounting().expect("accounting");
+        assert!(accounting.database_bytes > 0);
+        assert!(accounting.manifest_bytes > 0);
+        assert!(accounting.artifact_bytes >= 16_384);
+        assert_eq!(
+            accounting.total_bytes,
+            accounting.database_bytes + accounting.manifest_bytes + accounting.artifact_bytes
+        );
+    }
+
+    #[test]
+    fn incompatible_and_corrupt_catalogs_have_typed_errors() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        Catalog::create(&root, "Errors")
+            .expect("catalog creates")
+            .close();
+
+        let database_path = root.join(CATALOG_DATABASE_FILE);
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .pragma_update(None, "user_version", CATALOG_SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(connection);
+        assert!(matches!(
+            Catalog::open(&root),
+            Err(CatalogError::Incompatible { .. })
+        ));
+
+        fs::write(&database_path, b"not a sqlite database").expect("database corrupts");
+        assert!(matches!(
+            Catalog::open(&root),
+            Err(CatalogError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn older_schema_is_migrated_on_open() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        Catalog::create(&root, "Migration")
+            .expect("catalog creates")
+            .close();
+        let database_path = root.join(CATALOG_DATABASE_FILE);
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute("drop table catalog_records", [])
+            .unwrap();
+        connection.pragma_update(None, "user_version", 0).unwrap();
+        drop(connection);
+
+        Catalog::open(&root)
+            .expect("older catalog migrates")
+            .close();
+        let connection = Connection::open(database_path).unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, CATALOG_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn malformed_current_schema_is_reported_as_corrupt_during_open() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        Catalog::create(&root, "Schema")
+            .expect("catalog creates")
+            .close();
+        let connection = Connection::open(root.join(CATALOG_DATABASE_FILE)).unwrap();
+        connection
+            .execute("drop index idx_catalog_records_image_path", [])
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            Catalog::open(&root),
+            Err(CatalogError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn missing_metadata_table_is_reported_as_corrupt_during_open() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        Catalog::create(&root, "Metadata schema")
+            .expect("catalog creates")
+            .close();
+        let connection = Connection::open(root.join(CATALOG_DATABASE_FILE)).unwrap();
+        connection
+            .execute("drop table catalog_metadata", [])
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            Catalog::open(&root),
+            Err(CatalogError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn same_name_index_with_wrong_definition_is_reported_as_corrupt() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        Catalog::create(&root, "Index schema")
+            .expect("catalog creates")
+            .close();
+        let connection = Connection::open(root.join(CATALOG_DATABASE_FILE)).unwrap();
+        connection
+            .execute("drop index idx_catalog_records_image_path", [])
+            .unwrap();
+        connection
+            .execute(
+                "create index idx_catalog_records_image_path
+                 on catalog_metadata(value)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            Catalog::open(&root),
+            Err(CatalogError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn oversized_registry_is_rejected_before_replacing_the_valid_file() {
+        let temporary = tempdir().expect("temp directory");
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        registry
+            .save(&RegistryDocument::default())
+            .expect("small registry saves");
+        let oversized = RegistryDocument {
+            schema_version: REGISTRY_SCHEMA_VERSION,
+            catalogs: vec![AttachedCatalog {
+                id: "oversized".to_owned(),
+                name: "x".repeat(MAX_REGISTRY_BYTES as usize),
+                path: PathBuf::from("catalog"),
+                attached_at: utc_now(),
+            }],
+        };
+
+        assert!(matches!(
+            registry.save(&oversized),
+            Err(CatalogError::InvalidCatalog(_))
+        ));
+        assert!(
+            registry
+                .load()
+                .expect("prior registry still loads")
+                .catalogs
+                .is_empty(),
+            "oversized serialization must not replace the previous registry"
+        );
+    }
+
+    #[test]
+    fn creation_rejects_nonempty_directories_to_make_delete_semantics_safe() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("existing");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("keep.txt"), "user data").unwrap();
+        assert!(matches!(
+            Catalog::create(&root, "Unsafe"),
+            Err(CatalogError::AlreadyExists(_))
+        ));
+        assert_eq!(
+            fs::read_to_string(root.join("keep.txt")).unwrap(),
+            "user data"
+        );
+    }
+}
