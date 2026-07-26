@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -20,8 +21,8 @@ from conftest import require_tool
 # file and test_rust_api_contract_snapshots.py.
 from rust_api_harness import (
     PNG_1X1,
+    enable_api_listening_log,
     SpawnedProcess,
-    free_port,
     minimal_safetensors as _minimal_safetensors,
     spawn_process,
     wait_for_health,
@@ -232,27 +233,36 @@ def wait_for_job_status(base_url: str, job_id: str, status: str, process: Spawne
     raise AssertionError(f"Job did not reach {status}: {last_job}")
 
 
+def assert_claimed_by(completed: dict, base_worker_id: str) -> None:
+    """The supervisor gives each CPU utility child a strict, base-derived worker id."""
+    actual = completed["workerId"]
+    pattern = rf"{re.escape(base_worker_id)}-cpu(?:-[1-9][0-9]*)?"
+    assert re.fullmatch(pattern, actual), (
+        f"{actual!r} is not a CPU utility child of {base_worker_id!r}"
+    )
+
+
 @pytest.fixture()
 def rust_api(tmp_path):
     command = _launch_command(
         "SCENEWORKS_RUST_API_BINARY", "sceneworks-rust-api", "the Rust API smoke test"
     )
 
-    port = free_port()
-    base_url = f"http://127.0.0.1:{port}"
     env = os.environ.copy()
     env.update(
         {
             "SCENEWORKS_API_HOST": "127.0.0.1",
-            "SCENEWORKS_API_PORT": str(port),
+            "SCENEWORKS_API_PORT": "0",
             "SCENEWORKS_DATA_DIR": str(tmp_path / "data"),
             "SCENEWORKS_CONFIG_DIR": str(tmp_path / "config"),
             "SCENEWORKS_JOBS_DB_PATH": str(tmp_path / "cache" / "jobs.db"),
             "SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE": "1",
         }
     )
+    enable_api_listening_log(env)
     process = spawn_process(command, cwd=ROOT, env=env)
     try:
+        base_url = process.wait_for_listening_url()
         wait_for_health(base_url, process)
         yield base_url
     finally:
@@ -526,9 +536,7 @@ def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(ru
 
         completed = wait_for_job_status(rust_api, job["id"], "completed", worker)
 
-        # The supervisor spawns per-device child workers (e.g. <id>-cpu-2), so the
-        # configured WORKER_ID is a prefix of the claiming worker's id.
-        assert completed["workerId"].startswith("rust-worker-smoke")
+        assert_claimed_by(completed, "rust-worker-smoke")
         assert completed["result"]["repo"] is None
         assert completed["result"]["path"].endswith("smoke_lora")
         assert (
@@ -654,15 +662,16 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
         track_job.raise_for_status()
         track_completed = wait_for_job_status(rust_api, track_job.json()["id"], "completed", worker)
 
-        assert frame_completed["workerId"] == "rust-ffmpeg-smoke"
+        assert_claimed_by(frame_completed, "rust-ffmpeg-smoke")
         assert frame_completed["result"]["assets"][0]["type"] == "frame"
         assert frame_completed["result"]["assets"][0]["recipe"]["mode"] == "frame_extract"
-        assert export_completed["workerId"] == "rust-ffmpeg-smoke"
+        assert_claimed_by(export_completed, "rust-ffmpeg-smoke")
         assert export_completed["result"]["assets"][0]["type"] == "render"
         assert export_completed["result"]["assets"][0]["file"]["mimeType"] == "video/mp4"
-        assert {job["workerId"] for job in detection_completed} == {"rust-ffmpeg-smoke"}
+        for completed in detection_completed:
+            assert_claimed_by(completed, "rust-ffmpeg-smoke")
         assert all(job["result"]["detections"] for job in detection_completed)
-        assert track_completed["workerId"] == "rust-ffmpeg-smoke"
+        assert_claimed_by(track_completed, "rust-ffmpeg-smoke")
         assert track_completed["result"]["track"]["recipe"]["mode"] == "person_track"
     finally:
         worker.terminate()

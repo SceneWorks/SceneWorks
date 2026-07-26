@@ -79,11 +79,11 @@ services:
       HF_HOME: ${SCENEWORKS_HF_HOME:-/sceneworks/data/cache/huggingface}
       HF_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       HUGGINGFACE_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       # "Refine my prompt" (sc-2041 / sc-5500) runs in-process on the candle TextLlm
       # provider and downloads on demand. Optionally override the default model repo.
       PROMPT_REFINE_MODEL: ${PROMPT_REFINE_MODEL:-}
       PROMPT_REFINE_MAX_NEW_TOKENS: ${PROMPT_REFINE_MAX_NEW_TOKENS:-512}
-      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
     volumes:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
       - ${SCENEWORKS_HF_CACHE_BIND:-${HF_HOME:-${USERPROFILE:-$HOME}/.cache/huggingface}}:/sceneworks/data/cache/huggingface
@@ -131,7 +131,6 @@ services:
       HF_HOME: ${SCENEWORKS_HF_HOME:-/sceneworks/data/cache/huggingface}
       HF_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       HUGGINGFACE_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
-      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
     volumes:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
       - ${SCENEWORKS_HF_CACHE_BIND:-${HF_HOME:-${USERPROFILE:-$HOME}/.cache/huggingface}}:/sceneworks/data/cache/huggingface
@@ -139,15 +138,6 @@ services:
     depends_on:
       api:
         condition: service_healthy
-    # Keep GPU visibility available for explicit Rust GPU auto mode.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
   web:
     build:
       context: .

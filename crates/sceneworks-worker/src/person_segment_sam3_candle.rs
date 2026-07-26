@@ -80,10 +80,67 @@ fn parse_quant(value: &str) -> Option<Quant> {
 /// identities. Mirrors the MLX module's cache + poison-recovery idiom.
 static WEIGHTS: OnceLock<Mutex<Option<Weights>>> = OnceLock::new();
 
+fn propagate_person_concept(
+    model_path: &Path,
+    tokenizer_path: &Path,
+    frames: &[Tensor],
+    device: &Device,
+    cancel: Option<&CancelFlag>,
+    mut progress: Option<SegmentProgress>,
+) -> WorkerResult<Vec<VideoFrameOutput>> {
+    check_segment_canceled(cancel)?;
+    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        guard
+    });
+    if guard.is_none() {
+        let weights = Weights::from_file(model_path, device)
+            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
+        *guard = Some(weights);
+    }
+    let weights = guard.as_ref().expect("weights loaded");
+
+    let mut model = Sam3VideoModel::from_weights(weights)
+        .map_err(|e| WorkerError::Engine(format!("sam3 model build: {e}")))?;
+    if let Some(quant) = quant_level() {
+        model
+            .quantize(quant)
+            .map_err(|e| WorkerError::Engine(format!("sam3 quantize: {e}")))?;
+    }
+    let tokenizer = Sam3Tokenizer::from_file(tokenizer_path, &Sam3TextConfig::sam3())
+        .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
+    let (input_ids, text_mask) = tokenizer
+        .encode(CONCEPT_PROMPT, device)
+        .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+    check_segment_canceled(cancel)?;
+
+    model
+        .propagate(
+            frames,
+            &input_ids,
+            &text_mask,
+            cancel,
+            progress
+                .as_deref_mut()
+                .map(|cb| cb as &mut dyn FnMut(usize, usize)),
+        )
+        .map_err(|e| match e {
+            runtime_cuda::media::CandleError::Canceled => {
+                WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
+            }
+            e => WorkerError::Engine(format!("sam3 propagate: {e}")),
+        })
+}
+
 /// Preprocess an RGB frame to the SAM3 input tensor: resize to a 1008×1008 square (bilinear, fixed-
 /// square — *not* aspect-preserving), normalize by mean/std `0.5` to `[-1,1]`, packed NCHW
 /// `[1,3,1008,1008]` f32 on `device`.
-fn input_tensor(img: &image::RgbImage, device: &Device) -> WorkerResult<Tensor> {
+fn input_tensor<I>(img: &I, device: &Device) -> WorkerResult<Tensor>
+where
+    I: image::GenericImageView<Pixel = image::Rgb<u8>>,
+{
     let resized = image::imageops::resize(
         img,
         INPUT_SIZE,
@@ -118,7 +175,7 @@ pub(crate) fn segment_track_blocking(
     clip_frame_paths: Vec<PathBuf>,
     anchors: Vec<Option<BoxNorm>>,
     cancel: Option<CancelFlag>,
-    mut progress: Option<SegmentProgress>,
+    progress: Option<SegmentProgress>,
 ) -> WorkerResult<Vec<Vec<u8>>> {
     // A frames/anchors length mismatch is a caller contract violation. The old `assert_eq!`
     // panicked inside `spawn_blocking`, which `media_jobs` absorbed as a silent "degraded"
@@ -157,60 +214,14 @@ pub(crate) fn segment_track_blocking(
         frames.push(input_tensor(&img, &device)?);
     }
 
-    // Guard the cold multi-GB checkpoint parse + model build — the engine only observes the flag
-    // once propagation starts.
-    check_segment_canceled(cancel.as_ref())?;
-
-    // Cached checkpoint; recover from a poisoned lock by dropping the cached weights and reloading.
-    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if guard.is_none() {
-        let weights = Weights::from_file(&model_path, &device)
-            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
-        *guard = Some(weights);
-    }
-    let weights = guard.as_ref().expect("weights loaded");
-
-    // Fresh model per clip (clean tracking state) + tokenize the concept once.
-    let mut model = Sam3VideoModel::from_weights(weights)
-        .map_err(|e| WorkerError::Engine(format!("sam3 model build: {e}")))?;
-    // Optional quant (opt-in via `SCENEWORKS_SAM3_QUANT`); off-Mac defaults to dense (sc-6361), so
-    // unset leaves the F32 result unchanged.
-    if let Some(quant) = quant_level() {
-        model
-            .quantize(quant)
-            .map_err(|e| WorkerError::Engine(format!("sam3 quantize: {e}")))?;
-    }
-    let tokenizer = Sam3Tokenizer::from_file(&tokenizer_path, &Sam3TextConfig::sam3())
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
-    let (input_ids, text_mask) = tokenizer
-        .encode(CONCEPT_PROMPT, &device)
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
-    check_segment_canceled(cancel.as_ref())?;
-
-    // candle-gen-sam3 `propagate` takes `cancel` + per-frame `progress` (sc-8972, the candle
-    // sibling of the MLX video per-step cancel contract, gen-core d8038beb). Thread the caller's
-    // flag/callback so a user cancel stops between frames and each frame reports progress.
-    let outputs = model
-        .propagate(
-            &frames,
-            &input_ids,
-            &text_mask,
-            cancel.as_ref(),
-            progress
-                .as_deref_mut()
-                .map(|cb| cb as &mut dyn FnMut(usize, usize)),
-        )
-        .map_err(|e| match e {
-            runtime_cuda::media::CandleError::Canceled => {
-                WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
-            }
-            e => WorkerError::Engine(format!("sam3 propagate: {e}")),
-        })?;
+    let outputs = propagate_person_concept(
+        &model_path,
+        &tokenizer_path,
+        &frames,
+        &device,
+        cancel.as_ref(),
+        progress,
+    )?;
 
     // Associate SAM3's identities to the selected track, then emit that object's per-frame mask.
     let Some(selected) = select_object(&outputs, &anchors) else {
@@ -239,18 +250,18 @@ pub(crate) fn segment_track_blocking(
 pub(crate) fn segment_all_persons_in_memory(
     model_path: &Path,
     tokenizer_path: &Path,
-    frames: &[image::RgbImage],
+    frames: &[gen_core::Image],
     cancel: Option<CancelFlag>,
-    mut progress: Option<SegmentProgress>,
+    progress: Option<SegmentProgress>,
 ) -> WorkerResult<AllPersonMasks> {
     check_segment_canceled(cancel.as_ref())?;
     let first = frames.first().ok_or_else(|| {
         WorkerError::InvalidPayload("scail2 segmentation: no frames to segment".into())
     })?;
-    let (width, height) = (first.width(), first.height());
+    let (width, height) = (first.width, first.height);
     if frames
         .iter()
-        .any(|f| f.width() != width || f.height() != height)
+        .any(|f| f.width != width || f.height != height)
     {
         return Err(WorkerError::InvalidPayload(
             "scail2 segmentation: frames are not all the same size".into(),
@@ -260,62 +271,27 @@ pub(crate) fn segment_all_persons_in_memory(
     let device = default_device().map_err(|e| WorkerError::Engine(format!("sam3 device: {e}")))?;
     let tensors: Vec<Tensor> = frames
         .iter()
-        .map(|f| input_tensor(f, &device))
+        .map(|frame| {
+            let view = image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(
+                frame.width,
+                frame.height,
+                frame.pixels.as_slice(),
+            )
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("scail2 segmentation: malformed RGB frame".into())
+            })?;
+            input_tensor(&view, &device)
+        })
         .collect::<WorkerResult<Vec<_>>>()?;
 
-    // Guard the cold multi-GB checkpoint parse + model build — the engine only observes the flag
-    // once propagation starts.
-    check_segment_canceled(cancel.as_ref())?;
-
-    // Cached checkpoint; recover from a poisoned lock by dropping + reloading (mirrors
-    // `segment_track_blocking`).
-    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if guard.is_none() {
-        let weights = Weights::from_file(model_path, &device)
-            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
-        *guard = Some(weights);
-    }
-    let weights = guard.as_ref().expect("weights loaded");
-
-    // Fresh model per call (clean tracking state) + tokenize the concept once. Off-Mac defaults to
-    // dense (sc-6361); `SCENEWORKS_SAM3_QUANT` opts back in.
-    let mut model = Sam3VideoModel::from_weights(weights)
-        .map_err(|e| WorkerError::Engine(format!("sam3 model build: {e}")))?;
-    if let Some(quant) = quant_level() {
-        model
-            .quantize(quant)
-            .map_err(|e| WorkerError::Engine(format!("sam3 quantize: {e}")))?;
-    }
-    let tokenizer = Sam3Tokenizer::from_file(tokenizer_path, &Sam3TextConfig::sam3())
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
-    let (input_ids, text_mask) = tokenizer
-        .encode(CONCEPT_PROMPT, &device)
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
-    check_segment_canceled(cancel.as_ref())?;
-
-    // candle-gen-sam3 `propagate` takes `cancel` + per-frame `progress` (sc-8972). Thread the
-    // caller's flag/callback (mirrors `segment_track_blocking`).
-    let outputs = model
-        .propagate(
-            &tensors,
-            &input_ids,
-            &text_mask,
-            cancel.as_ref(),
-            progress
-                .as_deref_mut()
-                .map(|cb| cb as &mut dyn FnMut(usize, usize)),
-        )
-        .map_err(|e| match e {
-            runtime_cuda::media::CandleError::Canceled => {
-                WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
-            }
-            e => WorkerError::Engine(format!("sam3 propagate: {e}")),
-        })?;
+    let outputs = propagate_person_concept(
+        model_path,
+        tokenizer_path,
+        &tensors,
+        &device,
+        cancel.as_ref(),
+        progress,
+    )?;
 
     // Paint order + per-frame masks are backend-neutral pure logic shared with the MLX twin via
     // `person_segment_sam3_common` (sc-11191, F-018), so the tie-break and mask selection stay
@@ -375,7 +351,11 @@ mod tests {
             matches!(track, Err(WorkerError::Canceled(_))),
             "segment_track_blocking: expected Canceled, got {track:?}"
         );
-        let frames = vec![image::RgbImage::new(4, 4)];
+        let frames = vec![gen_core::Image {
+            pixels: vec![0; 4 * 4 * 3],
+            width: 4,
+            height: 4,
+        }];
         let all = segment_all_persons_in_memory(
             Path::new("/nonexistent/model.safetensors"),
             Path::new("/nonexistent/tokenizer.json"),
@@ -386,6 +366,26 @@ mod tests {
         assert!(
             matches!(all, Err(WorkerError::Canceled(_))),
             "segment_all_persons_in_memory: expected Canceled"
+        );
+    }
+
+    #[test]
+    fn in_memory_segmentation_rejects_malformed_engine_image_without_cloning() {
+        let frames = vec![gen_core::Image {
+            pixels: vec![0; 4 * 4 * 3 - 1],
+            width: 4,
+            height: 4,
+        }];
+        let result = segment_all_persons_in_memory(
+            Path::new("/nonexistent/model.safetensors"),
+            Path::new("/nonexistent/tokenizer.json"),
+            &frames,
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(WorkerError::InvalidPayload(ref m)) if m.contains("malformed RGB frame")),
+            "malformed borrowed frame must fail before loading weights"
         );
     }
 

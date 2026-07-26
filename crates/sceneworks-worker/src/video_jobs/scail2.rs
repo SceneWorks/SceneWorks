@@ -331,18 +331,6 @@ pub(super) async fn resolve_scail2_conditioning(
     let (sam_model, sam_tokenizer) =
         crate::person_segment_sam3::ensure_segmenter_weights(settings, &context).await?;
 
-    // Decode the engine `Image`s to `RgbImage`s for SAM3 (it normalizes RGB internally).
-    let ref_rgb =
-        image::RgbImage::from_raw(reference.width, reference.height, reference.pixels.clone())
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload("scail2 reference image is malformed".into())
-            })?;
-    let driving_rgb: Vec<image::RgbImage> = driving
-        .iter()
-        .map(|f| image::RgbImage::from_raw(f.width, f.height, f.pixels.clone()))
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| WorkerError::InvalidPayload("scail2 driving frame is malformed".into()))?;
-
     // Segment + paint via the shared orchestrator (sc-8830). Animation keeps the reference's world
     // (ref bg white) and drops the driving world (driving bg black); the native SAM3 module is the
     // per-frame 1008² MLX twin.
@@ -351,29 +339,31 @@ pub(super) async fn resolve_scail2_conditioning(
         api,
         settings,
         &job.id,
-        reference,
-        driving,
         move |flag| {
             let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
                 &rm,
                 &rt,
-                std::slice::from_ref(&ref_rgb),
+                std::slice::from_ref(&reference),
                 Some(flag),
                 None,
             )?;
-            crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
+            let mask =
+                crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)?;
+            Ok((reference, mask))
         },
         move |flag| {
             let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
                 &sam_model,
                 &sam_tokenizer,
-                &driving_rgb,
+                &driving,
                 Some(flag),
                 Some(Box::new(|frame, total| {
                     tracing::debug!(event = "scail2_sam3_propagate_progress", frame, total);
                 })),
             )?;
-            crate::scail2_masks::paint_driving_masks(&masks, crate::scail2_masks::BG_BLACK)
+            let masks =
+                crate::scail2_masks::paint_driving_masks(&masks, crate::scail2_masks::BG_BLACK)?;
+            Ok((driving, masks))
         },
     )
     .await
@@ -515,11 +505,6 @@ pub(super) async fn resolve_scail2_replace_conditioning(
     };
     let (sam_model, sam_tokenizer) =
         crate::person_segment_sam3::ensure_segmenter_weights(settings, &context).await?;
-    let ref_rgb =
-        image::RgbImage::from_raw(reference.width, reference.height, reference.pixels.clone())
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload("scail2 reference image is malformed".into())
-            })?;
     // Heartbeat keepalive + user cancel across the cold SAM3 parse + single-frame propagate
     // (sc-8390 / sc-8807), via the shared blocking-segment helper (sc-8830).
     let ref_mask = scail2_segment_blocking(
@@ -531,14 +516,17 @@ pub(super) async fn resolve_scail2_replace_conditioning(
             let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
                 &sam_model,
                 &sam_tokenizer,
-                std::slice::from_ref(&ref_rgb),
+                std::slice::from_ref(&reference),
                 Some(flag),
                 None,
             )?;
-            crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
+            let mask =
+                crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)?;
+            Ok((mask, reference))
         },
     )
     .await?;
+    let (ref_mask, reference) = ref_mask;
 
     let conditioning = vec![
         Conditioning::Reference {

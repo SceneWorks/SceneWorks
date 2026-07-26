@@ -272,6 +272,252 @@ fn streaming_result_carries_facts_for_api_persistence() {
     assert_eq!(result["generationSetId"], json!(plan.genset_id));
     assert_eq!(result["assetWrites"].as_array().map(Vec::len), Some(1));
     assert!(result.contains_key("generationSet"));
+    assert_eq!(result["adapter"], json!(plan.adapter));
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn ideogram_placeholder_recovery_handles_clean_recover_and_exhaustion() {
+    let cancel = CancelFlag::new();
+    let placeholder = |_pixels: &[u8], _width: u32, _height: u32| true;
+    let mut calls = 0;
+    let clean = recover_ideogram_placeholder_with(
+        false,
+        3,
+        7,
+        &cancel,
+        (1, 1, vec![1]),
+        placeholder,
+        |_| {
+            calls += 1;
+            Ok((1, 1, vec![0]))
+        },
+    )
+    .unwrap();
+    assert_eq!(clean, (7, 1, 1, vec![1]));
+    assert_eq!(calls, 0, "disabled recovery must not render again");
+
+    let enabled_clean = recover_ideogram_placeholder_with(
+        true,
+        3,
+        7,
+        &cancel,
+        (1, 1, vec![0]),
+        |pixels, _, _| pixels[0] == 1,
+        |_| {
+            calls += 1;
+            Ok((1, 1, vec![1]))
+        },
+    )
+    .unwrap();
+    assert_eq!(enabled_clean, (7, 1, 1, vec![0]));
+    assert_eq!(calls, 0, "an enabled clean render must not pay for a retry");
+
+    let recovered_seed = crate::ideogram_caption::recovery_seed(7, 0);
+    let recovered = recover_ideogram_placeholder_with(
+        true,
+        3,
+        7,
+        &cancel,
+        (1, 1, vec![1]),
+        |pixels, _, _| pixels[0] == 1,
+        |_| Ok((2, 2, vec![0])),
+    )
+    .unwrap();
+    assert_eq!(recovered, (recovered_seed, 2, 2, vec![0]));
+
+    let mut attempts = 0;
+    let exhausted = recover_ideogram_placeholder_with(
+        true,
+        2,
+        11,
+        &cancel,
+        (1, 1, vec![1]),
+        |pixels, _, _| pixels[0] == 1,
+        |_| {
+            attempts += 1;
+            Ok((1, 1, vec![1]))
+        },
+    )
+    .unwrap();
+    assert_eq!(attempts, 2);
+    assert_eq!(exhausted.0, crate::ideogram_caption::recovery_seed(11, 1));
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn ideogram_placeholder_recovery_honors_cancel_and_propagates_errors() {
+    let cancelled = CancelFlag::new();
+    cancelled.cancel();
+    let mut calls = 0;
+    let result = recover_ideogram_placeholder_with(
+        true,
+        3,
+        5,
+        &cancelled,
+        (1, 1, vec![1]),
+        |_, _, _| true,
+        |_| {
+            calls += 1;
+            Ok((1, 1, vec![0]))
+        },
+    )
+    .unwrap();
+    assert_eq!(result, (5, 1, 1, vec![1]));
+    assert_eq!(calls, 0);
+
+    let error = recover_ideogram_placeholder_with(
+        true,
+        1,
+        5,
+        &CancelFlag::new(),
+        (1, 1, vec![1]),
+        |_, _, _| true,
+        |_| Err(WorkerError::Engine("retry failed".to_owned())),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("retry failed"));
+}
+
+/// Mutation guard for F-061's production wiring. These paths normally require a live project,
+/// installed tier trees, and a GPU, so source-level assertions pin the exact call-site properties
+/// that pure helper tests cannot observe: one candle route decision reused by plan and dispatch,
+/// reject-only tier probes in both candle gates, and Qwen load telemetry using the resolved adapter
+/// count. Reintroducing the historical second route resolution, eager probes, or literal zero makes
+/// this test fail in the platform-neutral worker suite.
+#[test]
+fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
+    fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let tail = source
+            .split_once(start)
+            .unwrap_or_else(|| panic!("missing source marker {start:?}"))
+            .1;
+        tail.split_once(end)
+            .unwrap_or_else(|| panic!("missing source marker {end:?}"))
+            .0
+    }
+
+    let image_jobs = include_str!("../image_jobs.rs");
+    let run_job = between(
+        image_jobs,
+        "pub(crate) async fn run_image_generate_job(",
+        "\nasync fn generate_stub_stream(",
+    );
+    assert_eq!(
+        run_job.matches("resolve_candle_image_route(").count(),
+        1,
+        "candle route must be resolved exactly once per job"
+    );
+    let route_binding = run_job
+        .find("let route = resolve_candle_image_route")
+        .expect("one route binding");
+    let plan_use = run_job[route_binding..]
+        .find("ImagePlan::with_count_and_adapter")
+        .expect("the resolved route feeds the plan");
+    let dispatch_use = run_job[route_binding..]
+        .find("let handled = match route")
+        .expect("the same resolved route feeds dispatch");
+    assert!(
+        plan_use < dispatch_use,
+        "plan count/adapter must be bound before dispatching the same route"
+    );
+    let candle_route_wiring = &run_job[route_binding..route_binding + dispatch_use];
+    assert!(
+        candle_route_wiring.contains(
+            "route.map_or(request.count, |route| route.image_count(&request, settings))",
+        ),
+        "the resolved candle route must supply the effective image count"
+    );
+    assert!(
+        candle_route_wiring
+            .contains("route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request))"),
+        "the resolved candle route must supply the adapter label"
+    );
+
+    let base = include_str!("base.rs");
+    let mlx_stream = between(
+        base,
+        "async fn generate_stream(",
+        "\nasync fn generate_candle_stream(",
+    );
+    let candle_stream = between(base, "async fn generate_candle_stream(", "\nfn lora_label(");
+    assert_eq!(
+        mlx_stream.matches("recover_ideogram_placeholder(").count(),
+        1,
+        "the MLX generation loop must use the shared placeholder recovery policy"
+    );
+    assert_eq!(
+        candle_stream
+            .matches("recover_ideogram_placeholder(")
+            .count(),
+        1,
+        "the candle generation loop must use the shared placeholder recovery policy"
+    );
+    assert_eq!(
+        candle_stream.matches("installed_tier_keys(").count(),
+        2,
+        "the generic candle lane probes tiers only in its two reject arms"
+    );
+    let sequential_reject = candle_stream
+        .find("if let Some(seq_gb) =")
+        .expect("sequential overflow reject");
+    let first_probe = candle_stream
+        .find("installed_tier_keys(")
+        .expect("sequential reject tier probe");
+    let too_big_reject = candle_stream
+        .find("FitDecision::TooBig")
+        .expect("resident reject");
+    let second_probe = candle_stream[first_probe + 1..]
+        .find("installed_tier_keys(")
+        .map(|offset| first_probe + 1 + offset)
+        .expect("resident reject tier probe");
+    assert!(
+        sequential_reject < first_probe && too_big_reject < second_probe,
+        "installed-tier walks must stay below their reject decisions"
+    );
+
+    let qwen = include_str!("qwen_edit_candle.rs");
+    let qwen_stream = qwen
+        .split_once("pub(super) async fn generate_candle_qwen_edit_stream(")
+        .expect("Qwen edit stream")
+        .1;
+    assert_eq!(
+        qwen_stream.matches("installed_tier_keys(").count(),
+        1,
+        "Qwen edit probes installed tiers only for rejection advice"
+    );
+    assert!(
+        qwen_stream
+            .find("LoadPlan::Reject")
+            .expect("Qwen reject arm")
+            < qwen_stream
+                .find("installed_tier_keys(")
+                .expect("Qwen reject tier probe"),
+        "Qwen installed-tier walk must stay inside the reject arm"
+    );
+    assert!(
+        qwen_stream.contains("let adapter_count = adapters.len();"),
+        "Qwen load telemetry must derive its adapter count from the resolved adapter stack"
+    );
+    let start_args = between(
+        qwen_stream,
+        "let (cancel, rx, blocking) = start_gen_stream(",
+        "move || {",
+    );
+    assert!(
+        start_args.contains("adapter_count,"),
+        "Qwen load telemetry must carry the complete built-in + user adapter count"
+    );
+    assert!(
+        !start_args.lines().any(|line| line.trim() == "0,"),
+        "Qwen load telemetry must never regress to a literal zero adapter count"
+    );
 }
 
 #[test]
@@ -1833,20 +2079,76 @@ fn adapter_id_reports_per_family_mlx_label() {
         adapter_id(&request(json!({ "model": "lens_turbo" }))),
         "mlx_lens"
     );
-    // Bernini still-image companion (sc-5424) IS a MODEL_TABLE row (engine `bernini`), so unlike the
-    // bespoke pulid/instantid routes `adapter_id` resolves its real per-set label.
+    // Bernini still-image companion (sc-5424) IS a MODEL_TABLE row (engine `bernini`).
     assert_eq!(
         adapter_id(&request(json!({ "model": "bernini_image" }))),
         "mlx_bernini"
     );
-    // PuLID-FLUX (sc-3344) is MLX-routed but via a BESPOKE route (not the MODEL_TABLE registry
-    // families), so `adapter_id` — which only resolves MODEL_TABLE rows — reports the stub label;
-    // the real per-asset label (`mlx_pulid_flux`) is applied in `generate_pulid_flux_stream` via
-    // `consume_gen_events`. Same shape as the InstantID bespoke route.
+    // The request-only helper remains a registry fallback. Production generation-set telemetry uses
+    // the resolved route's label, which covers bespoke IDs such as PuLID and InstantID.
     assert_eq!(
         adapter_id(&request(json!({ "model": "pulid_flux_dev" }))),
         "procedural_preview"
     );
+    assert_eq!(
+        ImageRoute::PulidFlux.adapter_label(&request(json!({ "model": "pulid_flux_dev" }))),
+        "mlx_pulid_flux"
+    );
+    assert_eq!(
+        ImageRoute::InstantId.adapter_label(&request(json!({ "model": "instantid_realvisxl" }))),
+        "mlx_instantid"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn every_generating_mlx_route_has_a_real_generation_set_adapter() {
+    let cases = [
+        (ImageRoute::ZImageControl, "z_image_turbo", "mlx_z_image"),
+        (ImageRoute::ZImageBaseControl, "z_image", "mlx_z_image"),
+        (ImageRoute::QwenControl, "qwen_image", "mlx_qwen"),
+        (ImageRoute::KolorsControl, "kolors", "mlx_kolors"),
+        (
+            ImageRoute::KreaControl,
+            "krea_2_turbo",
+            "krea_2_turbo_control",
+        ),
+        (ImageRoute::Flux1DevControl, "flux_dev", "mlx_flux"),
+        (ImageRoute::Flux2DevControl, "flux2_dev", "mlx_flux2"),
+        (ImageRoute::Flux2Edit, "flux2_klein_9b", "mlx_flux2"),
+        (ImageRoute::QwenEdit, "qwen_image_edit", "mlx_qwen"),
+        (ImageRoute::KreaEdit, "krea_2_raw", "mlx_krea"),
+        (ImageRoute::KreaTurboOnRaw, "krea_2_raw", "mlx_krea"),
+        (ImageRoute::KreaMultiPhase, "krea_2_raw", "mlx_krea"),
+        (
+            ImageRoute::KreaImported,
+            "external_krea",
+            "mlx_krea_imported",
+        ),
+        (
+            ImageRoute::SdxlImported,
+            "external_sdxl",
+            "mlx_sdxl_imported",
+        ),
+        (
+            ImageRoute::InstantId,
+            "instantid_realvisxl",
+            "mlx_instantid",
+        ),
+        (ImageRoute::PulidFlux, "pulid_flux_dev", "mlx_pulid_flux"),
+        (ImageRoute::SdxlAdvanced, "sdxl", "mlx_sdxl"),
+        (
+            ImageRoute::SensenovaEdit,
+            "sensenova_u1_8b",
+            "mlx_sensenova",
+        ),
+        (ImageRoute::Bernini, "bernini_image", "mlx_bernini"),
+        (ImageRoute::Mlx, "flux_schnell", "mlx_flux"),
+    ];
+    for (route, model, expected) in cases {
+        let label = route.adapter_label(&request(json!({ "model": model })));
+        assert_eq!(label, expected, "{route:?} must match its asset label");
+    }
 }
 
 /// The Z-Image + FLUX.1 + Qwen-Image providers included by the worker's explicit platform catalog.
@@ -6804,6 +7106,123 @@ fn candle_strict_pose_route_image_count_is_pose_set_length() {
     );
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn every_generating_candle_route_has_a_real_generation_set_adapter() {
+    let cases = [
+        (
+            CandleImageRoute::InstantId,
+            "instantid_realvisxl",
+            "candle_instantid",
+        ),
+        (CandleImageRoute::SdxlEdit, "sdxl", "candle_sdxl_edit"),
+        (
+            CandleImageRoute::Flux2Edit,
+            "flux2_klein_9b",
+            "candle_flux2_edit",
+        ),
+        (
+            CandleImageRoute::QwenEdit,
+            "qwen_image_edit",
+            "candle_qwen_edit",
+        ),
+        (
+            CandleImageRoute::ZimageEdit,
+            "z_image_turbo",
+            "candle_zimage_edit",
+        ),
+        (CandleImageRoute::KreaEdit, "krea_2_raw", "candle_krea_edit"),
+        (CandleImageRoute::KreaTurboOnRaw, "krea_2_raw", "mlx_krea"),
+        (CandleImageRoute::KreaMultiPhase, "krea_2_raw", "mlx_krea"),
+        (
+            CandleImageRoute::KreaImported,
+            "external_krea",
+            "candle_krea_imported",
+        ),
+        (
+            CandleImageRoute::SdxlImported,
+            "external_sdxl",
+            "candle_sdxl_imported",
+        ),
+        (
+            CandleImageRoute::ZimageIdentity,
+            "z_image_turbo",
+            "candle_zimage_identity",
+        ),
+        (
+            CandleImageRoute::SdxlIpAdapter,
+            "sdxl",
+            "candle_sdxl_ipadapter",
+        ),
+        (
+            CandleImageRoute::KolorsIpAdapter,
+            "kolors",
+            "candle_kolors_ipadapter",
+        ),
+        (
+            CandleImageRoute::FluxIpAdapter,
+            "flux_dev",
+            "candle_flux_ipadapter",
+        ),
+        (
+            CandleImageRoute::Pulid,
+            "pulid_flux_dev",
+            "candle_pulid_flux",
+        ),
+        (
+            CandleImageRoute::QwenControl,
+            "qwen_image",
+            "candle_qwen_control",
+        ),
+        (
+            CandleImageRoute::KolorsControl,
+            "kolors",
+            "candle_kolors_control",
+        ),
+        (
+            CandleImageRoute::ZimageControl,
+            "z_image_turbo",
+            "candle_zimage_control",
+        ),
+        (
+            CandleImageRoute::Flux2Control,
+            "flux2_dev",
+            "candle_flux2_control",
+        ),
+        (
+            CandleImageRoute::Flux1Control,
+            "flux_dev",
+            "candle_flux1_control",
+        ),
+        (
+            CandleImageRoute::KreaControl,
+            "krea_2_turbo",
+            "candle_krea_control",
+        ),
+        (
+            CandleImageRoute::ZimageComfyui,
+            "external_zimage",
+            "candle_zimage_comfyui",
+        ),
+        (
+            CandleImageRoute::QwenImageComfyui,
+            "external_qwen",
+            "candle_qwen_image_comfyui",
+        ),
+        (
+            CandleImageRoute::Flux2Comfyui,
+            "external_flux2",
+            "candle_flux2_dev_comfyui",
+        ),
+        (CandleImageRoute::Bernini, "bernini_image", "candle_bernini"),
+        (CandleImageRoute::CandleTxt2Img, "sdxl", "candle_sdxl"),
+    ];
+    for (route, model, expected) in cases {
+        let label = route.adapter_label(&request(json!({ "model": model })));
+        assert_eq!(label, expected, "{route:?} must match its asset label");
+    }
+}
+
 // sc-10996 (epic 6562): `bernini_image` t2i / i2i route to the dedicated candle Bernini lane
 // (`CandleImageRoute::Bernini` → `generate_candle_bernini_image_stream`), NOT the generic txt2img arm
 // (the engine is `Modality::Video`, so `bernini_image` is not an `is_candle_engine` id). Routed on the
@@ -8439,7 +8858,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
     let cancel = CancelFlag::new();
     let enhance = PromptEnhance::default();
 
-    let render = |seed: i64| {
+    let mut render = |seed: i64| {
         generate_one(
             generator.as_ref(),
             &prompt,
@@ -8463,28 +8882,13 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
             &cancel,
             &mut |_| {},
         )
-        .expect("ideogram render from the auto-caption")
     };
     let retries = crate::ideogram_caption::placeholder_recovery_retries();
-    let (mut w, mut h, mut pixels) = render(7);
-    let mut placeholder = crate::ideogram_caption::looks_like_placeholder(&pixels, w, h);
-    let mut final_seed = 7i64;
-    for attempt in 0..retries {
-        if !placeholder {
-            break;
-        }
-        let retry_seed = crate::ideogram_caption::recovery_seed(7, attempt);
-        eprintln!(
-            "placeholder; reseeding {retry_seed} (attempt {}/{retries})",
-            attempt + 1
-        );
-        let (rw, rh, rpixels) = render(retry_seed);
-        w = rw;
-        h = rh;
-        pixels = rpixels;
-        final_seed = retry_seed;
-        placeholder = crate::ideogram_caption::looks_like_placeholder(&pixels, w, h);
-    }
+    let initial = render(7).expect("ideogram render from the auto-caption");
+    let (final_seed, w, h, pixels) =
+        recover_ideogram_placeholder(true, 7, &cancel, initial, &mut render)
+            .expect("ideogram placeholder recovery");
+    let placeholder = crate::ideogram_caption::looks_like_placeholder(&pixels, w, h);
     // Hard asserts validate THIS story's deliverable end-to-end with real weights: the 3B caption was
     // cleaned to the canonical engine form and rendered through the production Ideogram load + reseed
     // recovery, producing a correctly-sized, non-constant image.

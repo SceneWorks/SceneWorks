@@ -188,8 +188,18 @@ pub(crate) struct PromptBatchesQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct EventsQuery {
     pub(crate) ticket: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateEventTicketRequest {
+    #[serde(default)]
+    pub(crate) active_job_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) known_terminal_job_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -476,6 +486,52 @@ pub(crate) struct DatasetAnalysisJobRequest {
     /// Restrict the analysis to these dataset item ids; when absent, every item is embedded.
     #[serde(default)]
     pub(crate) item_ids: Option<Vec<String>>,
+}
+
+/// Import a bounded set of image/caption rows from local Parquet shards into an empty training
+/// dataset. The source may be one `.parquet` file or a directory whose direct children are shards.
+/// Column matching is case-insensitive, so LAION's `URL`/`TEXT` defaults also accept `url`/`text`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetParquetImportJobRequest {
+    pub(crate) source_path: String,
+    #[serde(default = "default_parquet_url_column")]
+    pub(crate) url_column: String,
+    #[serde(default = "default_parquet_caption_column")]
+    pub(crate) caption_column: String,
+    #[serde(default = "default_parquet_max_items")]
+    pub(crate) max_items: usize,
+    #[serde(default = "default_parquet_min_edge")]
+    pub(crate) min_edge: u32,
+    #[serde(default = "default_parquet_concurrency")]
+    pub(crate) concurrency: usize,
+    /// Case-insensitive caption substrings. A row is retained when any include
+    /// term matches; an empty list disables the include filter.
+    #[serde(default)]
+    pub(crate) caption_includes: Vec<String>,
+    /// Case-insensitive caption substrings. A matching row is always rejected.
+    #[serde(default)]
+    pub(crate) caption_excludes: Vec<String>,
+}
+
+fn default_parquet_url_column() -> String {
+    "URL".to_owned()
+}
+
+fn default_parquet_caption_column() -> String {
+    "TEXT".to_owned()
+}
+
+fn default_parquet_max_items() -> usize {
+    1_000
+}
+
+fn default_parquet_min_edge() -> u32 {
+    512
+}
+
+fn default_parquet_concurrency() -> usize {
+    16
 }
 
 /// Request to run the Dataset Doctor face-embedding pass over a (Person) training dataset (sc-6538).

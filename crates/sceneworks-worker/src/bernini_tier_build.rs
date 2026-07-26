@@ -45,6 +45,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::smoke_support::{report_tier, QUANT_TIERS};
 use mlx_rs::Array;
 
 /// The runtime files that make a Bernini tier subdir COMPLETE for the load path (mirrors
@@ -67,9 +68,6 @@ const TIER_FILES: &[&str] = &[
     "mllm/tokenizer.json",
 ];
 
-/// The two quantized tiers to derive from the bf16 tier: `(subdir, bits)`.
-const QUANT_TIERS: &[(&str, i32)] = &[("q8", 8), ("q4", 4)];
-
 /// The quant group size — the canonical mflux/reference default the load path
 /// (`WanModelConfig::from_config_json` / `QwenVlTextConfig::from_config_json`) reconstructs. Matches
 /// the Wan A14B renderer experts, so the two halves pack at the same group.
@@ -88,23 +86,6 @@ const RENDERER_EXPERTS: &[&str] = &[
 /// config gates `WanTransformer::from_weights`.
 const PLANNER_CONFIG: &str = "qwen2_5_vl_config.json";
 const RENDERER_CONFIG: &str = "config.json";
-
-/// Recursively sum the byte size of every file under `dir` (the on-disk size of a built tier).
-fn dir_size_bytes(dir: &Path) -> u64 {
-    let mut total = 0;
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            total += dir_size_bytes(&path);
-        } else if let Ok(meta) = path.metadata() {
-            total += meta.len();
-        }
-    }
-    total
-}
 
 /// Recursively copy a directory tree (following symlinks to real files, like the HF cache blobs).
 fn copy_tree(src: &Path, dst: &Path) {
@@ -135,15 +116,6 @@ fn assert_tier_complete(out_dir: &Path, tier: &str) {
             "built {tier} tier is missing {file}"
         );
     }
-}
-
-/// Print the machine-readable `[[TIER]]` line for backfilling the manifest sizes.
-fn report_tier(tier: &str, out_dir: &Path) {
-    let size = dir_size_bytes(out_dir);
-    eprintln!(
-        "[[TIER]] {{\"tier\":\"{tier}\",\"dir\":\"{}\",\"diskSizeBytes\":{size}}}",
-        out_dir.display()
-    );
 }
 
 /// Load a bf16 safetensors map, apply `quantize` to it, materialize, and save to `out`.

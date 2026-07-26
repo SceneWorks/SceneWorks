@@ -47,7 +47,7 @@ const SDXL_IPADAPTER_DEFAULT_STEPS: u32 = 30;
 const SDXL_IPADAPTER_DEFAULT_GUIDANCE: f32 = 5.0;
 /// The adapter/engine id recorded on candle SDXL IP-Adapter assets + telemetry (distinct from the
 /// txt2img `candle_sdxl` and the `candle_instantid` lanes).
-const SDXL_IPADAPTER_ENGINE: &str = "candle_sdxl_ipadapter";
+pub(super) const SDXL_IPADAPTER_ENGINE: &str = "candle_sdxl_ipadapter";
 
 /// SDXL model ids the candle IP-Adapter route accepts (the txt2img-eligible SDXL family). Must stay
 /// in lockstep with `jobs_store::routing::candle`'s `sdxl_ipadapter_candle_eligible` guard.

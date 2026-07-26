@@ -33,7 +33,13 @@ export const DEFAULT_MOTION = "slow push-in";
 // Asset origins stamped by the backend when media is generated in a studio. An asset
 // with one of these origins — or (for legacy records with no origin) a generation
 // recipe / batch id — is treated as AI-generated for the violet sparkle affordance.
-const STUDIO_ORIGINS = new Set(["image_studio", "video_studio", "document_studio", "character_studio"]);
+const STUDIO_ORIGINS = new Set([
+  "image_studio",
+  "video_studio",
+  "audio_studio",
+  "document_studio",
+  "character_studio",
+]);
 
 export function isAiAsset(asset) {
   if (!asset) {
@@ -60,6 +66,15 @@ export function isAiItem(item, assetsById) {
   }
   const history = Array.isArray(item.versionHistory) ? item.versionHistory : [];
   return history.some((entry) => ["extension", "bridge", "replacement"].includes(entry?.source));
+}
+
+export function isAiAudioTrack(track, assetsById) {
+  const provenance =
+    track?.provenance?.source ?? track?.provenance?.origin ?? track?.source ?? track?.origin ?? "";
+  if (["ai", "generated", "audio_studio", "music_generation", "voice_generation"].includes(provenance)) {
+    return true;
+  }
+  return (track?.items ?? []).some((item) => isAiItem(item, assetsById));
 }
 
 // A small deterministic hash → 0..1 PRNG seeded by a string, so a clip's waveform /

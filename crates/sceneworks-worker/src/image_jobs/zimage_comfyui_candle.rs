@@ -21,7 +21,7 @@ use serde_json::json;
 
 /// The adapter/engine id recorded on candle ComfyUI Z-Image assets + telemetry (distinct from the
 /// registry `candle_z_image` txt2img and the `candle_zimage_edit`/`_control` lanes).
-const ZIMAGE_COMFYUI_CANDLE_ENGINE: &str = "candle_zimage_comfyui";
+pub(super) const ZIMAGE_COMFYUI_CANDLE_ENGINE: &str = "candle_zimage_comfyui";
 /// Denoise-steps fallback — the Z-Image-Turbo manifest default (`z_image_turbo` `defaults.steps`). The UI
 /// normally supplies `advanced.steps`; this only applies when it does not.
 const ZIMAGE_COMFYUI_DEFAULT_STEPS: u32 = 8;

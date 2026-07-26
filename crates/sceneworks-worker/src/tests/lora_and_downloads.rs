@@ -146,6 +146,68 @@ async fn paired_moe_upload_writes_high_low_convention_files() {
 }
 
 #[tokio::test]
+async fn paired_moe_upload_rejects_single_digest_before_network_or_file_move() {
+    use sha2::{Digest, Sha256};
+
+    let temp = tempdir().expect("tempdir creates");
+    let mut settings = test_settings("http://127.0.0.1:1".to_owned(), None);
+    settings.data_dir = temp.path().join("data");
+    settings.api_url = "http://127.0.0.1:1".to_owned();
+    let upload_dir = settings.data_dir.join("cache/lora-uploads/upload-1");
+    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
+    let high_upload = upload_dir.join("high.safetensors");
+    let low_upload = upload_dir.join("low.safetensors");
+    tokio::fs::write(&high_upload, b"high").await.unwrap();
+    tokio::fs::write(&low_upload, b"low").await.unwrap();
+    // This digest matches the lexicographically first/high file, the exact case the old
+    // enumeration-first verification incorrectly accepted while leaving the low half unchecked.
+    let first_digest = format!("{:x}", Sha256::digest(b"high"));
+
+    let mut job_json = job_snapshot_json("job-1", false);
+    job_json["type"] = json!("lora_import");
+    job_json["payload"] = json!({
+        "loraId": "my_moe",
+        "sourcePath": high_upload.display().to_string(),
+        "secondarySourcePath": low_upload.display().to_string(),
+        "uploadedSourcePath": true,
+        "expectedSha256": first_digest,
+    });
+    let job: JobSnapshot = serde_json::from_value(job_json).expect("job deserializes");
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+
+    let error = super::model_jobs::run_lora_import_job(&api, &settings, &client, &job)
+        .await
+        .expect_err("one digest cannot verify a two-file upload");
+    assert!(
+        error.to_string().contains("ambiguous with secondarySourcePath"),
+        "digest contract rejection must win before the unreachable heartbeat: {error:?}"
+    );
+    assert!(high_upload.is_file(), "high staged source was not moved");
+    assert!(low_upload.is_file(), "low staged source was not moved");
+    assert!(
+        !settings.data_dir.join("loras/my_moe").exists(),
+        "no target directory is created for a rejected contract"
+    );
+}
+
+#[test]
+fn lora_import_digest_contract_allows_unambiguous_single_or_pair_inputs() {
+    let mut payload = JsonObject::new();
+    payload.insert("expectedSha256".to_owned(), json!("a".repeat(64)));
+    super::model_jobs::validate_lora_import_digest_contract(&payload)
+        .expect("single-file digest remains supported");
+
+    payload.remove("expectedSha256");
+    payload.insert(
+        "secondarySourcePath".to_owned(),
+        json!("/staged/low.safetensors"),
+    );
+    super::model_jobs::validate_lora_import_digest_contract(&payload)
+        .expect("paired upload without one ambiguous digest remains supported");
+}
+
+#[tokio::test]
 async fn lora_url_import_downloads_to_named_file() {
     let temp = tempdir().expect("tempdir creates");
     let source_url = spawn_binary_stub(b"url-lora".to_vec()).await;

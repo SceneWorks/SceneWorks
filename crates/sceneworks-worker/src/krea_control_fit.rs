@@ -39,6 +39,7 @@
 
 use super::*;
 use gen_core::{OffloadPolicy, Quant};
+#[cfg(test)]
 use serde_json::Value;
 
 /// Fixed transient/runtime headroom (GB) added on top of the MEASURED control-lane peak
@@ -324,13 +325,6 @@ pub(crate) fn incurred_peak_gb(
         _ => {}
     }
     Some(peak.max(0.0))
-}
-
-/// Parse a JSON float from either a number or a numeric string (mirrors [`crate::vram_gate`]'s helper).
-fn json_f64(value: &Value) -> Option<f64> {
-    value
-        .as_f64()
-        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
 }
 
 #[cfg(test)]

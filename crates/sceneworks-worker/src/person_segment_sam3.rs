@@ -76,12 +76,74 @@ fn parse_quant_bits(value: &str) -> Option<i32> {
     }
 }
 
+fn validate_square_mask_len(grid: usize, len: usize) -> WorkerResult<()> {
+    if len == grid.saturating_mul(grid) {
+        return Ok(());
+    }
+    Err(WorkerError::Engine(format!(
+        "sam3 mask grid is {grid}x{grid} but contains {len} values"
+    )))
+}
+
 /// The parsed SAM3 checkpoint is cached process-wide (the 3.2 GB safetensors parse is the
 /// expensive part). A **fresh** `Sam3VideoModel` is assembled from it per clip: the model carries
 /// per-session tracking state (obj ids, memory banks) and exposes no reset, so reusing one across
 /// clips would leak identities. Building from cached weights is cheap (layer assembly over
 /// already-resident arrays). Mirrors the SAM2 predictor cache + poison-recovery idiom.
 static WEIGHTS: OnceLock<Mutex<Option<Weights>>> = OnceLock::new();
+
+fn propagate_person_concept(
+    model_path: &Path,
+    tokenizer_path: &Path,
+    frames: &[Array],
+    cancel: Option<&CancelFlag>,
+    mut progress: Option<SegmentProgress>,
+) -> WorkerResult<Vec<VideoFrameOutput>> {
+    check_segment_canceled(cancel)?;
+    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        guard
+    });
+    if guard.is_none() {
+        let weights = Weights::from_file(model_path)
+            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
+        *guard = Some(weights);
+    }
+    let weights = guard.as_ref().expect("weights loaded");
+
+    let mut model = Sam3VideoModel::from_weights(weights)
+        .map_err(|e| WorkerError::Engine(format!("sam3 model build: {e}")))?;
+    if let Some(bits) = quant_bits() {
+        model
+            .quantize(bits)
+            .map_err(|e| WorkerError::Engine(format!("sam3 quantize q{bits}: {e}")))?;
+    }
+    let tokenizer = Sam3Tokenizer::from_file(tokenizer_path, &Sam3TextConfig::sam3())
+        .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
+    let (input_ids, text_mask) = tokenizer
+        .encode(CONCEPT_PROMPT)
+        .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+    check_segment_canceled(cancel)?;
+
+    model
+        .propagate(
+            frames,
+            &input_ids,
+            &text_mask,
+            cancel,
+            progress
+                .as_deref_mut()
+                .map(|cb| cb as &mut dyn FnMut(usize, usize)),
+        )
+        .map_err(|e| match e {
+            runtime_macos::media::Error::Canceled => {
+                WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
+            }
+            e => WorkerError::Engine(format!("sam3 propagate: {e}")),
+        })
+}
 
 /// Cache key for the smart-select single-image models: the resolved weight path + the quant tier in
 /// effect. A change in either (different model snapshot, `SCENEWORKS_SAM3_QUANT` flip) rebuilds, so a
@@ -269,7 +331,10 @@ fn build_point_tracker(model_path: &Path, quant: Option<i32>) -> WorkerResult<Sa
 /// Preprocess an RGB frame to the SAM3 input tensor: resize to a 1008×1008 square (bilinear,
 /// matching the processor's fixed-square resize — *not* aspect-preserving), rescale to `[0,1]`,
 /// normalize by mean/std `0.5` to `[-1,1]`, packed NCHW `[1,3,1008,1008]` f32.
-fn input_tensor(img: &image::RgbImage) -> Array {
+fn input_tensor<I>(img: &I) -> Array
+where
+    I: image::GenericImageView<Pixel = image::Rgb<u8>>,
+{
     let resized = image::imageops::resize(
         img,
         INPUT_SIZE,
@@ -308,7 +373,7 @@ pub(crate) fn segment_track_blocking(
     clip_frame_paths: Vec<PathBuf>,
     anchors: Vec<Option<BoxNorm>>,
     cancel: Option<CancelFlag>,
-    mut progress: Option<SegmentProgress>,
+    progress: Option<SegmentProgress>,
 ) -> WorkerResult<Vec<Vec<u8>>> {
     // A frames/anchors length mismatch is a caller contract violation. The old `assert_eq!`
     // panicked inside `spawn_blocking`, which `media_jobs` absorbed as a silent "degraded"
@@ -345,63 +410,13 @@ pub(crate) fn segment_track_blocking(
         frames.push(input_tensor(&img));
     }
 
-    // Guard the cold 3.2 GB checkpoint parse + model build + quantize — the engine only observes
-    // the flag once propagation starts.
-    check_segment_canceled(cancel.as_ref())?;
-
-    // Cached checkpoint; recover from a poisoned lock by dropping the cached weights and reloading
-    // (mirrors person_segment / sc-4277 F-MLXW-13).
-    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if guard.is_none() {
-        let weights = Weights::from_file(&model_path)
-            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
-        *guard = Some(weights);
-    }
-    let weights = guard.as_ref().expect("weights loaded");
-
-    // Fresh model per clip (clean tracking state) + tokenize the concept once.
-    let mut model = Sam3VideoModel::from_weights(weights)
-        .map_err(|e| WorkerError::Engine(format!("sam3 model build: {e}")))?;
-    // Quantize (Q8 default) for a ~0.9 GB footprint vs F32 ~3.2 GB (sc-4925). The dense path is
-    // parity-preserving, so the F32 (`SCENEWORKS_SAM3_QUANT=off`) result is unchanged.
-    if let Some(bits) = quant_bits() {
-        model
-            .quantize(bits)
-            .map_err(|e| WorkerError::Engine(format!("sam3 quantize q{bits}: {e}")))?;
-    }
-    let tokenizer = Sam3Tokenizer::from_file(&tokenizer_path, &Sam3TextConfig::sam3())
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
-    let (input_ids, text_mask) = tokenizer
-        .encode(CONCEPT_PROMPT)
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
-    // The quantize pass above is seconds-long on a cold start; re-check before committing to the
-    // propagate loop.
-    check_segment_canceled(cancel.as_ref())?;
-
-    // gen-core d8038beb (sc-7176 pin sync): `propagate` takes `cancel` + per-frame `progress`
-    // (the video per-step cancel contract). Thread the caller's flag/callback so a user cancel
-    // stops between frames and each frame reports progress (sc-8807).
-    let outputs = model
-        .propagate(
-            &frames,
-            &input_ids,
-            &text_mask,
-            cancel.as_ref(),
-            progress
-                .as_deref_mut()
-                .map(|cb| cb as &mut dyn FnMut(usize, usize)),
-        )
-        .map_err(|e| match e {
-            runtime_macos::media::Error::Canceled => {
-                WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
-            }
-            e => WorkerError::Engine(format!("sam3 propagate: {e}")),
-        })?;
+    let outputs = propagate_person_concept(
+        &model_path,
+        &tokenizer_path,
+        &frames,
+        cancel.as_ref(),
+        progress,
+    )?;
 
     // Associate SAM3's identities to the selected track, then emit that object's per-frame mask.
     let Some(selected) = select_object(&outputs, &anchors) else {
@@ -547,6 +562,7 @@ fn segment_box_on_thread(
             .map_err(|e| WorkerError::Engine(format!("sam3 mask read: {e}")))?
             .as_slice::<f32>()
             .to_vec();
+        validate_square_mask_len(grid, m.len())?;
         let mut inside = 0u64;
         for gy in 0..grid {
             for gx in 0..grid {
@@ -672,76 +688,45 @@ fn segment_points_on_thread(
 pub(crate) fn segment_all_persons_in_memory(
     model_path: &Path,
     tokenizer_path: &Path,
-    frames: &[image::RgbImage],
+    frames: &[gen_core::Image],
     cancel: Option<CancelFlag>,
-    mut progress: Option<SegmentProgress>,
+    progress: Option<SegmentProgress>,
 ) -> WorkerResult<AllPersonMasks> {
     check_segment_canceled(cancel.as_ref())?;
     let first = frames.first().ok_or_else(|| {
         WorkerError::InvalidPayload("scail2 segmentation: no frames to segment".into())
     })?;
-    let (width, height) = (first.width(), first.height());
+    let (width, height) = (first.width, first.height);
     if frames
         .iter()
-        .any(|f| f.width() != width || f.height() != height)
+        .any(|f| f.width != width || f.height != height)
     {
         return Err(WorkerError::InvalidPayload(
             "scail2 segmentation: frames are not all the same size".into(),
         ));
     }
-    let tensors: Vec<Array> = frames.iter().map(input_tensor).collect();
+    let tensors = frames
+        .iter()
+        .map(|frame| {
+            let view = image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(
+                frame.width,
+                frame.height,
+                frame.pixels.as_slice(),
+            )
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("scail2 segmentation: malformed RGB frame".into())
+            })?;
+            Ok(input_tensor(&view))
+        })
+        .collect::<WorkerResult<Vec<Array>>>()?;
 
-    // Guard the cold 3.2 GB checkpoint parse + model build + quantize — the engine only observes
-    // the flag once propagation starts.
-    check_segment_canceled(cancel.as_ref())?;
-
-    // Cached checkpoint; recover from a poisoned lock by dropping + reloading (mirrors
-    // `segment_track_blocking` / sc-4277 F-MLXW-13).
-    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if guard.is_none() {
-        let weights = Weights::from_file(model_path)
-            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
-        *guard = Some(weights);
-    }
-    let weights = guard.as_ref().expect("weights loaded");
-
-    let mut model = Sam3VideoModel::from_weights(weights)
-        .map_err(|e| WorkerError::Engine(format!("sam3 model build: {e}")))?;
-    if let Some(bits) = quant_bits() {
-        model
-            .quantize(bits)
-            .map_err(|e| WorkerError::Engine(format!("sam3 quantize q{bits}: {e}")))?;
-    }
-    let tokenizer = Sam3Tokenizer::from_file(tokenizer_path, &Sam3TextConfig::sam3())
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
-    let (input_ids, text_mask) = tokenizer
-        .encode(CONCEPT_PROMPT)
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
-    check_segment_canceled(cancel.as_ref())?;
-
-    // gen-core d8038beb (sc-7176 pin sync): `propagate` takes `cancel` + per-frame `progress`
-    // (the video per-step cancel contract). Thread the caller's flag/callback (sc-8807).
-    let outputs = model
-        .propagate(
-            &tensors,
-            &input_ids,
-            &text_mask,
-            cancel.as_ref(),
-            progress
-                .as_deref_mut()
-                .map(|cb| cb as &mut dyn FnMut(usize, usize)),
-        )
-        .map_err(|e| match e {
-            runtime_macos::media::Error::Canceled => {
-                WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
-            }
-            e => WorkerError::Engine(format!("sam3 propagate: {e}")),
-        })?;
+    let outputs = propagate_person_concept(
+        model_path,
+        tokenizer_path,
+        &tensors,
+        cancel.as_ref(),
+        progress,
+    )?;
 
     // Paint order + per-frame masks are backend-neutral pure logic shared with the candle twin via
     // `person_segment_sam3_common` (sc-11191, F-018), so the tie-break and mask selection stay
@@ -760,6 +745,15 @@ pub(crate) fn segment_all_persons_in_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smart_select_rejects_non_square_mask_storage_before_indexing() {
+        assert!(validate_square_mask_len(3, 9).is_ok());
+        let error = validate_square_mask_len(3, 8).expect_err("truncated mask must fail");
+        assert!(
+            matches!(error, WorkerError::Engine(ref message) if message.contains("3x3") && message.contains("8 values"))
+        );
+    }
     // The checkpoint filenames now live in the shared module; the real-weights smokes below join them
     // onto a snapshot dir to build the model/tokenizer paths. `MASK_GRID` sizes the synthetic mask
     // fixtures (the production paths call it inside the shared `person_segment_sam3_common` helpers).
@@ -808,7 +802,11 @@ mod tests {
             matches!(track, Err(WorkerError::Canceled(_))),
             "segment_track_blocking: expected Canceled, got {track:?}"
         );
-        let frames = vec![image::RgbImage::new(4, 4)];
+        let frames = vec![gen_core::Image {
+            pixels: vec![0; 4 * 4 * 3],
+            width: 4,
+            height: 4,
+        }];
         let all = segment_all_persons_in_memory(
             Path::new("/nonexistent/model.safetensors"),
             Path::new("/nonexistent/tokenizer.json"),
@@ -819,6 +817,26 @@ mod tests {
         assert!(
             matches!(all, Err(WorkerError::Canceled(_))),
             "segment_all_persons_in_memory: expected Canceled"
+        );
+    }
+
+    #[test]
+    fn in_memory_segmentation_rejects_malformed_engine_image_without_cloning() {
+        let frames = vec![gen_core::Image {
+            pixels: vec![0; 4 * 4 * 3 - 1],
+            width: 4,
+            height: 4,
+        }];
+        let result = segment_all_persons_in_memory(
+            Path::new("/nonexistent/model.safetensors"),
+            Path::new("/nonexistent/tokenizer.json"),
+            &frames,
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(WorkerError::InvalidPayload(ref m)) if m.contains("malformed RGB frame")),
+            "malformed borrowed frame must fail before loading weights"
         );
     }
 

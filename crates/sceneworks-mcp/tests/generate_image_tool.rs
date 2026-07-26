@@ -6,26 +6,30 @@
 //! notifications on a client-supplied progressToken, and clear errors (never a
 //! hang) for failed / canceled / stuck jobs.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::{convert::Infallible, iter};
 
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use futures_util::{stream, StreamExt};
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
     CallToolRequestParams, ClientInfo, ClientRequest, Meta, NumberOrString,
     ProgressNotificationParam, ProgressToken, Request,
 };
 use rmcp::service::{NotificationContext, PeerRequestOptions, RoleClient};
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::ServiceExt;
-use sceneworks_mcp::{ApiClientConfig, JobWaitConfig};
+use sceneworks_mcp::JobWaitConfig;
 use serde_json::{json, Value};
+
+use common::{connect_mcp, error_text, fast_job_wait, spawn};
 
 const PNG_BYTES: &[u8] = b"fake-png-payload-0001";
 const JPG_BYTES: &[u8] = b"fake-jpeg-payload-0002";
@@ -35,6 +39,7 @@ const JPG_PATH: &str = "assets/images/genset_1/img_0002.jpg";
 // generate_image must fall back to the ticketed-link response shape instead of
 // base64-inlining it.
 const LARGE_PATH: &str = "assets/images/genset_1/img_large.png";
+const CHUNKED_LARGE_PATH: &str = "assets/images/genset_1/img_chunked_large.png";
 const LARGE_IMAGE_LEN: usize = 5 * 1024 * 1024;
 const TICKET: &str = "tkt-abc123";
 
@@ -122,15 +127,31 @@ fn stub_api_router(state: StubState) -> Router {
             "/api/v1/projects/:project_id/files/*relative_path",
             get(
                 |Path((_project_id, relative_path)): Path<(String, String)>| async move {
+                    if relative_path == CHUNKED_LARGE_PATH {
+                        // No Content-Length and no end-of-stream: the client can return only by
+                        // enforcing the inline cap while consuming chunks and dropping the body.
+                        let chunks = stream::iter(
+                            iter::repeat_with(|| {
+                                Ok::<_, Infallible>(Bytes::from(vec![0x43; 1024 * 1024]))
+                            })
+                            .take(5),
+                        )
+                        .chain(stream::pending());
+                        return (
+                            [(header::CONTENT_TYPE, "image/png")],
+                            Body::from_stream(chunks),
+                        )
+                            .into_response();
+                    }
                     let (bytes, mime): (Vec<u8>, &str) = match relative_path.as_str() {
                         PNG_PATH => (PNG_BYTES.to_vec(), "image/png"),
                         JPG_PATH => (JPG_BYTES.to_vec(), "image/jpeg"),
                         LARGE_PATH => (vec![0x42u8; LARGE_IMAGE_LEN], "image/png"),
-                        _ => return Err(StatusCode::NOT_FOUND),
+                        _ => return StatusCode::NOT_FOUND.into_response(),
                     };
                     let mut headers = HeaderMap::new();
                     headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
-                    Ok((headers, bytes))
+                    (headers, bytes).into_response()
                 },
             ),
         )
@@ -140,17 +161,6 @@ fn stub_api_router(state: StubState) -> Router {
             post(|| async { Json(json!({ "ticket": TICKET, "expiresInSeconds": 600 })) }),
         )
         .with_state(state)
-}
-
-async fn spawn(router: Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind stub listener");
-    let addr = listener.local_addr().expect("stub addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, router).await;
-    });
-    format!("http://{addr}")
 }
 
 /// A minimal MCP client handler that records every progress notification the
@@ -195,27 +205,10 @@ async fn harness(snapshots: Vec<Value>) -> Harness {
     let polls = state.polls.clone();
     let cancels = state.cancels.clone();
     let api_base = spawn(stub_api_router(state)).await;
-    let mcp_service = sceneworks_mcp::streamable_http_service_with(
-        ApiClientConfig {
-            base_url: api_base,
-            access_token: None,
-        },
-        JobWaitConfig {
-            poll_interval: Duration::from_millis(10),
-            timeout: Duration::from_secs(10),
-        },
-    );
-    let mcp_base = spawn(Router::new().nest_service("/mcp", mcp_service)).await;
 
     let handler = RecordingClient::default();
     let progress = handler.progress.clone();
-    let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(format!("{mcp_base}/mcp")),
-    );
-    let client = handler
-        .serve(transport)
-        .await
-        .expect("MCP client initializes against the mounted /mcp service");
+    let (_, client) = connect_mcp(api_base, None, fast_job_wait(), handler).await;
     Harness {
         client,
         submitted,
@@ -241,16 +234,6 @@ fn call_with_progress_token(args: serde_json::Map<String, Value>) -> CallToolReq
         NumberOrString::String("progress-tok-1".into()),
     )));
     params
-}
-
-fn error_text(result: &rmcp::model::CallToolResult) -> String {
-    result
-        .content
-        .iter()
-        .filter_map(|block| block.as_text())
-        .map(|text| text.text.clone())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Poll `condition` until it holds, failing (never hanging) if it never does.
@@ -579,24 +562,8 @@ async fn transient_poll_failures_are_tolerated_until_the_job_completes() {
         )
         .with_state(state);
     let api_base = spawn(router).await;
-    let mcp_service = sceneworks_mcp::streamable_http_service_with(
-        ApiClientConfig {
-            base_url: api_base,
-            access_token: None,
-        },
-        JobWaitConfig {
-            poll_interval: Duration::from_millis(10),
-            timeout: Duration::from_secs(10),
-        },
-    );
-    let mcp_base = spawn(Router::new().nest_service("/mcp", mcp_service)).await;
-    let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(format!("{mcp_base}/mcp")),
-    );
-    let client = RecordingClient::default()
-        .serve(transport)
-        .await
-        .expect("MCP client initializes");
+    let (_, client) =
+        connect_mcp(api_base, None, fast_job_wait(), RecordingClient::default()).await;
 
     let result = client
         .call_tool(
@@ -632,24 +599,16 @@ async fn stuck_job_times_out_with_a_clear_error_instead_of_hanging() {
     };
     let cancels = state.cancels.clone();
     let api_base = spawn(stub_api_router(state)).await;
-    let mcp_service = sceneworks_mcp::streamable_http_service_with(
-        ApiClientConfig {
-            base_url: api_base,
-            access_token: None,
-        },
+    let (_, client) = connect_mcp(
+        api_base,
+        None,
         JobWaitConfig {
             poll_interval: Duration::from_millis(10),
             timeout: Duration::from_millis(100),
         },
-    );
-    let mcp_base = spawn(Router::new().nest_service("/mcp", mcp_service)).await;
-    let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(format!("{mcp_base}/mcp")),
-    );
-    let client = RecordingClient::default()
-        .serve(transport)
-        .await
-        .expect("MCP client initializes");
+        RecordingClient::default(),
+    )
+    .await;
 
     let result = client
         .call_tool(
@@ -800,6 +759,47 @@ async fn oversize_result_falls_back_to_ticketed_links() {
     assert!(summary["assets"][0]["url"]
         .as_str()
         .is_some_and(|url| url.contains(&format!("?ticket={TICKET}"))));
+
+    let _ = harness.client.cancel().await;
+}
+
+#[tokio::test]
+async fn chunked_oversize_result_aborts_without_waiting_for_end_of_stream() {
+    let harness = harness(vec![snapshot(
+        "completed",
+        1.0,
+        "completed",
+        json!({ "result": { "assets": [
+            image_asset("asset_chunked", CHUNKED_LARGE_PATH, "image/png")
+        ] } }),
+    )])
+    .await;
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        harness.client.call_tool(
+            CallToolRequestParams::new("generate_image").with_arguments(generate_args(json!({}))),
+        ),
+    )
+    .await
+    .expect("bounded reader aborts the never-ending body once it crosses the cap")
+    .expect("generate_image succeeds");
+
+    assert_ne!(result.is_error, Some(true), "unexpected error: {result:?}");
+    assert!(
+        !result
+            .content
+            .iter()
+            .any(|block| block.as_image().is_some()),
+        "an over-cap chunked result must not inline bytes: {result:?}"
+    );
+    let links: Vec<_> = result
+        .content
+        .iter()
+        .filter_map(|block| block.as_resource_link())
+        .collect();
+    assert_eq!(links.len(), 1, "one ticketed link: {result:?}");
+    assert!(links[0].uri.contains(&format!("?ticket={TICKET}")));
 
     let _ = harness.client.cancel().await;
 }

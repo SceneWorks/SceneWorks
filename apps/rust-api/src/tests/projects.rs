@@ -1,6 +1,98 @@
 //! rust-api projects tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+fn jpeg_fixture(rgb: [u8; 3]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
+        .encode(&rgb, 1, 1, image::ExtendedColorType::Rgb8)
+        .expect("test JPEG encodes");
+    bytes
+}
+
+#[tokio::test]
+async fn advertised_asset_poster_route_serves_the_indexed_blob() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let store =
+        sceneworks_core::project_store::ProjectStore::new(&settings.data_dir, "test-version");
+    let project = store.create_project("Poster endpoint").unwrap();
+    let other_project = store.create_project("Other poster endpoint").unwrap();
+    let project_path = std::path::PathBuf::from(&project.path);
+    let media = project_path.join("assets/videos/set/video.mp4");
+    let poster_bytes = jpeg_fixture([21, 43, 65]);
+    std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+    std::fs::write(&media, b"video").unwrap();
+    std::fs::write(media.with_extension("poster.jpg"), &poster_bytes).unwrap();
+    store
+        .persist_generated_asset(
+            &project.id,
+            "job",
+            "set",
+            &json!({
+                "assetId": "video",
+                "mediaPath": "assets/videos/set/video.mp4",
+                "mimeType": "video/mp4",
+                "type": "video",
+                "displayName": "Video",
+                "createdAt": "2026-05-25T00:00:00Z",
+                "mode": "image_to_video",
+                "model": "wan",
+                "adapter": "wan",
+                "prompt": "x",
+            }),
+        )
+        .unwrap();
+
+    let app = create_app(settings).expect("app creates");
+    let (status, listed) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{}/assets?includeRejected=true&includeTrashed=true",
+            project.id
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let poster_url = listed[0]["posterUrl"].as_str().unwrap();
+    let (status, headers, bytes) =
+        request_raw(app.clone(), "GET", poster_url, Body::empty(), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "image/jpeg");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(bytes, poster_bytes);
+
+    let wrong_url = poster_url
+        .rsplit_once('/')
+        .map(|(prefix, _)| format!("{prefix}/{}", "0".repeat(64)))
+        .unwrap();
+    assert_eq!(
+        request_raw(app.clone(), "GET", &wrong_url, Body::empty(), &[])
+            .await
+            .0,
+        StatusCode::NOT_FOUND,
+        "a valid-shaped digest cannot select bytes from a different indexed version"
+    );
+
+    let wrong_project_url = poster_url.replacen(&project.id, &other_project.id, 1);
+    assert_eq!(
+        request_raw(app.clone(), "GET", &wrong_project_url, Body::empty(), &[])
+            .await
+            .0,
+        StatusCode::NOT_FOUND,
+        "a digest is scoped to the authoritative project"
+    );
+    let wrong_asset_url = poster_url.replacen("/assets/video/", "/assets/another-video/", 1);
+    assert_eq!(
+        request_raw(app, "GET", &wrong_asset_url, Body::empty(), &[])
+            .await
+            .0,
+        StatusCode::NOT_FOUND,
+        "a digest is scoped to the authoritative asset row"
+    );
+}
+
 #[tokio::test]
 async fn project_and_asset_routes_persist_contract_state() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -89,6 +181,26 @@ async fn project_and_asset_routes_persist_contract_state() {
     assert_eq!(updated["status"]["rating"], 4);
     assert_eq!(updated["status"]["rejected"], true);
 
+    // Status must already be present in the DB-backed list before any later
+    // mutation gets a chance to refresh the same indexed envelope.
+    let (status, assets) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets?includeRejected=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let indexed = assets
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|asset| asset["id"] == asset_id)
+        .expect("status-mutated asset remains indexed");
+    assert_eq!(indexed["status"]["favorite"], true);
+    assert_eq!(indexed["status"]["rating"], 4);
+    assert_eq!(indexed["status"]["rejected"], true);
+
     let (status, tagged) = request(
         app.clone(),
         "PATCH",
@@ -98,6 +210,23 @@ async fn project_and_asset_routes_persist_contract_state() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(tagged["tags"], json!(["portrait", "reference"]));
+
+    // Tags independently update the same indexed envelope before returning.
+    let (status, assets) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets?includeRejected=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let indexed = assets
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|asset| asset["id"] == asset_id)
+        .expect("mutated asset remains indexed");
+    assert_eq!(indexed["tags"], json!(["portrait", "reference"]));
 
     let (status, deleted) = request(
         app.clone(),
@@ -505,4 +634,23 @@ async fn character_studio_routes_manage_references_loras_and_test_jobs() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(archived.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn move_asset_to_character_uses_the_shaped_json_error_contract() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, _, body) = request_raw(
+        app,
+        "POST",
+        "/api/v1/projects/project-1/assets/asset-1/move-to-character",
+        Body::from(r#"{"characterId":"#),
+        &[("content-type", "application/json")],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value = serde_json::from_slice(&body).expect("json error body");
+    assert_eq!(body["detail"][0]["type"], "json_invalid");
+    assert_eq!(body["detail"][0]["loc"], json!(["body", 0]));
 }

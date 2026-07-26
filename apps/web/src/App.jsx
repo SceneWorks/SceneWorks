@@ -1,5 +1,10 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "./api.js";
+import {
+  beginAssetRequest,
+  recordStartupMark,
+  settleAssetRequest,
+} from "./startupTiming.js";
 import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "./createJob.js";
 import { pollJobToCompletion } from "./pollJob.js";
 import { AccentPicker } from "./components/AccentPicker.jsx";
@@ -7,7 +12,7 @@ import { Icon } from "./components/Icons.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview, assetSeed } from "./components/assetPanels.jsx";
-import { fallbackModels, terminalStatuses } from "./constants.js";
+import { fallbackModels, isLibraryAsset, terminalStatuses } from "./constants.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { PoseLibraryScreen } from "./screens/PoseLibraryScreen.jsx";
 import { KeyPointLibraryScreen } from "./screens/KeyPointLibraryScreen.jsx";
@@ -85,10 +90,17 @@ import {
   readStoredTheme,
 } from "./appHelpers.js";
 import {
+  applySuccessfulProjectRefresh,
   hasVisibleLocalFailureForView,
   isCurrentProjectRequest,
   reconcileSelectedAssetId,
 } from "./appStateHelpers.js";
+import {
+  hydrationDomainsForRoute,
+  hydrationLedgerKey,
+  isProjectHydrationDomain,
+} from "./appHydration.js";
+import { refreshFailure, refreshSuccess } from "./refreshResult.js";
 
 // Desktop (Tauri) shell detection (unified helper, epic 4484 story 6). The first-run
 // setup wizard is desktop-only; web/Docker (and a remote LAN browser) keep the
@@ -419,6 +431,7 @@ export function App() {
   const [setupCompleted, setSetupCompleted] = useState(isDesktopShell ? null : true);
   const [activeProject, setActiveProject] = useState(null);
   const [activeView, setActiveView] = useState("Library");
+  const [simpleActiveScreen, setSimpleActiveScreen] = useState("image");
   // Selective lazy keep-alive (sc-11959): the set of keep-alive views the user has
   // visited at least once. A view mounts on first visit (activeView === view) and,
   // once here, stays mounted (hidden) across navigation so its state survives.
@@ -435,14 +448,39 @@ export function App() {
   const [trainingPresetsError, setTrainingPresetsError] = useState("");
   const [loadedAssets, setAssets] = useState([]);
   const [loadedAssetsProjectId, setLoadedAssetsProjectId] = useState(null);
+  const [assetLoadState, setAssetLoadState] = useState({
+    projectId: null,
+    status: "idle",
+    error: "",
+  });
   const [storedSelectedAssetId, setSelectedAssetId] = useState(null);
   // Scope project data during render, not in a passive effect. On A → B (or A
   // → no project), B's first render therefore cannot observe A's assets or raw
   // selection while B's catalog request is still pending.
-  const assets =
-    loadedAssetsProjectId === activeProject?.id ? loadedAssets : [];
+  const assets = useMemo(
+    () => (loadedAssetsProjectId === activeProject?.id ? loadedAssets : []),
+    [activeProject?.id, loadedAssets, loadedAssetsProjectId],
+  );
+  const hasLibraryConsumerAsset = useMemo(
+    () => assets.some(isLibraryAsset),
+    [assets],
+  );
   const selectedAssetId =
     loadedAssetsProjectId === activeProject?.id ? storedSelectedAssetId : null;
+  // A project switch renders before its passive refresh effect runs. Treat that
+  // first render as loading instead of briefly presenting the previous
+  // project's settled state (or a misleading empty catalog).
+  const activeAssetLoadState = useMemo(
+    () =>
+      activeProject && assetLoadState.projectId === activeProject.id
+        ? assetLoadState
+        : {
+            projectId: activeProject?.id ?? null,
+            status: activeProject ? "loading" : "idle",
+            error: "",
+          },
+    [activeProject, assetLoadState],
+  );
   const [projectFilter, setProjectFilter] = useState("all");
   const [requestedGpu, setRequestedGpu] = useState("auto");
   const [latestGenerationSetId, setLatestGenerationSetId] = useState(null);
@@ -474,10 +512,10 @@ export function App() {
     );
     setPreviewAsset(asset);
   }, []);
-  const closePreview = () => {
+  const closePreview = useCallback(() => {
     setPreviewScopeIds(null);
     setPreviewAsset(null);
-  };
+  }, []);
   const [studioLaunch, setStudioLaunch] = useState(null);
   // sc-8730: the launch channel INTO the Image Editor canvas (crop/upscale/refine
   // screen, activeView === "ImageEditor"). Mirrors studioLaunch but targets the
@@ -509,6 +547,29 @@ export function App() {
   // Back-compat: the existing setError(msg)/setError("") call sites map onto the
   // "general" notice kind — a truthy message replaces it, "" dismisses only it.
   const setError = useCallback((message) => pushNotice("general", message), [pushNotice]);
+  // Domain loaders and mutations own separate notice slots. A successful Models
+  // request must never erase a Training or Characters failure (sc-14783).
+  const setDomainError = useCallback(
+    (domain, message) => pushNotice(`domain:${domain}`, message),
+    [pushNotice],
+  );
+  const domainErrors = useMemo(
+    () => ({
+      assets: (message) => setDomainError("assets", message),
+      characters: (message) => setDomainError("characters", message),
+      loras: (message) => setDomainError("loras", message),
+      models: (message) => setDomainError("models", message),
+      personTracks: (message) => setDomainError("person-tracks", message),
+      presets: (message) => setDomainError("presets", message),
+      promptBatches: (message) => setDomainError("prompt-batches", message),
+      savedVoices: (message) => setDomainError("saved-voices", message),
+      timelines: (message) => setDomainError("timelines", message),
+      trainingDatasets: (message) => setDomainError("training-datasets", message),
+      trainingPresets: (message) => setDomainError("training-presets", message),
+      trainingTargets: (message) => setDomainError("training-targets", message),
+    }),
+    [setDomainError],
+  );
   // Remote-access gate (epic 4484), extracted to a hook (sc-9750): owns access probe,
   // host password/token, login-gate draft + error, and the media-ticket mint that must
   // settle before protected data loads. `authenticated`/`ready` gate the data + SSE
@@ -546,13 +607,13 @@ export function App() {
   // Same persistence contract as theme: instant localStorage cache + durable
   // server copy. The PUT sends only the changed field, so the endpoint must
   // MERGE partial updates (theme writes already rely on this).
-  const changeAccent = (next) => {
+  const changeAccent = useCallback((next) => {
     setAccent(next);
     apiFetch("/api/v1/ui-preferences", "", {
       method: "PUT",
       body: JSON.stringify({ accent: next }),
     }).catch(() => {});
-  };
+  }, []);
   // Simple UI (design handoff). `simpleUiDefault` is the persisted "Use Simple UI by
   // default" preference — same durable contract as theme/accent (server copy in
   // ui-preferences.json + a localStorage instant-paint cache), because the desktop
@@ -580,9 +641,17 @@ export function App() {
   const activeViewRef = useRef(activeView);
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
   const generatedAssetRefreshesRef = useRef(new Map());
-  const refreshDataRef = useRef(null);
+  const refreshShellDataRef = useRef(null);
+  const refreshModelsRef = useRef(null);
+  const refreshModelAndLorasRef = useRef(null);
+  const refreshTrainingTargetsRef = useRef(null);
+  const refreshTrainingPresetsRef = useRef(null);
+  const hydrateLaunchDomainsRef = useRef(null);
   const refreshAssetsRef = useRef(null);
   const healthRequestRef = useRef(null);
+  const hydrationLedgerRef = useRef(new Map());
+  const committedHydrationRouteRef = useRef(null);
+  const previousHydrationProjectIdRef = useRef(null);
   // Latest purgeAsset, held in a ref so the App-level scratch-op survivor (sc-8850) can
   // purge orphaned scratch/result assets from the SSE handler without re-subscribing.
   const purgeAssetRef = useRef(null);
@@ -594,7 +663,6 @@ export function App() {
   const refreshTrainingDatasetsRef = useRef(null);
   const refreshPersonTracksRef = useRef(null);
   const refreshTimelinesRef = useRef(null);
-  const refreshDataWithLoraOverlayRef = useRef(null);
   // A screen (the Image Editor, sc-2434) can register a guard that runs before a
   // user-initiated navigation leaves it — e.g. to confirm discarding unsaved edits.
   // Programmatic setActiveView calls (post-generation hops) deliberately bypass it.
@@ -751,7 +819,14 @@ export function App() {
     updateCharacterLora,
     detachCharacterLora,
     createCharacterTestJob,
-  } = useCharacters({ token, activeProject, activeProjectRef, setError, requestedGpu, setActiveView });
+  } = useCharacters({
+    token,
+    activeProject,
+    activeProjectRef,
+    setError: domainErrors.characters,
+    requestedGpu,
+    setActiveView,
+  });
 
   const {
     presets,
@@ -761,7 +836,7 @@ export function App() {
     updatePreset,
     duplicatePreset,
     deletePreset,
-  } = usePresets({ token, activeProject, activeProjectRef, setError });
+  } = usePresets({ token, activeProject, activeProjectRef, setError: domainErrors.presets });
 
   const {
     savedVoices,
@@ -769,7 +844,12 @@ export function App() {
     refreshSavedVoices,
     createSavedVoice,
     deleteSavedVoice,
-  } = useSavedVoices({ token, activeProject, activeProjectRef, setError });
+  } = useSavedVoices({
+    token,
+    activeProject,
+    activeProjectRef,
+    setError: domainErrors.savedVoices,
+  });
 
   const {
     promptBatches,
@@ -779,7 +859,12 @@ export function App() {
     updatePromptBatch,
     duplicatePromptBatch,
     deletePromptBatch,
-  } = usePromptBatches({ token, activeProject, activeProjectRef, setError });
+  } = usePromptBatches({
+    token,
+    activeProject,
+    activeProjectRef,
+    setError: domainErrors.promptBatches,
+  });
 
   const {
     trainingDatasets,
@@ -799,26 +884,36 @@ export function App() {
     batchRenameTrainingDataset,
     writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob,
+    createTrainingDatasetParquetImportJob,
     createTrainingDatasetUpscaleJob,
     createTrainingDatasetAnalysisJob,
     createTrainingDatasetFaceAnalysisJob,
     smartCropTrainingDataset,
     stripExifTrainingDataset,
     createTrainingJob,
-  } = useTraining({ token, activeProject, activeProjectRef, setError, setJobs });
+  } = useTraining({
+    token,
+    activeProject,
+    activeProjectRef,
+    setError: domainErrors.trainingDatasets,
+    setJobs,
+  });
 
-  // sc-8811: useModelsAndLoras lists these two cross-cutting refresh orchestrators as
+  // sc-8811: useModelsAndLoras lists these two model-domain refresh orchestrators as
   // useCallback deps of deleteModel/deleteLora, which sit in appContextValue's
-  // dependency array. The orchestrator bodies (refreshData / refreshDataWithLoraOverlay,
-  // defined below) are plain per-render function declarations published into the
+  // dependency array. The orchestrator bodies are published into the
   // refs above, so passing them in directly would give deleteModel/deleteLora — and
   // therefore the whole ~130-key context value — a fresh identity on every App render,
   // silently defeating the sc-4194 memoization. These identity-stable wrappers delegate
   // through the refs instead: callers always invoke the latest body (fresh token /
   // activeProject), while the hook's actions stay referentially stable.
-  const stableRefreshData = useCallback((...args) => refreshDataRef.current?.(...args), []);
+  const stableRefreshData = useCallback((...args) => refreshModelsRef.current?.(...args), []);
   const stableRefreshDataWithLoraOverlay = useCallback(
-    (...args) => refreshDataWithLoraOverlayRef.current?.(...args),
+    (...args) => refreshModelAndLorasRef.current?.(...args),
+    [],
+  );
+  const stableHydrateLaunchDomains = useCallback(
+    (...args) => hydrateLaunchDomainsRef.current?.(...args),
     [],
   );
 
@@ -842,7 +937,8 @@ export function App() {
     token,
     activeProject,
     activeProjectRef,
-    setError,
+    setError: domainErrors.models,
+    setLoraError: domainErrors.loras,
     setJobs,
     setActiveView,
     refreshData: stableRefreshData,
@@ -856,7 +952,14 @@ export function App() {
     createPersonDetectionJob,
     createPersonTrackJob,
     saveTrackCorrections,
-  } = usePersonTracks({ token, activeProject, activeProjectRef, setError, requestedGpu, setActiveView });
+  } = usePersonTracks({
+    token,
+    activeProject,
+    activeProjectRef,
+    setError: domainErrors.personTracks,
+    requestedGpu,
+    setActiveView,
+  });
 
   const {
     timelines,
@@ -878,7 +981,7 @@ export function App() {
     token,
     activeProject,
     activeProjectRef,
-    setError,
+    setError: domainErrors.timelines,
     pushNotice,
     requestedGpu,
     setActiveView,
@@ -1073,8 +1176,20 @@ export function App() {
     setVisitedKeepAliveViews((prev) => (prev.has(activeView) ? prev : new Set(prev).add(activeView)));
   }, [activeView]);
 
+  // Passive effects run after React commits the state batch from refreshData.
+  // Keep this before the active-project effect so the marks reflect the commit
+  // order that unlocks the project-scoped catalog request below.
+  useEffect(() => {
+    if (projectsLoaded) {
+      recordStartupMark("projects-committed");
+    }
+  }, [projectsLoaded, projects]);
+
   useEffect(() => {
     activeProjectRef.current = activeProject;
+    if (activeProject) {
+      recordStartupMark("active-project-selected");
+    }
   }, [activeProject]);
 
   useEffect(() => {
@@ -1293,42 +1408,60 @@ export function App() {
     if (!ready) {
       return;
     }
-    refreshDataRef.current?.();
+    hydrationLedgerRef.current.clear();
+    const controller = new AbortController();
+    refreshShellDataRef.current?.({ signal: controller.signal });
+    return () => controller.abort();
   }, [ready, token]);
 
-  useEffect(() => {
-    if (!activeProject || !ready) {
+  // Project changes reset only project-owned catalogs. Global models/training
+  // metadata and shared shell state survive. useLayoutEffect prevents the next
+  // project from painting the previous project's unscoped hook state.
+  useLayoutEffect(() => {
+    const nextProjectId = activeProject?.id ?? null;
+    const previousProjectId = previousHydrationProjectIdRef.current;
+    if (previousProjectId === nextProjectId) {
+      return;
+    }
+    previousHydrationProjectIdRef.current = nextProjectId;
+    if (previousProjectId !== null) {
       setAssets([]);
       setLoadedAssetsProjectId(null);
+      setAssetLoadState({
+        projectId: nextProjectId,
+        status: nextProjectId ? "loading" : "idle",
+        error: "",
+      });
       setCharacters([]);
       setSavedVoices([]);
       setPersonTracks([]);
       setTimelines([]);
       setTimelinesProjectId(null);
       setPresets([]);
-      setTrainingTargetsError("");
+      setPromptBatches([]);
+      setLoras([]);
       setTrainingDatasets([]);
       setTrainingDatasetsProjectId(null);
       setTrainingDatasetsError("");
       setSelectedTimelineId(null);
       setActiveTimeline(null);
-      return;
     }
-    // Switching projects (or unmounting) aborts the previous project's in-flight
-    // loads so a slow response can't overwrite the newly-selected project's data.
-    const controller = new AbortController();
-    const { signal } = controller;
-    refreshAssetsRef.current?.(activeProject.id, { signal });
-    refreshCharactersRef.current?.(activeProject.id, { signal });
-    refreshSavedVoicesRef.current?.(activeProject.id, { signal });
-    refreshLorasRef.current?.(activeProject.id, { signal });
-    refreshPresetsRef.current?.(activeProject.id, { signal });
-    refreshPromptBatchesRef.current?.(activeProject.id, { signal });
-    refreshTrainingDatasetsRef.current?.(activeProject.id, { signal });
-    refreshPersonTracksRef.current?.(activeProject.id, { signal });
-    refreshTimelinesRef.current?.(activeProject.id, { signal });
-    return () => controller.abort();
-  }, [activeProject?.id, ready, token]);
+  }, [
+    activeProject?.id,
+    setActiveTimeline,
+    setCharacters,
+    setLoras,
+    setPersonTracks,
+    setPresets,
+    setPromptBatches,
+    setSavedVoices,
+    setSelectedTimelineId,
+    setTimelines,
+    setTimelinesProjectId,
+    setTrainingDatasets,
+    setTrainingDatasetsError,
+    setTrainingDatasetsProjectId,
+  ]);
 
   // sc-11231 (F-037): useJobEvents captures whichever callback existed at subscribe time
   // (its SSE effect deps are only [access.authRequired, ready, token]), so this MUST have a
@@ -1351,6 +1484,7 @@ export function App() {
     access,
     ready,
     token,
+    jobsRef,
     setJobs,
     setWorkers,
     setQueueSummary,
@@ -1360,8 +1494,8 @@ export function App() {
     dismissNoticeKind,
     generatedAssetRefreshesRef,
     refreshAssetsRef,
-    refreshDataRef,
-    refreshDataWithLoraOverlayRef,
+    refreshModelsRef,
+    refreshModelAndLorasRef,
     refreshPersonTracksRef,
     activeProjectRef,
     enqueueTimelineGenerationApply,
@@ -1379,83 +1513,119 @@ export function App() {
     editorScratchRegistry.sweep(jobs);
   }, [jobs, editorScratchRegistry]);
 
-  async function refreshData() {
-    const fetchInitial = async (label, path, fallback, optional = false) => {
+  async function refreshShellData({ signal } = {}) {
+    const fetchInitial = async (domain, label, path, fallback, optional = false) => {
       try {
-        return { label, value: await apiFetch(path, token), error: "" };
+        const value = await apiFetch(path, token, { signal });
+        setDomainError(domain, "");
+        return { label, value, error: "" };
       } catch (err) {
-        return { label, value: fallback, error: optional ? "" : `${label}: ${err.message}` };
+        if (isAbortError(err)) {
+          return { label, value: fallback, error: "", aborted: true };
+        }
+        const error = optional ? "" : `${label}: ${err.message}`;
+        setDomainError(domain, error);
+        return { label, value: fallback, error };
       }
     };
-    const [
-      projectsResult,
-      jobsResult,
-      workersResult,
-      modelsResult,
-      lorasResult,
-      presetsResult,
-      trainingTargetsResult,
-      trainingPresetsResult,
-      promptBatchesResult,
-    ] =
-      await Promise.all([
-        fetchInitial("Projects", "/api/v1/projects", []),
-        fetchInitial("Jobs", "/api/v1/jobs", []),
-        fetchInitial("Workers", "/api/v1/workers", []),
-        fetchInitial("Models", "/api/v1/models", []),
-        fetchInitial("LoRAs", "/api/v1/loras", []),
-        fetchInitial("Presets", "/api/v1/recipe-presets", [], true),
-        fetchInitial("Training targets", "/api/v1/training/targets", { schemaVersion: 1, targets: [] }),
-        fetchInitial("Training presets", "/api/v1/training/presets", { schemaVersion: 1, presets: [] }),
-        fetchInitial("Prompt batches", "/api/v1/prompt-batches", [], true),
-      ]);
-    // Mac UI gating (sc-3486): optional + non-fatal — a fetch failure leaves gating inert.
-    fetchInitial("Mac capabilities", "/api/v1/capabilities/mac", DEFAULT_MAC_CAPABILITIES, true)
+    const projectsPromise = fetchInitial(
+      "projects",
+      "Projects",
+      "/api/v1/projects",
+      [],
+    ).then((result) => {
+      if (result.aborted) return result;
+      applySuccessfulProjectRefresh(result, setProjects, setActiveProject);
+      setProjectsLoaded(true);
+      return result;
+    });
+    fetchInitial(
+      "mac-capabilities",
+      "Mac capabilities",
+      "/api/v1/capabilities/mac",
+      DEFAULT_MAC_CAPABILITIES,
+      true,
+    )
       .then((result) => setMacCapabilities(result.value ?? DEFAULT_MAC_CAPABILITIES))
       .catch(() => {});
-    const projectItems = projectsResult.value;
-    setProjects(projectItems);
-    setProjectsLoaded(true);
-    setActiveProject((current) => current ?? projectItems[0] ?? null);
-    setJobs((current) => mergeFreshJobs(current, jobsResult.value));
-    setWorkers(workersResult.value.sort(sortWorkers));
-    setQueueSummary(null);
-    setModels(modelsResult.value);
-    setLoras(lorasResult.value);
-    setPresets(presetsResult.value);
-    setPromptBatches(promptBatchesResult.value);
-    setTrainingTargets(trainingTargetsResult.value);
-    setTrainingTargetsError(trainingTargetsResult.error);
-    setTrainingPresets(trainingPresetsResult.value);
-    setTrainingPresetsError(trainingPresetsResult.error);
-    setError(
-      [
-        projectsResult,
-        jobsResult,
-        workersResult,
-        modelsResult,
-        lorasResult,
-        presetsResult,
-        trainingTargetsResult,
-        trainingPresetsResult,
-      ]
-        .map((result) => result.error)
-        .filter(Boolean)
-        .join("; "),
-    );
+    const shellPromises = [
+      fetchInitial("jobs", "Jobs", "/api/v1/jobs", []).then((result) => {
+        if (result.aborted) return result;
+        setJobs((current) => mergeFreshJobs(current, result.value));
+        setQueueSummary(null);
+        return result;
+      }),
+      fetchInitial("workers", "Workers", "/api/v1/workers", []).then((result) => {
+        if (result.aborted) return result;
+        setWorkers(result.value.sort(sortWorkers));
+        return result;
+      }),
+    ];
+    await Promise.all([projectsPromise, ...shellPromises]);
+  }
+
+  async function refreshModels({ signal } = {}) {
+    try {
+      const items = await apiFetch("/api/v1/models", token, { signal });
+      setModels(items);
+      domainErrors.models("");
+      return refreshSuccess(items);
+    } catch (err) {
+      if (isAbortError(err)) return refreshFailure("aborted", err);
+      domainErrors.models(err.message);
+      return refreshFailure("error", err);
+    }
+  }
+
+  async function refreshTrainingTargets({ signal } = {}) {
+    try {
+      const catalog = await apiFetch("/api/v1/training/targets", token, { signal });
+      setTrainingTargets(catalog);
+      setTrainingTargetsError("");
+      domainErrors.trainingTargets("");
+      return refreshSuccess(catalog);
+    } catch (err) {
+      if (isAbortError(err)) return refreshFailure("aborted", err);
+      setTrainingTargetsError(err.message);
+      domainErrors.trainingTargets(err.message);
+      return refreshFailure("error", err);
+    }
+  }
+
+  async function refreshTrainingPresets({ signal } = {}) {
+    try {
+      const catalog = await apiFetch("/api/v1/training/presets", token, { signal });
+      setTrainingPresets(catalog);
+      setTrainingPresetsError("");
+      domainErrors.trainingPresets("");
+      return refreshSuccess(catalog);
+    } catch (err) {
+      if (isAbortError(err)) return refreshFailure("aborted", err);
+      setTrainingPresetsError(err.message);
+      domainErrors.trainingPresets(err.message);
+      return refreshFailure("error", err);
+    }
   }
 
   async function refreshAssets(projectId = activeProject?.id, { signal } = {}) {
     if (!projectId) {
-      return;
+      return refreshFailure("missing-project");
     }
     // SSE job events may describe a background project. Use this render's
     // project, not activeProjectRef: that ref advances in a passive effect while
     // this closure is published from a layout effect. During A→B, the published
     // B closure must reject an A refresh before the passive ref catches up.
     if (!isCurrentProjectRequest(activeProject?.id ?? null, projectId)) {
-      return;
+      return refreshFailure("stale");
     }
+    // Keep an already-settled grid usable during background/SSE refreshes.
+    // Initial loads, retries, and project switches still expose "loading".
+    setAssetLoadState((current) =>
+      loadedAssetsProjectId === projectId
+        ? { ...current, projectId, error: "" }
+        : { projectId, status: "loading", error: "" },
+    );
+    const timingStartedAt = beginAssetRequest();
     try {
       const items = await apiFetch(`/api/v1/projects/${projectId}/assets?includeRejected=true&includeTrashed=true`, token, { signal });
       // sc-8858: an SSE-triggered refresh for the just-active project can resolve
@@ -1463,26 +1633,32 @@ export function App() {
       // project's assets with the old one's. Drop the stale response — mirrors
       // refreshTimelines' guard (useTimelines.js).
       if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
-        return;
+        return refreshFailure("stale");
       }
       setAssets(items);
       setLoadedAssetsProjectId(projectId);
       setSelectedAssetId((current) => reconcileSelectedAssetId(items, current));
-      setError("");
+      setAssetLoadState({ projectId, status: "ready", error: "" });
+      domainErrors.assets("");
+      return refreshSuccess(items);
     } catch (err) {
-      if (isAbortError(err)) return;
-      setError(err.message);
+      if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
+        return refreshFailure("stale", err);
+      }
+      if (isAbortError(err)) return refreshFailure("aborted", err);
+      setAssetLoadState({ projectId, status: "error", error: err.message });
+      domainErrors.assets(err.message);
+      return refreshFailure("error", err);
+    } finally {
+      settleAssetRequest(timingStartedAt);
     }
   }
 
-  function refreshDataWithLoraOverlay(projectId = activeProjectRef.current?.id) {
-    refreshData()
-      .then(() => {
-        if (projectId) {
-          refreshLoras(projectId);
-        }
-      })
-      .catch(() => {});
+  async function refreshModelAndLoras(projectId = activeProjectRef.current?.id) {
+    await Promise.all([
+      refreshModels(),
+      refreshLoras(projectId || undefined),
+    ]);
   }
 
   // sc-8940: Publish the latest refresh closures into their refs from a post-commit
@@ -1496,7 +1672,26 @@ export function App() {
   // handlers, and React runs all layout effects before any passive effect — preserving
   // the original ordering where consumers saw the fresh closure.
   useLayoutEffect(() => {
-    refreshDataRef.current = refreshData;
+    const setupRoute =
+      isDesktopShell && setupCompleted === false && authenticated;
+    const simpleRoute = !setupRoute && uiMode === SIMPLE_MODE;
+    const route = setupRoute
+      ? "Setup"
+      : simpleRoute
+        ? simpleActiveScreen
+        : activeView;
+    const committedRoute = {
+      route,
+      simple: simpleRoute,
+      projectId: activeProject?.id ?? null,
+    };
+    committedHydrationRouteRef.current = committedRoute;
+    refreshShellDataRef.current = refreshShellData;
+    refreshModelsRef.current = refreshModels;
+    refreshModelAndLorasRef.current = refreshModelAndLoras;
+    refreshTrainingTargetsRef.current = refreshTrainingTargets;
+    refreshTrainingPresetsRef.current = refreshTrainingPresets;
+    hydrateLaunchDomainsRef.current = hydrateLaunchDomains;
     refreshAssetsRef.current = refreshAssets;
     refreshCharactersRef.current = refreshCharacters;
     refreshSavedVoicesRef.current = refreshSavedVoices;
@@ -1506,8 +1701,241 @@ export function App() {
     refreshTrainingDatasetsRef.current = refreshTrainingDatasets;
     refreshPersonTracksRef.current = refreshPersonTracks;
     refreshTimelinesRef.current = refreshTimelines;
-    refreshDataWithLoraOverlayRef.current = refreshDataWithLoraOverlay;
+    return () => {
+      if (committedHydrationRouteRef.current === committedRoute) {
+        committedHydrationRouteRef.current = null;
+      }
+    };
   });
+
+  const hydrationRefresher = useCallback((domain) => {
+    const refreshers = {
+      assets: (id, options) => refreshAssetsRef.current?.(id, options),
+      characters: (id, options) => refreshCharactersRef.current?.(id, options),
+      savedVoices: (id, options) => refreshSavedVoicesRef.current?.(id, options),
+      loras: (id, options) => refreshLorasRef.current?.(id, options),
+      presets: (id, options) => refreshPresetsRef.current?.(id, options),
+      promptBatches: (id, options) => refreshPromptBatchesRef.current?.(id, options),
+      trainingDatasets: (id, options) =>
+        refreshTrainingDatasetsRef.current?.(id, options),
+      personTracks: (id, options) => refreshPersonTracksRef.current?.(id, options),
+      timelines: (id, options) => refreshTimelinesRef.current?.(id, options),
+      models: (_id, options) => refreshModelsRef.current?.(options),
+      trainingTargets: (_id, options) =>
+        refreshTrainingTargetsRef.current?.(options),
+      trainingPresets: (_id, options) =>
+        refreshTrainingPresetsRef.current?.(options),
+    };
+    return refreshers[domain];
+  }, []);
+
+  const ensureHydrationDomain = useCallback((domain, projectId, options = {}) => {
+    if (isProjectHydrationDomain(domain) && !projectId) {
+      return Promise.resolve(refreshFailure("missing-project"));
+    }
+    const ledger = hydrationLedgerRef.current;
+    const key = hydrationLedgerKey(domain, projectId);
+    const current = ledger.get(key);
+    if (current?.status === "ready") {
+      return Promise.resolve(refreshSuccess());
+    }
+    if (current?.status === "loading") {
+      return current.promise;
+    }
+    const refresh = hydrationRefresher(domain);
+    if (!refresh) {
+      return Promise.resolve(refreshFailure("missing-refresher"));
+    }
+    const { abort: abortRequest = null, ...refreshOptions } = options;
+    const entry = { status: "loading", promise: null, abort: abortRequest };
+    entry.promise = Promise.resolve()
+      .then(() => refresh(projectId, refreshOptions))
+      .then((result) => {
+        const normalized = result?.ok === true
+          ? result
+          : result?.ok === false
+            ? result
+            : refreshFailure("error", new Error(`${domain} refresh did not report success`));
+        if (ledger.get(key) === entry) {
+          ledger.set(
+            key,
+            normalized.ok
+              ? { status: "ready" }
+              : { status: "error", reason: normalized.reason, error: normalized.error },
+          );
+        }
+        return normalized;
+      })
+      .catch((error) => {
+        const result = refreshFailure("error", error);
+        if (ledger.get(key) === entry) {
+          ledger.set(key, { status: "error", reason: result.reason, error });
+        }
+        return result;
+      });
+    ledger.set(key, entry);
+    return entry.promise;
+  }, [hydrationRefresher]);
+
+  // Hydrate only the active screen's domains. Each ledger entry is global or
+  // project-keyed, so keep-alive navigation reuses settled catalogs while a
+  // project switch loads fresh overlays without discarding global state.
+  useEffect(() => {
+    if (!ready || !projectsLoaded) {
+      return;
+    }
+    const setupRoute =
+      isDesktopShell && setupCompleted === false && authenticated;
+    const simpleRoute = !setupRoute && uiMode === SIMPLE_MODE;
+    const route = setupRoute
+      ? "Setup"
+      : simpleRoute
+        ? simpleActiveScreen
+        : activeView;
+    const domains = hydrationDomainsForRoute(route, { simple: simpleRoute });
+    const projectId = activeProject?.id ?? null;
+    const controller = new AbortController();
+    const started = [];
+    const hydrationLedger = hydrationLedgerRef.current;
+
+    domains.forEach((domain) => {
+      if (isProjectHydrationDomain(domain) && !projectId) {
+        return;
+      }
+      const key = hydrationLedgerKey(domain, projectId);
+      const current = hydrationLedger.get(key);
+      if (current?.status === "loading") {
+        started.push({ domain, key });
+        return;
+      }
+      if (current?.status === "ready") {
+        return;
+      }
+      started.push({ domain, key });
+      ensureHydrationDomain(domain, projectId, {
+        signal: controller.signal,
+        abort: () => controller.abort(),
+      });
+    });
+
+    return () => {
+      const next = committedHydrationRouteRef.current;
+      const nextDomains = next
+        ? new Set([
+            ...hydrationDomainsForRoute(next.route, { simple: next.simple }),
+            ...hydrationDomainsForRoute(next.route, {
+              simple: next.simple,
+              deferred: true,
+            }),
+          ])
+        : new Set();
+      if (
+        next?.projectId === projectId &&
+        started.every(({ domain }) => nextDomains.has(domain))
+      ) {
+        return;
+      }
+      controller.abort();
+      started.forEach(({ key }) => {
+        const entry = hydrationLedger.get(key);
+        if (entry?.status === "loading") {
+          entry.abort?.();
+          hydrationLedger.delete(key);
+        }
+      });
+    };
+  }, [
+    activeProject?.id,
+    activeView,
+    authenticated,
+    ensureHydrationDomain,
+    projectsLoaded,
+    ready,
+    setupCompleted,
+    simpleActiveScreen,
+    token,
+    uiMode,
+  ]);
+
+  // The default Library route paints from its project asset request first. Only
+  // after that catalog settles do we hydrate the secondary detail-panel domains:
+  // characters power "Move to Character", while models power image VQA and audio
+  // model metadata. This keeps startup assets-first without leaving direct Library
+  // entry with permanently incomplete controls.
+  useEffect(() => {
+    if (
+      !ready ||
+      !projectsLoaded ||
+      uiMode === SIMPLE_MODE ||
+      activeView !== "Library" ||
+      !activeProject?.id ||
+      activeAssetLoadState.status !== "ready" ||
+      !hasLibraryConsumerAsset
+    ) {
+      return;
+    }
+    const controller = new AbortController();
+    const domains = hydrationDomainsForRoute("Library", { deferred: true });
+    const startedKeys = [];
+    const hydrationLedger = hydrationLedgerRef.current;
+    domains.forEach((domain) => {
+      const key = hydrationLedgerKey(domain, activeProject.id);
+      const current = hydrationLedger.get(key);
+      if (current?.status !== "ready") {
+        startedKeys.push(key);
+      }
+      ensureHydrationDomain(domain, activeProject.id, {
+        signal: controller.signal,
+        abort: () => controller.abort(),
+      });
+    });
+    return () => {
+      const next = committedHydrationRouteRef.current;
+      const nextDomains = next
+        ? new Set([
+            ...hydrationDomainsForRoute(next.route, { simple: next.simple }),
+            ...hydrationDomainsForRoute(next.route, {
+              simple: next.simple,
+              deferred: true,
+            }),
+          ])
+        : new Set();
+      if (
+        next?.projectId === activeProject.id &&
+        domains.every((domain) => nextDomains.has(domain))
+      ) {
+        return;
+      }
+      controller.abort();
+      startedKeys.forEach((key) => {
+        const entry = hydrationLedger.get(key);
+        if (entry?.status === "loading") {
+          entry.abort?.();
+          hydrationLedger.delete(key);
+        }
+      });
+    };
+  }, [
+    activeAssetLoadState.status,
+    activeProject?.id,
+    activeView,
+    ensureHydrationDomain,
+    hasLibraryConsumerAsset,
+    projectsLoaded,
+    ready,
+    uiMode,
+  ]);
+
+  async function hydrateLaunchDomains(view, projectId = activeProjectRef.current?.id) {
+    const domains = hydrationDomainsForRoute(view);
+    const results = await Promise.all(
+      domains.map((domain) => ensureHydrationDomain(domain, projectId)),
+    );
+    const failed = results.filter((result) => result?.ok !== true);
+    return failed.length
+      ? { ok: false, failures: failed }
+      : refreshSuccess();
+  }
 
   // saveToken / lockRemote (the remote-browser login + lock affordances, epic 4484
   // story 7) live in useAccessGate now (sc-9750) and are destructured above.
@@ -1572,7 +2000,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token, activeProject, requestedGpu],
+    [token, activeProject?.id, activeProject?.name, requestedGpu, setError],
   );
 
   const createImageJob = useMemo(
@@ -1836,7 +2264,7 @@ export function App() {
     return asset?.generationSet?.recipe ?? asset?.recipe ?? null;
   }
 
-  function sendAssetRecipeToImage(asset, options = {}) {
+  async function sendAssetRecipeToImage(asset, options = {}) {
     const recipe = recipeForAsset(asset);
     if (!asset || !recipe) {
       return;
@@ -1847,8 +2275,14 @@ export function App() {
     // Null → Image Studio leaves the seed random (a close variation), the default.
     const seed = assetSeed(asset);
     const replaySeed = options.keepSeed && seed != null && seed !== "" ? seed : null;
+    const projectId = activeProjectRef.current?.id;
     setSelectedAssetId(asset.id);
     closePreview();
+    setActiveView("Image");
+    const hydration = await stableHydrateLaunchDomains("Image", projectId);
+    if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) {
+      return;
+    }
     setStudioLaunch({
       id: crypto.randomUUID(),
       view: "Image",
@@ -1857,21 +2291,26 @@ export function App() {
       recipe,
       replaySeed,
     });
-    setActiveView("Image");
   }
 
   // sc-12324: the video twin of sendAssetRecipeToImage — re-run a generated clip from its own
   // recorded recipe, with or without its seed. Distinct from `sendAssetToVideo` below, which
   // sends an asset as a source clip/frame and replays no settings.
-  function sendAssetRecipeToVideo(asset, options = {}) {
+  async function sendAssetRecipeToVideo(asset, options = {}) {
     const recipe = recipeForAsset(asset);
     if (!asset || !recipe) {
       return;
     }
     const seed = assetSeed(asset);
     const replaySeed = options.keepSeed && seed != null && seed !== "" ? seed : null;
+    const projectId = activeProjectRef.current?.id;
     setSelectedAssetId(asset.id);
     closePreview();
+    setActiveView("Video");
+    const hydration = await stableHydrateLaunchDomains("Video", projectId);
+    if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) {
+      return;
+    }
     setStudioLaunch({
       id: crypto.randomUUID(),
       view: "Video",
@@ -1879,7 +2318,6 @@ export function App() {
       recipe,
       replaySeed,
     });
-    setActiveView("Video");
   }
 
   // Route the viewer's "Use this recipe" to the studio that can actually run the asset's recipe.
@@ -1899,7 +2337,7 @@ export function App() {
   // (generationStudio.jsx). So the launch carries the preset's model and sub-mode too,
   // and the studio sets all three together. `presetId` and `recipe` are mutually
   // exclusive — a recipe launch keeps clearing the preset.
-  const sendPresetToStudio = useCallback((preset) => {
+  const sendPresetToStudio = useCallback(async (preset) => {
     if (!preset?.id) {
       return;
     }
@@ -1908,11 +2346,18 @@ export function App() {
     // to Image Studio, and it stays active if the user switches to Video. Model presets keep
     // carrying model + sub-mode so they resolve in the target studio (sc-10516).
     if (preset.kind === "general") {
-      setStudioLaunch({ id: crypto.randomUUID(), view: "Image", presetGeneralId: preset.id });
+      const projectId = activeProjectRef.current?.id;
       setActiveView("Image");
+      const hydration = await stableHydrateLaunchDomains("Image", projectId);
+      if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) return;
+      setStudioLaunch({ id: crypto.randomUUID(), view: "Image", presetGeneralId: preset.id });
       return;
     }
     const view = workflowModelType(preset.workflow) === "video" ? "Video" : "Image";
+    const projectId = activeProjectRef.current?.id;
+    setActiveView(view);
+    const hydration = await stableHydrateLaunchDomains(view, projectId);
+    if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) return;
     setStudioLaunch({
       id: crypto.randomUUID(),
       view,
@@ -1920,8 +2365,7 @@ export function App() {
       presetModel: preset.model ?? null,
       presetMode: preset.defaults?.mode ?? preset.workflow,
     });
-    setActiveView(view);
-  }, []);
+  }, [stableHydrateLaunchDomains]);
 
   const sendAssetToVideo = useCallback((asset, mode = null) => {
     if (!asset) {
@@ -1980,7 +2424,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
   );
 
   const updateAssetTags = useCallback(
@@ -1996,7 +2440,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
   );
 
   // A move endpoint returns the whole moved upscale-fold group (sc-10205) as an
@@ -2026,7 +2470,7 @@ export function App() {
         throw err;
       }
     },
-    [token, mergeMovedAssets],
+    [token, mergeMovedAssets, setError],
   );
 
   // Move an asset into a character's assets (sc-10200): the true-move twin of
@@ -2050,7 +2494,7 @@ export function App() {
         throw err;
       }
     },
-    [token, mergeMovedAssets],
+    [token, mergeMovedAssets, setError],
   );
 
   const deleteAsset = useCallback(
@@ -2067,7 +2511,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
   );
 
   const purgeAsset = useCallback(
@@ -2098,7 +2542,34 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
+  );
+  const deletePreviewAsset = useCallback(
+    async (asset) => {
+      const { previous, next } = previewNavigation;
+      const target =
+        previewDirectionRef.current === "previous" ? previous ?? next : next ?? previous;
+      await deleteAsset(asset);
+      if (target) {
+        setPreviewAsset(target);
+      } else {
+        closePreview();
+      }
+    },
+    [closePreview, deleteAsset, previewNavigation],
+  );
+  const previewAssetInDirection = useCallback((asset, direction) => {
+    if (direction) {
+      previewDirectionRef.current = direction;
+    }
+    setPreviewAsset(asset);
+  }, []);
+  const purgePreviewAsset = useCallback(
+    async (asset) => {
+      await purgeAsset(asset);
+      closePreview();
+    },
+    [closePreview, purgeAsset],
   );
   // Keep the ref current for the App-level scratch-op survivor (sc-8850), which purges
   // from the SSE/sweep path without re-subscribing. Published from a post-commit effect
@@ -2147,7 +2618,7 @@ export function App() {
         return null;
       }
     },
-    [token, activeProject],
+    [activeProject, setError, token],
   );
 
   const jobAction = useCallback(
@@ -2165,7 +2636,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
   );
 
   // Clear completed items from the queue (issue #1556 / sc-12231). The server
@@ -2191,7 +2662,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
   );
 
   // Cancel every pending (not-yet-started) item in the queue (sc-13448). The server
@@ -2217,7 +2688,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
   );
 
   // Clear a single completed item from the queue (issue #1556 / sc-12231) — the
@@ -2236,7 +2707,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [setError, token],
   );
 
   const titleInfo = viewTitles[activeView] ?? { title: activeView, blurb: "" };
@@ -2323,6 +2794,13 @@ export function App() {
     queueTimelineVideoJob,
     // Assets / library (sc-1651 Phase B batch 1)
     assets,
+    assetsReady: Boolean(
+      activeProject &&
+      loadedAssetsProjectId === activeProject.id &&
+      activeAssetLoadState.status === "ready"
+    ),
+    assetsLoading: activeAssetLoadState.status === "loading",
+    assetsError: activeAssetLoadState.error,
     selectedAsset,
     // The RAW selection id (null when nothing is explicitly selected). Studios need it
     // to tell an explicit user selection apart from `selectedAsset`'s assets[0] fallback
@@ -2429,6 +2907,7 @@ export function App() {
     batchRenameTrainingDataset,
     writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob,
+    createTrainingDatasetParquetImportJob,
     createTrainingDatasetUpscaleJob,
     createTrainingDatasetAnalysisJob,
     createTrainingDatasetFaceAnalysisJob,
@@ -2482,7 +2961,7 @@ export function App() {
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline, isActiveTimelineDirty,
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
-    assets, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
+    assets, loadedAssetsProjectId, activeAssetLoadState, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobAction, clearCompletedJobs, cancelPendingJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     projectFilter, setProjectFilter, projects,
@@ -2498,7 +2977,7 @@ export function App() {
     trainingDatasets, trainingDatasetsProjectId, trainingDatasetsError, loadingTrainingDatasets,
     refreshTrainingDatasets, loadTrainingDataset, loadTrainingDatasetReadiness, setTrainingDatasetItemQualityAck, createTrainingDataset, uploadTrainingDatasetItem,
     updateTrainingDataset, batchRenameTrainingDataset, writeTrainingDatasetCaptionSidecars,
-    createTrainingDatasetCaptionJob, createTrainingDatasetUpscaleJob, createTrainingDatasetAnalysisJob, createTrainingDatasetFaceAnalysisJob, smartCropTrainingDataset, stripExifTrainingDataset, createTrainingJob, trainingPresets, trainingPresetsError,
+    createTrainingDatasetCaptionJob, createTrainingDatasetParquetImportJob, createTrainingDatasetUpscaleJob, createTrainingDatasetAnalysisJob, createTrainingDatasetFaceAnalysisJob, smartCropTrainingDataset, stripExifTrainingDataset, createTrainingJob, trainingPresets, trainingPresetsError,
     trainingTargets, trainingTargetsError, setActiveView, registerLeaveGuard, registerProjectSwitchGuard,
     trackEditorScratchOp, releaseEditorScratchOp, registerEditorScratchClaim,
     savedVoices, refreshSavedVoices, createSavedVoice, deleteSavedVoice, characters,
@@ -2522,6 +3001,7 @@ export function App() {
             lockedToSimple={uiModeLocked}
             onAccentChange={changeAccent}
             onModeChange={setUiModeOverride}
+            onScreenChange={setSimpleActiveScreen}
             onSimpleDefaultChange={changeSimpleUiDefault}
             simpleDefault={simpleUiDefault}
           />
@@ -2625,9 +3105,6 @@ export function App() {
             </button>
           </div>
           <span className="topbar-divider" aria-hidden="true" />
-          <button className="icon-btn" title="Notifications" type="button">
-            <Icon.Bell />
-          </button>
           <AccentPicker accent={accent} onChange={changeAccent} />
           <button
             className="icon-btn"
@@ -2808,39 +3285,16 @@ export function App() {
       {previewedAsset ? (
         <FullscreenPreview
           asset={previewedAsset}
-          deleteAsset={async (asset) => {
-            // Stay in the preview and advance to the neighbour in the direction
-            // the user was scrolling (falling back to the other side, then to
-            // closing once nothing is left).
-            const { previous, next } = previewNavigation;
-            const target =
-              previewDirectionRef.current === "previous" ? previous ?? next : next ?? previous;
-            await deleteAsset(asset);
-            // Advance within the launch collection; close (and drop the scope)
-            // once it is exhausted.
-            if (target) {
-              setPreviewAsset(target);
-            } else {
-              closePreview();
-            }
-          }}
+          deleteAsset={deletePreviewAsset}
           nextAsset={previewNavigation.next}
           onClose={closePreview}
           onEditImage={sendAssetToImageEditor}
           onEditInStudio={sendAssetToImageEdit}
-          onPreviewAsset={(asset, direction) => {
-            if (direction) {
-              previewDirectionRef.current = direction;
-            }
-            setPreviewAsset(asset);
-          }}
+          onPreviewAsset={previewAssetInDirection}
           onUseRecipe={sendAssetRecipeToStudio}
           previousAsset={previewNavigation.previous}
           sourceAsset={previewSourceAsset}
-          purgeAsset={async (asset) => {
-            await purgeAsset(asset);
-            closePreview();
-          }}
+          purgeAsset={purgePreviewAsset}
           updateAssetStatus={updateAssetStatus}
         />
       ) : null}

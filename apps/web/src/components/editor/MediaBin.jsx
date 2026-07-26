@@ -1,7 +1,9 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { AssetThumbnail, assetCanRenderAsImage } from "../assetMedia.jsx";
 import { Icon } from "../Icons.jsx";
 import { isAiAsset } from "./editorUtils.js";
+
+const MEDIA_PAGE_SIZE = 60;
 
 // The left media bin (design 2a, epic 12798). Two tabs: "Media" (video + still assets
 // you drop onto the timeline) and "Assets" (the full project media library for preview).
@@ -9,11 +11,17 @@ import { isAiAsset } from "./editorUtils.js";
 // AI-generated assets (derived from origin/recipe, mirroring the LikenessBadge overlay).
 export function MediaBin({ assets = [], onAddToTrack, onPreview }) {
   const [tab, setTab] = useState("media");
+  const [visibleCount, setVisibleCount] = useState(MEDIA_PAGE_SIZE);
 
   const clipAssets = assets.filter(
     (asset) => asset.type === "video" || asset.file?.mimeType?.startsWith("video/") || assetCanRenderAsImage(asset),
   );
   const shown = tab === "media" ? clipAssets : assets;
+  const visible = shown.slice(0, visibleCount);
+
+  useEffect(() => {
+    setVisibleCount(MEDIA_PAGE_SIZE);
+  }, [tab]);
 
   function handleClick(asset) {
     if (tab === "media") {
@@ -37,7 +45,7 @@ export function MediaBin({ assets = [], onAddToTrack, onPreview }) {
         {shown.length === 0 ? (
           <div className="ve-bin-empty">No media</div>
         ) : (
-          shown.slice(0, 60).map((asset) => (
+          visible.map((asset) => (
             <button
               className="ve-bin-item"
               key={asset.id}
@@ -56,6 +64,21 @@ export function MediaBin({ assets = [], onAddToTrack, onPreview }) {
           ))
         )}
       </div>
+      {shown.length > MEDIA_PAGE_SIZE ? (
+        <div className="ve-bin-more">
+          <span aria-live="polite">
+            Showing {visible.length} of {shown.length}
+          </span>
+          {visible.length < shown.length ? (
+            <button
+              onClick={() => setVisibleCount((count) => count + MEDIA_PAGE_SIZE)}
+              type="button"
+            >
+              Show more
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

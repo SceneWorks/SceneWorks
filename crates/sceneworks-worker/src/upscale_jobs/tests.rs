@@ -3,6 +3,22 @@
 //! macOS and on the off-Mac candle lane (sc-5499), since the tiling path is now shared.
 
 use super::*;
+
+#[test]
+fn ort_upscaler_cache_key_includes_factor_and_resolved_path() {
+    assert_eq!(
+        upscaler_cache_key(2, Path::new("/weights/a.onnx")),
+        upscaler_cache_key(2, Path::new("/weights/a.onnx"))
+    );
+    assert_ne!(
+        upscaler_cache_key(2, Path::new("/weights/a.onnx")),
+        upscaler_cache_key(2, Path::new("/weights/b.onnx"))
+    );
+    assert_ne!(
+        upscaler_cache_key(2, Path::new("/weights/a.onnx")),
+        upscaler_cache_key(4, Path::new("/weights/a.onnx"))
+    );
+}
 // `Rgb`/`RgbImage` back the Real-ESRGAN tiling/crop tests + the off-Mac ort smoke (the `ort` path,
 // macOS + the candle lane) AND the SeedVR2 real-weight smoke (Mac MLX + the candle lane).
 #[cfg(any(

@@ -110,8 +110,16 @@ export function batchItemStatus(jobId, jobs, observedJobs) {
   return "queued";
 }
 
-// The completed result asset for a batch item (the worker returns it on `result.assets[0]`),
-// or null while pending / on failure.
+// Resolve the status of the batch item shape. Sequential fan-out starts with
+// explicit pending placeholders; once submission settles, a missing job id is
+// a failure because every successful response must provide one.
+export function batchItemStatusForItem(item, jobs, observedJobs) {
+  if (!item?.jobId) return item?.pending ? "queued" : "failed";
+  return batchItemStatus(item.jobId, jobs, observedJobs);
+}
+
+// The completed result asset for a batch item (the API exposes persisted worker asset writes on
+// `result.assets[0]`), or null while pending / on failure.
 export function batchItemResultAsset(jobId, jobs) {
   const job = (jobs ?? []).find((item) => item.id === jobId);
   if (!job || job.status !== "completed") return null;
@@ -124,11 +132,7 @@ export function batchItemResultAsset(jobId, jobs) {
 export function summarizeBatchProgress(items, jobs, observedJobs) {
   const summary = { total: items?.length ?? 0, queued: 0, running: 0, completed: 0, failed: 0 };
   for (const item of items ?? []) {
-    if (!item.jobId) {
-      summary.failed += 1;
-      continue;
-    }
-    summary[batchItemStatus(item.jobId, jobs, observedJobs)] += 1;
+    summary[batchItemStatusForItem(item, jobs, observedJobs)] += 1;
   }
   summary.done = summary.completed + summary.failed;
   summary.allDone = summary.total > 0 && summary.done === summary.total;

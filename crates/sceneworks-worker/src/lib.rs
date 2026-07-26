@@ -58,6 +58,24 @@ use uuid::Uuid;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod advanced;
 mod api_client;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod asset_media;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod image_sampling;
+// Shared one-child PNG persistence for upscale (Mac + candle) and smart-select (Mac).
+// Keep the include site on the callers' superset so the neither-backend lane does not
+// compile an otherwise dead helper.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod single_child_asset;
 // Lazy, on-demand download-credential pull from the macOS desktop credential socket
 // (sc-5891). Compiles on all targets; the socket I/O is `cfg(unix)` and inert unless
 // the desktop injects `SCENEWORKS_CRED_IPC_*`, so server/Docker/Windows are unaffected.
@@ -120,6 +138,7 @@ mod vram_gate;
 mod krea_control_fit;
 use supervisor::*;
 mod model_jobs;
+pub use model_jobs::recover_stranded_model_conversions;
 use model_jobs::*;
 mod media_jobs;
 use media_jobs::*;
@@ -167,6 +186,11 @@ mod training_jobs;
 use training_jobs::*;
 mod caption_jobs;
 use caption_jobs::*;
+// LAION-style URL/caption Parquet materialization belongs to the non-GPU
+// utility worker; the existing ControlNet trainer consumes the resulting
+// ordinary SceneWorks dataset.
+mod dataset_parquet_jobs;
+use dataset_parquet_jobs::*;
 // The shared scaffold both dataset-analysis jobs route through (sc-8836, F-034) — the `CancelJoinGuard`
 // select loop, per-item progress ramp, and sidecar POST extracted out of the two near-duplicate modules.
 // Gated to the same lanes as its only callers (the real `run_*_analysis_job` in the two modules below);
@@ -681,6 +705,37 @@ struct DiscoveredGpu {
 }
 
 async fn shutdown_signal() {
+    use std::sync::OnceLock;
+    use tokio::sync::watch;
+
+    static SHUTDOWN: OnceLock<watch::Sender<bool>> = OnceLock::new();
+    let sender = SHUTDOWN.get_or_init(|| {
+        let (sender, _receiver) = watch::channel(false);
+        let signal = sender.clone();
+        tokio::spawn(async move {
+            wait_for_process_shutdown_source().await;
+            // Latch the request even if it arrives between two `select!` calls,
+            // when no receiver is currently subscribed.
+            signal.send_replace(true);
+        });
+        sender
+    });
+    let mut receiver = sender.subscribe();
+    wait_for_shutdown_latch(&mut receiver).await;
+}
+
+async fn wait_for_shutdown_latch(receiver: &mut tokio::sync::watch::Receiver<bool>) {
+    if *receiver.borrow_and_update() {
+        return;
+    }
+    while receiver.changed().await.is_ok() {
+        if *receiver.borrow_and_update() {
+            return;
+        }
+    }
+}
+
+async fn wait_for_process_shutdown_source() {
     #[cfg(unix)]
     {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
@@ -721,12 +776,9 @@ async fn shutdown_signal() {
 /// (sc-11184 / F-014) — the Windows graceful-shutdown signal, standing in for the unix
 /// SIGTERM the supervisor cannot deliver per-child on Windows.
 ///
-/// `shutdown_signal()` is awaited on every worker-loop turn, so opening a fresh reader
-/// per call would risk parking a blocking thread on each turn. Instead a SINGLE
-/// background reader is started once (guarded by a `OnceLock`) and its EOF result is
-/// fanned out over a `watch` channel; every caller just subscribes. The channel latches
-/// `true` on close and stays there, so a caller that subscribes AFTER the pipe already
-/// closed still returns immediately. The reader drains stdin on std's blocking handle
+/// The process-wide shutdown source calls this once on a supervised Windows child.
+/// A SINGLE background reader is guarded by a `OnceLock`, and its EOF result is
+/// latched over a `watch` channel. The reader drains stdin on std's blocking handle
 /// inside `spawn_blocking` (rather than `tokio::io::stdin`, which needs the `io-std`
 /// feature this crate does not enable).
 #[cfg(not(unix))]
@@ -823,7 +875,11 @@ pub async fn run() -> WorkerResult<()> {
         );
     }
     let settings = Settings::from_env();
+    // Only the top-level worker process performs conversion recovery. It runs before any utility
+    // children are spawned, and the lifecycle lock excludes independently running finalizers.
+    // Child restarts must never sweep while sibling utility workers may be converting.
     if !settings.is_child_worker {
+        recover_stranded_model_conversions(&settings.data_dir).await?;
         if settings.gpu_id == "auto" {
             return supervise_auto_workers(settings).await;
         }
@@ -1018,14 +1074,14 @@ async fn run_job_with_shutdown(
     JobOutcome::ShutdownDuringJob
 }
 
-/// True when an error ultimately stems from SQLite reporting the jobs database as locked.
-/// The claim travels worker→API→store, so a lock surfaces as an `Api { detail }` whose
-/// message embeds the SQLite text; match on the rendered string rather than a typed variant.
+/// True when the API reports SQLite's typed BUSY/LOCKED class for the jobs database.
 fn is_database_locked(error: &WorkerError) -> bool {
-    error
-        .to_string()
-        .to_ascii_lowercase()
-        .contains("database is locked")
+    matches!(
+        error,
+        WorkerError::Api {
+            code: Some(code), ..
+        } if code == "database_locked"
+    )
 }
 
 async fn register_worker_with_retry(
@@ -1312,6 +1368,9 @@ async fn run_utility_job(
             JobType::TrainingCaption => run_training_caption_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Training captioning failed.", error)),
+            JobType::DatasetParquetImport => run_dataset_parquet_import_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Parquet dataset import failed.", error)),
             // Dataset Doctor CLIP-embedding analysis (sc-6535): the macOS MLX worker embeds every dataset
             // image (clip_vit_l14) and POSTs the content-hash sidecar; off-Mac the handler returns a
             // precise unsupported error (no candle CLIP embedder yet).

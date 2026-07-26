@@ -165,37 +165,92 @@ impl SessionLog {
 const VALUE_TERMINATORS: &[char] = &['&', '"', '\'', ' ', '\t', '<', '>', ',', '}'];
 
 fn redact_secrets(line: &str) -> String {
-    // Query / flag shapes: `token=…`, `access_token=…`, `api_key=…`.
-    let line = redact_marker_value(line.to_owned(), "token=", VALUE_TERMINATORS);
-    let line = redact_marker_value(line, "access_token=", VALUE_TERMINATORS);
-    let line = redact_marker_value(line, "api_key=", VALUE_TERMINATORS);
-    // JSON object shapes: `"token":"…"`, `"access_token":"…"`, `"api_key":"…"`.
-    // The marker consumes through the value-opening quote so the redaction span
-    // starts at the secret and stops at the closing quote (a terminator). This
-    // catches secrets a `key=value` marker never would (F-072).
-    let line = redact_json_marker_value(line, "token");
-    let line = redact_json_marker_value(line, "access_token");
-    let line = redact_json_marker_value(line, "api_key");
+    // Cover query, CLI, JSON and YAML-style key/value shapes, including whitespace
+    // around the delimiter. Secret-bearing callers are inconsistent about whether
+    // they spell API key with an underscore, so both common forms are included.
+    let mut line = line.to_owned();
+    for key in [
+        "token",
+        "access_token",
+        "api_key",
+        "apikey",
+        "secret",
+        "password",
+    ] {
+        line = redact_key_value(line, key);
+    }
     // Bearer credential, in both `Bearer abc` and `"Bearer abc"` forms.
     let line = redact_marker_value(line, "bearer ", VALUE_TERMINATORS);
     redact_authorization_header(line)
 }
 
-/// Redact the value of a `"<key>":"` JSON pair. The marker matches through the
-/// opening quote of the value so `redact_marker_value` starts replacing at the
-/// secret itself and stops at the closing quote (in `VALUE_TERMINATORS`).
-fn redact_json_marker_value(output: String, key: &str) -> String {
-    // Tolerate the whitespace serializers put around the colon: `"key": "val"`.
-    let marker_no_space = format!("\"{key}\":\"");
-    let marker_space = format!("\"{key}\": \"");
-    let output = redact_marker_value(output, &marker_no_space, VALUE_TERMINATORS);
-    redact_marker_value(output, &marker_space, VALUE_TERMINATORS)
+fn redact_key_value(mut output: String, key: &str) -> String {
+    let mut lowered = output.to_ascii_lowercase();
+    let mut search_from = 0;
+    while let Some(relative_start) = lowered[search_from..].find(key) {
+        let start = search_from + relative_start;
+        let end = start + key.len();
+        let boundary_before = start == 0
+            || !lowered.as_bytes()[start - 1].is_ascii_alphanumeric()
+                && lowered.as_bytes()[start - 1] != b'_';
+        let mut cursor = end;
+        if cursor < output.len() && output.as_bytes()[cursor] == b'"' {
+            cursor += 1;
+        }
+        while cursor < output.len() && matches!(output.as_bytes()[cursor], b' ' | b'\t') {
+            cursor += 1;
+        }
+        let delimiter = output.as_bytes().get(cursor).copied();
+        if !boundary_before || !matches!(delimiter, Some(b'=') | Some(b':')) {
+            search_from = end;
+            continue;
+        }
+        cursor += 1;
+        while cursor < output.len() && matches!(output.as_bytes()[cursor], b' ' | b'\t') {
+            cursor += 1;
+        }
+        let quote = output
+            .as_bytes()
+            .get(cursor)
+            .copied()
+            .filter(|value| matches!(value, b'"' | b'\''));
+        if quote.is_some() {
+            cursor += 1;
+        }
+        let value_start = cursor;
+        let value_end = if let Some(quote) = quote {
+            output[value_start..]
+                .bytes()
+                .position(|value| value == quote)
+                .map(|offset| value_start + offset)
+                .unwrap_or(output.len())
+        } else {
+            output[value_start..]
+                .char_indices()
+                .find_map(|(index, character)| {
+                    VALUE_TERMINATORS
+                        .contains(&character)
+                        .then_some(value_start + index)
+                })
+                .unwrap_or(output.len())
+        };
+        if value_end == value_start {
+            search_from = value_start;
+            continue;
+        }
+        output.replace_range(value_start..value_end, "[REDACTED]");
+        lowered.replace_range(value_start..value_end, "[redacted]");
+        search_from = value_start + "[REDACTED]".len();
+    }
+    output
 }
 
 fn redact_marker_value(mut output: String, marker: &str, terminators: &[char]) -> String {
+    // ASCII case folding preserves UTF-8 byte offsets. Keep one parallel search buffer and update
+    // only each replacement span instead of allocating/lowercasing the full line per occurrence.
+    let mut lowered = output.to_ascii_lowercase();
     let mut search_from = 0;
     loop {
-        let lowered = output.to_ascii_lowercase();
         let Some(relative_start) = lowered[search_from..].find(marker) else {
             return output;
         };
@@ -217,14 +272,15 @@ fn redact_marker_value(mut output: String, marker: &str, terminators: &[char]) -
             continue;
         }
         output.replace_range(value_start..value_end, "[REDACTED]");
+        lowered.replace_range(value_start..value_end, "[redacted]");
         search_from = value_start + "[REDACTED]".len();
     }
 }
 
 fn redact_authorization_header(mut output: String) -> String {
+    let mut lowered = output.to_ascii_lowercase();
     let mut search_from = 0;
     loop {
-        let lowered = output.to_ascii_lowercase();
         let Some(relative_start) = lowered[search_from..].find("authorization:") else {
             return output;
         };
@@ -263,6 +319,7 @@ fn redact_authorization_header(mut output: String) -> String {
             continue;
         }
         output.replace_range(value_start..value_end, "[REDACTED]");
+        lowered.replace_range(value_start..value_end, "[redacted]");
         search_from = value_start + "[REDACTED]".len();
     }
 }
@@ -554,6 +611,25 @@ mod tests {
             event.get("token").and_then(Value::as_str),
             Some("[REDACTED]")
         );
+    }
+
+    #[test]
+    fn redacts_whitespace_tolerant_yaml_and_secret_key_variants() {
+        let log = SessionLog::with_capacity(8);
+        log.push_line("worker", "token : yaml-secret keep: visible");
+        log.push_line("worker", "password: pass-word");
+        log.push_line("worker", "apikey : \"sk-abc\" keep=value");
+        log.push_line("worker", "secret=hidden&x=1");
+        let entries = log.query(&LogQuery::default());
+        for secret in ["yaml-secret", "pass-word", "sk-abc", "hidden"] {
+            assert!(
+                entries.iter().all(|entry| !entry.raw.contains(secret)),
+                "{secret} must be redacted: {entries:?}"
+            );
+        }
+        assert!(entries[0].raw.contains("keep: visible"));
+        assert!(entries[2].raw.contains("keep=value"));
+        assert!(entries[3].raw.contains("x=1"));
     }
 
     #[test]

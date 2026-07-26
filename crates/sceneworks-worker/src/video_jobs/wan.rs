@@ -1272,8 +1272,9 @@ pub(super) struct VideoGenInput {
     /// video behavior (every component held for the whole run). The candle A14B (two 14B experts swapped
     /// one-resident-at-a-time) and the dense 5B (TE/VAE flushed off-GPU around the denoise, sc-13175) flip
     /// this to [`OffloadPolicy::Sequential`] so the measured `candle.vramGbByTier` peak (the SEQUENTIAL
-    /// working set) is the one actually loaded; see `candle_wan_offload_policy`. Left `Resident` on the
-    /// MLX (macOS) path and the resident-only candle video engines (`ltx`/`svd`).
+    /// working set) is the one actually loaded; see `candle_video_offload_policy`. Left `Resident` on the
+    /// MLX (macOS) path and the resident-only LTX candle engine. SVD-XT also selects Sequential in
+    /// sc-14625 for its conditioner → UNet → VAE lifecycle.
     pub(super) offload_policy: OffloadPolicy,
 }
 
@@ -1343,7 +1344,7 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
         // `$LTX_GEMMA_DIR` / `<root>/text_encoder` fallback.
         text_encoder: input.text_encoder_dir.clone().map(WeightsSource::Dir),
         // Residency policy (sc-12631). `Resident` for every path historically; the candle A14B flips it
-        // to `Sequential` (`generate_candle_video_using` → `candle_wan_offload_policy`) so the two
+        // to `Sequential` (`generate_candle_video_using` → `candle_video_offload_policy`) so the two
         // 14B experts swap one-at-a-time and the load matches the SEQUENTIAL peak the manifest gate sized.
         // `apply_residency_policy` (the MLX cache seam) never downgrades a `Sequential` set here.
         offload_policy: input.offload_policy,

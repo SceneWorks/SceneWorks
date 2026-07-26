@@ -75,6 +75,36 @@ const CANDLE_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "candle"];
 const TORCH_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "image_detail"];
 
 #[test]
+fn candle_marker_detection_parses_exact_capability_membership() {
+    assert!(encoded_worker_has_capability(
+        r#"["gpu","image_generate","candle"]"#,
+        "candle"
+    ));
+    assert!(!encoded_worker_has_capability(
+        r#"["gpu","image_generate","not-candle"]"#,
+        "candle"
+    ));
+    assert!(!encoded_worker_has_capability(
+        r#"{"capabilities":["candle"]}"#,
+        "candle"
+    ));
+}
+
+#[test]
+fn candle_pose_model_catalog_matches_control_routes() {
+    let mut routed = candle_pose_route_models();
+    routed.sort_unstable();
+    routed.dedup();
+    let mut catalog = CANDLE_POSE_MODELS.to_vec();
+    catalog.sort_unstable();
+    catalog.dedup();
+    assert_eq!(
+        catalog, routed,
+        "the unsupported-pose guard must derive the same model set as the control route table"
+    );
+}
+
+#[test]
 fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
     assert_eq!(
         candle_image_route_lanes(),

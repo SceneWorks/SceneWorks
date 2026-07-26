@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import copy
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import sqlite3
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +21,7 @@ import pytest
 # between this file and test_rust_api_worker_smoke.py.
 from rust_api_harness import (
     PNG_1X1,
-    free_port,
+    enable_api_listening_log,
     safetensors_bytes,
     spawn_process,
     wait_for_health,
@@ -64,7 +66,7 @@ def write_updated_snapshots() -> None:
     # Note: because this merge preserves all pre-existing labels, intentionally
     # REMOVING a snapshot must be done by editing snapshots.json manually — a
     # filtered UPDATE_SNAPSHOTS run will never delete stale entries.
-    merged = snapshots()
+    merged = dict(snapshots())
     merged.update(UPDATED_SNAPSHOTS)
     SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
     SNAPSHOT_PATH.write_text(
@@ -186,19 +188,18 @@ class ServerApiHarness:
         self.root = root
         self.runtime = "rust"
         write_contract_manifests(root / "config")
-        port = free_port()
-        self.base_url = f"http://127.0.0.1:{port}"
         env = os.environ.copy()
         env.update(
             {
                 "SCENEWORKS_API_HOST": "127.0.0.1",
-                "SCENEWORKS_API_PORT": str(port),
+                "SCENEWORKS_API_PORT": "0",
                 "SCENEWORKS_DATA_DIR": str(root / "data"),
                 "SCENEWORKS_CONFIG_DIR": str(root / "config"),
                 "SCENEWORKS_JOBS_DB_PATH": str(root / "data" / "cache" / "jobs.db"),
                 "SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE": "1",
             }
         )
+        enable_api_listening_log(env)
         rust_binary = os.getenv("SCENEWORKS_RUST_API_BINARY")
         command = (
             [rust_binary]
@@ -206,6 +207,7 @@ class ServerApiHarness:
             else ["cargo", "run", "-q", "-p", "sceneworks-rust-api"]
         )
         self.process = spawn_process(command, cwd=ROOT, env=env)
+        self.base_url = self.process.wait_for_listening_url()
         wait_for_health(self.base_url, self.process, "rust")
         self.client = httpx.Client(base_url=self.base_url, timeout=10)
 
@@ -288,17 +290,57 @@ def contract_runtimes(tmp_path):
 
 
 def normalize_contract(value: Any, roots: tuple[Path, ...], path: str = "$") -> Any:
+    return _normalize_contract(value, roots, path, {}, {})
+
+
+def _normalize_contract(
+    value: Any,
+    roots: tuple[Path, ...],
+    path: str,
+    normalized_ids: dict[tuple[str, str], str],
+    id_counts: dict[str, int],
+) -> Any:
     if isinstance(value, dict):
-        return {key: normalize_contract(item, roots, f"{path}.{key}") for key, item in sorted(value.items())}
+        return {
+            key: _normalize_contract(
+                item,
+                roots,
+                f"{path}.{key}",
+                normalized_ids,
+                id_counts,
+            )
+            for key, item in sorted(value.items())
+        }
     if isinstance(value, list):
-        return [normalize_contract(item, roots, f"{path}[{index}]") for index, item in enumerate(value)]
+        return [
+            _normalize_contract(
+                item,
+                roots,
+                f"{path}[{index}]",
+                normalized_ids,
+                id_counts,
+            )
+            for index, item in enumerate(value)
+        ]
     if isinstance(value, str):
         normalized = value.replace("\\", "/")
         for root in roots:
             normalized = normalized.replace(str(root).replace("\\", "/"), "<runtime-root>")
         normalized = TIMESTAMP_RE.sub("<timestamp>", normalized)
         normalized = UPLOAD_SUFFIX_RE.sub(r"\1-<upload-suffix>", normalized)
-        normalized = PREFIXED_ID_RE.sub(lambda match: f"{match.group(1)}_fixture", normalized)
+
+        def normalize_id(match: re.Match[str]) -> str:
+            prefix = match.group(1)
+            original = match.group(0)
+            key = (prefix, original)
+            if key not in normalized_ids:
+                ordinal = id_counts.get(prefix, 0) + 1
+                id_counts[prefix] = ordinal
+                suffix = "" if ordinal == 1 else f"_{ordinal}"
+                normalized_ids[key] = f"{prefix}_fixture{suffix}"
+            return normalized_ids[key]
+
+        normalized = PREFIXED_ID_RE.sub(normalize_id, normalized)
         normalized = CLAIM_WORKER_RE.sub("claim-worker-fixture", normalized)
         # The exact JSON parser wording/offset is intentionally ignored; the
         # stable contract is the 422 envelope.
@@ -312,6 +354,24 @@ def normalize_contract(value: Any, roots: tuple[Path, ...], path: str = "$") -> 
     if path.endswith(".loc[1]") and isinstance(value, int):
         return "<json-error-offset>"
     return value
+
+
+def test_normalize_contract_preserves_distinct_id_relationships():
+    normalized = normalize_contract(
+        {
+            "assets": [
+                {"id": "asset_aaaaaaaa", "projectId": "project_11111111"},
+                {"id": "asset_bbbbbbbb", "projectId": "project_11111111"},
+            ],
+            "selectedAssetId": "asset_aaaaaaaa",
+        },
+        (),
+    )
+
+    assert normalized["assets"][0]["id"] == "asset_fixture"
+    assert normalized["assets"][1]["id"] == "asset_fixture_2"
+    assert normalized["selectedAssetId"] == "asset_fixture"
+    assert {asset["projectId"] for asset in normalized["assets"]} == {"project_fixture"}
 
 
 def diff_values(left: Any, right: Any, path: str = "$") -> list[str]:
@@ -371,10 +431,21 @@ def assert_runtime_consistency(
     return normalized_baseline
 
 
-def snapshots() -> dict[str, Any]:
-    if not SNAPSHOT_PATH.exists():
+@lru_cache(maxsize=None)
+def _cached_snapshots(path: Path) -> dict[str, Any]:
+    if not path.exists():
         return {}
-    return json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def snapshots() -> dict[str, Any]:
+    return copy.deepcopy(_cached_snapshots(SNAPSHOT_PATH))
+
+
+def test_cached_snapshots_are_isolated_between_callers():
+    first = snapshots()
+    first["mutation-probe"] = True
+    assert "mutation-probe" not in snapshots()
 
 
 def assert_snapshot(label: str, normalized_value: Any) -> None:
@@ -710,6 +781,10 @@ def collect_sse_events_during(runtime: ContractRuntime, action: Any, expected_ev
             lines = response.iter_lines()
             ready = read_sse_message(lines)
             assert ready == {"event": "ready", "data": {"status": "connected"}}
+            initial_jobs = read_sse_message(lines)
+            assert initial_jobs["event"] == "jobs.snapshot"
+            initial_queue = read_sse_message(lines)
+            assert initial_queue["event"] == "queue.updated"
             action_result = action()
             if action_result.status_code >= 400:
                 raise AssertionError(

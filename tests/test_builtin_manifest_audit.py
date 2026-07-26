@@ -14,10 +14,7 @@ self-contained readers are inlined below rather than imported from
 ``scene_worker``, which would re-couple these audits to the retired worker):
 
   * ``_strip_jsonc_comments`` + ``_load_builtin_models_manifest`` parse the file
-    to a dict for the capability / UI-wiring audits.
-  * ``_manifest_brace_walker`` walks balanced braces so a URL containing ``//``
-    inside an entry doesn't trip a naive comment strip; used by the per-model
-    ``mlx`` block audits.
+    to a dict for every capability, UI-wiring, and per-model ``mlx`` audit.
 
 The three character_image ENGINE-WIRING guards that used to live here additionally
 cross-referenced the retired Python worker's ``MODEL_TARGETS`` table via a lazy
@@ -33,8 +30,10 @@ embedded manifest, in ``crates/sceneworks-worker/src/engines.rs`` (the tests
 
 from __future__ import annotations
 
+import copy
 import json
 import re
+from functools import lru_cache
 from pathlib import Path
 
 import jsonschema
@@ -156,9 +155,35 @@ def _strip_jsonc_comments(body: str) -> str:
     return "".join(result)
 
 
-def _load_builtin_models_manifest() -> dict:
-    raw = MANIFEST_PATH.read_text(encoding="utf-8")
+@lru_cache(maxsize=None)
+def _cached_jsonc(path: Path) -> dict:
+    raw = path.read_text(encoding="utf-8")
     return json.loads(_strip_jsonc_comments(raw))
+
+
+@lru_cache(maxsize=None)
+def _cached_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_builtin_models_manifest() -> dict:
+    return copy.deepcopy(_cached_jsonc(MANIFEST_PATH))
+
+
+def _load_schema(path: Path) -> dict:
+    return copy.deepcopy(_cached_json(path))
+
+
+def test_cached_manifest_and_schema_loaders_return_isolated_copies():
+    first_manifest = _load_builtin_models_manifest()
+    original_id = first_manifest["models"][0]["id"]
+    first_manifest["models"][0]["id"] = "mutated"
+    assert _load_builtin_models_manifest()["models"][0]["id"] == original_id
+
+    first_schema = _load_schema(SCHEMA_PATH)
+    original_type = first_schema["type"]
+    first_schema["type"] = "mutated"
+    assert _load_schema(SCHEMA_PATH)["type"] == original_type
 
 
 def test_mage_flow_generation_family_is_pinned_and_complete():
@@ -556,7 +581,7 @@ def test_manifest_model_path_is_only_an_optional_override():
 def test_builtin_models_manifest_satisfies_authoring_schema():
     """sc-12338: the builtin catalog's $schema is an enforced CI contract."""
     manifest = _load_builtin_models_manifest()
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     jsonschema.Draft202012Validator.check_schema(schema)
     errors = sorted(
         jsonschema.Draft202012Validator(schema).iter_errors(manifest),
@@ -572,7 +597,7 @@ def test_builtin_schema_rejects_an_unknown_closed_model_key():
     """Mutation guard: a typo/decorative builtin key must make the CI gate fail."""
     manifest = _load_builtin_models_manifest()
     manifest["models"][0]["recommendded"] = True
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
     assert any("recommendded" in error.message for error in errors)
 
@@ -586,6 +611,7 @@ def _sample_audio_model_entry() -> dict:
     return {
         "id": "sample_audio_speech",
         "name": "Sample Audio Speech",
+        "family": "sample_audio",
         "type": "audio",
         # `audio` is a picker (non-utility) type, so the schema now requires a
         # `ui.promptGuide` with a title/path (sc-13783, reconciled with
@@ -621,7 +647,7 @@ def _sample_audio_model_entry() -> dict:
 def test_schema_accepts_audio_type_and_audio_sub_block():
     """sc-13401: a `type: "audio"` entry with a populated `audio` sub-block
     validates against the authoring schema (the new sibling of mlx/candle)."""
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     jsonschema.Draft202012Validator.check_schema(schema)
     manifest = {"schemaVersion": 1, "models": [_sample_audio_model_entry()]}
     errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
@@ -631,10 +657,30 @@ def test_schema_accepts_audio_type_and_audio_sub_block():
     )
 
 
+def test_model_schema_requires_entry_identity():
+    """Every model entry carries the id, display name, family, and type used by
+    routing and catalog consumers."""
+    schema = _load_schema(SCHEMA_PATH)
+    for field in ("id", "name", "family", "type"):
+        entry = _sample_audio_model_entry()
+        del entry[field]
+        errors = list(
+            jsonschema.Draft202012Validator(schema).iter_errors(
+                {"schemaVersion": 1, "models": [entry]}
+            )
+        )
+        assert any(
+            error.validator == "required"
+            and field in error.validator_value
+            and list(error.absolute_path) == ["models", 0]
+            for error in errors
+        ), f"a model entry without `{field}` must be rejected by the entry identity contract"
+
+
 def test_schema_rejects_unknown_field_under_audio_sub_block():
     """Mutation guard: the `audio` block is additionalProperties:false, so a typo
     / undeclared field under it must fail validation."""
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     entry = _sample_audio_model_entry()
     entry["audio"]["bogusField"] = True
     manifest = {"schemaVersion": 1, "models": [entry]}
@@ -646,7 +692,7 @@ def test_schema_rejects_unknown_field_under_audio_sub_block():
 
 def test_schema_rejects_audio_voice_without_id():
     """A voice object requires `id` so the picker always has a backend key."""
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     entry = _sample_audio_model_entry()
     entry["audio"]["voices"] = [{"label": "No Id", "gender": "female"}]
     manifest = {"schemaVersion": 1, "models": [entry]}
@@ -671,12 +717,16 @@ def test_schema_rejects_audio_voice_without_id():
 def test_schema_rejects_unknown_model_type():
     """Negative control: the `type` enum still rejects an out-of-set value even
     after `audio` was added, so the enum is not accidentally open."""
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     entry = _sample_audio_model_entry()
     entry["type"] = "hologram"
     manifest = {"schemaVersion": 1, "models": [entry]}
     errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
-    assert any("hologram" in error.message or "enum" in error.message for error in errors)
+    assert any(
+        error.validator == "enum"
+        and list(error.absolute_path) == ["models", 0, "type"]
+        for error in errors
+    ), "the model type must fail the enum validator exactly at models/0/type"
 
 
 # The seeded audio catalog (sc-13402, epic 13400). Each id is a live candle-audio
@@ -798,16 +848,11 @@ _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # crates/sceneworks-core/src/builtin_manifests.rs.
 _COREQUISITE_REVISION_MIGRATION_PENDING: frozenset[tuple[str, str]] = frozenset(
     {
-        ("qwen_image", "SceneWorks/qwen-image-2512-fun-controlnet-union"),
         # ("ltx_2_3", "SceneWorks/ltx-2.3-mlx") pinned in sc-13683 (the gemma coRequisite now carries
         # the full 40-hex LTX_BUNDLE_REVISION); removed here + in the Rust twin to keep both green.
         ("ltx_2_3_eros", "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments"),
         ("wan_2_2_t2v_14b", "lightx2v/Wan2.2-Lightning"),
         ("wan_2_2_i2v_14b", "lightx2v/Wan2.2-Lightning"),
-        ("pid_qwenimage", "SceneWorks/gemma-2-2b-it"),
-        ("pid_flux", "SceneWorks/gemma-2-2b-it"),
-        ("pid_flux2", "SceneWorks/gemma-2-2b-it"),
-        ("pid_sdxl", "SceneWorks/gemma-2-2b-it"),
     }
 )
 
@@ -839,6 +884,20 @@ def test_corequisite_downloads_pin_a_full_sha_revision():
         "co-requisite downloads must pin a 40-hex commit SHA (F-029, sc-13659); these are "
         f"unpinned and NOT tracked for the sc-13591 migration: {sorted(unexpected)}"
     )
+
+
+def test_first_party_downloads_pin_a_full_sha_revision():
+    """SceneWorks controls these repositories, so the shipped catalog must never
+    silently move an installed artifact when a repository's main branch changes."""
+    gaps = []
+    for model in _load_builtin_models_manifest()["models"]:
+        for download in model.get("downloads", []):
+            repo = download.get("repo", "")
+            if repo.startswith("SceneWorks/") and not _FULL_SHA_RE.fullmatch(
+                download.get("revision", "")
+            ):
+                gaps.append((model["id"], repo, download.get("variant")))
+    assert not gaps, f"first-party downloads must pin immutable revisions: {gaps}"
 
 
 def test_corequisite_revision_migration_allowlist_has_no_stale_entries():
@@ -877,6 +936,7 @@ def _model_entry_with_download(download: dict) -> dict:
     return {
         "id": "sample_pinned_model",
         "name": "Sample Pinned Model",
+        "family": "sample",
         "type": "image",
         # `image` is a picker (non-utility) type, so the schema now requires a
         # `ui.promptGuide` with a title/path (sc-13783, reconciled with
@@ -896,7 +956,7 @@ def test_schema_pins_download_revision_to_a_40hex_sha():
     (the F-029 pin authority), accepting a valid SHA and rejecting a branch/tag/
     short/uppercase/wrong-length value via the `pattern` keyword.
     """
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     jsonschema.Draft202012Validator.check_schema(schema)
     validator = jsonschema.Draft202012Validator(schema)
 
@@ -932,7 +992,7 @@ def test_schema_accepts_a_component_id_on_a_corequisite_download():
     authoring schema constrains it to lowercase snake_case (same shape as a descriptor id), accepting
     a valid id and rejecting capitals / hyphens / a leading digit / empty via the `pattern` keyword.
     """
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     jsonschema.Draft202012Validator.check_schema(schema)
     validator = jsonschema.Draft202012Validator(schema)
 
@@ -976,7 +1036,7 @@ def test_schema_rejects_a_component_id_on_a_non_corequisite_download():
     by the `a_required_component_with_no_matching_component_id_is_a_manifest_error` unit test in
     crates/sceneworks-worker/src/model_jobs.rs).
     """
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     jsonschema.Draft202012Validator.check_schema(schema)
     validator = jsonschema.Draft202012Validator(schema)
 
@@ -1047,7 +1107,7 @@ def test_manifest_constraint_contract_registry_is_complete_and_live():
     to reject requests, which is materially different from an accidental dead key.
     """
     manifest = _load_builtin_models_manifest()
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema(SCHEMA_PATH)
     model_properties = schema["properties"]["models"]["items"]["properties"]
 
     declared: set[str] = set()
@@ -1111,46 +1171,8 @@ def test_manifest_constraint_contract_registry_is_complete_and_live():
             )
 
 
-def _manifest_brace_walker():
-    # Helper for the mlx-block manifest tests. Returns (raw, find_entry_block,
-    # find_mlx_block) that walk balanced braces so a URL containing `//` (in
-    # the entry text) doesn't trip a naive jsonc strip.
-    raw = MANIFEST_PATH.read_text(encoding="utf-8")
-
-    def find_balanced_block(start_index: int) -> str:
-        depth = 0
-        for index in range(start_index, len(raw)):
-            ch = raw[index]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    return raw[start_index : index + 1]
-        raise AssertionError(f"unterminated brace block from index {start_index}")
-
-    def find_entry_block(model_id: str) -> str:
-        anchor = raw.index(f'"id": "{model_id}"')
-        start = raw.rfind("{", 0, anchor)
-        assert start != -1, f"entry start brace for {model_id} not found"
-        return find_balanced_block(start)
-
-    def find_mlx_block(entry_block: str) -> str:
-        match = re.search(r'"mlx"\s*:\s*\{', entry_block)
-        assert match, "entry block has no mlx block"
-        # Resolve the entry block's position in the raw manifest, then walk
-        # balanced braces from the actual opening brace so nested limits {...}
-        # are captured (Qwen carries a sampler/scheduler limits override, FLUX
-        # does not).
-        entry_start = raw.index(entry_block)
-        mlx_open = entry_start + match.end() - 1
-        return find_balanced_block(mlx_open)
-
-    return raw, find_entry_block, find_mlx_block
-
-
 # ---------------------------------------------------------------------------
-# Per-model `mlx` block structural audits (pure manifest; brace-walker based).
+# Per-model `mlx` block structural audits (parsed JSONC manifest).
 # Extracted from tests/test_worker_image_adapters.py (sc-8861 / F-059).
 # ---------------------------------------------------------------------------
 
@@ -1159,17 +1181,14 @@ def test_flux_manifest_has_mlx_block():
     # Manifest-driven auto-dispatch + Model Manager memory tier (sc-1970).
     # The Rust API owns the canonical jsonc parser; here we just confirm both
     # FLUX entries carry an `mlx` block and the contents look right.
-    _, find_entry_block, find_mlx_block = _manifest_brace_walker()
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
 
     for model_id in ("flux_schnell", "flux_dev"):
-        block = find_entry_block(model_id)
-        mlx_block = find_mlx_block(block)
-        quant_match = re.search(r'"quantize"\s*:\s*(\d+)', mlx_block)
-        mem_match = re.search(r'"minMemoryGb"\s*:\s*(\d+)', mlx_block)
-        assert quant_match and int(quant_match.group(1)) in {3, 4, 5, 6, 8}, (
+        mlx = models[model_id]["mlx"]
+        assert mlx["quantize"] in {3, 4, 5, 6, 8}, (
             f"{model_id} mlx.quantize must be a supported quant level (sc-1970)"
         )
-        assert mem_match and int(mem_match.group(1)) > 0, (
+        assert mlx["minMemoryGb"] > 0, (
             f"{model_id} mlx.minMemoryGb must be a positive int (sc-1970)"
         )
 
@@ -1179,24 +1198,25 @@ def test_qwen_image_manifest_has_mlx_block():
     # override (mflux's loop is sealed on "linear" — match the wan_2_2
     # precedent of restricting the menu to default-only when the MLX path is
     # the active backend, epic 1753 §14).
-    _, find_entry_block, find_mlx_block = _manifest_brace_walker()
-    block = find_entry_block("qwen_image")
-    mlx_block = find_mlx_block(block)
-    quant_match = re.search(r'"quantize"\s*:\s*(\d+)', mlx_block)
-    mem_match = re.search(r'"minMemoryGb"\s*:\s*(\d+)', mlx_block)
-    assert quant_match and int(quant_match.group(1)) in {3, 4, 5, 6, 8}, (
+    model = next(
+        model
+        for model in _load_builtin_models_manifest()["models"]
+        if model["id"] == "qwen_image"
+    )
+    mlx = model["mlx"]
+    assert mlx["quantize"] in {3, 4, 5, 6, 8}, (
         "qwen_image mlx.quantize must be a supported quant level (sc-1972)"
     )
-    assert mem_match and int(mem_match.group(1)) > 0, (
+    assert mlx["minMemoryGb"] > 0, (
         "qwen_image mlx.minMemoryGb must be a positive int (sc-1972)"
     )
     # MLX sampler/scheduler menu (epic 7114 P5, sc-7126): the native MLX engine now
     # routes through the unified curated sampler/scheduler framework (the old mflux
     # linear-only loop is gone), so the mlx block advertises the curated menu.
-    assert '"dpmpp_2m"' in mlx_block and '"uni_pc"' in mlx_block, (
+    assert {"dpmpp_2m", "uni_pc"} <= set(mlx["limits"]["samplers"]), (
         "qwen_image mlx must advertise the curated sampler menu (epic 7114)"
     )
-    assert '"sgm_uniform"' in mlx_block, (
+    assert "sgm_uniform" in mlx["limits"]["schedulers"], (
         "qwen_image mlx must advertise the curated scheduler menu (epic 7114)"
     )
 
@@ -1204,47 +1224,45 @@ def test_qwen_image_manifest_has_mlx_block():
 def test_flux2_true_v2_manifest_install_time_conversion():
     # sc-2235: the entry must declare the install-time conversion contract the
     # Rust convert job + adapter rely on.
-    _, find_entry_block, find_mlx_block = _manifest_brace_walker()
-    block = find_entry_block("flux2_klein_9b_true_v2")
-    assert '"macOnly": true' in block
-    assert '"adapter": "mlx_flux2"' in block
+    model = next(
+        model
+        for model in _load_builtin_models_manifest()["models"]
+        if model["id"] == "flux2_klein_9b_true_v2"
+    )
+    assert model["macOnly"] is True
+    assert model["adapter"] == "mlx_flux2"
     # Only the bf16 single-file is pulled (not the whole 73 GB repo).
-    assert "Flux2-Klein-9B-True-v2-bf16.safetensors" in block
+    assert model["downloads"][0]["files"] == ["Flux2-Klein-9B-True-v2-bf16.safetensors"]
     # Undistilled defaults differ from the 4-step distill.
-    assert re.search(r'"steps"\s*:\s*24', block)
-
-    mlx_block = find_mlx_block(block)
-    assert '"requiresConversion": true' in mlx_block
-    assert '"converter": "flux2_klein_diffusers"' in mlx_block
-    assert '"convertSourceRepo": "wikeeyang/Flux2-Klein-9B-True-V2"' in mlx_block
-    assert '"convertBaseRepo": "black-forest-labs/FLUX.2-klein-9B"' in mlx_block
-    assert re.search(r'"quantize"\s*:\s*8', mlx_block)
+    assert model["defaults"]["steps"] == 24
+    mlx = model["mlx"]
+    assert mlx["requiresConversion"] is True
+    assert mlx["converter"] == "flux2_klein_diffusers"
+    assert mlx["convertSourceRepo"] == "wikeeyang/Flux2-Klein-9B-True-V2"
+    assert mlx["convertBaseRepo"] == "black-forest-labs/FLUX.2-klein-9B"
+    assert mlx["quantize"] == 8
 
 
 def test_flux2_klein_manifest_entries_present():
     # Both flux2_klein_9b and flux2_klein_9b_kv must be present in the
     # builtin manifest with the expected adapter + family + mlx block.
-    _, find_entry_block, find_mlx_block = _manifest_brace_walker()
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
     # Both ids expose the same capability set: -kv is no longer gated to
     # character_image only — it runs plain txt2img on par with the base 9B,
     # the cache just doesn't engage without a reference (sc-2173).
     for model_id in ("flux2_klein_9b", "flux2_klein_9b_kv"):
-        block = find_entry_block(model_id)
-        assert '"adapter": "mlx_flux2"' in block, model_id
-        assert '"family": "flux2-klein"' in block, model_id
-        assert '"macOnly": true' in block, model_id
+        model = models[model_id]
+        assert model["adapter"] == "mlx_flux2", model_id
+        assert model["family"] == "flux2-klein", model_id
+        assert model["macOnly"] is True, model_id
         # sc-8711 (epic 8506): re-hosted as a public, ungated SceneWorks MLX quant-matrix
         # turnkey (q4/q8/bf16), so the entry is `gated: false` with no credentialHost — the
         # FLUX Non-Commercial LICENSE.md travels with the weights.
-        assert '"gated": false' in block, model_id
-        mlx_block = find_mlx_block(block)
-        quant_match = re.search(r'"quantize"\s*:\s*(\d+)', mlx_block)
-        assert quant_match is not None, f"{model_id}: mlx.quantize missing"
+        assert model["gated"] is False, model_id
         # quantize records the DEFAULT tier (q4); the load Quant is forced to None so the
         # dense bf16 Qwen3 TE is preserved (DENSE_TE_TIER_MODELS).
-        assert int(quant_match.group(1)) == 4, f"{model_id}: default tier should be q4 (sc-8711)"
-        assert '"text_to_image"' in block, model_id
-        assert '"character_image"' in block, model_id
+        assert model["mlx"]["quantize"] == 4, f"{model_id}: default tier should be q4 (sc-8711)"
+        assert {"text_to_image", "character_image"} <= set(model["capabilities"]), model_id
 
 
 def test_z_image_turbo_manifest_has_mlx_block():
@@ -1252,23 +1270,24 @@ def test_z_image_turbo_manifest_has_mlx_block():
     # override (mflux's loop is sealed on "linear" — match the wan_2_2 /
     # qwen_image precedents of restricting the menu to default-only when the
     # MLX path is the active backend, epic 1753 §14).
-    _, find_entry_block, find_mlx_block = _manifest_brace_walker()
-    block = find_entry_block("z_image_turbo")
-    mlx_block = find_mlx_block(block)
-    quant_match = re.search(r'"quantize"\s*:\s*(\d+)', mlx_block)
-    mem_match = re.search(r'"minMemoryGb"\s*:\s*(\d+)', mlx_block)
-    assert quant_match and int(quant_match.group(1)) in {3, 4, 5, 6, 8}, (
+    model = next(
+        model
+        for model in _load_builtin_models_manifest()["models"]
+        if model["id"] == "z_image_turbo"
+    )
+    mlx = model["mlx"]
+    assert mlx["quantize"] in {3, 4, 5, 6, 8}, (
         "z_image_turbo mlx.quantize must be a supported quant level (sc-2145)"
     )
-    assert mem_match and int(mem_match.group(1)) > 0, (
+    assert mlx["minMemoryGb"] > 0, (
         "z_image_turbo mlx.minMemoryGb must be a positive int (sc-2145)"
     )
     # epic 7114 P5 (sc-7126): the native MLX engine adopted the unified curated
     # sampler/scheduler framework, so the mflux linear-only restriction is gone.
-    assert '"dpmpp_2m"' in mlx_block and '"uni_pc"' in mlx_block, (
+    assert {"dpmpp_2m", "uni_pc"} <= set(mlx["limits"]["samplers"]), (
         "z_image_turbo mlx must advertise the curated sampler menu (epic 7114)"
     )
-    assert '"sgm_uniform"' in mlx_block, (
+    assert "sgm_uniform" in mlx["limits"]["schedulers"], (
         "z_image_turbo mlx must advertise the curated scheduler menu (epic 7114)"
     )
 
@@ -1402,11 +1421,12 @@ def test_sdxl_manifest_has_mlx_block():
     # sdxl carries an mlx block (no `limits` override here — the MLX SDXL schedule
     # matches the torch EulerDiscrete default, and there's no per-model sampler menu
     # in the sdxl manifest entry to limit).
-    _, find_entry_block, find_mlx_block = _manifest_brace_walker()
-    block = find_entry_block("sdxl")
-    mlx_block = find_mlx_block(block)
-    mem_match = re.search(r'"minMemoryGb"\s*:\s*(\d+)', mlx_block)
-    assert mem_match and int(mem_match.group(1)) > 0, (
+    model = next(
+        model
+        for model in _load_builtin_models_manifest()["models"]
+        if model["id"] == "sdxl"
+    )
+    assert model["mlx"]["minMemoryGb"] > 0, (
         "sdxl mlx.minMemoryGb must be a positive int"
     )
 
@@ -1483,14 +1503,14 @@ RECIPE_PRESET_SCHEMA_PATH = ROOT / "packages" / "schemas" / "recipe-preset.schem
 
 def _load_jsonc(path: Path) -> dict:
     """Generalization of `_load_builtin_models_manifest` for the sibling catalogs."""
-    return json.loads(_strip_jsonc_comments(path.read_text(encoding="utf-8")))
+    return copy.deepcopy(_cached_jsonc(path))
 
 
 def _schema_errors(manifest: dict, schema_path: Path) -> list:
     """Validate `manifest` against the schema at `schema_path`, returning the
     (path-sorted) validation errors. Also asserts the schema itself is a legal
     Draft 2020-12 document (a broken schema is a silent all-pass otherwise)."""
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema = _load_schema(schema_path)
     jsonschema.Draft202012Validator.check_schema(schema)
     return sorted(
         jsonschema.Draft202012Validator(schema).iter_errors(manifest),
@@ -1532,20 +1552,19 @@ def test_builtin_loras_manifest_satisfies_authoring_schema():
     assert not errors, "builtin.loras.jsonc violates lora-manifest.schema.json:\n" + _format_errors(errors)
 
 
-def test_lora_schema_requires_entry_id():
-    """A LoRA entry must carry `id` (the picker / job payloads / compatibility
-    checks all key on it). Discriminate on the `required` keyword + its value so a
-    schema revert dropping `required:[id]` goes red rather than passing on an
-    unrelated error."""
-    entry = _sample_lora_entry()
-    del entry["id"]
-    errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
-    assert any(
-        error.validator == "required"
-        and error.validator_value == ["id"]
-        and list(error.absolute_path) == ["loras", 0]
-        for error in errors
-    ), "a LoRA entry without `id` must be rejected by the entry's required:['id']"
+def test_lora_schema_requires_entry_identity():
+    """Every LoRA entry carries the complete identity consumed by catalog and
+    compatibility paths: id, display name, and normalized family."""
+    for field in ("id", "name", "family"):
+        entry = _sample_lora_entry()
+        del entry[field]
+        errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
+        assert any(
+            error.validator == "required"
+            and field in error.validator_value
+            and list(error.absolute_path) == ["loras", 0]
+            for error in errors
+        ), f"a LoRA entry without `{field}` must be rejected by the entry identity contract"
 
 
 def test_lora_schema_rejects_a_typod_source_key():

@@ -12,7 +12,7 @@
 //! soft, which is the correct signal). The perceptual hash is taken on the full image — it
 //! self-normalizes by downscaling internally. See `docs/sc-6530/dataset-doctor-metrics.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use image::{imageops::FilterType, DynamicImage, GrayImage, Luma, RgbImage};
@@ -121,18 +121,27 @@ pub fn extract_tier0_scalars(path: &Path, bucket_edge: u32) -> image::ImageResul
 
 /// Extract Tier-0 scalars from an already-decoded image — the testable core, no IO.
 pub fn scalars_from_image(image: &DynamicImage, bucket_edge: u32) -> Tier0Scalars {
+    if image.width() == 0 || image.height() == 0 {
+        return Tier0Scalars {
+            blur_variance: 0.0,
+            shadow_clip: 0.0,
+            highlight_clip: 0.0,
+            well_exposed_fraction: 0.0,
+            phash: Vec::new(),
+        };
+    }
     let phash = dataset_hasher().hash_image(image).as_bytes().to_vec();
 
     // Measure sharpness + exposure on exactly what the trainer feeds in. (If the metrics below
     // change meaning, bump `sceneworks_core::dataset_quality::TIER0_METRICS_VERSION` so persisted
     // caches recompute instead of being judged under the old definition.)
     let trainer_gray = trainer_grayscale(image, bucket_edge.max(1));
-    let (shadow_clip, highlight_clip) = exposure_clip(&trainer_gray);
+    let (shadow_clip, highlight_clip, well_exposed_fraction) = exposure_fractions(&trainer_gray);
     Tier0Scalars {
         blur_variance: tile_peak_focus(&trainer_gray),
         shadow_clip,
         highlight_clip,
-        well_exposed_fraction: well_exposed_fraction(&trainer_gray),
+        well_exposed_fraction,
         phash,
     }
 }
@@ -183,7 +192,7 @@ pub fn compute_readiness(
 ) -> (DatasetReadinessReport, Vec<(String, Tier0Scalars)>) {
     let mut inputs = Vec::with_capacity(items.len());
     let mut extracted = Vec::new();
-    let mut decode_failed = Vec::new();
+    let mut decode_failed = HashSet::new();
 
     for item in items {
         let scalars = if let Some(cached) = &item.cached_scalars {
@@ -194,8 +203,15 @@ pub fn compute_readiness(
                     extracted.push((item.item_id.clone(), scalars.clone()));
                     Some(scalars)
                 }
-                Err(_) => {
-                    decode_failed.push(item.item_id.clone());
+                Err(error) => {
+                    tracing::warn!(
+                        event = "dataset_quality_image_decode_failed",
+                        itemId = %item.item_id,
+                        path = %path.display(),
+                        error = %error,
+                        "Dataset Doctor could not decode an image"
+                    );
+                    decode_failed.insert(item.item_id.clone());
                     None
                 }
             }
@@ -380,7 +396,8 @@ fn response_tile_variance(
     let mut sum_sq = 0.0_f64;
     for y in y0..(y0 + h) {
         for x in x0..(x0 + w) {
-            let value = f64::from(response.get_pixel(x, y)[0]);
+            let index = (u64::from(y) * u64::from(response.width()) + u64::from(x)) as usize;
+            let value = f64::from(response.as_raw()[index]);
             sum += value;
             sum_sq += value * value;
             count += 1.0;
@@ -433,30 +450,15 @@ fn percentile(values: &mut [f64], p: f64) -> f64 {
     values[rank.min(values.len() - 1)]
 }
 
-/// Fraction of pixels sitting in a healthy midtone band — neither crushed toward black nor blown
-/// toward white (sc-8563). Distinguishes an intentional low-key frame (a lit subject on a dark
-/// backdrop: high `shadow_clip` *and* a healthy well-exposed band) from a genuinely under/over-
-/// exposed one (little to nothing in the band). In `[0, 1]`.
-fn well_exposed_fraction(gray: &GrayImage) -> f64 {
+/// Compute both histogram tails and the healthy midtone share in one pixel pass.
+fn exposure_fractions(gray: &GrayImage) -> (f64, f64, f64) {
     let total = u64::from(gray.width()) * u64::from(gray.height());
     if total == 0 {
-        return 0.0;
-    }
-    let healthy = gray
-        .pixels()
-        .filter(|pixel| (WELL_EXPOSED_LOW..=WELL_EXPOSED_HIGH).contains(&pixel[0]))
-        .count() as f64;
-    healthy / total as f64
-}
-
-/// Fraction of pixels crushed to black and blown to white (luma histogram tails).
-fn exposure_clip(gray: &GrayImage) -> (f64, f64) {
-    let total = u64::from(gray.width()) * u64::from(gray.height());
-    if total == 0 {
-        return (0.0, 0.0);
+        return (0.0, 0.0, 0.0);
     }
     let mut shadow = 0_u64;
     let mut highlight = 0_u64;
+    let mut healthy = 0_u64;
     for pixel in gray.pixels() {
         if pixel[0] <= SHADOW_CUTOFF {
             shadow += 1;
@@ -464,10 +466,14 @@ fn exposure_clip(gray: &GrayImage) -> (f64, f64) {
         if pixel[0] >= HIGHLIGHT_CUTOFF {
             highlight += 1;
         }
+        if (WELL_EXPOSED_LOW..=WELL_EXPOSED_HIGH).contains(&pixel[0]) {
+            healthy += 1;
+        }
     }
     (
         shadow as f64 / total as f64,
         highlight as f64 / total as f64,
+        healthy as f64 / total as f64,
     )
 }
 
@@ -1173,6 +1179,21 @@ mod tests {
             .find(|i| i.item_id == "broken")
             .expect("broken");
         assert!(broken.flags.iter().any(|f| f.check == QualityCheck::Decode));
+    }
+
+    #[test]
+    fn zero_dimension_image_returns_zeroed_scalars_without_crop_underflow() {
+        for image in [
+            DynamicImage::ImageRgb8(RgbImage::new(0, 4)),
+            DynamicImage::ImageRgb8(RgbImage::new(4, 0)),
+        ] {
+            let scalars = scalars_from_image(&image, 64);
+            assert_eq!(scalars.blur_variance, 0.0);
+            assert_eq!(scalars.shadow_clip, 0.0);
+            assert_eq!(scalars.highlight_clip, 0.0);
+            assert_eq!(scalars.well_exposed_fraction, 0.0);
+            assert!(scalars.phash.is_empty());
+        }
     }
 
     #[test]

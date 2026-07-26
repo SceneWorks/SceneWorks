@@ -29,7 +29,7 @@ use serde_json::json;
 
 /// The adapter/engine id recorded on candle ComfyUI Qwen-Image assets + telemetry (distinct from the
 /// registry `candle` qwen txt2img and the `qwen_edit`/`qwen_control` lanes).
-const QWEN_COMFYUI_CANDLE_ENGINE: &str = "candle_qwen_image_comfyui";
+pub(super) const QWEN_COMFYUI_CANDLE_ENGINE: &str = "candle_qwen_image_comfyui";
 
 /// Denoise-steps fallback — the `qwen_image` manifest default (`defaults.steps`). The UI normally
 /// supplies `advanced.steps`; this only applies when it does not. Qwen-Image base is a non-distilled

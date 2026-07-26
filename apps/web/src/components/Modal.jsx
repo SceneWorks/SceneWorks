@@ -1,6 +1,22 @@
 import React, { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  '[contenteditable="true"]',
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+function focusableChildren(dialog) {
+  return [...dialog.querySelectorAll(FOCUSABLE_SELECTOR)].filter(
+    (element) => !element.hidden && element.getAttribute("aria-hidden") !== "true",
+  );
+}
+
 // Shared modal primitive: a backdrop that closes on outside mousedown, a
 // role="dialog" container that closes on Escape, and focus moved into the
 // dialog on mount. Extracted so every overlay behaves consistently for
@@ -19,7 +35,13 @@ export function Modal({ children, onClose, className, labelledBy, label }) {
   const dialogRef = useRef(null);
 
   useEffect(() => {
+    const previousFocus = document.activeElement;
     dialogRef.current?.focus();
+    return () => {
+      if (previousFocus?.isConnected && typeof previousFocus.focus === "function") {
+        previousFocus.focus();
+      }
+    };
   }, []);
 
   const overlay = (
@@ -36,6 +58,37 @@ export function Modal({ children, onClose, className, labelledBy, label }) {
           if (event.key === "Escape") {
             event.preventDefault();
             onClose();
+            return;
+          }
+          if (event.key === "Tab") {
+            const dialog = dialogRef.current;
+            if (!dialog) return;
+            const focusable = focusableChildren(dialog);
+            if (focusable.length === 0) {
+              event.preventDefault();
+              dialog.focus();
+              return;
+            }
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            const focusIsOnContainer = document.activeElement === dialog;
+            if (
+              event.shiftKey &&
+              (document.activeElement === first ||
+                focusIsOnContainer ||
+                !dialog.contains(document.activeElement))
+            ) {
+              event.preventDefault();
+              last.focus();
+            } else if (
+              !event.shiftKey &&
+              (document.activeElement === last ||
+                focusIsOnContainer ||
+                !dialog.contains(document.activeElement))
+            ) {
+              event.preventDefault();
+              first.focus();
+            }
           }
         }}
         onMouseDown={(event) => event.stopPropagation()}

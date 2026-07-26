@@ -73,13 +73,17 @@ pub(crate) fn bounded_tail(value: &str, max_lines: usize, max_chars: usize) -> S
     let mut lines = value.lines().rev().take(max_lines).collect::<Vec<_>>();
     lines.reverse();
     let mut output = lines.join("\n");
-    if output.len() > max_chars {
-        let start = output
-            .char_indices()
-            .rev()
-            .nth(max_chars)
-            .map_or(0, |(index, _)| index);
-        output = output[start..].to_owned();
+    let char_count = output.chars().count();
+    if char_count > max_chars {
+        if max_chars == 0 {
+            output.clear();
+        } else {
+            let start = output
+                .char_indices()
+                .nth(char_count - max_chars)
+                .map_or(output.len(), |(index, _)| index);
+            output = output[start..].to_owned();
+        }
     }
     output
 }
@@ -157,4 +161,43 @@ pub(crate) fn resolve_env_file_pin(
         "{key} is set to {} but that path does not exist. Point it at {what}, or unset it to download on first use.",
         path.display()
     )))
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn resolved_cache_paths_match<const N: usize>(
+    cached: [&Path; N],
+    requested: [&Path; N],
+) -> bool {
+    cached == requested
+}
+
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
+mod cache_path_tests {
+    use super::*;
+
+    #[test]
+    fn resolved_cache_identity_changes_with_any_weight_path() {
+        let det_a = Path::new("/weights/a/det.onnx");
+        let det_b = Path::new("/weights/b/det.onnx");
+        let pose_a = Path::new("/weights/a/pose.onnx");
+        let pose_b = Path::new("/weights/b/pose.onnx");
+        assert!(resolved_cache_paths_match([det_a, pose_a], [det_a, pose_a]));
+        assert!(!resolved_cache_paths_match(
+            [det_a, pose_a],
+            [det_b, pose_a]
+        ));
+        assert!(!resolved_cache_paths_match(
+            [det_a, pose_a],
+            [det_a, pose_b]
+        ));
+    }
 }

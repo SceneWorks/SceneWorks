@@ -355,6 +355,390 @@ async fn models_route_overlaps_slow_probes_with_bounded_fanout() {
 }
 
 #[tokio::test]
+async fn models_catalog_reuses_every_unchanged_size_estimate_on_second_load() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let models = (0..70)
+        .map(|index| {
+            json!({
+                "id": format!("cache-{index:02}"),
+                "name": format!("Cache {index:02}"),
+                "family": "cache-test",
+                "type": "image",
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": format!("cache/model-{index:02}"),
+                    "files": ["*.safetensors"]
+                }]
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({ "schemaVersion": 1, "models": models }))
+            .expect("manifest serializes"),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    let hook = crate::models::ModelSizeEstimateTestHook::immediate(Some(1234));
+    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+
+    let first = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(first.0, StatusCode::OK);
+    let first_models = first.1.as_array().expect("models array");
+    assert_eq!(first_models.len(), 70);
+    assert!(first_models.windows(2).all(|pair| pair[0]["name"]
+        .as_str()
+        .zip(pair[1]["name"].as_str())
+        .is_some_and(|(left, right)| left < right)));
+    assert!(first_models.iter().all(|model| {
+        model["downloadSizeBytes"] == json!(1234)
+            && model["downloadSizeEstimated"] == json!(false)
+            && model["variants"][0]["downloadSizeBytes"] == json!(1234)
+    }));
+    assert_eq!(
+        hook.call_count(),
+        70,
+        "first load estimates every distinct key"
+    );
+
+    let second = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(second.0, StatusCode::OK);
+    assert_eq!(
+        second.1, first.1,
+        "warm catalog output and ordering drifted"
+    );
+    assert_eq!(
+        hook.call_count(),
+        70,
+        "unchanged second load must issue no upstream size requests"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_models_catalog_loads_share_one_estimate_per_distinct_key() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "models": [
+                {
+                    "id": "single-flight-a",
+                    "name": "Single Flight A",
+                    "family": "single-flight-test",
+                    "type": "image",
+                    "downloads": [{
+                        "provider": "huggingface",
+                        "repo": "single-flight/model-a",
+                        "files": ["*.safetensors"]
+                    }]
+                },
+                {
+                    "id": "single-flight-b",
+                    "name": "Single Flight B",
+                    "family": "single-flight-test",
+                    "type": "image",
+                    "downloads": [{
+                        "provider": "huggingface",
+                        "repo": "single-flight/model-b",
+                        "files": ["*.safetensors"]
+                    }]
+                }
+            ]
+        }))
+        .expect("manifest serializes"),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    let hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(1234));
+    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+
+    let first = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        hook.wait_for_call().await;
+        hook.wait_for_call().await;
+    })
+    .await
+    .expect("both distinct estimates start");
+
+    let second = tokio::spawn(request(app, "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        hook.wait_for_follower().await;
+        hook.wait_for_follower().await;
+    })
+    .await
+    .expect("the concurrent catalog load joins both estimates");
+    assert_eq!(hook.call_count(), 2, "one request per distinct cache key");
+    assert_eq!(hook.follower_count(), 2, "both in-flight keys are shared");
+
+    hook.release_one();
+    hook.release_one();
+    let first = first.await.expect("first catalog load joins");
+    let second = second.await.expect("second catalog load joins");
+    assert_eq!(first.0, StatusCode::OK);
+    assert_eq!(second.0, StatusCode::OK);
+    assert_eq!(second.1, first.1);
+    assert_eq!(
+        hook.call_count(),
+        2,
+        "completion must not trigger duplicate estimates"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_size_estimate_leader_wakes_follower_to_retry() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": "single-flight-cancel",
+                "name": "Single Flight Cancel",
+                "family": "single-flight-test",
+                "type": "image",
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "single-flight/cancel",
+                    "files": ["*.safetensors"]
+                }]
+            }]
+        }))
+        .expect("manifest serializes"),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    let hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(2468));
+    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+
+    let leader = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), hook.wait_for_call())
+        .await
+        .expect("leader estimate starts");
+    let follower = tokio::spawn(request(app, "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), hook.wait_for_follower())
+        .await
+        .expect("second catalog load follows the leader");
+
+    leader.abort();
+    assert!(leader
+        .await
+        .expect_err("leader request is cancelled")
+        .is_cancelled());
+    tokio::time::timeout(Duration::from_secs(2), hook.wait_for_call())
+        .await
+        .expect("follower retries as the new leader");
+    hook.release_one();
+    let response = tokio::time::timeout(Duration::from_secs(2), follower)
+        .await
+        .expect("retry completes without a deadlock")
+        .expect("follower request joins");
+
+    assert_eq!(response.0, StatusCode::OK);
+    assert_eq!(response.1[0]["downloadSizeBytes"], json!(2468));
+    assert_eq!(
+        response.1[0]["variants"][0]["downloadSizeBytes"],
+        json!(2468)
+    );
+    assert_eq!(
+        hook.call_count(),
+        2,
+        "cancelled work is retried exactly once"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_failed_estimate_is_shared_and_retries_after_negative_ttl_expiry() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": "single-flight-failure",
+                "name": "Single Flight Failure",
+                "family": "single-flight-test",
+                "type": "image",
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "single-flight/failure",
+                    "files": ["*.safetensors"],
+                    "estimatedSizeBytes": 4321
+                }]
+            }]
+        }))
+        .expect("manifest serializes"),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    let hook = crate::models::ModelSizeEstimateTestHook::blocked(None);
+    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+
+    let first = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), hook.wait_for_call())
+        .await
+        .expect("failed estimate starts");
+    let second = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), hook.wait_for_follower())
+        .await
+        .expect("concurrent failure joins the in-flight estimate");
+    hook.release_one();
+
+    let first = first.await.expect("first failed catalog load joins");
+    let second = second.await.expect("second failed catalog load joins");
+    assert_eq!(first.0, StatusCode::OK);
+    assert_eq!(second.0, StatusCode::OK);
+    assert_eq!(first.1[0]["downloadSizeBytes"], json!(4321));
+    assert_eq!(second.1, first.1);
+    assert_eq!(
+        hook.call_count(),
+        1,
+        "concurrent callers share the failed estimate"
+    );
+
+    let key = (
+        "single-flight/failure".to_owned(),
+        vec!["*.safetensors".to_owned()],
+    );
+    state
+        .model_size_cache
+        .lock()
+        .insert_failure_expiring_at(key, std::time::Instant::now());
+    hook.set_response(Some(9876));
+    hook.release_one();
+    let retry = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+    assert_eq!(retry.0, StatusCode::OK);
+    assert_eq!(retry.1[0]["downloadSizeBytes"], json!(9876));
+    assert_eq!(
+        hook.call_count(),
+        2,
+        "an expired failure must permit a fresh successful estimate"
+    );
+}
+
+#[tokio::test]
+async fn models_catalog_starts_install_sweep_before_size_estimation_completes() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": "overlap",
+                "name": "Overlap",
+                "family": "overlap-test",
+                "type": "image",
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "overlap/model",
+                    "files": ["*.safetensors"]
+                }],
+                "__testCatalogProbeDelayMs": 250
+            }]
+        }))
+        .expect("manifest serializes"),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    crate::models::test_reset_catalog_probe_concurrency();
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    let hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(1234));
+    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+
+    let request_task = tokio::spawn(request(app, "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), hook.wait_for_call())
+        .await
+        .expect("size estimator starts before overlap-test deadline");
+    let sweep_started_while_estimate_blocked =
+        tokio::time::timeout(Duration::from_millis(150), async {
+            loop {
+                if crate::models::test_catalog_probe_peak() > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+    hook.release_one();
+    let response = tokio::time::timeout(Duration::from_secs(2), request_task)
+        .await
+        .expect("models request completes before overlap-test deadline")
+        .expect("models request joins");
+
+    assert_eq!(response.0, StatusCode::OK);
+    assert!(
+        sweep_started_while_estimate_blocked,
+        "SC-14530 install-state sweep must start before upstream size estimation completes"
+    );
+}
+
+#[tokio::test]
+async fn models_catalog_disabled_size_estimation_skips_upstream_requests() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": "disabled",
+                "name": "Disabled",
+                "family": "disabled-test",
+                "type": "image",
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "disabled/model",
+                    "files": ["*.safetensors"],
+                    "estimatedSizeBytes": 4321
+                }]
+            }]
+        }))
+        .expect("manifest serializes"),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    let hook = crate::models::ModelSizeEstimateTestHook::immediate(Some(1234));
+    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+
+    let response = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+    assert_eq!(response.0, StatusCode::OK);
+    assert_eq!(hook.call_count(), 0, "disabled mode must skip upstream");
+    assert_eq!(response.1[0]["downloadSizeBytes"], json!(4321));
+    assert_eq!(response.1[0]["downloadSizeEstimated"], json!(true));
+}
+
+#[tokio::test]
 async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
     // sc-3486: the catalog stamps per-model `macSupport`, and the capabilities endpoint
     // carries the master switch (`macGatingActive` = mlx_required) + infra gating.
@@ -2959,6 +3343,7 @@ async fn catalog_delete_routes_remove_manifest_entries_and_owned_artifacts() {
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     // permanent=true keeps the assertions deterministic (the default move-to-OS-trash
     // path depends on the host having a usable recycle bin/trash).
+    crate::test_reset_catalog_build_counters();
     let (model_status, model_delete) = request(
         app.clone(),
         "DELETE",
@@ -2969,6 +3354,11 @@ async fn catalog_delete_routes_remove_manifest_entries_and_owned_artifacts() {
     assert_eq!(model_status, StatusCode::OK);
     assert_eq!(model_delete["removedManifestEntry"], true);
     assert_eq!(model_delete["removedLocalArtifacts"], true);
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        1,
+        "one delete request must assemble the model catalog only once"
+    );
     assert!(model_delete["warnings"][0]
         .as_str()
         .is_some_and(|warning| warning.contains("Moody")));

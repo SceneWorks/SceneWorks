@@ -27,7 +27,7 @@ use serde_json::json;
 
 /// The adapter/engine id recorded on candle ComfyUI FLUX.2-dev assets + telemetry (distinct from the
 /// registry `candle` flux2 txt2img and the `flux2_dev` edit/control lanes).
-const FLUX2_COMFYUI_CANDLE_ENGINE: &str = "candle_flux2_dev_comfyui";
+pub(super) const FLUX2_COMFYUI_CANDLE_ENGINE: &str = "candle_flux2_dev_comfyui";
 
 /// Denoise-steps fallback — the `flux2_dev` manifest default (`defaults.steps`). The UI normally
 /// supplies `advanced.steps`; this only applies when it does not. FLUX.2-dev is guidance-distilled (not

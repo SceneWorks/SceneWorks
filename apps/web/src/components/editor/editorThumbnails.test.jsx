@@ -46,6 +46,26 @@ describe("editor thumbnail surfaces (sc-13632)", () => {
     expect(onAddToTrack).toHaveBeenCalledWith(videoAsset);
   });
 
+  it("makes the MediaBin cap visible and lets users reveal the remaining assets", async () => {
+    const assets = Array.from({ length: 61 }, (_, index) => ({
+      ...videoAsset,
+      id: `video-${index}`,
+      displayName: `Clip ${index}`,
+    }));
+    await act(() => root.render(<MediaBin assets={assets} />));
+
+    expect(container.querySelectorAll(".ve-bin-item")).toHaveLength(60);
+    expect(container.textContent).toContain("Showing 60 of 61");
+
+    const showMore = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Show more",
+    );
+    await act(() => showMore.click());
+
+    expect(container.querySelectorAll(".ve-bin-item")).toHaveLength(61);
+    expect(container.textContent).toContain("Showing 61 of 61");
+  });
+
   it("renders video posters in StoryboardStrip without mounting full video media", async () => {
     const clip = {
       id: "clip-1",

@@ -8,7 +8,7 @@ use crate::contracts::{JobSnapshot, JobType};
 use crate::jobs_store::routing::candle::{
     image_job_is_candle_eligible, image_request_candle_pose_reject,
     training_job_is_candle_eligible, upscale_job_is_candle_eligible, video_job_is_candle_eligible,
-    video_upscale_job_is_candle_eligible,
+    video_upscale_job_is_candle_eligible, CANDLE_POSE_MODELS,
 };
 use crate::jobs_store::routing::catalog::{
     CANDLE_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
@@ -18,6 +18,7 @@ use crate::jobs_store::routing::mlx::{
     understanding_job_is_mlx_eligible, upscale_job_is_mlx_eligible, video_job_is_mlx_eligible,
     video_mode_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
 };
+use crate::jobs_store::routing::SENSENOVA_MODEL_IDS;
 
 /// True when *any* MLX-routing predicate (image/detail, video, or training) claims this
 /// job — the union an `mlx` worker would want. Used both to classify a claim for routing
@@ -282,6 +283,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::FrameExtract
         | JobType::TimelineExport
         | JobType::PromptRefine
+        | JobType::DatasetParquetImport
         // sc-6535: dataset_analysis is a native Rust/MLX job (the CLIP image embedder), not a
         // native-flow gap — so it's `Ok` here. Its real capability is gated by the worker's
         // advertisement once `mlx-gen-clip` is linked; until then it queues, never enforce-fails.
@@ -539,6 +541,7 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::FrameExtract
         | JobType::TimelineExport
         | JobType::PromptRefine
+        | JobType::DatasetParquetImport
         | JobType::ImageDetail
         | JobType::PersonDetect
         | JobType::PersonTrack
@@ -580,12 +583,15 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
     // The sc-5968 case generalized: a candle family with no strict-pose lane asked for poses —
     // it would otherwise silently render an unconditioned image, so it is a hard gap off-Mac.
     if image_request_candle_pose_reject(model, payload) {
+        let supported = CANDLE_POSE_MODELS.join(" / ");
         return UnsupportedReason::new(
             Some(model),
             "strict-pose ControlNet",
-            "this model has no candle strict-pose lane (candle serves strict pose for qwen_image / \
-             kolors / z_image_turbo, and SDXL via InstantID); the pose request would otherwise \
-             silently render an unconditioned image, so it is rejected off-Mac.",
+            &format!(
+                "this model has no candle strict-pose lane (candle serves strict pose for \
+                 {supported}); the pose request would otherwise silently render an unconditioned \
+                 image, so it is rejected off-Mac."
+            ),
             Some("sc-5489"),
         );
     }
@@ -683,7 +689,7 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
             "the Qwen-Image-Edit model needs edit_image+sourceAssetId or character_image+referenceAssetId to route to MLX.",
             None,
         ),
-        "sensenova_u1_8b" | "sensenova_u1_8b_fast" => {
+        model if SENSENOVA_MODEL_IDS.contains(&model) => {
             let has_poses = payload
                 .get("advanced")
                 .and_then(Value::as_object)

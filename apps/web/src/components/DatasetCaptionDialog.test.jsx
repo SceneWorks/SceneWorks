@@ -100,4 +100,33 @@ describe("DatasetCaptionDialog", () => {
     expect(document.body.querySelector(".caption-missing-model")).toBeNull();
     expect(buttonByText(container, "Caption missing").disabled).toBe(false);
   });
+
+  it("surfaces a model-download enqueue failure and permits a retry", async () => {
+    const onDownloadModel = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Models service is offline"))
+      .mockResolvedValueOnce({ id: "job-2" });
+    render(
+      <DatasetCaptionDialog
+        settings={baseSettings}
+        onChange={vi.fn()}
+        onRun={vi.fn()}
+        onToggleExtra={vi.fn()}
+        onClose={vi.fn()}
+        scope={{ type: "all" }}
+        modelMissing
+        onDownloadModel={onDownloadModel}
+      />,
+    );
+
+    await act(async () => buttonByText(container, "Download captioning model").click());
+    await settle();
+    expect(document.body.querySelector(".caption-missing-model").textContent).toContain("Models service is offline");
+    expect(buttonByText(container, "Download captioning model")).toBeTruthy();
+
+    await act(async () => buttonByText(container, "Download captioning model").click());
+    await settle();
+    expect(document.body.querySelector(".caption-missing-model").textContent).toContain("Downloading");
+    expect(onDownloadModel).toHaveBeenCalledTimes(2);
+  });
 });

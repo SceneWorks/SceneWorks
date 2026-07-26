@@ -39,7 +39,9 @@ mod imp {
     use crate::control_preprocess::{control_kind_label, PreprocessResources};
     use crate::downloads::DownloadContext;
     use crate::paths::resolve_dataset_item_path;
-    use crate::training_jobs::{parse_plan, run_training_execution, training_progress};
+    use crate::training_jobs::{
+        parse_plan, run_training_execution, training_progress, validate_training_plan,
+    };
 
     /// The only kernel the studio job trains today — the Krea 2 pose-ControlNet branch. The API stamps
     /// it into the plan (`krea_control` target); a plan with any other kernel is rejected here rather
@@ -101,6 +103,10 @@ mod imp {
     ) -> WorkerResult<()> {
         let backend = backend_label(&settings.gpu_id);
         let mut plan = parse_plan(&job.payload)?;
+        // Validate caller-controlled output and input confinement before heartbeat, weight downloads,
+        // detector setup, or GPU rendering. The rewritten rendered-dataset plan is validated again by
+        // `run_training_execution` after preparation.
+        validate_training_plan(settings, &plan)?;
         if plan.target.kernel != CONTROL_KERNEL {
             return Err(WorkerError::InvalidPayload(format!(
                 "control_training expects a '{CONTROL_KERNEL}' plan, got kernel '{}'.",
@@ -444,7 +450,8 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::{control_kind_from_label, ControlKind, WorkDirGuard};
+        use super::*;
+        use serde_json::json;
 
         /// A unique temp path per test (process id + line) so parallel/leftover runs don't collide.
         fn unique_temp(tag: &str, line: u32) -> std::path::PathBuf {
@@ -504,6 +511,114 @@ mod imp {
             assert_eq!(
                 control_kind_from_label("scribble"),
                 ControlKind::Other("scribble".to_owned())
+            );
+        }
+
+        #[tokio::test]
+        async fn invalid_output_is_rejected_before_heartbeat_or_preprocessor_download() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let data_dir = temp.path().join("data");
+            let dataset_root = data_dir.join("datasets/ds-1");
+            std::fs::create_dir_all(&dataset_root).expect("dataset root");
+            std::fs::write(dataset_root.join("image.png"), b"present").expect("dataset image");
+
+            let mut settings = Settings::from_env();
+            settings.data_dir = data_dir.clone();
+            // No server listens here. Reaching heartbeat (and therefore any later weight download)
+            // would produce an HTTP error instead of the confinement error asserted below.
+            settings.api_url = "http://127.0.0.1:1".to_owned();
+            settings.worker_id = "test-worker".to_owned();
+            settings.gpu_id = "gpu-0".to_owned();
+            let plan = json!({
+                "schemaVersion": 1,
+                "planVersion": 1,
+                "jobId": "job-control",
+                "target": {
+                    "targetId": "krea_control_target",
+                    "kernel": "krea_control",
+                    "family": "krea",
+                    "modality": "image",
+                    "outputKind": "controlnet",
+                    "baseModel": "krea_2_raw",
+                    "baseModelPath": data_dir.join("models/krea").display().to_string()
+                },
+                "dataset": {
+                    "datasetId": "ds-1",
+                    "datasetVersion": 1,
+                    "rootPath": dataset_root.display().to_string(),
+                    "items": [{
+                        "imagePath": "image.png",
+                        "caption": "a person"
+                    }]
+                },
+                "config": {
+                    "rank": 16,
+                    "alpha": 16,
+                    "learningRate": 0.0001,
+                    "steps": 10,
+                    "batchSize": 1,
+                    "gradientAccumulation": 1,
+                    "resolution": 512,
+                    "saveEvery": 10,
+                    "seed": 1,
+                    "optimizer": "adamw",
+                    "advanced": { "controlType": "pose" }
+                },
+                "output": {
+                    "loraId": "control-1",
+                    "outputDir": data_dir.join("outside-managed-output").display().to_string(),
+                    "fileName": "control.safetensors",
+                    "format": "safetensors",
+                    "triggerWords": []
+                },
+                "provenance": {
+                    "datasetId": "ds-1",
+                    "datasetVersion": 1,
+                    "targetId": "krea_control_target",
+                    "baseModel": "krea_2_raw",
+                    "configSnapshot": {},
+                    "outputLoraId": "control-1",
+                    "sourceJobId": "job-control",
+                    "createdAt": "2026-07-25T00:00:00Z"
+                }
+            });
+            let job: JobSnapshot = serde_json::from_value(json!({
+                "id": "job-control",
+                "type": "control_training",
+                "status": "running",
+                "projectId": null,
+                "projectName": null,
+                "payload": { "plan": plan },
+                "result": {},
+                "requestedGpu": "auto",
+                "assignedGpu": "gpu-0",
+                "workerId": "test-worker",
+                "progress": 0.0,
+                "stage": "queued",
+                "message": "queued",
+                "error": null,
+                "etaSeconds": null,
+                "elapsedSeconds": null,
+                "attempts": 1,
+                "sourceJobId": null,
+                "duplicateOfJobId": null,
+                "cancelRequested": false,
+                "createdAt": "2026-07-25T00:00:00Z",
+                "updatedAt": "2026-07-25T00:00:00Z",
+                "startedAt": null,
+                "completedAt": null,
+                "canceledAt": null,
+                "lastHeartbeatAt": null
+            }))
+            .expect("job snapshot");
+            let api = ApiClient::new(&settings);
+
+            let error = run_control_training_job(&api, &settings, &reqwest::Client::new(), &job)
+                .await
+                .expect_err("out-of-root output is rejected");
+            assert!(
+                error.to_string().contains("Training outputDir"),
+                "confinement validation must win before network/GPU setup: {error:?}"
             );
         }
     }

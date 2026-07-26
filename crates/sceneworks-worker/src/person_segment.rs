@@ -132,6 +132,9 @@ pub(crate) fn box_norm_to_pixels(
 pub(crate) fn mask_box_coverage(pixels: &[u8], box_norm: BoxNorm, width: u32, height: u32) -> f64 {
     let [x1, y1, x2, y2] = box_norm_to_pixels(box_norm, width, height);
     let (w, h) = (width as usize, height as usize);
+    if pixels.len() != w.saturating_mul(h) {
+        return 0.0;
+    }
     let (mut fg, mut inside) = (0u64, 0u64);
     for y in 0..h {
         for x in 0..w {
@@ -479,6 +482,11 @@ mod tests {
         assert_eq!(
             mask_box_coverage(&[0u8; 100], (0.0, 0.0, 1.0, 1.0), w, h),
             0.0
+        );
+        assert_eq!(
+            mask_box_coverage(&pixels[..99], (0.0, 0.0, 1.0, 1.0), w, h),
+            0.0,
+            "malformed masks must not index past their buffer"
         );
         // A box over the left half of the block → ~half the foreground inside.
         let half = mask_box_coverage(&pixels, (0.0, 0.0, 0.4, 1.0), w, h);

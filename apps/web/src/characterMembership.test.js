@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assetMatchesCharacter, characterAssetIds } from "./characterMembership.js";
+import { assetMatchesCharacter, characterAssetIdIndex, characterAssetIds } from "./characterMembership.js";
 
 const CHARACTER_ID = "char_1";
 
@@ -59,6 +59,15 @@ describe("assetMatchesCharacter", () => {
 });
 
 describe("characterAssetIds", () => {
+  it("precomputes one reference-id set per character for repeated asset scans", () => {
+    const index = characterAssetIdIndex([
+      { id: "char-a", approvedReferences: [{ assetId: "approved" }] },
+      { id: "char-b", references: [{ id: "reference" }] },
+    ]);
+    expect(index.get("char-a")).toEqual(new Set(["approved"]));
+    expect(index.get("char-b")).toEqual(new Set(["reference"]));
+  });
+
   it("unions approvedReferences and references and drops empty ids", () => {
     const ids = characterAssetIds({
       approvedReferences: [{ assetId: "a" }, { id: "b" }, {}],

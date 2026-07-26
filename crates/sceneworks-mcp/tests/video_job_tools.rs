@@ -8,20 +8,18 @@
 //! the job error, a completed job hands back a ticketed URL another machine
 //! can fetch, and the tools stay generic across image jobs.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use rmcp::handler::client::ClientHandler;
-use rmcp::model::{CallToolRequestParams, ClientInfo};
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::ServiceExt;
-use sceneworks_mcp::{ApiClientConfig, JobWaitConfig};
+use rmcp::model::CallToolRequestParams;
 use serde_json::{json, Value};
+
+use common::{connect_mcp, error_text, fast_job_wait, result_json, spawn, TestClient};
 
 const TICKET: &str = "tkt0123456789abcdef";
 const VIDEO_PATH: &str = "assets/videos/genset_1/clip_0001.mp4";
@@ -113,26 +111,6 @@ fn stub_api_router(state: StubState) -> Router {
         .with_state(state)
 }
 
-async fn spawn(router: Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind stub listener");
-    let addr = listener.local_addr().expect("stub addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, router).await;
-    });
-    format!("http://{addr}")
-}
-
-#[derive(Clone, Default)]
-struct TestClient;
-
-impl ClientHandler for TestClient {
-    fn get_info(&self) -> ClientInfo {
-        ClientInfo::default()
-    }
-}
-
 struct Harness {
     client: rmcp::service::RunningService<rmcp::service::RoleClient, TestClient>,
     submitted: Arc<Mutex<Vec<Value>>>,
@@ -155,24 +133,7 @@ async fn harness(snapshots: Vec<Value>) -> Harness {
     let submitted = state.submitted.clone();
     let tickets_minted = state.tickets_minted.clone();
     let api_base = spawn(stub_api_router(state)).await;
-    let mcp_service = sceneworks_mcp::streamable_http_service_with(
-        ApiClientConfig {
-            base_url: api_base,
-            access_token: None,
-        },
-        JobWaitConfig {
-            poll_interval: Duration::from_millis(10),
-            timeout: Duration::from_secs(10),
-        },
-    );
-    let mcp_base = spawn(Router::new().nest_service("/mcp", mcp_service)).await;
-    let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(format!("{mcp_base}/mcp")),
-    );
-    let client = TestClient
-        .serve(transport)
-        .await
-        .expect("MCP client initializes against the mounted /mcp service");
+    let (mcp_base, client) = connect_mcp(api_base, None, fast_job_wait(), TestClient).await;
     Harness {
         client,
         submitted,
@@ -183,26 +144,6 @@ async fn harness(snapshots: Vec<Value>) -> Harness {
 
 /// The JSON payload of a tool result (its text content blocks parsed as JSON;
 /// the last one wins — get_job_result appends the summary block last).
-fn result_json(result: &rmcp::model::CallToolResult) -> Value {
-    result
-        .content
-        .iter()
-        .rev()
-        .find_map(|block| block.as_text())
-        .map(|text| serde_json::from_str(&text.text).expect("tool result text is JSON"))
-        .expect("tool result carries a text block")
-}
-
-fn error_text(result: &rmcp::model::CallToolResult) -> String {
-    result
-        .content
-        .iter()
-        .filter_map(|block| block.as_text())
-        .map(|text| text.text.clone())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[tokio::test]
 async fn submit_video_job_returns_job_id_and_initial_snapshot() {
     let harness = harness(vec![]).await;

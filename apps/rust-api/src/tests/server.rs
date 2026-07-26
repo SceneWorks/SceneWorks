@@ -8,6 +8,71 @@ fn default_api_host_is_loopback() {
     assert!(ip.is_loopback(), "default API host must be loopback");
 }
 
+#[test]
+fn api_timing_route_labels_exclude_ids_queries_and_unknown_path_tails() {
+    let matched = normalized_api_route(
+        "/api/v1/projects/project-secret/assets/asset-secret",
+        Some("/api/v1/projects/:project_id/assets/:asset_id"),
+    );
+    assert_eq!(
+        matched.as_deref(),
+        Some("/api/v1/projects/:project_id/assets/:asset_id")
+    );
+    assert!(!matched
+        .as_deref()
+        .expect("API route is timed")
+        .contains("secret"));
+
+    // Middleware receives `Uri::path()`, never the query, and unknown paths
+    // collapse instead of echoing their potentially sensitive tail.
+    assert_eq!(
+        normalized_api_route("/api/v1/unknown/access-token-value", None).as_deref(),
+        Some("/api/<unmatched>")
+    );
+    assert_eq!(
+        normalized_api_route("/mcp/private-client-id", None).as_deref(),
+        Some("/mcp/<unmatched>")
+    );
+    assert_eq!(normalized_api_route("/assets/index.js", None), None);
+}
+
+#[tokio::test]
+async fn api_timing_adds_numeric_server_timing_to_success_and_error_responses() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, headers, _) = request_raw(
+        app.clone(),
+        "GET",
+        "/api/v1/access?ticket=never-echo",
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let timing = headers
+        .get("server-timing")
+        .and_then(|value| value.to_str().ok())
+        .expect("API success exposes Server-Timing");
+    assert!(timing.starts_with("app;dur="));
+    assert!(timing["app;dur=".len()..].parse::<f64>().is_ok());
+    assert!(!timing.contains("ticket"));
+
+    let (status, headers, _) = request_raw(
+        app,
+        "GET",
+        "/api/v1/not-a-route/private-value",
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        headers.contains_key("server-timing"),
+        "fallback API responses are timed too"
+    );
+}
+
 /// F-003 / sc-11159: the enqueue gate must reject a path-unsafe `model` id (traversal /
 /// separators / absolute), since it flows verbatim into the worker's asset filename. A
 /// plain single-component id — including an uncatalogued one the stub lane serves — is
@@ -156,6 +221,38 @@ fn inprocess_utility_worker_ids_are_distinct_and_stable() {
         .map(|index| inprocess_utility_worker_id("host-a", index))
         .collect();
     assert_eq!(ids.len(), 4);
+}
+
+/// The rust-api does not call the worker crate's top-level `run`; it owns and spawns
+/// `run_worker_loop` tasks directly. Exercise that exact production spawn boundary and prove
+/// recovery runs before any loop is created by giving it an unsafe conversion root. If recovery
+/// were removed from the topology, this would return a live pool instead of the confinement error.
+#[cfg(unix)]
+#[tokio::test]
+async fn inprocess_utility_worker_startup_runs_conversion_recovery_before_spawning_loops() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let models_dir = data_dir.join("models");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&models_dir).expect("models root");
+    std::fs::create_dir_all(&outside).expect("outside root");
+    std::os::unix::fs::symlink(&outside, models_dir.join("mlx"))
+        .expect("nested conversion-root symlink");
+
+    let result = crate::spawn_inprocess_utility_worker(0, data_dir).await;
+
+    match result {
+        Err(error) => assert!(
+            error.to_string().contains("escapes managed data root"),
+            "the production spawn boundary surfaces recovery confinement: {error:?}"
+        ),
+        Ok(worker) => {
+            for handle in worker.handles {
+                handle.abort();
+            }
+            panic!("production in-process startup skipped conversion recovery");
+        }
+    }
 }
 
 /// The watchdog must stay pending while the parent lives and resolve once it

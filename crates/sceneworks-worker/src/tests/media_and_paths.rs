@@ -140,6 +140,9 @@ fn path_and_error_helpers_are_bounded_and_defensive() {
 
     assert!(tail.contains("caf\u{e9}"));
     assert!(!tail.contains("line 1 "));
+    assert_eq!(tail.chars().count(), 37);
+    assert_eq!(bounded_tail("aé日", 1, 2), "é日");
+    assert_eq!(bounded_tail("aé日", 1, 0), "");
 }
 
 #[test]
@@ -194,9 +197,9 @@ fn model_destinations_are_constrained_to_data_models() {
         .expect_err("destination outside data/models is rejected");
     assert!(error.to_string().contains("data/models"));
 
-    // model_convert: outputDir under data/models is accepted, traversal is rejected.
+    // model_convert: only a direct child of the managed MLX conversion root is accepted.
     let ok = resolve_model_convert_output(
-        &settings,
+        &settings.data_dir,
         &temp
             .path()
             .join("models")
@@ -205,8 +208,30 @@ fn model_destinations_are_constrained_to_data_models() {
             .display()
             .to_string(),
     )
-    .expect("convert output under data/models is accepted");
-    assert!(ok.starts_with(&models_root));
+    .expect("direct MLX convert output is accepted");
+    assert_eq!(ok.parent(), Some(models_root.join("mlx").as_path()));
+
+    let nested = temp
+        .path()
+        .join("models")
+        .join("mlx")
+        .join("nested")
+        .join("wan")
+        .display()
+        .to_string();
+    let nested_error = resolve_model_convert_output(&settings.data_dir, &nested)
+        .expect_err("nested output falls outside the finalizer/recovery contract");
+    assert!(nested_error.to_string().contains("direct child"));
+
+    let wrong_managed_root = temp
+        .path()
+        .join("models")
+        .join("custom")
+        .display()
+        .to_string();
+    let wrong_root_error = resolve_model_convert_output(&settings.data_dir, &wrong_managed_root)
+        .expect_err("other managed model roots are not conversion destinations");
+    assert!(wrong_root_error.to_string().contains("direct child"));
 
     let traversal = temp
         .path()
@@ -215,9 +240,9 @@ fn model_destinations_are_constrained_to_data_models() {
         .join("escape")
         .display()
         .to_string();
-    let convert_error = resolve_model_convert_output(&settings, &traversal)
+    let convert_error = resolve_model_convert_output(&settings.data_dir, &traversal)
         .expect_err("convert output escaping data/models is rejected");
-    assert!(convert_error.to_string().contains("data/models"));
+    assert!(convert_error.to_string().contains("models/mlx"));
 }
 
 #[cfg(unix)]
@@ -483,7 +508,10 @@ fn app_managed_helpers_resolve_symlinks_before_root_check() {
     // resolve_model_convert_output (write target confined to data/models)
     let convert_link = models_dir.join("convert-escape");
     std::os::unix::fs::symlink(&outside_target, &convert_link).expect("symlink creates");
-    let err = super::resolve_model_convert_output(&settings, &convert_link.display().to_string())
+    let err = super::resolve_model_convert_output(
+        &settings.data_dir,
+        &convert_link.display().to_string(),
+    )
         .expect_err("symlinked convert outputDir escape rejects");
     assert!(err.to_string().contains("data/models"));
 

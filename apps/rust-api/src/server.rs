@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use sceneworks_core::jobs_store::JobsStore;
 use sceneworks_core::project_store::ProjectStore;
@@ -34,7 +34,7 @@ use crate::manifest::ManifestCache;
 use crate::models::ModelSizeCache;
 use crate::tickets::TicketStore;
 use crate::{
-    create_app, env_path_or, env_string, open_bind_override_enabled, parent_death,
+    create_app_with_state, env_path_or, env_string, open_bind_override_enabled, parent_death,
     parent_pid_to_watch, seed_mode_for_config_dir, should_warn_open_bind, shutdown_signal,
     spawn_inprocess_utility_worker, DEFAULT_API_HOST, DEFAULT_CORS_ORIGINS,
 };
@@ -265,13 +265,25 @@ pub struct AppState {
     pub(crate) jobs_store: Arc<JobsStore>,
     pub(crate) project_store: Arc<ProjectStore>,
     pub(crate) events: Arc<EventHub>,
+    /// Serializes authoritative SSE snapshots with queue publications. A
+    /// reconnect subscribes while holding this lock, so a queue mutation is
+    /// represented either in the initial snapshot or by a later live event,
+    /// never by a buffered event that can be replayed behind a newer snapshot.
+    pub(crate) queue_snapshot_lock: Arc<AsyncMutex<()>>,
     pub(crate) event_tickets: Arc<TicketStore>,
     pub(crate) media_tickets: Arc<TicketStore>,
+    /// Bounds CPU and memory consumed by on-demand Library thumbnail backfills.
+    pub(crate) thumbnail_generation_slots: Arc<Semaphore>,
     // sc-8870 (F-068): per-peer-IP failed-token throttle for the auth oracle.
     pub(crate) auth_throttle: Arc<AuthThrottle>,
     pub(crate) manifest_cache: Arc<Mutex<ManifestCache>>,
     pub(crate) manifest_write_locks: Arc<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>>,
     pub(crate) model_size_cache: Arc<Mutex<ModelSizeCache>>,
+    #[cfg(test)]
+    pub(crate) model_size_estimate_test_hook:
+        Arc<Mutex<Option<crate::models::ModelSizeEstimateTestHook>>>,
+    #[cfg(test)]
+    pub(crate) model_size_estimate_disabled_override: Arc<Mutex<Option<bool>>>,
     /// sc-10452 — memoized family detection for adapters scanned out of the operator's
     /// external model roots, keyed by each file's size + mtime. `lora_catalog` runs on
     /// every job-create; without this, every generation would re-parse every ComfyUI
@@ -284,6 +296,28 @@ pub struct AppState {
     pub(crate) external_base_model_cache: Arc<Mutex<ExternalBaseModelCache>>,
     pub(crate) http_client: reqwest::Client,
     pub(crate) interrupted_jobs_on_startup: usize,
+    /// Serializes the durable terminal-progress handoff from the jobs DB to
+    /// idempotent catalog/project writes. A retry re-checks the DB after taking
+    /// this lock, so two overlapping terminal reports cannot duplicate work.
+    pub(crate) progress_side_effects_lock: Arc<AsyncMutex<()>>,
+    /// Deterministic race hook for progress acceptance tests. Production builds
+    /// contain no hook or synchronization overhead.
+    #[cfg(test)]
+    pub(crate) progress_before_accept_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    /// Deterministic rendezvous after an SSE snapshot is read but before its
+    /// live subscription is installed. Production builds contain no hook.
+    #[cfg(test)]
+    pub(crate) sse_snapshot_before_subscribe_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    /// One-shot failure after terminal acceptance, used to prove the durable
+    /// pending handoff survives an error and resumes on the owner's retry.
+    #[cfg(test)]
+    pub(crate) progress_side_effects_fail_once: Arc<Mutex<bool>>,
+    /// Persistent per-job failures and attempt counts for recovery fairness
+    /// tests. Production builds contain neither field.
+    #[cfg(test)]
+    pub(crate) progress_side_effects_fail_job_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+    #[cfg(test)]
+    pub(crate) progress_side_effects_attempts: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -373,8 +407,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let run_utility_inprocess = settings.run_utility_inprocess;
-    let app = create_app(settings)?;
+    let utility_data_dir = settings.data_dir.clone();
+    let (app, state) = create_app_with_state(settings)?;
     let listener = tokio::net::TcpListener::bind(address).await?;
+    let progress_side_effect_recovery =
+        crate::jobs::spawn_terminal_progress_side_effect_recovery(state);
     // Use the actual bound address so port 0 (OS-assigned) is reported and the
     // in-process worker connects to the real port.
     let bound = listener.local_addr()?;
@@ -385,17 +422,23 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "SceneWorks API listening"
     );
 
-    let utility_worker = run_utility_inprocess.then(|| spawn_inprocess_utility_worker(port));
+    let utility_worker = if run_utility_inprocess {
+        Some(spawn_inprocess_utility_worker(port, utility_data_dir).await?)
+    } else {
+        None
+    };
 
     // `into_make_service_with_connect_info` exposes the peer `SocketAddr` to the auth
     // middleware so loopback callers can be trusted (epic 4484: keep the local desktop UI
     // and worker password-free while LAN clients stay gated).
-    axum::serve(
+    let serve_result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    .await;
+    progress_side_effect_recovery.abort();
+    serve_result?;
 
     if let Some(worker) = utility_worker {
         worker.shutdown().await;

@@ -10,8 +10,8 @@ pub(crate) async fn list_assets(
         Some("library") => sceneworks_core::project_store::AssetScope::Library,
         _ => sceneworks_core::project_store::AssetScope::All,
     };
-    let assets = project_call(state, move |store| {
-        store.list_assets(
+    let (assets, filesystem_operations) = project_call(state, move |store| {
+        store.list_assets_with_filesystem_operations(
             &project_id,
             query.include_rejected.unwrap_or(false),
             query.include_trashed.unwrap_or(false),
@@ -19,6 +19,28 @@ pub(crate) async fn list_assets(
         )
     })
     .await?;
+    tracing::debug!(
+        event = "asset_list_filesystem_operations",
+        total = filesystem_operations.total(),
+        registry_opens = filesystem_operations.registry_opens,
+        registry_metadata_reads = filesystem_operations.registry_metadata_reads,
+        registry_content_reads = filesystem_operations.registry_content_reads,
+        path_stats = filesystem_operations.path_stats,
+        directory_scans = filesystem_operations.directory_scans,
+        sidecar_reads = filesystem_operations.sidecar_reads,
+        generation_set_reads = filesystem_operations.generation_set_reads,
+        timeline_reads = filesystem_operations.timeline_reads,
+        character_reads = filesystem_operations.character_reads,
+        poster_stats = filesystem_operations.poster_stats,
+        poster_reads = filesystem_operations.poster_reads,
+        index_marker_reads = filesystem_operations.index_marker_reads,
+        index_marker_writes = filesystem_operations.index_marker_writes,
+        index_marker_removes = filesystem_operations.index_marker_removes,
+        directory_create_calls = filesystem_operations.directory_create_calls,
+        db_opens = filesystem_operations.db_opens,
+        asset_count = assets.len(),
+        "listed assets from the indexed project store"
+    );
     let assets = match character_id {
         Some(character_id) if !character_id.is_empty() => assets
             .into_iter()
@@ -62,6 +84,34 @@ pub(crate) async fn get_asset(
     Ok(Json(
         project_call(state, move |store| store.get_asset(&project_id, &asset_id)).await?,
     ))
+}
+
+pub(crate) async fn get_asset_poster(
+    State(state): State<AppState>,
+    Path((project_id, asset_id, poster_sha256)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    let poster = project_call(state, move |store| {
+        store.get_asset_poster(&project_id, &asset_id, &poster_sha256)
+    })
+    .await?;
+    let length = poster.bytes.len().to_string();
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/jpeg".to_owned()),
+            (header::CONTENT_LENGTH, length),
+            (
+                header::CACHE_CONTROL,
+                "private, max-age=31536000, immutable".to_owned(),
+            ),
+            (header::ETAG, format!("\"{}\"", poster.sha256)),
+            (
+                HeaderName::from_static("x-content-type-options"),
+                "nosniff".to_owned(),
+            ),
+        ],
+        poster.bytes,
+    )
+        .into_response())
 }
 
 pub(crate) async fn import_asset(
@@ -255,7 +305,7 @@ pub(crate) struct AssetMoveToCharacterBody {
 pub(crate) async fn move_asset_to_character(
     State(state): State<AppState>,
     Path((project_id, asset_id)): Path<(String, String)>,
-    Json(body): Json<AssetMoveToCharacterBody>,
+    ApiJson(body): ApiJson<AssetMoveToCharacterBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     Ok(Json(
         project_call(state, move |store| {

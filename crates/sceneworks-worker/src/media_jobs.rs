@@ -240,18 +240,10 @@ where
     }
 
     let sidecar_path = media_path.with_extension("sceneworks.json");
-    write_json_value(&sidecar_path, &asset).await?;
-    write_json_value(
-        &project_path
-            .join("recipes")
-            .join(format!("{asset_id}.recipe.json")),
-        &asset["recipe"],
-    )
-    .await?;
     let project_id = required_payload_string(&job.payload, "projectId")?;
     source
         .store
-        .index_asset_sidecar(project_id, &sidecar_path)?;
+        .persist_native_asset_sidecar(project_id, &sidecar_path, &asset)?;
 
     Ok((asset_id, asset, extra))
 }
@@ -446,6 +438,15 @@ pub(crate) async fn run_person_detect_job(
 
 /// The largest seek (seconds) a person-detect frame extraction will ever accept.
 const PERSON_DETECT_MAX_TIMESTAMP_SECONDS: f64 = 3600.0;
+pub(crate) const PERSON_DETECTOR_MODEL: &str = "yolo11m";
+#[cfg(target_os = "macos")]
+pub(crate) const PERSON_DETECTOR_ADAPTER: &str = "yolo11_mlx";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const PERSON_DETECTOR_ADAPTER: &str = "yolo11_ort";
+#[cfg(target_os = "macos")]
+pub(crate) const PERSON_DETECTOR_BACKEND: &str = "mlx";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const PERSON_DETECTOR_BACKEND: &str = "ort";
 
 /// Clamp the requested `sourceTimestamp` into a seek that lands inside the source clip.
 ///
@@ -544,10 +545,14 @@ pub(crate) async fn run_person_detect(
                     .await?;
                     (
                         boxes,
-                        "yolo11m".to_owned(),
-                        "yolo11_mlx",
+                        PERSON_DETECTOR_MODEL.to_owned(),
+                        PERSON_DETECTOR_ADAPTER,
                         true,
-                        json!({ "backend": "mlx", "device": device, "model": "yolo11m" }),
+                        json!({
+                            "backend": PERSON_DETECTOR_BACKEND,
+                            "device": device,
+                            "model": PERSON_DETECTOR_MODEL
+                        }),
                     )
                 };
             let asset = json!({
@@ -2107,19 +2112,9 @@ impl TimelineExport<'_> {
             duration,
         );
         let sidecar_path = output_path.with_extension("sceneworks.json");
-        write_json_value(&sidecar_path, &asset).await?;
-        tokio::fs::create_dir_all(self.project_path.join("recipes")).await?;
         let asset_id = required_value_str(&asset, "id")?.to_owned();
-        write_json_value(
-            &self
-                .project_path
-                .join("recipes")
-                .join(format!("{asset_id}.recipe.json")),
-            &asset["recipe"],
-        )
-        .await?;
         self.store
-            .index_asset_sidecar(&self.request.project_id, &sidecar_path)?;
+            .persist_native_asset_sidecar(&self.request.project_id, &sidecar_path, &asset)?;
 
         let mut result = JsonObject::new();
         result.insert("assetIds".to_owned(), json!([asset_id]));
@@ -3151,12 +3146,34 @@ pub(crate) async fn run_ffmpeg(
     run_ffmpeg_capture_stderr(args, context).await.map(|_| ())
 }
 
+/// Run FFmpeg while streaming pre-split binary chunks into stdin. The chunks are consumed one at a
+/// time, so callers can move already-owned frame buffers into the writer without concatenating or
+/// cloning a second whole-video buffer. Heartbeat, cancellation, binary resolution, stderr bounds,
+/// and kill-on-drop behavior are identical to [`run_ffmpeg`].
+pub(crate) async fn run_ffmpeg_with_stdin_chunks(
+    args: Vec<String>,
+    chunks: Vec<Vec<u8>>,
+    context: Option<FfmpegContext<'_>>,
+) -> WorkerResult<()> {
+    run_ffmpeg_capture_stderr_inner(args, context, Some(chunks))
+        .await
+        .map(|_| ())
+}
+
 /// Run FFmpeg with the shared heartbeat/cancellation lifecycle and return its stderr on success.
 /// Most callers use [`run_ffmpeg`]; media probes need FFmpeg's progress/stream metadata without
 /// introducing an `ffprobe` dependency (the desktop bundle ships only FFmpeg).
 pub(crate) async fn run_ffmpeg_capture_stderr(
     args: Vec<String>,
     context: Option<FfmpegContext<'_>>,
+) -> WorkerResult<String> {
+    run_ffmpeg_capture_stderr_inner(args, context, None).await
+}
+
+async fn run_ffmpeg_capture_stderr_inner(
+    args: Vec<String>,
+    context: Option<FfmpegContext<'_>>,
+    stdin_chunks: Option<Vec<Vec<u8>>>,
 ) -> WorkerResult<String> {
     let Some((program, arguments)) = args.split_first() else {
         return Err(WorkerError::InvalidPayload(
@@ -3178,10 +3195,17 @@ pub(crate) async fn run_ffmpeg_capture_stderr(
     // no-op for a plain binary and on every other platform.
     let resolved_program =
         sceneworks_core::media_convert::resolve_ffmpeg_program(&configured_program);
-    let mut child = Command::new(resolved_program.as_ref())
+    let mut command = Command::new(resolved_program.as_ref());
+    command
         .args(arguments)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if stdin_chunks.is_some() {
+        command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
+    let mut child = command
         // sc-8804 (F-003): if the heartbeat/cancel `?` below returns early (a transient POST
         // failure or a 409 stale-sweep reclaim), `child` is dropped without an explicit kill. A
         // tokio child is not reaped on drop by default, so ffmpeg would keep running and writing a
@@ -3194,6 +3218,18 @@ pub(crate) async fn run_ffmpeg_capture_stderr(
             ))
         })?;
 
+    let mut stdin_task = stdin_chunks.map(|chunks| {
+        let mut stdin = child
+            .stdin
+            .take()
+            .expect("piped FFmpeg stdin is available after spawn");
+        tokio::spawn(async move {
+            for chunk in chunks {
+                stdin.write_all(&chunk).await?;
+            }
+            stdin.shutdown().await
+        })
+    });
     let mut stderr = child.stderr.take();
     let stderr_task = tokio::spawn(async move {
         let mut bytes = Vec::new();
@@ -3210,10 +3246,25 @@ pub(crate) async fn run_ffmpeg_capture_stderr(
             tokio::select! {
                 status = child.wait() => break status?,
                 _ = interval.tick() => {
-                    heartbeat(context.api, context.settings, WorkerStatus::Busy, Some(context.job_id)).await?;
+                    if let Err(error) = heartbeat(
+                        context.api,
+                        context.settings,
+                        WorkerStatus::Busy,
+                        Some(context.job_id),
+                    ).await {
+                        if let Some(task) = stdin_task.take() {
+                            task.abort();
+                            let _ = task.await;
+                        }
+                        return Err(error);
+                    }
                     if cancel_requested_peek(context.api, context.job_id).await {
                         let _ = child.kill().await;
                         let _ = child.wait().await;
+                        if let Some(task) = stdin_task.take() {
+                            task.abort();
+                            let _ = task.await;
+                        }
                         mark_job_canceled(context.api, context.job_id, context.cancel_message).await?;
                         return Err(WorkerError::Canceled(context.cancel_message.to_owned()));
                     }
@@ -3229,7 +3280,16 @@ pub(crate) async fn run_ffmpeg_capture_stderr(
         .map_err(|error| task_join_error("ffmpeg stderr reader task", error))?;
     let stderr = String::from_utf8_lossy(&stderr);
     if status.success() {
+        if let Some(task) = stdin_task {
+            task.await
+                .map_err(|error| task_join_error("ffmpeg stdin writer task", error))?
+                .map_err(WorkerError::Io)?;
+        }
         return Ok(stderr.into_owned());
+    }
+    if let Some(task) = stdin_task {
+        task.abort();
+        let _ = task.await;
     }
     let bounded = bounded_tail(&stderr, 10, 2000);
     if bounded.trim().is_empty() {

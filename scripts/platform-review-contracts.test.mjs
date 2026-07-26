@@ -19,6 +19,17 @@ test("Windows workflows watch the local Rust runner action", async () => {
   }
 });
 
+test("Windows runner prep falls back when its optional rustc wrapper is missing", async () => {
+  const action = await source(".github/actions/prepare-rust-runner/action.yml");
+  assert.match(action, /\$rustcWrapper = \$env:RUSTC_WRAPPER/);
+  assert.match(action, /Test-Path -LiteralPath \$rustcWrapper -PathType Leaf/);
+  assert.match(action, /Get-Command \$rustcWrapper -CommandType Application/);
+  assert.match(
+    action,
+    /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/,
+  );
+});
+
 test("Docker relevance gate paginates and checks for truncated file lists", async () => {
   const workflow = await source(".github/workflows/check.yml");
   assert.match(workflow, /gh api --paginate/);

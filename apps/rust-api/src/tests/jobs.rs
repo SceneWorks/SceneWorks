@@ -165,6 +165,100 @@ async fn generic_model_utility_jobs_reject_path_unsafe_model_id_before_create() 
     assert!(jobs.as_array().expect("jobs array").is_empty());
 }
 
+#[tokio::test]
+async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let conversion_root = settings.data_dir.join("models/mlx");
+    let app = create_app(settings).expect("app creates");
+
+    let request_convert = |output_dir: &std::path::Path| {
+        json!({
+            "type": "model_convert",
+            "requestedGpu": "auto",
+            "payload": {
+                "modelId": "model-1",
+                "sourceRepo": "owner/source",
+                "outputDir": output_dir.display().to_string(),
+            },
+        })
+    };
+
+    let (status, accepted) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        request_convert(&conversion_root.join(".foo.finalize-backup-123")),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "backup-looking model names remain valid in the disjoint recovery design: {accepted}"
+    );
+
+    for (output_dir, expected) in [
+        (conversion_root.join("nested/model-2"), "direct child"),
+        (
+            temp_dir.path().join("data/models/custom-model"),
+            "direct child",
+        ),
+        (
+            conversion_root.join(".sceneworks-finalize-backups"),
+            "reserved",
+        ),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            request_convert(&output_dir),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{output_dir:?}: {body}");
+        assert!(
+            body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains(expected)),
+            "{output_dir:?}: expected {expected:?} in {body}"
+        );
+    }
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        jobs.as_array().expect("jobs array").len(),
+        1,
+        "invalid conversion targets must fail before persistence"
+    );
+}
+
+/// The route-derived output path is a trust-boundary input too. Confinement must run before
+/// `model_catalog` performs its filesystem/cache sweep, so an invalid path-shaped ID wins over the
+/// catalog's otherwise-observable "Model not found" response.
+#[tokio::test]
+async fn typed_model_convert_confines_route_id_before_catalog_lookup() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    for (encoded_model_id, expected) in [
+        ("%2E%2E", "direct child"),
+        (".sceneworks-finalize-backups", "reserved"),
+    ] {
+        let endpoint = format!("/api/v1/models/{encoded_model_id}/convert");
+        let (status, body) = request(app.clone(), "POST", &endpoint, json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{endpoint}: {body}");
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains(expected),
+            "{endpoint}: confinement must precede catalog/404 work, got {body}"
+        );
+        assert!(
+            !detail.contains("Model not found"),
+            "{endpoint}: invalid route ID must not fall through to catalog lookup"
+        );
+    }
+}
+
 /// sc-13617 / F-011: retry and duplicate merge payloadChanges into an existing generation
 /// payload. Validate the merged model before either operation can persist a new job.
 #[tokio::test]
@@ -1356,6 +1450,142 @@ async fn worker_can_register_claim_and_complete_job_through_http() {
     assert_eq!(queue["workers"][0]["status"], "idle");
 }
 
+/// sc-13842: the audio streaming pump may have a Running progress POST already in flight when the
+/// cancel watcher commits terminal Canceled. Hold that nonterminal report immediately before the
+/// authoritative store transition, let Canceled win, then prove the delayed report receives 409
+/// and cannot resurrect the terminal row.
+#[tokio::test]
+async fn in_flight_running_progress_cannot_resurrect_a_canceled_job() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "payload": { "prompt": "streaming race" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = created["id"].as_str().expect("job id").to_owned();
+    claim_job_as_worker(&app, &job_id, "stream-worker", &["image_detail"]).await;
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    *state.progress_before_accept_once.lock() = Some(barrier.clone());
+    let progress_app = app.clone();
+    let progress_job_id = job_id.clone();
+    let progress = tokio::spawn(async move {
+        request(
+            progress_app,
+            "POST",
+            &format!("/api/v1/jobs/{progress_job_id}/progress"),
+            json!({
+                "status": "running",
+                "stage": "generating",
+                "progress": 0.5,
+                "message": "Streaming audio…",
+                "workerId": "stream-worker"
+            }),
+        )
+        .await
+    });
+
+    barrier.wait().await;
+    let (cancel_status, canceled) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "canceled",
+            "stage": "canceled",
+            "progress": 1,
+            "message": "Canceled by user.",
+            "workerId": "stream-worker"
+        }),
+    )
+    .await;
+    assert_eq!(cancel_status, StatusCode::OK);
+    assert_eq!(canceled["status"], "canceled");
+    barrier.wait().await;
+
+    let (progress_status, _) = progress.await.expect("progress request joins");
+    assert_eq!(
+        progress_status,
+        StatusCode::CONFLICT,
+        "a nonterminal progress report accepted after cancellation must receive 409"
+    );
+    let (status, job) = request(app, "GET", &format!("/api/v1/jobs/{job_id}"), Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(job["status"], "canceled");
+}
+
+#[tokio::test]
+async fn authenticated_lan_caller_cannot_mutate_an_unclaimed_job_without_worker_id() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let auth = [("x-sceneworks-token", "secret-token")];
+    let peer = "192.168.1.44:50123";
+
+    let (status, created) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "mist" },
+            "requestedGpu": "auto"
+        }),
+        peer,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = created["id"].as_str().expect("job id");
+
+    let (status, rejected) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "ownerless completion"
+        }),
+        peer,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(rejected["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("no longer owns")));
+
+    let (status, unchanged) = request_with_peer_headers(
+        app,
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+        peer,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unchanged["status"], "queued");
+    assert!(unchanged["result"]
+        .as_object()
+        .is_some_and(serde_json::Map::is_empty));
+}
+
 #[tokio::test]
 async fn progress_ticks_only_republish_queue_on_status_change() {
     // sc-4203 (F-API-5): a pure progress tick (status unchanged) must not trigger the
@@ -1439,6 +1669,109 @@ async fn progress_ticks_only_republish_queue_on_status_change() {
     assert!(
         done_events.iter().any(|name| name == "queue.updated"),
         "a status transition must republish the queue: {done_events:?}"
+    );
+}
+
+#[tokio::test]
+async fn cleared_terminal_noop_retry_is_owner_checked_and_emits_no_events() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": "GPU 0",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "mist" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let job_id = created["id"].as_str().expect("job id").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+    let terminal_payload = json!({
+        "status": "completed",
+        "stage": "completed",
+        "progress": 1,
+        "message": "done",
+        "result": {},
+        "workerId": "worker-1"
+    });
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        terminal_payload.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["status"], "completed");
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut events = state.events.subscribe();
+    let (status, retry) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        terminal_payload,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(retry["status"], "completed");
+    assert!(
+        drain_event_names(&mut events).await.is_empty(),
+        "an unapplied, unaugmented same-terminal retry must publish no event"
+    );
+
+    let (status, rejected) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "stale retry",
+            "workerId": "worker-2"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(rejected["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("no longer owns")));
+    assert!(
+        drain_event_names(&mut events).await.is_empty(),
+        "an unauthorized same-terminal retry must publish no event"
     );
 }
 
@@ -1802,6 +2135,77 @@ async fn clear_single_job_soft_hides_only_that_terminal_job() {
 }
 
 #[tokio::test]
+async fn clear_publishes_a_live_tombstone_and_retains_it_for_reconnect() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    let (_, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "done" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/cancel"),
+        Value::Null,
+    )
+    .await;
+
+    let mut events = state.events.subscribe();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let names = drain_event_names(&mut events).await;
+    assert!(
+        names.iter().any(|name| name == "jobs.cleared"),
+        "connected peers need an explicit clear tombstone: {names:?}"
+    );
+
+    let (status, ticket) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        json!({ "knownTerminalJobIds": [job_id] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ticket = ticket["ticket"].as_str().expect("event ticket");
+    let (status, reconnect) =
+        request_sse_prefix(app, &format!("/api/v1/jobs/events?ticket={ticket}"), 3).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        reconnect[1].1["jobs"]
+            .as_array()
+            .expect("snapshot jobs")
+            .iter()
+            .all(|job| job["id"] != json!(job_id)),
+        "a requested soft-hidden row must not be composed back into the snapshot"
+    );
+    assert!(
+        reconnect[1].1["clearedJobIds"]
+            .as_array()
+            .expect("clear tombstones array")
+            .iter()
+            .any(|id| id == &json!(job_id)),
+        "a peer reconnecting after the live event must receive the persistent tombstone"
+    );
+}
+
+#[tokio::test]
 async fn clear_single_job_rejects_a_non_terminal_job() {
     // sc-12231: clearing an active (queued) job is a 400 — the × only appears on
     // terminal cards, and the server refuses to soft-hide a live job.
@@ -2039,8 +2443,7 @@ async fn ideogram_plain_text_job_returns_immediately_in_pending_caption() {
     );
     assert_eq!(refine_job["payload"]["aspectRatio"], "1:1");
 
-    // Complete the expansion with a rich caption. The unclaimed job has no owner, so the progress
-    // report omits a workerId (matching the store's `(None, None)` ownership rule).
+    // Complete the expansion with a rich caption through a real worker claim.
     let caption = r#"{"high_level_description": "a red fox", "compositional_deconstruction": {"background": "a snowy forest at golden hour", "elements": []}}"#;
     complete_prompt_refine_job(&app, &refine_id, json!({ "refinedPrompt": caption })).await;
 
@@ -2078,6 +2481,8 @@ async fn ideogram_plain_text_job_degrades_to_original_prompt_when_expansion_fail
     let image_job_id = image_job["id"].as_str().expect("job id").to_owned();
 
     let refine_id = wait_for_prompt_refine_job(&app).await;
+    const WORKER_ID: &str = "test-prompt-refine-worker";
+    claim_job_as_worker(&app, &refine_id, WORKER_ID, &["gpu", "prompt_refine"]).await;
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -2087,7 +2492,8 @@ async fn ideogram_plain_text_job_degrades_to_original_prompt_when_expansion_fail
             "stage": "failed",
             "progress": 0,
             "message": "Expansion failed.",
-            "error": "prompt-refine model not staged"
+            "error": "prompt-refine model not staged",
+            "workerId": WORKER_ID
         }),
     )
     .await;

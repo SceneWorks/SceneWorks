@@ -50,6 +50,7 @@ fn classify_audio_synthesis_error(context: &str, error: gen_core::Error) -> Work
 struct AudioRequest {
     project_id: String,
     model: String,
+    model_provided: bool,
     prompt: String,
     voice: Option<String>,
     language: Option<String>,
@@ -95,8 +96,9 @@ struct AudioRequest {
     /// path. `None` ⇒ an ordinary Speech/SFX/Music generation.
     reference_audio_asset_id: Option<String>,
     /// Voice Clone base TTS model id (the "content" generator whose speech OpenVoice re-timbres). The API
-    /// injects its manifest entry as `baseModelManifestEntry`. Defaults to Kokoro (`kokoro_82m`).
+    /// injects its manifest entry as `baseModelManifestEntry`.
     base_model: String,
+    base_model_provided: bool,
     /// Voice Clone match strength — overrides OpenVoice V2's posterior-sampling temperature τ (rides
     /// `AudioTransformRequest::strength`). `None` ⇒ the converter's own default (τ = 0.3).
     match_strength: Option<f32>,
@@ -178,9 +180,12 @@ impl AudioRequest {
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned)
         };
+        let model = string("model");
+        let base_model = string("baseModel");
         Self {
             project_id: string("projectId").unwrap_or_default(),
-            model: string("model").unwrap_or_else(|| "kokoro_82m".to_owned()),
+            model_provided: model.is_some(),
+            model: model.unwrap_or_else(|| "kokoro_82m".to_owned()),
             prompt: payload
                 .get("prompt")
                 .and_then(Value::as_str)
@@ -233,7 +238,8 @@ impl AudioRequest {
                 .and_then(Value::as_f64)
                 .map(|value| value as f32),
             reference_audio_asset_id: string("referenceAudioAssetId"),
-            base_model: string("baseModel").unwrap_or_else(|| "kokoro_82m".to_owned()),
+            base_model_provided: base_model.is_some(),
+            base_model: base_model.unwrap_or_else(|| "kokoro_82m".to_owned()),
             match_strength: payload
                 .get("matchStrength")
                 .and_then(Value::as_f64)
@@ -405,6 +411,9 @@ fn audio_preflight(request: &AudioRequest) -> WorkerResult<()> {
         return Err(WorkerError::InvalidPayload(
             "projectId is required.".to_owned(),
         ));
+    }
+    if !request.model_provided {
+        return Err(WorkerError::InvalidPayload("model is required.".to_owned()));
     }
     // A single-voice request needs a prompt; a multi-speaker request (sc-13676) carries its text in
     // the `script` instead, so one of the two must be present. `script` is `None` for every
@@ -777,9 +786,11 @@ async fn run_audio_synthesis_using(
     // Concurrent incremental-progress pump (sc-13675): posts a Running/Generating job update as each
     // streamed chunk arrives so the UI reflects the stream. It runs ALONGSIDE
     // `run_blocking_with_heartbeat` (which owns worker heartbeats + the cancel watcher on a DIFFERENT
-    // endpoint). It stops the instant the shared cancel flag is tripped, so it can never post a Running
-    // status after the watcher writes the terminal `Canceled` (no cancel/heartbeat regression), and it
-    // ends when synthesis closes the channel. Non-streaming synthesis never sends, so the pump exits
+    // endpoint). The cancel check stops new attempts once the shared flag is observed, but cancellation
+    // can still serialize while an already-started progress POST is awaiting the API. That race is safe
+    // because jobs_store transactionally rejects any nonterminal write after `Canceled`; the resulting
+    // 409 is deliberately ignored here because synthesis must not depend on its progress sink. The pump
+    // ends when synthesis closes the channel. Non-streaming synthesis never sends, so it exits
     // immediately with zero posts, leaving those modes untouched.
     let pump = {
         let api = api.clone();
@@ -882,6 +893,11 @@ fn resolve_voice_clone_plan(
     request: &AudioRequest,
     project_path: &Path,
 ) -> WorkerResult<VoiceClonePlan> {
+    if !request.base_model_provided {
+        return Err(WorkerError::InvalidPayload(
+            "baseModel is required for converter-based voice cloning.".to_owned(),
+        ));
+    }
     let base_model_dir = resolve_audio_model_dir_for(
         settings,
         &request.base_model_manifest_entry,
@@ -1625,6 +1641,14 @@ mod tests {
         assert!(audio_preflight(&no_project).is_err());
         let no_prompt = AudioRequest::from_payload(&payload(json!({ "prompt": "   " })));
         assert!(audio_preflight(&no_prompt).is_err());
+
+        let mut no_model_payload = payload(json!({}));
+        no_model_payload.remove("model");
+        let no_model = AudioRequest::from_payload(&no_model_payload);
+        assert!(matches!(
+            audio_preflight(&no_model),
+            Err(WorkerError::InvalidPayload(message)) if message == "model is required."
+        ));
     }
 
     #[test]
@@ -1969,13 +1993,24 @@ mod tests {
         assert!(request.is_voice_clone());
         assert_eq!(request.mode(), "voice_clone");
 
-        // A base model defaults to Kokoro when the payload omits it.
+        // Parsing retains the legacy value for replay helpers, but the converter-plan resolver rejects
+        // the omission so a direct worker payload can never silently select Kokoro.
         let defaulted = AudioRequest::from_payload(&payload(json!({
             "model": "openvoice_v2",
             "referenceAudioAssetId": "ref-voice-1",
         })));
         assert_eq!(defaulted.base_model, "kokoro_82m");
         assert!(defaulted.is_voice_clone());
+        assert!(audio_preflight(&defaulted).is_ok());
+        assert!(matches!(
+            resolve_voice_clone_plan(
+                &Settings::from_env(),
+                &defaulted,
+                Path::new("/unused-project"),
+            ),
+            Err(WorkerError::InvalidPayload(message))
+                if message == "baseModel is required for converter-based voice cloning."
+        ));
 
         // No reference ⇒ an ordinary (non-voice-clone) run: a blank/whitespace id does not route.
         let none = AudioRequest::from_payload(&payload(json!({ "model": "kokoro_82m" })));
@@ -2056,6 +2091,7 @@ mod tests {
             "referenceAudioAssetId": "ref-voice-1",
             "seed": 9,
         })));
+        assert!(audio_preflight(&request).is_ok());
         let plan = AudioPlan::new(&request, Path::new("/tmp/project"));
         let fact = audio_asset_fact(
             &plan, &request, 24_000, 1, 4.0, /* native_clone */ true,

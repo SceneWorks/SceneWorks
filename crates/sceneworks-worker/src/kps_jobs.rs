@@ -73,6 +73,42 @@ const DETECTOR_BACKEND: &str = "mlx";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const DETECTOR_BACKEND: &str = "candle";
 
+struct KpsDetection {
+    bbox: [f32; 4],
+    kps: [[f32; 2]; 5],
+    score: f32,
+}
+
+fn extraction_from_detections(
+    detections: impl IntoIterator<Item = KpsDetection>,
+    width: u32,
+    height: u32,
+) -> KpsExtraction {
+    let largest = detections.into_iter().max_by(|a, b| {
+        let area =
+            |d: &KpsDetection| (d.bbox[2] - d.bbox[0]).max(0.0) * (d.bbox[3] - d.bbox[1]).max(0.0);
+        area(a).total_cmp(&area(b))
+    });
+    let Some(det) = largest else {
+        return KpsExtraction::none(width, height);
+    };
+
+    let kps = det
+        .kps
+        .map(|point| normalize_to_square(point[0], point[1], width, height));
+    let tl = normalize_to_square(det.bbox[0], det.bbox[1], width, height);
+    let br = normalize_to_square(det.bbox[2], det.bbox[3], width, height);
+    KpsExtraction {
+        detected: true,
+        kps: Some(kps),
+        bbox: Some([tl[0], tl[1], br[0], br[1]]),
+        det_score: det.score,
+        low_confidence: det.score < LOW_CONF_THRESH,
+        source_width: width,
+        source_height: height,
+    }
+}
+
 /// Map a detected pixel coordinate into the square-normalized `[0,1]` preset space, applying
 /// the engine's centered-letterbox geometry analytically (no image resize needed). Pure +
 /// unit-tested. `M = max(w, h)`; for a square image this is just `px/w, py/h`.
@@ -150,7 +186,12 @@ impl KpsExtraction {
 /// `pose_jobs::DETECTOR` / `person_segment_sam3::WEIGHTS` (poison-recovery: a poisoned lock drops the
 /// cached value and rebuilds). macOS only; `Weights` is the MLX weight container.
 #[cfg(target_os = "macos")]
-static WEIGHTS: OnceLock<Mutex<Option<Weights>>> = OnceLock::new();
+static WEIGHTS: OnceLock<Mutex<Option<(PathBuf, Weights)>>> = OnceLock::new();
+
+#[cfg(any(target_os = "macos", test))]
+fn cached_path_matches<T>(cached: Option<&(PathBuf, T)>, path: &Path) -> bool {
+    cached.map(|(cached_path, _)| cached_path.as_path()) == Some(path)
+}
 
 thread_local! {
     /// The built [`Scrfd`] detector cached per blocking thread, keyed by weight path (sc-8910 /
@@ -199,12 +240,13 @@ fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtra
                     *guard = None;
                     guard
                 });
-                if guard.is_none() {
-                    *guard = Some(Weights::from_file(scrfd_path).map_err(|error| {
+                if !cached_path_matches(guard.as_ref(), scrfd_path) {
+                    let weights = Weights::from_file(scrfd_path).map_err(|error| {
                         WorkerError::Engine(format!("SCRFD weights {scrfd_path:?}: {error}"))
-                    })?);
+                    })?;
+                    *guard = Some((scrfd_path.to_path_buf(), weights));
                 }
-                let scrfd = Scrfd::from_weights(guard.as_ref().expect("weights loaded"))
+                let scrfd = Scrfd::from_weights(&guard.as_ref().expect("weights loaded").1)
                     .map_err(|error| WorkerError::Engine(format!("SCRFD load: {error}")))?;
                 *cell.borrow_mut() = Some((scrfd_path.to_path_buf(), scrfd));
             }
@@ -216,32 +258,15 @@ fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtra
             .map_err(|error| WorkerError::Engine(format!("SCRFD detect: {error}")))
     })?;
 
-    let (w, h) = (image.width, image.height);
-    let largest = dets.into_iter().max_by(|a, b| {
-        let area = |d: &runtime_macos::providers::face::Detection| {
-            (d.bbox[2] - d.bbox[0]).max(0.0) * (d.bbox[3] - d.bbox[1]).max(0.0)
-        };
-        area(a).total_cmp(&area(b))
-    });
-    let Some(det) = largest else {
-        return Ok(KpsExtraction::none(w, h));
-    };
-
-    let mut kps = [[0.0f32; 2]; 5];
-    for (i, point) in det.kps.iter().enumerate() {
-        kps[i] = normalize_to_square(point[0], point[1], w, h);
-    }
-    let tl = normalize_to_square(det.bbox[0], det.bbox[1], w, h);
-    let br = normalize_to_square(det.bbox[2], det.bbox[3], w, h);
-    Ok(KpsExtraction {
-        detected: true,
-        kps: Some(kps),
-        bbox: Some([tl[0], tl[1], br[0], br[1]]),
-        det_score: det.score,
-        low_confidence: det.score < LOW_CONF_THRESH,
-        source_width: w,
-        source_height: h,
-    })
+    Ok(extraction_from_detections(
+        dets.into_iter().map(|det| KpsDetection {
+            bbox: det.bbox,
+            kps: det.kps,
+            score: det.score,
+        }),
+        image.width,
+        image.height,
+    ))
 }
 
 /// Off-Mac sibling of [`detect_largest_kps`] (sc-5497, epic 5482): load the candle SCRFD/ArcFace stack
@@ -270,32 +295,15 @@ fn detect_largest_kps_candle(face_dir: &Path, image: &Image) -> WorkerResult<Kps
             .map_err(|error| WorkerError::Engine(format!("SCRFD detect: {error}")))
     })?;
 
-    let (w, h) = (image.width, image.height);
-    let largest = dets.into_iter().max_by(|a, b| {
-        let area = |d: &gen_core::DetectedFace| {
-            (d.bbox[2] - d.bbox[0]).max(0.0) * (d.bbox[3] - d.bbox[1]).max(0.0)
-        };
-        area(a).total_cmp(&area(b))
-    });
-    let Some(det) = largest else {
-        return Ok(KpsExtraction::none(w, h));
-    };
-
-    let mut kps = [[0.0f32; 2]; 5];
-    for (i, point) in det.kps.iter().enumerate() {
-        kps[i] = normalize_to_square(point[0], point[1], w, h);
-    }
-    let tl = normalize_to_square(det.bbox[0], det.bbox[1], w, h);
-    let br = normalize_to_square(det.bbox[2], det.bbox[3], w, h);
-    Ok(KpsExtraction {
-        detected: true,
-        kps: Some(kps),
-        bbox: Some([tl[0], tl[1], br[0], br[1]]),
-        det_score: det.det_score,
-        low_confidence: det.det_score < LOW_CONF_THRESH,
-        source_width: w,
-        source_height: h,
-    })
+    Ok(extraction_from_detections(
+        dets.into_iter().map(|det| KpsDetection {
+            bbox: det.bbox,
+            kps: det.kps,
+            score: det.det_score,
+        }),
+        image.width,
+        image.height,
+    ))
 }
 
 /// Resolve the source image from the payload: a project `sourceAssetId` (+ `projectId`) or a
@@ -476,6 +484,19 @@ pub(crate) async fn run_kps_extract_job(
 mod tests {
     use super::*;
 
+    #[test]
+    fn weights_cache_identity_includes_the_resolved_path() {
+        let cached = (PathBuf::from("/weights/a.safetensors"), "weights");
+        assert!(cached_path_matches(
+            Some(&cached),
+            Path::new("/weights/a.safetensors")
+        ));
+        assert!(!cached_path_matches(
+            Some(&cached),
+            Path::new("/weights/b.safetensors")
+        ));
+    }
+
     /// A queued `kps_extract` job carrying `payload` (mirrors `jobs_store`'s test constructor).
     fn kps_job(payload: Value) -> JobSnapshot {
         serde_json::from_value(json!({
@@ -588,6 +609,33 @@ mod tests {
         // A square image: side cancels, normalized = px/side, py/side.
         assert_eq!(normalize_to_square(512.0, 256.0, 1024, 1024), [0.5, 0.25]);
         assert_eq!(normalize_to_square(0.0, 0.0, 800, 800), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn shared_detection_tail_selects_largest_and_normalizes_once() {
+        let small = KpsDetection {
+            bbox: [0.0, 0.0, 10.0, 10.0],
+            kps: [[1.0, 1.0]; 5],
+            score: 0.99,
+        };
+        let large = KpsDetection {
+            bbox: [100.0, 20.0, 500.0, 420.0],
+            kps: [[300.0, 220.0]; 5],
+            score: 0.8,
+        };
+        let result = extraction_from_detections([small, large], 600, 400);
+        assert!(result.detected);
+        assert_eq!(result.det_score, 0.8);
+        let kps = result.kps.expect("kps");
+        assert!((kps[0][0] - 0.5).abs() < 1e-6);
+        assert!((kps[0][1] - 0.533_333_36).abs() < 1e-6);
+        let bbox = result.bbox.expect("bbox");
+        for (actual, expected) in bbox
+            .into_iter()
+            .zip([1.0 / 6.0, 0.2, 5.0 / 6.0, 0.866_666_7])
+        {
+            assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+        }
     }
 
     #[test]

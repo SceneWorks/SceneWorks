@@ -18,17 +18,19 @@
 //! by the MLX worker (`gpu.rs mlx_gpu`), so a segment job never routes off-Mac. There is no
 //! torch/candle SAM3 image path yet (a Windows/Linux backport is tracked separately).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
+use crate::asset_media::resolve_asset_media;
 use crate::downloads::DownloadContext;
 use crate::person_segment_sam3::{
     ensure_segmenter_weights, segment_box_blocking, segment_points_blocking,
 };
+use crate::single_child_asset::{write_single_child_asset, SingleChildAssetSpec};
 use crate::{
-    fresh_asset_id, heartbeat, now_rfc3339, progress_payload, run_blocking_with_heartbeat,
-    task_join_error, update_job, ApiClient, Settings, WorkerError, WorkerResult,
+    heartbeat, progress_payload, run_blocking_with_heartbeat, update_job, ApiClient, Settings,
+    WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -37,34 +39,6 @@ use sceneworks_core::project_store::ProjectStore;
 /// test): keep an instance when `σ(logit)·σ(presence) > THRESHOLD`, binarize its mask at `σ > MASK`.
 const SEGMENT_THRESHOLD: f32 = 0.5;
 const SEGMENT_MASK_THRESHOLD: f32 = 0.5;
-
-/// Resolve a `sourceAssetId` to its on-disk media path + the asset's `displayName` via the project
-/// sidecar (mirrors `upscale_jobs::resolve_source` / `image_adapters.find_asset_media_path`).
-fn resolve_source(
-    store: &ProjectStore,
-    project_id: &str,
-    asset_id: &str,
-    project_path: &Path,
-) -> Option<(PathBuf, Option<String>)> {
-    let asset = store.get_asset(project_id, asset_id).ok()?;
-    let rel = asset.get("file")?.get("path")?.as_str()?;
-    let mut path = project_path.to_path_buf();
-    for component in Path::new(rel).components() {
-        if let std::path::Component::Normal(value) = component {
-            path.push(value);
-        } else {
-            return None;
-        }
-    }
-    if !path.exists() {
-        return None;
-    }
-    let display = asset
-        .get("displayName")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    Some((path, display))
-}
 
 /// Parse `payload.box` (the box prompt in source-image pixel coords). Accepts either the canonical
 /// 4-array `[x1, y1, x2, y2]` or an `{x, y, width, height}` object (the editor's rect shape), so the
@@ -225,12 +199,14 @@ pub(crate) async fn run_image_segment_job(
         .get_project(&project_id)
         .map_err(|e| WorkerError::InvalidPayload(format!("project not found: {e}")))?;
     let project_path = PathBuf::from(project.path);
-    let (source_path, source_display) =
-        resolve_source(&store, &project_id, &source_asset_id, &project_path).ok_or_else(|| {
+    let source = resolve_asset_media(&store, &project_id, &source_asset_id, &project_path)
+        .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
                 "Source image asset not found or missing: {source_asset_id}."
             ))
         })?;
+    let source_path = source.path;
+    let source_display = source.display_name;
 
     update_job(
         api,
@@ -346,91 +322,56 @@ pub(crate) async fn run_image_segment_job(
     let mask_image = image::GrayImage::from_raw(src_w, src_h, mask)
         .ok_or_else(|| WorkerError::Engine("smart-select mask buffer size mismatch".to_owned()))?;
 
-    // Write exactly one child asset (the mask PNG) with lineage back to the source, mirroring the
-    // upscale/detail asset-write shape so the API materializes it into `result.assets`.
-    let created_at = now_rfc3339();
-    let generation_set_id = format!("genset_{}", uuid::Uuid::new_v4().simple());
-    let asset_id = fresh_asset_id();
-    let date = &created_at[..10];
-    let suffix: String = asset_id.chars().skip(6).take(8).collect();
-    let filename = format!("{date}_mask_{suffix}.png");
-    let media_rel = format!("assets/images/{generation_set_id}/{filename}");
-    let media_path = project_path.join(&media_rel);
-    if let Some(parent) = media_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let tmp_path = media_path.with_extension("tmp.png");
-    // Encode the mask PNG off the async runtime thread (sc-8909 / F-107) so the blocking encode never
-    // stalls the heartbeat.
-    let encode_tmp = tmp_path.clone();
-    tokio::task::spawn_blocking(move || {
-        mask_image
-            .save_with_format(&encode_tmp, image::ImageFormat::Png)
-            .map_err(|e| WorkerError::Io(std::io::Error::other(e)))
-    })
-    .await
-    .map_err(|e| task_join_error("smart-select mask encode task", e))??;
-    tokio::fs::rename(&tmp_path, &media_path)
-        .await
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&tmp_path);
-        })?;
-
     let source_name = payload
         .get("displayName")
         .and_then(Value::as_str)
         .map(str::to_owned)
         .or(source_display)
         .unwrap_or_else(|| "Image".to_owned());
-    let fact = json!({
-        "assetId": asset_id,
-        "mediaPath": media_rel,
-        "mimeType": "image/png",
-        "type": "image",
-        "width": src_w,
-        "height": src_h,
-        "normalizedWidth": src_w,
-        "normalizedHeight": src_h,
-        "count": 1,
-        "seed": 0,
-        "displayName": format!("{source_name} (mask)"),
-        "createdAt": created_at.clone(),
-        "mode": "image_segment",
-        "model": "sam3",
-        "adapter": "sam3",
-        "prompt": "",
-        "negativePrompt": "",
-        "loras": [],
-        "stylePreset": "",
-        "sourceAssetId": source_asset_id,
-        "rawAdapterSettings": {
-            "segment": segment_settings,
+    let result = write_single_child_asset(
+        &project_path,
+        image::DynamicImage::ImageLuma8(mask_image),
+        SingleChildAssetSpec {
+            filename_stem: "mask",
+            mode: "image_segment",
+            model: "sam3",
+            adapter: "sam3",
+            encode_label: "smart-select mask encode task",
         },
-        "parents": [source_asset_id],
-        "extra": {
-            "isMask": true,
-            "maskOfAssetId": source_asset_id,
+        |write| {
+            json!({
+                "assetId": write.asset_id,
+                "mediaPath": write.media_path,
+                "mimeType": "image/png",
+                "type": "image",
+                "width": src_w,
+                "height": src_h,
+                "normalizedWidth": src_w,
+                "normalizedHeight": src_h,
+                "count": 1,
+                "seed": 0,
+                "displayName": format!("{source_name} (mask)"),
+                "createdAt": write.created_at,
+                "mode": "image_segment",
+                "model": "sam3",
+                "adapter": "sam3",
+                "prompt": "",
+                "negativePrompt": "",
+                "loras": [],
+                "stylePreset": "",
+                "sourceAssetId": source_asset_id,
+                "rawAdapterSettings": {
+                    "segment": segment_settings,
+                },
+                "parents": [source_asset_id],
+                "extra": {
+                    "isMask": true,
+                    "maskOfAssetId": source_asset_id,
+                },
+            })
         },
-    });
-    let generation_set = json!({
-        "id": generation_set_id,
-        "mode": "image_segment",
-        "model": "sam3",
-        "prompt": "",
-        "negativePrompt": "",
-        "count": 1,
-        "createdAt": created_at,
-    });
-    let mut result = JsonObject::new();
-    result.insert(
-        "generationSetId".to_owned(),
-        Value::String(generation_set_id),
-    );
-    result.insert("expectedCount".to_owned(), json!(1));
-    result.insert("adapter".to_owned(), Value::String("sam3".to_owned()));
-    result.insert("model".to_owned(), Value::String("sam3".to_owned()));
-    result.insert("generationSet".to_owned(), generation_set);
-    result.insert("assetWrites".to_owned(), Value::Array(vec![fact]));
+    )
+    .await?;
 
     update_job(
         api,

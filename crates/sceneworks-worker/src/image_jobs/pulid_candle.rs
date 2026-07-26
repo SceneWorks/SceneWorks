@@ -78,7 +78,7 @@ const PULID_CANDLE_DEFAULT_GUIDANCE: f32 = 4.0;
 const PULID_CANDLE_DEFAULT_ID_WEIGHT: f32 = 1.0;
 /// The adapter/engine id recorded on candle PuLID-FLUX assets + telemetry (distinct from the macOS
 /// `mlx_pulid_flux` label and the txt2img `candle_flux` lane).
-const PULID_CANDLE_ENGINE: &str = "candle_pulid_flux";
+pub(super) const PULID_CANDLE_ENGINE: &str = "candle_pulid_flux";
 
 /// Resolve the FLUX.1-dev backbone snapshot for candle PuLID-FLUX: an explicit `modelPath` dir
 /// (advanced or manifest) wins (used verbatim — an app-managed override picks its own layout), else the

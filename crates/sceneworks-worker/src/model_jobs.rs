@@ -426,7 +426,7 @@ pub(crate) async fn run_lora_download_job(
         snapshot.total_bytes(),
         progress_report_interval(settings),
     );
-    download_snapshot_into_cache(
+    let resolved_revision = download_snapshot_into_cache(
         &DownloadContext {
             api,
             client: http_client,
@@ -441,17 +441,6 @@ pub(crate) async fn run_lora_download_job(
         &mut progress,
     )
     .await?;
-    // Symmetric with the `refs/<rev>` write in `download_snapshot_into_cache`: confine the read path
-    // so this receipt-facing lookup can't be turned into an arbitrary-file read by a `..`/absolute
-    // revision (sc-13583). `revision` is already validated at the entry point above; this is the
-    // defense-in-depth twin of the write-side `safe_join`.
-    let refs_path = safe_join(&repo_dir.join("refs"), revision)?;
-    let resolved_revision = tokio::fs::read_to_string(refs_path)
-        .await
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| revision.to_owned());
     let resolved_files = snapshot
         .files
         .iter()
@@ -1071,6 +1060,13 @@ enum Sd3Variant {
     Medium,
 }
 
+fn unknown_converter_error(model_id: &str, converter: &str) -> ConvertPlanError {
+    ConvertPlanError {
+        message: "Unknown MLX converter.",
+        detail: format!("Unrecognized mlx.converter '{converter}' for {model_id}."),
+    }
+}
+
 /// Resolve the native [`ConvertPlan`] for a convert job from its `converter` discriminator, or a
 /// [`ConvertPlanError`] naming why it can't proceed (missing source file, base model not installed,
 /// unknown converter, …). Split out of [`run_model_convert_job`] (sc-8921, F-119): the converter-arm
@@ -1097,10 +1093,7 @@ async fn resolve_convert_plan(
     // the exact drift that shipped as sc-10573 (`ltx_video` handled here but missing from the gate).
     // The empty ("" = no converter configured) case still falls through to its own arm below.
     if !converter.is_empty() && !NATIVE_CONVERTERS.contains(&converter) {
-        return Ok(Err(ConvertPlanError {
-            message: "Unknown MLX converter.",
-            detail: format!("Unrecognized mlx.converter '{converter}' for {model_id}."),
-        }));
+        return Ok(Err(unknown_converter_error(model_id, converter)));
     }
     let plan = match converter {
         "flux2_klein_diffusers" => {
@@ -1266,10 +1259,9 @@ async fn resolve_convert_plan(
             }));
         }
         other => {
-            return Ok(Err(ConvertPlanError {
-                message: "Unknown MLX converter.",
-                detail: format!("Unrecognized mlx.converter '{other}' for {model_id}."),
-            }));
+            // The registry precheck above makes this defensive arm unreachable for production
+            // inputs. Keep one shared error constructor so the guard and fallback cannot drift.
+            return Ok(Err(unknown_converter_error(model_id, other)));
         }
     };
     Ok(Ok(plan))
@@ -1332,6 +1324,10 @@ pub(crate) async fn run_model_convert_job(
     let model_id = required_payload_string(&job.payload, "modelId")?.to_owned();
     let source_repo = required_payload_string(&job.payload, "sourceRepo")?.to_owned();
     let output_dir = required_payload_string(&job.payload, "outputDir")?.to_owned();
+    // Validate the final destination before heartbeat/status mutation, cancellation checks,
+    // checkpoint lookup, plan resolution, or any converter-specific provisioning. A malformed raw
+    // job must fail at the worker trust boundary without touching job state or local model storage.
+    let final_dir = resolve_model_convert_output(&settings.data_dir, &output_dir)?;
     // NOTE: there is intentionally no `dtype` knob. The native converters each produce a fixed
     // precision (the FLUX.2-klein converter is bf16-only; LTX / FLUX.2-dev honor `quantizeBits`),
     // so a client-supplied `dtype` had no converter to receive it and only ever appeared in the
@@ -1423,10 +1419,6 @@ pub(crate) async fn run_model_convert_job(
     // canceled/failed conversion never leaves a partial directory that the catalog
     // and adapter would treat as a ready model (convert tools write config.json
     // before all weight shards).
-    // Constrain the client-supplied outputDir to app-managed data/models the same way import
-    // jobs constrain targetDir; the worker is the trust boundary, so never create/rename a
-    // converted model tree to an arbitrary location.
-    let final_dir = resolve_model_convert_output(settings, &output_dir)?;
     let parent = final_dir
         .parent()
         .map(Path::to_path_buf)
@@ -1569,7 +1561,7 @@ pub(crate) async fn run_model_convert_job(
 
     // Promote the completed conversion atomically; on any rename failure the partial
     // temp dir is removed so it can't be picked up later.
-    if let Err(error) = finalize_converted_dir(&temp_dir, &final_dir).await {
+    if let Err(error) = finalize_converted_dir(&temp_dir, &final_dir, &settings.data_dir).await {
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
         return Err(error);
     }
@@ -1649,8 +1641,16 @@ pub(crate) fn huggingface_pinned_snapshot_dir(
     // seam, `resolve_co_requisites` / `resolve_optional_component`), which is unvalidated over the LAN
     // jobs API (epic 4484). A `..`/absolute revision would otherwise join OUTSIDE `snapshots/` — a dir
     // that passes `is_dir()` and, on Windows, gets its symlinks rewritten to hardlinks by
-    // `materialize_snapshot_hardlinks`. A pinned revision is a single 40-hex commit component, so
-    // confine it with `safe_join`; a traversal value yields `None` ("not installed") (sc-13583).
+    // `materialize_snapshot_hardlinks`. A pinned revision is exactly one lowercase 40-hex commit
+    // component. Enforce that runtime contract before confinement because the manifest schema is not
+    // authoritative for the copy embedded in an untrusted job payload (sc-13842 / sc-13583).
+    if revision.len() != 40
+        || !revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
     let dir = safe_join(
         &huggingface_repo_cache_path(data_dir, repo)?.join("snapshots"),
         revision,
@@ -1763,11 +1763,74 @@ pub(crate) fn resolve_co_requisites(
                 }
                 gen_core::WeightsSource::File(path)
             }
-            _ => gen_core::WeightsSource::Dir(snapshot),
+            [] => gen_core::WeightsSource::Dir(snapshot),
+            _ => {
+                // Multi-file components are staged as directories because providers join their own
+                // internal paths, but the pre-load all-or-nothing contract still requires every
+                // manifest-declared file or pattern to be present.
+                for file in &files {
+                    if !snapshot_contains_declared_file(&snapshot, file)? {
+                        return Err(WorkerError::InvalidPayload(format!(
+                            "{model_id}: the '{component_id}' component file {repo}/{file} is missing \
+                             from the cached snapshot — reinstall {model_id} to repair it"
+                        )));
+                    }
+                }
+                gen_core::WeightsSource::Dir(snapshot)
+            }
         };
         components.insert(component_id.to_owned(), source);
     }
     Ok(components)
+}
+
+fn snapshot_contains_declared_file(snapshot: &Path, declared: &str) -> WorkerResult<bool> {
+    if !declared.contains(['*', '?', '[']) {
+        return Ok(safe_join(snapshot, declared)?.is_file());
+    }
+    let relative = Path::new(declared);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "model component file pattern `{declared}` must stay within its cached snapshot"
+        )));
+    }
+    let pattern = glob::Pattern::new(declared).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "invalid model component file pattern `{declared}`: {error}"
+        ))
+    })?;
+    Ok(snapshot_tree_contains(snapshot, &|path| {
+        path.strip_prefix(snapshot)
+            .is_ok_and(|relative| pattern.matches_path(relative))
+    }))
+}
+
+fn snapshot_tree_contains(dir: &Path, predicate: &impl Fn(&Path) -> bool) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(file_type) if file_type.is_dir() => {
+                if snapshot_tree_contains(&path, predicate) {
+                    return true;
+                }
+            }
+            Ok(_) if predicate(&path) => return true,
+            Ok(_) | Err(_) => {}
+        }
+    }
+    false
 }
 
 /// Resolve an OPTIONAL, on-demand model component the caller stages only for specific requests — the
@@ -1838,112 +1901,143 @@ pub(crate) fn huggingface_receipt_weights_dir(
     variant: Option<&str>,
 ) -> Option<PathBuf> {
     let models_dir = data_dir.join("models");
-    let mut markers = Vec::new();
-    markers.push(
-        models_dir
-            .join(safe_download_dir(repo))
-            .join(INSTALL_MARKER),
-    );
+    let repo_marker = models_dir
+        .join(safe_download_dir(repo))
+        .join(INSTALL_MARKER);
+    let mut targeted = vec![repo_marker];
     if let Some(model_id) = model_id {
-        markers.push(
+        targeted.push(
             models_dir
                 .join(safe_download_dir(model_id))
                 .join(INSTALL_MARKER),
         );
     }
-    if let Ok(entries) = std::fs::read_dir(&models_dir) {
-        markers.extend(
-            entries
-                .flatten()
-                .map(|entry| entry.path().join(INSTALL_MARKER)),
-        );
-    }
-    markers.sort();
-    markers.dedup();
+    targeted.dedup();
 
-    for marker in markers {
-        let Ok(bytes) = std::fs::read(marker) else {
-            continue;
-        };
-        let Ok(top) = serde_json::from_slice::<Value>(&bytes) else {
-            continue;
-        };
-        let receipts = top
-            .get("receipts")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_else(|| vec![top]);
-        for receipt in receipts {
-            if receipt.get("repo").and_then(Value::as_str) != Some(repo) {
-                continue;
-            }
-            if let Some(model_id) = model_id {
-                if receipt
-                    .get("modelId")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| id != model_id)
-                {
-                    continue;
-                }
-            }
-            if let Some(variant) = variant {
-                if receipt.get("variant").and_then(Value::as_str) != Some(variant) {
-                    continue;
-                }
-            }
-            let files = receipt
-                .get("resolvedFiles")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>();
-            if files.is_empty() {
-                continue;
-            }
-            let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
-            let snapshots = repo_dir.join("snapshots");
-            let Ok(snapshot_entries) = std::fs::read_dir(&snapshots) else {
-                continue;
-            };
-            let recorded_revision = receipt
-                .get("snapshotRevision")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|revision| !revision.is_empty());
-            let matching = snapshot_entries
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|snapshot| {
-                    snapshot.is_dir() && files.iter().all(|file| snapshot.join(file).is_file())
-                })
-                .filter(|snapshot| {
-                    recorded_revision.map_or(true, |revision| {
-                        snapshot.file_name().and_then(|name| name.to_str()) == Some(revision)
-                    })
-                })
-                .collect::<Vec<_>>();
-            // Schema-v2 receipts written before snapshotRevision are accepted only when their exact
-            // file set identifies one revision unambiguously. Never guess by filesystem order.
-            if recorded_revision.is_none() && matching.len() != 1 {
-                continue;
-            }
-            if let Some(snapshot) = matching.into_iter().next() {
-                // Tier receipts are self-contained below a tier directory.  Only descend when every
-                // file belongs to that same recorded tier; otherwise return the snapshot root for a
-                // single-variant/whole-repo install.
-                if let Some(variant) = receipt.get("variant").and_then(Value::as_str) {
-                    let tier = snapshot.join(variant);
-                    let prefix = format!("{variant}/");
-                    if files.iter().all(|file| file.starts_with(&prefix)) && tier.is_dir() {
-                        return Some(tier);
-                    }
-                }
-                return Some(snapshot);
-            }
+    // The repo/model marker is the overwhelmingly common path. Resolve it before walking every
+    // installed model directory; a targeted hit makes this lookup O(1) in the catalog size.
+    for marker in &targeted {
+        if let Some(weights_dir) =
+            receipt_weights_dir_from_marker(data_dir, marker, repo, model_id, variant)
+        {
+            return Some(weights_dir);
+        }
+    }
+
+    let entries = std::fs::read_dir(&models_dir).ok()?;
+    for marker in entries
+        .flatten()
+        .map(|entry| entry.path().join(INSTALL_MARKER))
+        .filter(|marker| !targeted.contains(marker))
+    {
+        if let Some(weights_dir) =
+            receipt_weights_dir_from_marker(data_dir, &marker, repo, model_id, variant)
+        {
+            return Some(weights_dir);
         }
     }
     None
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+fn receipt_weights_dir_from_marker(
+    data_dir: &Path,
+    marker: &Path,
+    repo: &str,
+    model_id: Option<&str>,
+    variant: Option<&str>,
+) -> Option<PathBuf> {
+    #[cfg(test)]
+    RECEIPT_MARKERS_READ.with(|count| count.set(count.get() + 1));
+    let bytes = std::fs::read(marker).ok()?;
+    let top = serde_json::from_slice::<Value>(&bytes).ok()?;
+    let receipts = top
+        .get("receipts")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| vec![top]);
+    for receipt in receipts {
+        if receipt.get("repo").and_then(Value::as_str) != Some(repo) {
+            continue;
+        }
+        if let Some(model_id) = model_id {
+            if receipt
+                .get("modelId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id != model_id)
+            {
+                continue;
+            }
+        }
+        if let Some(variant) = variant {
+            if receipt.get("variant").and_then(Value::as_str) != Some(variant) {
+                continue;
+            }
+        }
+        let files = receipt
+            .get("resolvedFiles")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        if files.is_empty() {
+            continue;
+        }
+        let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
+        let snapshots = repo_dir.join("snapshots");
+        let snapshot_entries = std::fs::read_dir(&snapshots).ok()?;
+        let recorded_revision = receipt
+            .get("snapshotRevision")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|revision| !revision.is_empty());
+        let matching = snapshot_entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|snapshot| {
+                snapshot.is_dir() && files.iter().all(|file| snapshot.join(file).is_file())
+            })
+            .filter(|snapshot| {
+                recorded_revision.map_or(true, |revision| {
+                    snapshot.file_name().and_then(|name| name.to_str()) == Some(revision)
+                })
+            })
+            .collect::<Vec<_>>();
+        // Schema-v2 receipts written before snapshotRevision are accepted only when their exact
+        // file set identifies one revision unambiguously. Never guess by filesystem order.
+        if recorded_revision.is_none() && matching.len() != 1 {
+            continue;
+        }
+        if let Some(snapshot) = matching.into_iter().next() {
+            // Tier receipts are self-contained below a tier directory. Only descend when every
+            // file belongs to that same recorded tier; otherwise return the snapshot root.
+            if let Some(variant) = receipt.get("variant").and_then(Value::as_str) {
+                let tier = snapshot.join(variant);
+                let prefix = format!("{variant}/");
+                if files.iter().all(|file| file.starts_with(&prefix)) && tier.is_dir() {
+                    return Some(tier);
+                }
+            }
+            return Some(snapshot);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    static RECEIPT_MARKERS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_receipt_markers_read() {
+    RECEIPT_MARKERS_READ.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn receipt_markers_read() -> usize {
+    RECEIPT_MARKERS_READ.with(std::cell::Cell::get)
 }
 
 fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathBuf> {
@@ -1956,7 +2050,7 @@ fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathB
     // empty/torn one, not dummy fixture weights from real ones.
     if let Ok(rev) = std::fs::read_to_string(repo_dir.join("refs").join("main")) {
         let candidate = snapshots.join(rev.trim());
-        if snapshot_file_count(&candidate) > 0 {
+        if snapshot_has_any_file(&candidate) {
             return Some(candidate);
         }
     }
@@ -1971,6 +2065,13 @@ fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathB
         .filter(|(count, _)| *count > 0)
         .max_by_key(|(count, _)| *count)
         .map(|(_, path)| path)
+}
+
+/// Short-circuiting presence probe for the hot `refs/main` path. Unlike
+/// [`snapshot_file_count`], it stops at the first file instead of walking a large snapshot tree on
+/// every model resolve.
+fn snapshot_has_any_file(dir: &Path) -> bool {
+    snapshot_tree_contains(dir, &|_| true)
 }
 
 /// Recursively count regular files under `dir` (symlinks counted as files — HF snapshots link into
@@ -2062,58 +2163,398 @@ fn relink_to_blob(link: &Path) {
 /// first, rename temp → final, and only then delete the backup. If anything fails after
 /// the aside move, we RESTORE the backup back to `final_dir`, honoring the doc's promise
 /// that on error the previously working model is left untouched.
-pub(crate) async fn finalize_converted_dir(temp_dir: &Path, final_dir: &Path) -> WorkerResult<()> {
-    if let Some(parent) = final_dir.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
+pub(crate) async fn finalize_converted_dir(
+    temp_dir: &Path,
+    final_dir: &Path,
+    data_dir: &Path,
+) -> WorkerResult<()> {
+    finalize_converted_dir_with_hook(temp_dir, final_dir, data_dir, |_| {}).await
+}
 
-    // Move any stale install aside instead of destroying it, so a later failure can
-    // restore it. The backup lives next to `final_dir` (same filesystem) so the move is
-    // an atomic rename and the restore is equally cheap and safe.
-    let backup_dir: Option<PathBuf> = if final_dir.exists() {
-        let backup = converted_dir_backup_path(final_dir);
-        // A leftover backup from a prior interrupted finalize would block the aside move;
-        // clear it first (best effort — a stale backup is never the working install).
-        let _ = tokio::fs::remove_dir_all(&backup).await;
-        tokio::fs::rename(final_dir, &backup).await?;
+/// Backup path used to move a stale converted dir aside during finalize (sc-8837).
+/// Kept in a dedicated child of the conversion root so recovery cannot confuse a
+/// legitimate model name with a backup, while aside/restore remain same-filesystem
+/// atomic renames.
+fn converted_dir_backup_path(final_dir: &Path, backup_root: &Path) -> PathBuf {
+    let name = final_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "model".to_string());
+    let suffix = format!(
+        ".{name}.finalize-backup-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    );
+    backup_root.join(suffix)
+}
+
+const CONVERSION_MODELS_DIR: &str = "models/mlx";
+const CONVERSION_LOCKS_DIR: &str = "cache/worker-locks/model-conversion";
+const CONVERSION_LIFECYCLE_LOCK: &str = "lifecycle.lock";
+const CONVERSION_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const CONVERSION_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Run one final promotion under a cross-process shared lifecycle lock plus an exclusive per-target
+/// lock. The shared lock excludes the startup sweep; the target lock serializes the four utility
+/// worker processes when they race to replace the same converted model.
+async fn finalize_converted_dir_with_hook<F>(
+    temp_dir: &Path,
+    final_dir: &Path,
+    data_dir: &Path,
+    after_aside: F,
+) -> WorkerResult<()>
+where
+    F: FnOnce(&Path) + Send + 'static,
+{
+    let temp_dir = temp_dir.to_path_buf();
+    let final_dir = final_dir.to_path_buf();
+    let data_dir = data_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        finalize_converted_dir_blocking(&temp_dir, &final_dir, &data_dir, after_aside)
+    })
+    .await
+    .map_err(|error| task_join_error("converted model finalize", error))?
+}
+
+fn finalize_converted_dir_blocking<F>(
+    temp_dir: &Path,
+    final_dir: &Path,
+    data_dir: &Path,
+    after_aside: F,
+) -> WorkerResult<()>
+where
+    F: FnOnce(&Path),
+{
+    let ConversionManagedRoots {
+        conversion_root,
+        backup_root,
+        lock_root,
+    } = resolve_conversion_managed_roots(data_dir)?;
+    let final_parent = final_dir.parent().ok_or_else(|| {
+        WorkerError::InvalidPayload("Converted model final directory has no parent.".to_owned())
+    })?;
+    let final_parent = std::fs::canonicalize(final_parent)?;
+    if final_parent != conversion_root {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Converted model final directory {} must be a direct child of {}.",
+            final_dir.display(),
+            conversion_root.display()
+        )));
+    }
+    let target_name = final_dir.file_name().ok_or_else(|| {
+        WorkerError::InvalidPayload("Converted model final directory has no name.".to_owned())
+    })?;
+    if target_name == std::ffi::OsStr::new(MODEL_CONVERSION_BACKUPS_DIR_NAME) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Converted model final directory name {MODEL_CONVERSION_BACKUPS_DIR_NAME} is reserved for conversion recovery."
+        )));
+    }
+    let canonical_target = conversion_root.join(target_name);
+    let _locks = ConversionFinalizeLocks::acquire(&lock_root, &canonical_target)?;
+
+    // Move any stale install aside instead of destroying it, so a later failure can restore it. No
+    // sweep runs here: another process may have a live recovery source. Stranded backups are handled
+    // only by the exclusive startup lifecycle pass.
+    let backup_dir = if final_dir.exists() {
+        let backup = converted_dir_backup_path(final_dir, &backup_root);
+        std::fs::rename(final_dir, &backup)?;
+        after_aside(&backup);
         Some(backup)
     } else {
         None
     };
 
-    // Promote the freshly converted dir into place. On any failure, restore the stale
-    // install so the user keeps the previously working model.
-    if let Err(error) = tokio::fs::rename(temp_dir, final_dir).await {
+    if let Err(error) = std::fs::rename(temp_dir, final_dir) {
         if let Some(backup) = backup_dir {
-            // Best effort: the working install is the priority, so ignore restore errors
-            // (there is nothing more we can do) but surface the original failure.
-            let _ = tokio::fs::remove_dir_all(final_dir).await;
-            let _ = tokio::fs::rename(&backup, final_dir).await;
+            let _ = std::fs::remove_dir_all(final_dir);
+            let _ = std::fs::rename(&backup, final_dir);
         }
         return Err(error.into());
     }
 
-    // Success: the new install is in place; drop the stale backup (best effort — a
-    // leftover backup is harmless and never mistaken for the live install).
     if let Some(backup) = backup_dir {
-        let _ = tokio::fs::remove_dir_all(&backup).await;
+        let _ = std::fs::remove_dir_all(backup);
     }
     Ok(())
 }
 
-/// Sibling backup path used to move a stale converted dir aside during finalize
-/// (sc-8837). Kept next to `final_dir` so the aside/restore moves are atomic renames on
-/// the same filesystem rather than cross-device copies.
-fn converted_dir_backup_path(final_dir: &Path) -> PathBuf {
-    let name = final_dir
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "model".to_string());
-    let suffix = format!(".{name}.finalize-backup-{}", std::process::id());
-    match final_dir.parent() {
-        Some(parent) => parent.join(suffix),
-        None => PathBuf::from(suffix),
+struct ConversionFinalizeLocks {
+    _lifecycle: std::fs::File,
+    _target: std::fs::File,
+}
+
+impl ConversionFinalizeLocks {
+    fn acquire(lock_root: &Path, final_dir: &Path) -> WorkerResult<Self> {
+        let lifecycle_path = lock_root.join(CONVERSION_LIFECYCLE_LOCK);
+        let lifecycle = open_conversion_lock(&lifecycle_path)?;
+        lock_conversion_file(&lifecycle, &lifecycle_path, true)?;
+
+        // Hash the canonical target path so arbitrary/custom model ids can never alias the
+        // lifecycle lock or another model's lock-file pathname.
+        let target_digest = format!(
+            "{:x}",
+            Sha256::digest(final_dir.to_string_lossy().as_bytes())
+        );
+        let target_path = lock_root.join(format!("target-{target_digest}.lock"));
+        let target = open_conversion_lock(&target_path)?;
+        lock_conversion_file(&target, &target_path, false)?;
+        Ok(Self {
+            _lifecycle: lifecycle,
+            _target: target,
+        })
     }
+}
+
+fn open_conversion_lock(path: &Path) -> WorkerResult<std::fs::File> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Conversion lock path {} must be a regular file.",
+                path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?)
+}
+
+/// Resolve one worker-owned directory and prove its canonical location remains inside the
+/// canonical configured data root. This permits a symlinked `data_dir` itself (the macOS
+/// `/var` -> `/private/var` case) while rejecting a nested `models`, `mlx`, or lock-root symlink
+/// that redirects cleanup/locking outside app-managed storage.
+fn canonical_managed_worker_dir(
+    data_dir: &Path,
+    relative: &str,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    std::fs::create_dir_all(data_dir)?;
+    let canonical_data_dir = std::fs::canonicalize(data_dir)?;
+    let requested = data_dir.join(relative);
+    // Resolve through the deepest existing ancestor before creating anything, so a nested symlink
+    // cannot cause even the directory creation itself to escape the managed root.
+    let normalized = normalize_existing_or_absolute(&requested)?;
+    if normalized == canonical_data_dir || !normalized.starts_with(&canonical_data_dir) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{label} {} escapes managed data root {}.",
+            requested.display(),
+            canonical_data_dir.display()
+        )));
+    }
+    std::fs::create_dir_all(&normalized)?;
+    let canonical = std::fs::canonicalize(&normalized)?;
+    if canonical == canonical_data_dir || !canonical.starts_with(&canonical_data_dir) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{label} {} escapes managed data root {}.",
+            requested.display(),
+            canonical_data_dir.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+struct ConversionManagedRoots {
+    conversion_root: PathBuf,
+    backup_root: PathBuf,
+    lock_root: PathBuf,
+}
+
+fn canonical_conversion_backup_root(conversion_root: &Path) -> WorkerResult<PathBuf> {
+    let backup_root = conversion_root.join(MODEL_CONVERSION_BACKUPS_DIR_NAME);
+    match std::fs::symlink_metadata(&backup_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Conversion backup root {} must be a real directory.",
+                backup_root.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&backup_root)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let canonical = std::fs::canonicalize(&backup_root)?;
+    if canonical.parent() != Some(conversion_root) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Conversion backup root {} must be a direct child of conversion model root {}.",
+            canonical.display(),
+            conversion_root.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+/// Resolve the model-conversion data and coordination roots and prove their canonical namespaces are
+/// disjoint. Checking each root only against `data_dir` is insufficient: an internal symlink can
+/// legally remain under app-managed storage while aliasing `cache/worker-locks/model-conversion` to
+/// `models/mlx` (or one root below the other). That would place `lifecycle.lock` / `target-*.lock`
+/// among model targets and let a reserved-looking model id rename or replace a live coordination
+/// file. Reject equality and either-direction ancestor overlap before opening a lock or touching an
+/// install.
+fn resolve_conversion_managed_roots(data_dir: &Path) -> WorkerResult<ConversionManagedRoots> {
+    let conversion_root =
+        canonical_managed_worker_dir(data_dir, CONVERSION_MODELS_DIR, "conversion model root")?;
+    let lock_root =
+        canonical_managed_worker_dir(data_dir, CONVERSION_LOCKS_DIR, "conversion lock root")?;
+    if conversion_root == lock_root
+        || conversion_root.starts_with(&lock_root)
+        || lock_root.starts_with(&conversion_root)
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Conversion model root {} and lock root {} must be disjoint managed directories.",
+            conversion_root.display(),
+            lock_root.display()
+        )));
+    }
+    let backup_root = canonical_conversion_backup_root(&conversion_root)?;
+    Ok(ConversionManagedRoots {
+        conversion_root,
+        backup_root,
+        lock_root,
+    })
+}
+
+fn lock_conversion_file(file: &std::fs::File, path: &Path, shared: bool) -> WorkerResult<()> {
+    let deadline = std::time::Instant::now() + CONVERSION_LOCK_TIMEOUT;
+    let contended = fs2::lock_contended_error().raw_os_error();
+    loop {
+        let result = if shared {
+            fs2::FileExt::try_lock_shared(file)
+        } else {
+            fs2::FileExt::try_lock_exclusive(file)
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) if error.raw_os_error() == contended => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(WorkerError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "timed out after {:?} waiting for conversion lock {}",
+                            CONVERSION_LOCK_TIMEOUT,
+                            path.display()
+                        ),
+                    )));
+                }
+                std::thread::sleep(CONVERSION_LOCK_POLL);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// Recover or remove crash-stranded converted-model backups at top-level worker startup.
+///
+/// The exclusive lifecycle lock guarantees no finalizer is active in any utility process. The scan
+/// is bounded to the worker-owned backup namespace under `<data>/models/mlx`, so a legitimate model
+/// directory whose name resembles the old sibling-backup grammar can never be touched. Only real
+/// directories matching the exact backup naming convention are considered. If the canonical target
+/// is missing, the newest backup is restored before older copies are removed.
+pub async fn recover_stranded_model_conversions(data_dir: &Path) -> WorkerResult<()> {
+    let data_dir = data_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || sweep_stranded_conversion_backups_blocking(&data_dir))
+        .await
+        .map_err(|error| task_join_error("converted model startup sweep", error))?
+}
+
+fn sweep_stranded_conversion_backups_blocking(data_dir: &Path) -> WorkerResult<()> {
+    let ConversionManagedRoots {
+        conversion_root,
+        backup_root,
+        lock_root,
+    } = resolve_conversion_managed_roots(data_dir)?;
+    let lifecycle_path = lock_root.join(CONVERSION_LIFECYCLE_LOCK);
+    let lifecycle = open_conversion_lock(&lifecycle_path)?;
+    lock_conversion_file(&lifecycle, &lifecycle_path, false)?;
+
+    let mut by_target: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for entry in std::fs::read_dir(&backup_root)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        let Some(target) = converted_backup_target_name(&entry.file_name()) else {
+            continue;
+        };
+        by_target.entry(target).or_default().push(entry.path());
+    }
+
+    for (target, mut backups) in by_target {
+        let final_dir = conversion_root.join(&target);
+        match std::fs::symlink_metadata(&final_dir) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                for backup in backups {
+                    std::fs::remove_dir_all(backup)?;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                backups.sort_by(|left, right| {
+                    backup_modified_time(left)
+                        .cmp(&backup_modified_time(right))
+                        .then_with(|| left.file_name().cmp(&right.file_name()))
+                });
+                let restore = backups.pop().expect("backup group is non-empty");
+                std::fs::rename(&restore, &final_dir)?;
+                for backup in backups {
+                    std::fs::remove_dir_all(backup)?;
+                }
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    event = "conversion_backup_sweep_skipped_target",
+                    target = %final_dir.display(),
+                    "converted-model startup sweep found a non-directory target; preserving backups"
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn converted_backup_target_name(name: &std::ffi::OsStr) -> Option<String> {
+    let name = name.to_str()?.strip_prefix('.')?;
+    let (target, suffix) = name.rsplit_once(".finalize-backup-")?;
+    let mut suffix_parts = suffix.splitn(2, '-');
+    let process_id = suffix_parts.next()?;
+    if target.is_empty()
+        || target.contains('/')
+        || target.contains('\\')
+        || process_id.parse::<u32>().is_err()
+        || suffix_parts
+            .next()
+            .is_some_and(|value| Uuid::parse_str(value).is_err())
+    {
+        return None;
+    }
+    Some(target.to_owned())
+}
+
+fn backup_modified_time(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+}
+
+#[cfg(test)]
+pub(crate) async fn finalize_converted_dir_with_test_hook<F>(
+    temp_dir: &Path,
+    final_dir: &Path,
+    data_dir: &Path,
+    after_aside: F,
+) -> WorkerResult<()>
+where
+    F: FnOnce(&Path) + Send + 'static,
+{
+    finalize_converted_dir_with_hook(temp_dir, final_dir, data_dir, after_aside).await
 }
 
 /// Fetch the `files` glob patterns from `repo`@`revision` into the shared Hugging Face hub cache
@@ -2352,6 +2793,7 @@ pub(crate) async fn run_lora_import_job(
     http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    validate_lora_import_digest_contract(&job.payload)?;
     let repo = optional_payload_string(&job.payload, "repo");
     let source_url = optional_payload_string(&job.payload, "sourceUrl");
     let source_path = optional_payload_string(&job.payload, "sourcePath");
@@ -2598,6 +3040,22 @@ pub(crate) async fn run_lora_import_job(
         ),
     )
     .await?;
+    Ok(())
+}
+
+/// A single `expectedSha256` cannot identify both files in a paired Wan MoE upload. Reject that
+/// ambiguous contract before heartbeat, target creation, or moving either staged upload. Single-file
+/// imports retain their existing digest verification.
+pub(crate) fn validate_lora_import_digest_contract(payload: &JsonObject) -> WorkerResult<()> {
+    if optional_payload_string(payload, "secondarySourcePath").is_some()
+        && optional_payload_string(payload, "expectedSha256").is_some()
+    {
+        return Err(WorkerError::InvalidPayload(
+            "LoRA import expectedSha256 is ambiguous with secondarySourcePath; provide a paired \
+             upload without a single-file digest."
+                .to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -3492,6 +3950,37 @@ mod convert_registry_tests {
             Ok(_) => panic!("a bogus converter must not resolve to a plan"),
         }
     }
+
+    /// A raw queue row can bypass the typed API, so output confinement is the worker's final trust
+    /// boundary. Both clients deliberately point at unreachable endpoints: if heartbeat/status work
+    /// or LTX planning/provisioning runs first, this returns an HTTP/download error instead. The
+    /// absent data root also proves the rejected job created no model/provisioning state.
+    #[tokio::test]
+    async fn invalid_convert_output_wins_before_api_or_ltx_provisioning_side_effects() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let data_dir = tmp.path().join("data");
+        let settings = minimal_settings(data_dir.clone());
+        let api = ApiClient::new(&settings);
+        let mut job = convert_job("ltx_video");
+        job.payload.insert(
+            "outputDir".to_owned(),
+            Value::String(tmp.path().join("outside").display().to_string()),
+        );
+
+        assert!(!data_dir.exists(), "fixture starts without app model state");
+        let error = run_model_convert_job(&api, &settings, &job)
+            .await
+            .expect_err("invalid output must fail before any API or download access");
+
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(ref detail) if detail.contains("direct child")),
+            "output confinement must win error precedence, got {error}"
+        );
+        assert!(
+            !data_dir.exists(),
+            "invalid output must not create checkpoint, conversion, or provisioning state"
+        );
+    }
 }
 
 /// Offline quant-matrix tier builder (sc-8513, epic 8506) — the generalization of the FLUX.2-dev
@@ -3844,6 +4333,64 @@ mod co_requisite_tests {
             huggingface_pinned_snapshot_dir(data_dir.path(), repo, "../escaped"),
             None,
             "a `..` revision must not resolve to a dir outside snapshots/"
+        );
+        for invalid in [
+            "abc123",
+            "5BB1F6EE58E50C3B8D408BC82A6D3740C2DB6E18",
+            "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e1g",
+        ] {
+            assert_eq!(
+                huggingface_pinned_snapshot_dir(data_dir.path(), repo, invalid),
+                None,
+                "a pinned revision must be exactly 40 lowercase hex characters: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_co_requisites_rejects_a_torn_multi_file_component() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let repo = "owner/multi-component";
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        stage_snapshot_file(data_dir.path(), repo, revision, "weights/a.bin");
+        let descriptor = gen_core::ModelDescriptor {
+            id: "multi_model",
+            family: "multi",
+            backend: "candle",
+            modality: gen_core::Modality::Audio,
+            capabilities: gen_core::Capabilities::default(),
+            required_components: &["bundle"],
+        };
+        let manifest = json!({
+            "id": "multi_model",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": repo,
+                "revision": revision,
+                "coRequisite": true,
+                "componentId": "bundle",
+                "files": ["weights/a.bin", "weights/b.bin"]
+            }]
+        });
+        let settings = settings_at(data_dir.path().to_path_buf());
+
+        let error = resolve_co_requisites(&descriptor, &manifest, &settings)
+            .expect_err("a missing member makes the component incomplete");
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(ref message) if message.contains("weights/b.bin")),
+            "the repair error must identify the missing member, got {error:?}"
+        );
+
+        stage_snapshot_file(data_dir.path(), repo, revision, "weights/b.bin");
+        assert!(
+            matches!(
+                resolve_co_requisites(&descriptor, &manifest, &settings)
+                    .expect("the complete component resolves")
+                    .get("bundle"),
+                Some(gen_core::WeightsSource::Dir(path)) if path.ends_with(revision)
+            ),
+            "a complete multi-file component stages its snapshot root"
         );
     }
 
@@ -4277,11 +4824,32 @@ mod co_requisite_tests {
         for &(model_id, family, repo, revision, file) in MOSS_CODEC_SNAPSHOTS {
             let _env = isolate_hf_cache();
             let data_dir = tempfile::tempdir().expect("temp data dir");
-            stage_snapshot_file(data_dir.path(), repo, revision, file);
+            let manifest = builtin_manifest_entry(model_id);
+            let codec_download = manifest["downloads"]
+                .as_array()
+                .expect("downloads array")
+                .iter()
+                .find(|download| {
+                    download.get("componentId").and_then(Value::as_str) == Some("codec")
+                })
+                .expect("codec co-requisite");
+            let declared_files: Vec<&str> = codec_download["files"]
+                .as_array()
+                .expect("codec files")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            assert!(
+                declared_files.contains(&file),
+                "{model_id}: fixture anchor must remain in the live codec file set"
+            );
+            for declared in declared_files {
+                stage_snapshot_file(data_dir.path(), repo, revision, declared);
+            }
 
             let components = resolve_co_requisites(
                 &moss_descriptor(model_id, family),
-                &builtin_manifest_entry(model_id),
+                &manifest,
                 &settings_at(data_dir.path().to_path_buf()),
             )
             .unwrap_or_else(|error| {

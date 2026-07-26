@@ -97,11 +97,12 @@ fn decode_rejects_malformed_output_shape_and_length() {
         matches!(short, Err(WorkerError::Engine(_))),
         "truncated data buffer must be rejected, got {short:?}"
     );
-    // channels < 5 (no person class channel) is a benign "nothing to decode", not an error.
+    // channels < 5 means this is not the detector head we pinned. Treating it as no detections
+    // would hide a mis-pinned export as "no people found".
     let no_person = decode(&[0.0; 8], &[1, 4, 2], &lb, 0.25, 640, 640);
     assert!(
-        matches!(no_person, Ok(ref v) if v.is_empty()),
-        "channels<5 → empty, got {no_person:?}"
+        matches!(no_person, Err(WorkerError::Engine(_))),
+        "channels<5 must be rejected, got {no_person:?}"
     );
 }
 
@@ -776,4 +777,19 @@ fn resolve_detector_weights_env_pin_missing_errors_and_unset_falls_through() {
         "an unset detector pin must fall through to Ok(None), got {unset:?}"
     );
     // `_env` restores the prior value on drop.
+}
+
+#[test]
+fn detector_provenance_matches_the_compiled_runtime() {
+    assert_eq!(crate::media_jobs::PERSON_DETECTOR_MODEL, "yolo11m");
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(crate::media_jobs::PERSON_DETECTOR_ADAPTER, "yolo11_mlx");
+        assert_eq!(crate::media_jobs::PERSON_DETECTOR_BACKEND, "mlx");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert_eq!(crate::media_jobs::PERSON_DETECTOR_ADAPTER, "yolo11_ort");
+        assert_eq!(crate::media_jobs::PERSON_DETECTOR_BACKEND, "ort");
+    }
 }

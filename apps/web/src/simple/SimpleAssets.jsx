@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useLayoutEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { AssetThumbnail, assetCanRenderAsAudio, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
 import { useAppContext } from "../context/AppContext.js";
@@ -8,6 +8,7 @@ import { assetMatchesSearch } from "../screens/LibraryScreen.jsx";
 import { assetGridColumns } from "./breakpoint.js";
 import { SimpleAudioTile } from "./simpleAudioParts.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";
+import { recordStartupMark } from "../startupTiming.js";
 
 // Simple Assets (design handoff): search + type pills + a responsive thumbnail grid.
 // Reuses the Library screen's own hygiene rules so the two views can't disagree about
@@ -22,10 +23,21 @@ const FILTERS = [
 ];
 
 export function SimpleAssets() {
-  const { assets = [] } = useAppContext();
+  const {
+    assets = [],
+    assetsReady = false,
+    assetsLoading = false,
+    assetsError = "",
+  } = useAppContext();
   const { breakpoint, openPreview, loadedTakeId } = useSimpleUi();
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
+
+  useLayoutEffect(() => {
+    if (assetsReady) {
+      recordStartupMark("assets-ready-render");
+    }
+  }, [assetsReady]);
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -71,7 +83,11 @@ export function SimpleAssets() {
         ))}
       </div>
 
-      {visible.length ? (
+      {assetsLoading ? (
+        <p className="su-empty" role="status">Loading assets…</p>
+      ) : assetsError ? (
+        <p className="su-empty" role="alert">Couldn&apos;t load assets: {assetsError}</p>
+      ) : visible.length ? (
         <div
           className="su-asset-grid"
           style={{ "--su-asset-cols": assetGridColumns(breakpoint) }}

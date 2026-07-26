@@ -10094,6 +10094,18 @@ details[open] > summary.lora-scope-group-heading::before,
   text-align: center;
   padding: 20px 0;
 }
+.ve-bin-more {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  display: flex;
+  font-size: 11px;
+  justify-content: space-between;
+  padding: 8px 10px;
+}
+.ve-bin-more button {
+  min-height: 28px;
+}
 .ve-bin-item {
   position: relative;
   aspect-ratio: 16 / 10;
@@ -12529,6 +12541,25 @@ details[open] > summary.lora-scope-group-heading::before,
 .dataset-caption-options {
   display: grid;
   gap: 4px;
+}
+
+.dataset-parquet-copy,
+.dataset-parquet-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dataset-parquet-path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.dataset-parquet-path-row input {
+  min-width: 0;
+  font-family: var(--font-mono);
 }
 
 /* Asset preview chip (in pickers) */

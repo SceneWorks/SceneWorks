@@ -537,5 +537,27 @@ describe("PresetManagerScreen", () => {
       expect(field(container, "Name").value).toBe("Edited Name");
       expect(pill()).toContain("Unsaved changes");
     });
+
+    it("preserves a dirty form when catalogs refresh with new object identities", async () => {
+      const context = await render();
+      await editCard("Cinematic Portrait");
+      await changeField(field(container, "Name"), "In-progress name");
+
+      await act(async () => {
+        root.render(
+          withAppContext(
+            {
+              ...context,
+              presets: context.presets.map((preset) => ({ ...preset })),
+              imageModels: context.imageModels.map((model) => ({ ...model })),
+            },
+            <PresetManagerScreen />,
+          ),
+        );
+      });
+
+      expect(field(container, "Name").value).toBe("In-progress name");
+      expect(pill()).toContain("Unsaved changes");
+    });
   });
 });

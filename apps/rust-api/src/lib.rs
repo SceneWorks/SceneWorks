@@ -9,7 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::body::{to_bytes, Body};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{
-    DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request as AxumRequest, State,
+    DefaultBodyLimit, FromRequest, MatchedPath, Multipart, Path, Query, Request as AxumRequest,
+    State,
 };
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
@@ -17,7 +18,7 @@ use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
-use futures_util::future::join_all;
+use futures_util::{future::join_all, stream};
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
     CancelPendingJobsRequest, CancelPendingJobsResponse, ClaimRequest, ClaimResponse,
@@ -35,7 +36,6 @@ use sceneworks_core::jobs_store::{
     candle_supported, mac_capabilities, mac_rust_supported, model_mac_support, CreateJob,
     DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
     RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
-    TERMINAL_STATUSES,
 };
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, canonical_lora_family, detect_lora_family, detect_model_family,
@@ -66,6 +66,7 @@ use sceneworks_core::video_request::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
@@ -100,7 +101,7 @@ mod projects;
 use projects::{create_project, get_project, list_projects, reindex_project_endpoint};
 mod assets;
 use assets::{
-    delete_asset, get_asset, import_asset, list_assets, move_asset_to_character,
+    delete_asset, get_asset, get_asset_poster, import_asset, list_assets, move_asset_to_character,
     move_asset_to_library, purge_asset, sweep_stale_asset_uploads, update_asset_status,
     update_asset_tags, write_upload_field_to_dir, write_upload_field_to_temp_file,
 };
@@ -114,10 +115,11 @@ mod training;
 use training::{
     batch_rename_training_dataset_items, create_training_dataset,
     create_training_dataset_analysis_job, create_training_dataset_caption_job,
-    create_training_dataset_face_analysis_job, create_training_dataset_upscale_job,
-    create_training_job, delete_training_dataset, get_training_dataset,
-    get_training_dataset_readiness, list_training_datasets, list_training_presets,
-    list_training_targets, repoint_training_dataset_items, resolve_control_overlay_output_location,
+    create_training_dataset_face_analysis_job, create_training_dataset_parquet_import_job,
+    create_training_dataset_upscale_job, create_training_job, delete_training_dataset,
+    finalize_training_dataset_parquet_import, get_training_dataset, get_training_dataset_readiness,
+    list_training_datasets, list_training_presets, list_training_targets,
+    repoint_training_dataset_items, resolve_control_overlay_output_location,
     resolve_training_output_location, set_training_dataset_item_quality_ack,
     smart_crop_training_dataset_items, strip_exif_training_dataset_items, trusted_adapter_files,
     update_training_dataset, upload_training_dataset_item, validate_lora_id_component,
@@ -147,23 +149,24 @@ use workers::{
 mod events;
 use events::{create_event_ticket, job_events, EventHub, EventMessage};
 mod tickets;
-use tickets::{create_media_ticket, TicketResponse, TicketStore};
+use tickets::{create_media_ticket, EventTicketContext, TicketResponse, TicketStore};
 mod dto;
 use dto::{
     AccessResponse, AssetPurgeQuery, AssetsQuery, AudioJobRequest, CatalogDeleteQuery,
     CharacterCreateRequest, CharacterLookRequest, CharacterLookUpdateRequest, CharacterLoraRequest,
     CharacterLoraUpdateRequest, CharacterReferenceRequest, CharacterReferenceUpdateRequest,
-    CharacterTestRequest, CharacterUpdateRequest, CharactersQuery, DatasetAnalysisJobRequest,
-    DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest, DatasetFaceRecordsBody,
-    DatasetImageFixBody, DatasetRepointBody, DatasetUpscaleJobRequest, DirectoriesResponse,
-    EventsQuery, FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse,
-    HostCapabilitiesResponse, ImageJobRequest, InterleaveJobRequest, JobsQuery,
-    LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest, LorasQuery, MetricsQuery,
-    ModelConvertRequest, ModelDownloadRequest, ModelImportRequest, PersonDetectionJobRequest,
-    PersonTrackCorrectionsRequest, PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery,
-    PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery,
-    SavedVoiceCreateRequest, TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest,
-    TrainingCaptionJobRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
+    CharacterTestRequest, CharacterUpdateRequest, CharactersQuery, CreateEventTicketRequest,
+    DatasetAnalysisJobRequest, DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest,
+    DatasetFaceRecordsBody, DatasetImageFixBody, DatasetParquetImportJobRequest,
+    DatasetRepointBody, DatasetUpscaleJobRequest, DirectoriesResponse, EventsQuery,
+    FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse, HostCapabilitiesResponse,
+    ImageJobRequest, InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest,
+    LoraUpdateRequest, LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest,
+    ModelImportRequest, PersonDetectionJobRequest, PersonTrackCorrectionsRequest,
+    PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest,
+    QualityAckBody, ReadinessQuery, RecipePresetsQuery, SavedVoiceCreateRequest,
+    TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest,
+    VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 use manifest::{
@@ -202,7 +205,7 @@ mod manifest_entity;
 mod recipe_presets;
 use recipe_presets::{
     create_recipe_preset, delete_recipe_preset, duplicate_recipe_preset, get_recipe_preset,
-    list_recipe_presets, preset_lora_id, preset_lora_weight, preset_prompt, recipe_preset_catalog,
+    list_recipe_presets, preset_lora_id, preset_lora_weight, preset_prompt,
     recipe_preset_catalog_with, recipe_preset_loras, serialize_preset_lora,
     stamp_recipe_preset_used, update_recipe_preset,
 };
@@ -271,6 +274,15 @@ const DEFAULT_CORS_ORIGINS: &str = concat!(
 const EVENT_BUFFER_SIZE: usize = 100;
 // SSE tickets are single-use and consumed on connect, so a tight window suffices.
 const EVENT_TICKET_TTL_SECONDS: u64 = 30;
+// Reconnect context is bounded independently from the router-wide 10 MiB JSON
+// allowance. 1,024 active UUIDs preserves the tested 600-job reconnect case;
+// terminal IDs mirror the web client's 200-row retained-history cap.
+const MAX_EVENT_TICKET_ACTIVE_JOB_IDS: usize = 1024;
+const MAX_EVENT_TICKET_TERMINAL_JOB_IDS: usize = 200;
+const MAX_EVENT_TICKET_JOB_ID_BYTES: usize = 128;
+const MAX_EVENT_TICKET_CONTEXT_BYTES: usize = 48 * 1024;
+const MAX_EVENT_TICKET_BODY_BYTES: usize = 64 * 1024;
+const MAX_OUTSTANDING_EVENT_TICKETS: usize = 128;
 // Media tickets ride in <img>/<video>/<a download> URLs (headers impossible), so
 // they are multi-use; the web client re-arms the sliding ticket every TTL/3, and a
 // leaked URL dies at most one TTL after the last authenticated refresh (sc-8810).
@@ -293,6 +305,10 @@ const DEFAULT_API_HOST: &str = "127.0.0.1";
 // person-track corrections) while shrinking the per-request ceiling ~200x. The large
 // limit is re-attached per-route ONLY to the multipart/upload endpoints below.
 const MAX_JSON_BODY_BYTES: usize = 10 * 1024 * 1024;
+// The trusted worker may finalize up to 100k URL/caption records in one atomic
+// dataset replacement. Captions are bounded separately, but the JSON envelope can
+// still exceed the ordinary API ceiling by hundreds of megabytes.
+const MAX_PARQUET_FINALIZE_BODY_BYTES: usize = 512 * 1024 * 1024;
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
 const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
@@ -467,11 +483,19 @@ pub fn gpu_check() -> Result<(), String> {
 /// (sc-10723). Running ≥2 loops lets independent downloads proceed in parallel; the
 /// per-file `DownloadLock` (sc-8900) still serializes two jobs resolving the *same*
 /// cache target, so concurrency never corrupts a shared file.
-fn spawn_inprocess_utility_worker(port: u16) -> InProcessUtilityWorker {
+async fn spawn_inprocess_utility_worker(
+    port: u16,
+    data_dir: PathBuf,
+) -> Result<InProcessUtilityWorker, sceneworks_worker::WorkerError> {
     let mut worker_settings = sceneworks_worker::Settings::from_env();
     worker_settings.api_url = format!("http://127.0.0.1:{port}");
+    worker_settings.data_dir = data_dir;
     worker_settings.gpu_id =
         inprocess_worker_gpu_id(std::env::var("SCENEWORKS_RUST_WORKER_GPU_ID").ok());
+    // This API process is the top-level owner of the in-process utility loops, which deliberately
+    // call `run_worker_loop` directly. Recover once here before any loop can claim a conversion;
+    // never put recovery inside each child loop, where sibling restarts could sweep live backups.
+    sceneworks_worker::recover_stranded_model_conversions(&worker_settings.data_dir).await?;
     let grace = Duration::from_secs(worker_settings.shutdown_timeout_seconds.max(1));
     let count = inprocess_utility_worker_count();
     let base_worker_id = worker_settings.worker_id.clone();
@@ -490,7 +514,7 @@ fn spawn_inprocess_utility_worker(port: u16) -> InProcessUtilityWorker {
             tokio::spawn(async move { sceneworks_worker::run_worker_loop(settings).await })
         })
         .collect();
-    InProcessUtilityWorker { handles, grace }
+    Ok(InProcessUtilityWorker { handles, grace })
 }
 
 /// Number of in-process CPU utility worker loops to run. Defaults to **2** so desktop
@@ -870,6 +894,92 @@ fn warn_on_sweep_err(kind: &str, result: std::io::Result<usize>) {
     }
 }
 
+/// One-shot pre-bind phase timer. Startup has only four of these, and `Drop`
+/// ensures a failing phase is still visible without changing the existing error
+/// propagation.
+struct StartupPhaseTimer {
+    phase: &'static str,
+    started: Instant,
+}
+
+impl StartupPhaseTimer {
+    fn start(phase: &'static str) -> Self {
+        Self {
+            phase,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for StartupPhaseTimer {
+    fn drop(&mut self) {
+        tracing::info!(
+            event = "startup_phase_duration",
+            phase = self.phase,
+            duration_ms = self.started.elapsed().as_secs_f64() * 1000.0,
+            "SceneWorks API pre-bind startup phase completed"
+        );
+    }
+}
+
+/// Return only bounded, source-owned route labels. Axum's matched path contains
+/// route parameter *names* (`:project_id`), never their values. Unknown API and
+/// MCP paths deliberately collapse to one label rather than copying a raw URI
+/// that could contain IDs, filesystem-shaped path tails, or secret-bearing query
+/// values.
+fn normalized_api_route(path: &str, matched_path: Option<&str>) -> Option<String> {
+    if path == "/mcp" || path.starts_with("/mcp/") {
+        return Some(
+            matched_path
+                .filter(|route| route.starts_with("/mcp"))
+                .unwrap_or("/mcp/<unmatched>")
+                .to_owned(),
+        );
+    }
+    if path == "/api" || path.starts_with("/api/") {
+        return Some(
+            matched_path
+                .filter(|route| route.starts_with("/api/"))
+                .unwrap_or("/api/<unmatched>")
+                .to_owned(),
+        );
+    }
+    None
+}
+
+async fn api_request_timing(request: AxumRequest, next: Next) -> Response {
+    let method = request.method().clone();
+    // `Uri::path()` excludes the query by contract. Retain it only long enough
+    // to classify API versus frontend traffic; it is never emitted.
+    let path = request.uri().path().to_owned();
+    let matched_path = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|matched| matched.as_str().to_owned());
+    let started = Instant::now();
+    let mut response = next.run(request).await;
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+    if let Some(route) = normalized_api_route(&path, matched_path.as_deref()) {
+        let server_timing = format!("app;dur={elapsed_ms:.3}");
+        if let Ok(value) = HeaderValue::from_str(&server_timing) {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static("server-timing"), value);
+        }
+        tracing::info!(
+            event = "api_request_duration",
+            method = %method,
+            route,
+            status = response.status().as_u16(),
+            duration_ms = elapsed_ms,
+            "SceneWorks API response completed"
+        );
+    }
+
+    response
+}
+
 pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
     Ok(create_app_with_state(settings)?.0)
 }
@@ -903,45 +1013,55 @@ pub(crate) fn create_app_with_state(
             std::fs::create_dir_all(jobs_db_parent),
         );
     }
-    // sc-8882 (F-080): a failed sweep leaves leaked multi-GB upload temps unreclaimed
-    // and was previously silent. WARN (never fatal) so the operator can investigate.
-    warn_on_sweep_err("lora", sweep_stale_lora_uploads(&settings.data_dir));
-    warn_on_sweep_err("pose", sweep_stale_pose_uploads(&settings.data_dir));
-    warn_on_sweep_err("keypoint", sweep_stale_keypoint_uploads(&settings.data_dir));
-    // sc-4204 (F-API-6): asset-import temp files (cache/uploads) had no startup sweep.
-    warn_on_sweep_err("asset", sweep_stale_asset_uploads(&settings.data_dir));
-    let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
-    jobs_store.initialize()?;
-    let purged_terminal_jobs =
-        jobs_store.purge_terminal_jobs_older_than(settings.jobs_retention_days)?;
-    tracing::info!(
-        event = "terminal_job_retention",
-        retention_days = settings.jobs_retention_days,
-        purged_terminal_jobs,
-        "applied terminal job retention"
-    );
-    let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
+    {
+        let _phase = StartupPhaseTimer::start("upload_sweeps");
+        // sc-8882 (F-080): a failed sweep leaves leaked multi-GB upload temps unreclaimed
+        // and was previously silent. WARN (never fatal) so the operator can investigate.
+        warn_on_sweep_err("lora", sweep_stale_lora_uploads(&settings.data_dir));
+        warn_on_sweep_err("pose", sweep_stale_pose_uploads(&settings.data_dir));
+        warn_on_sweep_err("keypoint", sweep_stale_keypoint_uploads(&settings.data_dir));
+        // sc-4204 (F-API-6): asset-import temp files (cache/uploads) had no startup sweep.
+        warn_on_sweep_err("asset", sweep_stale_asset_uploads(&settings.data_dir));
+    }
+    let (jobs_store, interrupted_jobs_on_startup) = {
+        let _phase = StartupPhaseTimer::start("jobs_retention_recovery");
+        let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
+        jobs_store.initialize()?;
+        let purged_terminal_jobs =
+            jobs_store.purge_terminal_jobs_older_than(settings.jobs_retention_days)?;
+        tracing::info!(
+            event = "terminal_job_retention",
+            retention_days = settings.jobs_retention_days,
+            purged_terminal_jobs,
+            "applied terminal job retention"
+        );
+        let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
+        (jobs_store, interrupted_jobs_on_startup)
+    };
     let project_store = Arc::new(ProjectStore::new(
         settings.data_dir.clone(),
         settings.app_version.clone(),
     ));
-    // Reserved global pose library (epic 2282): created up front so its assets
-    // endpoint returns [] (not 404) before any pose is saved. Best-effort.
-    if let Err(error) = project_store.ensure_global_poses_project() {
-        tracing::error!(
-            event = "ensure_global_poses_project_failed",
-            error = %error,
-            "could not ensure global pose library project"
-        );
-    }
-    // Reserved global Key Point Library (epic 4422): created up front so its assets +
-    // collections endpoints return seeded data before any preset is saved. Best-effort.
-    if let Err(error) = project_store.ensure_global_keypoints_project() {
-        tracing::error!(
-            event = "ensure_global_keypoints_project_failed",
-            error = %error,
-            "could not ensure global keypoint library project"
-        );
+    {
+        let _phase = StartupPhaseTimer::start("reserved_project_initialization");
+        // Reserved global pose library (epic 2282): created up front so its assets
+        // endpoint returns [] (not 404) before any pose is saved. Best-effort.
+        if let Err(error) = project_store.ensure_global_poses_project() {
+            tracing::error!(
+                event = "ensure_global_poses_project_failed",
+                error = %error,
+                "could not ensure global pose library project"
+            );
+        }
+        // Reserved global Key Point Library (epic 4422): created up front so its assets +
+        // collections endpoints return seeded data before any preset is saved. Best-effort.
+        if let Err(error) = project_store.ensure_global_keypoints_project() {
+            tracing::error!(
+                event = "ensure_global_keypoints_project_failed",
+                error = %error,
+                "could not ensure global keypoint library project"
+            );
+        }
     }
     // Startup data-integrity pass: drop index rows for assets whose media was
     // purged from disk but whose row/sidecar lingered, so the Library never fetches
@@ -949,36 +1069,59 @@ pub(crate) fn create_app_with_state(
     // Runs before the server binds, so the first `list_assets` is already clean.
     // Best-effort and non-fatal — a failure just leaves the stale rows for next
     // startup; the sidecars are untouched, so nothing is lost.
-    match project_store.prune_all_orphaned_assets() {
-        Ok(0) => {}
-        Ok(pruned) => tracing::info!(
-            event = "orphaned_assets_pruned",
-            count = pruned,
-            "pruned purged-but-referenced assets from project registries at startup"
-        ),
-        Err(error) => tracing::warn!(
-            event = "orphaned_assets_prune_failed",
-            error = %error,
-            "startup orphaned-asset prune failed; the Library may still request purged media"
-        ),
+    {
+        let _phase = StartupPhaseTimer::start("orphaned_asset_maintenance");
+        match project_store.prune_all_orphaned_assets() {
+            Ok(0) => {}
+            Ok(pruned) => tracing::info!(
+                event = "orphaned_assets_pruned",
+                count = pruned,
+                "pruned purged-but-referenced assets from project registries at startup"
+            ),
+            Err(error) => tracing::warn!(
+                event = "orphaned_assets_prune_failed",
+                error = %error,
+                "startup orphaned-asset prune failed; the Library may still request purged media"
+            ),
+        }
     }
     let state = AppState {
         settings,
         jobs_store,
         project_store,
         events: Arc::new(EventHub::default()),
-        event_tickets: Arc::new(TicketStore::new(EVENT_TICKET_TTL_SECONDS)),
+        queue_snapshot_lock: Arc::new(AsyncMutex::new(())),
+        event_tickets: Arc::new(TicketStore::with_max_outstanding(
+            EVENT_TICKET_TTL_SECONDS,
+            MAX_OUTSTANDING_EVENT_TICKETS,
+        )),
         media_tickets: Arc::new(TicketStore::new(MEDIA_TICKET_TTL_SECONDS)),
+        thumbnail_generation_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         auth_throttle: Arc::new(AuthThrottle::default()),
         manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
         manifest_write_locks: Arc::new(Mutex::new(HashMap::new())),
         model_size_cache: Arc::new(Mutex::new(ModelSizeCache::default())),
+        #[cfg(test)]
+        model_size_estimate_test_hook: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        model_size_estimate_disabled_override: Arc::new(Mutex::new(None)),
         external_lora_cache: Arc::new(Mutex::new(external_loras::ExternalLoraCache::default())),
         external_base_model_cache: Arc::new(Mutex::new(
             external_base_models::ExternalBaseModelCache::default(),
         )),
         http_client: reqwest::Client::new(),
         interrupted_jobs_on_startup,
+        progress_side_effects_lock: Arc::new(AsyncMutex::new(())),
+        #[cfg(test)]
+        progress_before_accept_once: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        sse_snapshot_before_subscribe_once: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        progress_side_effects_fail_once: Arc::new(Mutex::new(false)),
+        #[cfg(test)]
+        progress_side_effects_fail_job_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        #[cfg(test)]
+        progress_side_effects_attempts: Arc::new(Mutex::new(HashMap::new())),
     };
     let cors = cors_layer(&state.settings);
     let returned_state = state.clone();
@@ -1044,6 +1187,10 @@ pub(crate) fn create_app_with_state(
             get(get_asset).delete(delete_asset),
         )
         .route(
+            "/api/v1/projects/:project_id/assets/:asset_id/poster/:poster_sha256",
+            get(get_asset_poster),
+        )
+        .route(
             "/api/v1/projects/:project_id/assets/:asset_id/purge",
             delete(purge_asset),
         )
@@ -1098,6 +1245,15 @@ pub(crate) fn create_app_with_state(
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/caption-jobs",
             post(create_training_dataset_caption_job),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/parquet-import-jobs",
+            post(create_training_dataset_parquet_import_job),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/parquet-import-finalize",
+            post(finalize_training_dataset_parquet_import)
+                .layer(DefaultBodyLimit::max(MAX_PARQUET_FINALIZE_BODY_BYTES)),
         )
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/analysis-jobs",
@@ -1402,7 +1558,10 @@ pub(crate) fn create_app_with_state(
         // model/lora import routes above).
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(middleware::from_fn_with_state(state, access_control))
-        .layer(cors);
+        .layer(cors)
+        // Outermost so auth failures, CORS responses, and handler responses are
+        // all timed. Non-API frontend traffic is ignored by the middleware.
+        .layer(middleware::from_fn(api_request_timing));
     Ok((router, returned_state))
 }
 
@@ -1471,12 +1630,21 @@ async fn verify_access(
     Json(VerifyResponse { ok })
 }
 
+const GRID_THUMBNAIL_SIZE: u32 = 384;
+const PROJECT_MEDIA_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
+
+#[derive(Debug, Default, Deserialize)]
+struct ProjectFileQuery {
+    thumbnail: Option<u32>,
+}
+
 async fn get_project_file(
     State(state): State<AppState>,
     Path((project_id, relative_path)): Path<(String, String)>,
+    Query(query): Query<ProjectFileQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let project_file = project_call(state, {
+    let project_file = project_call(state.clone(), {
         let project_id = project_id.clone();
         let relative_path = relative_path.clone();
         move |store| store.project_file(&project_id, &relative_path)
@@ -1500,15 +1668,74 @@ async fn get_project_file(
             );
         }
     })?;
-    let mut file = tokio::fs::File::open(&project_file.path)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let total = file
-        .metadata()
+
+    // One fixed representation prevents unbounded cache variants. Derivatives
+    // are generated on first use, so assets written before this route existed
+    // backfill without a migration.
+    let (served_path, content_type) = if let Some(size) = query.thumbnail {
+        if size != GRID_THUMBNAIL_SIZE {
+            return Err(ApiError::bad_request(format!(
+                "thumbnail must be {GRID_THUMBNAIL_SIZE}"
+            )));
+        }
+        if !project_file.content_type.starts_with("image/") {
+            return Err(ApiError::bad_request(
+                "thumbnail is only available for image media",
+            ));
+        }
+        let permit = state
+            .thumbnail_generation_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let source_path = project_file.path.clone();
+        let cache_root = state
+            .settings
+            .data_dir
+            .join("cache")
+            .join("media-thumbnails")
+            .join("v1");
+        let thumbnail_path = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            ensure_grid_thumbnail(&source_path, &cache_root)
+        })
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?
-        .len();
-    let content_type = project_file.content_type;
+        .map_err(|error| {
+            tracing::debug!(
+                event = "project_thumbnail_unavailable",
+                project_id = %project_id,
+                relative_path = %relative_path,
+                error = %error,
+                "could not create bounded project thumbnail"
+            );
+            ApiError::bad_request("Thumbnail unavailable for this media")
+        })?;
+        (thumbnail_path, "image/png".to_owned())
+    } else {
+        (project_file.path, project_file.content_type)
+    };
+
+    let mut file = tokio::fs::File::open(&served_path)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let total = metadata.len();
+    let etag = project_file_etag(&metadata);
+    let last_modified = metadata.modified().ok();
+    let base_headers = project_file_response_headers(&content_type, total, &etag, last_modified)?;
+
+    if project_file_is_not_modified(&headers, &etag, last_modified) {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::NOT_MODIFIED;
+        *response.headers_mut() = base_headers;
+        response.headers_mut().remove(header::CONTENT_LENGTH);
+        return Ok(response);
+    }
 
     // WebKit/WKWebView (the macOS desktop webview) requires HTTP byte-range
     // responses to play <video>: it probes with `Range: bytes=0-1` and treats
@@ -1522,10 +1749,10 @@ async fn get_project_file(
                     .await
                     .map_err(|error| ApiError::internal(error.to_string()))?;
                 let stream = ReaderStream::new(file.take(len));
-                return Ok((
+                let mut response = (
                     StatusCode::PARTIAL_CONTENT,
                     [
-                        (header::CONTENT_TYPE, content_type),
+                        (header::CONTENT_TYPE, content_type.clone()),
                         (header::ACCEPT_RANGES, "bytes".to_string()),
                         (
                             header::CONTENT_RANGE,
@@ -1543,20 +1770,30 @@ async fn get_project_file(
                     ],
                     Body::from_stream(stream),
                 )
-                    .into_response());
+                    .into_response();
+                response.headers_mut().extend(base_headers);
+                response.headers_mut().insert(
+                    header::CONTENT_LENGTH,
+                    HeaderValue::from_str(&len.to_string())
+                        .map_err(|error| ApiError::internal(error.to_string()))?,
+                );
+                return Ok(response);
             }
             None => {
-                return Ok((
+                let mut response = (
                     StatusCode::RANGE_NOT_SATISFIABLE,
                     [(header::CONTENT_RANGE, format!("bytes */{total}"))],
                 )
-                    .into_response());
+                    .into_response();
+                response.headers_mut().extend(base_headers);
+                response.headers_mut().remove(header::CONTENT_LENGTH);
+                return Ok(response);
             }
         }
     }
 
     let stream = ReaderStream::new(file);
-    Ok((
+    let mut response = (
         [
             (header::CONTENT_TYPE, content_type),
             (header::ACCEPT_RANGES, "bytes".to_string()),
@@ -1567,7 +1804,139 @@ async fn get_project_file(
         ],
         Body::from_stream(stream),
     )
-        .into_response())
+        .into_response();
+    response.headers_mut().extend(base_headers);
+    Ok(response)
+}
+
+fn ensure_grid_thumbnail(source_path: &FsPath, cache_root: &FsPath) -> Result<PathBuf, String> {
+    let metadata = std::fs::metadata(source_path).map_err(|error| error.to_string())?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .unwrap_or_default();
+    let mut hash = Sha256::new();
+    hash.update(source_path.to_string_lossy().as_bytes());
+    hash.update(metadata.len().to_le_bytes());
+    hash.update(modified.as_nanos().to_le_bytes());
+    hash.update(GRID_THUMBNAIL_SIZE.to_le_bytes());
+    let key = format!("{:x}", hash.finalize());
+    let target = cache_root.join(format!("{key}.png"));
+    if target.is_file() {
+        return Ok(target);
+    }
+
+    std::fs::create_dir_all(cache_root).map_err(|error| error.to_string())?;
+    let decoded = match image::open(source_path) {
+        Ok(decoded) => decoded,
+        Err(decode_error) => {
+            // Project imports normalize these formats today, but old projects
+            // can still contain AVIF/HEIC/HEIF (and other platform-decodable
+            // raster files). Reuse the worker's cross-platform compatibility
+            // path before declaring the thumbnail unavailable.
+            let converted =
+                cache_root.join(format!("{key}.{}.converted.png", Uuid::new_v4().simple()));
+            let transcode_result =
+                sceneworks_core::media_convert::transcode_to_png(source_path, &converted);
+            let decoded = transcode_result
+                .map_err(|error| format!("{decode_error}; {error}"))
+                .and_then(|()| image::open(&converted).map_err(|error| error.to_string()));
+            let _ = std::fs::remove_file(&converted);
+            decoded?
+        }
+    };
+    let thumbnail = decoded.thumbnail(GRID_THUMBNAIL_SIZE, GRID_THUMBNAIL_SIZE);
+    let temporary = cache_root.join(format!("{key}.{}.tmp", Uuid::new_v4().simple()));
+    thumbnail
+        .save_with_format(&temporary, image::ImageFormat::Png)
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = std::fs::rename(&temporary, &target) {
+        if target.is_file() {
+            let _ = std::fs::remove_file(&temporary);
+        } else {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error.to_string());
+        }
+    }
+    Ok(target)
+}
+
+fn project_file_etag(metadata: &std::fs::Metadata) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .unwrap_or_default();
+    // Weak avoids reading and hashing a multi-gigabyte original before it can
+    // stream; project media is immutable after publication.
+    format!(
+        "W/\"{:x}-{:x}-{:x}\"",
+        metadata.len(),
+        modified.as_secs(),
+        modified.subsec_nanos()
+    )
+}
+
+fn project_file_response_headers(
+    content_type: &str,
+    total: u64,
+    etag: &str,
+    last_modified: Option<SystemTime>,
+) -> Result<HeaderMap, ApiError> {
+    let mut headers = HeaderMap::new();
+    for (name, value) in [
+        (header::CONTENT_TYPE, content_type.to_owned()),
+        (header::ACCEPT_RANGES, "bytes".to_owned()),
+        (header::CONTENT_LENGTH, total.to_string()),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),
+        (
+            header::CACHE_CONTROL,
+            PROJECT_MEDIA_CACHE_CONTROL.to_owned(),
+        ),
+        (header::ETAG, etag.to_owned()),
+    ] {
+        headers.insert(
+            name,
+            HeaderValue::from_str(&value).map_err(|error| ApiError::internal(error.to_string()))?,
+        );
+    }
+    if let Some(modified) = last_modified {
+        headers.insert(
+            header::LAST_MODIFIED,
+            HeaderValue::from_str(&httpdate::fmt_http_date(modified))
+                .map_err(|error| ApiError::internal(error.to_string()))?,
+        );
+    }
+    Ok(headers)
+}
+
+fn project_file_is_not_modified(
+    request_headers: &HeaderMap,
+    etag: &str,
+    last_modified: Option<SystemTime>,
+) -> bool {
+    if let Some(value) = request_headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+    {
+        return value
+            .split(',')
+            .map(str::trim)
+            .any(|candidate| candidate == "*" || candidate == etag);
+    }
+    let Some(modified) = last_modified else {
+        return false;
+    };
+    request_headers
+        .get(header::IF_MODIFIED_SINCE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| httpdate::parse_http_date(value).ok())
+        .is_some_and(|since| {
+            modified
+                .duration_since(since)
+                .map_or(true, |delta| delta < Duration::from_secs(1))
+        })
 }
 
 /// Parse a single HTTP byte range (`bytes=start-end`, `bytes=start-`, or
@@ -1849,6 +2218,7 @@ async fn create_generation_job_with_status(
 }
 
 async fn publish_queue(state: &AppState) -> Result<(), ApiError> {
+    let _snapshot_guard = state.queue_snapshot_lock.lock().await;
     let queue = queue_summary_snapshot(state.clone()).await?;
     publish(state, "queue.updated", &queue);
     Ok(())
@@ -1859,6 +2229,7 @@ async fn publish_queue(state: &AppState) -> Result<(), ApiError> {
 /// only right after a `mark_stale_workers_interrupted` call — otherwise stale
 /// workers won't be reaped on this refresh.
 async fn publish_queue_skip_sweep(state: &AppState) -> Result<(), ApiError> {
+    let _snapshot_guard = state.queue_snapshot_lock.lock().await;
     let queue = queue_summary_snapshot_inner(state.clone(), true).await?;
     publish(state, "queue.updated", &queue);
     Ok(())
@@ -1870,6 +2241,7 @@ fn publish<T: Serialize>(state: &AppState, event: &str, data: &T) {
         state.events.publish(EventMessage {
             event: event.to_owned(),
             data,
+            revision: 0,
         });
     }
 }
@@ -1878,6 +2250,39 @@ async fn project_path_for_id(state: AppState, project_id: &str) -> Result<PathBu
     let project_id = project_id.to_owned();
     let project = project_call(state, move |store| store.get_project(&project_id)).await?;
     Ok(PathBuf::from(project.path))
+}
+
+/// Resolve a project asset record to an on-disk path without allowing absolute
+/// paths or traversal outside the owning project.
+async fn resolve_project_confined_asset_path(
+    state: AppState,
+    project_id: &str,
+    asset_id: &str,
+    project_path: &FsPath,
+) -> Result<PathBuf, ApiError> {
+    let project_id = project_id.to_owned();
+    let asset_id = asset_id.to_owned();
+    let asset = project_call(state, move |store| store.get_asset(&project_id, &asset_id)).await?;
+    let relative_path = asset
+        .get("file")
+        .and_then(|file| file.get("path"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("Asset has no file path"))?;
+    let mut resolved = project_path.to_path_buf();
+    for component in FsPath::new(relative_path).components() {
+        match component {
+            std::path::Component::Normal(value) => resolved.push(value),
+            _ => {
+                return Err(ApiError::bad_request(
+                    "Asset path must stay inside the project directory",
+                ))
+            }
+        }
+    }
+    if !resolved.exists() {
+        return Err(ApiError::bad_request("Asset file not found on disk"));
+    }
+    Ok(resolved)
 }
 
 fn model_lora_families(model: &Value) -> Vec<String> {
@@ -1930,9 +2335,10 @@ async fn catalog_delete_warnings(
     kind: &str,
     id: &str,
     project_id: Option<&str>,
+    catalogs: Option<&JobCatalogSnapshot>,
 ) -> Result<Vec<String>, ApiError> {
     let mut warnings = Vec::new();
-    let presets = recipe_preset_catalog(state, project_id).await?;
+    let presets = recipe_preset_catalog_with(state, project_id, catalogs).await?;
     let preset_names = presets
         .iter()
         .filter(|preset| match kind {
@@ -2647,6 +3053,12 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         ));
     }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
+    if payload.loras.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
+        return Err(ApiError::bad_request(format!(
+            "loras must contain at most {} entries",
+            sceneworks_core::lora_family::MAX_JOB_LORAS
+        )));
+    }
     if ![
         "text_to_image",
         "edit_image",
@@ -2685,10 +3097,10 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
 }
 
 fn validate_character_test_job(payload: &CharacterTestRequest) -> Result<(), ApiError> {
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > 4000 {
-        return Err(ApiError::bad_request(
-            "prompt must be between 1 and 4000 characters",
-        ));
+    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "prompt must be between 1 and {MAX_PROMPT_CHARS} characters"
+        )));
     }
     if !(1..=8).contains(&payload.count) {
         return Err(ApiError::bad_request("count must be between 1 and 8"));
@@ -2709,6 +3121,12 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         ));
     }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
+    if payload.loras.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
+        return Err(ApiError::bad_request(format!(
+            "loras must contain at most {} entries",
+            sceneworks_core::lora_family::MAX_JOB_LORAS
+        )));
+    }
     if ![
         "image_to_video",
         "text_to_video",
@@ -3121,6 +3539,7 @@ fn find_timeline_item<'a>(timeline: &'a Value, item_id: &str) -> Result<&'a Valu
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Timeline item not found".to_owned(),
+            code: None,
         })
 }
 

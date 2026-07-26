@@ -15,7 +15,7 @@ import {
 } from "../../quantTier.js";
 import { serializeLora, buildStudioPresetPayload } from "../../presetUtils.js";
 import { WAN_A14B_LIGHTNING_MODEL_IDS } from "../../constants.js";
-import { useGenerationStudio } from "../../screens/generationStudio.jsx";
+import { useGenerationStudio } from "../generationStudio.jsx";
 import { loadStudioSettings, useStudioSettingsWriter } from "../../hooks/useStudioSettings.js";
 import { MOTIONS, DEFAULT_MOTION } from "./editorUtils.js";
 
@@ -113,13 +113,20 @@ export function useEditorGeneration({ context }) {
   const durationOptions = selectedModel?.limits?.durations ?? DURATION_FALLBACK;
   const samplerOptions = useMemo(() => samplerOptionsFromModel(selectedModel, null), [selectedModel]);
   const schedulerOptions = useMemo(() => schedulerOptionsFromModel(selectedModel, null), [selectedModel]);
-  const tierPickerOpts = { convRotEligible: false, nvfp4Eligible: false, defaultQuality: EDITOR_DEFAULT_TIER };
-  const availableTiers = useMemo(() => installedTiers(selectedModel, tierPickerOpts), [selectedModel]);
+  const tierPickerOpts = useMemo(
+    () => ({
+      convRotEligible: false,
+      nvfp4Eligible: false,
+      defaultQuality: EDITOR_DEFAULT_TIER,
+    }),
+    [],
+  );
+  const availableTiers = useMemo(() => installedTiers(selectedModel, tierPickerOpts), [selectedModel, tierPickerOpts]);
   // Full display set + option list with un-downloaded tiers disabled — same show-all/disable-unavailable
   // rule as the studios. `availableTiers` stays the SELECTABLE set; the picker shows when there is more
   // than one POSSIBLE tier and at least one is installed.
-  const possibleTiers = useMemo(() => allPossibleTiers(selectedModel, tierPickerOpts), [selectedModel]);
-  const tierPickerItems = useMemo(() => tierPickerOptions(selectedModel, tierPickerOpts), [selectedModel]);
+  const possibleTiers = useMemo(() => allPossibleTiers(selectedModel, tierPickerOpts), [selectedModel, tierPickerOpts]);
+  const tierPickerItems = useMemo(() => tierPickerOptions(selectedModel, tierPickerOpts), [selectedModel, tierPickerOpts]);
   // Only an installed tier can be selected; disabled chips are shown for discoverability, never picked.
   const selectTier = (tier) => {
     if (availableTiers.includes(tier)) {

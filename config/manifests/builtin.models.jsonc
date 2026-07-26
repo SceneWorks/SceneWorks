@@ -585,6 +585,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-turbo-mlx",
+          "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -602,6 +603,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-turbo-mlx",
+          "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 10998523666,
@@ -610,6 +612,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-turbo-mlx",
+          "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 20538406851,
@@ -737,6 +740,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-mlx",
+          "revision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -751,6 +755,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-mlx",
+          "revision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 10996438540,
@@ -759,6 +764,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-mlx",
+          "revision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 20538412852,
@@ -853,6 +859,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-turbo-mlx",
+          "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -864,6 +871,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-turbo-mlx",
+          "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 10998523666,
@@ -872,6 +880,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-turbo-mlx",
+          "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 20538406851,
@@ -934,6 +943,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-mlx",
+          "revision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -943,6 +953,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-mlx",
+          "revision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 38583632655,
@@ -951,6 +962,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-mlx",
+          "revision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 57731960832,
@@ -970,6 +982,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-2512-fun-controlnet-union",
+          "revision": "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca",
           "coRequisite": true,
           "required": "soft",
           "files": ["q4/model.safetensors"],
@@ -979,6 +992,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-2512-fun-controlnet-union",
+          "revision": "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca",
           "coRequisite": true,
           "required": "soft",
           "files": ["q8/model.safetensors"],
@@ -988,6 +1002,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-2512-fun-controlnet-union",
+          "revision": "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca",
           "coRequisite": true,
           "required": "soft",
           "files": ["bf16/model.safetensors"],
@@ -1118,6 +1133,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "revision": "0dfbf3a018bcee42d77de14494c35f97a7531def",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -1127,6 +1143,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "revision": "0dfbf3a018bcee42d77de14494c35f97a7531def",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 38583632655,
@@ -1135,6 +1152,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "revision": "0dfbf3a018bcee42d77de14494c35f97a7531def",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 57731960832,
@@ -1256,6 +1274,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "revision": "0dfbf3a018bcee42d77de14494c35f97a7531def",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -1265,6 +1284,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "revision": "0dfbf3a018bcee42d77de14494c35f97a7531def",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 38583632655,
@@ -1273,6 +1293,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "revision": "0dfbf3a018bcee42d77de14494c35f97a7531def",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 57731960832,
@@ -1421,6 +1442,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/lens-mlx",
+          "revision": "4e1349c1962950eee328c69537904631ebc64283",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -1431,6 +1453,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/lens-mlx",
+          "revision": "4e1349c1962950eee328c69537904631ebc64283",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos", "windows", "linux"],
@@ -1440,6 +1463,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/lens-mlx",
+          "revision": "4e1349c1962950eee328c69537904631ebc64283",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos", "windows", "linux"],
@@ -1460,6 +1484,7 @@
           // tracks independently of the MLX inference tiers (sc-8508).
           "provider": "huggingface",
           "repo": "SceneWorks/Lens",
+          "revision": "5c5521d4417a3cae55816929ece69319d1e7712a",
           "variant": "training",
           "files": [],
           "platforms": ["macos", "windows", "linux"],
@@ -1548,6 +1573,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/lens-turbo-mlx",
+          "revision": "d3f485c320039595cff16d4f686a5f9378714f25",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -1565,6 +1591,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/lens-turbo-mlx",
+          "revision": "d3f485c320039595cff16d4f686a5f9378714f25",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos", "windows", "linux"],
@@ -1574,6 +1601,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/lens-turbo-mlx",
+          "revision": "d3f485c320039595cff16d4f686a5f9378714f25",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos", "windows", "linux"],
@@ -1676,6 +1704,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-mlx",
+          "revision": "b6206ea2e888198418b92f3bed31f5506c6183f9",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -1685,6 +1714,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-mlx",
+          "revision": "b6206ea2e888198418b92f3bed31f5506c6183f9",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 19927870461,
@@ -1693,6 +1723,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-mlx",
+          "revision": "b6206ea2e888198418b92f3bed31f5506c6183f9",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 35121691427,
@@ -1829,6 +1860,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-mlx",
+          "revision": "9c2f476b136ff146691fc7c792e46c8a8df6a10b",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -1838,6 +1870,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-mlx",
+          "revision": "9c2f476b136ff146691fc7c792e46c8a8df6a10b",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 19927923905,
@@ -1846,6 +1879,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-mlx",
+          "revision": "9c2f476b136ff146691fc7c792e46c8a8df6a10b",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 35121744859,
@@ -1949,6 +1983,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-mlx",
+          "revision": "34f24bc8195f601cb90cb207acd4233eb7d0e2d3",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -1958,6 +1993,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-mlx",
+          "revision": "34f24bc8195f601cb90cb207acd4233eb7d0e2d3",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 19927776248,
@@ -1966,6 +2002,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-mlx",
+          "revision": "34f24bc8195f601cb90cb207acd4233eb7d0e2d3",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 35121597119,
@@ -2070,6 +2107,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
+          "revision": "d432225e00e5b6f59a86602e237876c9298b3a77",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -2079,6 +2117,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
+          "revision": "d432225e00e5b6f59a86602e237876c9298b3a77",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 19927870497,
@@ -2087,6 +2126,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
+          "revision": "d432225e00e5b6f59a86602e237876c9298b3a77",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 35121579949,
@@ -2214,6 +2254,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
+          "revision": "33d42d2e3b2c3dce102f8982d173c98ef361d098",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -2223,6 +2264,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
+          "revision": "33d42d2e3b2c3dce102f8982d173c98ef361d098",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 19927924235,
@@ -2231,6 +2273,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
+          "revision": "33d42d2e3b2c3dce102f8982d173c98ef361d098",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 35121633249,
@@ -2343,6 +2386,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx",
+          "revision": "660506e94bf0b0898476949f9e661dc58611d70f",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -2352,6 +2396,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx",
+          "revision": "660506e94bf0b0898476949f9e661dc58611d70f",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 19927776291,
@@ -2360,6 +2405,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx",
+          "revision": "660506e94bf0b0898476949f9e661dc58611d70f",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 35121485601,
@@ -2468,6 +2514,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-schnell-mlx",
+          "revision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -2477,6 +2524,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-schnell-mlx",
+          "revision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 17999175703,
@@ -2485,6 +2533,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-schnell-mlx",
+          "revision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 33725923002,
@@ -2573,6 +2622,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-dev-mlx",
+          "revision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -2582,6 +2632,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-dev-mlx",
+          "revision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 18010071290,
@@ -2590,6 +2641,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-dev-mlx",
+          "revision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 33746402173,
@@ -2738,6 +2790,7 @@
           // (previously off-Mac gracefully fell back to q4).
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4-mlx",
+          "revision": "a3095855b8819dc0d6b067cb1354aaa7da189ff8",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -2755,6 +2808,7 @@
           // generation-time on-demand fetch — never a Models-page-installable variant.)
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4-mlx",
+          "revision": "a3095855b8819dc0d6b067cb1354aaa7da189ff8",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos", "windows", "linux"],
@@ -2778,6 +2832,7 @@
           // turnkey; `candle_ideogram_repo` stays retired.
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4",
+          "revision": "2e8fb610109bf0db195344cc424df98b301d3cad",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos", "windows", "linux"],
@@ -2909,6 +2964,7 @@
           // entry (the retired `candle_ideogram_repo` target) is removed.
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4-mlx",
+          "revision": "a3095855b8819dc0d6b067cb1354aaa7da189ff8",
           "variant": "q4",
           "default": true,
           "files": ["q4/*", "q4/turbo_lora.safetensors"],
@@ -2923,6 +2979,7 @@
           // so off-Mac gets the real q4/q8 A-B picker. Size includes the ~0.85 GB LoRA (turbo uses it).
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4-mlx",
+          "revision": "a3095855b8819dc0d6b067cb1354aaa7da189ff8",
           "variant": "q8",
           "files": ["q8/*", "q8/turbo_lora.safetensors"],
           "platforms": ["macos", "windows", "linux"],
@@ -2944,6 +3001,7 @@
           // a large-card tier (see the candle VRAM block). (Base q4/q8 come from the `-mlx` turnkey.)
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4",
+          "revision": "2e8fb610109bf0db195344cc424df98b301d3cad",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos", "windows", "linux"],
@@ -3054,6 +3112,7 @@
           // multi-tier picker as macOS (previously off-Mac resolved only the shipped Q8 default).
           "provider": "huggingface",
           "repo": "SceneWorks/boogu-image-mlx",
+          "revision": "a459e614d408bfdf57089c32cc3da706f5a017de",
           "files": ["base/transformer/*", "base/mllm/*", "base/vae/*"],
           "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 23380234752
@@ -3167,6 +3226,7 @@
           // `candle_boogu_repo` target) is removed.
           "provider": "huggingface",
           "repo": "SceneWorks/boogu-image-mlx",
+          "revision": "a459e614d408bfdf57089c32cc3da706f5a017de",
           "files": ["turbo/transformer/*", "turbo/mllm/*", "turbo/vae/*"],
           "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 23380234586
@@ -3280,6 +3340,7 @@
           // target) is removed.
           "provider": "huggingface",
           "repo": "SceneWorks/boogu-image-mlx",
+          "revision": "a459e614d408bfdf57089c32cc3da706f5a017de",
           "files": ["edit/transformer/*", "edit/mllm/*", "edit/vae/*"],
           "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 23380234314
@@ -3376,6 +3437,7 @@
           // 20,554,619,613 B = transformer 14.57 + text_encoder 5.47 + vae 0.48 GB; rounded up).
           "provider": "huggingface",
           "repo": "SceneWorks/krea-2-turbo-mlx",
+          "revision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
           // sc-9300: the per-tier `variant` keys make Krea 2 a proper variant matrix (like the
           // standard-tier models) so `/models` emits a `variants[]` entry per tier and the studio tier
           // picker (`quantTier.js`) can toggle installed tiers. q8 is the shipped default.
@@ -3397,6 +3459,7 @@
           // selectable via advanced mlxQuantize<=4 (sc-8508/8509). Same complete-root shape as q8.
           "provider": "huggingface",
           "repo": "SceneWorks/krea-2-turbo-mlx",
+          "revision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
           "variant": "q4",
           "files": [
             "q4/transformer/*",
@@ -3415,6 +3478,7 @@
           // via advanced mlxQuantize<=0 (sc-8508/8509). Mirror of the dense `krea/Krea-2-Turbo` tree.
           "provider": "huggingface",
           "repo": "SceneWorks/krea-2-turbo-mlx",
+          "revision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
           "variant": "bf16",
           "files": [
             "bf16/transformer/*",
@@ -3447,6 +3511,7 @@
           // global co-requisite. `platforms` OMITS macos so the Mac picker never lists this tier.
           "provider": "huggingface",
           "repo": "SceneWorks/krea-2-turbo-int8-convrot",
+          "revision": "b25730586dceb84efdc8286df586ba47103dba3f",
           "variant": "int8-convrot",
           "files": ["krea2_turbo_int8_convrot.safetensors"],
           "platforms": ["windows", "linux"],
@@ -3696,6 +3761,7 @@
           // model_index.json). MEASURED q8 download 20,554,619,432 B. q8 is the shipped default.
           "provider": "huggingface",
           "repo": "SceneWorks/krea-2-raw-mlx",
+          "revision": "b88090c79762ba34b1de23a892da239eb76962e4",
           "variant": "q8",
           "default": true,
           "files": [
@@ -3714,6 +3780,7 @@
           // complete-root shape as q8. MEASURED 12,488,709,625 B.
           "provider": "huggingface",
           "repo": "SceneWorks/krea-2-raw-mlx",
+          "revision": "b88090c79762ba34b1de23a892da239eb76962e4",
           "variant": "q4",
           "files": [
             "q4/transformer/*",
@@ -3732,6 +3799,7 @@
           // tier is ALSO the Krea 2 LoRA training base (the trainer reads `bf16/`). MEASURED 35,678,121,657 B.
           "provider": "huggingface",
           "repo": "SceneWorks/krea-2-raw-mlx",
+          "revision": "b88090c79762ba34b1de23a892da239eb76962e4",
           "variant": "bf16",
           "files": [
             "bf16/transformer/*",
@@ -3898,6 +3966,7 @@
           // (`DENSE_TE_TIER_MODELS`). Replaces the old gated 49 GiB whole-repo + load-time quantize.
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
+          "revision": "1d36c68041725a14c76566cdf6cea4270b264b03",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -3907,6 +3976,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
+          "revision": "1d36c68041725a14c76566cdf6cea4270b264b03",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 26100000000,
@@ -3917,6 +3987,7 @@
           // per-variant tracking (sc-8508/8509).
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
+          "revision": "1d36c68041725a14c76566cdf6cea4270b264b03",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 34600000000,
@@ -4057,6 +4128,7 @@
           // load via `DENSE_TE_TIER_MODELS`). Replaces the old gated whole-repo + load-time quantize.
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
+          "revision": "fc6579b25dcb7e1bce85dd27cb9b901312110bab",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -4066,6 +4138,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
+          "revision": "fc6579b25dcb7e1bce85dd27cb9b901312110bab",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 26100000000,
@@ -4074,6 +4147,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
+          "revision": "fc6579b25dcb7e1bce85dd27cb9b901312110bab",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 34600000000,
@@ -4283,6 +4357,7 @@
           // bf16 tier added separately. q8/ is a second entry (tier selection: epic 8506 sc-8508/8509).
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-dev-mlx",
+          "revision": "0c9b86f4d91eeaec3db11bcc9cc0e4c006faed74",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -4292,6 +4367,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-dev-mlx",
+          "revision": "0c9b86f4d91eeaec3db11bcc9cc0e4c006faed74",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 55000000000,
@@ -4304,6 +4380,7 @@
           // generates; 256² fits a 128 GB box, production 1024² wants >128 GB).
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-dev-mlx",
+          "revision": "0c9b86f4d91eeaec3db11bcc9cc0e4c006faed74",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 113000000000,
@@ -4468,6 +4545,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/chroma1-hd-mlx",
+          "revision": "9d99afe1ebca67032476756bc70d4a7152bc1bd5",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -4477,6 +4555,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/chroma1-hd-mlx",
+          "revision": "9d99afe1ebca67032476756bc70d4a7152bc1bd5",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 19424564251,
@@ -4485,6 +4564,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/chroma1-hd-mlx",
+          "revision": "9d99afe1ebca67032476756bc70d4a7152bc1bd5",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 27493363692,
@@ -4555,6 +4635,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/chroma1-base-mlx",
+          "revision": "e7330dda29d00ffdeeb719b28e92ee74cff0884c",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -4564,6 +4645,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/chroma1-base-mlx",
+          "revision": "e7330dda29d00ffdeeb719b28e92ee74cff0884c",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 19424563899,
@@ -4572,6 +4654,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/chroma1-base-mlx",
+          "revision": "e7330dda29d00ffdeeb719b28e92ee74cff0884c",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 27493363362,
@@ -4642,6 +4725,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/chroma1-flash-mlx",
+          "revision": "6a9cb6178709559461506bf247f708d0d1008d00",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -4651,6 +4735,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/chroma1-flash-mlx",
+          "revision": "6a9cb6178709559461506bf247f708d0d1008d00",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 19424564095,
@@ -4659,6 +4744,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/chroma1-flash-mlx",
+          "revision": "6a9cb6178709559461506bf247f708d0d1008d00",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 27493363732,
@@ -4732,6 +4818,7 @@
           // bf16-only cross-cutting caveat is tracked separately across Group-B.
           "provider": "huggingface",
           "repo": "SceneWorks/kolors-mlx",
+          "revision": "aadbd49f53b66a33ef1be09384eac409cbc44061",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -4741,6 +4828,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/kolors-mlx",
+          "revision": "aadbd49f53b66a33ef1be09384eac409cbc44061",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 10363817984,
@@ -4749,6 +4837,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/kolors-mlx",
+          "revision": "aadbd49f53b66a33ef1be09384eac409cbc44061",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 17821597696,
@@ -4841,6 +4930,7 @@
           // separate entries (tier selection: sc-8508/8509). Sizes are the measured on-disk totals.
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-large-mlx",
+          "revision": "0cf819d00d30d296cee58e02c59b0daa5b8ede89",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -4850,6 +4940,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-large-mlx",
+          "revision": "0cf819d00d30d296cee58e02c59b0daa5b8ede89",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 31248461824,
@@ -4860,6 +4951,7 @@
           // Selectable via per-variant tracking (sc-8508/8509).
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-large-mlx",
+          "revision": "0cf819d00d30d296cee58e02c59b0daa5b8ede89",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 38789746688,
@@ -4969,6 +5061,7 @@
           // quantized). Replaces the gated download + install-time convert. Sizes = measured on-disk.
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-large-turbo-mlx",
+          "revision": "e9166f4632ec64f74d560be3ac778d346f89a364",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -4978,6 +5071,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-large-turbo-mlx",
+          "revision": "e9166f4632ec64f74d560be3ac778d346f89a364",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 31239405568,
@@ -4987,6 +5081,7 @@
           // bf16/ — the dense diffusers tree (sharded transformer), max-fidelity tier (sc-8508/8509).
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-large-turbo-mlx",
+          "revision": "e9166f4632ec64f74d560be3ac778d346f89a364",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 38789746688,
@@ -5082,6 +5177,7 @@
           // (the dense T5-XXL TE dominates even the small backbone, so the tiers are close in size).
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-medium-mlx",
+          "revision": "5413e962bb326db248be2026a93b147c323392b6",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -5091,6 +5187,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-medium-mlx",
+          "revision": "5413e962bb326db248be2026a93b147c323392b6",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 25334730752,
@@ -5100,6 +5197,7 @@
           // bf16/ — the dense diffusers tree, max-fidelity tier (sc-8508/8509).
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-medium-mlx",
+          "revision": "5413e962bb326db248be2026a93b147c323392b6",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 27436347392,
@@ -5218,6 +5316,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
+          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -5228,6 +5327,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
+          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -5237,6 +5337,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
+          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -5380,6 +5481,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
+          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -5390,6 +5492,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
+          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -5399,6 +5502,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
+          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -5836,6 +5940,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sdxl-base-mlx",
+          "revision": "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -5845,6 +5950,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sdxl-base-mlx",
+          "revision": "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 4177386896,
@@ -5859,6 +5965,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sdxl-base-mlx",
+          "revision": "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 6941187536,
@@ -6015,6 +6122,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/realvisxl-mlx",
+          "revision": "e40202d63baef826c7df95a639a811698c1178d2",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -6024,6 +6132,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/realvisxl-mlx",
+          "revision": "e40202d63baef826c7df95a639a811698c1178d2",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 5385840183,
@@ -6032,6 +6141,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/realvisxl-mlx",
+          "revision": "e40202d63baef826c7df95a639a811698c1178d2",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108692804,
@@ -6163,6 +6273,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/realvisxl-lightning-mlx",
+          "revision": "c09fd586989bdc3c658d4acd03e8ae81677ade8e",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -6172,6 +6283,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/realvisxl-lightning-mlx",
+          "revision": "c09fd586989bdc3c658d4acd03e8ae81677ade8e",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 5385843729,
@@ -6180,6 +6292,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/realvisxl-lightning-mlx",
+          "revision": "c09fd586989bdc3c658d4acd03e8ae81677ade8e",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108692804,
@@ -6289,6 +6402,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v1-mlx",
+          "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -6298,6 +6412,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v1-mlx",
+          "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 5385646417,
@@ -6306,6 +6421,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v1-mlx",
+          "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108498305,
@@ -6417,6 +6533,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v2-mlx",
+          "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -6426,6 +6543,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v2-mlx",
+          "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 5385646137,
@@ -6434,6 +6552,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v2-mlx",
+          "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108498177,
@@ -6555,6 +6674,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/realvisxl-mlx",
+          "revision": "e40202d63baef826c7df95a639a811698c1178d2",
           "variant": "bf16",
           "default": true,
           "files": ["bf16/*"],
@@ -6564,6 +6684,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/realvisxl-mlx",
+          "revision": "e40202d63baef826c7df95a639a811698c1178d2",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 5385840183,
@@ -6572,6 +6693,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/realvisxl-mlx",
+          "revision": "e40202d63baef826c7df95a639a811698c1178d2",
           "variant": "q4",
           "files": ["q4/*"],
           "estimatedSizeBytes": 3911656467,
@@ -6745,6 +6867,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-dev-mlx",
+          "revision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -6754,6 +6877,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-dev-mlx",
+          "revision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 18010071290,
@@ -6762,6 +6886,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-dev-mlx",
+          "revision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 33746402173,
@@ -6894,6 +7019,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
+          "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -6904,6 +7030,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
+          "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -6913,6 +7040,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
+          "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -7243,6 +7371,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
+          "revision": "bb1b055249614cf9d7cf4373fbdbc184b77dee88",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -7255,6 +7384,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
+          "revision": "bb1b055249614cf9d7cf4373fbdbc184b77dee88",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -7264,6 +7394,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
+          "revision": "bb1b055249614cf9d7cf4373fbdbc184b77dee88",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -7281,6 +7412,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-ti2v-5b-candle",
+          "revision": "9b173dc8660334a87a11e67de58939afe68f8cb2",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -7291,6 +7423,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-ti2v-5b-candle",
+          "revision": "9b173dc8660334a87a11e67de58939afe68f8cb2",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["windows", "linux"],
@@ -7514,6 +7647,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
+          "revision": "991eb255c544bbb2e1f1e07da4355c2f0a5337b7",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -7529,6 +7663,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
+          "revision": "991eb255c544bbb2e1f1e07da4355c2f0a5337b7",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -7538,6 +7673,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
+          "revision": "991eb255c544bbb2e1f1e07da4355c2f0a5337b7",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -7552,6 +7688,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-t2v-a14b-candle",
+          "revision": "da1909b66b360e1ea8cdeb3e39e40dca172cfa32",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -7562,6 +7699,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-t2v-a14b-candle",
+          "revision": "da1909b66b360e1ea8cdeb3e39e40dca172cfa32",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["windows", "linux"],
@@ -7779,6 +7917,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
+          "revision": "c6c786170031eccc3a1fac0f98f1ad4ff988271e",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -7793,6 +7932,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
+          "revision": "c6c786170031eccc3a1fac0f98f1ad4ff988271e",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -7802,6 +7942,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
+          "revision": "c6c786170031eccc3a1fac0f98f1ad4ff988271e",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -7816,6 +7957,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-i2v-a14b-candle",
+          "revision": "d01bf1ea995c01a5bc545cefb977a320c9cb9fd0",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -7826,6 +7968,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-i2v-a14b-candle",
+          "revision": "d01bf1ea995c01a5bc545cefb977a320c9cb9fd0",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["windows", "linux"],
@@ -8127,6 +8270,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/bernini-mlx",
+          "revision": "533d688f16c8f33dc832890c1e16c11921a2019a",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -8138,6 +8282,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/bernini-mlx",
+          "revision": "533d688f16c8f33dc832890c1e16c11921a2019a",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -8148,6 +8293,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/bernini-mlx",
+          "revision": "533d688f16c8f33dc832890c1e16c11921a2019a",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -8171,6 +8317,7 @@
           // is a follow-up). Size is the bf16 tier estimate (candle loads the converted tree dense).
           "provider": "huggingface",
           "repo": "SceneWorks/bernini",
+          "revision": "f9f95e0ff3d7940664ab8163ebf71bf0c8018b27",
           "files": [],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 87591990679
@@ -8288,6 +8435,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/bernini-mlx",
+          "revision": "533d688f16c8f33dc832890c1e16c11921a2019a",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -8298,6 +8446,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/bernini-mlx",
+          "revision": "533d688f16c8f33dc832890c1e16c11921a2019a",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -8307,6 +8456,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/bernini-mlx",
+          "revision": "533d688f16c8f33dc832890c1e16c11921a2019a",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -8323,6 +8473,7 @@
           // (HF cache dedupes). Loads dense today (off-Mac packed-tier select is a follow-up).
           "provider": "huggingface",
           "repo": "SceneWorks/bernini",
+          "revision": "f9f95e0ff3d7940664ab8163ebf71bf0c8018b27",
           "files": [],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 87591990679
@@ -8421,6 +8572,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/scail2-mlx",
+          "revision": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -8433,6 +8585,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/scail2-mlx",
+          "revision": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -8442,6 +8595,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/scail2-mlx",
+          "revision": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -8921,6 +9075,7 @@
           // the weights. Converted losslessly from nvidia/PiD's model_ema_bf16.pth (sc-7843 converter).
           "provider": "huggingface",
           "repo": "SceneWorks/pid-qwenimage",
+          "revision": "4aeb783a9d3037b75275c42d35d84210c89cb044",
           "files": [],
           "estimatedSizeBytes": 5525193754
         },
@@ -8931,6 +9086,7 @@
           // mirror's LICENSE (Gemma Terms) + Prohibited Use Policy + NOTICE alongside the weights.
           "provider": "huggingface",
           "repo": "SceneWorks/gemma-2-2b-it",
+          "revision": "684c553b5b41a1c835989d89f62f585e6269a7de",
           // Co-requisite (sc-9696): fetched ALONGSIDE the PiD checkpoint, not an alternate to it.
           // Model Manager downloads both, and the entry only reports installed once both are cached
           // (else `resolve_pid_weights` silently no-ops to the native VAE). Shared across all four PiD
@@ -9000,6 +9156,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/pid-flux",
+          "revision": "6d5c1f1049e863f1757f68fd81c6bc850a95609d",
           // Whole-repo download (empty `files`): fetches BOTH the 4K-tuned `2kto4k` student AND the
           // 2K-tuned `res2k` student (`pid_flux_2k.safetensors`, sc-10056) the 2K output tier prefers.
           // Size ≈ 2× the single 2.72 GB student.
@@ -9009,6 +9166,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/gemma-2-2b-it",
+          "revision": "684c553b5b41a1c835989d89f62f585e6269a7de",
           // Co-requisite (sc-9696): fetched ALONGSIDE the PiD checkpoint, not an alternate to it.
           // Model Manager downloads both, and the entry only reports installed once both are cached
           // (else `resolve_pid_weights` silently no-ops to the native VAE). Shared across all four PiD
@@ -9077,6 +9235,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/pid-flux2",
+          "revision": "900de3a7114cbdd8551274ba7773014d934ceca8",
           // Whole-repo download (empty `files`): fetches BOTH the 4K-tuned `2kto4k` student AND the
           // 2K-tuned `res2k` student (`pid_flux2_2k.safetensors`, sc-10056) the 2K output tier prefers.
           // Size ≈ 2× the single 2.73 GB student.
@@ -9086,6 +9245,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/gemma-2-2b-it",
+          "revision": "684c553b5b41a1c835989d89f62f585e6269a7de",
           // Co-requisite (sc-9696): fetched ALONGSIDE the PiD checkpoint, not an alternate to it.
           // Model Manager downloads both, and the entry only reports installed once both are cached
           // (else `resolve_pid_weights` silently no-ops to the native VAE). Shared across all four PiD
@@ -9154,12 +9314,14 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/pid-sdxl",
+          "revision": "70b494831561dc2c181f04a7f057260b8785419a",
           "files": [],
           "estimatedSizeBytes": 2724634940
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/gemma-2-2b-it",
+          "revision": "684c553b5b41a1c835989d89f62f585e6269a7de",
           // Co-requisite (sc-9696): fetched ALONGSIDE the PiD checkpoint, not an alternate to it.
           // Model Manager downloads both, and the entry only reports installed once both are cached
           // (else `resolve_pid_weights` silently no-ops to the native VAE). Shared across all four PiD

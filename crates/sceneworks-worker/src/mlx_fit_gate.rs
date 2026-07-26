@@ -246,8 +246,23 @@ pub(crate) fn sequential_overflow_gb(
 /// the AppleDouble sidecar gotcha). Returns 0 if the directory is missing or holds no weights, which
 /// the gate treats as "no signal".
 pub(crate) fn sum_safetensors_bytes(dir: &Path) -> u64 {
-    fn walk(dir: &Path, total: &mut u64) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
+    fn walk(
+        dir: &Path,
+        visited_dirs: &mut std::collections::HashSet<std::path::PathBuf>,
+        total: &mut u64,
+    ) {
+        // `metadata` below intentionally follows file symlinks because Hugging Face
+        // snapshots link shards into `blobs/`. Directory links are different: an
+        // operator-provided model root may contain a link/junction cycle. Canonical
+        // directory identity makes that traversal finite and also avoids double-counting
+        // an aliased subtree.
+        let Ok(canonical_dir) = std::fs::canonicalize(dir) else {
+            return;
+        };
+        if !visited_dirs.insert(canonical_dir.clone()) {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(canonical_dir) else {
             return;
         };
         for entry in entries.flatten() {
@@ -258,7 +273,7 @@ pub(crate) fn sum_safetensors_bytes(dir: &Path) -> u64 {
                 continue;
             };
             if meta.is_dir() {
-                walk(&path, total);
+                walk(&path, visited_dirs, total);
                 continue;
             }
             let name = entry.file_name();
@@ -269,7 +284,7 @@ pub(crate) fn sum_safetensors_bytes(dir: &Path) -> u64 {
         }
     }
     let mut total = 0;
-    walk(dir, &mut total);
+    walk(dir, &mut std::collections::HashSet::new(), &mut total);
     total
 }
 
@@ -1393,6 +1408,25 @@ mod tests {
         // Summing the SNAPSHOT dir follows the symlink to the 4096-byte blob and skips the `._`
         // sidecar; the `blobs/` dir is not under the snapshot, so nothing is double-counted.
         assert_eq!(sum_safetensors_bytes(&root.join("snapshots/hash")), 4096);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sum_safetensors_terminates_on_directory_symlink_cycles() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "mlx_fit_gate_cycle_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let weights = root.join("weights");
+        std::fs::create_dir_all(&weights).expect("mk weights");
+        std::fs::write(weights.join("model.safetensors"), vec![0_u8; 4096]).expect("write weights");
+        symlink(&root, weights.join("cycle")).expect("create directory cycle");
+
+        assert_eq!(sum_safetensors_bytes(&root), 4096);
 
         std::fs::remove_dir_all(&root).ok();
     }

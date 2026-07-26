@@ -29,6 +29,7 @@ export const GPU_REQUIRED_JOB_TYPES = new Set([
 
 // Utility job types that run on any worker (no GPU required).
 export const NON_GPU_JOB_TYPES = new Set([
+  "dataset_parquet_import",
   "model_download",
   "model_import",
   "model_convert",

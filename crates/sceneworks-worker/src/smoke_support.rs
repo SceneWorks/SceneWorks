@@ -19,6 +19,35 @@ use std::path::Path;
 
 use gen_core::Image;
 
+#[cfg(target_os = "macos")]
+pub(crate) const QUANT_TIERS: &[(&str, i32)] = &[("q8", 8), ("q4", 4)];
+
+#[cfg(target_os = "macos")]
+pub(crate) fn tier_dir_size_bytes(dir: &Path) -> u64 {
+    let mut total = 0;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            total += tier_dir_size_bytes(&path);
+        } else if let Ok(metadata) = path.metadata() {
+            total += metadata.len();
+        }
+    }
+    total
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn report_tier(tier: &str, out_dir: &Path) {
+    let size = tier_dir_size_bytes(out_dir);
+    eprintln!(
+        "[[TIER]] {{\"tier\":\"{tier}\",\"dir\":\"{}\",\"diskSizeBytes\":{size}}}",
+        out_dir.display()
+    );
+}
+
 /// General degenerate-decode floor for the mean per-pixel std-dev sanity check (sc-9838, F-122).
 ///
 /// This is the model-agnostic "is the decode alive?" guard: a NaN / all-black / flat collapse pulls

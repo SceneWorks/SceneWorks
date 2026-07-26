@@ -26,6 +26,7 @@
 //! Each tier prints a `[[TIER]] {json}` line (tier, dir, diskSizeBytes) so the manifest
 //! `estimatedSizeBytes`/`footprint.diskSizeBytes` can be backfilled with the exact hosted sizes.
 
+use crate::smoke_support::report_tier;
 use std::path::{Path, PathBuf};
 
 /// The three tiers to build: `(subdir, Option<(bits, group_size)>)`. bf16 is dense (`None`); q8/q4
@@ -33,23 +34,6 @@ use std::path::{Path, PathBuf};
 /// same group `WanModelConfig::from_config_json` assumes and the load path reconstructs).
 const TIERS: &[(&str, Option<(i32, i32)>)] =
     &[("bf16", None), ("q8", Some((8, 64))), ("q4", Some((4, 64)))];
-
-/// Recursively sum the byte size of every file under `dir` (the on-disk size of a built tier).
-fn dir_size_bytes(dir: &Path) -> u64 {
-    let mut total = 0;
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            total += dir_size_bytes(&path);
-        } else if let Ok(meta) = path.metadata() {
-            total += meta.len();
-        }
-    }
-    total
-}
 
 /// Resolve the `tokenizer.json` to copy into each tier: the explicit env override, then
 /// `<native>/tokenizer.json`, then the cached `SceneWorks/wan2.2-t2v-a14b-mlx` turnkey's
@@ -149,12 +133,7 @@ fn wan_t2v_14b_build_tiers() {
                 "built {tier} tier is missing {file}"
             );
         }
-        let size = dir_size_bytes(&out_dir);
-        // Machine-readable line for backfilling the manifest sizes.
-        eprintln!(
-            "[[TIER]] {{\"tier\":\"{tier}\",\"dir\":\"{}\",\"diskSizeBytes\":{size}}}",
-            out_dir.display()
-        );
+        report_tier(tier, &out_dir);
     }
     eprintln!(
         "done — upload the tier subdirs:\n  hf upload SceneWorks/wan2.2-t2v-a14b-mlx {} --include 'bf16/*' 'q8/*' 'q4/*'",

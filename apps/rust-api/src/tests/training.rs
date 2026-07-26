@@ -49,6 +49,131 @@ async fn training_presets_route_returns_builtin_registry() {
 }
 
 #[tokio::test]
+async fn parquet_import_job_queues_for_empty_dataset_and_finalizes_staged_items() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Parquet Import Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let project_path = std::path::PathBuf::from(project["path"].as_str().expect("project path"));
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({ "name": "LAION subset", "items": [] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dataset_id = dataset["id"].as_str().expect("dataset id");
+    let source = temp_dir.path().join("laion-metadata");
+    std::fs::create_dir_all(&source).expect("source directory creates");
+    std::fs::write(source.join("part-00000.snappy.parquet"), b"PAR1")
+        .expect("placeholder shard writes");
+
+    let (status, rejected) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/parquet-import-jobs"
+        ),
+        json!({
+            "sourcePath": source.clone(),
+            "maxItems": 100_001
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(rejected["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("100000")));
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/parquet-import-jobs"
+        ),
+        json!({
+            "sourcePath": source,
+            "maxItems": 100_000,
+            "minEdge": 384,
+            "concurrency": 8,
+            "captionIncludes": ["portrait", "person"],
+            "captionExcludes": ["logo"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["type"], "dataset_parquet_import");
+    assert_eq!(job["payload"]["urlColumn"], "URL");
+    assert_eq!(job["payload"]["captionColumn"], "TEXT");
+    assert_eq!(job["payload"]["maxItems"], 100_000);
+    assert_eq!(job["payload"]["minEdge"], 384);
+    assert_eq!(job["payload"]["concurrency"], 8);
+    assert_eq!(
+        job["payload"]["captionIncludes"],
+        json!(["portrait", "person"])
+    );
+    assert_eq!(job["payload"]["captionExcludes"], json!(["logo"]));
+
+    let job_id = job["id"].as_str().expect("job id");
+    let staging = project_path
+        .join("training")
+        .join("datasets")
+        .join(dataset_id)
+        .join("parquet-imports")
+        .join(job_id);
+    std::fs::create_dir_all(&staging).expect("staging creates");
+    std::fs::write(staging.join("pq_abc.png"), b"png-bytes").expect("staged image writes");
+    let relative = format!("training/datasets/{dataset_id}/parquet-imports/{job_id}/pq_abc.png");
+    let (status, finalized) = request(
+        app,
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/parquet-import-finalize"
+        ),
+        json!({
+            "jobId": job_id,
+            "datasetVersion": dataset["version"],
+            "items": [{
+                "id": "pq_abc",
+                "path": relative,
+                "displayName": "pq_abc.png",
+                "caption": {
+                    "text": "a cinematic portrait",
+                    "source": "imported",
+                    "triggerWords": []
+                },
+                "width": 1024,
+                "height": 768
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(finalized["version"], 2);
+    assert_eq!(finalized["items"][0]["id"], "pq_abc");
+    assert_eq!(
+        finalized["items"][0]["caption"]["text"],
+        "a cinematic portrait"
+    );
+    assert_eq!(finalized["items"][0]["caption"]["source"], "imported");
+    assert!(project_path
+        .join("training")
+        .join("datasets")
+        .join(dataset_id)
+        .join("images")
+        .join("pq_abc.png")
+        .exists());
+}
+
+#[tokio::test]
 async fn training_dataset_routes_persist_and_validate_project_assets() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
@@ -1723,6 +1848,7 @@ async fn completed_training_job_registers_lora_with_provenance() {
 
     let (job_id, output_dir, adapter_path) =
         submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job(&app, &job_id).await;
 
     // The worker writes the final adapter into the resolved output dir before
     // it reports completion, alongside step checkpoints it does not clean up.
@@ -1749,6 +1875,7 @@ async fn completed_training_job_registers_lora_with_provenance() {
             "stage": "completed",
             "progress": 1,
             "message": "Trained LoRA saved.",
+            "workerId": TEST_TRAINING_WORKER_ID,
             "result": { "outputPath": adapter_path.display().to_string() }
         }),
     )
@@ -1838,6 +1965,7 @@ async fn failed_or_unwritten_training_job_registers_no_lora() {
     // A failed job never registers, even though a manifest entry was staged.
     let (failed_job_id, _output_dir, _adapter_path) =
         submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job(&app, &failed_job_id).await;
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -1847,6 +1975,7 @@ async fn failed_or_unwritten_training_job_registers_no_lora() {
             "stage": "failed",
             "progress": 1,
             "message": "Training failed.",
+            "workerId": TEST_TRAINING_WORKER_ID,
             "error": "CUDA out of memory"
         }),
     )
@@ -1857,6 +1986,7 @@ async fn failed_or_unwritten_training_job_registers_no_lora() {
     // broken registry entry either, and the failure is surfaced in the result.
     let (completed_no_weights_id, _, _) =
         submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job(&app, &completed_no_weights_id).await;
     let (status, completed) = request(
         app.clone(),
         "POST",
@@ -1865,7 +1995,8 @@ async fn failed_or_unwritten_training_job_registers_no_lora() {
             "status": "completed",
             "stage": "completed",
             "progress": 1,
-            "message": "Reported complete without weights."
+            "message": "Reported complete without weights.",
+            "workerId": TEST_TRAINING_WORKER_ID
         }),
     )
     .await;
@@ -1964,6 +2095,472 @@ async fn terminal_training_job_completed_report_registers_no_lora_and_409s() {
     );
 }
 
+/// The pre-side-effect snapshot fixed the already-terminal case but still left
+/// a TOCTOU window: another terminal report could commit while completion was
+/// registering its LoRA. Hold completion immediately before authoritative
+/// acceptance, let `failed` win, then prove the losing 409 wrote no catalog.
+#[tokio::test]
+async fn racing_terminal_training_report_loses_before_lora_side_effects() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (job_id, output_dir, adapter_path) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    stage_trained_adapter(&output_dir, &adapter_path);
+    claim_training_job(&app, &job_id).await;
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    *state.progress_before_accept_once.lock() = Some(barrier.clone());
+    let completing_app = app.clone();
+    let completing_job_id = job_id.clone();
+    let completing_adapter_path = adapter_path.display().to_string();
+    let completing = tokio::spawn(async move {
+        request(
+            completing_app,
+            "POST",
+            &format!("/api/v1/jobs/{completing_job_id}/progress"),
+            json!({
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Trained LoRA saved.",
+                "workerId": TEST_TRAINING_WORKER_ID,
+                "result": { "outputPath": completing_adapter_path }
+            }),
+        )
+        .await
+    });
+
+    // Completion has parsed the request but has not yet attempted the atomic
+    // ownership/terminal transition.
+    barrier.wait().await;
+    let (failed_status, failed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "failed",
+            "stage": "failed",
+            "progress": 1,
+            "message": "Competing terminal report won.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "error": "training failed"
+        }),
+    )
+    .await;
+    assert_eq!(failed_status, StatusCode::OK);
+    assert_eq!(failed["status"], "failed");
+    barrier.wait().await;
+
+    let (completed_status, _) = completing.await.expect("completion request joins");
+    assert_eq!(
+        completed_status,
+        StatusCode::CONFLICT,
+        "the completion report that loses authoritative acceptance must 409"
+    );
+
+    let (status, job) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(job["status"], "failed");
+
+    let (status, loras) = request(
+        app,
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .all(|item| item["name"] != json!("Aurora Style")),
+        "the losing completed report must not register a ghost LoRA"
+    );
+}
+
+/// A terminal row is committed before catalog/project side effects so a losing
+/// report cannot create ghosts. A production worker does not repeat terminal
+/// progress after the API has already committed `completed`, so recovery must
+/// be API-driven across restart. The test explicitly replays one failing
+/// same-terminal request only to pin event idempotency; it never completes side
+/// effects and recovery still occurs without a successful worker retry.
+#[tokio::test]
+async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_successful_worker_retry(
+) {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Retry Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (job_id, output_dir, adapter_path) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    stage_trained_adapter(&output_dir, &adapter_path);
+    claim_training_job(&app, &job_id).await;
+
+    let completion = json!({
+        "status": "completed",
+        "stage": "completed",
+        "progress": 1,
+        "message": "Trained LoRA saved.",
+        "workerId": TEST_TRAINING_WORKER_ID,
+        "result": { "outputPath": adapter_path.display().to_string() }
+    });
+    let mut failure_events = state.events.subscribe();
+    *state.progress_side_effects_fail_once.lock() = true;
+    let (first_status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        completion.clone(),
+    )
+    .await;
+    assert_eq!(
+        first_status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the injected failure must happen after terminal acceptance"
+    );
+    let failure_event_names = drain_event_names(&mut failure_events).await;
+    assert_eq!(
+        failure_event_names
+            .iter()
+            .filter(|name| name.as_str() == "job.updated")
+            .count(),
+        1,
+        "the committed terminal snapshot must be published exactly once on side-effect failure: \
+         {failure_event_names:?}"
+    );
+    assert_eq!(
+        failure_event_names
+            .iter()
+            .filter(|name| name.as_str() == "queue.updated")
+            .count(),
+        1,
+        "the committed terminal transition must refresh queue counts despite the 500: \
+         {failure_event_names:?}"
+    );
+
+    // A same-terminal worker retry does not create another queue transition.
+    // Keep the handoff pending for startup recovery and prove the retry emits
+    // neither a duplicate terminal snapshot nor a duplicate queue refresh.
+    let mut retry_events = state.events.subscribe();
+    *state.progress_side_effects_fail_once.lock() = true;
+    let (retry_status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        completion,
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::INTERNAL_SERVER_ERROR);
+    let retry_event_names = drain_event_names(&mut retry_events).await;
+    assert!(
+        retry_event_names.is_empty(),
+        "a failed same-terminal retry changes neither the job snapshot nor queue composition: \
+         {retry_event_names:?}"
+    );
+
+    let (status, accepted) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(accepted["status"], "completed");
+    assert_eq!(
+        accepted["result"]["loraRegistered"],
+        Value::Null,
+        "failed post-acceptance work must remain pending, not look finalized"
+    );
+    let (status, failed_queue) = request(app.clone(), "GET", "/api/v1/queue", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        failed_queue["activeJobs"]
+            .as_array()
+            .expect("active jobs array")
+            .iter()
+            .filter(|job| job["id"] == json!(job_id))
+            .count(),
+        0,
+        "the durably terminal job must leave the active queue even while side effects are pending"
+    );
+    let (status, partially_registered) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        partially_registered
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .filter(|item| item["name"] == json!("Aurora Style"))
+            .count(),
+        1,
+        "the injected interruption occurs after the first idempotent catalog upsert"
+    );
+
+    // Drop every clone of the first process's router/state and reconstruct the
+    // application from the same durable data. The production lifecycle task
+    // invokes this drain immediately at startup and once per second thereafter;
+    // call one cycle directly so the regression is deterministic and does not
+    // substitute a manual terminal progress retry.
+    drop(app);
+    drop(state);
+    let (restarted_app, restarted_state) =
+        create_app_with_state(settings).expect("restarted app and state create");
+    let mut recovery_events = restarted_state.events.subscribe();
+    let recovery_task =
+        crate::jobs::spawn_terminal_progress_side_effect_recovery(restarted_state.clone());
+    let recovered = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let (status, job) = request(
+                restarted_app.clone(),
+                "GET",
+                &format!("/api/v1/jobs/{job_id}"),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            if job["result"]["loraRegistered"] == json!(true) {
+                break job;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("production startup recovery must finalize the durable pending row");
+    recovery_task.abort();
+    assert_eq!(recovered["status"], "completed");
+    assert_eq!(recovered["result"]["loraRegistered"], true);
+    let recovery_event_names = drain_event_names(&mut recovery_events).await;
+    assert_eq!(
+        recovery_event_names
+            .iter()
+            .filter(|name| name.as_str() == "job.updated")
+            .count(),
+        1,
+        "recovery must publish the one augmented terminal snapshot: {recovery_event_names:?}"
+    );
+    assert_eq!(
+        recovery_event_names
+            .iter()
+            .filter(|name| name.as_str() == "queue.updated")
+            .count(),
+        0,
+        "recovery must not duplicate the queue transition already published at terminal acceptance: \
+         {recovery_event_names:?}"
+    );
+    let (status, recovered_queue) =
+        request(restarted_app.clone(), "GET", "/api/v1/queue", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        recovered_queue["activeJobs"]
+            .as_array()
+            .expect("active jobs array")
+            .iter()
+            .filter(|job| job["id"] == json!(job_id))
+            .count(),
+        0,
+        "queue counts must remain converged after recovery"
+    );
+    let (status, reconnect_events) =
+        request_sse_prefix(restarted_app.clone(), "/api/v1/jobs/events", 3).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reconnect_events[0].0, "ready");
+    assert_eq!(reconnect_events[1].0, "jobs.snapshot");
+    assert!(reconnect_events[1].1["jobs"].is_array());
+    assert_eq!(reconnect_events[2].0, "queue.updated");
+    assert_eq!(
+        reconnect_events[2].1["activeJobs"]
+            .as_array()
+            .expect("reconnect active jobs array")
+            .iter()
+            .filter(|job| job["id"] == json!(job_id))
+            .count(),
+        0,
+        "a reconnect after crash recovery must receive an authoritative queue snapshot even \
+         though the original terminal event and the same-terminal retry emitted no usable refresh"
+    );
+
+    assert_eq!(
+        crate::jobs::recover_pending_terminal_progress_side_effects_once(&restarted_state)
+            .await
+            .expect("second recovery scans"),
+        0,
+        "a cleared handoff must not be processed twice"
+    );
+    let (status, loras) = request(
+        restarted_app,
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .filter(|item| item["name"] == json!("Aurora Style"))
+            .count(),
+        1,
+        "retry-safe registration must upsert rather than duplicate"
+    );
+}
+
+/// A fixed oldest-first batch must not let persistent failures monopolize the
+/// recovery queue. The first pass poisons a full production-sized batch; the
+/// durable retry schedule must rotate all of them out so the newer healthy row
+/// completes on the next pass, without retrying the poison rows every second.
+#[tokio::test]
+async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation() {
+    use sceneworks_core::contracts::{JobStatus, JobType, ProgressStage};
+    use sceneworks_core::jobs_store::{CreateJob, ProgressUpdate, RegisterWorker};
+
+    const BATCH: usize = crate::jobs::PROGRESS_SIDE_EFFECT_RECOVERY_BATCH;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let (_, state) = create_app_with_state(settings.clone()).expect("app and state create");
+    state
+        .jobs_store
+        .register_worker(RegisterWorker {
+            worker_id: "recovery-fairness-worker".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: Some("Test GPU".to_owned()),
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("worker registers");
+
+    for _ in 0..=BATCH {
+        state
+            .jobs_store
+            .create_job(CreateJob {
+                job_type: JobType::ImageGenerate,
+                project_id: None,
+                project_name: None,
+                payload: serde_json::Map::new(),
+                requested_gpu: "auto".to_owned(),
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            })
+            .expect("recovery fixture job creates");
+        let claimed = state
+            .jobs_store
+            .claim_next_job("recovery-fairness-worker")
+            .expect("fixture claim succeeds")
+            .expect("fixture job is claimable");
+        state
+            .jobs_store
+            .update_job_progress_with_outcome(
+                &claimed.id,
+                ProgressUpdate {
+                    status: JobStatus::Failed,
+                    stage: ProgressStage::Failed,
+                    progress: 1.0,
+                    message: "terminal fixture".to_owned(),
+                    error: Some("fixture failure".to_owned()),
+                    result: Some(serde_json::Map::new()),
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                    worker_id: Some("recovery-fairness-worker".to_owned()),
+                },
+            )
+            .expect("terminal fixture is accepted");
+    }
+
+    let poison_ids = state
+        .jobs_store
+        .pending_terminal_progress_side_effect_job_ids(BATCH)
+        .expect("initial recovery batch enumerates");
+    assert_eq!(
+        poison_ids.len(),
+        BATCH,
+        "fixture must poison one complete production batch"
+    );
+    state
+        .progress_side_effects_fail_job_ids
+        .lock()
+        .extend(poison_ids.iter().cloned());
+
+    assert_eq!(
+        crate::jobs::recover_pending_terminal_progress_side_effects_once(&state)
+            .await
+            .expect("poison batch recovery returns"),
+        0
+    );
+    let first_attempts = state.progress_side_effects_attempts.lock().clone();
+    assert!(
+        poison_ids
+            .iter()
+            .all(|job_id| first_attempts.get(job_id) == Some(&1)),
+        "every poison row must be attempted exactly once in the first pass"
+    );
+
+    drop(state);
+    let (_, restarted_state) =
+        create_app_with_state(settings).expect("restarted app and state create");
+    restarted_state
+        .progress_side_effects_fail_job_ids
+        .lock()
+        .extend(poison_ids);
+    assert_eq!(
+        crate::jobs::recover_pending_terminal_progress_side_effects_once(&restarted_state)
+            .await
+            .expect("healthy recovery returns"),
+        1,
+        "durably deferred poison rows must not starve the newer healthy handoff after restart"
+    );
+    assert_eq!(
+        crate::jobs::recover_pending_terminal_progress_side_effects_once(&restarted_state)
+            .await
+            .expect("bounded retry scan returns"),
+        0
+    );
+    assert_eq!(
+        *restarted_state.progress_side_effects_attempts.lock(),
+        std::collections::HashMap::new(),
+        "poison rows must stay out of the due set across restart until durable backoff expires"
+    );
+}
+
 /// sc-11213 (F-028): a `completed` report from a caller that does not own the job
 /// (here, any report carrying a `workerId` for a job whose owner is unset) must
 /// receive the 409 AND must NOT register a LoRA — the ownership check has to gate
@@ -2011,6 +2608,36 @@ async fn non_owner_completed_report_registers_no_lora_and_409s() {
         "a completed report from a non-owner must 409"
     );
 
+    // Omitting workerId is not a privileged/internal path: the same unclaimed
+    // job must reject the report before registration side effects.
+    let (status, _rejected) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Ownerless completion.",
+            "result": { "outputPath": adapter_path.display().to_string() }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "an ownerless completed report must 409"
+    );
+    let (status, unchanged) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unchanged["status"], "queued");
+
     // No catalog entry: a non-owned report must not register a LoRA.
     let (status, loras) = request(
         app,
@@ -2051,9 +2678,9 @@ async fn winning_completed_report_still_registers_lora() {
     let (job_id, output_dir, adapter_path) =
         submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
     stage_trained_adapter(&output_dir, &adapter_path);
+    claim_training_job(&app, &job_id).await;
 
-    // A trusted (owner-equivalent, worker_id unset both sides) report against the
-    // still-non-terminal job wins the race and registers normally.
+    // The claimed worker's completion wins the race and registers normally.
     let (status, completed) = request(
         app.clone(),
         "POST",
@@ -2063,6 +2690,7 @@ async fn winning_completed_report_still_registers_lora() {
             "stage": "completed",
             "progress": 1,
             "message": "Trained LoRA saved.",
+            "workerId": TEST_TRAINING_WORKER_ID,
             "result": { "outputPath": adapter_path.display().to_string() }
         }),
     )
@@ -2141,6 +2769,7 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let job_id = job["id"].as_str().expect("job id").to_owned();
+    claim_training_job(&app, &job_id).await;
 
     let (status, completed) = request(
         app.clone(),
@@ -2150,7 +2779,8 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
             "status": "completed",
             "stage": "completed",
             "progress": 1,
-            "message": "Crafted completion."
+            "message": "Crafted completion.",
+            "workerId": TEST_TRAINING_WORKER_ID
         }),
     )
     .await;
@@ -2222,6 +2852,7 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
     )
     .await;
     let evil_job_id = evil_job["id"].as_str().expect("job id").to_owned();
+    claim_training_job(&app, &evil_job_id).await;
     let (status, completed) = request(
         app.clone(),
         "POST",
@@ -2230,7 +2861,8 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
             "status": "completed",
             "stage": "completed",
             "progress": 1,
-            "message": "Traversal completion."
+            "message": "Traversal completion.",
+            "workerId": TEST_TRAINING_WORKER_ID
         }),
     )
     .await;
@@ -2268,6 +2900,7 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
     )
     .await;
     let files_job_id = files_job["id"].as_str().expect("job id").to_owned();
+    claim_training_job(&app, &files_job_id).await;
     let (status, completed) = request(
         app.clone(),
         "POST",
@@ -2276,7 +2909,8 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
             "status": "completed",
             "stage": "completed",
             "progress": 1,
-            "message": "Files traversal completion."
+            "message": "Files traversal completion.",
+            "workerId": TEST_TRAINING_WORKER_ID
         }),
     )
     .await;

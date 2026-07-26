@@ -103,7 +103,7 @@ export async function emptyTrash(trashedAssets, purgeAsset) {
     return;
   }
   for (const asset of items) {
-    // eslint-disable-next-line no-await-in-loop -- sequential keeps state updates predictable
+    // Sequential awaits keep state updates predictable.
     await purgeAsset(asset);
   }
 }
@@ -183,6 +183,7 @@ function normalizeTagInput(value) {
 
 function AssetTags({ asset, availableTags = [], updateAssetTags = () => {} }) {
   const [draft, setDraft] = React.useState("");
+  const suggestionsId = React.useId();
   const tags = Array.isArray(asset.tags) ? asset.tags : [];
   const suggestions = availableTags.filter((tag) => !tags.includes(tag));
 
@@ -216,12 +217,12 @@ function AssetTags({ asset, availableTags = [], updateAssetTags = () => {} }) {
       <form className="asset-tag-form" onSubmit={submit}>
         <input
           aria-label="Add asset tag"
-          list="asset-tag-suggestions"
+          list={suggestionsId}
           onChange={(event) => setDraft(event.target.value)}
           placeholder="Add tag"
           value={draft}
         />
-        <datalist id="asset-tag-suggestions">
+        <datalist id={suggestionsId}>
           {suggestions.map((tag) => (
             <option key={tag} value={tag} />
           ))}
@@ -229,6 +230,42 @@ function AssetTags({ asset, availableTags = [], updateAssetTags = () => {} }) {
         <button type="submit">Add</button>
       </form>
     </div>
+  );
+}
+
+function AssetStatusActions({
+  asset,
+  deleteAsset,
+  purgeAsset,
+  updateAssetStatus,
+  danger = false,
+  children = null,
+}) {
+  const dangerClass = danger ? "danger-action" : undefined;
+  return (
+    <>
+      <button onClick={() => updateAssetStatus(asset, { favorite: !asset.status?.favorite })} type="button">
+        {asset.status?.favorite ? "Unfavorite" : "Favorite"}
+      </button>
+      <button onClick={() => updateAssetStatus(asset, { rejected: !asset.status?.rejected })} type="button">
+        {asset.status?.rejected ? "Restore" : "Reject"}
+      </button>
+      {children}
+      {asset.status?.trashed ? (
+        <>
+          <button onClick={() => updateAssetStatus(asset, { trashed: false })} type="button">
+            Restore
+          </button>
+          <button className={dangerClass} onClick={() => purgeAsset(asset)} type="button">
+            Purge
+          </button>
+        </>
+      ) : (
+        <button className={dangerClass} onClick={() => deleteAsset(asset)} type="button">
+          Discard
+        </button>
+      )}
+    </>
   );
 }
 
@@ -593,41 +630,28 @@ export function AssetDetail({
       <RatingControl asset={asset} updateAssetStatus={updateAssetStatus} />
       <CharacterAssetLinker asset={asset} characters={characters} onMoveToCharacter={onMoveToCharacter} />
       <div className="detail-actions">
-        <button onClick={() => updateAssetStatus(asset, { favorite: !asset.status?.favorite })} type="button">
-          {asset.status?.favorite ? "Unfavorite" : "Favorite"}
-        </button>
-        <button onClick={() => updateAssetStatus(asset, { rejected: !asset.status?.rejected })} type="button">
-          {asset.status?.rejected ? "Restore" : "Reject"}
-        </button>
-        {asset.type === "image" ? (
-          <button onClick={() => onSendImage(asset)} type="button">
-            Send to Image
-          </button>
-        ) : null}
-        {asset.type === "image" ? (
-          <button onClick={() => onSendVideo(asset)} type="button">
-            Send to Video
-          </button>
-        ) : null}
-        {["image", "video", "upload", "frame"].includes(asset.type) ? (
-          <button onClick={() => onSendEditor(asset)} type="button">
-            Send to Editor
-          </button>
-        ) : null}
-        {asset.status?.trashed ? (
-          <>
-            <button onClick={() => updateAssetStatus(asset, { trashed: false })} type="button">
-              Restore
+        <AssetStatusActions
+          asset={asset}
+          deleteAsset={deleteAsset}
+          purgeAsset={purgeAsset}
+          updateAssetStatus={updateAssetStatus}
+        >
+          {asset.type === "image" ? (
+            <button onClick={() => onSendImage(asset)} type="button">
+              Send to Image
             </button>
-            <button onClick={() => purgeAsset(asset)} type="button">
-              Purge
+          ) : null}
+          {asset.type === "image" ? (
+            <button onClick={() => onSendVideo(asset)} type="button">
+              Send to Video
             </button>
-          </>
-        ) : (
-          <button onClick={() => deleteAsset(asset)} type="button">
-            Discard
-          </button>
-        )}
+          ) : null}
+          {["image", "video", "upload", "frame"].includes(asset.type) ? (
+            <button onClick={() => onSendEditor(asset)} type="button">
+              Send to Editor
+            </button>
+          ) : null}
+        </AssetStatusActions>
       </div>
       <dl>
         <div>
@@ -661,26 +685,12 @@ export function AssetCard({ asset, deleteAsset, purgeAsset, onPreview, updateAss
         <LikenessBadge asset={asset} />
       </button>
       <div className="review-actions">
-        <button onClick={() => updateAssetStatus(asset, { favorite: !asset.status?.favorite })} type="button">
-          {asset.status?.favorite ? "Saved" : "Favorite"}
-        </button>
-        <button onClick={() => updateAssetStatus(asset, { rejected: !asset.status?.rejected })} type="button">
-          {asset.status?.rejected ? "Restore" : "Reject"}
-        </button>
-        {asset.status?.trashed ? (
-          <>
-            <button onClick={() => updateAssetStatus(asset, { trashed: false })} type="button">
-              Restore
-            </button>
-            <button onClick={() => purgeAsset(asset)} type="button">
-              Purge
-            </button>
-          </>
-        ) : (
-          <button onClick={() => deleteAsset(asset)} type="button">
-            Discard
-          </button>
-        )}
+        <AssetStatusActions
+          asset={asset}
+          deleteAsset={deleteAsset}
+          purgeAsset={purgeAsset}
+          updateAssetStatus={updateAssetStatus}
+        />
       </div>
     </article>
   );
@@ -859,7 +869,7 @@ function PreviewContextMenu({ x, y, items, submenu, onClose }) {
   );
 }
 
-export function FullscreenPreview({
+function FullscreenPreviewComponent({
   asset,
   deleteAsset,
   nextAsset,
@@ -877,6 +887,8 @@ export function FullscreenPreview({
   const [variantMode, setVariantMode] = React.useState("upscaled");
   React.useEffect(() => {
     setVariantMode(asset.variants?.upscaled ? "upscaled" : "original");
+    // Variant identity controls reset; catalog object refreshes must preserve the user's mode.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [asset.id, asset.variants?.upscaled?.id]);
   const displayedAsset = hasUpscaleVariants ? asset.variants[variantMode] : asset;
 
@@ -1299,28 +1311,17 @@ export function FullscreenPreview({
                 Edit
               </button>
             ) : null}
-            <button onClick={() => updateAssetStatus(asset, { favorite: !asset.status?.favorite })} type="button">
-              {asset.status?.favorite ? "Saved" : "Favorite"}
-            </button>
-            <button onClick={() => updateAssetStatus(asset, { rejected: !asset.status?.rejected })} type="button">
-              {asset.status?.rejected ? "Restore" : "Reject"}
-            </button>
-            {asset.status?.trashed ? (
-              <>
-                <button onClick={() => updateAssetStatus(asset, { trashed: false })} type="button">
-                  Restore
-                </button>
-                <button className="danger-action" onClick={() => purgeAsset(asset)} type="button">
-                  Purge
-                </button>
-              </>
-            ) : (
-              <button className="danger-action" onClick={() => deleteAsset(asset)} type="button">
-                Discard
-              </button>
-            )}
+            <AssetStatusActions
+              asset={asset}
+              deleteAsset={deleteAsset}
+              danger
+              purgeAsset={purgeAsset}
+              updateAssetStatus={updateAssetStatus}
+            />
           </div>
         </footer>
     </Modal>
   );
 }
+
+export const FullscreenPreview = React.memo(FullscreenPreviewComponent);

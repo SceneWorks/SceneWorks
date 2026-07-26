@@ -65,8 +65,8 @@ describe("selectionAfterDuplicateRemoval (sc-6539 one-tap dedupe mapping)", () =
 });
 
 // The dataset-save gate in the app-wide vocabulary (epic 10644, sc-10648). A missing name
-// or empty selection is a silent requirement; the one thing that earns a chip is a
-// selection holding assets that went unavailable after they were picked.
+// is a silent requirement; an empty selection is valid so a Parquet import has a persisted
+// destination. The one thing that earns a chip is a selected asset that went unavailable.
 describe("datasetSaveValidation", () => {
   const whole = { name: "Kelsie", selectedAssetIds: ["a", "b"] };
   const kinds = (issues, field) => issues.filter((entry) => entry.field === field).map((entry) => entry.kind);
@@ -84,10 +84,11 @@ describe("datasetSaveValidation", () => {
     expect(summarize(issues).ready).toBe(false);
   });
 
-  it("requires at least one asset, silently", () => {
+  it("allows a named empty dataset for Parquet import", () => {
     const issues = datasetSaveValidation({ ...whole, selectedAssetIds: [] }, { health: { disabledItems: 0 } });
-    expect(kinds(issues, "assets")).toEqual(["requirement"]);
+    expect(kinds(issues, "assets")).toEqual([]);
     expect(summarize(issues).surfaced).toEqual([]);
+    expect(summarize(issues).ready).toBe(true);
   });
 
   // The one improvement this migration buys: a dead Save that used to say nothing (the
@@ -106,12 +107,10 @@ describe("datasetSaveValidation", () => {
     expect(summary.surfaced[0].message).toContain("it has been");
   });
 
-  // An empty selection is a requirement, not the disabledItems error — order matters, or a
-  // brand-new dataset would nag about "unavailable images" it doesn't have.
-  it("prefers the empty-selection requirement over the unavailable error", () => {
+  // A stale health count must not prevent creating a genuinely empty Parquet destination.
+  it("ignores unavailable counts when the selection is empty", () => {
     const issues = datasetSaveValidation({ ...whole, selectedAssetIds: [] }, { health: { disabledItems: 5 } });
-    expect(issues).toHaveLength(1);
-    expect(issues[0].kind).toBe("requirement");
+    expect(issues).toEqual([]);
   });
 
   it("tolerates a missing health context", () => {

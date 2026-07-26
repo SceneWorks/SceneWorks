@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useLayoutEffect, useState } from "react";
 import { AssetBatchModal, AssetSelectionBar, useAssetBatch } from "../assetBatch.jsx";
 import { foldUpscaledAssetVariants } from "../assetVariants.js";
 import { AssetDetail, AssetGrid, emptyTrash } from "../components/assetPanels.jsx";
@@ -6,6 +6,7 @@ import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";
 import { isLibraryAsset, terminalStatuses } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
+import { recordStartupMark } from "../startupTiming.js";
 
 // Free-text Library search across an asset's display name, prompt, and tags.
 // Case-insensitive substring match; an empty needle matches everything so callers
@@ -24,6 +25,9 @@ export function LibraryScreen() {
   const {
     activeProject,
     assets,
+    assetsReady = false,
+    assetsLoading = false,
+    assetsError = "",
     jobs = [],
     imageModels = [],
     createVqaJob,
@@ -42,6 +46,11 @@ export function LibraryScreen() {
     updateAssetTags,
     audioModels = [],
   } = useAppContext();
+  useLayoutEffect(() => {
+    if (assetsReady) {
+      recordStartupMark("assets-ready-render");
+    }
+  }, [assetsReady]);
   // Shared multi-select + batch toolbar (selection state, fan-out, Discard/Move).
   const batch = useAssetBatch();
   // ONE audio transport for the screen (sc-14391): the grid tiles and the detail stage drive
@@ -236,37 +245,45 @@ export function LibraryScreen() {
 
       <AssetSelectionBar batch={batch} showDiscard={assetMode === "assets"} />
 
-      <div className="library-layout">
-        <AssetGrid
-          audioPlayer={audioPlayer}
-          assets={visibleAssets}
-          onPreview={onPreview}
-          selectedAsset={librarySelectedAsset}
-          setSelectedAssetId={setSelectedAssetId}
-          selectedIds={batch.selectedAssetIds}
-          onToggleSelect={batch.toggleSelect}
-        />
-        <AssetDetail
-          audioPlayer={audioPlayer}
-          asset={librarySelectedAsset}
-          deleteAsset={deleteAsset}
-          purgeAsset={purgeAsset}
-          onPreview={onPreview}
-          onSendImage={onSendImage}
-          onSendVideo={onSendVideo}
-          onSendEditor={onSendEditor}
-          characters={characters}
-          onMoveToCharacter={moveAssetToCharacter ?? null}
-          updateAssetStatus={updateAssetStatus}
-          updateAssetTags={updateAssetTags}
-          availableTags={availableTags}
-          vqaEnabled={vqaEnabled}
-          vqaEntries={vqaEntries}
-          vqaPending={vqaPending}
-          audioModels={audioModels}
-          createVqaJob={createVqaJob}
-        />
-      </div>
+      {assetsLoading ? (
+        <div className="empty-panel" role="status">Loading assets…</div>
+      ) : assetsError ? (
+        <div className="empty-panel error-text" role="alert">
+          Couldn&apos;t load assets: {assetsError}
+        </div>
+      ) : (
+        <div className="library-layout">
+          <AssetGrid
+            audioPlayer={audioPlayer}
+            assets={visibleAssets}
+            onPreview={onPreview}
+            selectedAsset={librarySelectedAsset}
+            setSelectedAssetId={setSelectedAssetId}
+            selectedIds={batch.selectedAssetIds}
+            onToggleSelect={batch.toggleSelect}
+          />
+          <AssetDetail
+            audioPlayer={audioPlayer}
+            asset={librarySelectedAsset}
+            deleteAsset={deleteAsset}
+            purgeAsset={purgeAsset}
+            onPreview={onPreview}
+            onSendImage={onSendImage}
+            onSendVideo={onSendVideo}
+            onSendEditor={onSendEditor}
+            characters={characters}
+            onMoveToCharacter={moveAssetToCharacter ?? null}
+            updateAssetStatus={updateAssetStatus}
+            updateAssetTags={updateAssetTags}
+            availableTags={availableTags}
+            vqaEnabled={vqaEnabled}
+            vqaEntries={vqaEntries}
+            vqaPending={vqaPending}
+            audioModels={audioModels}
+            createVqaJob={createVqaJob}
+          />
+        </div>
+      )}
 
       <AssetBatchModal batch={batch} />
     </section>

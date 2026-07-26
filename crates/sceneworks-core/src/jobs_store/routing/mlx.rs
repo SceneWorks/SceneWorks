@@ -8,6 +8,10 @@ use crate::jobs_store::routing::catalog::{
     imported_image_request_family_eligible, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_FAMILIES,
     MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
 };
+use crate::jobs_store::routing::{
+    has_nonempty_array, has_nonempty_nested_array, has_nonempty_string, has_nonempty_string_array,
+    SENSENOVA_MODEL_IDS,
+};
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
 /// worker? This lifts the per-family `_should_route_*_to_mlx` decision (ported
@@ -78,12 +82,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "instantid_realvisxl" => instantid_mlx_eligible(payload),
         "pulid_flux_dev" => pulid_flux_mlx_eligible(payload),
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => chroma_mlx_eligible(payload),
-        "sensenova_u1_8b"
-        | "sensenova_u1_8b_infographic_v2"
-        | "sensenova_u1_8b_infographic_v3"
-        | "sensenova_u1_8b_fast"
-        | "sensenova_u1_8b_infographic_v2_fast"
-        | "sensenova_u1_8b_infographic_v3_fast" => sensenova_mlx_eligible(payload),
+        model if SENSENOVA_MODEL_IDS.contains(&model) => sensenova_mlx_eligible(payload),
         "kolors" => kolors_mlx_eligible(payload),
         "lens" | "lens_turbo" => lens_mlx_eligible(payload),
         "bernini_image" => bernini_image_mlx_eligible(payload),
@@ -154,15 +153,7 @@ pub(crate) fn understanding_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     // the same in-process T2iModel. The V2/V3 bases advertise vqa/interleave; the `_fast` ids don't
     // (their manifests omit those caps, so a VQA/interleave job is never created for them) but are
     // listed for parity with the base+fast pattern — harmless.
-    matches!(
-        model,
-        "sensenova_u1_8b"
-            | "sensenova_u1_8b_infographic_v2"
-            | "sensenova_u1_8b_infographic_v3"
-            | "sensenova_u1_8b_fast"
-            | "sensenova_u1_8b_infographic_v2_fast"
-            | "sensenova_u1_8b_infographic_v3_fast"
-    )
+    SENSENOVA_MODEL_IDS.contains(&model)
 }
 
 /// SDXL MLX-routing conditions. sc-3026 brought txt2img + LoRA; sc-3060 (epic 3041) adds the
@@ -187,15 +178,9 @@ pub(crate) fn realvisxl_lightning_mlx_eligible(payload: &Map<String, Value>) -> 
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    let has_nonempty_id = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    !(has_nonempty_id("sourceAssetId")
-        || has_nonempty_id("referenceAssetId")
-        || has_nonempty_id("maskAssetId"))
+    !(has_nonempty_string(payload, "sourceAssetId")
+        || has_nonempty_string(payload, "referenceAssetId")
+        || has_nonempty_string(payload, "maskAssetId"))
 }
 
 /// InstantID (`instantid_realvisxl`) MLX-routing conditions. The native `mlx-gen-instantid`
@@ -318,33 +303,14 @@ pub(crate) fn mage_flow_mlx_eligible(payload: &Map<String, Value>) -> bool {
         return false;
     }
 
-    let has_nonempty_string = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    let has_nonempty_array = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_array)
-            .is_some_and(|values| !values.is_empty())
-    };
-    let has_control = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
-
-    !(has_nonempty_string("sourceAssetId")
-        || has_nonempty_string("referenceAssetId")
-        || has_nonempty_string("maskAssetId")
-        || has_nonempty_array("referenceAssetIds")
-        || has_nonempty_array("loras")
-        || has_nonempty_array("controls")
-        || has_nonempty_array("controlnets")
-        || has_control)
+    !(has_nonempty_string(payload, "sourceAssetId")
+        || has_nonempty_string(payload, "referenceAssetId")
+        || has_nonempty_string(payload, "maskAssetId")
+        || has_nonempty_array(payload, "referenceAssetIds")
+        || has_nonempty_array(payload, "loras")
+        || has_nonempty_array(payload, "controls")
+        || has_nonempty_array(payload, "controlnets")
+        || has_nonempty_nested_array(payload, "advanced", "poses"))
 }
 
 /// Mage-Flow Edit requires a real primary source image. Optional plural references augment that
@@ -353,32 +319,14 @@ pub(crate) fn mage_flow_edit_mlx_eligible(payload: &Map<String, Value>) -> bool 
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
-    let has_nonempty_string = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    let has_nonempty_array = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_array)
-            .is_some_and(|values| !values.is_empty())
-    };
-    let has_control = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
 
-    has_nonempty_string("sourceAssetId")
-        && !has_nonempty_string("referenceAssetId")
-        && !has_nonempty_string("maskAssetId")
-        && !has_nonempty_array("loras")
-        && !has_nonempty_array("controls")
-        && !has_nonempty_array("controlnets")
-        && !has_control
+    has_nonempty_string(payload, "sourceAssetId")
+        && !has_nonempty_string(payload, "referenceAssetId")
+        && !has_nonempty_string(payload, "maskAssetId")
+        && !has_nonempty_array(payload, "loras")
+        && !has_nonempty_array(payload, "controls")
+        && !has_nonempty_array(payload, "controlnets")
+        && !has_nonempty_nested_array(payload, "advanced", "poses")
 }
 
 /// Z-Image (sc-3022) MLX-routing conditions, ported from
@@ -575,21 +523,9 @@ pub(crate) fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// list, a `referenceAssetId`, or a `sourceAssetId`. Mirrors that worker helper so the router and
 /// the worker agree on what counts as a runnable edit.
 fn edit_has_reference(payload: &Map<String, Value>) -> bool {
-    let has_nonempty_str = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    let has_reference_list = payload
-        .get("referenceAssetIds")
-        .and_then(Value::as_array)
-        .is_some_and(|ids| {
-            ids.iter()
-                .filter_map(Value::as_str)
-                .any(|id| !id.trim().is_empty())
-        });
-    has_reference_list || has_nonempty_str("referenceAssetId") || has_nonempty_str("sourceAssetId")
+    has_nonempty_string_array(payload, "referenceAssetIds")
+        || has_nonempty_string(payload, "referenceAssetId")
+        || has_nonempty_string(payload, "sourceAssetId")
 }
 
 /// Stable Diffusion 3.5 Large / Large Turbo / Medium (epic 7841, surfaced S4 sc-7873) MLX-eligibility.

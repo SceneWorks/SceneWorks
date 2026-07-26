@@ -26,3 +26,16 @@ export function reconcileSelectedAssetId(items, currentId) {
 export function isCurrentProjectRequest(activeProjectId, requestedProjectId) {
   return activeProjectId === requestedProjectId;
 }
+
+export function reconcileActiveProject(projects, current) {
+  if (!current) return projects[0] ?? null;
+  return projects.find((project) => project.id === current.id) ?? projects[0] ?? null;
+}
+
+export function applySuccessfulProjectRefresh(result, setProjects, setActiveProject) {
+  if (result.error) return false;
+  const projects = result.value;
+  setProjects(projects);
+  setActiveProject((current) => reconcileActiveProject(projects, current));
+  return true;
+}

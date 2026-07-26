@@ -27,6 +27,22 @@ export function assetUrl(asset) {
   return withMediaTicket(bareAssetUrl(asset));
 }
 
+// Grid thumbnails use one bounded, server-cached representation. The API
+// backfills this derivative on first request for old assets and caches it under
+// data/cache/media-thumbnails; a missing/corrupt source fails the image request
+// and the existing MissingMedia fallback is shown. Full preview, playback and
+// download continue to use assetUrl()/posterUrl() and therefore the original.
+export const ASSET_THUMBNAIL_SIZE = 384;
+
+function withThumbnailRequest(url) {
+  if (!url) {
+    return "";
+  }
+  const thumbnail = new URL(url);
+  thumbnail.searchParams.set("thumbnail", String(ASSET_THUMBNAIL_SIZE));
+  return withMediaTicket(thumbnail.toString());
+}
+
 export function assetCanRenderAsImage(asset) {
   return asset?.type === "image" || asset?.file?.mimeType?.startsWith("image/");
 }
@@ -69,19 +85,28 @@ export function suppressThumbnailContextMenu(event) {
 // render, spamming the log). We only fall back to deriving the poster path for
 // transient/live-job assets the server hasn't normalized yet (no `url`), preserving
 // the in-progress poster behavior in the studios.
-export function posterUrl(asset) {
+function barePosterUrl(asset) {
   if (!assetCanRenderAsVideo(asset)) {
     return "";
   }
   if (asset?.posterUrl) {
-    return withMediaTicket(API_BASE_URL + asset.posterUrl);
+    return API_BASE_URL + asset.posterUrl;
   }
   if (asset?.url) {
     // Normalized asset with no server-advertised poster ⇒ none exists; don't probe.
     return "";
   }
   const src = bareAssetUrl(asset);
-  return src ? withMediaTicket(src.replace(/\.\w+$/, ".poster.jpg")) : "";
+  return src ? src.replace(/\.\w+$/, ".poster.jpg") : "";
+}
+
+export function posterUrl(asset) {
+  return withMediaTicket(barePosterUrl(asset));
+}
+
+export function thumbnailUrl(asset) {
+  const source = assetCanRenderAsVideo(asset) ? barePosterUrl(asset) : bareAssetUrl(asset);
+  return withThumbnailRequest(source);
 }
 
 // Placeholder shown when an asset's underlying file can't be loaded — e.g. it
@@ -117,14 +142,24 @@ function ImageThumb({ src, className }) {
   if (failed) {
     return <MissingMedia className={className} />;
   }
-  return <img alt="" className={className} onContextMenu={suppressThumbnailContextMenu} onError={() => setFailed(true)} src={src} />;
+  return (
+    <img
+      alt=""
+      className={className}
+      decoding="async"
+      loading="lazy"
+      onContextMenu={suppressThumbnailContextMenu}
+      onError={() => setFailed(true)}
+      src={src}
+    />
+  );
 }
 
 export function AssetThumbnail({ asset, className = "" }) {
   if (!asset) {
     return null;
   }
-  const src = assetUrl(asset);
+  const src = thumbnailUrl(asset);
   if (!src) {
     return <span className={className} onContextMenu={suppressThumbnailContextMenu}>{asset.type ?? "asset"}</span>;
   }
@@ -139,7 +174,7 @@ export function AssetThumbnail({ asset, className = "" }) {
 
 function VideoPoster({ asset, className }) {
   const [failed, setFailed] = React.useState(false);
-  const poster = posterUrl(asset);
+  const poster = thumbnailUrl(asset);
   // Same per-URL retry as ImageThumb (sc-9063): a new poster URL (fresh media
   // ticket) clears a stale failure so the placeholder isn't permanent.
   React.useEffect(() => {
@@ -151,7 +186,17 @@ function VideoPoster({ asset, className }) {
   if (failed) {
     return <MissingMedia className={className} />;
   }
-  return <img alt="" className={className} onContextMenu={suppressThumbnailContextMenu} onError={() => setFailed(true)} src={poster} />;
+  return (
+    <img
+      alt=""
+      className={className}
+      decoding="async"
+      loading="lazy"
+      onContextMenu={suppressThumbnailContextMenu}
+      onError={() => setFailed(true)}
+      src={poster}
+    />
+  );
 }
 
 export const AssetMedia = React.forwardRef(function AssetMedia({ asset, className = "", controls = true, ...mediaProps }, ref) {

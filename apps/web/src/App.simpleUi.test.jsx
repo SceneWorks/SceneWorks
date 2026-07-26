@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./main.jsx";
 import { FakeEventSource, response, settle } from "./main.testSupport.jsx";
 import { click } from "./testUtils/dom.js";
+import { resetStartupTimingForTests } from "./startupTiming.js";
 
 // Simple UI ⇄ full workspace switching at the App level (design handoff).
 //
@@ -53,6 +54,8 @@ describe("App — Simple/Advanced shell switching", () => {
   afterEach(async () => {
     await act(async () => root?.unmount());
     container.remove();
+    resetStartupTimingForTests();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -69,6 +72,32 @@ describe("App — Simple/Advanced shell switching", () => {
     expect(container.querySelector("main.app")).toBeTruthy();
     expect(container.querySelector(".workspace")).toBeTruthy();
     expect(container.querySelector(".su-root")).toBeNull();
+  });
+
+  it("records Assets ready only after the advanced Library surface commits", async () => {
+    let now = 0;
+    const mark = vi.fn();
+    vi.stubGlobal("performance", {
+      clearMarks: vi.fn(),
+      clearMeasures: vi.fn(),
+      mark,
+      measure: vi.fn(),
+      now: () => ++now,
+    });
+    resetStartupTimingForTests();
+
+    await renderApp();
+
+    expect(mark.mock.calls.map(([name]) => name)).toEqual([
+      "sceneworks.access-resolved",
+      "sceneworks.media-authorization-settled",
+      "sceneworks.projects-committed",
+      "sceneworks.active-project-selected",
+      "sceneworks.asset-request-start",
+      "sceneworks.asset-request-settled",
+      "sceneworks.assets-ready-render",
+    ]);
+    expect(container.querySelector(".workspace")).toBeTruthy();
   });
 
   it("adds the Simple/Advanced switch to the workspace sidebar, on Advanced", async () => {

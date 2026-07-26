@@ -573,6 +573,7 @@ pub(crate) fn recipe_preset_not_found() -> ApiError {
     ApiError {
         status: StatusCode::NOT_FOUND,
         detail: "Recipe preset not found".to_owned(),
+        code: None,
     }
 }
 

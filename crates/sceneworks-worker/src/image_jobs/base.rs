@@ -318,6 +318,23 @@ impl ImageRoute {
             | ImageRoute::Mlx => request.count,
         }
     }
+
+    /// The label written by this route's per-asset stream. Bespoke routes that do not map directly
+    /// to the request's registry row are named explicitly; the remaining MLX routes use the same
+    /// descriptor label their stream resolves.
+    fn adapter_label(self, request: &ImageRequest) -> &'static str {
+        match self {
+            ImageRoute::KreaControl => KREA_CONTROL_ENGINE_ID,
+            ImageRoute::KreaImported => KREA_IMPORTED_ENGINE,
+            ImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
+            ImageRoute::InstantId => INSTANTID_ENGINE,
+            ImageRoute::PulidFlux => PULID_ADAPTER_LABEL,
+            ImageRoute::PoseControlBaseMissing | ImageRoute::PoseReject => STUB_ADAPTER,
+            _ => mlx_model(&request.model)
+                .map(|model| model.adapter_label())
+                .unwrap_or(STUB_ADAPTER),
+        }
+    }
 }
 
 /// The candle (Windows/CUDA/Linux) image engine a `run_image_generate_job` request routes to — the
@@ -466,6 +483,55 @@ impl CandleImageRoute {
             // Every other lane (plain txt2img, the edit/reference/identity/comfyui/bernini lanes, and the
             // pose-reject arms — which error before generation) produces the requested count.
             _ => request.count,
+        }
+    }
+
+    /// The exact label written by this route's per-asset stream. This is intentionally route-based:
+    /// imported/external/bespoke IDs are not present in the generic candle catalog.
+    fn adapter_label(self, request: &ImageRequest) -> &'static str {
+        match self {
+            CandleImageRoute::InstantId => INSTANTID_ENGINE,
+            CandleImageRoute::SdxlEdit => sdxl_edit_candle::SDXL_EDIT_CANDLE_ENGINE,
+            CandleImageRoute::Flux2Edit => flux2_edit_candle::FLUX2_EDIT_CANDLE_ENGINE,
+            CandleImageRoute::QwenEdit => qwen_edit_candle::QWEN_EDIT_CANDLE_ENGINE,
+            CandleImageRoute::ZimageEdit => zimage_edit_candle::ZIMAGE_EDIT_CANDLE_ENGINE,
+            CandleImageRoute::KreaEdit => krea_edit_candle::KREA_EDIT_CANDLE_ENGINE,
+            CandleImageRoute::KreaTurboOnRaw | CandleImageRoute::KreaMultiPhase => {
+                mlx_model(&request.model)
+                    .map(|model| model.adapter_label())
+                    .unwrap_or(STUB_ADAPTER)
+            }
+            CandleImageRoute::KreaImported => KREA_IMPORTED_ENGINE,
+            CandleImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
+            CandleImageRoute::ZimageIdentity => {
+                zimage_identity_candle::ZIMAGE_IDENTITY_CANDLE_ENGINE
+            }
+            CandleImageRoute::SdxlIpAdapter => sdxl_ipadapter::SDXL_IPADAPTER_ENGINE,
+            CandleImageRoute::KolorsIpAdapter => kolors_ipadapter::KOLORS_IPADAPTER_ENGINE,
+            CandleImageRoute::FluxIpAdapter => flux_ipadapter::FLUX_IPADAPTER_ENGINE,
+            CandleImageRoute::Pulid => pulid_candle::PULID_CANDLE_ENGINE,
+            CandleImageRoute::QwenControl => qwen_control::QWEN_CONTROL_ENGINE,
+            CandleImageRoute::KolorsControl => kolors_control::KOLORS_CONTROL_ENGINE,
+            CandleImageRoute::ZimageControl => zimage_control::ZIMAGE_CTRL_ENGINE,
+            CandleImageRoute::Flux2Control => {
+                flux2_control_candle::FLUX2_CONTROL_CANDLE_ENGINE
+            }
+            CandleImageRoute::Flux1Control => {
+                flux1_control_candle::FLUX1_CONTROL_CANDLE_ENGINE
+            }
+            CandleImageRoute::KreaControl => krea_control_candle::KREA_CONTROL_ENGINE,
+            CandleImageRoute::PoseReject | CandleImageRoute::PoseControlBaseMissing => STUB_ADAPTER,
+            CandleImageRoute::ZimageComfyui => {
+                zimage_comfyui_candle::ZIMAGE_COMFYUI_CANDLE_ENGINE
+            }
+            CandleImageRoute::QwenImageComfyui => {
+                qwen_comfyui_candle::QWEN_COMFYUI_CANDLE_ENGINE
+            }
+            CandleImageRoute::Flux2Comfyui => {
+                flux2_comfyui_candle::FLUX2_COMFYUI_CANDLE_ENGINE
+            }
+            CandleImageRoute::Bernini => CANDLE_BERNINI_IMAGE_ADAPTER,
+            CandleImageRoute::CandleTxt2Img => candle_adapter_label(&request.model),
         }
     }
 }
@@ -1731,15 +1797,6 @@ async fn ensure_ideogram_tier_present(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn quant_int(value: &Value) -> Option<i64> {
-    if value.is_boolean() {
-        return None;
-    }
-    value
-        .as_i64()
-        .or_else(|| value.as_str()?.trim().parse().ok())
-}
-
 /// Resolve quantization: the explicit `advanced.quantTier: "nvfp4"` label → `advanced.mlxQuantize` →
 /// `manifest.mlx.quantize` → Q8 default. The engine supports Q4/Q8/NVFP4; map (<=0 → dense, <=4 → Q4,
 /// else Q8). Returns the engine quant + the effective bit count for the recipe (None = dense bf16).
@@ -2209,18 +2266,7 @@ fn resolve_advanced_or_manifest_u32(
     default: u32,
     range: std::ops::RangeInclusive<u32>,
 ) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get(key)
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get(key).and_then(parse))
-        .map(|value| value.clamp(*range.start() as u64, *range.end() as u64) as u32)
-        .unwrap_or(default)
+    resolve_advanced_or_manifest_u32_with(request, key, || default, range)
 }
 
 /// Resolve a float advanced knob with a manifest fallback (sc-8825). The guidance twin of
@@ -2239,17 +2285,7 @@ fn resolve_advanced_or_manifest_f32(
     default: f32,
     range: std::ops::RangeInclusive<f32>,
 ) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get(key)
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(default);
-    advanced::f32_clamped(&request.advanced, key, manifest_default, range)
+    resolve_advanced_or_manifest_f32_with(request, key, || default, range)
 }
 
 /// Closure-default twin of [`resolve_advanced_or_manifest_u32`] (sc-8825). Identical mechanism —
@@ -2259,10 +2295,8 @@ fn resolve_advanced_or_manifest_f32(
 /// (`flux_ipadapter` variant steps, `qwen_edit_candle`/`zimage_control` per-variant steps) rather than a
 /// bare constant. Every caller passes its OWN `range`/`default_fn`, so per-lane bounds stay byte-for-byte.
 ///
-/// Unlike the const twins (which have macOS-live callers in `pulid.rs`/`instantid.rs`), these variants
-/// are only *called* by the candle-exclusive lanes, so the macOS non-test lib build has no caller —
-/// hence the gate is `candle-lane OR test` (the sc-8825 unit tests exercise it on both build lanes).
 #[cfg(any(
+    target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle"),
     test
 ))]
@@ -2290,9 +2324,9 @@ fn resolve_advanced_or_manifest_u32_with(
 /// manifest `[key]` supplies the effective default (else the per-lane `default_fn` closure, evaluated
 /// only when the manifest key is absent), then [`advanced::f32_clamped`] reads `advanced[key]` (falling
 /// back to that default) and clamps to `range`. Covers `flux_ipadapter`, whose guidance fallback is a
-/// per-variant fn. Each caller passes its OWN `range`/`default_fn`. Gated `candle-lane OR test` for the
-/// same reason as the u32 twin: no macOS non-test caller, but the sc-8825 tests exercise it on both lanes.
+/// per-variant fn. Each caller passes its OWN `range`/`default_fn`.
 #[cfg(any(
+    target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle"),
     test
 ))]
@@ -2327,6 +2361,77 @@ fn resolve_advanced_or_manifest_f32_with(
 ))]
 fn uses_true_cfg(model: &ResolvedModel) -> bool {
     !model.supports_guidance() && model.supports_negative_prompt()
+}
+
+/// Apply the Ideogram placeholder recovery policy to one completed render. The renderer is injected
+/// so the MLX and candle lanes share cancellation, reseeding, retry exhaustion, and error behavior.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn recover_ideogram_placeholder<R>(
+    enabled: bool,
+    seed: i64,
+    cancel: &CancelFlag,
+    initial: (u32, u32, Vec<u8>),
+    mut render: R,
+) -> WorkerResult<(i64, u32, u32, Vec<u8>)>
+where
+    R: FnMut(i64) -> WorkerResult<(u32, u32, Vec<u8>)>,
+{
+    recover_ideogram_placeholder_with(
+        enabled,
+        crate::ideogram_caption::placeholder_recovery_retries(),
+        seed,
+        cancel,
+        initial,
+        |pixels, width, height| {
+            crate::ideogram_caption::looks_like_placeholder(pixels, width, height)
+        },
+        &mut render,
+    )
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn recover_ideogram_placeholder_with<R, P>(
+    enabled: bool,
+    retries: u32,
+    seed: i64,
+    cancel: &CancelFlag,
+    initial: (u32, u32, Vec<u8>),
+    mut is_placeholder: P,
+    mut render: R,
+) -> WorkerResult<(i64, u32, u32, Vec<u8>)>
+where
+    R: FnMut(i64) -> WorkerResult<(u32, u32, Vec<u8>)>,
+    P: FnMut(&[u8], u32, u32) -> bool,
+{
+    let (mut width, mut height, mut pixels) = initial;
+    if !enabled || !is_placeholder(&pixels, width, height) {
+        return Ok((seed, width, height, pixels));
+    }
+
+    let mut final_seed = seed;
+    for attempt in 0..retries {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let retry_seed = crate::ideogram_caption::recovery_seed(seed, attempt);
+        tracing::warn!(
+            "ideogram 4 placeholder detected (seed {seed}); reseeding {retry_seed} \
+             (attempt {}/{retries})",
+            attempt + 1,
+        );
+        (width, height, pixels) = render(retry_seed)?;
+        final_seed = retry_seed;
+        if !is_placeholder(&pixels, width, height) {
+            break;
+        }
+    }
+    Ok((final_seed, width, height, pixels))
 }
 
 /// Resolve the true-CFG scale for a true-CFG family (Chroma). `None` for every other family
@@ -2600,9 +2705,9 @@ fn resolve_sdxl_components(
         crate::model_jobs::resolve_co_requisites(&descriptor, &manifest_value, settings)?;
     let mut take = |id: &str| -> WorkerResult<WeightsSource> {
         components.remove(id).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "SDXL requires the '{id}' component, but its catalog entry declares no matching \
-                 `coRequisite` download — the model manifest entry is misconfigured"
+            WorkerError::Engine(format!(
+                "the registered candle SDXL descriptor does not advertise its required '{id}' \
+                 component — the SceneWorks inference runtime pin is incompatible with this worker"
             ))
         })
     };
@@ -4470,39 +4575,19 @@ async fn generate_stream(
                         on_progress,
                     )
                 };
-                let (mut out_w, mut out_h, mut pixels) = render(seed, on_progress)?;
-                let mut final_seed = seed;
                 // Detect-and-recover safety net (sc-6501): the caption guard makes the placeholder
                 // rare, but a residual one can still occur even with a caption. Detect it via the
                 // baked-text heuristic (NOT a std/flatness check — the text lifts std to ~10) and
                 // reseed transparently, keeping the first clean render. Gated to Ideogram 4; a no-op
                 // elsewhere (and on turbo, which is CFG-free and cannot produce the placeholder).
-                if is_ideogram
-                    && crate::ideogram_caption::looks_like_placeholder(&pixels, out_w, out_h)
-                {
-                    let retries = crate::ideogram_caption::placeholder_recovery_retries();
-                    for attempt in 0..retries {
-                        if cancel.is_cancelled() {
-                            break;
-                        }
-                        let retry_seed = crate::ideogram_caption::recovery_seed(seed, attempt);
-                        tracing::warn!(
-                            "ideogram 4 placeholder detected (seed {seed}); reseeding {retry_seed} \
-                             (attempt {}/{retries})",
-                            attempt + 1,
-                        );
-                        let (rw, rh, rpixels) = render(retry_seed, on_progress)?;
-                        let recovered =
-                            !crate::ideogram_caption::looks_like_placeholder(&rpixels, rw, rh);
-                        out_w = rw;
-                        out_h = rh;
-                        pixels = rpixels;
-                        final_seed = retry_seed;
-                        if recovered {
-                            break;
-                        }
-                    }
-                }
+                let initial = render(seed, on_progress)?;
+                let (final_seed, out_w, out_h, pixels) = recover_ideogram_placeholder(
+                    is_ideogram,
+                    seed,
+                    &cancel,
+                    initial,
+                    |retry_seed| render(retry_seed, on_progress),
+                )?;
                 // Score this finished image against the cached source embedding (sc-4411). Image build +
                 // pixel clone is paid ONLY when a scorer exists (a With-Character generation) — a plain
                 // t2i / edit job has no scorer, so this is a no-op with no clone. Non-frontal → honest
@@ -4554,8 +4639,8 @@ fn is_candle_engine(model: &str) -> bool {
 }
 
 /// The per-asset `adapter` id recorded for a candle image engine (`candle_<family>`), the candle
-/// sibling of the `MODEL_TABLE` `mlx_<family>` labels. Used both per-asset (`generate_candle_stream`)
-/// and at the generation-set level (`adapter_id`) so the sidecar + result agree on the backend.
+/// sibling of the `MODEL_TABLE` `mlx_<family>` labels. Used by both the generic per-asset stream and
+/// [`CandleImageRoute::adapter_label`] so the sidecar and generation-set result agree.
 /// (sc-5099 extends this same labeling to the video + caption engines.)
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_adapter_label(model: &str) -> &'static str {
@@ -5179,10 +5264,6 @@ async fn generate_candle_stream(
     // the one being rejected — never the rejected tier, never the picker (hidden when ≤1 tier installed).
     // Reached only on the explicit-pick / ConvRot reject below (the downtier path already rejected above
     // when nothing smaller fits), where suggesting a smaller installed tier the user could pick is apt.
-    let installed_smaller: Vec<&'static str> = installed_tier_keys(request, settings)
-        .into_iter()
-        .filter(|candidate| tier_quality_rank(candidate) < tier_quality_rank(tier))
-        .collect();
     let use_sequential = {
         match crate::vram_gate::resolve_offload(
             crate::vram_gate::fit_decision(needed, budget),
@@ -5203,6 +5284,13 @@ async fn generate_candle_stream(
                 if let Some(seq_gb) =
                     crate::vram_gate::sequential_overflow_gb(sequential_needed, budget)
                 {
+                    let installed_smaller: Vec<&'static str> =
+                        installed_tier_keys(request, settings)
+                            .into_iter()
+                            .filter(|candidate| {
+                                tier_quality_rank(candidate) < tier_quality_rank(tier)
+                            })
+                            .collect();
                     return Err(WorkerError::InvalidPayload(format!(
                         "{model} at the {tier} tier needs ~{seq} GB of VRAM even with sequential \
                          component residency (loading one component at a time), but GPU {gpu} has \
@@ -5227,6 +5315,13 @@ async fn generate_candle_stream(
                 needed_gb,
                 available_gb,
             } => {
+                let installed_smaller: Vec<&'static str> =
+                    installed_tier_keys(request, settings)
+                        .into_iter()
+                        .filter(|candidate| {
+                            tier_quality_rank(candidate) < tier_quality_rank(tier)
+                        })
+                        .collect();
                 return Err(WorkerError::InvalidPayload(format!(
                     "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU \
                      {gpu} has ~{available} GB available. {tail}",
@@ -5325,8 +5420,6 @@ async fn generate_candle_stream(
                         on_progress,
                     )
                 };
-                let (mut out_w, mut out_h, mut pixels) = render(seed, on_progress)?;
-                let mut final_seed = seed;
                 // Ideogram 4 placeholder detect-and-reseed (sc-6858, parity with the macOS
                 // `generate_stream` net, sc-6501): the caption guard above makes it rare, but a residual
                 // "Image blocked by safety filter" placeholder can still occur even with a caption.
@@ -5334,32 +5427,14 @@ async fn generate_candle_stream(
                 // render. Gated to Ideogram 4; a no-op for every other candle family, for turbo (CFG-free,
                 // cannot produce it), and for an edit (the output is anchored to a real source latent, so
                 // `looks_like_placeholder` returns false).
-                if is_ideogram
-                    && crate::ideogram_caption::looks_like_placeholder(&pixels, out_w, out_h)
-                {
-                    let retries = crate::ideogram_caption::placeholder_recovery_retries();
-                    for attempt in 0..retries {
-                        if cancel.is_cancelled() {
-                            break;
-                        }
-                        let retry_seed = crate::ideogram_caption::recovery_seed(seed, attempt);
-                        tracing::warn!(
-                            "ideogram 4 placeholder detected (seed {seed}); reseeding {retry_seed} \
-                             (attempt {}/{retries})",
-                            attempt + 1,
-                        );
-                        let (rw, rh, rpixels) = render(retry_seed, on_progress)?;
-                        let recovered =
-                            !crate::ideogram_caption::looks_like_placeholder(&rpixels, rw, rh);
-                        out_w = rw;
-                        out_h = rh;
-                        pixels = rpixels;
-                        final_seed = retry_seed;
-                        if recovered {
-                            break;
-                        }
-                    }
-                }
+                let initial = render(seed, on_progress)?;
+                let (final_seed, out_w, out_h, pixels) = recover_ideogram_placeholder(
+                    is_ideogram,
+                    seed,
+                    &cancel,
+                    initial,
+                    |retry_seed| render(retry_seed, on_progress),
+                )?;
                 Ok(Some((final_seed, out_w, out_h, pixels)))
             })
         },

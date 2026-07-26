@@ -28,7 +28,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use crate::asset_media::resolve_asset_media;
 use crate::downloads::{ensure_cached_file, verify_file_sha256, DownloadContext};
+use crate::image_sampling::sample_rgb_bilinear;
 use image::RgbImage;
 #[cfg(not(target_os = "macos"))]
 use ort::execution_providers::CUDAExecutionProvider;
@@ -39,6 +41,7 @@ use ort::value::Tensor;
 use serde_json::{json, Value};
 
 use crate::openpose_skeleton::{body_stickwidth, draw_wholebody, Keypoint};
+use crate::util::{resolve_env_file_pin, resolved_cache_paths_match};
 use crate::{
     heartbeat, normalize_app_managed_cache_path, optional_payload_string, progress_payload,
     run_blocking_with_heartbeat, task_join_error, update_job, ApiClient, Settings, WorkerError,
@@ -132,32 +135,6 @@ const COCO_TO_OPENPOSE: [(usize, usize); 17] = [
 // pure detector math (ported from the spike crate; unit-tested without weights)
 // ---------------------------------------------------------------------------
 
-/// Bilinear sample of a BGR channel from an RgbImage; out-of-bounds → `border`.
-/// `c` is the BGR channel index (0=B,1=G,2=R); RgbImage stores RGB so we remap.
-#[inline]
-fn sample_bgr(img: &RgbImage, x: f32, y: f32, c: usize, border: f32) -> f32 {
-    let (w, h) = (img.width() as i64, img.height() as i64);
-    let x0 = x.floor() as i64;
-    let y0 = y.floor() as i64;
-    let fx = x - x0 as f32;
-    let fy = y - y0 as f32;
-    let rgb_c = [2usize, 1, 0][c];
-    let get = |xi: i64, yi: i64| -> f32 {
-        if xi < 0 || yi < 0 || xi >= w || yi >= h {
-            border
-        } else {
-            img.get_pixel(xi as u32, yi as u32)[rgb_c] as f32
-        }
-    };
-    let v00 = get(x0, y0);
-    let v10 = get(x0 + 1, y0);
-    let v01 = get(x0, y0 + 1);
-    let v11 = get(x0 + 1, y0 + 1);
-    let top = v00 * (1.0 - fx) + v10 * fx;
-    let bot = v01 * (1.0 - fx) + v11 * fx;
-    top * (1.0 - fy) + bot * fy
-}
-
 #[derive(Clone, Copy)]
 struct Box4 {
     x1: f32,
@@ -180,14 +157,13 @@ fn yolox_preprocess(img: &RgbImage) -> (Vec<f32>, f32) {
             let src_y = (dy as f32 + 0.5) * sy - 0.5; // cv2 INTER_LINEAR half-pixel
             for dx in 0..new_w {
                 let src_x = (dx as f32 + 0.5) * sx - 0.5;
-                let v = sample_bgr(
+                let rgb = sample_rgb_bilinear(
                     img,
                     src_x.clamp(0.0, w - 1.0),
                     src_y.clamp(0.0, h - 1.0),
-                    c,
                     0.0,
                 );
-                chw[plane + dy * DET + dx] = v;
+                chw[plane + dy * DET + dx] = rgb[2 - c];
             }
         }
     }
@@ -203,13 +179,16 @@ fn yolox_preprocess(img: &RgbImage) -> (Vec<f32>, f32) {
 /// return an `Engine` error instead (sc-8904).
 fn yolox_decode(dets: &[f32], shape: &[i64], ratio: f32) -> WorkerResult<Vec<Box4>> {
     let mut out = Vec::new();
-    if shape.last().copied() != Some(5) {
-        return Ok(out);
-    }
     if shape.len() < 2 {
         return Err(WorkerError::Engine(format!(
             "yolox output rank {} < 2 (expected (…, N, 5))",
             shape.len()
+        )));
+    }
+    if shape.last().copied() != Some(5) {
+        return Err(WorkerError::Engine(format!(
+            "yolox output last dimension {:?}, expected 5 for embedded-NMS detections",
+            shape.last()
         )));
     }
     let n = shape[1].max(0) as usize;
@@ -257,7 +236,8 @@ fn pose_preprocess(img: &RgbImage, b: &Box4) -> (Vec<f32>, f32, f32, f32, f32) {
             let src_y = y0 + dy as f32 * sh / PH as f32; // affine inverse (no half-pixel)
             for dx in 0..PW {
                 let src_x = x0 + dx as f32 * sw / PW as f32;
-                chw[plane + dy * PW + dx] = (sample_bgr(img, src_x, src_y, c, 0.0) - m) / sd;
+                let rgb = sample_rgb_bilinear(img, src_x, src_y, 0.0);
+                chw[plane + dy * PW + dx] = (rgb[2 - c] - m) / sd;
             }
         }
     }
@@ -288,15 +268,20 @@ fn pose_decode(
     simcc_x: &[f32],
     sx_shape: &[i64],
     simcc_y: &[f32],
-    cx: f32,
-    cy: f32,
-    sw: f32,
-    sh: f32,
+    sy_shape: &[i64],
+    crop: (f32, f32, f32, f32),
 ) -> WorkerResult<Vec<[f32; 3]>> {
+    let (cx, cy, sw, sh) = crop;
     if sx_shape.len() < 3 {
         return Err(WorkerError::Engine(format!(
             "rtmw simcc_x rank {} < 3 (expected (1, K, Wx))",
             sx_shape.len()
+        )));
+    }
+    if sy_shape.len() < 3 {
+        return Err(WorkerError::Engine(format!(
+            "rtmw simcc_y rank {} < 3 (expected (1, K, Wy))",
+            sy_shape.len()
         )));
     }
     let k = sx_shape[1].max(0) as usize;
@@ -306,7 +291,18 @@ fn pose_decode(
             "rtmw simcc_x has 0 keypoints".to_owned(),
         ));
     }
-    let wy = simcc_y.len() / k;
+    let y_k = sy_shape[1].max(0) as usize;
+    if y_k != k {
+        return Err(WorkerError::Engine(format!(
+            "rtmw simcc keypoint dimensions disagree: x reports {k}, y reports {y_k}"
+        )));
+    }
+    let wy = sy_shape[2].max(0) as usize;
+    if wx == 0 || wy == 0 {
+        return Err(WorkerError::Engine(format!(
+            "rtmw simcc bins must be non-zero (Wx={wx}, Wy={wy})"
+        )));
+    }
     if simcc_x.len() < k.saturating_mul(wx) || simcc_y.len() < k.saturating_mul(wy) {
         return Err(WorkerError::Engine(format!(
             "rtmw simcc buffers too short: x has {} (needs {}), y has {} (needs {})",
@@ -481,7 +477,7 @@ struct Detector {
     device: &'static str,
 }
 
-static DETECTOR: OnceLock<Mutex<Option<Detector>>> = OnceLock::new();
+static DETECTOR: OnceLock<Mutex<Option<(PathBuf, PathBuf, Detector)>>> = OnceLock::new();
 
 /// Build a session, optionally registering the platform hardware EP (CoreML on macOS,
 /// CUDA off-Mac). `accel == false` builds a plain CPU session (the fallback).
@@ -610,10 +606,8 @@ impl Detector {
                 &pout[xi].1,
                 &pout[xi].0,
                 &pout[yi].1,
-                cx,
-                cy,
-                sw,
-                sh,
+                &pout[yi].0,
+                (cx, cy, sw, sh),
             )?);
         }
         Ok(people)
@@ -644,10 +638,20 @@ fn detect_batch(
         *guard = None;
         guard
     });
-    if guard.is_none() {
-        *guard = Some(Detector::load(&det_path, &pose_path)?);
+    let cache_matches = guard.as_ref().is_some_and(|(cached_det, cached_pose, _)| {
+        resolved_cache_paths_match(
+            [cached_det.as_path(), cached_pose.as_path()],
+            [det_path.as_path(), pose_path.as_path()],
+        )
+    });
+    if !cache_matches {
+        *guard = Some((
+            det_path.clone(),
+            pose_path.clone(),
+            Detector::load(&det_path, &pose_path)?,
+        ));
     }
-    let detector = guard.as_mut().expect("detector loaded");
+    let detector = &mut guard.as_mut().expect("detector loaded").2;
     let device = detector.device;
     let mut out = Vec::with_capacity(images.len());
     for path in images {
@@ -693,10 +697,6 @@ fn detect_batch(
 /// Blocking (onnx forward + raster); callers on an async runtime should wrap it in
 /// `spawn_blocking`, exactly as the batch job does for its detect + render loops.
 ///
-/// Lands with its registry wrapper ahead of the first non-test caller — the folder-ingest
-/// data-prep pipeline (A2, sc-10161) drives it through [`crate::control_preprocess::PosePreprocessor`];
-/// allow dead_code until then.
-#[allow(dead_code)]
 pub(crate) fn detect_and_render_skeleton(
     det_path: &Path,
     pose_path: &Path,
@@ -716,10 +716,20 @@ pub(crate) fn detect_and_render_skeleton(
         *guard = None;
         guard
     });
-    if guard.is_none() {
-        *guard = Some(Detector::load(det_path, pose_path)?);
+    let cache_matches = guard.as_ref().is_some_and(|(cached_det, cached_pose, _)| {
+        resolved_cache_paths_match(
+            [cached_det.as_path(), cached_pose.as_path()],
+            [det_path, pose_path],
+        )
+    });
+    if !cache_matches {
+        *guard = Some((
+            det_path.to_path_buf(),
+            pose_path.to_path_buf(),
+            Detector::load(det_path, pose_path)?,
+        ));
     }
-    let detector = guard.as_mut().expect("detector loaded");
+    let detector = &mut guard.as_mut().expect("detector loaded").2;
     let people = detector.detect(image)?;
 
     // Convert + squareify each person, keep the largest-area one (same ordering rule as the
@@ -821,29 +831,6 @@ async fn ensure_weights(
     Ok((det, pose))
 }
 
-/// Resolve an explicit env-pinned weight path (sc-8911). Unset → `Ok(None)` (fall through
-/// to cache/download). Set and existing → `Ok(Some(path))`. Set but missing → an
-/// `InvalidPayload` error, so an operator's typo fails loudly rather than silently
-/// loading whatever the download path resolves. Takes the raw value explicitly so it's
-/// unit-testable without mutating the process environment.
-fn resolve_pinned_weight(
-    env_key: &str,
-    value: Option<std::ffi::OsString>,
-    file: &str,
-) -> WorkerResult<Option<PathBuf>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let path = PathBuf::from(&value);
-    if path.exists() {
-        return Ok(Some(path));
-    }
-    Err(WorkerError::InvalidPayload(format!(
-        "{env_key} is set to {} but that path does not exist. Point it at the local {file}, or unset it to download on first use.",
-        path.display()
-    )))
-}
-
 async fn ensure_one(
     env_key: &str,
     file: &str,
@@ -856,7 +843,7 @@ async fn ensure_one(
     // path is missing, that's an operator error — surface it instead of silently falling
     // through to the cache/network (sc-8911), which would mask a typo and load different
     // weights than the operator intended.
-    if let Some(path) = resolve_pinned_weight(env_key, std::env::var_os(env_key), file)? {
+    if let Some(path) = resolve_env_file_pin(env_key, std::env::var_os(env_key), file)? {
         return Ok(path);
     }
     let target = cache.join(file);
@@ -1002,12 +989,12 @@ fn resolve_source(
     }
     // asset id resolved against the originating project (Create tab sends ids)
     if let (Some(id), Some(pid), Some(proj)) = (&asset_id, project_id, project_path) {
-        if let Some(path) = resolve_asset_path(store, pid, id, proj) {
+        if let Some(asset) = resolve_asset_media(store, pid, id, proj) {
             return Ok(PoseSource {
                 asset_id,
-                display_name,
+                display_name: display_name.or(asset.display_name),
                 temp,
-                path: Some(path),
+                path: Some(asset.path),
             });
         }
     }
@@ -1048,25 +1035,6 @@ fn join_project_relative(project_path: &Path, raw: &str) -> Option<PathBuf> {
         }
     }
     Some(path)
-}
-
-fn resolve_asset_path(
-    store: &ProjectStore,
-    project_id: &str,
-    asset_id: &str,
-    project_path: &Path,
-) -> Option<PathBuf> {
-    let asset = store.get_asset(project_id, asset_id).ok()?;
-    let rel = asset.get("file")?.get("path")?.as_str()?;
-    let mut path = project_path.to_path_buf();
-    for component in Path::new(rel).components() {
-        if let std::path::Component::Normal(value) = component {
-            path.push(value);
-        } else {
-            return None;
-        }
-    }
-    path.exists().then_some(path)
 }
 
 // ---------------------------------------------------------------------------

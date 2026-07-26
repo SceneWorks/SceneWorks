@@ -280,6 +280,13 @@ string_enum! {
         // `lora_train`/`lora_train_execute` capabilities (no new WorkerCapability).
         ControlTraining => "control_training",
         TrainingCaption => "training_caption",
+        // Materialize a URL/caption Parquet source (LAION-style `URL`/`TEXT`) into an empty
+        // SceneWorks training dataset. Pure I/O/CPU: the utility worker streams bounded public
+        // image downloads into a job staging directory, then atomically asks the API to replace
+        // the empty dataset with the successful image/caption items. Kept separate from
+        // `control_training` so retries resume independently and Dataset Doctor can inspect the
+        // materialized targets before an expensive control-branch run.
+        DatasetParquetImport => "dataset_parquet_import",
         // CLIP image-embedding pass over a training dataset for Dataset Doctor analysis
         // (epic 6529 P2, sc-6535): set-level near-duplicate / diversity / aesthetic findings.
         // GPU-routed (MLX `clip_vit_l14`; in job_requires_gpu, not in NON_GPU_JOB_TYPES),
@@ -442,6 +449,9 @@ string_enum! {
         // Built-in LoRA explicit download capability (sc-5944), advertised by the CPU
         // utility worker alongside model_download / lora_import.
         LoraDownload => "lora_download",
+        // LAION-style URL/caption Parquet materialization. This is a CPU utility job:
+        // it scans local metadata and downloads public images without an inference backend.
+        DatasetParquetImport => "dataset_parquet_import",
         LoraTrain => "lora_train",
         TrainingCaption => "training_caption",
         // Dataset Doctor CLIP-embedding analysis (sc-6535). Advertised only when the MLX/candle
@@ -629,6 +639,12 @@ string_enum! {
         PersonReplace => "person_replace",
     }
 }
+
+/// Maximum number of images one Parquet materialization job may add.
+///
+/// Shared by API validation and the worker clamp so a newer client cannot create
+/// a job that is accepted at submission but silently truncated at execution.
+pub const MAX_DATASET_PARQUET_IMPORT_ITEMS: usize = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -873,10 +889,11 @@ pub struct ProgressRequest {
     /// First non-null value sticks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
-    /// Id of the worker reporting this progress. When present, the server
-    /// rejects the report with 409 unless the job's `worker_id` still matches —
+    /// Id of the worker reporting this progress. The server rejects the report
+    /// with 409 unless this value and the job's `worker_id` are both present and match —
     /// so a zombie worker whose job was swept to `interrupted` or reclaimed
-    /// can't resurrect it (sc-4172). Omitted = legacy trusted caller.
+    /// can't resurrect it (sc-4172). The field remains optional on the wire so
+    /// older callers receive that ownership 409 rather than a deserialization error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<String>,
     #[serde(flatten)]

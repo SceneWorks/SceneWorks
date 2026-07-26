@@ -1,5 +1,8 @@
 //! rust-api media tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
+use crate::publish_queue;
+use sceneworks_core::{contracts::JobType, jobs_store::CreateJob};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn project_file_route_serves_files_and_rejects_traversal() {
@@ -43,6 +46,14 @@ async fn project_file_route_serves_files_and_rejects_traversal() {
             .and_then(|value| value.to_str().ok()),
         Some("nosniff")
     );
+    assert_eq!(
+        headers
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("private, max-age=31536000, immutable")
+    );
+    assert!(headers.get("etag").is_some());
+    assert!(headers.get("last-modified").is_some());
 
     let (status, _, bytes) = request_raw(
         app.clone(),
@@ -67,6 +78,103 @@ async fn project_file_route_serves_files_and_rejects_traversal() {
     let error: Value = serde_json::from_slice(&bytes).expect("json error parses");
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(error["detail"], "Invalid project file path");
+}
+
+#[tokio::test]
+async fn project_file_route_backfills_and_reuses_bounded_thumbnails() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    let app = create_app(settings).expect("app creates");
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Thumbnail backfill" }),
+    )
+    .await;
+    let project_id = created["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
+    let media_path = project_path.join("assets/images/large.png");
+    let original = image::RgbImage::from_fn(1_280, 720, |x, y| {
+        image::Rgb([
+            ((x * 17 + y * 7) % 256) as u8,
+            ((x * 5 + y * 19) % 256) as u8,
+            ((x * 13 + y * 3) % 256) as u8,
+        ])
+    });
+    original.save(&media_path).expect("original writes");
+    let original_bytes = std::fs::read(&media_path).expect("original reads");
+    let uri = format!("/api/v1/projects/{project_id}/files/assets/images/large.png?thumbnail=384");
+
+    let (status, headers, first_bytes) =
+        request_raw(app.clone(), "GET", &uri, Body::empty(), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("image/png")
+    );
+    let decoded = image::load_from_memory(&first_bytes).expect("thumbnail decodes");
+    assert_eq!((decoded.width(), decoded.height()), (384, 216));
+    assert!(
+        first_bytes.len() < original_bytes.len(),
+        "thumbnail should transfer fewer bytes than its full-resolution source"
+    );
+
+    let cache_root = data_dir.join("cache/media-thumbnails/v1");
+    assert_eq!(
+        std::fs::read_dir(&cache_root)
+            .expect("thumbnail cache exists")
+            .count(),
+        1,
+        "first request backfills exactly one derivative"
+    );
+    let (_, second_headers, second_bytes) =
+        request_raw(app.clone(), "GET", &uri, Body::empty(), &[]).await;
+    assert_eq!(second_bytes, first_bytes);
+    assert_eq!(second_headers.get("etag"), headers.get("etag"));
+    assert_eq!(
+        std::fs::read_dir(&cache_root)
+            .expect("thumbnail cache exists")
+            .count(),
+        1,
+        "warm request reuses the on-disk derivative"
+    );
+
+    let etag = headers
+        .get("etag")
+        .and_then(|value| value.to_str().ok())
+        .expect("etag");
+    let (status, conditional_headers, bytes) = request_raw(
+        app.clone(),
+        "GET",
+        &uri,
+        Body::empty(),
+        &[("if-none-match", etag)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert!(bytes.is_empty());
+    assert_eq!(conditional_headers.get("etag"), headers.get("etag"));
+    assert_eq!(
+        conditional_headers
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+
+    let (status, _, original_response) = request_raw(
+        app,
+        "GET",
+        &format!("/api/v1/projects/{project_id}/files/assets/images/large.png"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(original_response, original_bytes);
 }
 
 #[tokio::test]
@@ -121,6 +229,13 @@ async fn project_file_route_serves_byte_ranges() {
             .and_then(|v| v.to_str().ok()),
         Some("nosniff")
     );
+    assert!(headers.get("etag").is_some());
+    assert_eq!(
+        headers
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("private, max-age=31536000, immutable")
+    );
 
     // An open-ended range serves to EOF (this is how WebKit fetches the
     // trailing moov atom on a non-faststart MP4).
@@ -162,7 +277,7 @@ async fn event_tickets_are_protected_and_match_contract_shape() {
         app.clone(),
         "POST",
         "/api/v1/jobs/events/ticket",
-        Value::Null,
+        json!({ "activeJobIds": ["job-a", "job-a", "job-b"] }),
         &[("x-sceneworks-token", "secret-token")],
     )
     .await;
@@ -171,6 +286,20 @@ async fn event_tickets_are_protected_and_match_contract_shape() {
         .as_str()
         .is_some_and(|value| value.len() == 32 && value.chars().all(|c| c.is_ascii_hexdigit())));
     assert_eq!(ticket["expiresInSeconds"], 30);
+
+    let (status, error) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        json!({ "activeJobIds": [""] }),
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["detail"],
+        "activeJobIds must contain non-empty job ids"
+    );
 
     let (status, error) = request(
         app,
@@ -181,6 +310,161 @@ async fn event_tickets_are_protected_and_match_contract_shape() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(error["detail"], "Invalid or expired event stream ticket");
+}
+
+#[tokio::test]
+async fn event_ticket_mint_preserves_the_complete_reconnect_context() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    let active_job_ids = (0..600)
+        .map(|index| format!("00000000-0000-4000-8000-{index:012}"))
+        .collect::<Vec<_>>();
+    let terminal_job_ids = (0..200)
+        .map(|index| format!("10000000-0000-4000-8000-{index:012}"))
+        .collect::<Vec<_>>();
+
+    let (status, response) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        json!({
+            "activeJobIds": active_job_ids.clone(),
+            "knownTerminalJobIds": terminal_job_ids.clone(),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ticket = response["ticket"].as_str().expect("ticket");
+    assert_eq!(
+        state
+            .event_tickets
+            .consume_event(ticket)
+            .expect("ticket redeems"),
+        crate::tickets::EventTicketContext {
+            active_job_ids,
+            known_terminal_job_ids: terminal_job_ids,
+        },
+        "ticket mint must preserve every bounded reconnect id without putting it in the GET URL"
+    );
+}
+
+#[tokio::test]
+async fn event_ticket_context_rejects_each_route_specific_memory_bound() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let too_many_active = (0..=crate::MAX_EVENT_TICKET_ACTIVE_JOB_IDS)
+        .map(|index| format!("active-{index}"))
+        .collect::<Vec<_>>();
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        json!({ "activeJobIds": too_many_active }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        error["detail"],
+        format!(
+            "activeJobIds may contain at most {} job ids",
+            crate::MAX_EVENT_TICKET_ACTIVE_JOB_IDS
+        )
+    );
+
+    let too_many_terminal = (0..=crate::MAX_EVENT_TICKET_TERMINAL_JOB_IDS)
+        .map(|index| format!("terminal-{index}"))
+        .collect::<Vec<_>>();
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        json!({ "knownTerminalJobIds": too_many_terminal }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        error["detail"],
+        format!(
+            "knownTerminalJobIds may contain at most {} job ids",
+            crate::MAX_EVENT_TICKET_TERMINAL_JOB_IDS
+        )
+    );
+
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        json!({ "activeJobIds": ["x".repeat(crate::MAX_EVENT_TICKET_JOB_ID_BYTES + 1)] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        error["detail"],
+        format!(
+            "activeJobIds job ids may contain at most {} bytes",
+            crate::MAX_EVENT_TICKET_JOB_ID_BYTES
+        )
+    );
+
+    let aggregate = (0..crate::MAX_EVENT_TICKET_ACTIVE_JOB_IDS)
+        .map(|index| format!("{index:04}-{}", "x".repeat(44)))
+        .collect::<Vec<_>>();
+    assert!(
+        aggregate.iter().map(String::len).sum::<usize>() > crate::MAX_EVENT_TICKET_CONTEXT_BYTES
+    );
+    let (status, error) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        json!({ "activeJobIds": aggregate }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        error["detail"],
+        format!(
+            "event ticket job-id context exceeds {} bytes",
+            crate::MAX_EVENT_TICKET_CONTEXT_BYTES
+        )
+    );
+}
+
+#[tokio::test]
+async fn event_ticket_route_has_a_small_body_limit_and_outstanding_backpressure() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let oversized = vec![b'a'; crate::MAX_EVENT_TICKET_BODY_BYTES + 1];
+    let (status, _, _) = request_raw(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        oversized,
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    for _ in 0..crate::MAX_OUTSTANDING_EVENT_TICKETS {
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs/events/ticket",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, error) = request(app, "POST", "/api/v1/jobs/events/ticket", Value::Null).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        error["detail"],
+        format!(
+            "Too many outstanding event tickets; retry after at most {} seconds",
+            crate::EVENT_TICKET_TTL_SECONDS
+        )
+    );
 }
 
 #[tokio::test]
@@ -229,6 +513,298 @@ async fn sse_event_ticket_is_single_use_at_the_endpoint() {
 }
 
 #[tokio::test]
+async fn sse_connection_starts_with_authoritative_queue_snapshot() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "mist" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, events) = request_sse_prefix(app, "/api/v1/jobs/events", 3).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        events[0],
+        ("ready".to_owned(), json!({ "status": "connected" }))
+    );
+    assert_eq!(events[1].0, "jobs.snapshot");
+    assert!(
+        events[1].1["jobs"]
+            .as_array()
+            .expect("jobs snapshot array")
+            .iter()
+            .any(|job| job["id"] == created["id"]),
+        "the reconnect snapshot must include the authoritative job row"
+    );
+    assert_eq!(events[2].0, "queue.updated");
+    assert_eq!(events[2].1["counts"]["queued"], 1);
+    assert!(
+        events[2].1["activeJobs"]
+            .as_array()
+            .expect("active jobs array")
+            .iter()
+            .any(|job| job["id"] == created["id"]),
+        "the initial stream snapshot must include jobs created before this connection"
+    );
+}
+
+#[tokio::test]
+async fn sse_snapshot_precedes_a_concurrent_queue_publication() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "mist" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = created["id"].as_str().expect("job id").to_owned();
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    *state.sse_snapshot_before_subscribe_once.lock() = Some(barrier.clone());
+    let stream = tokio::spawn(request_sse_prefix(app, "/api/v1/jobs/events", 4));
+    barrier.wait().await;
+
+    state
+        .jobs_store
+        .cancel_job(&job_id)
+        .expect("concurrent terminal transition commits");
+    let publish_state = state.clone();
+    let publish = tokio::spawn(async move { publish_queue(&publish_state).await });
+    barrier.wait().await;
+
+    publish
+        .await
+        .expect("queue publisher joins")
+        .expect("queue publication succeeds");
+    let (status, events) = stream.await.expect("SSE request joins");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(events[0].0, "ready");
+    assert_eq!(events[1].0, "jobs.snapshot");
+    assert_eq!(events[2].0, "queue.updated");
+    assert_eq!(events[2].1["counts"]["queued"], 1);
+    assert_eq!(events[3].0, "queue.updated");
+    assert_eq!(events[3].1["counts"]["queued"], 0);
+    assert_eq!(events[3].1["counts"]["canceled"], 1);
+    assert!(
+        events[3].1["activeJobs"]
+            .as_array()
+            .expect("active jobs array")
+            .iter()
+            .all(|job| job["id"] != json!(job_id)),
+        "the concurrent live event must follow and supersede the older snapshot"
+    );
+}
+
+#[tokio::test]
+async fn sse_revision_barrier_orders_a_delayed_equal_timestamp_job_event_behind_snapshot() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "mist" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let job_id = created["id"].as_str().expect("job id").to_owned();
+    let mut old_job = state.jobs_store.get_job(&job_id).expect("old job reads");
+
+    // Commit first, but retain the pre-commit row for a deliberately delayed
+    // publication with an equal-second timestamp.
+    let terminal = state
+        .jobs_store
+        .cancel_job(&job_id)
+        .expect("terminal transition commits");
+    old_job.updated_at = terminal.updated_at.clone();
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    *state.sse_snapshot_before_subscribe_once.lock() = Some(barrier.clone());
+    let stream = tokio::spawn(request_sse_prefix_with_ids(app, "/api/v1/jobs/events", 4));
+    barrier.wait().await;
+
+    // Publish only after the terminal snapshot and stream barrier were built.
+    // The stale row is globally newer but durably older.
+    state.events.publish(EventMessage {
+        event: "job.updated".to_owned(),
+        data: serde_json::to_string(&old_job).expect("old job serializes"),
+        revision: 0,
+    });
+    barrier.wait().await;
+
+    let (status, events) = stream.await.expect("SSE request joins");
+    assert_eq!(status, StatusCode::OK);
+    let snapshot_revision = events[1].2["revision"].as_u64().expect("snapshot revision");
+    let snapshot_job = events[1].2["jobs"]
+        .as_array()
+        .expect("snapshot jobs")
+        .iter()
+        .find(|job| job["id"] == json!(job_id))
+        .expect("snapshot contains job");
+    assert_eq!(snapshot_job["status"], "canceled");
+    assert_eq!(snapshot_job["updatedAt"], old_job.updated_at);
+    assert!(
+        snapshot_job["revision"]
+            .as_i64()
+            .expect("snapshot job revision")
+            > old_job.extra["revision"]
+                .as_i64()
+                .expect("old job revision")
+    );
+    assert_eq!(events[3].0, "job.updated");
+    assert_eq!(events[3].2["status"], "queued");
+    assert_eq!(events[3].2["updatedAt"], old_job.updated_at);
+    assert!(
+        events[3].1.expect("buffered event revision") > snapshot_revision,
+        "the delayed stale publication must reproduce a globally newer event"
+    );
+}
+
+#[tokio::test]
+async fn sse_snapshot_reconciles_only_requested_rows_beyond_the_recent_history_window() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.jobs_retention_days = 0;
+    let (app, state) = create_app_with_state(settings).expect("app creates");
+    let create = || CreateJob {
+        job_type: JobType::ImageDetail,
+        project_id: Some("project-1".to_owned()),
+        project_name: Some("Project 1".to_owned()),
+        payload: serde_json::Map::new(),
+        requested_gpu: "auto".to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+        initial_status: None,
+    };
+    let target = state
+        .jobs_store
+        .create_job(create())
+        .expect("target creates");
+    let terminal = state
+        .jobs_store
+        .cancel_job(&target.id)
+        .expect("target completes before disconnect churn");
+    let cleared_active = state
+        .jobs_store
+        .create_job(create())
+        .expect("active-then-cleared target creates");
+    state
+        .jobs_store
+        .cancel_job(&cleared_active.id)
+        .expect("active-then-cleared target completes");
+    state
+        .jobs_store
+        .clear_job(&cleared_active.id)
+        .expect("active-then-cleared target clears");
+    let cleared_terminal = state
+        .jobs_store
+        .create_job(create())
+        .expect("known-terminal target creates");
+    state
+        .jobs_store
+        .cancel_job(&cleared_terminal.id)
+        .expect("known-terminal target completes");
+    state
+        .jobs_store
+        .clear_job(&cleared_terminal.id)
+        .expect("known-terminal target clears");
+    let unrelated_cleared = state
+        .jobs_store
+        .create_job(create())
+        .expect("unrelated cleared target creates");
+    state
+        .jobs_store
+        .cancel_job(&unrelated_cleared.id)
+        .expect("unrelated cleared target completes");
+    state
+        .jobs_store
+        .clear_job(&unrelated_cleared.id)
+        .expect("unrelated cleared target clears");
+
+    // updated_at is second-granularity. Cross a boundary before producing more
+    // than the bounded history window so the target is deterministically absent
+    // from that generic window.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    for _ in 0..501 {
+        state
+            .jobs_store
+            .create_job(create())
+            .expect("newer filler creates");
+    }
+    assert!(
+        state
+            .jobs_store
+            .list_jobs_recently_updated(500)
+            .expect("bounded history reads")
+            .iter()
+            .all(|job| job.id != target.id),
+        "the locally active target must reproduce the high-volume reconnect gap"
+    );
+
+    let (status, ticket) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        json!({
+            "activeJobIds": [target.id, cleared_active.id],
+            "knownTerminalJobIds": [cleared_terminal.id],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ticket = ticket["ticket"].as_str().expect("ticket").to_owned();
+    let uri = format!("/api/v1/jobs/events?ticket={ticket}");
+    let (status, events) = request_sse_prefix(app, &uri, 3).await;
+    assert_eq!(status, StatusCode::OK);
+    let reconciled = events[1].1["jobs"]
+        .as_array()
+        .expect("snapshot jobs")
+        .iter()
+        .find(|job| job["id"] == json!(target.id))
+        .expect("requested pre-disconnect active job is reconciled");
+    assert_eq!(reconciled["status"], terminal.status.as_str());
+    assert_eq!(reconciled["revision"], terminal.extra["revision"]);
+    assert_eq!(
+        events[1].1["clearedJobIds"],
+        json!([cleared_active.id, cleared_terminal.id]),
+        "reconnect returns only tombstones intersecting the bounded client context"
+    );
+    assert!(
+        events[1].1["clearedJobIds"]
+            .as_array()
+            .expect("cleared ids")
+            .iter()
+            .all(|id| id != &json!(unrelated_cleared.id)),
+        "full retained clear history is never exported"
+    );
+}
+
+#[tokio::test]
 async fn media_tickets_authenticate_project_file_urls() {
     // sc-8810: element-driven media requests (<img>/<video>/<a download>) cannot
     // attach the token header, so the files route honors a short-lived query-param
@@ -251,6 +827,11 @@ async fn media_tickets_authenticate_project_file_urls() {
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     std::fs::write(project_path.join("assets/images/image.png"), b"image-bytes")
         .expect("media writes");
+    std::fs::write(
+        project_path.join("assets/images/thumbnail-source.png"),
+        PNG_32X32,
+    )
+    .expect("thumbnail source writes");
     let file_uri = format!("/api/v1/projects/{project_id}/files/assets/images/image.png");
 
     // Minting a media ticket itself requires authentication.
@@ -299,6 +880,19 @@ async fn media_tickets_authenticate_project_file_urls() {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(bytes, b"image-bytes");
     }
+    let thumbnail_uri = format!(
+        "/api/v1/projects/{project_id}/files/assets/images/thumbnail-source.png?thumbnail=384&ticket={ticket_value}"
+    );
+    let (status, headers, bytes) =
+        request_raw(app.clone(), "GET", &thumbnail_uri, Body::empty(), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("image/png")
+    );
+    assert!(!bytes.is_empty());
 
     // A garbage ticket stays locked out.
     let (status, _) = request(
@@ -448,7 +1042,7 @@ fn media_ticket_paths_cover_exactly_the_media_routes() {
 
 #[test]
 fn ticket_store_sliding_reuse_and_expiry() {
-    use crate::tickets::TicketStore;
+    use crate::tickets::{EventTicketContext, TicketStore};
     // Sliding (media) tickets: reusable, stable across re-issue, non-consuming.
     let store = TicketStore::new(300);
     let first = store.issue_sliding();
@@ -461,8 +1055,36 @@ fn ticket_store_sliding_reuse_and_expiry() {
 
     // Single-use (SSE) tickets: consume removes them.
     let sse = store.issue();
-    assert!(store.consume(&sse.ticket));
-    assert!(!store.consume(&sse.ticket), "consume is single-use");
+    assert_eq!(
+        store.consume_event(&sse.ticket),
+        Some(EventTicketContext::default())
+    );
+    assert_eq!(
+        store.consume_event(&sse.ticket),
+        None,
+        "consume is single-use"
+    );
+
+    let active_ids = (0..600)
+        .map(|index| format!("job-{index}"))
+        .collect::<Vec<_>>();
+    let context = EventTicketContext {
+        active_job_ids: active_ids,
+        known_terminal_job_ids: vec!["terminal-1".to_owned()],
+    };
+    let contextual = store
+        .try_issue_event(context.clone())
+        .expect("unbounded store issues");
+    assert_eq!(
+        store.consume_event(&contextual.ticket),
+        Some(context),
+        "the single-use ticket must preserve the complete reconnect set without a cap"
+    );
+    assert_eq!(
+        store.consume_event(&contextual.ticket),
+        None,
+        "context redemption remains single-use"
+    );
 
     // TTL 0: expired as soon as any time passes (the sleep guards against two
     // Instant::now() calls landing on the same tick).
@@ -471,7 +1093,21 @@ fn ticket_store_sliding_reuse_and_expiry() {
     let single = expired.issue();
     std::thread::sleep(Duration::from_millis(5));
     assert!(!expired.validate(&sliding.ticket));
-    assert!(!expired.consume(&single.ticket));
+    assert_eq!(expired.consume_event(&single.ticket), None);
+
+    // Expired unredeemed event tickets are pruned before the outstanding cap is
+    // enforced, so backpressure never becomes a permanent lockout.
+    let bounded = TicketStore::with_max_outstanding(0, 1);
+    let first = bounded
+        .try_issue_event(EventTicketContext::default())
+        .expect("first bounded ticket issues");
+    std::thread::sleep(Duration::from_millis(5));
+    let second = bounded
+        .try_issue_event(EventTicketContext::default())
+        .expect("expired ticket frees bounded capacity");
+    assert_ne!(first.ticket, second.ticket);
+    assert_eq!(bounded.consume_event(&first.ticket), None);
+    assert_eq!(bounded.consume_event(&second.ticket), None);
 }
 
 #[tokio::test]
@@ -483,11 +1119,13 @@ async fn lagged_event_subscribers_are_disconnected() {
         hub.publish(EventMessage {
             event: "job.updated".to_owned(),
             data: json!({ "index": index }).to_string(),
+            revision: 0,
         });
     }
     hub.publish(EventMessage {
         event: "job.updated".to_owned(),
         data: json!({ "index": EVENT_BUFFER_SIZE }).to_string(),
+        revision: 0,
     });
 
     for _ in 0..EVENT_BUFFER_SIZE {

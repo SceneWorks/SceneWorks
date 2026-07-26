@@ -187,6 +187,9 @@ fn rust_cpu_capabilities_do_not_claim_gpu_generation_jobs() {
     assert!(cpu_capabilities
         .iter()
         .any(|capability| capability.as_str() == "timeline_export"));
+    assert!(cpu_capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "dataset_parquet_import"));
     // The CPU utility worker advertises only the procedural *preview*
     // capabilities; real detection/tracking route to the native MLX/candle worker.
     assert!(cpu_capabilities
@@ -218,6 +221,9 @@ fn rust_cpu_capabilities_do_not_claim_gpu_generation_jobs() {
     assert!(!gpu_capabilities
         .iter()
         .any(|capability| capability.as_str() == "model_download"));
+    assert!(!gpu_capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "dataset_parquet_import"));
     assert!(!gpu_capabilities
         .iter()
         .any(|capability| capability.as_str() == "image_generate"));
@@ -2191,4 +2197,40 @@ fn bernini_manifest_ships_the_quant_matrix() {
             .collect();
         assert_eq!(defaults, vec!["q4"], "{id} macOS default tier is q4");
     }
+}
+
+#[tokio::test]
+async fn utilization_cache_shares_a_fresh_probe_and_refreshes_when_stale() {
+    let cache = tokio::sync::Mutex::new(HashMap::new());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let snapshot = || WorkerUtilizationSnapshot {
+        memory_total_mb: Some(24_576),
+        memory_used_mb: Some(4_096),
+        memory_free_mb: Some(20_480),
+        gpu_load_percent: Some(25.0),
+    };
+
+    for _ in 0..2 {
+        let probes = probes.clone();
+        let result = cached_gpu_utilization_with(
+            "0",
+            &cache,
+            Duration::from_secs(60),
+            move |_| async move {
+                probes.fetch_add(1, Ordering::SeqCst);
+                Some(snapshot())
+            },
+        )
+        .await;
+        assert_eq!(result, Some(snapshot()));
+    }
+    assert_eq!(probes.load(Ordering::SeqCst), 1);
+
+    let probes_for_refresh = probes.clone();
+    cached_gpu_utilization_with("0", &cache, Duration::ZERO, move |_| async move {
+        probes_for_refresh.fetch_add(1, Ordering::SeqCst);
+        Some(snapshot())
+    })
+    .await;
+    assert_eq!(probes.load(Ordering::SeqCst), 2);
 }

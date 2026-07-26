@@ -453,6 +453,14 @@ fn clear_terminal_jobs_soft_hides_from_queue_but_keeps_stats() {
     );
     assert!(cleared.contains(&completed.id));
     assert!(cleared.contains(&canceled.id));
+    let requested = store
+        .list_existing_jobs_by_ids(&[completed.id.clone(), canceled.id.clone(), queued.id.clone()])
+        .expect("requested reconnect jobs load");
+    assert_eq!(
+        requested.iter().map(|job| &job.id).collect::<Vec<_>>(),
+        vec![&queued.id],
+        "targeted reconnect lookup must not compose soft-hidden rows with clear tombstones"
+    );
 
     // The queue now lists only the still-queued job.
     let remaining = store.list_jobs(None, None, 100).expect("list after clear");
@@ -533,6 +541,23 @@ fn clear_job_soft_hides_a_single_terminal_job() {
 
     let cleared = store.clear_job(&canceled.id).expect("clears one job");
     assert_eq!(cleared.id, canceled.id);
+    assert_eq!(
+        store
+            .cleared_job_ids_by_ids(&[
+                queued.id.clone(),
+                canceled.id.clone(),
+                other_terminal.id.clone(),
+            ])
+            .expect("clear tombstones read"),
+        vec![canceled.id.clone()]
+    );
+    assert!(
+        store
+            .cleared_job_ids_by_ids(&[queued.id.clone(), other_terminal.id.clone()])
+            .expect("unrelated tombstone query reads")
+            .is_empty(),
+        "clear reconciliation returns only requested cleared ids"
+    );
 
     // Only the one job is gone; the other terminal job and the queued job remain.
     let remaining: Vec<String> = store
@@ -570,6 +595,40 @@ fn clear_job_rejects_a_non_terminal_job() {
     let listed = store.list_jobs(None, None, 100).expect("list");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, queued.id);
+}
+
+#[test]
+fn reconnect_window_prioritizes_recently_updated_old_jobs() {
+    let store = store("reconnect-updated-window");
+    let old = store
+        .create_job(image_job(Map::new()))
+        .expect("old creates");
+    let newer = store
+        .create_job(image_job(Map::new()))
+        .expect("newer creates");
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .execute(
+            "update jobs set created_at = '2000-01-01T00:00:00Z', updated_at = '2000-01-01T00:00:00Z' where id = ?1",
+            params![old.id],
+        )
+        .expect("old timestamps set");
+    connection
+        .execute(
+            "update jobs set created_at = '2020-01-01T00:00:00Z', updated_at = '2020-01-01T00:00:00Z' where id = ?1",
+            params![newer.id],
+        )
+        .expect("newer timestamps set");
+    store.cancel_job(&old.id).expect("old job transitions now");
+
+    assert_eq!(
+        store
+            .list_jobs_recently_updated(1)
+            .expect("reconnect window reads")[0]
+            .id,
+        old.id,
+        "an old job's missed terminal transition must stay in the bounded reconnect window"
+    );
 }
 
 #[test]
@@ -665,6 +724,42 @@ fn cancel_pending_jobs_scopes_to_one_project() {
     let b_after = store.get_job(&b.id).expect("b reload");
     assert_eq!(b_after.status, JobStatus::Queued);
     assert!(!b_after.cancel_requested);
+}
+
+#[test]
+fn cancel_pending_jobs_preserves_the_selected_newest_first_order() {
+    let store = store("cancel-pending-order");
+    let oldest = store
+        .create_job(image_job(object(json!({ "prompt": "oldest" }))))
+        .expect("oldest creates");
+    let middle = store
+        .create_job(image_job(object(json!({ "prompt": "middle" }))))
+        .expect("middle creates");
+    let newest = store
+        .create_job(image_job(object(json!({ "prompt": "newest" }))))
+        .expect("newest creates");
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    for (job_id, created_at) in [
+        (&oldest.id, "2026-01-01T00:00:00Z"),
+        (&middle.id, "2026-01-02T00:00:00Z"),
+        (&newest.id, "2026-01-03T00:00:00Z"),
+    ] {
+        connection
+            .execute(
+                "update jobs set created_at = ?2, updated_at = ?2 where id = ?1",
+                params![job_id, created_at],
+            )
+            .expect("timestamps update");
+    }
+    drop(connection);
+
+    let canceled_ids: Vec<String> = store
+        .cancel_pending_jobs(None)
+        .expect("pending jobs cancel")
+        .into_iter()
+        .map(|job| job.id)
+        .collect();
+    assert_eq!(canceled_ids, vec![newest.id, middle.id, oldest.id]);
 }
 
 /// An Ideogram auto-caption image job (sc-9120). Created NON-claimable in `pending_caption`.
@@ -1451,9 +1546,18 @@ fn dry_run_lora_train_does_not_require_execute_capability() {
 #[test]
 fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
     let store = store("training-progress-stages");
+    register_gpu_worker(&store, "trainer", "gpu-0", training_caps());
     let job = store
         .create_job(lora_train_job("auto", false))
         .expect("training job creates");
+    assert_eq!(
+        store
+            .claim_next_job("trainer")
+            .expect("claim succeeds")
+            .expect("training job is claimable")
+            .id,
+        job.id
+    );
 
     // The trainer reports caching/training/checkpointing stages under the running
     // status; all must be accepted and persisted, not rejected as invalid.
@@ -1476,7 +1580,7 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
-                    worker_id: None,
+                    worker_id: Some("trainer".to_owned()),
                 },
             )
             .expect("running status with a training stage is accepted");
@@ -1500,7 +1604,7 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
                 backend: None,
-                worker_id: None,
+                worker_id: Some("trainer".to_owned()),
             },
         )
         .expect_err("an unknown status is rejected");
@@ -1510,9 +1614,18 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
 #[test]
 fn training_progress_merges_latest_sample_batches_into_history() {
     let store = store("training-sample-history");
+    register_gpu_worker(&store, "trainer", "gpu-0", training_caps());
     let job = store
         .create_job(lora_train_job("auto", false))
         .expect("training job creates");
+    assert_eq!(
+        store
+            .claim_next_job("trainer")
+            .expect("claim succeeds")
+            .expect("training job is claimable")
+            .id,
+        job.id
+    );
 
     for (step, path) in [
         (250, "training/job-1/samples/step-000250/front.png"),
@@ -1538,7 +1651,7 @@ fn training_progress_merges_latest_sample_batches_into_history() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
-                    worker_id: None,
+                    worker_id: Some("trainer".to_owned()),
                 },
             )
             .expect("sample progress updates");
@@ -2355,9 +2468,14 @@ fn stale_sweep_marks_worker_offline_and_job_interrupted() {
 fn json_columns_use_python_compatible_sorted_key_order() {
     let store = store("json-order");
     let job = store
-        .create_job(image_job(object(
-            json!({ "z": 1, "a": { "b": 2, "a": 1 } }),
-        )))
+        .create_job(image_job(object(json!({
+            "z": 1,
+            "a": {
+                "b": 2,
+                "a": 1,
+                "items": [{ "z": 3, "a": 2 }]
+            }
+        }))))
         .expect("job creates");
 
     let connection = Connection::open(store.db_path()).expect("db opens");
@@ -2369,7 +2487,10 @@ fn json_columns_use_python_compatible_sorted_key_order() {
         )
         .expect("payload json loads");
 
-    assert_eq!(payload_json, r#"{"a":{"a":1,"b":2},"z":1}"#);
+    assert_eq!(
+        payload_json,
+        r#"{"a":{"a":1,"b":2,"items":[{"a":2,"z":3}]},"z":1}"#
+    );
 }
 
 #[test]
@@ -3079,6 +3200,49 @@ fn candle_supported_rejects_unsupported_strict_pose() {
     assert!(reason
         .candle_error_message()
         .starts_with("candle_unsupported:"));
+    let message = reason.candle_error_message();
+    for model in [
+        "qwen_image",
+        "kolors",
+        "z_image_turbo",
+        "z_image",
+        "flux2_dev",
+        "flux_dev",
+    ] {
+        assert!(
+            message.contains(model),
+            "strict-pose gap should name supported Candle family {model}: {message}"
+        );
+    }
+}
+
+#[test]
+fn mac_rust_supported_classifies_every_sensenova_id_as_the_same_strict_pose_gap() {
+    for model in [
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3_fast",
+    ] {
+        let store = store(&format!("sensenova-strict-pose-{model}"));
+        let job = job_of(
+            &store,
+            JobType::ImageGenerate,
+            json!({
+                "model": model,
+                "prompt": "p",
+                "advanced": { "poses": [{ "id": "pose-1" }] }
+            }),
+        );
+        let reason = mac_rust_supported(&job).expect_err("strict pose is not MLX-supported");
+        assert_eq!(reason.model.as_deref(), Some(model));
+        assert_eq!(
+            reason.feature, "strict pose (ControlNet)",
+            "{model} should hit the strict-pose gap, not a generic model gap"
+        );
+    }
 }
 
 #[test]
@@ -6308,8 +6472,8 @@ fn reads_proceed_while_a_writer_holds_the_write_lock() {
 }
 
 /// sc-4172 — a zombie worker's late progress report must not resurrect a job
-/// the stale sweep marked `interrupted`; terminal statuses are immutable except
-/// for an idempotent re-report of the same terminal status.
+/// the stale sweep marked `interrupted`; terminal statuses are immutable and
+/// even same-status no-op retries still require the stored owner.
 #[test]
 fn progress_cannot_resurrect_terminal_jobs() {
     fn report(status: JobStatus, stage: ProgressStage, worker_id: Option<&str>) -> ProgressUpdate {
@@ -6375,9 +6539,9 @@ fn progress_cannot_resurrect_terminal_jobs() {
         .expect_err("terminal job rejects a different terminal status");
     assert!(matches!(error, JobsStoreError::TerminalJobImmutable { .. }));
 
-    // An idempotent re-report of the same terminal status is a no-op success
-    // (e.g. a worker retrying its own "canceled" POST).
-    let job = store
+    // The sweep deliberately cleared ownership, so even an idempotent
+    // same-terminal retry from the zombie is unauthorized.
+    let error = store
         .update_job_progress(
             &created.id,
             report(
@@ -6386,16 +6550,13 @@ fn progress_cannot_resurrect_terminal_jobs() {
                 Some("worker-1"),
             ),
         )
-        .expect("same-terminal re-report succeeds");
-    assert_eq!(job.status, JobStatus::Interrupted);
-    assert_eq!(
-        job.message, "Lost contact with the worker.",
-        "no-op re-report must not rewrite the row"
-    );
+        .expect_err("ownerless terminal row rejects same-status retry");
+    assert!(matches!(error, JobsStoreError::NotJobOwner { .. }));
 
     let job = store.get_job(&created.id).expect("job loads");
     assert_eq!(job.status, JobStatus::Interrupted);
     assert_eq!(job.worker_id, None);
+    assert_eq!(job.message, "Lost contact with the worker.");
 }
 
 /// sc-4172 / sc-5751 — progress reports must name the claimed job's owner.
@@ -6447,6 +6608,202 @@ fn progress_from_non_owner_worker_is_rejected() {
         .update_job_progress(&created.id, running(None))
         .expect_err("ownerless report on an owned job is rejected");
     assert!(matches!(error, JobsStoreError::NotJobOwner { .. }));
+}
+
+#[test]
+fn ownerless_progress_is_rejected_for_an_unclaimed_job_without_mutation() {
+    let store = store("ownerless-unclaimed-progress");
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+
+    let error = store
+        .update_job_progress(
+            &created.id,
+            ProgressUpdate {
+                status: JobStatus::Completed,
+                stage: ProgressStage::Completed,
+                progress: 1.0,
+                message: "completed without a claim".to_owned(),
+                error: None,
+                result: Some(object(json!({ "assetId": "must-not-land" }))),
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: None,
+                worker_id: None,
+            },
+        )
+        .expect_err("an ownerless report cannot mutate an unclaimed job");
+    assert!(matches!(error, JobsStoreError::NotJobOwner { .. }));
+
+    let unchanged = store.get_job(&created.id).expect("job reloads");
+    assert_eq!(unchanged.status, JobStatus::Queued);
+    assert_eq!(unchanged.stage, ProgressStage::Queued);
+    assert!(unchanged.result.is_empty());
+}
+
+#[test]
+fn terminal_side_effect_handoff_is_resumable_only_by_the_original_owner() {
+    let store = store("terminal-side-effect-owner");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    let completion = |worker_id: &str| ProgressUpdate {
+        status: JobStatus::Completed,
+        stage: ProgressStage::Completed,
+        progress: 1.0,
+        message: "done".to_owned(),
+        error: None,
+        result: Some(object(json!({ "assetWrites": [] }))),
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: None,
+        worker_id: Some(worker_id.to_owned()),
+    };
+
+    let accepted = store
+        .update_job_progress_with_outcome(&created.id, completion("worker-1"))
+        .expect("terminal progress is accepted");
+    assert!(accepted.applied);
+    assert!(accepted.side_effects_pending);
+    assert_eq!(
+        store
+            .pending_terminal_progress_side_effect_job_ids(128)
+            .expect("recovery queue scans"),
+        vec![created.id.clone()],
+        "the production recovery drain must discover the accepted handoff"
+    );
+
+    let error = store
+        .update_job_progress_with_outcome(&created.id, completion("worker-2"))
+        .expect_err("a stale reporter cannot resume pending side effects");
+    assert!(matches!(error, JobsStoreError::NotJobOwner { .. }));
+    assert!(
+        store
+            .pending_terminal_progress_side_effects(
+                &created.id,
+                Some("worker-1"),
+                JobStatus::Completed,
+            )
+            .expect("pending state reads")
+            .is_some()
+    );
+
+    let retry = store
+        .update_job_progress_with_outcome(&created.id, completion("worker-1"))
+        .expect("the owner may retry the same terminal state");
+    assert!(!retry.applied);
+    assert!(retry.side_effects_pending);
+}
+
+#[test]
+fn cleared_terminal_same_status_retry_still_requires_the_stored_owner() {
+    let store = store("cleared-terminal-owner");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    let completion = |worker_id: Option<&str>| ProgressUpdate {
+        status: JobStatus::Completed,
+        stage: ProgressStage::Completed,
+        progress: 1.0,
+        message: "done".to_owned(),
+        error: None,
+        result: Some(object(json!({ "assetWrites": [] }))),
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: None,
+        worker_id: worker_id.map(str::to_owned),
+    };
+
+    store
+        .update_job_progress(&created.id, completion(Some("worker-1")))
+        .expect("terminal progress lands");
+    store.clear_job(&created.id).expect("terminal job clears");
+
+    for reporter in [Some("worker-2"), None] {
+        let error = store
+            .update_job_progress(&created.id, completion(reporter))
+            .expect_err("a non-owner cannot retry a cleared terminal row");
+        assert!(matches!(error, JobsStoreError::NotJobOwner { .. }));
+    }
+    let retry = store
+        .update_job_progress(&created.id, completion(Some("worker-1")))
+        .expect("the stored owner retains idempotent retry semantics");
+    assert_eq!(retry.status, JobStatus::Completed);
+    assert!(
+        store
+            .list_jobs(None, None, 100)
+            .expect("queue list reads")
+            .is_empty(),
+        "the accepted no-op must not un-clear the row"
+    );
+}
+
+#[test]
+fn post_progress_result_cas_never_overwrites_a_competing_update() {
+    let store = store("progress-result-cas");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    let progress = |result: Value| ProgressUpdate {
+        status: JobStatus::Running,
+        stage: ProgressStage::Running,
+        progress: 0.5,
+        message: "running".to_owned(),
+        error: None,
+        result: Some(object(result)),
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: None,
+        worker_id: Some("worker-1".to_owned()),
+    };
+
+    let accepted = store
+        .update_job_progress_with_outcome(&created.id, progress(json!({ "version": "first" })))
+        .expect("first progress lands");
+    let first_result = accepted.job.result.clone();
+    store
+        .update_job_progress(&created.id, progress(json!({ "version": "competing" })))
+        .expect("competing progress lands");
+
+    let mut augmented = first_result.clone();
+    augmented.insert("sidecar".to_owned(), json!(true));
+    let current = store
+        .replace_job_result_after_progress(
+            &created.id,
+            Some("worker-1"),
+            JobStatus::Running,
+            &first_result,
+            &augmented,
+            false,
+        )
+        .expect("CAS returns the current row");
+    assert_eq!(current.result["version"], "competing");
+    assert_eq!(current.result.get("sidecar"), None);
+    assert_eq!(
+        store.get_job(&created.id).expect("job reloads").result,
+        current.result,
+        "a stale augmentation must not overwrite the competing result"
+    );
 }
 
 /// Regression for the Anima routing gap (epic 10512 / sc-10523): `anima_base`/`anima_aesthetic`/

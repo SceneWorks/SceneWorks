@@ -18,6 +18,7 @@ use sceneworks_core::project_store::ProjectStoreError;
 pub(crate) struct ApiError {
     pub(crate) status: StatusCode,
     pub(crate) detail: String,
+    pub(crate) code: Option<&'static str>,
 }
 
 impl ApiError {
@@ -25,6 +26,7 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             detail: detail.into(),
+            code: None,
         }
     }
 
@@ -32,6 +34,7 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             detail: detail.into(),
+            code: None,
         }
     }
 
@@ -39,6 +42,7 @@ impl ApiError {
         Self {
             status: StatusCode::FORBIDDEN,
             detail: detail.into(),
+            code: None,
         }
     }
 
@@ -46,6 +50,15 @@ impl ApiError {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             detail: detail.into(),
+            code: None,
+        }
+    }
+
+    pub(crate) fn conflict(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            detail: detail.into(),
+            code: None,
         }
     }
 
@@ -53,20 +66,34 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             detail: detail.into(),
+            code: None,
+        }
+    }
+
+    fn database_locked(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            detail: detail.into(),
+            code: Some("database_locked"),
         }
     }
 }
 
 impl From<JobsStoreError> for ApiError {
     fn from(error: JobsStoreError) -> Self {
+        if error.is_database_locked() {
+            return Self::database_locked(error.to_string());
+        }
         match error {
             JobsStoreError::NotFound(_) => Self {
                 status: StatusCode::NOT_FOUND,
                 detail: "Record not found".to_owned(),
+                code: None,
             },
             JobsStoreError::InvalidStatus(status) => Self {
                 status: StatusCode::BAD_REQUEST,
                 detail: format!("Unsupported job status: {status}"),
+                code: None,
             },
             JobsStoreError::InvalidNumber(field) => {
                 Self::bad_request(format!("Invalid numeric value for {field}"))
@@ -75,6 +102,7 @@ impl From<JobsStoreError> for ApiError {
             JobsStoreError::RetryLimit { max_attempts } => Self {
                 status: StatusCode::BAD_REQUEST,
                 detail: format!("Job retry limit reached after {max_attempts} attempts."),
+                code: None,
             },
             // 409 tells the worker its report lost a race with cancel/sweep/
             // reclaim: abandon the job instead of retrying (sc-4172).
@@ -83,12 +111,14 @@ impl From<JobsStoreError> for ApiError {
                 detail: format!(
                     "Job {job_id} is already {status}; terminal jobs cannot be updated."
                 ),
+                code: None,
             },
             JobsStoreError::NotJobOwner { job_id } => Self {
                 status: StatusCode::CONFLICT,
                 detail: format!(
                     "Progress rejected: the reporting worker no longer owns job {job_id}."
                 ),
+                code: None,
             },
             other => Self::internal(other.to_string()),
         }
@@ -102,6 +132,7 @@ impl From<ProjectStoreError> for ApiError {
             ProjectStoreError::NotFound(detail) => Self {
                 status: StatusCode::NOT_FOUND,
                 detail,
+                code: None,
             },
             // A non-writable workspace folder is an environment problem, not a bad
             // request — 507 keeps the actionable, path-naming detail intact and out
@@ -110,6 +141,7 @@ impl From<ProjectStoreError> for ApiError {
             ProjectStoreError::StorageNotWritable(detail) => Self {
                 status: StatusCode::INSUFFICIENT_STORAGE,
                 detail,
+                code: None,
             },
             other => Self::internal(other.to_string()),
         }
@@ -135,6 +167,26 @@ impl IntoResponse for ApiError {
                 detail = %self.detail,
             );
         }
-        (self.status, Json(json!({ "detail": self.detail }))).into_response()
+        let body = match self.code {
+            Some(code) => json!({ "detail": self.detail, "code": code }),
+            None => json!({ "detail": self.detail }),
+        };
+        (self.status, Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_lock_maps_to_machine_readable_api_code() {
+        let sqlite = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("wording is deliberately irrelevant".to_owned()),
+        );
+        let error = ApiError::from(JobsStoreError::Sqlite(sqlite));
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code, Some("database_locked"));
     }
 }

@@ -6,6 +6,21 @@
 //
 // Applied before first paint to avoid a theme/accent flash. Kept as an external
 // script (not inline) so the served CSP can use a strict script-src 'self'.
+//
+// This is also the tiny, parser-blocking bootstrap entry for startup timing.
+// It executes before /src/main.jsx is requested/evaluated, so this first
+// operation includes the whole ESM graph's fetch, parse, and evaluation cost.
+try {
+  const timing = window.performance;
+  if (timing && typeof timing.mark === "function") {
+    timing.clearMarks?.("sceneworks.bootstrap-start");
+    timing.mark("sceneworks.bootstrap-start");
+    globalThis.__SCENEWORKS_BOOTSTRAP_TIMING_STARTED__ = true;
+  }
+} catch {
+  // Timing must never affect bootstrap.
+}
+
 try {
   const root = document.documentElement;
 

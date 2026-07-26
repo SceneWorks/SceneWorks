@@ -159,11 +159,12 @@ pub(crate) fn validate_vqa_job(payload: &VqaJobRequest) -> Result<(), ApiError> 
         return Err(ApiError::bad_request("sourceAssetId is required"));
     }
     let question = payload.question.trim();
-    if question.is_empty() || question.chars().count() > 4000 {
-        return Err(ApiError::bad_request(
-            "question must be between 1 and 4000 characters",
-        ));
+    if question.is_empty() || question.chars().count() > MAX_PROMPT_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "question must be between 1 and {MAX_PROMPT_CHARS} characters"
+        )));
     }
+    validate_prompt_extras("", &payload.advanced)?;
     if !(16..=2048).contains(&payload.max_new_tokens) {
         return Err(ApiError::bad_request(
             "maxNewTokens must be between 16 and 2048",
@@ -198,11 +199,12 @@ pub(crate) fn validate_interleave_job(payload: &InterleaveJobRequest) -> Result<
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }
-    if payload.prompt.trim().is_empty() || payload.prompt.chars().count() > 4000 {
-        return Err(ApiError::bad_request(
-            "prompt must be between 1 and 4000 characters",
-        ));
+    if payload.prompt.trim().is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "prompt must be between 1 and {MAX_PROMPT_CHARS} characters"
+        )));
     }
+    validate_prompt_extras("", &payload.advanced)?;
     // Upstream interleave_gen caps the run at 10 generated images.
     if !(1..=10).contains(&payload.max_images) {
         return Err(ApiError::bad_request("maxImages must be between 1 and 10"));

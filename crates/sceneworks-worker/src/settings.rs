@@ -1,7 +1,7 @@
 //! Worker [`Settings`] and the environment-variable accessors that populate it.
 use super::*;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Settings {
     pub api_url: String,
     pub access_token: Option<String>,
@@ -54,6 +54,38 @@ pub struct Settings {
     /// single value covers generations, upscales, AND LoRA training in this process. macOS/MLX only;
     /// inert on candle/CPU builds (the cross-platform path is tracked separately as sc-7826).
     pub gpu_memory_limit_bytes: u64,
+}
+
+impl fmt::Debug for Settings {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Settings")
+            .field("api_url", &self.api_url)
+            .field("access_token", &self.access_token.as_ref().map(|_| "***"))
+            .field("data_dir", &self.data_dir)
+            .field("config_dir", &self.config_dir)
+            .field("worker_id", &self.worker_id)
+            .field("gpu_id", &self.gpu_id)
+            .field("is_child_worker", &self.is_child_worker)
+            .field("poll_seconds", &self.poll_seconds)
+            .field("heartbeat_seconds", &self.heartbeat_seconds)
+            .field("shutdown_timeout_seconds", &self.shutdown_timeout_seconds)
+            .field("huggingface_base_url", &self.huggingface_base_url)
+            .field(
+                "huggingface_token",
+                &self.huggingface_token.as_ref().map(|_| "***"),
+            )
+            .field("credentials", &self.credentials)
+            .field("max_lora_url_bytes", &self.max_lora_url_bytes)
+            .field("max_model_url_bytes", &self.max_model_url_bytes)
+            .field("allow_private_lora_urls", &self.allow_private_lora_urls)
+            .field("utility_workers", &self.utility_workers)
+            .field("backend_mlx_enabled", &self.backend_mlx_enabled)
+            .field("backend_candle_enabled", &self.backend_candle_enabled)
+            .field("external_model_roots", &self.external_model_roots)
+            .field("gpu_memory_limit_bytes", &self.gpu_memory_limit_bytes)
+            .finish()
+    }
 }
 
 impl Settings {

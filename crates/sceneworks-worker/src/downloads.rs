@@ -305,20 +305,6 @@ pub(crate) async fn ensure_cached_file_verified(
             return Ok(target.to_path_buf());
         }
     }
-    if expected_size.is_none() && target.exists() {
-        if let Some(expected) = expected_sha256 {
-            verify_file_sha256(
-                context.api,
-                context.settings,
-                context.job_id,
-                target,
-                expected,
-                label,
-            )
-            .await?;
-        }
-        return Ok(target.to_path_buf());
-    }
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -1450,6 +1436,117 @@ pub(crate) fn build_source_url_client(
         builder = builder.resolve_to_addrs(host, addrs);
     }
     Ok(builder.build()?)
+}
+
+/// Fetch one untrusted, public image URL from a metadata dataset into memory.
+///
+/// LAION rows are third-party input, so this path intentionally ignores the
+/// `allow_private_lora_urls` escape hatch: both the initial URL and every
+/// redirect are DNS-pinned and rejected when they resolve to a private address.
+/// The byte ceiling is enforced from both Content-Length and the streamed body.
+pub(crate) async fn fetch_public_source_url_bytes(
+    source_url: &str,
+    max_bytes: usize,
+) -> WorkerResult<Vec<u8>> {
+    let mut current = parse_lora_source_url_with_private(source_url, false)
+        .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
+    let mut client = public_source_url_client(&current).await?;
+    for _ in 0..=MAX_SOURCE_URL_REDIRECTS {
+        let response =
+            client.get(current.clone()).send().await.map_err(|error| {
+                redact_reqwest_source_url_error("dataset image GET failed", error)
+            })?;
+        if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "dataset image redirect was missing a Location header".to_owned(),
+                    )
+                })?;
+            current = current.join(location).map_err(|_| {
+                WorkerError::InvalidPayload("dataset image redirect target was invalid".to_owned())
+            })?;
+            if !matches!(current.scheme(), "http" | "https") {
+                return Err(WorkerError::InvalidPayload(
+                    "dataset image redirect must use http or https".to_owned(),
+                ));
+            }
+            if !current.username().is_empty() || current.password().is_some() {
+                return Err(WorkerError::InvalidPayload(
+                    "dataset image redirect must not contain credentials".to_owned(),
+                ));
+            }
+            client = public_source_url_client(&current).await?;
+            continue;
+        }
+        let mut response = response
+            .error_for_status()
+            .map_err(|error| redact_reqwest_source_url_error("dataset image GET failed", error))?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "dataset image exceeds the {} limit",
+                format_bytes(max_bytes as u64)
+            )));
+        }
+        let mut bytes = Vec::with_capacity(
+            response
+                .content_length()
+                .and_then(|length| usize::try_from(length).ok())
+                .unwrap_or(0)
+                .min(max_bytes),
+        );
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| redact_reqwest_source_url_error("dataset image body failed", error))?
+        {
+            if bytes.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "dataset image exceeds the {} limit",
+                    format_bytes(max_bytes as u64)
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return Ok(bytes);
+    }
+    Err(WorkerError::InvalidPayload(
+        "dataset image exceeded the redirect limit".to_owned(),
+    ))
+}
+
+async fn public_source_url_client(url: &reqwest::Url) -> WorkerResult<reqwest::Client> {
+    let Some(host) = url.host_str() else {
+        return Err(WorkerError::InvalidPayload(
+            "dataset image URL host is not allowed".to_owned(),
+        ));
+    };
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addrs = if let Ok(address) = host.parse::<IpAddr>() {
+        validate_public_ip(address)
+            .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
+        vec![SocketAddr::new(address, port)]
+    } else {
+        let mut resolved = Vec::new();
+        for address in tokio::net::lookup_host((host, port)).await? {
+            validate_public_ip(address.ip())
+                .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
+            resolved.push(address);
+        }
+        if resolved.is_empty() {
+            return Err(WorkerError::InvalidPayload(
+                "dataset image URL host did not resolve".to_owned(),
+            ));
+        }
+        resolved
+    };
+    build_source_url_client(url, Some(&addrs))
 }
 
 pub(crate) async fn lora_source_content_length(

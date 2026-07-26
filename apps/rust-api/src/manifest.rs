@@ -314,8 +314,12 @@ pub(crate) fn metadata_modified_ns(metadata: &std::fs::Metadata) -> u128 {
 
 pub(crate) fn merge_entries_by_id(builtin: Vec<Value>, user: Vec<Value>) -> Vec<Value> {
     let mut entries = Vec::<Value>::new();
+    let mut indexes = HashMap::<String, usize>::new();
     for entry in builtin {
-        if entry.get("id").and_then(Value::as_str).is_some() {
+        if let Some(id) = entry.get("id").and_then(Value::as_str) {
+            // Preserve the existing first-match override behavior for a malformed
+            // manifest containing duplicate built-in ids.
+            indexes.entry(id.to_owned()).or_insert(entries.len());
             entries.push(entry);
         }
     }
@@ -323,12 +327,10 @@ pub(crate) fn merge_entries_by_id(builtin: Vec<Value>, user: Vec<Value>) -> Vec<
         let Some(id) = entry.get("id").and_then(Value::as_str) else {
             continue;
         };
-        if let Some(existing) = entries
-            .iter_mut()
-            .find(|existing| existing.get("id").and_then(Value::as_str) == Some(id))
-        {
-            merge_object(existing, entry);
+        if let Some(index) = indexes.get(id).copied() {
+            merge_object(&mut entries[index], entry);
         } else {
+            indexes.insert(id.to_owned(), entries.len());
             entries.push(entry);
         }
     }

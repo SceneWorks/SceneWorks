@@ -313,6 +313,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     updateTrainingDataset,
     batchRenameTrainingDataset,
     createTrainingDatasetCaptionJob,
+    createTrainingDatasetParquetImportJob,
     createTrainingDatasetUpscaleJob,
     createTrainingDatasetAnalysisJob,
     createTrainingDatasetFaceAnalysisJob,
@@ -341,8 +342,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const updateDataset = updateTrainingDataset;
   const batchRenameDataset = batchRenameTrainingDataset;
   const createCaptionJob = createTrainingDatasetCaptionJob;
-  const trainingPresets = trainingPresetsCatalog?.presets ?? [];
-  const trainingTargets = trainingTargetsCatalog?.targets ?? [];
+  const trainingPresets = useMemo(
+    () => trainingPresetsCatalog?.presets ?? [],
+    [trainingPresetsCatalog?.presets],
+  );
+  const trainingTargets = useMemo(
+    () => trainingTargetsCatalog?.targets ?? [],
+    [trainingTargetsCatalog?.targets],
+  );
   const [activeDataset, setActiveDataset] = useState(null);
   const [datasetError, setDatasetError] = useState("");
   const [datasetMessage, setDatasetMessage] = useState("");
@@ -352,6 +359,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [uploadedDatasetAssets, setUploadedDatasetAssets] = useState([]);
   const [savingDataset, setSavingDataset] = useState(false);
+  const openDatasetRef = useRef(null);
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
   // Dataset Doctor readiness report (sc-6534), fetched server-side over the saved
   // dataset. `null` until the first fetch resolves; the loading flag keeps badges in
@@ -743,8 +751,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
       return;
     }
     if (studioLaunch.datasetId !== selectedDatasetId) {
-      openDataset(studioLaunch.datasetId);
+      openDatasetRef.current?.(studioLaunch.datasetId);
     }
+    // A persistent launch is one-shot by launch id; selection changes must not reopen the old dataset.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [datasetLibraryMode, studioLaunch?.id]);
 
   useEffect(() => {
@@ -813,6 +823,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setConfigError("");
     setConfigTriggerFollowsCaptions(true);
     setConfigPromptsFollowTrigger(true);
+    // Dataset/target identities own hydration; background object refreshes must preserve edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDataset?.id, selectedTarget?.id, trainingPresets]);
 
   useEffect(() => {
@@ -827,6 +839,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
       return { ...current, triggerWord: nextTriggerPhrase };
     });
     setConfigSnapshot(null);
+    // Target identity is sufficient; catalog object refreshes must not invalidate the draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [captionTriggerWords, configTriggerFollowsCaptions, selectedTarget?.id]);
 
   // Keep the sample-prompts draft in sync with the trigger phrase until the user
@@ -858,6 +872,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
       }
       return { ...current, requestedGpu: gpuOptions[0] ?? "" };
     });
+    // The stable key captures the complete option set without array-identity churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gpuOptionsKey]);
 
   // Live mirror of the unsaved-draft flag so imperative guards (the project-switch guard
@@ -930,6 +946,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setBusyDatasetId("");
     }
   }
+  openDatasetRef.current = openDataset;
 
   // Drops a member (or an unavailable/orphaned id) from the dataset selection.
   function removeUnavailableAsset(assetId) {
@@ -1258,6 +1275,33 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setDatasetError(err.message);
     } finally {
       setSavingDataset(false);
+    }
+  }
+
+  async function importParquetDataset(settings) {
+    setDatasetError("");
+    setDatasetMessage("");
+    try {
+      if (!draftName.trim()) {
+        throw new Error("Name the dataset before importing Parquet metadata.");
+      }
+      if (memberAssets.length) {
+        throw new Error("Parquet import currently requires an empty dataset.");
+      }
+      // A new draft has no server id yet. Persist the named empty destination as part
+      // of the import action so users do not need a placeholder image or a separate save.
+      const saved = await persistDataset([], activeDataset ?? undefined);
+      if (!saved?.id) {
+        throw new Error("The empty dataset could not be created.");
+      }
+      const job = await createTrainingDatasetParquetImportJob(saved.id, settings);
+      setDatasetMessage(
+        `Parquet import queued${job?.id ? ` (${job.id})` : ""}. Track it in the Queue, then refresh this dataset when it finishes.`,
+      );
+      return job;
+    } catch (err) {
+      setDatasetError(err.message);
+      throw err;
     }
   }
 
@@ -1602,7 +1646,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   dirty, discardDraft, setAddDialogOpen, renamePrefix, setRenamePrefix,
                   renaming, memberAssets, applyOrderedNames, setCaptionDialog, health,
                   canSave, saveValidity, saveDataset, savingDataset, unavailableAssetIds,
-                  removeUnavailableAsset,
+                  removeUnavailableAsset, onImportParquet: importParquetDataset,
                 }}
                 captionSession={{
                   captionDraftById, onPreview, updateCaption, captioning, addDialogOpen,

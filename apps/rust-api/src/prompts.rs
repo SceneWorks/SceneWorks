@@ -185,30 +185,7 @@ async fn resolve_image_caption_path(
     asset_id: &str,
 ) -> Result<String, ApiError> {
     let project_path = project_path_for_id(state.clone(), project_id).await?;
-    let project_id_owned = project_id.to_owned();
-    let asset_id_owned = asset_id.to_owned();
-    let asset = project_call(state, move |store| {
-        store.get_asset(&project_id_owned, &asset_id_owned)
-    })
-    .await?;
-    let rel = asset
-        .get("file")
-        .and_then(|file| file.get("path"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::bad_request("Reference asset has no file path"))?;
-    let mut path = project_path;
-    for component in std::path::Path::new(rel).components() {
-        match component {
-            std::path::Component::Normal(value) => path.push(value),
-            _ => {
-                return Err(ApiError::bad_request(
-                    "Reference asset path must stay inside the project directory",
-                ))
-            }
-        }
-    }
-    if !path.exists() {
-        return Err(ApiError::bad_request("Reference image not found on disk"));
-    }
+    let path =
+        resolve_project_confined_asset_path(state, project_id, asset_id, &project_path).await?;
     Ok(path.display().to_string())
 }
