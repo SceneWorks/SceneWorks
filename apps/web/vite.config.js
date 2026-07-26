@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { defineConfig, searchForWorkspaceRoot } from "vite";
 
+import precompressPlugin from "./vite-plugin-precompress.js";
 import themeInitPlugin from "./vite-plugin-theme-init.js";
 
 // Expose the product version (kept in lockstep across the repo's package.json /
@@ -35,7 +36,7 @@ const configDir = fileURLToPath(new URL("../../config", import.meta.url));
 export default defineConfig({
   // Generate the pre-paint /theme-init.js from src/accents.js at dev/build time
   // (single source of truth for the accent-id list). See vite-plugin-theme-init.js.
-  plugins: [themeInitPlugin()],
+  plugins: [themeInitPlugin(), precompressPlugin()],
   // Matches the existing import.meta.env.VITE_* convention (see api.js). Defining
   // the specific key keeps it lint-safe (no bare global) under no-undef.
   define: {

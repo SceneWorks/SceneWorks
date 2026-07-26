@@ -1972,7 +1972,8 @@ fn parse_single_byte_range(value: &str, total: u64) -> Option<(u64, u64)> {
 /// `embed-web` feature so default/server/test builds need no web build.
 #[cfg(feature = "embed-web")]
 mod web_assets {
-    use axum::http::{header, StatusCode, Uri};
+    use axum::body::Body;
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
     use axum::response::{IntoResponse, Response};
     use rust_embed::RustEmbed;
 
@@ -1983,8 +1984,24 @@ mod web_assets {
     #[cfg(test)]
     pub(super) fn first_static_asset_path() -> String {
         WebAssets::iter()
-            .find(|path| path.starts_with("assets/"))
+            .find(|path| {
+                path.starts_with("assets/") && !path.ends_with(".br") && !path.ends_with(".gz")
+            })
             .expect("production web bundle contains a static asset")
+            .into_owned()
+    }
+
+    #[cfg(test)]
+    pub(super) fn first_compressible_static_asset_path() -> String {
+        WebAssets::iter()
+            .find(|path| {
+                path.starts_with("assets/")
+                    && !path.ends_with(".br")
+                    && !path.ends_with(".gz")
+                    && WebAssets::get(&format!("{path}.br")).is_some()
+                    && WebAssets::get(&format!("{path}.gz")).is_some()
+            })
+            .expect("production web bundle contains a precompressed static asset")
             .into_owned()
     }
 
@@ -2007,37 +2024,217 @@ base-uri 'self'; \
 frame-ancestors 'none'; \
 form-action 'self'";
 
-    pub(super) async fn serve(uri: Uri) -> Response {
+    const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
+    const REVALIDATE_CACHE: &str = "no-cache";
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Encoding {
+        Brotli,
+        Gzip,
+        Identity,
+    }
+
+    impl Encoding {
+        fn suffix(self) -> &'static str {
+            match self {
+                Self::Brotli => ".br",
+                Self::Gzip => ".gz",
+                Self::Identity => "",
+            }
+        }
+
+        fn header_value(self) -> Option<&'static str> {
+            match self {
+                Self::Brotli => Some("br"),
+                Self::Gzip => Some("gzip"),
+                Self::Identity => None,
+            }
+        }
+    }
+
+    fn accepted_quality(headers: &HeaderMap, encoding: &str) -> f32 {
+        let mut explicit = None;
+        let mut wildcard = None;
+        for value in headers.get_all(header::ACCEPT_ENCODING) {
+            let Ok(value) = value.to_str() else {
+                continue;
+            };
+            for item in value.split(',') {
+                let mut parts = item.trim().split(';');
+                let name = parts.next().unwrap_or_default().trim();
+                let mut quality = 1.0;
+                for parameter in parts {
+                    let Some((key, value)) = parameter.trim().split_once('=') else {
+                        continue;
+                    };
+                    if key.trim().eq_ignore_ascii_case("q") {
+                        quality = value
+                            .trim()
+                            .parse::<f32>()
+                            .ok()
+                            .filter(|quality| (0.0..=1.0).contains(quality))
+                            .unwrap_or(0.0);
+                    }
+                }
+                if name.eq_ignore_ascii_case(encoding) {
+                    explicit = Some(quality);
+                } else if name == "*" {
+                    wildcard = Some(quality);
+                }
+            }
+        }
+        explicit.or(wildcard).unwrap_or(0.0)
+    }
+
+    fn select_encoding(headers: &HeaderMap, requested: &str) -> Encoding {
+        let br_quality = accepted_quality(headers, "br");
+        let gzip_quality = accepted_quality(headers, "gzip");
+        let has_br = br_quality > 0.0 && WebAssets::get(&format!("{requested}.br")).is_some();
+        let has_gzip = gzip_quality > 0.0 && WebAssets::get(&format!("{requested}.gz")).is_some();
+        if has_br && (!has_gzip || br_quality >= gzip_quality) {
+            Encoding::Brotli
+        } else if has_gzip {
+            Encoding::Gzip
+        } else {
+            Encoding::Identity
+        }
+    }
+
+    fn is_hashed_asset(path: &str) -> bool {
+        if !path.starts_with("assets/") {
+            return false;
+        }
+        let Some(file_name) = path.rsplit('/').next() else {
+            return false;
+        };
+        let stem = file_name
+            .rsplit_once('.')
+            .map_or(file_name, |(stem, _)| stem);
+        let Some((_, hash)) = stem.rsplit_once('-') else {
+            return false;
+        };
+        hash.len() >= 8
+            && hash.len() <= 32
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    }
+
+    fn etag(hash: [u8; 32]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut value = String::with_capacity(66);
+        value.push('"');
+        for byte in hash {
+            value.push(HEX[(byte >> 4) as usize] as char);
+            value.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        value.push('"');
+        value
+    }
+
+    fn if_none_match(headers: &HeaderMap, current: &str) -> bool {
+        headers
+            .get_all(header::IF_NONE_MATCH)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .map(str::trim)
+            .any(|candidate| {
+                candidate == "*"
+                    || candidate == current
+                    || candidate
+                        .strip_prefix("W/")
+                        .is_some_and(|candidate| candidate == current)
+            })
+    }
+
+    fn embedded_response(
+        requested: &str,
+        mime: &str,
+        fallback: bool,
+        request_headers: &HeaderMap,
+    ) -> Option<Response> {
+        let encoding = select_encoding(request_headers, requested);
+        let representation_path = format!("{requested}{}", encoding.suffix());
+        let file = WebAssets::get(&representation_path)?;
+        let etag = etag(file.metadata.sha256_hash());
+        let cache_control = if !fallback && is_hashed_asset(requested) {
+            IMMUTABLE_CACHE
+        } else {
+            REVALIDATE_CACHE
+        };
+        let status = if if_none_match(request_headers, &etag) {
+            StatusCode::NOT_MODIFIED
+        } else {
+            StatusCode::OK
+        };
+        let mut response = Response::builder().status(status);
+        let headers = response
+            .headers_mut()
+            .expect("embedded response headers are available");
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(mime).expect("embedded MIME type is a valid header"),
+        );
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+        );
+        headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(cache_control),
+        );
+        headers.insert(
+            header::ETAG,
+            HeaderValue::from_str(&etag).expect("SHA-256 ETag is a valid header"),
+        );
+        if let Some(content_encoding) = encoding.header_value() {
+            headers.insert(
+                header::CONTENT_ENCODING,
+                HeaderValue::from_static(content_encoding),
+            );
+        }
+        let body = if status == StatusCode::NOT_MODIFIED {
+            Body::empty()
+        } else {
+            Body::from(file.data.into_owned())
+        };
+        Some(
+            response
+                .body(body)
+                .expect("embedded response body constructs"),
+        )
+    }
+
+    pub(super) async fn serve(uri: &Uri, request_headers: &HeaderMap) -> Response {
         let requested = uri.path().trim_start_matches('/');
         let requested = if requested.is_empty() {
             "index.html"
         } else {
             requested
         };
-        if let Some(file) = WebAssets::get(requested) {
+        // .br/.gz siblings are internal representations, never public paths.
+        if !requested.ends_with(".br")
+            && !requested.ends_with(".gz")
+            && WebAssets::get(requested).is_some()
+        {
             let mime = mime_guess::from_path(requested).first_or_octet_stream();
-            return (
-                [
-                    (header::CONTENT_TYPE, mime.as_ref()),
-                    (header::CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY),
-                ],
-                file.data.into_owned(),
-            )
-                .into_response();
+            if let Some(response) =
+                embedded_response(requested, mime.as_ref(), false, request_headers)
+            {
+                return response;
+            }
         }
         // Single-page app: unknown non-API paths resolve to index.html so
         // client-side deep links (e.g. project routes) load correctly.
-        match WebAssets::get("index.html") {
-            Some(index) => (
-                [
-                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                    (header::CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY),
-                ],
-                index.data.into_owned(),
-            )
-                .into_response(),
-            None => StatusCode::NOT_FOUND.into_response(),
-        }
+        embedded_response(
+            "index.html",
+            "text/html; charset=utf-8",
+            true,
+            request_headers,
+        )
+        .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
     }
 }
 
@@ -2048,7 +2245,7 @@ async fn app_fallback(request: Request<axum::body::Body>) -> Response {
     #[cfg(feature = "embed-web")]
     {
         if !request.uri().path().starts_with("/api/") {
-            return web_assets::serve(request.uri().clone()).await;
+            return web_assets::serve(request.uri(), request.headers()).await;
         }
     }
     route_not_found(request).await
